@@ -33,13 +33,21 @@ arguments to the template *build*, so a per-sandbox
 ``SandboxSpec.resources`` cannot be honoured at create time. Requests are
 reported once per provider instance (or raise, with ``create.strict_resources``)
 instead of being dropped quietly.
+
+**Snapshots keep processes.** A snapshot (``create_snapshot``) saves the whole
+VM: memory, running processes and disk. A sandbox created from it resumes those
+processes where they were, so the provider sets ``snapshot_keeps_processes``.
+The snapshot is usable as soon as the call returns.
 """
 
 import asyncio
+import json
 import logging
 import math
 import os
 import re
+import shlex
+import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
 from pathlib import Path
@@ -52,6 +60,7 @@ from nemo_gym.sandbox.providers.base import (
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
+    SandboxSnapshotNotFoundError,
     SandboxSpec,
     SandboxStatus,
 )
@@ -87,8 +96,105 @@ _API_PARAM_KEYS = (
 _NETWORK_API_KEYS = {"allow_out": "allowOut", "deny_out": "denyOut"}
 
 
+# Provider options a spec may carry. ``resource_requests`` is OpenSandbox's and is reported, not applied: E2B fixes
+# resources when the template is built. ``network_policy`` maps onto E2B's ``network`` create option.
+_PROVIDER_OPTION_KEYS = frozenset({"template", "resource_requests", "network_policy"})
+_NETWORK_POLICY_KEYS = frozenset({"defaultAction", "egress"})
+
+# Every command carries this marker in its environment, so the processes a timed-out command left behind can be
+# found and killed. Never by process group: envd runs commands in its own group, and killing it ends the sandbox.
+_EXEC_MARKER_ENV = "NEMO_GYM_E2B_EXEC"
+_KILL_MARKED_SCRIPT = (
+    'm={marker}; for d in /proc/[0-9]*; do p=${{d#/proc/}}; [ "$p" = "$$" ] && continue; '
+    'while IFS= read -r -d "" e; do [ "$e" = "$m" ] && {{ kill -KILL "$p" 2>/dev/null; break; }}; '
+    'done 2>/dev/null < "$d/environ"; done; true'
+)
+_KILL_MARKED_TIMEOUT_S = 30.0
+# A command that raised a timeout this close to its deadline ran out its deadline (E2B ends the stream at, or a hair
+# before, the configured timeout); an earlier timeout is a transport failure.
+_DEADLINE_FRACTION = 0.99
+_TIMEOUT_RETURN_CODE = 124
+
+# A kill that finds no sandbox is checked again after this delay: a gateway replica that has not seen the sandbox can
+# answer "not found" for one that still runs.
+KILL_RECHECK_DELAY_S = 1.0
+
+# Lease renewal: at most this many renewals at once, each cut off after this long.
+LEASE_RENEW_BATCH = 64
+LEASE_RENEW_TIMEOUT_S = 10.0
+
+
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
+
+
+class E2BSandboxUnreachableError(RuntimeError):
+    """Raised when the E2B gateway could not reach a sandbox it reports as running (HTTP 502, or the SDK's
+    ``SandboxUnreachableException``); the sandbox may still be alive."""
+
+
+class E2BSnapshotError(RuntimeError):
+    """Raised when the installed e2b SDK or the service cannot snapshot a sandbox."""
+
+
+def _is_not_found(error: BaseException | None, e2b: Any) -> bool:
+    """Whether an SDK error says the resource does not exist, including a 404 the SDK could not parse."""
+    if error is None:
+        return False
+    not_found = tuple(
+        exc
+        for exc in (getattr(e2b, "NotFoundException", None), getattr(e2b, "SandboxNotFoundException", None))
+        if isinstance(exc, type)
+    )
+    if not_found and isinstance(error, not_found):
+        return True
+    return getattr(error, "status_code", None) == 404 or str(error).startswith("404:")
+
+
+def _is_missing_template(error: BaseException | None) -> bool:
+    """Whether a create failed because its template does not exist: AgentENV answers HTTP 400 "template ... not found"
+    for a template or snapshot id it does not have."""
+    if error is None:
+        return False
+    message = str(error)
+    bad_request = getattr(error, "status_code", None) == 400 or message.startswith("400:")
+    return bad_request and "not found" in message.lower()
+
+
+def _is_unreachable(error: BaseException, e2b: Any) -> bool:
+    unreachable = getattr(e2b, "SandboxUnreachableException", None)
+    if isinstance(unreachable, type) and isinstance(error, unreachable):
+        return True
+    return getattr(error, "status_code", None) == 502 or str(error).startswith("502:")
+
+
+def _network_options(network_policy: Any) -> dict[str, list[str]]:
+    """Map an OpenSandbox-shaped ``network_policy`` onto E2B's ``network`` create option.
+
+    ``{"defaultAction": "deny", "egress": [{"action": "allow", "target": T}, ...]}`` denies all egress but the allowed
+    targets; ``defaultAction: allow`` denies only the targets marked ``deny``. Anything else is refused rather than
+    applied loosely.
+    """
+    if not isinstance(network_policy, Mapping) or not set(network_policy) <= _NETWORK_POLICY_KEYS:
+        raise ValueError(
+            "E2B provider option 'network_policy' must be a mapping with only defaultAction and egress, "
+            f"got {network_policy!r}"
+        )
+    default = network_policy.get("defaultAction", "allow")
+    if default not in ("allow", "deny"):
+        raise ValueError(f"network_policy.defaultAction must be 'allow' or 'deny', got {default!r}")
+    targets: dict[str, list[str]] = {"allow": [], "deny": []}
+    for rule in network_policy.get("egress") or []:
+        if (
+            not isinstance(rule, Mapping)
+            or rule.get("action") not in targets
+            or not isinstance(rule.get("target"), str)
+        ):
+            raise ValueError(f"network_policy.egress rules need action allow|deny and a target string, got {rule!r}")
+        targets[rule["action"]].append(rule["target"])
+    if default == "deny":
+        return {"deny_out": ["0.0.0.0/0"], "allow_out": targets["allow"]}
+    return {"deny_out": targets["deny"]} if targets["deny"] else {}
 
 
 def _require_e2b_sdk() -> Any:
@@ -191,6 +297,10 @@ class E2BCreateConfig:
     # True pauses/resumes; False kills at timeout; None sends no lifecycle. E2B 2.42+ then leaves
     # the choice to the server, and AgentENV pauses without resume and never evicts the sandbox.
     auto_resume: bool | None = field(default=False, kw_only=True)
+    # A lease in seconds. The sandbox is created with this timeout and the provider that created it renews it every
+    # third of a lease, up to the sandbox's own lifetime; a process that dies stops renewing, so its sandboxes end
+    # one lease later instead of at their full lifetime. None creates with the full lifetime and does not renew.
+    lease_s: float | None = field(default=None, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
     # Outbound traffic rules, passed as the SDK's ``network`` option:
@@ -231,6 +341,7 @@ class E2BCreateConfig:
             raise TypeError("create.custom_extension_params must be a mapping")
         if self.auto_resume is not None and not isinstance(self.auto_resume, bool):
             raise ValueError("create.auto_resume must be a boolean or None")
+        _validate_optional_number("create.lease_s", self.lease_s, positive=True)
 
 
 @dataclass(frozen=True)
@@ -275,10 +386,29 @@ class E2BOperationConfig:
         _validate_nonnegative_number("operations.retry_max_delay_s", self.retry_max_delay_s)
 
 
+@dataclass(frozen=True)
+class E2BSnapshotConfig:
+    """Snapshot settings."""
+
+    # Send the checkpointer's snapshot names to the service. E2B files a named snapshot as a template of that name
+    # (an alias visible to the whole team), so names are off by default: snapshots are then unnamed, and the
+    # checkpointer releases them by the ids in its index; ``list_snapshots`` finds none by name.
+    send_names: bool = False
+
+
+@dataclass
+class _Lease:
+    sandbox: Any
+    # Monotonic time the sandbox's own lifetime ends, or None for no limit.
+    lifetime_end: float | None
+
+
 class E2BProvider:
     """Provider backed by the E2B Python SDK."""
 
     name = "e2b"
+    # A snapshot saves memory and processes, and a sandbox created from it continues them.
+    snapshot_keeps_processes = True
 
     def __init__(
         self,
@@ -288,13 +418,18 @@ class E2BProvider:
         exec: E2BExecConfig | Mapping[str, Any] | None = None,
         operations: E2BOperationConfig | Mapping[str, Any] | None = None,
         attribution: AttributionConfig | Mapping[str, Any] | None = None,
+        snapshots: E2BSnapshotConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _config_from_mapping(E2BConnectionConfig, connection)
         self._create = _config_from_mapping(E2BCreateConfig, create)
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
         self._attribution = _config_from_mapping(AttributionConfig, attribution)
+        self._snapshots = _config_from_mapping(E2BSnapshotConfig, snapshots)
         self._warned_resource_specs: set[str] = set()
+        self._warned_resource_requests = False
+        self._leases: dict[str, _Lease] = {}
+        self._lease_task: asyncio.Task[None] | None = None
 
     # ---------------------------------------------------------------- helpers
 
@@ -335,12 +470,7 @@ class E2BProvider:
         a sandbox, so it lives in :mod:`nemo_gym.sandbox.providers.e2b.build`
         and never runs on this path.
         """
-        options = spec.provider_options or {}
-        if not isinstance(options, Mapping):
-            raise TypeError("E2B provider_options must be a mapping")
-        unknown = set(options) - {"template"}
-        if unknown:
-            raise ValueError(f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template")
+        options = self._provider_options(spec)
         option = options.get("template")
         if option is not None:
             if not isinstance(option, str) or not option:
@@ -367,6 +497,25 @@ class E2BProvider:
         raise E2BCreateError(
             "No E2B template to start from: set SandboxSpec.image, provider_options.template, or create.template."
         )
+
+    def _provider_options(self, spec: SandboxSpec) -> Mapping[str, Any]:
+        options = spec.provider_options or {}
+        if not isinstance(options, Mapping):
+            raise TypeError("E2B provider_options must be a mapping")
+        unknown = set(options) - _PROVIDER_OPTION_KEYS
+        if unknown:
+            raise ValueError(
+                f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. "
+                f"Supported: {', '.join(sorted(_PROVIDER_OPTION_KEYS))}"
+            )
+        if "resource_requests" in options and not self._warned_resource_requests:
+            self._warned_resource_requests = True
+            LOGGER.warning(
+                "E2B fixes sandbox resources when the template is built; provider option resource_requests=%r is "
+                "not applied",
+                options["resource_requests"],
+            )
+        return options
 
     def _check_resources(self, spec: SandboxSpec, template: str) -> None:
         """Surface resource requests E2B cannot honour per sandbox."""
@@ -418,9 +567,11 @@ class E2BProvider:
         for attempt in range(attempts):
             try:
                 return await factory()
-            except non_retryable:
-                raise
             except Exception as exc:  # noqa: BLE001 - transport/5xx errors are provider-specific
+                # A sandbox the gateway could not reach is retried: these operations are idempotent. The SDK files it
+                # under TimeoutException, which is otherwise final.
+                if (isinstance(exc, non_retryable) and not _is_unreachable(exc, e2b)) or _is_not_found(exc, e2b):
+                    raise
                 last_exc = exc
                 if attempt == attempts - 1:
                     break
@@ -446,15 +597,36 @@ class E2BProvider:
                 "the E2B template defines the sandbox entrypoint"
             )
         template = self._resolve_template(spec)
+        self._check_resources(spec, template)
+        return await self._create_sandbox(spec, template)
 
-        timeout_s = spec.ttl_s if spec.ttl_s is not None else self._create.timeout_s
-        if timeout_s is not None and (not _is_finite_number(timeout_s) or timeout_s <= 0):
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        """Create a sandbox from a snapshot: E2B starts it from the snapshot's template id.
+
+        The sandbox resumes the snapshot's memory and processes. Raises ``SandboxSnapshotNotFoundError`` when the
+        service has no such snapshot.
+        """
+        self._provider_options(spec)
+        try:
+            return await self._create_sandbox(spec, snapshot_id)
+        except E2BCreateError as error:
+            if _is_not_found(error.__cause__, _require_e2b_sdk()) or _is_missing_template(error.__cause__):
+                raise SandboxSnapshotNotFoundError(
+                    f"E2B has no snapshot {snapshot_id!r}: {error.__cause__}"
+                ) from error
+            raise
+
+    async def _create_sandbox(self, spec: SandboxSpec, template: str) -> SandboxHandle:
+        lifetime_s = spec.ttl_s if spec.ttl_s is not None else self._create.timeout_s
+        if lifetime_s is not None and (not _is_finite_number(lifetime_s) or lifetime_s <= 0):
             raise E2BCreateError("E2B sandbox ttl_s must be > 0")
         if spec.ready_timeout_s is not None and (
             not _is_finite_number(spec.ready_timeout_s) or spec.ready_timeout_s <= 0
         ):
             raise E2BCreateError("E2B sandbox ready_timeout_s must be > 0")
-        self._check_resources(spec, template)
+        timeout_s = lifetime_s
+        if self._create.lease_s is not None:
+            timeout_s = self._create.lease_s if lifetime_s is None else min(lifetime_s, self._create.lease_s)
         kwargs: dict[str, Any] = {
             "template": template,
             "timeout": max(1, math.ceil(timeout_s)) if timeout_s is not None else None,
@@ -467,6 +639,12 @@ class E2BProvider:
                 "on_timeout": "pause" if self._create.auto_resume else "kill",
                 "auto_resume": self._create.auto_resume,
             }
+        if self._create.network:
+            kwargs["network"] = {key: list(rules) for key, rules in self._create.network.items()}
+        # A sandbox's own network policy overrides the provider-wide default.
+        network_policy = (spec.provider_options or {}).get("network_policy")
+        if network_policy is not None:
+            kwargs["network"] = _network_options(network_policy)
         if spec.ready_timeout_s is not None:
             # E2B retains this on the returned sandbox connection. Subsequent
             # provider calls explicitly reapply connection.request_timeout_s
@@ -479,8 +657,6 @@ class E2BProvider:
         metadata = {**self._attribution.metadata(), **spec.metadata}
         if metadata:
             kwargs["metadata"] = {str(k): str(v) for k, v in metadata.items()}
-        if self._create.network:
-            kwargs["network"] = {key: list(rules) for key, rules in self._create.network.items()}
 
         e2b = _require_e2b_sdk()
         try:
@@ -493,6 +669,7 @@ class E2BProvider:
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
+        self._hold_lease(sandbox, lifetime_s)
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
 
     async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
@@ -537,6 +714,56 @@ class E2BProvider:
             except Exception as kill_exc:  # noqa: BLE001 - best effort; the sandbox TTL is the backstop
                 LOGGER.warning("Could not kill e2b sandbox %s after a failed connect: %s", sandbox_id, kill_exc)
             raise
+
+    # ------------------------------------------------------------------ lease
+
+    def _hold_lease(self, sandbox: Any, lifetime_s: float | None) -> None:
+        if self._create.lease_s is None:
+            return
+        lifetime_end = None if lifetime_s is None else monotonic() + lifetime_s
+        self._leases[str(sandbox.sandbox_id)] = _Lease(sandbox=sandbox, lifetime_end=lifetime_end)
+        if self._lease_task is None or self._lease_task.done():
+            self._lease_task = asyncio.create_task(self._renew_leases(), name="e2b-lease-renewal")
+
+    async def _renew_leases(self) -> None:
+        """Renew every held lease each third of a lease, until none is held."""
+        assert self._create.lease_s is not None
+        while self._leases:
+            await asyncio.sleep(self._create.lease_s / 3)
+            await self.renew_leases()
+
+    async def renew_leases(self) -> None:
+        """Renew every held lease once, ``LEASE_RENEW_BATCH`` at a time."""
+        held = list(self._leases.items())
+        for start in range(0, len(held), LEASE_RENEW_BATCH):
+            await asyncio.gather(
+                *(
+                    self._renew_lease(sandbox_id, lease)
+                    for sandbox_id, lease in held[start : start + LEASE_RENEW_BATCH]
+                )
+            )
+
+    async def _renew_lease(self, sandbox_id: str, lease: _Lease) -> None:
+        assert self._create.lease_s is not None
+        timeout_s = self._create.lease_s
+        if lease.lifetime_end is not None:
+            remaining = lease.lifetime_end - monotonic()
+            if remaining <= 0:
+                # Its lifetime is over: it ends at its current timeout.
+                self._leases.pop(sandbox_id, None)
+                return
+            timeout_s = min(timeout_s, remaining)
+        try:
+            await asyncio.wait_for(
+                lease.sandbox.set_timeout(max(1, math.ceil(timeout_s)), **self._request_params()),
+                LEASE_RENEW_TIMEOUT_S,
+            )
+        except Exception as error:  # noqa: BLE001 - a failed renewal is retried at the next round
+            if _is_not_found(error, _require_e2b_sdk()) or await self._gone_behind_unparsed_reply(error, sandbox_id):
+                LOGGER.info("e2b sandbox %s is gone; stopping its lease", sandbox_id)
+                self._leases.pop(sandbox_id, None)
+                return
+            LOGGER.warning("e2b lease renewal failed for sandbox %s; retrying next round: %r", sandbox_id, error)
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for attaching to this sandbox from another process."""
@@ -667,6 +894,22 @@ class E2BProvider:
             for exc in (getattr(e2b, "SandboxNotFoundException", None), getattr(e2b, "NotFoundException", None))
             if isinstance(exc, type)
         )
+        self._leases.pop(handle.sandbox_id, None)
+        if await self._kill(sandbox, not_found) is False:
+            # Already gone (expired TTL or killed elsewhere) -- unless a gateway replica that has not seen the
+            # sandbox answered for one that still runs. Look again, and kill it if it is there.
+            await asyncio.sleep(KILL_RECHECK_DELAY_S)
+            if await self.status(handle) is SandboxStatus.RUNNING:
+                LOGGER.warning(
+                    "e2b sandbox %s still runs after a kill that did not find it; killing again", handle.sandbox_id
+                )
+                await self._kill(sandbox, not_found)
+            else:
+                LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
+        handle.raw = None
+
+    async def _kill(self, sandbox: Any, not_found: tuple[type[BaseException], ...]) -> bool:
+        """Kill a sandbox; False when the service did not find it."""
         try:
             killed = await self._with_retries(
                 lambda: sandbox.kill(**self._api_params()),
@@ -674,16 +917,99 @@ class E2BProvider:
                 retry_timeouts=True,
             )
         except not_found:
-            # Already gone (expired TTL or killed elsewhere) - closing is idempotent.
-            LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
-        else:
-            if killed is False:
-                LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
-        handle.raw = None
+            return False
+        except Exception as error:
+            if await self._gone_behind_unparsed_reply(error, sandbox.sandbox_id):
+                return False
+            raise
+        return killed is not False
+
+    async def _gone_behind_unparsed_reply(self, error: BaseException, sandbox_id: str) -> bool:
+        """Whether ``error`` is a reply the SDK could not parse about a sandbox the service no longer has.
+
+        AgentENV answers a request about a sandbox it no longer has with a 404 whose body is empty, and the SDK parses
+        the body before it checks the status, so the not-found arrives as a ``JSONDecodeError`` instead of the SDK's
+        not-found exception. Only for such an error is the sandbox looked up; a 404 there settles it. Any other answer,
+        or a lookup that fails, leaves the original error to the caller.
+        """
+        if not isinstance(error, json.JSONDecodeError):
+            return False
+        e2b = _require_e2b_sdk()
+        client = e2b.api.client_async.get_api_client(e2b.ConnectionConfig(**self._api_params()))
+        try:
+            response = await client.get_async_httpx_client().get(f"/sandboxes/{sandbox_id}")
+        except Exception:  # noqa: BLE001 - an unknown answer keeps the original error
+            return False
+        return response.status_code == 404
 
     async def aclose(self) -> None:
-        """No provider-scoped client to close; sandboxes own their connections."""
+        """Stop renewing leases; sandboxes own their connections."""
+        self._leases.clear()
+        if self._lease_task is not None:
+            self._lease_task.cancel()
+            await asyncio.gather(self._lease_task, return_exceptions=True)
+            self._lease_task = None
+
+    # ------------------------------------------------------------- snapshots
+
+    async def snapshot(self, handle: SandboxHandle, *, name: str | None = None) -> str:
+        """Snapshot the whole VM and return the snapshot id; it is usable when this returns.
+
+        The VM pauses for the moment it is captured and then keeps running. Not retried: a repeated request could
+        leave a second snapshot nobody knows the id of. ``name`` is sent only with ``snapshots.send_names``.
+        """
+        sandbox = self._sandbox(handle)
+        create_snapshot = getattr(sandbox, "create_snapshot", None)
+        if create_snapshot is None:
+            raise E2BSnapshotError(
+                "The installed e2b SDK has no AsyncSandbox.create_snapshot; install a release that has it "
+                f"within '{E2B_SDK_CONSTRAINT}'"
+            )
+        try:
+            info = await create_snapshot(name if self._snapshots.send_names else None, **self._request_params())
+        except Exception as error:
+            if await self._gone_behind_unparsed_reply(error, handle.sandbox_id):
+                raise E2BSnapshotError(
+                    f"e2b sandbox {handle.sandbox_id!r} is gone and cannot be snapshotted (HTTP 404)"
+                ) from error
+            raise
+        snapshot_id = getattr(info, "snapshot_id", None)
+        if not snapshot_id:
+            raise E2BSnapshotError(f"e2b create_snapshot returned no snapshot id for sandbox {handle.sandbox_id!r}")
+        return str(snapshot_id)
+
+    async def wait_snapshot_ready(self, snapshot_id: str) -> None:
+        """Nothing to wait for: an E2B snapshot is usable once ``snapshot`` returns."""
         return None
+
+    async def delete_snapshot(self, snapshot_id: str) -> None:
+        """Delete a snapshot (its template); one that is already gone is not an error."""
+        e2b = _require_e2b_sdk()
+        try:
+            await self._with_retries(
+                lambda: e2b.AsyncSandbox.delete_snapshot(snapshot_id, **self._api_params()),
+                operation="delete_snapshot",
+            )
+        except Exception as error:
+            if not _is_not_found(error, e2b):
+                raise
+
+    async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
+        """Every snapshot whose name starts with ``prefix``, filtered here: the service matches whole names only.
+
+        A snapshot's name is its template alias without the team namespace and tag. Unnamed snapshots (the default,
+        see ``snapshots.send_names``) never match a non-empty prefix.
+        """
+        e2b = _require_e2b_sdk()
+        paginator = e2b.AsyncSandbox.list_snapshots(**self._api_params())
+        found: list[dict[str, Any]] = []
+        while paginator.has_next:
+            for info in await paginator.next_items():
+                names = list(getattr(info, "names", None) or [])
+                name = names[0].rsplit("/", 1)[-1].split(":", 1)[0] if names else ""
+                if name.startswith(prefix):
+                    found.append({"id": str(info.snapshot_id), "name": name})
+        return found
 
     # -------------------------------------------------------------- commands
 
@@ -798,8 +1124,8 @@ class E2BProvider:
         kwargs: dict[str, Any] = {"cmd": command}
         if cwd is not None:
             kwargs["cwd"] = cwd
-        if env:
-            kwargs["envs"] = {str(k): str(v) for k, v in env.items()}
+        exec_id = uuid.uuid4().hex
+        kwargs["envs"] = {**{str(k): str(v) for k, v in (env or {}).items()}, _EXEC_MARKER_ENV: exec_id}
         if effective_user is not None:
             kwargs["user"] = str(effective_user)
         # E2B treats ``timeout`` as "no timeout" when falsy; keep None explicit.
@@ -808,6 +1134,7 @@ class E2BProvider:
 
         timeout_exc = getattr(e2b, "TimeoutException", None)
         exit_exc = getattr(e2b, "CommandExitException", None)
+        started = monotonic()
         try:
             if self._exec.background:
                 result = await self._run_background(sandbox, kwargs)
@@ -821,11 +1148,27 @@ class E2BProvider:
                     stderr=getattr(exc, "stderr", None),
                     return_code=int(getattr(exc, "exit_code", 1) or 1),
                 )
+            if _is_unreachable(exc, e2b):
+                raise E2BSandboxUnreachableError(
+                    f"the e2b gateway could not reach sandbox {handle.sandbox_id}: {exc}"
+                ) from exc
             # E2B uses one TimeoutException for stream-open timeouts, the
             # running stream deadline, sandbox expiry and server cancellation.
-            # Preserve that SDK detail instead of claiming every case was the
-            # configured command deadline.
-            if isinstance(timeout_exc, type) and isinstance(exc, timeout_exc):
+            # A timeout at the configured deadline is the command's own, and is
+            # reported like every provider's: exit 124, error_type "timeout".
+            # Any earlier one keeps the SDK detail.
+            timed_out = isinstance(exc, TimeoutError) or (
+                isinstance(timeout_exc, type) and isinstance(exc, timeout_exc)
+            )
+            if timed_out and effective_timeout and monotonic() - started >= _DEADLINE_FRACTION * effective_timeout:
+                await self._kill_marked(sandbox, f"{_EXEC_MARKER_ENV}={exec_id}")
+                return SandboxExecResult(
+                    stdout=None,
+                    stderr=f"Command timed out after {effective_timeout:g}s",
+                    return_code=_TIMEOUT_RETURN_CODE,
+                    error_type="timeout",
+                )
+            if timed_out:
                 raise TimeoutError(
                     f"e2b command did not complete: {exc} (configured wait/stream budget={effective_timeout}s)"
                 ) from exc
@@ -836,6 +1179,19 @@ class E2BProvider:
             stderr=getattr(result, "stderr", None),
             return_code=int(getattr(result, "exit_code", 0) or 0),
         )
+
+    async def _kill_marked(self, sandbox: Any, marker: str) -> None:
+        """Kill what a timed-out command left running, found by its environment marker; best effort."""
+        script = _KILL_MARKED_SCRIPT.format(marker=shlex.quote(marker))
+        try:
+            await sandbox.commands.run(
+                cmd=f"bash -c {shlex.quote(script)}",
+                user="root",
+                timeout=_KILL_MARKED_TIMEOUT_S,
+                request_timeout=self._exec_request_timeout(),
+            )
+        except Exception as error:  # noqa: BLE001 - the timeout is reported either way
+            LOGGER.warning("could not end the processes a timed-out e2b command left running: %r", error)
 
     # ----------------------------------------------------------------- files
 
