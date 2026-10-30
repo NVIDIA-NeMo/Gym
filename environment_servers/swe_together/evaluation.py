@@ -169,7 +169,8 @@ async def run_judge(
     session_id = "judge-" + uuid4().hex
     judge_cookies = dict(cookies)
     # The judge is a separate logical activation and has a separate capture identity.
-    judge_episode = EpisodeId(rollout_id=episode.capture_key + "-judge")
+    judge_episode = EpisodeId(rollout_id=f"{episode.capture_key}-{session_id}")
+    evidence["judge_capture_episode"] = judge_episode.capture_key
     seed = AgentSeedSessionRequest(
         agent_session_id=session_id,
         episode_id=judge_episode,

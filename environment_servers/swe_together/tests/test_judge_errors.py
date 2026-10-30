@@ -11,11 +11,13 @@ import pytest
 from aiohttp import ClientConnectionError, ClientResponseError
 
 from environment_servers.swe_together import evaluation
+from environment_servers.swe_together.judge_evidence import collect_judge_evidence
 from environment_servers.swe_together.schemas import SWETRequest
 from environment_servers.swe_together.task import TaskData
+from nemo_gym.rollout_observability import TrajectoryRecord
 
 
-SEED, ACTIVATE, CLOSE = "/v1/agent_sessions", "/ng-rollout/one-judge/v1/responses", "/v1/agent_sessions/close"
+SEED, ACTIVATE, CLOSE = "/v1/agent_sessions", "/ng-rollout/one-judge-test/v1/responses", "/v1/agent_sessions/close"
 CONFIRMED = {"agent_session_id": "judge-test", "cleanup_confirmed": True}
 UNCONFIRMED = {"agent_session_id": "judge-test"}
 
@@ -130,3 +132,101 @@ async def test_successful_judge_is_unchanged(tmp_path, monkeypatch):
     assert verdict["judge_score"] == 1.0
     assert verdict["judge_close"]["cleanup_confirmed"] is True
     assert "judge_close_error" not in evidence and "judge_transport_error" not in evidence
+
+
+@pytest.mark.parametrize("attempt", [0, 2])
+async def test_each_physical_judge_session_collects_only_its_own_capture(tmp_path, monkeypatch, attempt):
+    identities = iter(["first", "second"])
+    monkeypatch.setattr(evaluation, "uuid4", lambda: SimpleNamespace(hex=next(identities)))
+    monkeypatch.setattr(evaluation, "stage_judge", AsyncMock(return_value="judge"))
+    monkeypatch.setattr(evaluation, "raise_for_status", AsyncMock())
+    monkeypatch.setattr(evaluation, "read_test_reward", AsyncMock(return_value={}))
+    monkeypatch.setattr(
+        evaluation, "read_text", AsyncMock(return_value=json.dumps({"goal_results": [{"id": "goal", "met": True}]}))
+    )
+    monkeypatch.setattr(evaluation, "get_response_json", AsyncMock(side_effect=lambda response: response.payload))
+    (tmp_path / "canonical_goals.json").write_text(json.dumps({"completeness_goals": [{"id": "goal", "weight": 1}]}))
+    req = SWETRequest(
+        episode_id={"rollout_id": "parent", "attempt": attempt},
+        task={
+            "task_id": {"taskset": "swet", "task_id": "task"},
+            "task_input": {"task_data": TaskData(task_id="task", image="image", image_digest="sha256:" + "1" * 64)},
+        },
+    )
+    model = {"type": "responses_api_models", "name": "judge"}
+    old_path = tmp_path / f"{req.episode_id.capture_key}-judge.capture.jsonl"
+    old_bytes = json.dumps({"model_call_id": "old-session", "request": {}, "response": {}})
+    old_path.write_text(old_bytes)
+    session = None
+    keys = {}
+    encode = json.dumps
+
+    async def post(name, path, *, json, cookies, _control=False):
+        nonlocal session
+        if path == SEED:
+            session = json.agent_session_id
+            keys[session] = [json.episode_id.capture_key]
+            payload = {}
+        elif path == CLOSE:
+            keys[session].append(json.episode_id.capture_key)
+            payload = {
+                "agent_session_id": session,
+                "cleanup_confirmed": True,
+                "agent_observations": {
+                    "source": "claude_code",
+                    "records": [
+                        {
+                            "kind": "agent_invocation",
+                            "invocation_id": session,
+                            "status": "completed",
+                            "model_calls": [{"model_ref": model, "response_id": session}],
+                        }
+                    ],
+                },
+            }
+        else:
+            key = path.removeprefix("/ng-rollout/").removesuffix("/v1/responses")
+            keys[session].append(key)
+            exchange = {
+                "model_call_id": session,
+                "model_ref": model,
+                "request": {"messages": []},
+                "response": {"id": session, "content": []},
+                "status_code": 200,
+            }
+            with (tmp_path / f"{key}.capture.jsonl").open("a") as handle:
+                handle.write(encode(exchange) + "\n")
+            payload = {"status": "completed", "output": []}
+        return SimpleNamespace(cookies={}, payload=payload)
+
+    child_keys = []
+    for identity in ["first", "second"]:
+        evidence = {}
+        verdict = await evaluation.run_judge(
+            client=SimpleNamespace(post=post),
+            agent=SimpleNamespace(name="judge"),
+            sandbox=SimpleNamespace(serialize=AsyncMock(return_value={})),
+            provider="sandbox",
+            task_dir=tmp_path,
+            patch="patch",
+            workdir="/workspace",
+            episode=req.episode_id,
+            task_id=req.task.task_id,
+            timeout=100,
+            cookies={},
+            artifact_dir=tmp_path,
+            evidence=evidence,
+        )
+        key = evidence["judge_capture_episode"]
+        child_keys.append(key)
+        assert keys[f"judge-{identity}"] == [key, key, key]
+        assert key.startswith(req.episode_id.capture_key + "-")
+        assert verdict["judge_score"] == 1 and verdict["judge_close"]["cleanup_confirmed"] is True
+        parent = TrajectoryRecord(task_id="task", rollout_id=req.episode_id.capture_key)
+        result = await collect_judge_evidence(
+            parent, evidence, {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}, tmp_path
+        )
+        assert [call.model_call_id for call in result.model_calls] == [f"judge-{identity}"]
+        assert not result.gaps
+    assert child_keys[0] != child_keys[1]
+    assert old_path.read_text() == old_bytes
