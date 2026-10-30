@@ -22,6 +22,7 @@ from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
 
 import aiohttp
+from nooa.agents.summarization import summary_fork_active
 from nooa.unifiedllm import (
     AssistantPart,
     AssistantReasoning,
@@ -449,7 +450,8 @@ class GymResponsesLLM(UnifiedLLM):
                 request["max_output_tokens"] = limits.reserved_output_tokens
             body = NeMoGymResponseCreateParamsNonStreaming.model_validate(request)
         except Exception as error:
-            self._state.fatal_error = error
+            if not summary_fork_active():
+                self._state.fatal_error = error
             raise
 
         # Preparation failures are recorded but never consume a policy request.
@@ -485,11 +487,15 @@ class GymResponsesLLM(UnifiedLLM):
             call.response = response
             self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
         except Exception as error:
-            self._state.fatal_error = error
+            # Summary forks contain their own errors; their optional model calls
+            # must neither poison nor clear the main invocation's failure state.
+            if not summary_fork_active():
+                self._state.fatal_error = error
             raise
-
-        # A successful retry clears an earlier preparation or transport failure.
-        self._state.fatal_error = None
+        if not summary_fork_active():
+            # A recovered model call no longer vetoes successful completion.
+            # Earlier requests and responses remain in the rollout evidence.
+            self._state.fatal_error = None
         if self._on_response is not None:
             self._on_response()
 

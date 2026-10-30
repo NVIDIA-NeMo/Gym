@@ -165,6 +165,7 @@ async def test_terminal_result_waits_for_cleanup_before_capture_and_return() -> 
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
     ],
 )
 async def test_limit_result_survives_worker_boundary_and_cleanup(reason: NOOATerminationReason) -> None:
