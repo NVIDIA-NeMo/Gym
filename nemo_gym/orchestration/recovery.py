@@ -389,7 +389,7 @@ def decide_recovery(
                 if model_kind and is_terminal_failure(last) and not contradictory
                 else IdentityState.UNKNOWN
             )
-        elif not _known_kind(kind):
+        elif not _known_kind(_policy_evidence(last)[0]):
             state = IdentityState.UNKNOWN
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
@@ -1215,6 +1215,8 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
     if rows is None or len(rows) != decision.expected or {_identity(row) for row in rows} != expected:
         return False
     provenance = (collected.quality or {}).get("provenance") or {}
+    if not isinstance(provenance, dict):
+        return False
     servers = provenance.get("servers") or {}
     if provenance.get("resolved_config") != "read" or not isinstance(servers, dict):
         return False

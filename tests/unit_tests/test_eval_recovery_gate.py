@@ -231,3 +231,31 @@ def test_the_decision_reads_saved_files_without_changing_a_byte(tmp_path: Path) 
     assert d.action == RecoveryAction.STOP
     assert {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in paths.items()} == before
     assert loaded["results"][1]["response"] == {"output_text": "saved answer 1"}
+
+
+def _selected_event_failure(*, kind: str, selected: bool) -> dict:
+    # A collection row carries its failure kind only on the event its failure_id selects, not at the top level.
+    event = {"event_id": "e0", "boundary": "agent", "failure_kind": kind, "operation": "collection.dispatch"}
+    return ident(
+        0,
+        _ng_attempt_index=0,
+        _ng_failure_terminal=False,
+        _ng_failure_max_attempts=3,
+        _ng_failure_id="e0" if selected else "other",
+        _ng_failure_events={"e0": event},
+    )
+
+
+def test_a_kind_named_only_by_the_selected_event_is_known() -> None:
+    row = _selected_event_failure(kind="collection_dispatch_failed", selected=True)
+    d = decide_recovery(materialized=inventory(1), results=[], failures=[row], budget=OK_BUDGET)
+    assert d.counts.get(IdentityState.RETRYABLE) == 1 and d.action == RecoveryAction.RESUBMIT
+
+
+def test_an_unregistered_or_unselected_event_kind_stays_unknown() -> None:
+    for row in (
+        _selected_event_failure(kind="not_a_registered_kind", selected=True),
+        _selected_event_failure(kind="collection_dispatch_failed", selected=False),
+    ):
+        d = decide_recovery(materialized=inventory(1), results=[], failures=[row], budget=OK_BUDGET)
+        assert d.counts.get(IdentityState.UNKNOWN) == 1 and d.action == RecoveryAction.STOP

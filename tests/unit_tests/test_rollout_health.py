@@ -3337,3 +3337,100 @@ def test_run_provenance_reads_mlflow_configuration_from_names_only(tmp_path: Pat
 
 def result_text(root: Path) -> str:
     return (root / "quality_summary.json").read_text()
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected"),
+    [
+        # A stream that stopped on its output budget is selected and faulted as truncated.
+        (
+            {"response_status": "incomplete", "error_category": "incomplete", "finish_reason": "max_output_tokens"},
+            {"selected": ["c1"], "faulted": ["c1"]},
+        ),
+        ({"response_status": "incomplete", "error_category": "incomplete", "finish_reason": "length"}, None),
+        # Failed, cancelled and transport-failed calls stay trial matters, not selected responses.
+        ({"response_status": "failed", "error_category": "incomplete", "finish_reason": "max_output_tokens"}, []),
+        ({"response_status": "cancelled", "finish_reason": "max_output_tokens"}, []),
+        ({"status_code": 502, "error_category": "incomplete", "response_status": "incomplete"}, []),
+        ({"response_status": "incomplete", "error_category": "incomplete", "finish_reason": "stop"}, []),
+    ],
+)
+def test_an_output_budget_incomplete_stream_is_a_selected_truncated_response(
+    tmp_path: Path, updates: dict, expected
+) -> None:
+    rows = [(_record(0, 0, refs=[{"model_call_id": "c1"}]), [_call(**updates)])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    if expected is None:
+        expected = {"selected": ["c1"], "faulted": ["c1"]}
+    elif expected == []:
+        expected = {"selected": [], "faulted": []}
+    assert [d.responses for d in result.rollouts] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("message", "finish_reason", "faulted"),
+    [
+        ({"role": "assistant", "content": None, "refusal": "I can't help with that."}, "stop", []),
+        ({"role": "assistant", "content": None, "refusal": "   "}, "stop", ["c1"]),
+        ({"role": "assistant", "content": None, "refusal": ""}, "stop", ["c1"]),
+        ({"role": "assistant", "content": None, "refusal": "I can't help with that."}, "length", ["c1"]),
+    ],
+)
+def test_a_chat_refusal_is_usable_output(tmp_path: Path, message: dict, finish_reason: str, faulted: list) -> None:
+    response = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    rows = [(_record(0, 0, refs=[{"model_call_id": "c1"}]), [_call(response=response, finish_reason=finish_reason)])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    assert [d.responses for d in result.rollouts] == [{"selected": ["c1"], "faulted": faulted}]
+
+
+@pytest.mark.parametrize(
+    ("stream_status", "expected_selected", "expected_faulted"),
+    [("incomplete", 1, 1), ("completed", 1, 0), ("failed", 0, 0)],
+)
+def test_raw_responses_stream_capture_preserves_response_population(
+    tmp_path, stream_status, expected_selected, expected_faulted
+):
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import read_model_call_records
+    from tests.unit_tests.test_base_responses_api_model import _install_capture
+
+    app = FastAPI()
+    response = {
+        "id": "captured-response",
+        "status": stream_status,
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "partial answer"}]}
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    }
+    if stream_status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    raw = (
+        b"event: response."
+        + stream_status.encode()
+        + b"\ndata: "
+        + orjson.dumps({"type": "response." + stream_status, "response": response})
+        + b"\n\n"
+    )
+
+    @app.post("/v1/responses")
+    async def responses():
+        return StreamingResponse(iter([raw[:17], raw[17:]]), media_type="text/event-stream")
+
+    captures = tmp_path / "capture"
+    _install_capture(app, captures)
+    received = TestClient(app).post("/ng-rollout/raw-sse/v1/responses", json={"input": "question", "stream": True})
+    assert received.status_code == 200 and received.content == raw
+    [call] = read_model_call_records(CaptureStore(captures), "raw-sse")
+    assert call.response_status == stream_status
+    if stream_status == "incomplete":
+        assert call.error_category == "incomplete" and call.finish_reason == "max_output_tokens"
+    record = _record(0, 0, refs=[{"model_call_id": call.model_call_id}])
+    saved = _write_fixture(tmp_path, [(record, [call.model_dump(mode="json")])])
+    result = run_health_checks(saved, output_dir=tmp_path / "report", workers=1)
+    assert len(result.rollouts[0].responses["selected"]) == expected_selected
+    assert len(result.rollouts[0].responses["faulted"]) == expected_faulted

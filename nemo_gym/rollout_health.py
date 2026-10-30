@@ -476,9 +476,19 @@ def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[
     selected: list[str] = []
     faulted: list[str] = []
     for call in bindings.matched_calls:
-        if _is_failed(call):
-            continue
         status = call.get("status_code")
+        # The SSE capture marks a stream that stopped on its output budget as failed; the model still answered.
+        length_incomplete = (
+            type(status) is int
+            and 200 <= status < 400
+            and isinstance(call.get("response"), dict)
+            and call.get("response_status") == "incomplete"
+            and call.get("error_category") == "incomplete"
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and not _is_length_refusal(call)
+        )
+        if _is_failed(call) and not length_incomplete:
+            continue
         identity = str(call.get("model_call_id") or call.get("response_id") or "")
         if type(status) is not int or not 200 <= status < 400 or call.get("response") is None or not identity:
             return None

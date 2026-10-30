@@ -2012,3 +2012,22 @@ def test_terminal_judge_failure_never_reopens_by_policy(tmp_path, where):
 def test_explicit_missing_final_failure_id_is_not_validated_from_unrelated_observations(tmp_path, events):
     job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[_final_zero(events)])
     assert _decide(job).action == RecoveryAction.STOP
+
+
+@pytest.mark.parametrize("provenance", ["read", ["read"], 1, {"resolved_config": "read", "servers": []}])
+def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_raised(provenance) -> None:
+    from nemo_gym.orchestration import recovery
+
+    row = {recovery.TASK_INDEX: 0, recovery.ROLLOUT_INDEX: 0}
+    decision = recovery.RecoveryDecision(
+        action=recovery.RecoveryAction.NOOP,
+        reason="scored",
+        expected=1,
+        counts={recovery.IdentityState.SCORED.value: 1},
+        identities={recovery.IdentityState.SCORED.value: [(0, 0)]},
+        evidence=[],
+    )
+    collected = recovery.CollectedEvidence(
+        materialized=[row], results=[row], failures=[], quality={"source_matches": True, "provenance": provenance}
+    )
+    assert recovery._bounded_mcqa_trial_operations(decision, collected) is False

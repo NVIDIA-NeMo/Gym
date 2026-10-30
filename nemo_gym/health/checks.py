@@ -518,7 +518,12 @@ def _response_has_usable_output(response: Any) -> bool:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        if _nonempty(choice.get("text")) or _nonempty(message.get("content")) or message.get("tool_calls"):
+        if (
+            _nonempty(choice.get("text"))
+            or _nonempty(message.get("content"))
+            or _nonempty(message.get("refusal"))
+            or message.get("tool_calls")
+        ):
             return True
     return False
 
