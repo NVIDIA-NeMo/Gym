@@ -374,6 +374,60 @@ Agents based on `SimpleResponsesAPIAgent` can add the prefix with these helpers:
 The prefixed self-call route (`/ng-rollout/{rollout_id}/v1/responses`) is registered on every agent by
 default.
 
+### Clients with a fixed base URL
+
+A long-lived client, such as one a resources server calls during verification, may not be able to change its
+base URL for each rollout. `nemo_gym.server_utils.with_rollout_prefix` rewrites each request URL instead: it
+inserts `/ng-rollout/<rollout>` after the matching base URL, using the current rollout, so the call reaches the
+model server exactly like a prefixed one, and every Gym server layer that reads the prefix (capture, policy
+checkpointing, session affinity) sees it.
+
+- Only URLs under one of the base URLs you list are changed. They are compared by scheme, host
+  (case-insensitive), effective port and whole path segments, the way HTTP clients normalize them.
+- A URL that already carries a rollout prefix below the base is left as it is.
+- With no current rollout the URL is unchanged, a debug message is logged, and the model server forwards the
+  call without capture.
+- The current rollout is a `ContextVar`. A synchronous client run through `asyncio.to_thread` or
+  `contextvars.copy_context().run` sees it; one run through `loop.run_in_executor` or a thread pool does not.
+
+`rollout_prefix_hook` and `async_rollout_prefix_hook` wrap it as httpx request event hooks. The OpenAI SDK
+accepts such a client through `http_client`.
+
+```python
+import httpx
+import requests
+from openai import OpenAI
+from requests.adapters import HTTPAdapter
+
+from nemo_gym.server_utils import async_rollout_prefix_hook, rollout_prefix_hook, with_rollout_prefix
+
+model_base_urls = ["http://model-server:8000"]
+
+# httpx, synchronous and asynchronous clients
+client = httpx.Client(event_hooks={"request": [rollout_prefix_hook(model_base_urls)]})
+async_client = httpx.AsyncClient(event_hooks={"request": [async_rollout_prefix_hook(model_base_urls)]})
+
+# the OpenAI SDK, through its httpx client
+openai_client = OpenAI(base_url="http://model-server:8000/v1", api_key="unused", http_client=client)
+
+
+# requests
+class RolloutPrefixAdapter(HTTPAdapter):
+    def send(self, request, **kwargs):
+        request.url = with_rollout_prefix(request.url, model_base_urls)
+        return super().send(request, **kwargs)
+
+
+session = requests.Session()
+session.mount("http://", RolloutPrefixAdapter())
+session.mount("https://", RolloutPrefixAdapter())
+```
+
+With observability or checkpointing on, Gym sets the current rollout for every request it sends to a
+resources server for that rollout, including `/verify`. Clients created once and shared across concurrent
+rollouts therefore name each request's own rollout. The rollout is the capture key, including an `-a<N>`
+attempt suffix when the run retries.
+
 ## Add agent-side evidence
 
 Model-call capture is one input to Gym's broader rollout-evidence pipeline. Supported harnesses can
