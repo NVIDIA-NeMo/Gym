@@ -6,8 +6,8 @@ from nemo_gym.base_responses_api_agent import AgentSessionSetupError, AgentSessi
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
+from tests.unit_tests.server_runtime.test_session_routing import AgentWorker
 from tests.unit_tests.test_agent_session_retries import _seed
-from tests.unit_tests.test_session_routing import AgentWorker
 
 
 def _served(label: str = "a") -> AgentWorker:
