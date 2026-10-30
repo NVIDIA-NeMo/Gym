@@ -12,6 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import shutil
+import subprocess
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -20,6 +22,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
+from swebench.harness.constants import END_TEST_OUTPUT, START_TEST_OUTPUT
 
 from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxExecResult, SandboxHandle
@@ -31,7 +34,7 @@ from resources_servers.swebench.app import (
     patch_extraction_command,
     strip_binary_diffs,
 )
-from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox
+from resources_servers.swebench.swebench_patches import EVAL_SCRIPT_COMMAND, patch_swebench_multilingual_sandbox
 
 
 def make_sandbox(
@@ -312,3 +315,23 @@ class TestPatchExtraction:
         out = strip_binary_diffs(text)
         assert "img.png" not in out and "a/a.py" in out and "b/b.py" in out
         assert strip_binary_diffs("") == ""
+
+
+class TestEvalScriptCommand:
+    @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+    def test_stderr_of_the_tests_stays_between_the_markers_when_only_stdout_is_read(self, tmp_path: Path) -> None:
+        """A provider that returns stdout and stderr apart (E2B) still yields one ordered graded region."""
+        script = tmp_path / "eval.sh"
+        script.write_text(
+            f"echo '{START_TEST_OUTPUT}'\n"
+            "echo 'PASSED tests/test_a.py::test_one' >&2\n"
+            "echo 'FAILED tests/test_a.py::test_two'\n"
+            f"echo '{END_TEST_OUTPUT}'\n"
+        )
+        command = EVAL_SCRIPT_COMMAND.replace("/eval.sh", str(script))
+
+        result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, check=True)
+
+        assert result.stderr == ""
+        region = result.stdout.split(START_TEST_OUTPUT)[1].split(END_TEST_OUTPUT)[0]
+        assert region.splitlines()[1:] == ["PASSED tests/test_a.py::test_one", "FAILED tests/test_a.py::test_two"]
