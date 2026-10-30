@@ -4,6 +4,7 @@
 
 import io
 import logging
+import shutil
 import urllib.request
 import zipfile
 from pathlib import Path
@@ -57,3 +58,12 @@ def ensure_spider2_lite(base_dir: Path | str | None = None) -> Path:
 
     logger.info("Spider 2.0-Lite: extracted %d databases to %s", len(sqlite_entries), sqlite_dir)
     return sqlite_dir
+
+
+def delete_spider2_lite(base_dir: Path | str | None = None) -> None:
+    """Delete the Spider 2.0-Lite cache dir (git clone + SQLite databases)."""
+    base_dir = Path(base_dir) if base_dir else _DEFAULT_DIR
+    if not base_dir.exists():
+        return
+    logger.info("Deleting Spider 2.0-Lite cache at %s", base_dir)
+    shutil.rmtree(base_dir)

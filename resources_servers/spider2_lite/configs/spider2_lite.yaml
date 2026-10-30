@@ -2,23 +2,27 @@
 # SPDX-License-Identifier: Apache-2.0
 #
 # Spider 2.0-Lite resource server configuration.
-# Execution-based text-to-SQL evaluation on 135 local SQLite tasks.
+# Execution-based text-to-SQL evaluation. SQLite is the default. Rows may set engine: bigquery.
 
 spider2_lite_resources_server:
   resources_servers:
     spider2_lite:
       entrypoint: app.py
       spider2_lite_dir: resources_servers/spider2_lite/.spider2_lite
-      max_concurrency: 32
-      sql_execution_timeout_s: 30.0
+      sqlite_max_concurrency: 32
+      sqlite_execution_timeout_s: 30.0
+      bigquery_credentials_path: "~/.config/gcloud/application_default_credentials.json"
+      bigquery_project: null
+      bigquery_execution_timeout_s: 120.0
+      bigquery_max_concurrency: 8
       domain: coding
       verified: false
-      description: Text-to-SQL with execution-based evaluation on Spider 2.0-Lite (135 SQLite tasks). Binary reward based on result-set equivalence.
+      description: Text-to-SQL with execution-based evaluation on Spider 2.0-Lite. Binary reward based on result-set equivalence. Supports SQLite and BigQuery engines.
       value: Improve text-to-SQL capabilities for real-world enterprise queries using execution-based binary reward without an LLM judge.
 
 spider2_lite_simple_agent:
   responses_api_agents:
-    simple_agent:
+    spider2_lite_agent:
       entrypoint: app.py
       resources_server:
         type: resources_servers
@@ -30,6 +34,10 @@ spider2_lite_simple_agent:
         - name: example
           type: example
           jsonl_fpath: resources_servers/spider2_lite/data/example.jsonl
+          license: Creative Commons Attribution-ShareAlike 4.0 International
+        - name: bigquery_example
+          type: example
+          jsonl_fpath: resources_servers/spider2_lite/data/bigquery_example.jsonl
           license: Creative Commons Attribution-ShareAlike 4.0 International
         - name: spider2_lite_sqlite_validation
           type: validation

@@ -3,16 +3,20 @@
 """Task-data schema for the spider2_lite server.
 
 All task fields are top-level (no ``verifier_metadata``). Two dataset variants exist: the
-committed ``data/example.jsonl`` carries ``gold_sql`` (verify() executes it against the local
-SQLite database named by ``db_id``), while ``scripts/prepare_dataset.py`` also emits an
-uncommitted validation file whose rows carry ``gold_result`` — a list of acceptable result sets —
-instead. ``verify()`` branches on whichever is present and raises when both are absent; there is
+committed ``data/example.jsonl`` carries ``gold_sql`` (verify() executes it against the
+local SQLite database named by ``db_id``), while ``scripts/prepare_dataset.py`` also emits an
+uncommitted validation file whose rows carry ``gold_result`` (a list of acceptable result sets)
+instead. ``verify()`` branches on whichever is present and raises when both are absent. There is
 no in-band discriminator field, so this is a single model with both golds Optional, mirroring
-``Spider2LiteVerifyRequest`` (app.py:85, ``extra="allow"``). ``uuid`` and ``metadata`` are
+``Spider2LiteVerifyRequest`` in app.py (``extra="allow"``). ``uuid`` and ``metadata`` are
 accepted by the wire but never emitted by the prepare script.
+
+Rows may set ``engine: bigquery`` to opt into BigQuery execution against a Google Cloud project
+read from the user's Application Default Credentials file. The default ``engine: sqlite`` keeps
+all existing rows on the current local SQLite path.
 """
 
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Dict, List, Literal, Optional, Union
 
 from pydantic import BaseModel, ConfigDict, Field
 
@@ -31,11 +35,23 @@ class TaskData(BaseModel):
         json_schema_extra={"consumed_by": ["provenance"]},
     )
     db_id: str = Field(
-        description="Name of the SQLite database the query runs against (e.g. 'IPL').",
+        description=(
+            "Name of the database the query runs against (e.g. 'IPL' for SQLite, "
+            "or a BigQuery dataset/project reference for engine='bigquery')."
+        ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
     question: str = Field(
         description="Natural-language question; wire-required, echoed into the verify response.",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+    engine: Literal["sqlite", "bigquery"] = Field(
+        default="sqlite",
+        description=(
+            "Execution engine for the predicted SQL. 'sqlite' (default) runs against the "
+            "local Spider 2.0 Lite SQLite databases. 'bigquery' submits a query job to the "
+            "user's Google Cloud project (BigQuery Job User required)."
+        ),
         json_schema_extra={"consumed_by": ["verify"]},
     )
     gold_sql: Optional[str] = Field(
