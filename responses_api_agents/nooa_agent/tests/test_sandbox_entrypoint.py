@@ -706,10 +706,30 @@ def test_enable_trace_export_writes_otlp_jsonl_per_session(tmp_path: Path) -> No
     assert "resourceSpans" in first
 
 
-def test_expose_runtime_scripts_puts_the_runtime_bin_first_without_duplicates() -> None:
-    """Console scripts installed with the staged runtime (ripgrep's rg) must be visible to the agent's shells."""
-    bin_dir = os.path.dirname(sys.executable)
+def test_expose_runtime_scripts_exposes_only_rg_not_the_runtime_bin(tmp_path, monkeypatch) -> None:
+    """The agent's shells must see the runtime's rg, while python3 and pip keep resolving to the task image's."""
+    prefix = tmp_path / "runtime"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True)
+    for name in ("python3", "pip", "rg"):
+        (bin_dir / name).write_text("#!/bin/sh\n")
+        (bin_dir / name).chmod(0o755)
+    monkeypatch.setattr(entrypoint.sys, "executable", str(bin_dir / "python3"))
     env = {"PATH": f"/usr/bin:{bin_dir}:/bin"}
-    path = entrypoint.expose_runtime_scripts(env)
-    assert path.split(os.pathsep) == [bin_dir, "/usr/bin", "/bin"]
-    assert entrypoint.expose_runtime_scripts({}) == bin_dir
+    path = entrypoint.expose_runtime_scripts(env).split(os.pathsep)
+    tools_dir = str(prefix / "shell-tools")
+    assert path == [tools_dir, "/usr/bin", "/bin"], path
+    assert sorted(os.listdir(tools_dir)) == ["rg"]
+    assert os.path.realpath(os.path.join(tools_dir, "rg")) == str(bin_dir / "rg")
+    # Idempotent: a second call keeps one entry and relinks.
+    assert entrypoint.expose_runtime_scripts(env).split(os.pathsep) == [tools_dir, "/usr/bin", "/bin"]
+
+
+def test_expose_runtime_scripts_without_rg_only_removes_the_runtime_bin(tmp_path, monkeypatch) -> None:
+    """A runtime without rg exposes nothing; the runtime bin never stays on PATH."""
+    bin_dir = tmp_path / "runtime" / "bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr(entrypoint.sys, "executable", str(bin_dir / "python3"))
+    env = {"PATH": f"{bin_dir}:/usr/bin"}
+    assert entrypoint.expose_runtime_scripts(env) == "/usr/bin"
+    assert not (tmp_path / "runtime" / "shell-tools").exists()

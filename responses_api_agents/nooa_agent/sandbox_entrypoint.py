@@ -296,16 +296,33 @@ def collect_trace_export(trace_dir: str, output: Path) -> int:
     return lines
 
 
-def expose_runtime_scripts(environ: dict[str, str] | None = None) -> str:
-    """Put the staged runtime's ``bin`` first on PATH so the agent's shells see its console scripts.
+def expose_runtime_scripts(environ: dict[str, str] | None = None, *, tools: tuple[str, ...] = ("rg",)) -> str:
+    """Expose named console scripts of the staged runtime to the agent's shells, and nothing else from it.
 
-    The runtime is a private prefix outside the task image; tools it installs as scripts (ripgrep's ``rg``
-    from ``ripgrep-bin``, for example) are otherwise invisible to ``command -v`` in a shell the agent spawns.
+    The runtime is a private prefix outside the task image, so ripgrep's ``rg`` (from ``ripgrep-bin``) is invisible
+    to ``command -v`` in a shell the agent spawns. Putting the runtime's whole ``bin`` on PATH is wrong: ``python3``
+    and ``pip`` would then resolve to the harness interpreter instead of the task image's, and task installs would
+    land in the harness runtime. A directory beside the runtime holds symlinks to just the named tools; it goes first
+    on PATH, and the runtime's ``bin`` is removed from PATH if something put it there.
     """
     env = os.environ if environ is None else environ
     bin_dir = os.path.dirname(sys.executable)
     parts = [p for p in env.get("PATH", "").split(os.pathsep) if p and p != bin_dir]
-    env["PATH"] = os.pathsep.join([bin_dir, *parts])
+    tools_dir = os.path.join(os.path.dirname(bin_dir), "shell-tools")
+    exposed = False
+    for name in tools:
+        target = os.path.join(bin_dir, name)
+        if not os.access(target, os.X_OK):
+            continue
+        os.makedirs(tools_dir, exist_ok=True)
+        link = os.path.join(tools_dir, name)
+        if os.path.islink(link) or os.path.exists(link):
+            os.unlink(link)
+        os.symlink(target, link)
+        exposed = True
+    if exposed:
+        parts = [tools_dir, *[p for p in parts if p != tools_dir]]
+    env["PATH"] = os.pathsep.join(parts)
     return env["PATH"]
 
 
