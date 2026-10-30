@@ -26,6 +26,12 @@ from nemo_gym import PARENT_DIR
 from nemo_gym.sandbox import AsyncSandbox
 
 
+# The eval script's stderr joins its stdout, in order: test runners report on either stream, and the log parser
+# reads only the region between the start and end markers. A provider that returns a command's stdout and stderr
+# apart (E2B) would otherwise put every stderr line after the end marker.
+EVAL_SCRIPT_COMMAND = "/bin/bash /eval.sh 2>&1"
+
+
 # @bxyu-nvidia: We modify the run_instance function to:
 # 1. Enable async container operations.
 # 2. Avoid complicated patching logic.
@@ -187,7 +193,7 @@ async def run_instance(
         #
         # Modified code:
         test_output, timed_out, total_runtime = await container.exec_run_with_timeout(
-            "/bin/bash /eval.sh", timeout=timeout
+            EVAL_SCRIPT_COMMAND, timeout=timeout
         )
         test_output_path = log_dir / LOG_TEST_OUTPUT
         logger.info(f"Test runtime: {total_runtime:_.2f} seconds")
