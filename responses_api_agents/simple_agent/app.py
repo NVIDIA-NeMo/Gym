@@ -26,7 +26,16 @@ from uuid import uuid4
 from aiohttp import ClientResponseError
 from fastapi import Request, Response
 from fastapi.responses import JSONResponse
-from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, ValidationError
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    JsonValue,
+    PrivateAttr,
+    TypeAdapter,
+    ValidationError,
+    model_validator,
+)
 
 from nemo_gym._checkpoint.agent import (
     Activation,
@@ -37,7 +46,13 @@ from nemo_gym._checkpoint.agent import (
 )
 from nemo_gym._checkpoint.errors import RolloutIdRequiredError
 from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    OutcomeAction,
+    OutcomePolicyConfig,
+    failure_outcome_policy,
+)
 from nemo_gym.base_environment_server import is_retryable_dependency_status
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
@@ -60,7 +75,11 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, FailureBoundary
 from nemo_gym.exception_inspection import explicit_causes
-from nemo_gym.failure_kinds import AGENT_RUN_ERROR, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
+from nemo_gym.failure_kinds import (
+    AGENT_RUN_ERROR,
+    MODEL_REQUEST_ERROR,
+    POLICY_MODEL_RESPONSE_TIMEOUT,
+)
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
 from nemo_gym.openai_utils import (
@@ -174,6 +193,23 @@ class _LegacyLoopReply:
     completed_reply: dict[str, Any] | None = None
 
 
+class SimpleAgentOutcomePolicyConfig(OutcomePolicyConfig):
+    """The legacy /run boundary can retry or stop; it has no output to verify after a timeout."""
+
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+    @model_validator(mode="after")
+    def require_run_actions(self) -> "SimpleAgentOutcomePolicyConfig":
+        """Reject grading actions this failure-only boundary cannot execute."""
+        if OutcomeAction.VERIFY in [
+            self.default_action,
+            *self.by_failure_kind.values(),
+            *self.by_status_code.values(),
+        ]:
+            raise ValueError("SimpleAgent /run outcome policy does not support verify")
+        return self
+
+
 class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
     resources_server: ResourcesServerRef | None = None
     model_server: ModelServerRef
@@ -190,20 +226,36 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
             "requests, where unresolved function calls are returned to the Environment Server."
         ),
     )
+    outcome_policy: SimpleAgentOutcomePolicyConfig = Field(default_factory=SimpleAgentOutcomePolicyConfig)
     final_on_model_timeout: bool = Field(
         default=False,
-        description=(
-            "On the /run route, end a rollout as a final model failure when its policy model request still times out "
-            "after the model server's own attempts (every attempt it reports timed out): /run answers a failure row "
-            "with _ng_failure_class agent_run_error, _ng_failure_terminal true, _ng_failure_counts_as_zero true and "
-            "failure_kind model_transport_error, so resume does not run it again and the metrics count it as 0 "
-            "without count_failure_classes_as_zero. Other policy errors, judge and tool calls, and cancellation are "
-            "unchanged. Off keeps /run failing as before, which rollout collection retries."
-        ),
+        exclude=True,
+        description="Compatibility alias for the confirmed policy-response timeout rule in outcome_policy.",
     )
 
+    @model_validator(mode="before")
+    @classmethod
+    def resolve_timeout_alias(cls, value: Any) -> Any:
+        """Resolve the old opt-in once; conflicting explicit policy is rejected instead of silently overridden."""
+        if not isinstance(value, Mapping) or "final_on_model_timeout" not in value:
+            return value
+        value = dict(value)
+        enabled = TypeAdapter(bool).validate_python(value["final_on_model_timeout"])
+        action = OutcomeAction.COUNT_AS_ZERO if enabled else OutcomeAction.RETRY
+        supplied = value.get("outcome_policy") or {}
+        if isinstance(supplied, OutcomePolicyConfig):
+            supplied = supplied.model_dump(exclude_unset=True)
+        policy = dict(supplied)
+        rules = dict(policy.get("by_failure_kind") or {})
+        selected = rules.get(POLICY_MODEL_RESPONSE_TIMEOUT, policy.get("default_action"))
+        if selected is not None and selected != action:
+            raise ValueError("final_on_model_timeout conflicts with the explicit outcome_policy timeout action")
+        policy["by_failure_kind"] = rules | {POLICY_MODEL_RESPONSE_TIMEOUT: action}
+        value["outcome_policy"] = policy
+        return value
 
-# The operation of the agent failure that marks a policy request timeout; /run turns only this one into a final row.
+
+# The classified policy-request timeout whose outcome the legacy /run boundary selects.
 POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
@@ -219,14 +271,32 @@ def _policy_request_timed_out(error: ClientResponseError) -> bool:
     if report is None or report.omitted or report.failure_id is None:
         return False
     final = report.events.get(report.failure_id)
-    if final is None or final.boundary != FailureBoundary.MODEL or final.operation != "model_request":
+    if (
+        final is None
+        or final.boundary != FailureBoundary.MODEL
+        or final.operation != "model_request"
+        or not final.operation_id
+        or not final.attempt_id
+    ):
         return False
-    return all(
-        event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    observed = [
+        event
         for event in report.events.values()
-        if event.boundary == FailureBoundary.MODEL
-        and event.operation == "model_request"
-        and event.operation_id == final.operation_id
+        if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
+    ]
+    # An unidentified attempt cannot be proven to belong to an earlier operation instead of the final one.
+    if any(not event.operation_id or not event.attempt_id for event in observed):
+        return False
+    attempts = [event for event in observed if event.operation_id == final.operation_id]
+    return (
+        bool(attempts)
+        and len({event.attempt_id for event in attempts}) == len(attempts)
+        and all(
+            event.attempt_id
+            and event.request_upload_complete is True
+            and event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+            for event in attempts
+        )
     )
 
 
@@ -236,7 +306,7 @@ def _policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None
         if (
             isinstance(cause, NgFailureEvent)
             and cause.boundary == FailureBoundary.AGENT
-            and cause.failure_kind == MODEL_TRANSPORT_ERROR
+            and cause.failure_kind == POLICY_MODEL_RESPONSE_TIMEOUT
             and cause.operation == POLICY_TIMEOUT_OPERATION
         ):
             return cause
@@ -499,12 +569,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     model_response_json, model_server_cookies = await self._call_policy(activation, call_model)
                 except ClientResponseError as error:
                     if not in_session:
-                        if self.config.final_on_model_timeout and _policy_request_timed_out(error):
+                        if _policy_request_timed_out(error):
+                            report = FailureHeader.decode(error.headers)
+                            final = report.events[report.failure_id]
                             raise NgFailureEvent(
                                 boundary=FailureBoundary.AGENT,
-                                failure_kind=MODEL_TRANSPORT_ERROR,
+                                failure_kind=POLICY_MODEL_RESPONSE_TIMEOUT,
                                 failure_reason="Policy model request timed out on every attempt",
                                 operation=POLICY_TIMEOUT_OPERATION,
+                                operation_id=final.operation_id,
                             ) from error
                         raise
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
@@ -900,15 +973,15 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             return None
         return session_key, path_episode, self._legacy_replies.setdefault(session_key, _LegacyLoopReply())
 
-    def _final_model_timeout_row(self, failure: NgFailureEvent, *, elapsed_s: float) -> dict[str, Any]:
-        """The /run failure row for a rollout ended by its policy model request timing out: final, no reward."""
+    def _model_timeout_row(self, failure: NgFailureEvent, *, elapsed_s: float) -> dict[str, Any]:
+        """Translate a recorded timeout and the boundary's policy into existing Collection failure fields."""
+        action = failure_outcome_policy(failure, config=self.config.outcome_policy)
         report = report_for_current_request(failure)
         return {
             "_ng_failure_class": AGENT_RUN_ERROR,
-            "_ng_failure_terminal": True,
-            # A rollout the evaluated model failed counts as 0, without zeroing other agent_run_error rows.
-            "_ng_failure_counts_as_zero": True,
-            "failure_kind": MODEL_TRANSPORT_ERROR,
+            "_ng_failure_terminal": action != OutcomeAction.RETRY,
+            "_ng_failure_counts_as_zero": action == OutcomeAction.COUNT_AS_ZERO,
+            "failure_kind": failure.failure_kind,
             "failure_reason": failure.failure_reason,
             "_ng_failure_message": failure.failure_reason,
             "timeouts": [
@@ -1016,11 +1089,11 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     await raise_for_status(response)
                     model_response_json = await get_response_json(response)
             except ClientResponseError as error:
-                failure = _policy_timeout_failure(error) if self.config.final_on_model_timeout else None
+                failure = _policy_timeout_failure(error)
                 if failure is None:
                     raise
                 return JSONResponse(
-                    self._final_model_timeout_row(failure, elapsed_s=monotonic() - loop_started), status_code=200
+                    self._model_timeout_row(failure, elapsed_s=monotonic() - loop_started), status_code=200
                 )
             cookies = _cookie_values(response.cookies)
         elif stage in ("verify", "return"):

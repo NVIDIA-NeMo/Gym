@@ -143,6 +143,7 @@ def _never_accepting_listener() -> tuple[socket.socket, list[socket.socket], int
     ("phase", "connect_timeout", "waited_for_response"),
     [
         pytest.param("sent", None, True, id="sent-and-never-answered"),
+        pytest.param("uploading", None, False, id="upload-still-in-progress"),
         pytest.param("sent", 5.0, True, id="sent-and-never-answered-with-a-connect-timeout"),
         pytest.param("never-connected", None, False, id="never-connected"),
         pytest.param("never-connected", 0.2, False, id="connect-timeout"),
@@ -177,7 +178,13 @@ async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     try:
         with RequestFailureLog.capture() as log:
             with pytest.raises(TimeoutError) as caught:
-                await model._request(method="POST", url=url, json={"model": "m"})
+
+                async def unfinished_body():
+                    yield b"started"
+                    await asyncio.Event().wait()
+
+                payload = {"data": unfinished_body()} if phase == "uploading" else {"json": {"model": "m"}}
+                await model._request(method="POST", url=url, **payload)
             report = log.reply_report(caught.value)
     finally:
         if held is not None:
@@ -190,6 +197,7 @@ async def test_only_a_timeout_after_the_request_was_sent_is_a_response_timeout(
     [attempt] = report.events.values()
     assert report.failure_id == attempt.event_id
     assert (attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON) is waited_for_response
+    assert (attempt.request_upload_complete is True) is waited_for_response
 
 
 def _reply(status: int, *, headers: dict | None = None, body: bytes = b"") -> SimpleNamespace:
@@ -368,3 +376,62 @@ async def test_a_forwarded_gym_failure_stays_the_cause_and_no_attempt_is_added(m
         await server.close()
 
     assert not script and report.failure_id == forwarded.event_id and list(report.events) == [forwarded.event_id]
+
+
+async def test_a_recovered_response_timeout_keeps_its_confirmed_upload_observation(monkeypatch):
+    calls = 0
+
+    async def endpoint(request):
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            await asyncio.sleep(0.08)
+        return web.json_response({})
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test", base_url=str(server.make_url("/")), max_connection_retries=2, request_timeout_seconds=0.04
+        )
+        with RequestFailureLog.capture() as log:
+            response = await model._request(
+                method="POST", url=str(server.make_url("/responses")), json={"input": "fixture"}
+            )
+            assert response.status == 200
+            await response.read()
+            report = log.reply_report(None)
+    assert calls == 2 and report.failure_id is None
+    [attempt] = report.events.values()
+    assert attempt.request_upload_complete is True
+    assert attempt.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+    assert attempt.operation_id and attempt.attempt_id
+    assert FailureHeader.decode(FailureHeader.encode(report)) == report
+
+
+async def test_failed_body_upload_never_reports_a_response_wait_timeout(monkeypatch):
+    async def endpoint(request):
+        await request.read()
+        return web.json_response({})
+
+    async def broken_body():
+        yield b"prefix"
+        raise OSError("controlled upload failure")
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(server_utils, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test", base_url=str(server.make_url("/")), max_num_tries=1, request_timeout_seconds=0.2
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises((aiohttp.ClientError, OSError)) as caught:
+                await model._request(method="POST", url=str(server.make_url("/responses")), data=broken_body())
+            report = log.reply_report(caught.value)
+    [attempt] = report.events.values()
+    assert attempt.request_upload_complete is False
+    assert attempt.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON

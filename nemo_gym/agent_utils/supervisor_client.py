@@ -44,7 +44,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
 from nemo_gym.typed_exceptions import NgFailureEvent
 

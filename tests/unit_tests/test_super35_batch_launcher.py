@@ -618,7 +618,7 @@ def test_shared_model_endpoints_only_define_model_connections() -> None:
         "gpt-5_2-2025-12-11": ("openai_model", "openai/openai/gpt-5.2"),
         "gpt-5_4-mini-2026-03-17": ("openai_model", "azure/openai/gpt-5.4-mini"),
         "Qwen3-235B-A22B-Instruct-2507-FP8": ("vllm_model", "nvidia/qwen/qwen-235b"),
-        "hle_benchmark_equivalence_judge_model": ("openai_model", "azure/openai/gpt-4o"),
+        "hle_benchmark_equivalence_judge_model": ("openai_model", "openai/openai/gpt-5.6-luna"),
         "genrm_model": ("openai_model", "gcp/google/gemini-3-flash-preview"),
     }
     assert set(shared) == set(expected_models)

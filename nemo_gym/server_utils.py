@@ -51,6 +51,7 @@ from aiohttp import (
     ClientTimeout,
     DummyCookieJar,
     ServerDisconnectedError,
+    UploadTracker,
 )
 from aiohttp.client import _RequestOptions
 from anyio import create_task_group
@@ -601,7 +602,8 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
-    _on_transport_failure: Callable[[Exception], None] | None = None,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -624,6 +626,12 @@ async def request(
 
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
+
+    ``_read_body=True`` reads a success reply's body before returning, but only within a ``_max_num_tries`` or
+    ``_max_connection_retries`` bound and only when resending is allowed, so a reply cut off mid-body is sent again
+    within that bound. Otherwise, and for an error reply, the response is returned unread: the caller's own read gets
+    the complete body or raises the original error, so the caller's failure handling (for collection, its rollout
+    attempt budget) decides whether the request runs again.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -651,13 +659,14 @@ async def request(
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
+            _read_body=_read_body,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
         # whether or not traces are exported.
         observe_reply(getattr(response, "headers", None))
         return response
-    # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
+    # With metrics exporting, count calls until this helper returns or raises, including eligible body reads.
     counts.outbound_in_flight += 1
     try:
         response = await send(
@@ -670,6 +679,7 @@ async def request(
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
+            _read_body=_read_body,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -689,7 +699,8 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
-    _on_transport_failure: Callable[[Exception], None] | None = None,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -734,6 +745,7 @@ async def _traced_request(
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
+            _read_body=_read_body,
             **kwargs,
         )
 
@@ -793,6 +805,18 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+def _request_upload_complete(upload: UploadTracker | None) -> bool | None:
+    """Whether the one observed HTTP attempt finished sending its body, including EOF.
+
+    Pending/cancelled state or an unobserved aiohttp resend is unknown; it cannot qualify a response timeout.
+    """
+    if upload is None or upload.attempts != 1 or not upload.upload_complete.done():
+        return None
+    if upload.upload_complete.cancelled():
+        return None
+    return upload.upload_complete.exception() is None
+
+
 async def _request_with_retries(
     method: str,
     url: str,
@@ -802,7 +826,8 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
-    _on_transport_failure: Callable[[Exception], None] | None = None,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -816,11 +841,27 @@ async def _request_with_retries(
         while True:
             if _max_num_tries is not None:
                 explicit_tries += 1
+            # A tracker belongs to exactly one request. Do not reuse a completed upload across retries.
+            upload = UploadTracker() if _on_transport_failure is not None else None
+            attempt_kwargs = dict(kwargs)
+            if upload is not None:
+                attempt_kwargs["upload_tracker"] = upload
             try:
-                return await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **attempt_kwargs)
+                if (
+                    _read_body
+                    and _resend_after_disconnect
+                    and (_max_num_tries is not None or _max_connection_retries is not None)
+                    and response.ok
+                ):
+                    # A success body cut off mid-read is retried below within the caller's bound. Without one, each
+                    # resend would start another episode, and an error reply is the caller's to read in full: such a
+                    # reply goes back unread, so the caller's own read raises the original error, with its status.
+                    await response.read()
+                return response
             except ServerDisconnectedError as error:
                 if _on_transport_failure is not None:
-                    _on_transport_failure(error)
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect:
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
@@ -842,7 +883,7 @@ async def _request_with_retries(
                 await asyncio.sleep(0.5)
             except ClientOSError as error:
                 if _on_transport_failure is not None:
-                    _on_transport_failure(error)
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
                     raise
                 global _NUM_CLIENT_OS_ERROR
@@ -863,7 +904,7 @@ async def _request_with_retries(
                 await asyncio.sleep(0.5)
             except Exception as e:
                 if _on_transport_failure is not None:
-                    _on_transport_failure(e)
+                    _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
                 if not _resend_after_disconnect:
@@ -1143,6 +1184,8 @@ class ServerClient(BaseModel):
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),
+            # Collection reads the whole /run reply, so a reply cut off mid-body counts as a failed attempt.
+            _read_body=url_path == "/run",
             **kwargs,
         )
 
@@ -1609,6 +1652,9 @@ def install_trace_context_path(app: FastAPI) -> None:
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
 
+    # Direct MCP dispatch has no client connection to monitor.
+    skipped_on_direct_mcp_dispatch = True
+
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
         self.num_cancelled = 0
@@ -1948,6 +1994,9 @@ class SimpleServer(BaseServer):
                 del session[SESSION_ID_KEY]
             return response
 
+        # Direct MCP dispatch materializes the session itself.
+        add_session_id.skipped_on_direct_mcp_dispatch = True
+
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
@@ -1971,6 +2020,9 @@ class SimpleServer(BaseServer):
                     report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
                 response.headers.update(FailureHeader.encode(report))
                 return response
+
+        # Direct MCP dispatch handles exceptions in the /mcp request itself.
+        exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
 
     def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
         """The reply for an exception the route did not handle."""

@@ -122,6 +122,46 @@ def _ends_on_finish_tool(messages: list[Any]) -> bool:
     return False
 
 
+def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
+    """True when the run had not ended and had submitted nothing, so a stop at its deadline is a timeout.
+
+    A finish tool call that succeeded is a submission; gym_mcp.mjs marks only those results terminal. Pi reports each
+    call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
+    call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
+    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless the reply
+    was an empty `length` reply that Pi counts as a context overflow: Pi compacts to retry it (Pi 0.80.2 then exits
+    with code 1, a failure).
+    """
+    if any(
+        event.get("type") == "tool_execution_end"
+        and isinstance(event.get("result"), dict)
+        and isinstance(event["result"].get("details"), dict)
+        and event["result"]["details"].get("terminal") is True
+        for _, event in events
+    ):
+        return False
+    replies = [
+        index
+        for index, (_, event) in enumerate(events)
+        if event.get("type") == "message_end"
+        and isinstance(event.get("message"), dict)
+        and event["message"].get("role") == "assistant"
+    ]
+    if not replies:
+        return True
+    last = events[replies[-1]][1]["message"]
+    # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
+    called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
+    # pi-ai also counts an empty `length` reply at a full context as an overflow, and Pi compacts to retry it (Pi
+    # 0.80.2 then exits with code 1, a failure). Pi never retries a `stop` reply, so its compaction for an overflow
+    # after one runs after the run has ended.
+    recovering = last.get("stopReason") == "length" and any(
+        event.get("type") == "compaction_start" and event.get("reason") == "overflow"
+        for _, event in events[replies[-1] + 1 :]
+    )
+    return called_tools or recovering or last.get("stopReason") not in ("stop", "length")
+
+
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
     """Rename gym_mcp.mjs' ``<server>_<tool>`` to Gym's ``mcp__<server>__<tool>``, which Gym strips before verify.
 
@@ -616,7 +656,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
         default_factory=list,
         description=(
             "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run "
-            "when every tool call of that turn is one of them."
+            "when every tool call of that turn is one of them. Only one required grant may offer each; an optional "
+            "grant that also offers one is left out."
         ),
     )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -921,13 +962,22 @@ class PiAgent(SimpleResponsesAPIAgent):
         }
         try:
             async with self.sem:
-                raw = await state.execute(
-                    command=command,
-                    env=env,
-                    prompt=prompt,
-                    timeout=timeout,
-                    close_timeout=self.config.session_close_timeout_seconds,
-                )
+                try:
+                    raw = await state.execute(
+                        command=command,
+                        env=env,
+                        prompt=prompt,
+                        timeout=timeout,
+                        close_timeout=self.config.session_close_timeout_seconds,
+                    )
+                except TimeoutError:
+                    # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
+                    # expired as well, the run is still a timeout, as Stirrup counts it, when the supervisor
+                    # confirmed the deadline and the events were captured.
+                    cleanup, raw = state.session.cleanup, state.session.artifacts
+                    if not (cleanup and cleanup["timed_out"] and raw is not None):
+                        raise
+                    LOG.warning("The sandbox provider stopped waiting for Pi's supervisor after Pi's deadline")
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
             raw = state.session.artifacts if state.session.artifacts is not None else ""
@@ -1033,9 +1083,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
             model_limit, terminal_error = False, recovery_error
             compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
-        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
-            # Expected model limits/interruptions do not invalidate partial work.
-            # They must not erase an independently confirmed worker or cleanup failure.
+        terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+        retrying = terminal.get("willRetry") is True
+        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted") or (cleanup["timed_out"] and retrying):
+            # Expected model limits/interruptions, including a deadline before Pi's retry of an error, do not
+            # invalidate partial work. They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
         execution_error = cleanup["error"]
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
@@ -1088,6 +1140,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "pi_version": self.config.pi_version,
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                # Stirrup's timeout report: the deadline stopped a run that had neither ended nor submitted.
+                **({"stop_reason": "wall_time"} if cleanup["timed_out"] and _was_still_working(events) else {}),
             },
         )
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
@@ -1126,11 +1180,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
             assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if not execution_error and _reported_model_error(
-                assistant, cleanup, will_retry=terminal.get("willRetry") is True
-            ):
+            if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
                 # Classify a failed compaction call, not the overflow it was recovering from.
                 return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")

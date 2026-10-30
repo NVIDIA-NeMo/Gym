@@ -1621,7 +1621,9 @@ MODEL_RESPONSE_TIMEOUT_REASON = "Model request timed out waiting for the respons
 
 
 def _timed_out_waiting_for_response(error: BaseException) -> bool:
-    """Whether ``error`` is a timeout that fired after the request was sent, while aiohttp awaited the response.
+    """Whether the traceback places a timeout in aiohttp response processing.
+
+    This alone does not establish a completed upload; the caller must require that evidence separately.
 
     With only a total timeout, aiohttp raises the same ``TimeoutError`` while connecting or waiting for a pooled
     connection, so where it fired decides. Any other shape is not a response timeout.
@@ -1644,6 +1646,7 @@ def _model_attempt_failure(
     attempt_id: str,
     http_status: Optional[int] = None,
     foreign_error: Optional[SdkErrorDetails] = None,
+    request_upload_complete: bool | None = None,
 ) -> NgFailureEvent:
     """The model boundary's failure for one HTTP attempt of a model call (``operation_id``)."""
     return NgFailureEvent(
@@ -1654,6 +1657,7 @@ def _model_attempt_failure(
         operation_id=operation_id,
         attempt_id=attempt_id,
         http_status=http_status,
+        request_upload_complete=request_upload_complete,
         foreign_error=foreign_error,
     )
 
@@ -1887,15 +1891,16 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         transport_failures = 0
         last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
 
-        def observe_transport_failure(error: Exception) -> None:
+        def observe_transport_failure(error: Exception, upload_complete: bool | None) -> None:
             nonlocal transport_failures, last_transport_failure
             transport_failures += 1
             failure = _model_attempt_failure(
                 MODEL_RESPONSE_TIMEOUT_REASON
-                if _timed_out_waiting_for_response(error)
+                if upload_complete is True and _timed_out_waiting_for_response(error)
                 else "Model request transport failed",
                 operation_id=operation_id,
                 attempt_id=f"{operation_id}-transport-{transport_failures}",
+                request_upload_complete=upload_complete,
                 # The transport error is recorded by type only; its text may hold request data.
                 foreign_error=sdk_error_details(error),
             )

@@ -29,7 +29,7 @@ from mlflow.utils.validation import (
     MAX_PARAMS_TAGS_PER_BATCH,
     _validate_metric_name,
 )
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.exporters as exporters_module
@@ -795,6 +795,27 @@ class TestMLflowExporter:
         client.set_terminated.assert_called_once_with("run-1", status="FINISHED")
         assert exporter.run_id is None
 
+    def test_teardown_closes_a_run_whose_evaluation_failed_as_failed(
+        self, monkeypatch: MonkeyPatch, mlflow_config: DictConfig
+    ) -> None:
+        exporter, client = _open_mlflow_exporter(monkeypatch, mlflow_config)
+
+        exporters_module.mark_run_failed()
+        exporter.teardown()
+
+        client.set_terminated.assert_called_once_with("run-1", status="FAILED")
+
+    def test_opening_exporters_clears_an_earlier_failure(
+        self, monkeypatch: MonkeyPatch, wandb_config: DictConfig
+    ) -> None:
+        _register_recording(monkeypatch)
+        wandb_config["recording_enabled"] = False
+        exporters_module.mark_run_failed()
+
+        setup_exporters(wandb_config)
+
+        assert not exporters_module.run_failed()
+
     def test_teardown_without_setup_is_a_noop(self, mlflow_config: DictConfig) -> None:
         MLflowExporter(mlflow_config).teardown()
 
@@ -1067,3 +1088,128 @@ class TestMLflowReopenAgainstARealStore:
 
         assert replacement != deleted
         assert Path(mlflow_store["output_jsonl_fpath"]).with_name("rollouts_mlflow_run_id").read_text() == replacement
+
+    def test_a_failed_session_closes_failed_before_its_resume_reopens_and_finishes(
+        self, monkeypatch: MonkeyPatch, mlflow_store: DictConfig
+    ) -> None:
+        store = mlflow_module.MlflowClient(tracking_uri=mlflow_store["mlflow_tracking_uri"])
+        closed: list[str] = []
+        close = MLflowExporter.teardown
+
+        def recording_teardown(exporter: MLflowExporter) -> None:
+            run_id = exporter.run_id
+            close(exporter)
+            if run_id is not None:
+                closed.append(store.get_run(run_id).info.status)
+
+        monkeypatch.setattr(MLflowExporter, "teardown", recording_teardown)
+        (failed,) = setup_exporters(mlflow_store)
+        run_id = failed.run_id
+        exporters_module.mark_run_failed()
+
+        # Opening the exporters again, as a resume does, first closes the failed session, then clears the flag.
+        (resumed,) = setup_exporters(mlflow_store)
+        assert closed == ["FAILED"]
+        assert (resumed.run_id, resumed.reopened) == (run_id, True)
+        assert store.get_run(run_id).info.status == "RUNNING"
+
+        teardown_exporters()
+        assert closed == ["FAILED", "FINISHED"]
+
+
+_CLI_OUTCOMES = [
+    ("success", True),
+    ("success", False),
+    ("failure", True),
+    ("failure", False),
+    ("interrupt", True),
+    ("sigterm", True),
+    ("sigterm", False),
+]
+
+
+@pytest.mark.parametrize("serve", [True, False], ids=["serve", "no-serve"])
+@pytest.mark.parametrize(
+    ("outcome", "require_complete"), _CLI_OUTCOMES, ids=[f"{o}-require_complete={r}" for o, r in _CLI_OUTCOMES]
+)
+def test_cli_collection_failure_status(
+    tmp_path: Path,
+    monkeypatch: MonkeyPatch,
+    mlflow_store: DictConfig,
+    serve: bool,
+    outcome: str,
+    require_complete: bool,
+) -> None:
+    import asyncio
+    import os
+    import signal
+
+    import nemo_gym.cli.eval as cli
+    import nemo_gym.resolved_config as resolved_config
+    import nemo_gym.telemetry.setup as telemetry
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    output = tmp_path / "output.jsonl"
+    prepared = tmp_path / "output" / "preprocessed_datasets" / "train.jsonl"
+    prepared.parent.mkdir(parents=True)
+    prepared.write_text("{}\n")
+    input_path = tmp_path / "input.jsonl"
+    input_path.write_text("{}\n")
+    config = OmegaConf.create(
+        {
+            "output_jsonl_fpath": str(output),
+            "split": "train",
+            "reuse_existing_data_preparation": True,
+            "require_complete": require_complete,
+            "disable_aggregation": True,
+            "disable_health_check": True,
+        }
+    )
+    if not serve:
+        config["input_jsonl_fpath"] = str(input_path)
+
+    # Exercise the CLI failure-to-exporter wiring without starting servers or telemetry; the run is tracked in a
+    # real local MLflow store, opened as config resolution opens it.
+    monkeypatch.setattr(cli, "get_global_config_dict", lambda: config)
+    monkeypatch.setattr(cli, "RunHelper", MagicMock())
+    monkeypatch.setattr(cli.GlobalConfigDictParser, "filter_for_server_instance_configs", lambda *args, **kwargs: {})
+    monkeypatch.setattr(cli, "_validate_split_datasets_declared", lambda *args, **kwargs: None)
+    monkeypatch.setattr(cli, "_terminated", False)
+    monkeypatch.setattr(resolved_config, "write_resolved_config", lambda *args, **kwargs: None)
+    for name in ("configure_telemetry_env", "init_telemetry", "shutdown_telemetry"):
+        monkeypatch.setattr(telemetry, name, lambda *args, **kwargs: None)
+    (exporter,) = setup_exporters(mlflow_store)
+    run_id = exporter.run_id
+
+    async def collect(_self, _config):
+        if outcome == "failure":
+            raise RuntimeError("EVAL FAILED: 0/1 rollouts completed")
+        if outcome == "interrupt":
+            raise KeyboardInterrupt
+        if outcome == "sigterm":
+            # A real SIGTERM, as Slurm sends at scancel or the time limit; the CLI's handler interrupts this wait.
+            os.kill(os.getpid(), signal.SIGTERM)
+            await asyncio.sleep(30)
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collect)
+    command = cli.e2e_rollout_collection if serve else cli.collect_rollouts
+    previous_handler = signal.getsignal(signal.SIGTERM)
+    try:
+        if outcome == "success":
+            command()
+        elif outcome == "failure" or (serve and require_complete):
+            with pytest.raises(RuntimeError):
+                command()
+        elif outcome == "sigterm":
+            with pytest.raises(SystemExit) as stopped:
+                command()
+            assert stopped.value.code == 143
+        else:
+            with pytest.raises(KeyboardInterrupt):
+                command()
+    finally:
+        signal.signal(signal.SIGTERM, previous_handler)
+
+    teardown_exporters()  # what the atexit hook does when the process exits
+    status = mlflow_module.MlflowClient(tracking_uri=mlflow_store["mlflow_tracking_uri"]).get_run(run_id).info.status
+    assert status == ("FINISHED" if outcome == "success" else "FAILED")
