@@ -59,7 +59,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+)
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
@@ -550,6 +556,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         else:
             observations = artifacts.observations.model_copy(deep=True)
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if outcome == "failed" or record.status == "failed":
                     record.status = "failed"
@@ -961,6 +969,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 gaps=[ObservationGap(code="agent_artifact_unavailable")],
             )
         for record in observations.records:
+            if isinstance(record, ContextCompactionObservation):
+                record.source_model_ref = self.config.model_server
             if isinstance(record, AgentInvocation) and record.parent_invocation_id is None:
                 if problem is not None:
                     record.status = "failed"

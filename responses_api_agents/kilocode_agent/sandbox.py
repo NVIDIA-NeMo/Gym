@@ -188,6 +188,10 @@ class KiloSandboxSession(AgentSessionState):
             )
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(
+            Path(__file__).parents[1] / "opencode_agent" / "assistant_message_header.js",
+            f"{directory}/assistant_message_header.mjs",
+        )
+        await sandbox.upload(
             Path(__file__).with_name(TASK_ENVIRONMENT_PLUGIN), f"{directory}/{TASK_ENVIRONMENT_PLUGIN}"
         )
 
