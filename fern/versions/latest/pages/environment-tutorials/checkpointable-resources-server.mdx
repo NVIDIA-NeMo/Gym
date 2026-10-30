@@ -55,14 +55,16 @@ class MyServer(SandboxOwnerResourcesServer):
 
 A commit snapshots each live sandbox through the provider and indexes the snapshot under
 `<checkpoint.state_dir>/<server>/snapshots/<checkpoint id>/`. The snapshot is the restore point: a restore forks it
-into a new sandbox, whatever happened to the original since. The snapshot keeps **files, not processes**.
+into a new sandbox, whatever happened to the original since. What the snapshot keeps depends on the provider:
+always the sandbox's **files**, and its **running processes** too when the provider's `snapshot_keeps_processes` says
+so (a VM memory snapshot). The checkpoint records which it was (`keeps_processes`).
 
 - **Grade an artifact, not a live sandbox.** Capture it with `capture_once` and declare `checkpoint_verify = "replay"`:
   a checkpoint does not wait for grading, and a `/verify` that runs again after a restore grades the same artifact.
   A session past its capture exports its data alone; the restore grades again from the saved artifact.
-- **In-place graders** that need processes the agent started declare `restore_policy = "before_agent_close"`. The seed
-  reply says so, and the Environment Server makes the episode a restart once its agent has closed, instead of
-  continuing it in a fork that has none of those processes.
+- **In-place graders** that need processes the agent started declare `restore_policy = "before_agent_close"` on a
+  provider whose snapshots keep files only. The seed reply says so, and the Environment Server makes the episode a
+  restart once its agent has closed, instead of continuing it in a fork that has none of those processes.
 - After a restore, the Environment Server seeds the session again under the replacement attempt. The base answers with
   the forked sandbox and does not run your setup again.
 

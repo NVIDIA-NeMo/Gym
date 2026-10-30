@@ -18,8 +18,9 @@ the agent runs its harness in that sandbox, and ``/verify`` captures what the ag
 - the lifecycle: shutdown stops every live sandbox, and a session nobody closed is released once its
   lifetime from its latest seed (the sandbox ``ttl_s``, else 24 hours) has passed.
 
-A snapshot holds the sandbox's files, not its processes.
-A grader that needs processes the agent started, rather than files the agent left, declares
+What a snapshot holds depends on the provider: always the sandbox's files, and its running processes too when the
+provider's ``snapshot_keeps_processes`` says so (a VM memory snapshot). On a provider whose snapshots hold files
+only, a grader that needs processes the agent started, rather than files the agent left, declares
 ``restore_policy = "before_agent_close"``: the Environment Server then starts such an episode over after a crash
 once its agent closed, instead of continuing it in a fork.
 
