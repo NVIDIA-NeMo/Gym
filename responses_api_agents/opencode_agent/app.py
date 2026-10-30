@@ -49,6 +49,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     MODEL_CONTEXT_LIMIT,
@@ -65,15 +66,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentInvocation,
-    AgentObservationBundle,
-    ObservationGap,
-    SandboxObservation,
-    ToolCallObservation,
-    TrajectoryRecord,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -82,7 +74,15 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.trajectory import (
+    AgentEpisode,
+    AgentInvocation,
+    AgentObservationBundle,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,

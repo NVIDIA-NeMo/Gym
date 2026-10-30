@@ -10,7 +10,7 @@ import pytest
 
 from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 ROOT = Path(__file__).resolve().parents[3]

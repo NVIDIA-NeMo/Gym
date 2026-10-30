@@ -145,7 +145,7 @@ def context_overflow_error_fields(error: BaseException) -> tuple[str, str | None
     """Return ``(message, code, param)`` for a marked engine refusal.
 
     The engine's error body travels on the exception as ``response_content`` (attached by
-    ``nemo_gym.server_utils.raise_for_status``). vLLM 0.10.1 and later format it as
+    ``nemo_gym.client.http_client.raise_for_status``). vLLM 0.10.1 and later format it as
     ``{"error": {"message": ..., "type": ..., "param": ..., "code": 400}}``; older engines used a
     flat object with a top-level ``message``. The message is the engine's own sentence from
     either shape, verbatim; any other body is returned as raw text so no information is lost.

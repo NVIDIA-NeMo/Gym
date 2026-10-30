@@ -45,6 +45,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import apply_rollout_prefix, get_response_json, raise_for_status
 from nemo_gym.config import SKILLS_REF_KEY_NAME, ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -56,15 +57,14 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
+from nemo_gym.skills import stage_skills
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider, resolve_provider_config
-from nemo_gym.server_utils import apply_rollout_prefix, get_response_json, raise_for_status
-from nemo_gym.skills import stage_skills
 from responses_api_agents.claude_code_agent.observability import extract_claude_code_observations
 from responses_api_agents.claude_code_agent.parsing import _extract_instruction, _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.runtime import install_sandbox_runtime

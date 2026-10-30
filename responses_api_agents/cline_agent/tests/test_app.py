@@ -25,6 +25,7 @@ import yaml
 from fastapi import Request
 from omegaconf import OmegaConf
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -33,7 +34,6 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.cline_agent.app import (
     ClineAgent,
     ClineAgentConfig,

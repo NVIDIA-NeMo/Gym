@@ -28,6 +28,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -36,7 +37,6 @@ from nemo_gym.core import (
     current_rollout_id,
     rollout_context,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -44,8 +44,8 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, get_server_url, raise_for_status
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
+from nemo_gym.trajectory import AgentObservationBundle
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,

@@ -28,14 +28,13 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_valid
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.atif_json import strict_json_loads
-from nemo_gym.atif_reverification import (
-    AtifProjectionError,
-    index_materialized_inputs,
-    load_atif_manifest,
-    project_atif_manifest_entries,
-)
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
+from nemo_gym.client.http_client import (
+    get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
+    raise_for_status,
+)
+from nemo_gym.client.server_client import ServerClient, setup_server_client
 from nemo_gym.config.config_types import (
     BaseNeMoGymCLIConfig,
     ConfigError,
@@ -76,12 +75,12 @@ from nemo_gym.rollout_records import (
 )
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import raw_outcomes_are_selected
-from nemo_gym.server_utils import (
-    ServerClient,
-    get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
-    raise_for_status,
-    setup_server_client,
+from nemo_gym.trajectory.atif_json import strict_json_loads
+from nemo_gym.trajectory.atif_reverification import (
+    AtifProjectionError,
+    index_materialized_inputs,
+    load_atif_manifest,
+    project_atif_manifest_entries,
 )
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,

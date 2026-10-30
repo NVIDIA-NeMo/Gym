@@ -23,7 +23,7 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.google_search import app as google_search_app
 from resources_servers.google_search.app import (
     BaseSearchQueryRequest,

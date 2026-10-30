@@ -19,6 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -26,7 +27,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.server_utils import ServerClient
 from resources_servers.chemreason_bench import metrics as M
 from resources_servers.chemreason_bench import response_parsing
 from resources_servers.chemreason_bench.app import (
