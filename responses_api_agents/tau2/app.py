@@ -209,6 +209,7 @@ class Tau2Config(BaseResponsesAPIAgentConfig):
     max_agent_steps: Optional[int] = None
     turns_remaining_interval: int = 1
     malformed_tool_call_max_retries: int = Field(default=0, ge=0)
+    replay_policy_reasoning: bool = False
 
 
 class Tau2RunRequest(BaseRunRequest):
@@ -339,6 +340,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             "api_base": f"{self.base_url_for_run(get_server_url(self.config.model_server.name), body)}/v1",
             "api_key": "dummy api key",  # pragma: allowlist secret
         } | extra_agent_args
+        if self.config.replay_policy_reasoning:
+            config.llm_args_agent["replay_reasoning"] = True
 
         config.max_steps = self.config.max_steps
         config.max_agent_steps = self.config.max_agent_steps
@@ -358,14 +361,24 @@ class Tau2Agent(SimpleResponsesAPIAgent):
                     continue
                 messages_to_convert.append(message)
 
-        message_dicts = to_litellm_messages(messages_to_convert)
+        if self.config.replay_policy_reasoning:
+            message_dicts = to_litellm_messages(messages_to_convert, replay_reasoning=True)
+        else:
+            message_dicts = to_litellm_messages(messages_to_convert)
 
         converter = VLLMConverter(return_token_id_information=True)
-        all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
-        input_items_1, output_items = split_responses_input_output_items(all_items)
-        # Tau starts trajectories with an assistant message
-        input_items_1 += output_items[:1]
-        input_items_2, output_items = split_responses_input_output_items(output_items[1:])
+        if self.config.replay_policy_reasoning:
+            # Tau starts with an assistant turn. Reasoning, visible text, and
+            # tool calls from that turn are all prompt items, not sampled output.
+            input_items_1 = converter.chat_completions_messages_to_responses_items(message_dicts[:1])
+            remaining_items = converter.chat_completions_messages_to_responses_items(message_dicts[1:])
+            input_items_2, output_items = split_responses_input_output_items(remaining_items)
+        else:
+            # Preserve the existing trajectory boundary when replay is off.
+            all_items = converter.chat_completions_messages_to_responses_items(message_dicts)
+            input_items_1, output_items = split_responses_input_output_items(all_items)
+            input_items_1 += output_items[:1]
+            input_items_2, output_items = split_responses_input_output_items(output_items[1:])
 
         prompt_usages = []
         completion_usages = []
