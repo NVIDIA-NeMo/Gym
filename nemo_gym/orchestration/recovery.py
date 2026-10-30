@@ -105,12 +105,6 @@ class RecoveryOutcome(BaseModel):
     mlflow: dict[str, Any] | None = None
 
 
-# Failure kinds whose owner is a judge, verifier, provider, transport, session or persistence, never the evaluated
-# model: a row of one of these marked counts-as-zero contradicts itself and nobody can own it.
-_NOT_MODEL_KIND_PREFIXES = ("judge_", "verifier_", "provider_", "transport_", "session_", "persistence_", "cohort_")
-_NOT_MODEL_BOUNDARIES = {"resources_server", "environment", "collection"}
-
-
 class IdentityEvidence(BaseModel):
     identity: Identity
     state: IdentityState
@@ -168,11 +162,17 @@ def decide_recovery(
     failures: Iterable[Mapping[str, Any]],
     budget: RecoveryBudget,
     default_max_attempts: int = 3,
+    resubmit_offset: int = 0,
 ) -> RecoveryDecision:
     """Classify every materialized identity and choose the run-level action.
 
-    ``failures`` are the sidecar rows that count, those after the last resubmit offset. The rows are only read.
+    ``failures`` are every failures-sidecar row in file order (``_line`` is the row's line number when known). The
+    standing row of a rollout is chosen as rollout collection chooses it (``_latest_failure_rows``): rows that
+    ``is_non_superseding_rollout_row`` names are skipped, and an interrupted omitted row means the rollout is missing.
+    Only rows at or after ``resubmit_offset`` count towards the attempt cap. The rows are only read.
     """
+    from nemo_gym.rollout_collection import is_non_superseding_rollout_row, is_omitted_rollout_row, is_terminal_failure
+
     expected: list[Identity] = []
     invalid_inventory = 0
     for row in materialized:
@@ -239,22 +239,26 @@ def decide_recovery(
                 )
             )
             continue
-        rows = sidecar.get(identity)
-        if not rows:
+        standing = [row for row in sidecar.get(identity, []) if not is_non_superseding_rollout_row(row)]
+        if not standing or is_omitted_rollout_row(standing[-1]):
+            # No attempt ran, or the latest one was interrupted: the input restarts.
             evidence.append(IdentityEvidence(identity=identity, state=IdentityState.MISSING))
             continue
-        last = rows[-1]
+        last = standing[-1]
+        rows = [
+            row
+            for index, row in enumerate(standing)
+            if (row.get("_line") if isinstance(row.get("_line"), int) else index) >= resubmit_offset
+        ]
         kind = last.get("failure_kind")
         cap = last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts
-        boundaries = {event[0] for event in _events(last)}
-        if last.get(COUNTS_AS_ZERO) is True:
-            # Final only when terminal, and the evaluated model's: a judge or infra owner contradicts the flag.
-            contradicts = (isinstance(kind, str) and kind.startswith(_NOT_MODEL_KIND_PREFIXES)) or bool(
-                boundaries & _NOT_MODEL_BOUNDARIES
-            )
-            state = (
-                IdentityState.MODEL_FINAL if last.get(TERMINAL) is True and not contradicts else IdentityState.UNKNOWN
-            )
+        if last.get(FAILURE_CLASS) == JUDGE_FAILED:
+            # A judge that failed is re-judged from the saved answer, never by running the policy again.
+            state = IdentityState.JUDGE_RECOVERABLE
+        elif last.get(COUNTS_AS_ZERO) is True:
+            # Settled exactly as rollout collection settles it (_final_zero_failure_rows): marked by its producer and
+            # final. A counts-as-zero row that is not final contradicts itself, so nobody owns it.
+            state = IdentityState.MODEL_FINAL if is_terminal_failure(last) else IdentityState.UNKNOWN
         elif not _known_kind(kind):
             state = IdentityState.UNKNOWN
         elif last.get(TERMINAL) is True:
@@ -359,7 +363,8 @@ d = sys.argv[1]
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
-        "_ng_failure_events", "_ng_omitted_rollout", "reward", "mask_sample", "evaluation_completed")
+        "_ng_failure_events", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
+        "mask_sample", "evaluation_completed")
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -370,6 +375,8 @@ def rows(name, skip=0):
             if i < skip or not line.strip():
                 continue
             r = json.loads(line)
+            if name == "rollouts_failures.jsonl":
+                r["_line"] = i
             out.append({k: r[k] for k in KEEP if k in r})
     return out
 def num(name):
@@ -409,7 +416,7 @@ if len(sys.argv) > 2:
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
 print(json.dumps({"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
-                  "failures": rows("rollouts_failures.jsonl", offset) or [], "infra_retries_used": num(".gym_infra_retries")[0],
+                  "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
                   "infra_retries_state": num(".gym_infra_retries")[1],
                   "walltime_used_s": num(".gym_accumulated_walltime")[0],
                   "walltime_state": num(".gym_accumulated_walltime")[1], "job_chain": chain,
@@ -422,6 +429,7 @@ class CollectedEvidence(BaseModel):
     materialized: list[dict[str, Any]] | None
     results: list[dict[str, Any]] | None
     failures: list[dict[str, Any]]
+    resubmit_offset: int = 0
     infra_retries_used: float | None = None
     infra_retries_state: str = "absent"
     walltime_used_s: float | None = None
@@ -473,6 +481,7 @@ def decide_from_collected(
         results=collected.results or [],
         failures=collected.failures,
         budget=budget,
+        resubmit_offset=collected.resubmit_offset,
     )
 
 
@@ -569,20 +578,33 @@ def quality_inputs(
         fe_reasons.append(f"summary counts {artifacts.get('expected')} expected, inventory {decision.expected}")
     verdicts = quality.get("verdicts")
     if not isinstance(verdicts, dict) or not all(
-        isinstance(verdicts.get(k), int) for k in ("healthy", "unhealthy", "unobserved")
+        type(verdicts.get(k)) is int and verdicts[k] >= 0 for k in ("healthy", "unhealthy", "unobserved")
     ):
-        return fe_valid, fe_reasons, None, ["no rollout verdict counts"]
+        return fe_valid, fe_reasons, None, ["no valid rollout verdict counts (non-negative integers)"]
     counts = f"{verdicts['healthy']} healthy, {verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved"
     if verdicts["healthy"] + verdicts["unhealthy"] + verdicts["unobserved"] != decision.expected:
         return fe_valid, fe_reasons, None, [f"verdict counts ({counts}) do not cover the {decision.expected} expected"]
     if max_unhealthy_fraction is None:
         return fe_valid, fe_reasons, None, [f"no response-health criterion configured ({counts})"]
+    if (
+        isinstance(max_unhealthy_fraction, bool)
+        or not isinstance(max_unhealthy_fraction, (int, float))
+        or not math.isfinite(max_unhealthy_fraction)
+        or not 0 < max_unhealthy_fraction <= 1
+    ):
+        return fe_valid, fe_reasons, None, [f"invalid response-health criterion {max_unhealthy_fraction!r}"]
     judged = verdicts["healthy"] + verdicts["unhealthy"]
     if verdicts["unobserved"] or not judged:
         return fe_valid, fe_reasons, None, [f"health not observed for every rollout ({counts})"]
     share = verdicts["unhealthy"] / judged
-    if share > max_unhealthy_fraction:
-        return fe_valid, fe_reasons, False, [f"unhealthy {share:.2%} above {max_unhealthy_fraction:.2%} ({counts})"]
+    # The criterion is a strict bound, as the Day-0 gate's "< limit": a share equal to it fails.
+    if share >= max_unhealthy_fraction:
+        return (
+            fe_valid,
+            fe_reasons,
+            False,
+            [f"unhealthy {share:.2%} not below {max_unhealthy_fraction:.2%} ({counts})"],
+        )
     return fe_valid, fe_reasons, True, [counts]
 
 
@@ -595,7 +617,10 @@ def mlflow_errors(local: dict[str, bool] | None, observed_status: str | None) ->
     """
     local = local or {}
     if not local.get("run_id_present"):
-        return [f"MLflow status {observed_status!r} given for a run with no MLflow run id"] if observed_status else []
+        # No MLflow evidence is unknown, never a pass; a status without a run contradicts.
+        if observed_status:
+            return [f"MLflow status {observed_status!r} given for a run with no MLflow run id"]
+        return ["no MLflow run evidence"]
     errors = [] if local.get("export_done") else ["MLflow run exists but its export did not finish"]
     if observed_status is None:
         errors.append("MLflow terminal status not observed")
@@ -612,9 +637,13 @@ def gate_summary_from_collected(
     mlflow_status: str | None = None,
 ) -> dict[str, Any]:
     """The Day-0 gate task entry from the collected run: decision counts, the named score and the quality summary."""
-    fe_valid, fe_reasons, health, health_reasons = quality_inputs(
+    fe_valid, fe_reasons, rollout_health, rollout_reasons = quality_inputs(
         decision, collected, max_unhealthy_fraction=max_unhealthy_fraction
     )
+    # The Day-0 gate's response and trial health need their own counters and denominators; quality_summary's
+    # verdicts are per rollout, so they are reported in warnings, never used as either. Health stays unknown.
+    health = None
+    health_reasons = ["this adapter lacks separately validated ModelOpt response and trial health evidence"]
     task = gate_task_summary(
         decision,
         score=collected.score,
@@ -623,6 +652,8 @@ def gate_summary_from_collected(
         health_passed=health,
         health_reasons=health_reasons,
     )
+    judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
+    task["warnings"] = task["warnings"] + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
         extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")

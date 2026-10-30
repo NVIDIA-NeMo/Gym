@@ -107,8 +107,9 @@ def test_collector_reads_identity_and_cause_fields_only_and_honours_the_resubmit
     got = collect(job)
     assert got.results == [{"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0}]
     assert "secret answer" not in got.model_dump_json() and "prompt" not in got.model_dump_json()
-    assert len(got.failures) == 1 and got.failures[0]["_ng_attempt_index"] == 1
-    assert got.failures[0]["_ng_failure_events"]["e"]["attempt_id"] == "a1"
+    assert got.resubmit_offset == 1 and [f["_line"] for f in got.failures] == [0, 1]
+    assert got.failures[1]["_ng_attempt_index"] == 1
+    assert got.failures[1]["_ng_failure_events"]["e"]["attempt_id"] == "a1"
     assert (got.infra_retries_used, got.walltime_used_s, got.job_chain) == (2.0, 7200.0, ["101", "102"])
 
 
@@ -246,14 +247,8 @@ def test_recover_keeps_a_terminal_model_zero_done(tmp_path, fake_executor) -> No
 @pytest.mark.parametrize(
     "contradiction",
     [
-        dict(failure_kind="judge_failed", _ng_failure_terminal=True),
-        dict(failure_kind="provider_unavailable", _ng_failure_terminal=True),
         dict(failure_kind="model_context_limit", _ng_failure_terminal=False),
-        dict(
-            failure_kind="model_context_limit",
-            _ng_failure_terminal=True,
-            _ng_failure_events={"e": {"boundary": "resources_server", "operation": "judge"}},
-        ),
+        dict(failure_kind="model_transport_error"),
     ],
 )
 def test_counts_as_zero_without_terminal_model_ownership_is_not_final(tmp_path, fake_executor, contradiction) -> None:
@@ -262,6 +257,17 @@ def test_counts_as_zero_without_terminal_model_ownership_is_not_final(tmp_path, 
     out = submit.recover("gym-job-c2", "bench")
     assert out.decision.identities.get("model_final") is None
     assert not out.ok and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
+
+
+@pytest.mark.parametrize("kind", ["provider_unavailable", "model_transport_error", None])
+def test_a_terminal_counts_as_zero_row_is_settled_as_rollout_collection_settles_it(
+    tmp_path, fake_executor, kind
+) -> None:
+    # The producer's flag and finality decide, as in _final_zero_failure_rows; no label list overrides them.
+    row = ident(1, _ng_failure_counts_as_zero=True, _ng_failure_terminal=True, failure_kind=kind)
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[row])
+    out = submit.recover("gym-job-c3", "bench")
+    assert out.decision.identities["model_final"] == [(1, 0)] and fake_executor.calls == ["decide"]
 
 
 def test_recover_queues_missing_and_retryable_work_once_through_the_existing_resubmit(tmp_path, fake_executor) -> None:
@@ -367,6 +373,8 @@ def collect_with_score(job_dir: Path, key: str) -> CollectedEvidence:
 def complete_job(tmp_path: Path) -> Path:
     job = write_job_dir(tmp_path / "job", n=4, results=[ident(t, reward=1.0) for t in range(4)], failures=[])
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.75}}))
+    (job / "artifacts" / "rollouts_mlflow_run_id").write_text("run")
+    (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
     return job
 
 
@@ -408,13 +416,15 @@ def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_
     write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02)
+    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED")
     assert (task["status"], task["score"], task["expected_samples"], task["scored_samples"], task["errors"]) == (
-        "SUCCESS",
+        "FAILED",
         0.75,
         4,
         4,
-        [],
+        [
+            "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
+        ],
     )
     missing_key = collect_with_score(job, json.dumps(["agent", "no_such_metric"]))
     assert gate_summary_from_collected(d, missing_key, max_unhealthy_fraction=0.02)["score"] is None
@@ -516,6 +526,8 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
             }
         )
     )
+    (job / "artifacts" / "rollouts_mlflow_run_id").write_text("run")
+    (job / "artifacts" / "rollouts_mlflow_export_done").write_text("")
     fake_executor.job_dir = job
     code, out = run_cli(
         [
@@ -528,18 +540,17 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
             '["agent", "mean/reward"]',
             "--max-unhealthy-fraction",
             "0.02",
+            "--mlflow-status",
+            "FINISHED",
         ],
         capsys,
     )
     assert code == 0 and out["dispatched"] is None and fake_executor.calls == ["decide"]
-    assert out["gate_task"] == {
-        "status": "SUCCESS",
-        "expected_samples": 2,
-        "scored_samples": 2,
-        "score": 0.5,
-        "errors": [],
-        "warnings": [],
-    }
+    assert out["gate_task"]["status"] == "FAILED" and out["gate_task"]["score"] == 0.5
+    assert out["gate_task"]["errors"] == [
+        "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
+    ]
+    assert out["gate_task"]["warnings"][0].startswith("per-rollout health within the configured criterion")
 
 
 def test_cli_recover_without_score_or_criterion_fails_closed(tmp_path, fake_executor, capsys) -> None:
@@ -615,7 +626,9 @@ def test_mlflow_run_without_finished_export_blocks_acceptance(tmp_path, fake_exe
         max_unhealthy_fraction=0.02,
         mlflow_status="FINISHED",
     )
-    assert done.gate_task["status"] == "SUCCESS" and done.gate_task["errors"] == []
+    assert done.gate_task["status"] == "FAILED" and done.gate_task["errors"] == [
+        "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
+    ]
 
 
 def test_omitted_rollout_rows_are_unsupported_not_scored_or_retried(tmp_path, fake_executor) -> None:
@@ -683,7 +696,14 @@ def test_mlflow_acceptance_needs_the_export_marker_and_an_observed_finished_stat
         "gym-job-r", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status=status
     )
     assert out.dispatched is None and fake_executor.calls == ["decide"]
-    assert (out.gate_task["status"] == "SUCCESS") is accepted
+    # No case accepts: response/trial health has no producer. Only MLflow-valid cases have no MLflow error.
+    assert out.gate_task["status"] == "FAILED"
+    assert (
+        out.gate_task["errors"]
+        == [
+            "response/trial health unknown: ['this adapter lacks separately validated ModelOpt response and trial health evidence']"
+        ]
+    ) is accepted
     assert out.mlflow == {"local": {"run_id_present": True, "export_done": marker}, "observed_status": status}
 
 
@@ -809,3 +829,128 @@ def test_a_nonfinite_aggregate_score_cannot_be_accepted(tmp_path, score) -> None
         decision, collected.model_copy(update={"score": score}), max_unhealthy_fraction=0.02
     )
     assert task["status"] == "FAILED" and any("score unavailable" in error for error in task["errors"])
+
+
+def judge_failed_sidecar(task: int) -> dict:
+    return {
+        "_ng_task_index": task,
+        "_ng_rollout_index": 0,
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_failed",
+        "_ng_failure_terminal": False,
+        "_ng_failure_max_attempts": 3,
+    }
+
+
+def unstarted(task: int) -> dict:
+    return {"_ng_task_index": task, "_ng_rollout_index": 0, "_ng_omitted_rollout": True, "_ng_dispatch_drained": True}
+
+
+def unrouted(task: int) -> dict:
+    return {
+        "_ng_task_index": task,
+        "_ng_rollout_index": 0,
+        "_ng_omitted_rollout": True,
+        "_ng_unrouted_run_error": True,
+    }
+
+
+def interrupted(task: int) -> dict:
+    return {"_ng_task_index": task, "_ng_rollout_index": 0, "_ng_omitted_rollout": True}
+
+
+def test_sidecar_judge_failure_is_reverified_never_resubmitted(tmp_path, fake_executor) -> None:
+    fake_executor.supports_reverify = False
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[judge_failed_sidecar(1)], retries=0
+    )
+    out = submit.recover("gym-job-u", "bench")
+    assert out.decision.action == RecoveryAction.REVERIFY and out.decision.identities["judge_recoverable"] == [(1, 0)]
+    assert fake_executor.calls == ["decide"] and out.dispatched is None and out.unsupported
+
+
+def test_a_final_model_zero_before_the_resubmit_offset_stays_done(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[final_model_zero(1, 0)], offset=1
+    )
+    out = submit.recover("gym-job-v", "bench")
+    assert out.decision.identities["model_final"] == [(1, 0)] and out.decision.action == RecoveryAction.NOOP
+    assert fake_executor.calls == ["decide"]
+
+
+@pytest.mark.parametrize("later", [unstarted, unrouted])
+def test_a_later_non_superseding_row_does_not_erase_a_final_model_zero(tmp_path, fake_executor, later) -> None:
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[final_model_zero(1, 0), later(1)]
+    )
+    out = submit.recover("gym-job-w", "bench")
+    assert out.decision.identities["model_final"] == [(1, 0)] and out.decision.action == RecoveryAction.NOOP
+
+
+def test_a_later_interrupted_row_restarts_the_input(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[ident(1, **INFRA), interrupted(1)], retries=0
+    )
+    out = submit.recover("gym-job-x", "bench")
+    assert out.decision.identities["missing"] == [(1, 0)] and fake_executor.calls == ["decide", "resubmit"]
+
+
+def test_attempts_before_the_resubmit_offset_do_not_count_towards_the_cap(tmp_path, fake_executor) -> None:
+    rows = [ident(1, _ng_attempt_index=a, **INFRA) for a in range(4)]
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=rows, offset=3, retries=0
+    )
+    out = submit.recover("gym-job-y", "bench")
+    item = [e for e in out.decision.evidence if e.identity == (1, 0)][0]
+    assert (item.state, item.attempts) == ("retryable", 1)
+
+
+@pytest.mark.parametrize(
+    ("verdicts", "criterion", "health"),
+    [
+        ({"healthy": 98, "unhealthy": 2, "unobserved": 0}, 0.02, False),
+        ({"healthy": 99, "unhealthy": 1, "unobserved": 0}, 0.02, True),
+        ({"healthy": 0, "unhealthy": 100, "unobserved": 0}, float("nan"), None),
+        ({"healthy": 0, "unhealthy": 100, "unobserved": 0}, float("inf"), None),
+        ({"healthy": 100, "unhealthy": 0, "unobserved": 0}, True, None),
+        ({"healthy": 101, "unhealthy": -1, "unobserved": 0}, 0.02, None),
+        ({"healthy": True, "unhealthy": 0, "unobserved": 99}, 0.02, None),
+    ],
+)
+def test_health_criterion_and_counts_are_strict(tmp_path, verdicts, criterion, health) -> None:
+    from nemo_gym.orchestration.recovery import quality_inputs
+
+    job = write_job_dir(tmp_path / "job", n=100, results=[ident(t, reward=1.0) for t in range(100)], failures=[])
+    write_quality(job, expected=100, healthy=True, verdicts=verdicts)
+    collected = collect(job)
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert quality_inputs(d, collected, max_unhealthy_fraction=criterion)[2] is health
+
+
+def test_absent_mlflow_evidence_never_passes(tmp_path) -> None:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    job = complete_job(tmp_path)
+    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    (job / "artifacts" / "rollouts_mlflow_run_id").unlink()
+    (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02)
+    assert task["status"] == "FAILED" and "no MLflow run evidence" in task["errors"]
+
+
+def test_an_interrupted_row_with_failure_events_restarts_like_rollout_collection(tmp_path, fake_executor) -> None:
+    # Rollout collection (_latest_failure_rows, _load_from_cache) treats any latest interrupted row as missing and
+    # runs the input again, whatever events it carries; recovery selects the same input.
+    row = interrupted(1) | {
+        "_ng_failure_class": "agent_run_error",
+        "_ng_failure_id": "f",
+        "_ng_failure_events": {"e": {"boundary": "agent", "operation": "run"}},
+    }
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[row], retries=0
+    )
+    out = submit.recover("gym-job-z", "bench")
+    assert out.decision.identities["missing"] == [(1, 0)] and "unknown" not in out.decision.identities
+    assert fake_executor.calls == ["decide", "resubmit"]
