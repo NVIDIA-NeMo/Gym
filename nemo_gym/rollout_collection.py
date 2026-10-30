@@ -4552,7 +4552,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         output_fpath: Path,
         samples: Mapping[str, Mapping[str, Any]],
         persisted_results: Optional[List[Dict]],
-    ) -> Path:
+    ) -> Optional[Path]:
         """Aggregate one agent whose every expected rollout is scored, and write its completion file.
 
         The file is written atomically beside the run's rollouts (``agent_complete_dir_for``), so a
@@ -4563,39 +4563,51 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``persisted_results`` are the run's scored rows when the run keeps them in memory; otherwise
         the agent's rows are read back from ``output_fpath``.
-        """
-        if persisted_results is not None:
-            results = [r for r in persisted_results if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) in keys]
-        else:
-            results = await _read_jsonl_for_keys(output_fpath, keys)
-        scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
-        if scored_keys != keys:
-            raise RuntimeError(
-                f"Agent '{dispatch_name}' has every expected rollout scored, but {output_fpath} holds "
-                f"{len(scored_keys)} of its {len(keys)} rollouts."
-            )
 
-        entries, _ = await self._aggregate_entries(results, results, labels=self._agent_complete_labels(samples))
-        if len(entries) != 1:
-            raise RuntimeError(
-                f"Agent '{dispatch_name}' aggregated into {len(entries)} environment servers, expected one."
+        The file is a side channel: any other failure here (a write error, a rollout count that does not
+        add up) is logged and returns None. Raised, it would surface only when the run's tasks are
+        gathered, which is before the run-wide aggregate is computed, and a run whose rollouts all
+        succeeded would end without one.
+        """
+        try:
+            if persisted_results is not None:
+                results = [r for r in persisted_results if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) in keys]
+            else:
+                results = await _read_jsonl_for_keys(output_fpath, keys)
+            scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
+            if scored_keys != keys:
+                raise RuntimeError(
+                    f"Agent '{dispatch_name}' has every expected rollout scored, but {output_fpath} holds "
+                    f"{len(scored_keys)} of its {len(keys)} rollouts."
+                )
+
+            entries, _ = await self._aggregate_entries(results, results, labels=self._agent_complete_labels(samples))
+            if len(entries) != 1:
+                raise RuntimeError(
+                    f"Agent '{dispatch_name}' aggregated into {len(entries)} environment servers, expected one."
+                )
+            entry = entries[0]
+            label = entry[AGENT_REF_KEY_NAME]["name"]
+            fpath = _agent_complete_fpath(output_fpath, label)
+            _atomic_write_json(
+                fpath,
+                {
+                    "schema_version": AGENT_COMPLETE_SCHEMA_VERSION,
+                    AGENT_REF_KEY_NAME: entry[AGENT_REF_KEY_NAME],
+                    NG_ENVIRONMENT_SERVER_KEY: entry[NG_ENVIRONMENT_SERVER_KEY],
+                    "expected_rollouts": len(keys),
+                    "completed_rollouts": len(scored_keys),
+                    "completed_at": datetime.now(timezone.utc).isoformat(),
+                    "aggregation_status": "error" if AGGREGATION_ERROR_KEY in entry else "complete",
+                    "aggregate": entry,
+                },
             )
-        entry = entries[0]
-        label = entry[AGENT_REF_KEY_NAME]["name"]
-        fpath = _agent_complete_fpath(output_fpath, label)
-        _atomic_write_json(
-            fpath,
-            {
-                "schema_version": AGENT_COMPLETE_SCHEMA_VERSION,
-                AGENT_REF_KEY_NAME: entry[AGENT_REF_KEY_NAME],
-                NG_ENVIRONMENT_SERVER_KEY: entry[NG_ENVIRONMENT_SERVER_KEY],
-                "expected_rollouts": len(keys),
-                "completed_rollouts": len(scored_keys),
-                "completed_at": datetime.now(timezone.utc).isoformat(),
-                "aggregation_status": "error" if AGGREGATION_ERROR_KEY in entry else "complete",
-                "aggregate": entry,
-            },
-        )
+        except Exception:
+            logger.exception(
+                "Could not write the completion file of agent '%s'; the run-wide aggregate is unaffected.",
+                dispatch_name,
+            )
+            return None
         print(f"Agent '{label}' complete: all {len(keys)} rollouts scored. Completion file: {fpath}", flush=True)
         return fpath
 

@@ -812,6 +812,43 @@ class TestRolloutCollection:
         assert alpha["aggregate"][AGGREGATION_ERROR_KEY]["http_status"] == 500
         assert orjson.loads((complete_dir / "beta.json").read_bytes())["aggregation_status"] == "complete"
 
+    async def test_a_failed_completion_file_write_does_not_stop_the_run_aggregate(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        caplog: pytest.LogCaptureFixture,
+    ) -> None:
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+        )
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                return FakeResponse(
+                    200, compute_aggregate_metrics([dict(r) for r in json.verify_responses]).model_dump()
+                )
+            return FakeResponse(200, {"reward": 1.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+        write_json = nemo_gym.rollout_collection._atomic_write_json
+
+        def write_json_unless_alpha(path: Path, payload: dict) -> None:
+            if path.name == "alpha.json":
+                raise OSError(122, "Disk quota exceeded")
+            write_json(path, payload)
+
+        monkeypatch.setattr(nemo_gym.rollout_collection, "_atomic_write_json", write_json_unless_alpha)
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        assert "Could not write the completion file of agent 'alpha'" in caplog.text
+        assert sorted(path.name for path in (tmp_path / "rollouts_agent_complete").iterdir()) == ["beta.json"]
+        run_aggregate = orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        assert sorted(entry[AGENT_REF_KEY_NAME]["name"] for entry in run_aggregate) == ["alpha", "beta"]
+
     async def test_read_jsonl_for_keys_parses_only_the_wanted_complete_rows(self, tmp_path: Path) -> None:
         fpath = tmp_path / "rollouts.jsonl"
         nested = {TASK_INDEX_KEY_NAME: 9, ROLLOUT_INDEX_KEY_NAME: 9}
