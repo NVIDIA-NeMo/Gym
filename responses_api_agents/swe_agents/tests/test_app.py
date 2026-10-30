@@ -3663,8 +3663,8 @@ class TestEvaluatorLaunchFailure:
         # An unmeasured reward outranks the agent's own limit.
         ({"eval_launch_failed": True, "agent_error_kind": "max_iteration"}, PROVIDER_UNAVAILABLE),
         ({"oom_killed": True, "agent_error_kind": "oom"}, PROVIDER_OOM_KILLED),
-        ({"eval_oom_killed": True, "agent_timed_out": True}, PROVIDER_OOM_KILLED),
-        ({"eval_timed_out": True, "agent_timed_out": True}, EVAL_TIMEOUT),
+        ({"eval_oom_killed": True, "agent_error_kind": "max_iteration"}, PROVIDER_OOM_KILLED),
+        ({"eval_timed_out": True, "agent_error_kind": "context_window"}, EVAL_TIMEOUT),
         ({"agent_timed_out": True, "resolved": True}, AGENT_TIMEOUT),
         ({"agent_error_kind": "max_iteration", "resolved": True}, AGENT_LIMIT),
         ({"agent_error_kind": "context_window", "resolved": False}, MODEL_CONTEXT_LIMIT),
