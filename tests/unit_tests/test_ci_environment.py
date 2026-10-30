@@ -224,6 +224,51 @@ def test_coverage_gate_compares_fractional_percentages() -> None:
     assert coverage_report["fail_under"] == 95.0
 
 
+@pytest.mark.parametrize("missing_source", [False, True])
+def test_combined_coverage_omits_discarded_uv_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_source: bool
+) -> None:
+    """Combine shard coverage after uv removes its temporary interpreter probes."""
+    from io import StringIO
+
+    from coverage import Coverage
+    from coverage.exceptions import NoSource
+
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "module.py"
+    source.write_text("value = 42\n")
+    probe = tmp_path / "cache" / "uv" / ".tmp-probe" / "python" / "__init__.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("interpreter_version = '3.13'\n")
+    config_file = str(REPO_ROOT / "pyproject.toml")
+    shard_dirs = []
+
+    for shard in range(4):
+        shard_file = tmp_path / f"shard-{shard}" / ".coverage"
+        shard_file.parent.mkdir()
+        coverage = Coverage(config_file=config_file, data_file=str(shard_file), source=[str(tmp_path)])
+        coverage.set_option("run:omit", [pattern for pattern in coverage.config.run_omit if pattern != "/tmp/*"])
+        coverage.start()
+        try:
+            for script in (source, probe):
+                exec(compile(script.read_text(), str(script), "exec"), {})
+        finally:
+            coverage.stop()
+            coverage.save()
+        shard_dirs.append(str(shard_file.parent))
+
+    shutil.rmtree(tmp_path / "cache")
+    combined = Coverage(config_file=config_file, data_file=str(tmp_path / ".coverage"))
+    combined.combine(shard_dirs)
+
+    if missing_source:
+        source.unlink()
+        with pytest.raises(NoSource, match="module.py"):
+            combined.report(file=StringIO())
+    else:
+        assert combined.report(file=StringIO()) == 100.0
+
+
 def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: Path) -> None:
     workflow = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())
     setup = next(step["run"] for step in workflow["jobs"]["server-suite"]["steps"] if step["name"] == "Setup for test")
