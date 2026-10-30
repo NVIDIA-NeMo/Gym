@@ -412,7 +412,7 @@ async def test_admission_seeded_history_on_empty_ledger_is_text_root(store):
 
 
 @pytest.mark.asyncio
-async def test_admission_unresolved_poisons_instead_of_new_root(store):
+async def test_admission_unresolved_poisons_instead_of_new_root(store, caplog):
     await _record_call_1(store)
     # Assistant history that matches no committed call on a non-empty ledger.
     context = await _admit(store, [USER_1, ASSISTANT_SEEDED, USER_2])
@@ -420,10 +420,12 @@ async def test_admission_unresolved_poisons_instead_of_new_root(store):
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
     assert manifest.failures[0].model_call_id == "c2"
+    # The warning says why the parent was not found, so a poisoned call can be diagnosed from the log.
+    assert "Unresolved parent for model call c2 of rollout r1 (reason=no_match, 3 request items)" in caplog.text
 
 
 @pytest.mark.asyncio
-async def test_ambiguous_siblings_are_unresolved(store):
+async def test_ambiguous_siblings_are_unresolved(store, caplog):
     """Two committed calls with identical text but different tokens must never resolve; the call poisons."""
     await _record_call_1(store)
     # Same request and response text as c1, but a different token sequence.
@@ -433,6 +435,7 @@ async def test_ambiguous_siblings_are_unresolved(store):
     assert context.capture_admission is None
     manifest = RolloutManifest.model_validate(await store.manifest("r1"))
     assert [failure.reason for failure in manifest.failures] == [UNRESOLVED_PARENT_REASON]
+    assert "(reason=ambiguous, 3 request items); poisoning the call" in caplog.text
 
 
 @pytest.mark.asyncio

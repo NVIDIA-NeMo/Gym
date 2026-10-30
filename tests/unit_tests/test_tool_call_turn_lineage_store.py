@@ -14,6 +14,7 @@
 # limitations under the License.
 """Whole-turn fallback preserves durable token custody and rejects unrecorded output."""
 
+import json
 from copy import deepcopy
 
 import pytest
@@ -213,6 +214,54 @@ async def test_whole_turn_fallback_rejects_other_changes(stores, change) -> None
     result = await stores[2].resolve("r", request)
     assert result.status == ParentResolutionStatus.UNRESOLVED
     assert result.match is None
+
+
+def _unavailable_tool_placeholder(arguments: dict) -> list[dict]:
+    """The request as OpenCode sends it after the model called a tool OpenCode does not offer: the call keeps its
+    served ID and becomes a call to OpenCode's `invalid` tool."""
+    request = _request()
+    request[3] = {**request[3], "name": "invalid", "arguments": json.dumps(arguments)}
+    return request
+
+
+@pytest.mark.asyncio
+async def test_opencode_unavailable_tool_placeholder_resolves_to_the_served_call(stores) -> None:
+    await _publish(stores)
+    request = _unavailable_tool_placeholder(
+        {"tool": "Read", "error": "Model tried to call unavailable tool 'Read'. Available tools: bash, invalid."}
+    )
+    result = await stores[2].resolve("r", request)
+    assert result.status == ParentResolutionStatus.RESOLVED
+    assert result.match.model_call_id == "a"
+    assert result.reason == "tool_call_turn"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "arguments",
+    [
+        {"tool": "Bash", "error": "names another served tool"},
+        {"tool": "Read"},
+        {"tool": "Read", "error": "unavailable", "extra": "field"},
+        {"tool": "", "error": "unavailable"},
+        {"tool": "Read", "error": None},
+    ],
+)
+async def test_only_the_exact_placeholder_of_the_served_tool_resolves(stores, arguments) -> None:
+    await _publish(stores)
+    result = await stores[2].resolve("r", _unavailable_tool_placeholder(arguments))
+    assert result.status == ParentResolutionStatus.UNRESOLVED
+    assert result.match is None
+
+
+def test_placeholder_keeps_the_served_turn_key_and_other_renames_do_not() -> None:
+    served = _turn()
+    placeholder = deepcopy(served)
+    placeholder[2] = {**placeholder[2], "name": "invalid", "arguments": '{"error":"unavailable","tool":"Read"}'}
+    renamed = deepcopy(served)
+    renamed[2] = {**renamed[2], "name": "invalid", "arguments": "{}"}
+    assert tool_call_turn_fingerprint(placeholder) == tool_call_turn_fingerprint(served)
+    assert tool_call_turn_fingerprint(renamed) != tool_call_turn_fingerprint(served)
 
 
 @pytest.mark.asyncio
