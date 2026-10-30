@@ -15,6 +15,7 @@
 import asyncio
 import bisect
 import copy
+import fcntl
 import functools
 import glob as glob_module
 import hashlib
@@ -25,6 +26,7 @@ import os
 import re
 import secrets
 import signal
+import tempfile
 import time
 import warnings
 from asyncio import Future, Semaphore
@@ -1265,22 +1267,142 @@ _ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
 
 
 async def _enrich_returned_result(
-    row: dict[str, Any], result: dict[str, Any], rollout_latency_ms: Optional[float], **options: Any
-) -> None:
+    row: dict[str, Any],
+    result: dict[str, Any],
+    rollout_latency_ms: Optional[float],
+    *,
+    stamp: Optional[Callable[[dict[str, Any]], None]] = None,
+    **options: Any,
+) -> dict[str, Any]:
     """``enrich_run_result`` for a result ``run_examples`` returns, keeping its public shape.
 
     An Environment Server reply to a materialized task is a ``BaseEpisodeResponse`` whose evidence is nested; it is
     enriched through the record the collector stores, and the enrichment keys are added to the reply's top level.
+    Returns the record ``ng_collect_rollouts`` would store for this rollout. ``stamp``, when given, adds the
+    collector's identity and routing fields to that record before enrichment, in the collector's order, so the capture
+    joined is the one the stored record names.
     """
     if _materialized_taskset(row) is not None and _is_episode_response(result):
         record = _episode_record(copy.deepcopy(result))
+        for key, value in _task_data_provenance(row).items():
+            record.setdefault(key, value)
+        if stamp is not None:
+            stamp(record)
         await enrich_run_result(row, record, rollout_latency_ms=rollout_latency_ms, **options)
         identity = (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME)
         for key in (*_ENRICHMENT_KEYS, *identity):
             if key in record and key not in result:
                 result[key] = record[key]
-        return
+        return record
+    if stamp is not None:
+        if _materialized_taskset(row) is not None:
+            for key, value in _task_data_provenance(row).items():
+                result.setdefault(key, value)
+        stamp(result)
     await enrich_run_result(row, result, rollout_latency_ms=rollout_latency_ms, **options)
+    return result
+
+
+def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, Any]) -> None:
+    """Stamp the row's identity and routing fields onto the record collection stores, as every reader expects."""
+    row = completed.row
+    if completed.elapsed_s is not None:
+        # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
+        # which resume reads to order dispatch.
+        result[ELAPSED_S_KEY] = completed.elapsed_s
+
+    result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
+    result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
+    for key in (AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME, SKILLS_REF_KEY_NAME, ATTEMPT_INDEX_KEY_NAME):
+        if key in row:
+            result[key] = row[key]
+    if ROLLOUT_ID_KEY_NAME in row:
+        # Capture readback recomputes the id from the finished record.
+        # Preserve an explicit id on the result just like the indices.
+        result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
+    # Every record names the Environment Server that ran it and that server's type,
+    # so readers group by server instead of agent_ref and know which result type they hold.
+    if completed.environment_server is not None:
+        result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
+    if completed.environment_server_type is not None:
+        result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
+
+
+def _failure_row_bytes(result: Mapping[str, Any]) -> bytes:
+    """A failures-sidecar row: the failed result with the attempt cap it ran under, for offline aggregation."""
+    return orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
+
+
+_SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
+_RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs")
+
+
+class RunRecordWriter:
+    """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
+
+    A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar beside it, so a folder of
+    shards is what ``gym eval aggregate``, the run health check and EvalRDL's reader already read. The caller picks
+    the shard label (for example a training step and worker); Gym owns the file names. A result goes to the rollouts
+    file, a failed one to the failures sidecar with its attempt cap, and an interrupted or never-started try to the
+    sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
+    earlier run wrote under the same label, so a replayed step does not duplicate rows.
+    """
+
+    def __init__(self, record_output_dir: Path | str, shard: str, *, record_omitted_rollouts: bool = False) -> None:
+        if not _SHARD_LABEL.fullmatch(shard):
+            raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
+        if shard.endswith(_RESERVED_SHARD_ENDINGS):
+            # `rollouts-x_failures.jsonl` is shard `x`'s failures sidecar, and readers skip both endings.
+            raise ValueError(f"shard label {shard!r} must not end with {' or '.join(_RESERVED_SHARD_ENDINGS)}")
+        self.rollouts_fpath = Path(record_output_dir) / f"rollouts-{shard}.jsonl"
+        self.failures_fpath = failures_path_for(self.rollouts_fpath)
+        self.record_omitted_rollouts = record_omitted_rollouts
+        self.rollouts_fpath.parent.mkdir(parents=True, exist_ok=True)
+        self._lock_fpath = self.rollouts_fpath.with_name(f".{self.rollouts_fpath.name}.lock")
+        with self._locked():
+            self.failures_fpath.unlink(missing_ok=True)
+            # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
+            # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
+            # inode, which write() checks to notice a later writer of the same shard.
+            fd, partial = tempfile.mkstemp(dir=self.rollouts_fpath.parent, prefix=f".{self.rollouts_fpath.name}.")
+            os.close(fd)
+            Path(partial).replace(self.rollouts_fpath)
+            self._generation = self.rollouts_fpath.stat().st_ino
+
+    @contextmanager
+    def _locked(self) -> Iterator[None]:
+        """Hold the shard's lock across processes, so opening and each write never interleave with another's."""
+        with self._lock_fpath.open("a") as lock:
+            fcntl.flock(lock, fcntl.LOCK_EX)
+            try:
+                yield
+            finally:
+                fcntl.flock(lock, fcntl.LOCK_UN)
+
+    def write(self, result: Mapping[str, Any]) -> Optional[Path]:
+        """Append one finished rollout's record; returns the file written, or None for an omitted row not kept.
+
+        Raises:
+            RuntimeError: Another writer opened the same shard since this one did.
+        """
+        if result.get(NG_NO_PERSIST_KEY):
+            if not self.record_omitted_rollouts:
+                return None
+            fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
+        elif result.get(NG_FAILURE_CLASS_KEY) is not None:
+            fpath, line = self.failures_fpath, _failure_row_bytes(result)
+        else:
+            fpath, line = self.rollouts_fpath, orjson.dumps(result)
+        with self._locked():
+            try:
+                current = self.rollouts_fpath.stat().st_ino
+            except FileNotFoundError:
+                current = None
+            if current != self._generation:
+                raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
+            with fpath.open("ab") as f:
+                f.write(line + b"\n")
+        return fpath
 
 
 def _drop_truncated_tail(fpath: Path) -> None:
@@ -2897,7 +3019,7 @@ class _RowResultIterator:
     def __init__(
         self,
         completions: Iterator[Future],
-        enrich: Optional[Callable[[dict, dict, Optional[float]], Awaitable[Any]]] = None,
+        enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Any]]] = None,
     ):
         self._completions = completions
         self._enrich = enrich
@@ -2914,7 +3036,7 @@ class _RowResultIterator:
     async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict]:
         completed = await future
         if self._enrich is not None:
-            await self._enrich(completed.row, completed.result, completed.rollout_latency_ms)
+            await self._enrich(completed)
         return completed.row, completed.result
 
     async def aclose(self) -> None:
@@ -2970,7 +3092,7 @@ class _RowResultIterator:
                 result = task.result()
                 if self._enrich is not None:
                     try:
-                        await self._enrich(result.row, result.result, result.rollout_latency_ms)
+                        await self._enrich(result)
                     except Exception as enrich_error:
                         outcome.set_exception(enrich_error)
                         outcome.exception()
@@ -3893,31 +4015,7 @@ class RolloutCollectionHelper(BaseModel):
                     # Result or failure, the record names the inputs it ran (task and dataset digests).
                     for key, value in _task_data_provenance(row).items():
                         result.setdefault(key, value)
-                if completed.elapsed_s is not None:
-                    # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
-                    # which resume reads to order dispatch.
-                    result[ELAPSED_S_KEY] = completed.elapsed_s
-
-                result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
-                result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
-                if AGENT_REF_KEY_NAME in row:
-                    result[AGENT_REF_KEY_NAME] = row[AGENT_REF_KEY_NAME]
-                if TASK_SOURCE_KEY_NAME in row:
-                    result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
-                if SKILLS_REF_KEY_NAME in row:
-                    result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-                if ATTEMPT_INDEX_KEY_NAME in row:
-                    result[ATTEMPT_INDEX_KEY_NAME] = row[ATTEMPT_INDEX_KEY_NAME]
-                if ROLLOUT_ID_KEY_NAME in row:
-                    # Capture readback recomputes the id from the finished record.
-                    # Preserve an explicit id on the result just like the indices.
-                    result[ROLLOUT_ID_KEY_NAME] = row[ROLLOUT_ID_KEY_NAME]
-                # Every record names the Environment Server that ran it and that server's type,
-                # so readers group by server instead of agent_ref and know which result type they hold.
-                if completed.environment_server is not None:
-                    result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
-                if completed.environment_server_type is not None:
-                    result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
+                _stamp_collector_fields(completed, result)
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -4017,7 +4115,7 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     write_started = perf_counter()
                     # The cap this attempt ran under travels with it, for offline aggregation.
-                    serialized = orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
+                    serialized = _failure_row_bytes(result)
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
@@ -4970,6 +5068,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         enrich_results: bool = False,
         include_model_call_payloads: bool = True,
         delete_model_call_capture: bool = False,
+        record_output_dir: Optional[Path | str] = None,
+        record_shard: Optional[str] = None,
+        record_omitted_rollouts: bool = False,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -5039,7 +5140,14 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
         enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
         is merged, and needs the payloads kept. With ``enrich_results`` off, results are exactly what `/run` returned.
+
+        ``record_output_dir`` with ``record_shard`` also writes each enriched rollout to that run folder through
+        :class:`RunRecordWriter`, as ``ng_collect_rollouts`` would (``rollouts-<shard>.jsonl`` and its failures
+        sidecar; omitted-rollout rows with ``record_omitted_rollouts``). It implies ``enrich_results``.
         """
+        if record_output_dir is not None and not record_shard:
+            raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
+        enrich_results = enrich_results or record_output_dir is not None
         if delete_model_call_capture and not include_model_call_payloads:
             raise ValueError("delete_model_call_capture would drop the bodies include_model_call_payloads=False keeps")
         enrich = None
@@ -5048,32 +5156,47 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
 
-            async def enrich(row: dict, result: dict, rollout_latency_ms: Optional[float]) -> None:
-                await _enrich_returned_result(
-                    row,
-                    result,
-                    rollout_latency_ms,
+            def stamp_for(completed: _CompletedRollout) -> Callable[[dict[str, Any]], None]:
+                def stamp(record: dict[str, Any]) -> None:
+                    _stamp_collector_fields(completed, record)
+                    agent_name = self._agent_name_for_row(completed.row, global_config)
+                    _record_policy_model_server(record, global_config, agent_name)
+
+                return stamp
+
+            async def enrich(completed: _CompletedRollout) -> None:
+                record = await _enrich_returned_result(
+                    completed.row,
+                    completed.result,
+                    completed.rollout_latency_ms,
+                    stamp=stamp_for(completed) if writer is not None else None,
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
                     include_payloads=include_model_call_payloads,
                     delete_capture=delete_model_call_capture,
                 )
+                if writer is not None:
+                    writer.write(record)
 
-        return _RowResultIterator(
-            self._run_examples_with_metadata(
-                examples,
-                head_server_config=head_server_config,
-                semaphore=semaphore,
-                route_failures_to_sidecar=route_failures_to_sidecar,
-                environment_server_name=environment_server_name,
-                max_resident_tasks=max_resident_tasks,
-                dispatch_budget_s=dispatch_budget_s,
-                drain_margin_s=drain_margin_s,
-                latency_tracker=latency_tracker,
-                **({"retry_requests": False} if not retry_requests else {}),
-            ),
-            enrich=enrich,
+        completions = self._run_examples_with_metadata(
+            examples,
+            head_server_config=head_server_config,
+            semaphore=semaphore,
+            route_failures_to_sidecar=route_failures_to_sidecar,
+            environment_server_name=environment_server_name,
+            max_resident_tasks=max_resident_tasks,
+            dispatch_budget_s=dispatch_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+            **({"retry_requests": False} if not retry_requests else {}),
         )
+        # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
+        writer = (
+            RunRecordWriter(record_output_dir, record_shard, record_omitted_rollouts=record_omitted_rollouts)
+            if record_output_dir is not None
+            else None
+        )
+        return _RowResultIterator(completions, enrich=enrich)
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         """Return a client for the head server, reusing the cached one when the helper opted in.
