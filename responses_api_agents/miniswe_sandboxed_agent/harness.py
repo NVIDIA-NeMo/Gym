@@ -374,7 +374,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         termination = HarnessOutcome(reason="completed")
         started = monotonic()
         run_result = None
-        cleanup_failure = None
+        cleanup_failure = cleanup_termination = None
         try:
             await self.sandbox.upload(local_config, f"{remote}/config.yaml")
             await self.sandbox.upload(
@@ -408,7 +408,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 termination = HarnessOutcome(reason="cancelled")
             except Exception as error:
                 LOGGER.exception("Failed to stop mini-SWE processes; resources must quiesce the sandbox")
-                # The run's processes may still be alive. This is the run's own failure, so the result carries it.
+                # The run's processes may still be alive. It is the run's failure unless mini-SWE stopped at a limit.
                 cleanup_failure = NgFailureEvent(
                     boundary=FailureBoundary.HARNESS,
                     failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
@@ -416,7 +416,9 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                     operation="harness.terminate",
                 )
                 cleanup_failure.__cause__ = error
-                termination = HarnessOutcome(reason="infrastructure_error", detail=f"Process cleanup failed: {error}")
+                cleanup_termination = HarnessOutcome(
+                    reason="infrastructure_error", detail=f"Process cleanup failed: {error}"
+                )
 
         try:
             await self.sandbox.download(f"{remote}/agent.log", self.directory / "agent.log")
@@ -448,6 +450,10 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 termination = HarnessOutcome(
                     reason="infrastructure_error", detail=status or "mini-SWE produced no trajectory"
                 )
+        if cleanup_termination is not None and termination.reason != "nonzero_exit":
+            # Only a native limit or format stop settles the run without a submitted answer; otherwise, a submission
+            # included, the failed cleanup is the run's failure.
+            termination = cleanup_termination
 
         history, tool_history = project_native_trajectory(result)
         responses = []
@@ -482,7 +488,11 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         )
         extra = {"harness_version": info.get("mini_version")}
         if cleanup_failure is not None:
-            extra.update(FailureReportRow.fields(report_for_current_request(cleanup_failure)))
+            report = report_for_current_request(cleanup_failure)
+            if termination is not cleanup_termination:
+                # The native limit stands as the result: the failed cleanup is an observation, not the run's cause.
+                report = report.model_copy(update={"failure_id": None})
+            extra.update(FailureReportRow.fields(report))
         if native_trajectory is not None:
             extra["mini_swe_trajectory"] = native_trajectory
             termination.artifacts = [str(self.directory / "trajectory.json")]

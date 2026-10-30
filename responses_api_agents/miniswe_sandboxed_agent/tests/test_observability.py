@@ -286,9 +286,14 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert result.summary["run"]["issues"]["rollout_ended_on_failed_model_call"] == 1
 
 
+@pytest.mark.parametrize("final", ["submitted", "limits_exceeded", "no_native_final"])
 @pytest.mark.parametrize("cleanup", ["confirmed", "provider_timeout"])
-async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, runner_factory, cleanup):
-    """A nonzero model command stays the agent's result; only the harness's failed cleanup becomes a typed event."""
+async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, runner_factory, cleanup, final):
+    """A failed cleanup is the run's selected typed failure unless mini-SWE stopped at a native limit.
+
+    After a native limit the agent's result stands and the cleanup stays an unselected failure event; a
+    submission keeps the cleanup as its failure. A nonzero model command is always the agent's result.
+    """
     from nemo_gym.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog
 
     app = FastAPI()
@@ -297,6 +302,8 @@ async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, 
     @app.post("/v1/responses")
     async def model(body: dict = Body()):
         requests.append(body)
+        if final == "no_native_final" and len(requests) == 2:
+            return JSONResponse({"error": {"message": "controlled failure"}}, status_code=503)
         command = "exit 7" if len(requests) == 1 else "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
         return {
             "id": f"response-{len(requests)}",
@@ -326,7 +333,7 @@ async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, 
 
     harness = await runner_factory(
         context=HarnessContext(session_id="invocation", task_id="0", rollout_id="0-0", instruction="run then submit"),
-        config=MiniSWEConfig(step_limit=3),
+        config=MiniSWEConfig(step_limit=1 if final == "limits_exceeded" else 3),
         params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         query=query,
         model_name="model",
@@ -352,12 +359,20 @@ async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, 
     )
     tools = [r for r in extra["ng_agent_observations"]["records"] if r["kind"] == "tool_call"]
     assert tools[0]["status"] == "failed"
+    native = ("nonzero_exit", "LimitsExceeded") if final == "limits_exceeded" else None
+    if native is not None:
+        # mini-SWE's own limit stands whether or not the cleanup was confirmed.
+        assert (outcome.reason, outcome.detail) == native
+        assert FailureReportRow.FAILURE_ID not in row
+    elif cleanup == "confirmed":
+        assert outcome.reason == ("completed" if final == "submitted" else "infrastructure_error")
+    else:
+        # A submission or a run without a native final status is not settled while its processes may live.
+        assert outcome.reason == "infrastructure_error"
     if cleanup == "confirmed":
-        assert outcome.reason == "completed"
         assert FailureReportRow.EVENTS not in row
+        assert not (outcome.detail or "").startswith("Process cleanup failed")
         return
-    assert outcome.reason == "infrastructure_error"
-    assert outcome.detail == "Process cleanup failed: provider command timed out after 70s"
     (event,) = row[FailureReportRow.EVENTS].values()
     assert (event["boundary"], event["failure_kind"], event["operation"]) == (
         "harness",
@@ -365,7 +380,9 @@ async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, 
         "harness.terminate",
     )
     assert event["foreign_error"]["exception_type"] == "TimeoutError"
-    assert row[FailureReportRow.FAILURE_ID] == event["event_id"]
+    if native is None:
+        assert outcome.detail == "Process cleanup failed: provider command timed out after 70s"
+        assert row[FailureReportRow.FAILURE_ID] == event["event_id"]
 
 
 @pytest.mark.parametrize(
