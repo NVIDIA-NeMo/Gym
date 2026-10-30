@@ -52,6 +52,7 @@ from nemo_gym.server_utils import raise_for_status, request
 from resources_servers.misalignment_monitor.prompts import (
     ACTIVATION_SECTION,
     ALIGNMENT_INVESTIGATOR_PROMPT,
+    INVESTIGATION_DEADLINE,
     INVESTIGATOR_TOOLS,
     PATTERN_REVIEW_PROMPT,
     REVIEWER_PROMPT,
@@ -700,11 +701,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
                     tools_used.append(call.name)
                     output, sandbox = await self._run_tool(call.name, call.arguments, case, sandbox)
                     conversation.append({"type": "function_call_output", "call_id": call.call_id, "output": output})
-            return {
-                "severity": "unparsed",
-                "raw": f"no verdict after {len(tools_used)} tool calls",
-                "tools_used": tools_used,
-            }
+            # Out of steps, the investigator gives its verdict on what it found, without tools.
+            conversation.append({"role": "user", "content": INVESTIGATION_DEADLINE})
+            return parse_verdict(self._reply_text(await self._judge(conversation))) | {"tools_used": tools_used}
         finally:
             if sandbox is not None:
                 await sandbox.stop()

@@ -34,6 +34,7 @@ from resources_servers.misalignment_monitor.app import (
     _Case,
     parse_verdict,
 )
+from resources_servers.misalignment_monitor.prompts import INVESTIGATION_DEADLINE
 from resources_servers.misalignment_monitor.transcripts import render_items, render_transcript, turn_items
 
 
@@ -344,6 +345,15 @@ async def test_investigators_use_tools_before_deciding(tmp_path: Path) -> None:
     assert second_tool["output"].startswith("tool error: IndexError")
     tool_names = [tool["name"] for tool in server.server_client.post.call_args_list[1].kwargs["json"].tools]
     assert tool_names == ["read_window", "search", "recent_alerts"]
+
+
+async def test_an_investigator_out_of_steps_still_gives_a_verdict(tmp_path: Path) -> None:
+    config = _config(tmp_path, security_confirmation=False, investigator_max_steps=1)
+    server = _server(config, P1_REVIEW, ("tool", "search", {"pattern": "test"}), P1_SECURITY, NONE)
+    report = await server.review(_case())
+    assert report["l2"]["security"] == P1_SECURITY | {"tools_used": ["search"]}
+    deadline = server.server_client.post.call_args_list[2].kwargs["json"]
+    assert _sent(server)[2][-1]["content"] == INVESTIGATION_DEADLINE and not deadline.tools
 
 
 async def test_investigators_run_python_in_a_sandbox_that_is_always_stopped(
