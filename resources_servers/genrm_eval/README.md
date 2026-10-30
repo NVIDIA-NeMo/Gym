@@ -27,7 +27,7 @@ for an example. Gym adds no extra prompt (`prompt_config: null`).
 
 `genrm_model` converts candidate metadata into `response_1`/`response_2` messages.
 Labels stay in verifier metadata. HS3/HS4 retain preference strength; scoring uses direction only.
-JudgeBench and RM-Bench supply direction labels without strength.
+JudgeBench, RM-Bench, and RewardBench 2 supply direction labels without strength.
 
 The five examples reuse public JudgeBench inputs and saved GenRM outputs.
 Direction-only labels use 3/4 for the generic preference scorer. Run and model
@@ -35,11 +35,12 @@ identifiers are anonymized; generated answers and reasoning are unchanged.
 
 ## Prepare and evaluate
 
-Supported benchmarks: JudgeBench, RM-Bench, HS3, and HS4. Prepare their inputs:
+Supported benchmarks: JudgeBench, RM-Bench, RewardBench 2, HS3, and HS4. Prepare their inputs:
 
 ```bash
 uv run python -m benchmarks.genrm_judgebench.prepare  # gpt split; --split claude also supported
 uv run python -m benchmarks.genrm_rmbench.prepare
+uv run python -m benchmarks.genrm_rewardbench2.prepare
 uv run --extra mlflow python -m benchmarks.genrm_hs3.prepare
 uv run --extra mlflow python -m benchmarks.genrm_hs4.prepare
 ```
@@ -88,6 +89,7 @@ OPENBLAS_NUM_THREADS=1 gym eval reverify \
 |---|---|
 | JudgeBench | Percentage of pairs with a positive sum across both orders: correct +1, incorrect -1, unparseable 0. Missing orders count as incorrect. |
 | RM-Bench | Average of the chat, math, code, and safety domain scores, with equal weight per domain; missing rankings receive 0.5. |
+| RewardBench 2 | Unweighted average of the six domain scores. Each comparison averages both candidate orders; a best-of-4 record scores 1 when the chosen response wins every comparison, or 1/(1+ties) when some are tied. The Ties subset uses the published composite of accuracy and reward margins. |
 | HS3 / HS4 | Percentage of records with the correct preference; missing rankings count as incorrect. |
 
 Rankings must be integers 1–6; invalid values (including 3.5) count as unparseable.

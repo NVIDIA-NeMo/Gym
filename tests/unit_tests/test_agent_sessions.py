@@ -26,8 +26,8 @@ from nemo_gym.base_responses_api_agent import (
     RolloutStopResponse,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.episode import EpisodeId, TaskId
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess

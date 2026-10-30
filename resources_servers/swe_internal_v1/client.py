@@ -17,7 +17,7 @@
 import asyncio
 import json
 
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.server_utils import ServerClient
 
 

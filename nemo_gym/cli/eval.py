@@ -46,7 +46,7 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     BaseNeMoGymCLIConfig,
     BenchmarkDatasetConfig,
     ConfigError,
@@ -54,15 +54,7 @@ from nemo_gym.config_types import (
     DatasetConfig,
     ServerInstanceConfig,
 )
-from nemo_gym.discovery import read_config_metadata
-from nemo_gym.eval_plan import (
-    PlanBenchmark,
-    PlanGym,
-    build_eval_plan,
-    eval_plan_json_schema,
-    write_eval_plan,
-)
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
@@ -75,6 +67,15 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.discovery import read_config_metadata
+from nemo_gym.eval_plan import (
+    PlanBenchmark,
+    PlanGym,
+    build_eval_plan,
+    eval_plan_json_schema,
+    write_eval_plan,
+)
+from nemo_gym.exporters import mark_run_failed
 from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
@@ -635,8 +636,13 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(rch.run_from_config(rollout_collection_config))
     except KeyboardInterrupt:
         if rollout_collection_config.require_complete:
+            mark_run_failed()
             raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
         pass
+    except BaseException:
+        # Includes an incomplete run that check_completion rejects: the tracking run must not read as finished.
+        mark_run_failed()
+        raise
     finally:
         # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
@@ -668,6 +674,8 @@ def _interrupt_on_sigterm() -> None:
     def _on_sigterm(signum: int, frame: Any) -> None:
         global _terminated
         _terminated = True
+        # The run exits 143 (`_exit_if_terminated`) whatever `require_complete` says; its tracking run closes FAILED.
+        mark_run_failed()
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
@@ -700,7 +708,7 @@ def _health_check_collected_rollouts(
     from nemo_gym.rollout_health import format_health_report, run_health_checks, write_provisional_summary
 
     if _terminated and landed_keys is not None:
-        from nemo_gym.path_utils import aggregation_sources_path_for
+        from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
         if aggregation_sources_path_for(output_fpath).is_file():
             # A run drops the shard list with the first row it writes, so this run added none: the summary the
@@ -766,8 +774,12 @@ def collect_rollouts():  # pragma: no cover
     try:
         asyncio.run(rch.run_from_config(config))
     except KeyboardInterrupt:
+        mark_run_failed()
         if not _terminated:
             raise
+    except BaseException:
+        mark_run_failed()
+        raise
     finally:
         try:
             shutdown_telemetry()
@@ -826,7 +838,7 @@ def health_check_rollouts(
 
 @exit_cleanly_on_config_error
 def export_run() -> None:  # pragma: no cover
-    from nemo_gym.config_types import RunExportConfig
+    from nemo_gym.config.config_types import RunExportConfig
     from nemo_gym.exporters import load_run_exporter_class
     from nemo_gym.exporters.base import ExportState
     from nemo_gym.run_artifacts import RunArtifacts

@@ -17,7 +17,6 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
@@ -32,11 +31,9 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
-from nemo_gym.failure_kinds import MODEL_TRANSPORT_ERROR
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_correlation import current_rollout_id
+from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.core import MODEL_TRANSPORT_ERROR, EpisodeId, NeMoGymResponse, TaskId, current_rollout_id
+from nemo_gym.episode_types import MaterializedTask
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
@@ -48,7 +45,7 @@ class _Cookie:
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
 
     namespace = runpy.run_path(
@@ -620,6 +617,36 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
 
     assert metrics == AggregateMetrics()
     assert client.calls == []
+
+
+def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:
+    return SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), "resources_server": None}
+    )
+
+
+async def test_an_unset_resources_server_is_the_agents_own() -> None:
+    # A server that replaced a legacy_agent relay binds the resources server the agent's /run used.
+    configured, client = _environment_server(resources_tool_transports=["direct_http"])
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
+    )
+    environment_server = SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    resources_calls = [path for server, path, _ in client.calls if server == "agents_resources"]
+    assert resources_calls == ["/seed_session", "/verify", "/close_session"]
+    create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
+    assert [access.name for access in create_body.tool_accesses] == ["agents_resources.direct_http"]
+
+
+def test_a_server_whose_agent_names_no_resources_server_does_not_start() -> None:
+    configured, client = _environment_server()
+
+    with pytest.raises(ValueError, match="sets no resources_server"):
+        SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])

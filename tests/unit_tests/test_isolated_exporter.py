@@ -22,7 +22,7 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.exporters.isolated as isolated
-from nemo_gym.config_types import RunExportConfig
+from nemo_gym.config.config_types import RunExportConfig
 from nemo_gym.exporters.base import ExportState
 from nemo_gym.exporters.isolated import (
     ExportPreparationError,

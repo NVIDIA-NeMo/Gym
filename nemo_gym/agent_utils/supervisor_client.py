@@ -43,7 +43,7 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
 
 

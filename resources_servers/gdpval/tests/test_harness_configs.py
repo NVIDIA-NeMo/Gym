@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.codex_agent.app import CodexAgentConfig
 from responses_api_agents.pi_agent.app import PiAgentConfig
 
