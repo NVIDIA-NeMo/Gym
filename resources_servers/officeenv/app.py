@@ -533,12 +533,23 @@ _ATTACHED = (
     "filename defaults to the file's name), and {{filename, content, mimeType?}} text of at most {limit} bytes; any "
     "other file goes by its path. Unknown fields are refused."
 )
-# Gmail's attachment parameters as a sandboxed episode reads them (ContentInWorkspace), in place of OfficeEnv's, which
-# take content or content_base64. Formatted with the limit and the workspace, as CONTENT_DESCRIPTIONS.
+_TEXT_PARAM = (
+    f"Text of at most {{limit}} bytes; a longer or binary file goes from the workspace with the file API "
+    f"({{workdir}}/{GUIDE_NAME})"
+)
+_BYTES_PARAM = (
+    "Not taken here: text goes in content (at most {limit} bytes), and a binary file (an XLSX workbook, a PDF, an "
+    f"image) goes from the workspace with the file API ({{workdir}}/{GUIDE_NAME}), never pasted here"
+)
+# Gmail's attachment parameters, and the file apps' upload content, as a sandboxed episode reads them
+# (ContentInWorkspace), in place of OfficeEnv's, which take content or content_base64 in the call. Formatted with the
+# limit and the workspace, as CONTENT_DESCRIPTIONS.
 PARAM_DESCRIPTIONS: dict[tuple[str, str, str], str] = {
     ("gmail", "send_message", "attachments"): "Attachments: " + _ATTACHED,
     ("gmail", "create_draft", "attachments"): "Attachments: " + _ATTACHED,
     ("gmail", "update_draft", "attachments"): "New attachments (replaces): " + _ATTACHED,
+    **{(app, op, "content"): _TEXT_PARAM for app, op in CONTENT_UPLOADS},
+    **{(app, op, "content_base64"): _BYTES_PARAM for app, op in CONTENT_UPLOADS},
 }
 
 
@@ -557,9 +568,9 @@ def content_description(app: str, op: str, description: str, limit: int | None, 
 def content_schema(
     app: str, op: str, schema: Mapping[str, Any], limit: int | None, *, workdir: str = "/workspace"
 ) -> Mapping[str, Any]:
-    """An op's parameter schema as a sandboxed episode reads it: Gmail's attachments described as they move there
-    (PARAM_DESCRIPTIONS, ``workdir`` the workspace); every other schema, and every one when content moves through
-    the conversation (``limit`` None), is OfficeEnv's. The schema given is not changed."""
+    """An op's parameter schema as a sandboxed episode reads it: Gmail's attachments and the uploads' content
+    described as they move there (PARAM_DESCRIPTIONS, ``workdir`` the workspace); every other schema, and every one
+    when content moves through the conversation (``limit`` None), is OfficeEnv's. The schema given is not changed."""
     changed = {param: text for (a, o, param), text in PARAM_DESCRIPTIONS.items() if (a, o) == (app, op)}
     properties = schema.get("properties")
     if limit is None or not changed or not isinstance(properties, Mapping):

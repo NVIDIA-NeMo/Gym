@@ -189,8 +189,9 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
      refused (`upload_from_workspace`), and so is an attachment that names a file without its
      content (`attach_from_workspace`), each with the attachment that names the workspace file;
    - these tools are described as they behave here, in place of OfficeEnv's words
-     (`contentBase64`, `content_base64`), Gmail's `attachments` parameter too, and `README.md`
-     says the same. `/verify` reports `sandbox_files_saved`, `sandbox_bytes_saved`,
+     (`contentBase64`, `content_base64`), and so are the uploads' `content` and
+     `content_base64` parameters and Gmail's `attachments`; `README.md` says the same.
+     `/verify` reports `sandbox_files_saved`, `sandbox_bytes_saved`,
      `sandbox_uploads_refused`, `sandbox_files_attached` and `sandbox_bytes_attached`, over all
      five apps.
 
