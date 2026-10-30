@@ -19,6 +19,7 @@ import shlex
 import socket
 import subprocess
 import tempfile
+import time
 from asyncio import Semaphore
 from contextvars import ContextVar
 from pathlib import Path
@@ -37,6 +38,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE
 from nemo_gym.global_config import get_first_server_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymResponse,
@@ -44,7 +46,7 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxSpec
+from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxCreateError, SandboxSpec
 from nemo_gym.sandbox.providers.registry import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
 
@@ -87,6 +89,63 @@ _WORKDIR_KEYS = {
     "opencode": "repo_dir",
     "terminus_2": "workspace_root",
 }
+
+
+_OOM_MARKERS = ("exited with code 137", "OOMKilled", "runner failed (137)", "signal: killed")
+
+
+class RunnerTerminatedError(RuntimeError):
+    """The runner died from a signal well before its own deadline: the sandbox runtime ended it, not the agent."""
+
+
+def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
+    """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
+
+    A sandbox that ends mid-episode (OpenSandbox ``SANDBOX::ENDED``, e.g. its container OOM-killed with exit 137), a
+    sandbox that cannot be created, and transport failures to it are infrastructure: the rollout is not a measurement of
+    the policy. Exit 137 is reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    """
+    text = str(exc)
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    infra = (
+        "SandboxApiException" in names
+        or type(exc).__module__.startswith("opensandbox.")
+        or isinstance(exc, (SandboxCreateError, TimeoutError, ConnectionError, RunnerTerminatedError))
+        or "SANDBOX::ENDED" in text
+        or (isinstance(exc, RuntimeError) and text.startswith("runner failed (137)"))
+    )
+    if not infra:
+        return None
+    return PROVIDER_OOM_KILLED if any(marker in text for marker in _OOM_MARKERS) else PROVIDER_UNAVAILABLE
+
+
+def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="harness-agent-sandbox-failure",
+        created_at=0,
+        model=params.model or "unknown",
+        object="response",
+        output=[],
+        parallel_tool_calls=params.parallel_tool_calls,
+        tool_choice=params.tool_choice,
+        tools=[],
+    )
+
+
+def _masked_result(
+    body: "HarnessAgentRunRequest", failure_kind: str | None, reason: str | None
+) -> "HarnessAgentVerifyResponse":
+    return HarnessAgentVerifyResponse.model_validate(
+        body.model_dump()
+        | {
+            "response": _empty_response(body.responses_create_params).model_dump(mode="json"),
+            "reward": 0.0,
+            "mask_sample": True,
+            "evaluation_completed": False,
+            "failure_kind": failure_kind,
+            "failure_reason": (reason or "")[:4000],
+        }
+    )
 
 
 def resolve_agent(name: str) -> tuple[str, str, str]:
@@ -308,6 +367,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     ):
                         verify_json["reward"] = 0.0
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
+            except Exception as exc:
+                await self._close_run_sandbox(run_context)
+                failure_kind = sandbox_infra_failure_kind(exc)
+                if failure_kind is None:
+                    raise
+                # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
+                LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
+                return _masked_result(body, failure_kind, f"{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
@@ -484,17 +551,26 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                             "/work/runner_config.json": json.dumps(runner_config),
                         },
                     )
+            started = time.monotonic()
             r = await self._provider.exec(
                 handle,
                 f"{runner_cmd} > runner.out 2>&1",
                 cwd=work_dir,
                 timeout_s=self.config.rollout_timeout,
             )
+            elapsed = time.monotonic() - started
             logs = await self._provider.exec(handle, "tail -c 6000 runner.out", cwd=work_dir, timeout_s=30)
             if r.return_code != 0 or "RUNNER_DONE" not in (logs.stdout or ""):
-                raise RuntimeError(
-                    f"runner failed ({r.return_code}): {(logs.stdout or logs.stderr or r.stderr or '')[-6000:]}"
-                )
+                detail = (logs.stdout or logs.stderr or r.stderr or "")[-6000:]
+                # A signal before the deadline (e.g. the pod evicted or recycled under load) is the runtime, not the
+                # agent; at the deadline it is the agent running out of time.
+                if (
+                    r.return_code == -1
+                    and "signal:" in (r.stderr or detail)
+                    and elapsed < 0.95 * self.config.rollout_timeout
+                ):
+                    raise RunnerTerminatedError(f"runner terminated after {elapsed:.0f}s: {detail}")
+                raise RuntimeError(f"runner failed ({r.return_code}): {detail}")
 
             resp = NeMoGymResponse.model_validate(
                 await self._download_json(handle, self._box_path(handle, "/work/response.json"))
