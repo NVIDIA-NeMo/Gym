@@ -51,14 +51,15 @@ bird_interact_resources:
           memory_mib: 1024
         metadata:
           benchmark: bird-interact
+      # One file, one taskset for each mode. The two entries share a name, so they share the file's metrics.
       datasets:
-        - name: c_interact_example
+        - name: example
           type: example
           jsonl_fpath: resources_servers/bird_interact/data/example.jsonl
           taskset: bird_interact:c_interact_example
           num_repeats: 1
           license: Apache 2.0
-        - name: a_interact_example
+        - name: example
           type: example
           jsonl_fpath: resources_servers/bird_interact/data/example.jsonl
           taskset: bird_interact:a_interact_example

@@ -104,6 +104,10 @@ and compares rows in order when `conditions.order` is set, or as sets otherwise.
 server. `bookshop_3` and `bookshop_4` have a follow-up question. `bookshop_4` and `bookshop_5` have two critical
 ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge.
 
+The config declares the file once for each mode's taskset, under one dataset name, so both share
+`data/example_metrics.json`. `data/example_rollouts.jsonl` has one c-Interact rollout for each task, with
+`simple_agent`; the data check expects one rollout for each row, so the a-Interact rollouts are not included.
+
 The public BIRD-Interact releases (Mini-Interact, Lite, Full) withhold `sol_sql` and `test_cases`. The authors
 send them on request. A seed for a row without `sol_sql` is refused with HTTP 422. Mini-Interact uses SQLite, so its
 databases work as downloaded from [`birdsql/mini-interact`](https://huggingface.co/datasets/birdsql/mini-interact),
