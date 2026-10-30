@@ -25,7 +25,7 @@ from omegaconf import OmegaConf
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient, http_client
 from nemo_gym.config import BaseServerConfig, global_config
 from nemo_gym.rollouts import merge_model_call_capture_into_record, run_health_checks
-from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig

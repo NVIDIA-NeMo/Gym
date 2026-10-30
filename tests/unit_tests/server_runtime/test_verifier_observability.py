@@ -15,7 +15,7 @@ from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_i
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollouts.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollouts.rollout_collection import _build_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _build_trajectory_record
 from nemo_gym.server_runtime.base_resources_server import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,

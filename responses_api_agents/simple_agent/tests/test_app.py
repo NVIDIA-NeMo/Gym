@@ -57,7 +57,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     TaskId,
 )
-from nemo_gym.rollouts.rollout_collection import _attach_trajectory_record
+from nemo_gym.rollouts.trajectory_builder import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
