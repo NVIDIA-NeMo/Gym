@@ -30,5 +30,3 @@ hle_diamond_equivalence_llm_judge_environment_server:
         name: hle_diamond_text_equivalence_llm_judge_simple_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

@@ -55,5 +55,3 @@ example_multi_step_environment_server:
         name: example_multi_step_simple_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

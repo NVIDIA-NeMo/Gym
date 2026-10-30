@@ -161,8 +161,6 @@ over_refusal_detection_environment_server:
         name: over_refusal_detection_simple_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 
 xstest_eval_environment_server:
   environment_servers:
@@ -173,5 +171,3 @@ xstest_eval_environment_server:
         name: xstest_eval_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

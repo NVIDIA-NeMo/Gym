@@ -84,7 +84,7 @@ TYPED_SEED = "ResourcesSeedSessionRequest"
 RELAY = "legacy_agent"
 SWITCHED_AGENT_TYPE = "simple_agent"
 # Without a resources_server, the server binds its agent's, so it follows an `_inherit_from` agent rename.
-# The timeouts are the relay's own defaults, which the relay did not enforce and this server does.
+# The server defaults preserve the migrated relay's timeouts without repeating them in every config.
 SWITCHED = """\
 {server}:
   environment_servers:
@@ -95,8 +95,6 @@ SWITCHED = """\
         name: {agent}
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 """
 # A relay that inherits another keeps inheriting it, so the parent stays a template that composition consumes.
 # The parent switches in the same run, so the merge holds one environment server type.

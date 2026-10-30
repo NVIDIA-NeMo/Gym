@@ -31,5 +31,3 @@ circle_click_environment_server:
         name: circle_click_simple_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

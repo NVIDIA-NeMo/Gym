@@ -266,8 +266,6 @@ jailbreak_detection_environment_server:
         name: jailbreak_detection_simple_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 
 jailbreak_engagement_with_disclaimer_environment_server:
   environment_servers:
@@ -278,8 +276,6 @@ jailbreak_engagement_with_disclaimer_environment_server:
         name: jailbreak_engagement_with_disclaimer
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 
 jailbreak_refusal_with_explanation_environment_server:
   environment_servers:
@@ -290,8 +286,6 @@ jailbreak_refusal_with_explanation_environment_server:
         name: jailbreak_refusal_with_explanation
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 
 jailbreak_hard_refusal_no_redirection_environment_server:
   environment_servers:
@@ -302,8 +296,6 @@ jailbreak_hard_refusal_no_redirection_environment_server:
         name: jailbreak_hard_refusal_no_redirection
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 
 jailbreak_hard_refusal_with_helplines_environment_server:
   environment_servers:
@@ -314,5 +306,3 @@ jailbreak_hard_refusal_with_helplines_environment_server:
         name: jailbreak_hard_refusal_with_helplines
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

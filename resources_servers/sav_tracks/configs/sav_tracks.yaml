@@ -31,8 +31,6 @@ sav_pt_tracks_environment_server:
         name: sav_pt_tracks_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 sav_box_tracks_agent:
   responses_api_agents:
     simple_agent:
@@ -52,8 +50,6 @@ sav_box_tracks_environment_server:
         name: sav_box_tracks_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 sav_ref_tracks_agent:
   responses_api_agents:
     simple_agent:
@@ -73,5 +69,3 @@ sav_ref_tracks_environment_server:
         name: sav_ref_tracks_agent
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
