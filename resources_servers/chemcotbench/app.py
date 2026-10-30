@@ -18,6 +18,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
+from nemo_gym.failure_kinds import VERIFIER_ERROR
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.chemcotbench.scoring_pool import ScoringPool, ScoringWorkerError
 from resources_servers.chemcotbench.setup_molopt import ensure_molopt_runtime
@@ -28,6 +29,8 @@ from resources_servers.chemcotbench.verifier_fixture import create_server, invok
 
 THINK_BLOCK = re.compile(r"<(think|thinking)\b[^>]*>.*?(?:</\1\s*>|$)", re.I | re.S)
 THINK_END = re.compile(r"</(?:think|thinking)\s*>", re.I)
+# Scoring was turned off by configuration, so nothing failed; the masked zero is not a measurement.
+SCORING_DISABLED = "chemcotbench:scoring_disabled"
 
 
 class ChemCoTBenchResourcesServerConfig(BaseResourcesServerConfig):
@@ -118,6 +121,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=SCORING_DISABLED,
                 scoring_error="molopt_disabled",
                 failure_reason="Enable enable_molopt to score molecular optimization tasks",
             )
@@ -143,6 +147,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
                 scoring_error="timeout",
                 failure_reason="ChemCoTBench upstream scoring timed out",
             )
@@ -151,6 +156,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
                 scoring_error=error.code if isinstance(error, ScoringWorkerError) else "upstream_error",
                 failure_reason=str(error)[-2000:],
             )
@@ -159,6 +165,7 @@ class ChemCoTBenchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 reward=0.0,
                 mask_sample=True,
+                failure_kind=VERIFIER_ERROR,
                 scoring_error="invalid_result",
                 failure_reason=f"Invalid upstream scorer result: {type(error).__name__}",
             )
