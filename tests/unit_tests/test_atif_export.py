@@ -28,6 +28,7 @@ from nemo_gym.atif_reverification import (
 )
 from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.rollout_prompt_storage import encode_rollout
 
 
 def _reasoning(item_id: str, text: str) -> dict[str, Any]:
@@ -2090,3 +2091,10 @@ def test_transcript_to_atif_needs_identity_and_at_least_one_message() -> None:
         transcript_to_atif([], [], session_id=" ", agent_name="a", agent_version="1")
     with pytest.raises(AtifExportError, match="contains no messages"):
         _transcript([], [])
+
+
+def test_export_expands_compact_model_call_prompts() -> None:
+    rollout = _canonical_rollout()
+    expected = gym_rollout_to_atif(rollout, session_id="session", agent_version="test")
+    actual = gym_rollout_to_atif(encode_rollout(rollout), session_id="session", agent_version="test")
+    assert actual.model_dump() == expected.model_dump()

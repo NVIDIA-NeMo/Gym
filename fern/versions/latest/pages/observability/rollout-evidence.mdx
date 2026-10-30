@@ -58,6 +58,54 @@ remain and a `trajectory_projection_failed` gap is recorded. LabBench's
 The trajectory does not include the full compaction and sandbox records. Read
 `ng_agent_observations` for those details.
 
+## Compact Model-Call Prompts
+
+Add `--compact-model-call-prompts` to `gym eval run`, or set this top-level collection config:
+
+```yaml
+compact_model_call_prompts: true
+```
+
+The default is `false`. When enabled, collection encodes
+`ng_trajectory.model_calls[].request.messages` and `.request.input` immediately before writing
+rollout JSONL, including the failures sidecar. Normal in-memory results stay expanded.
+This option uses whatever calls were captured; it does not enable capture itself.
+
+Each row carries `_ng_model_call_prompt_storage: "gym-model-call-prompts-v1"`.
+Other rollout fields remain at their usual locations. Prompt fields use two representations:
+
+```json
+{"full": [{"role": "user", "content": "Task"}]}
+{"append_to": 0, "items": [{"role": "assistant", "content": "Answer"}]}
+```
+
+`append_to` is a zero-based position in the same row's `model_calls` list. Collection uses it
+only when the entire preceding call's prompt is an exact prefix and the reference is smaller.
+The first prompt, compaction, a rewrite, or an unrelated intervening call uses `full` when that
+condition fails. Earlier prompts remain available. References describe stored data, not turn
+ownership or which call caused another call.
+
+Gym's collection/resume, aggregation, health, compare, reverification and ATIF export readers
+expand these prompts automatically. Files may mix ordinary and compact rows when resuming.
+External consumers must decode before accessing prompts or filtering/reordering model calls:
+
+```python
+import json
+from nemo_gym.rollout_prompt_storage import decode_rollout
+
+with open("evaluator_rollouts.jsonl") as source:
+    for line in source:
+        rollout = decode_rollout(json.loads(line))
+        # All prompt fields now have their original values.
+```
+
+The decoder accepts ordinary rows too, and rejects unknown versions or invalid references.
+Older Gym versions and external tools that expect prompt arrays need decoding first.
+Aggregation that rewrites JSONL and reverification can produce expanded rows. The option changes only
+collection output: original capture files, response payloads, token counts/IDs, turn records
+and verifier associations are preserved. Savings depend on exact prompt-prefix reuse;
+short prompts or frequent rewrites can add a small amount of format overhead.
+
 ## Correlation and Gaps
 
 Collection matches calls by `model_call_id`, or by the exact pair of `model_ref` and `response_id`.

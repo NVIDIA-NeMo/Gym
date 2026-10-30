@@ -162,6 +162,7 @@ class TestEvalRunFlags:
             (["--top-p", "1.0"], "+responses_create_params.top_p=1.0"),
             (["--max-output-tokens", "4096"], "+responses_create_params.max_output_tokens=4096"),
             (["--resume"], "+resume_from_cache=true"),
+            (["--compact-model-call-prompts"], "+compact_model_call_prompts=true"),
             (["--no-health-check"], "+disable_health_check=true"),
             (["--health-check-workers", "4"], "+health_check_workers=4"),
             (

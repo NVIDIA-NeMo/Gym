@@ -1362,6 +1362,11 @@ COMMANDS = {
                 )
             ),
             _bool_flag("resume", "resume_from_cache", "Resume from cached rollouts instead of recollecting."),
+            _bool_flag(
+                "compact-model-call-prompts",
+                "compact_model_call_prompts",
+                "Store captured model-call prompts using lossless append/reset references.",
+            ),
             AGENT_TYPE,
             ALLOW_UNSUPPORTED_PAIRING,
             _value_flag("agent", "agent_name", "Agent to collect rollouts with.", aliases=("-a",)),

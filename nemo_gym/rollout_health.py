@@ -72,6 +72,7 @@ from nemo_gym.health.types import (
     _WorkerInput,
 )
 from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.rollout_prompt_storage import decode_rollout
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -108,7 +109,7 @@ def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
         handle.seek(line.offset)
         raw = handle.read(line.length).strip()
     try:
-        parsed = orjson.loads(raw)
+        parsed = decode_rollout(orjson.loads(raw))
         if not isinstance(parsed, dict):
             raise ValueError("rollout line is not an object")
         return parsed, None
@@ -483,7 +484,7 @@ def _jsonl_rows(path: Path) -> Iterator[dict[str, Any]]:
     with path.open("rb") as handle:
         for line in handle:
             try:
-                row = orjson.loads(line)
+                row = decode_rollout(orjson.loads(line))
             except orjson.JSONDecodeError:
                 continue  # Blank lines, and the truncated last line a killed writer can leave.
             if isinstance(row, dict):

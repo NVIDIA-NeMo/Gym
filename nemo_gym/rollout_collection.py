@@ -121,6 +121,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTurn,
     VerifierInvocation,
 )
+from nemo_gym.rollout_prompt_storage import decode_rollout, encode_rollout
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -1296,6 +1297,13 @@ class SharedRolloutCollectionConfig(
         description=(
             "Maximum number of rollout tasks resident in the driver at once. "
             "When unset, no driver-side task admission limit is applied."
+        ),
+    )
+    compact_model_call_prompts: bool = Field(
+        default=False,
+        description=(
+            "Store captured model-call prompts as lossless append/reset references in rollout JSONL. "
+            "Gym readers expand references automatically; external readers must use decode_rollout."
         ),
     )
     retain_results_in_memory: bool = Field(
@@ -2602,7 +2610,7 @@ async def _read_jsonl(path: Path) -> List[Dict]:
     with path.open("rb") as f:
         for line in f:
             if line.strip():
-                rows.append(orjson.loads(line))
+                rows.append(decode_rollout(orjson.loads(line)))
             if time.monotonic() - yielded_at >= _READ_JSONL_YIELD_INTERVAL_S:
                 await asyncio.sleep(0)
                 yielded_at = time.monotonic()
@@ -3338,7 +3346,7 @@ class RolloutCollectionHelper(BaseModel):
                 if not stripped:
                     continue
 
-                result = orjson.loads(stripped)
+                result = decode_rollout(orjson.loads(stripped))
                 successes_seen.add(get_key(result))
 
                 if retain_results_in_memory:
@@ -3361,7 +3369,7 @@ class RolloutCollectionHelper(BaseModel):
                     line = line.strip()
                     if not line:
                         continue
-                    fr = orjson.loads(line)
+                    fr = decode_rollout(orjson.loads(line))
                     # A rollout that produced no result used no attempt; resume runs it again.
                     if is_omitted_rollout_row(fr):
                         continue
@@ -3568,7 +3576,7 @@ class RolloutCollectionHelper(BaseModel):
             if output_fpath.exists():
                 with output_fpath.open("rb") as existing_results:
                     batch_completed_rows = [
-                        _batch_status_row(orjson.loads(line), batch_agent_refs)
+                        _batch_status_row(decode_rollout(orjson.loads(line)), batch_agent_refs)
                         for line in existing_results
                         if line.strip()
                     ]
@@ -3740,7 +3748,9 @@ class RolloutCollectionHelper(BaseModel):
                     with output_fpath.open("rb") as existing_results:
                         for line in existing_results:
                             if line.strip():
-                                upload_spool.write(orjson.dumps(_rollout_for_export(orjson.loads(line))) + b"\n")
+                                upload_spool.write(
+                                    orjson.dumps(_rollout_for_export(decode_rollout(orjson.loads(line)))) + b"\n"
+                                )
 
             if run_timing is not None:
 
@@ -3886,7 +3896,7 @@ class RolloutCollectionHelper(BaseModel):
                 if config.retain_results_in_memory:
                     rows.append(row)
                     results.append(result)
-                serialized = orjson.dumps(result)
+                serialized = orjson.dumps(encode_rollout(result) if config.compact_model_call_prompts else result)
                 # A drained row never ran, so it is not a rollout to upload.
                 if upload_spool is not None and not result.get(NG_DISPATCH_DRAINED_KEY):
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
@@ -3924,7 +3934,10 @@ class RolloutCollectionHelper(BaseModel):
                     )
                     write_started = perf_counter()
                     # The cap this attempt ran under travels with it, for offline aggregation.
-                    serialized = orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
+                    failure_result = {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
+                    serialized = orjson.dumps(
+                        encode_rollout(failure_result) if config.compact_model_call_prompts else failure_result
+                    )
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     _record_rollout_outcome(result, "failed", dispatch_name)
@@ -5072,8 +5085,8 @@ class RolloutAggregationConfig(RunHealthConfig, BaseNeMoGymCLIConfig):
 def loads_jsonl_line(raw, fpath, line_no: int):
     """Parse one JSONL line, raising a clean `ConfigError` (naming file + line) on malformed JSON."""
     try:
-        return orjson.loads(raw)
-    except orjson.JSONDecodeError as e:
+        return decode_rollout(orjson.loads(raw))
+    except ValueError as e:
         raise ConfigError(f"Malformed JSON in '{fpath}' at line {line_no}: {e}") from e
 
 
