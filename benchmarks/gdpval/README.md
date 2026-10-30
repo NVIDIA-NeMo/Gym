@@ -287,9 +287,9 @@ comparison mode.
 
 To collect deliverables without judging them, for example for a reference set,
 set `++gdpval_resources_server.resources_servers.gdpval.judge_deliverables=false`.
-`/verify` still persists each deliverable, then returns `reward: 0.0` with
-`mask_sample: true`, so the rows stay in the output with their
-`deliverables_dir` and aggregation skips them.
+`/verify` still persists each deliverable, then returns `reward: 0.0`,
+`mask_sample: true`, and `failure_kind: gdpval:judging_disabled`. The rows stay
+in the output with their `deliverables_dir`, and aggregation skips them.
 
 ### Full run as a single stage
 

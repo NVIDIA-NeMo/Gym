@@ -63,6 +63,8 @@ Interpret attribution carefully:
 `failure_kind` is derived from `failure_class`. A class that is already a registered Gym failure kind or already
 contains a namespace is kept as is. Any other class is lowercased, characters other than letters, digits, and
 underscores become underscores, and `usersim:` is prepended, for example `usersim:assistant_activation_error`.
+For simulation failures attributed outside the Assistant, a missing `failure_class` falls back to
+`usersim:simulation_failed`. Grading failures use the kinds described below.
 
 Assistant-caused invalid responses and non-retryable Assistant 4xx responses follow the measured-failure path.
 Participant timeouts, provider/transport failures, retryable status codes, and session-plumbing failures remain failures

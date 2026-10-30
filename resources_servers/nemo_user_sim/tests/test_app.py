@@ -19,6 +19,7 @@ from nemo_gym.testing.session_conformance import check_resources_session_contrac
 from resources_servers.nemo_user_sim import app as usersim_app
 from resources_servers.nemo_user_sim.app import (
     PROBE_SCORERS,
+    SIMULATION_FAILED,
     UserSimResourcesServer,
     UserSimResourcesServerConfig,
     _decode_provenance,
@@ -366,6 +367,44 @@ async def test_verify_masks_swallowed_judge_failure_from_real_evaluator(
     assert verification.mask_sample is True
     assert verification.failure_kind == JUDGE_FAILED
     assert verification.scenario_completed is True
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("outcome", "failure_kind", "failure_reason"),
+    [
+        (
+            {"failure_class": "user_simulator_error", "failure_detail": "User simulator returned HTTP 503"},
+            "usersim:user_simulator_error",
+            "User simulator returned HTTP 503",
+        ),
+        ({"failure_reason": "The simulation stopped early"}, SIMULATION_FAILED, "The simulation stopped early"),
+    ],
+)
+async def test_verify_masks_a_failed_simulation_under_a_failure_kind(
+    monkeypatch: pytest.MonkeyPatch,
+    outcome: dict[str, str],
+    failure_kind: str,
+    failure_reason: str,
+) -> None:
+    server = _server()
+    server.session_id_to_seed = {}
+    row = _resolved_row()
+    request = _request("simulation-failed")
+    await server.seed_session(request, _seed_body(row))
+
+    async def scorer(_trajectory: dict[str, Any], _models: dict[str, Any]) -> dict[str, Any]:
+        return {"status_proposal": True, "scores": {}}
+
+    _install_evaluator_scripts(monkeypatch, _ScriptedModelFacade(_judge_payload()), scorer)
+    body = _verify_body(row)
+    body.verification_input.usersim_result.conversation_status = False
+    body.verification_input.usersim_result.simulation_outcome = {"status": "failed", **outcome}
+
+    verification = await server.verify(request, body)
+
+    assert (verification.reward, verification.mask_sample) == (0.0, True)
+    assert (verification.failure_kind, verification.failure_reason) == (failure_kind, failure_reason)
 
 
 @pytest.mark.asyncio
