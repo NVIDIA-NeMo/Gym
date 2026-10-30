@@ -18,7 +18,16 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from anyio import CancelScope
 from fastapi import Body, FastAPI, Request
 from fastapi.responses import JSONResponse
-from pydantic import ConfigDict, Field, JsonValue, PositiveFloat, PositiveInt, field_validator, model_validator
+from pydantic import (
+    ConfigDict,
+    Field,
+    JsonValue,
+    PositiveFloat,
+    PositiveInt,
+    ValidationError,
+    field_validator,
+    model_validator,
+)
 from starlette.datastructures import Headers
 from typing_extensions import Self
 
@@ -46,6 +55,7 @@ from nemo_gym.server_runtime.episode_tokens import (
 )
 from nemo_gym.server_runtime.episode_tools import EpisodeToolset, ToolArgumentsError, ToolCallRecord, ToolSpec
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
+from nemo_gym.server_runtime.request_handling.session_routing import SessionKind, SessionOwners
 from nemo_gym.server_runtime.tool_access import (
     TOOL_CALL_ID_HEADER,
     TOOL_ERROR_HEADER,
@@ -656,6 +666,15 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         """Aggregate per-rollout scores into task-level metrics."""
 
 
+# An episode's tool calls name it only by the episode token header; no cookie, seed or close names it.
+EPISODE_TOOL_SESSIONS = SessionKind(
+    cookie_key=None,
+    id_field=None,
+    seed_path=None,
+    close_path=None,
+    cookie_session=False,
+)
+
 ToolTransport = Literal["direct_http", "mcp"]
 # The path ``nemo_gym.server_runtime.mcp_auto_exposure.mount_mcp_endpoint`` serves. Kept here so that a server without MCP never
 # imports the MCP SDK.
@@ -784,12 +803,19 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     A tool that raises a handled episode failure (``handled_episode_failure``), such as for a crashed sandbox,
     fails the episode with it when ``run`` returns; the agent sees that call fail meanwhile.
+
+    With several workers, the worker that runs the episode owns it (see ``session_routing``), so a tool call that
+    reaches another worker, over either transport, is forwarded there, by the episode its token names.
     """
 
     config: BaseEnvironmentServerWithToolsConfig
+
+    routes_sessions_to_owner = True
     _episode_tokens: Optional[EpisodeTokens] = None
     _open_episodes: Optional[dict[EpisodeId, _OpenEpisode]] = None
     _reserved_tool_names: frozenset[str] = frozenset()
+    # With several workers, which worker runs each episode (see nemo_gym.server_runtime.request_handling.session_routing).
+    _session_owners: Optional[SessionOwners] = None
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
         super().__init_subclass__(**kwargs)
@@ -830,8 +856,27 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         episode = self._open_episodes.get(request.episode_id)
         return episode.failure if episode is not None else None
 
-    def multiple_workers_unsupported_reason(self) -> Optional[str]:
-        return "a tool call reaches whichever worker accepts it, and only the worker that runs the episode holds it"
+    def owned_session_routing(self) -> dict[str, Any]:
+        return {
+            "kind": EPISODE_TOOL_SESSIONS,
+            "session_header": EPISODE_TOKEN_HEADER,
+            "session_from_header": self._episode_session_id,
+            "session_holder": self,
+        }
+
+    def _episode_session_id(self, token: str) -> Optional[str]:
+        # Routing needs only the episode the token names; the worker that runs the episode checks its nonce.
+        claims = self._episode_tokens.read(token)
+        return claims.episode_id.capture_key if claims is not None else None
+
+    def holds_session(self, session_id: str) -> bool:
+        try:
+            return EpisodeId.from_capture_key(session_id) in self._open_episodes
+        except (ValueError, ValidationError):
+            return False
+
+    def use_session_owners(self, owners: SessionOwners) -> None:
+        self._session_owners = owners
 
     async def serve_tools(
         self, request: EpisodeRequestT, toolset: EpisodeToolset, cleanup: CleanupContext
@@ -857,6 +902,10 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             if unnamable:
                 raise ValueError(f"MCP tool names may use only letters, digits, _ and -: {', '.join(unnamable)}")
 
+        session_owners = self._session_owners
+        if session_owners is not None and session_owners.acquire(episode_id.capture_key) != session_owners.routing_id:
+            raise ValueError(f"Episode {episode_id.capture_key} already serves its tools on another worker")
+
         token, claims = self._episode_tokens.mint(episode_id)
         episode = _OpenEpisode(claims=claims, toolset=toolset, specs=specs, calls=[])
         self._open_episodes[episode_id] = episode
@@ -864,6 +913,8 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         async def stop_serving() -> None:
             if self._open_episodes.get(episode_id) is episode:
                 del self._open_episodes[episode_id]
+                if session_owners is not None:
+                    session_owners.release(episode_id.capture_key)
             # A call still running would change state that the episode no longer owns, such as a stopped sandbox.
             running = episode.running
             if running is not None and not running.done():
