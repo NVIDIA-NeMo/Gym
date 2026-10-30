@@ -62,6 +62,7 @@ from nemo_gym.eval_plan import (
     eval_plan_json_schema,
     write_eval_plan,
 )
+from nemo_gym.exporters import mark_run_failed
 from nemo_gym.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
@@ -640,6 +641,12 @@ def e2e_rollout_collection():  # pragma: no cover
         collection_completed = True
     except KeyboardInterrupt:
         interrupted = True
+        if rollout_collection_config.require_complete:
+            mark_run_failed()
+    except BaseException:
+        # Includes an incomplete run that check_completion rejects: the tracking run must not read as finished.
+        mark_run_failed()
+        raise
     finally:
         # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
         # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
@@ -677,6 +684,8 @@ def _interrupt_on_sigterm() -> None:
     def _on_sigterm(signum: int, frame: Any) -> None:
         global _terminated
         _terminated = True
+        # The run exits 143 (`_exit_if_terminated`) whatever `require_complete` says; its tracking run closes FAILED.
+        mark_run_failed()
         raise KeyboardInterrupt
 
     signal.signal(signal.SIGTERM, _on_sigterm)
@@ -834,8 +843,12 @@ def collect_rollouts():  # pragma: no cover
             Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
         )
     except KeyboardInterrupt:
+        mark_run_failed()
         if not _terminated:
             raise
+    except BaseException:
+        mark_run_failed()
+        raise
     finally:
         shutdown_telemetry()
     _exit_if_terminated()

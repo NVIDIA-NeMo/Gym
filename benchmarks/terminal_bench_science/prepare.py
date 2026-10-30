@@ -37,6 +37,18 @@ def task_row(manifest: dict, task: dict) -> dict:
 def prepare(*, task_names: list[str] | None = None, category: str | None = None, domain: str | None = None) -> Path:
     """Write one identity row per selected task; filters combine, and no filter selects all 70 tasks."""
     manifest = load_manifest()
+    tasks = select_tasks(manifest, task_names=task_names, category=category, domain=domain)
+    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with OUTPUT_PATH.open("w") as output:
+        for task in tasks:
+            output.write(json.dumps(task_row(manifest, task)) + "\n")
+    return OUTPUT_PATH
+
+
+def select_tasks(
+    manifest: dict, *, task_names: list[str] | None = None, category: str | None = None, domain: str | None = None
+) -> list[dict]:
+    """Return the manifest tasks a selection names; filters combine, and no filter selects all 70 tasks."""
     tasks = manifest["tasks"]
     if task_names is not None:
         unknown = set(task_names) - {task["name"] for task in tasks}
@@ -53,11 +65,7 @@ def prepare(*, task_names: list[str] | None = None, category: str | None = None,
         tasks = [task for task in tasks if task["domain"] == domain]
     if not tasks:
         raise ValueError("The Terminal-Bench-Science task selection is empty")
-    OUTPUT_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with OUTPUT_PATH.open("w") as output:
-        for task in tasks:
-            output.write(json.dumps(task_row(manifest, task)) + "\n")
-    return OUTPUT_PATH
+    return tasks
 
 
 if __name__ == "__main__":

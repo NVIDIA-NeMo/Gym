@@ -819,6 +819,4 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 if __name__ == "__main__":
     SWETEnvironmentServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    from nemo_gym.server_utils import create_nemo_gym_fastapi_app
-
-    app = create_nemo_gym_fastapi_app(SWETEnvironmentServer)
+    app = SWETEnvironmentServer.run_webserver()  # noqa: F401
