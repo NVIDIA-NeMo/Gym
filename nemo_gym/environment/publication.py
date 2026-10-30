@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import EnvironmentKind, load_manifest
 from nemo_gym.environment.onboarding import VerifierReport
 from nemo_gym.environment.validation import EnvironmentValidationReport

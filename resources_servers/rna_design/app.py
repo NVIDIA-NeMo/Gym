@@ -36,7 +36,6 @@ from typing import Any, Optional
 from fastapi import FastAPI, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym import failure_kinds
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -48,6 +47,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionFence,
     SimpleResourcesServer,
 )
+from nemo_gym.core import failure_kinds
 from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.rna_design.verifier_fixture import create_server, invoke

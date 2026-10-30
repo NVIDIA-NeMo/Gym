@@ -22,8 +22,9 @@ core module would create a circular import.
 """
 
 import importlib
-import warnings
 from typing import Any, Callable, Mapping
+
+from nemo_gym._moved_paths import warn_moved
 
 
 def moved_attr_getter(module_name: str, moved: Mapping[str, str]) -> Callable[[str], Any]:
@@ -45,11 +46,10 @@ def moved_attr_getter(module_name: str, moved: Mapping[str, str]) -> Callable[[s
             raise AttributeError(f"module {module_name!r} has no attribute {name!r}")
         new_module, _, new_name = target.partition(":")
         new_name = new_name or name
-        warnings.warn(
+        warn_moved(
             f"`{module_name}.{name}` has moved to `{new_module}.{new_name}` and will be removed in a "
             f"future release. Update your import to `from {new_module} import {new_name}`.",
-            DeprecationWarning,
-            stacklevel=2,
+            old_module=module_name,
         )
         return getattr(importlib.import_module(new_module), new_name)
 

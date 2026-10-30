@@ -22,8 +22,7 @@ import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,

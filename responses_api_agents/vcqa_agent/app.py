@@ -56,15 +56,8 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.failure_kinds import (
-    AGENT_REQUEST_FAILED,
-    AGENT_RUN_ERROR,
-    JUDGE_FAILED,
-    PROVIDER_UNAVAILABLE,
-    VERIFIER_ERROR,
-)
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -72,6 +65,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
+    failure_kinds,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.vcqa_agent.judge import grade as judge_grade
@@ -336,10 +330,10 @@ class VcqaAgentVerifyResponse(BaseVerifyResponse):
 
 _STAGE_FAILURE_KINDS = {
     "materialize": "vcqa_agent:artifact_unavailable",
-    "sandbox_start": PROVIDER_UNAVAILABLE,
-    "model": AGENT_REQUEST_FAILED,
-    "judge": JUDGE_FAILED,
-    "sandbox": PROVIDER_UNAVAILABLE,
+    "sandbox_start": failure_kinds.PROVIDER_UNAVAILABLE,
+    "model": failure_kinds.AGENT_REQUEST_FAILED,
+    "judge": failure_kinds.JUDGE_FAILED,
+    "sandbox": failure_kinds.PROVIDER_UNAVAILABLE,
 }
 
 
@@ -554,10 +548,10 @@ class VcqaAgent(SimpleResponsesAPIAgent):
             run_error = judge_result.error
             if judge_result.judge_errors:
                 # A criterion the judge never answered is not a measured NO.
-                evaluation_completed, failure_stage, failure_kind = False, "judge", JUDGE_FAILED
+                evaluation_completed, failure_stage, failure_kind = False, "judge", failure_kinds.JUDGE_FAILED
             elif judge_result.must_total == 0:
                 # A row without must-have items cannot be scored at all.
-                evaluation_completed, failure_stage, failure_kind = False, "judge", VERIFIER_ERROR
+                evaluation_completed, failure_stage, failure_kind = False, "judge", failure_kinds.VERIFIER_ERROR
 
         except Exception as e:
             run_error = f"{type(e).__name__}: {e}"
@@ -565,7 +559,7 @@ class VcqaAgent(SimpleResponsesAPIAgent):
             evaluation_completed = False
             # A sandbox that dies mid-rollout is the environment's failure, whichever stage it hit.
             failure_stage = "sandbox" if isinstance(e, SandboxInfraError) else stage
-            failure_kind = _STAGE_FAILURE_KINDS.get(failure_stage, AGENT_RUN_ERROR)
+            failure_kind = _STAGE_FAILURE_KINDS.get(failure_stage, failure_kinds.AGENT_RUN_ERROR)
         finally:
             if sandbox is not None:
                 try:

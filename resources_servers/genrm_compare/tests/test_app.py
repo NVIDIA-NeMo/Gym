@@ -23,13 +23,12 @@ from fastapi import HTTPException
 from pytest import MonkeyPatch, approx
 
 import resources_servers.genrm_compare.app
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
+    ModelServerRef,
 )
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -38,6 +37,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
+from nemo_gym.judge import JudgeError
 from resources_servers.genrm_compare.app import (
     GROUP_ATTEMPT_KEY_NAME,
     GenRMCompareConfig,

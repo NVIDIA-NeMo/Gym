@@ -68,7 +68,8 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym.config_types import (
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.config.config_types import (
     DEFAULT_UVICORN_BACKLOG,
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -77,10 +78,9 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     HeadServerUnreachableError,
 )
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
-    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     RAY_HEAD_NODE_ADDRESS_KEY_NAME,
@@ -91,16 +91,15 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import (
-    ROUTED_PATH_STATE_KEY,
+from nemo_gym.core.episode import (
     VERIFIER_INVOCATION_HEADER,
     current_rollout_id,
     current_verifier_invocation_id,
     maybe_rollout_id_from_run_body,
     rollout_context,
-    scope_with_routed_path,
 )
+from nemo_gym.profiling import Profiler
+from nemo_gym.rollout_correlation import ROUTED_PATH_STATE_KEY, scope_with_routed_path
 from nemo_gym.session_routing import (
     SESSION_CLAIM_SCOPE_KEY,
     SESSION_ID_SCOPE_KEY,
@@ -121,6 +120,14 @@ from nemo_gym.telemetry.observer import observe_app_event_loop, request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+from nemo_gym.utils.server_process import (
+    _has_injected_global_config_env,
+    get_nemo_gym_fastapi_num_workers,
+    is_nemo_gym_fastapi_worker,
+    set_is_nemo_gym_fastapi_entrypoint,
+    set_is_nemo_gym_fastapi_worker,
+    set_nemo_gym_fastapi_num_workers,
+)
 
 
 try:
@@ -598,6 +605,7 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -617,6 +625,12 @@ async def request(
 
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
+
+    ``_read_body=True`` reads a success reply's body before returning, but only within a ``_max_num_tries`` or
+    ``_max_connection_retries`` bound and only when resending is allowed, so a reply cut off mid-body is sent again
+    within that bound. Otherwise, and for an error reply, the response is returned unread: the caller's own read gets
+    the complete body or raises the original error, so the caller's failure handling (for collection, its rollout
+    attempt budget) decides whether the request runs again.
     """
     if _max_num_tries is not None and _max_num_tries < 1:
         raise ValueError("_max_num_tries must be at least 1")
@@ -643,9 +657,10 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _read_body=_read_body,
             **kwargs,
         )
-    # While metrics are exporting, count calls still waiting for their response, which ends when the headers arrive.
+    # With metrics exporting, count calls until this helper returns or raises, including eligible body reads.
     counts.outbound_in_flight += 1
     try:
         return await send(
@@ -657,6 +672,7 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _read_body=_read_body,
             **kwargs,
         )
     finally:
@@ -672,6 +688,7 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -715,6 +732,7 @@ async def _traced_request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _read_body=_read_body,
             **kwargs,
         )
 
@@ -781,6 +799,7 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -795,7 +814,18 @@ async def _request_with_retries(
             if _max_num_tries is not None:
                 explicit_tries += 1
             try:
-                return await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **kwargs)
+                if (
+                    _read_body
+                    and _resend_after_disconnect
+                    and (_max_num_tries is not None or _max_connection_retries is not None)
+                    and response.ok
+                ):
+                    # A success body cut off mid-read is retried below within the caller's bound. Without one, each
+                    # resend would start another episode, and an error reply is the caller's to read in full: such a
+                    # reply goes back unread, so the caller's own read raises the original error, with its status.
+                    await response.read()
+                return response
             except ServerDisconnectedError:
                 if not _resend_after_disconnect:
                     raise
@@ -1092,6 +1122,8 @@ class ServerClient(BaseModel):
             # so the controller never retires the attempt.
             _resend_after_disconnect=_resend_after_disconnect
             and not (self.checkpoint_enabled() and url_path == "/run"),
+            # Collection reads the whole /run reply, so a reply cut off mid-body counts as a failed attempt.
+            _read_body=url_path == "/run",
             **kwargs,
         )
 
@@ -1168,10 +1200,6 @@ class ServerClient(BaseModel):
         # duck-typed or mocked ServerClient.
         host = _connectable_client_host(server_config_dict.host)
         return f"http://{host}:{server_config_dict.port}"
-
-
-def _has_injected_global_config_env() -> bool:
-    return getenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME) is not None
 
 
 SESSION_ID_KEY = "session_id"
@@ -1338,37 +1366,6 @@ def maybe_ray_cluster_exit():  # pragma: no cover
 
 
 atexit.register(maybe_ray_cluster_exit)
-
-# These environment variables are the ONLY environment variables that Gym uses. Please do not set these, they are only used here to pass information
-# from main proc to child procs under FastAPI/uvicorn parallelism
-IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME = "IS_NEMO_GYM_FASTAPI_WORKER"
-IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME = "IS_NEMO_GYM_FASTAPI_ENTRYPOINT"
-NEMO_GYM_FASTAPI_NUM_WORKERS = "NEMO_GYM_FASTAPI_NUM_WORKERS"
-
-
-def is_nemo_gym_fastapi_worker() -> bool:  # pragma: no cover
-    return getenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME) == "1"
-
-
-def set_is_nemo_gym_fastapi_worker() -> None:  # pragma: no cover
-    environ[IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME] = "1"
-
-
-def is_nemo_gym_fastapi_entrypoint(file: str) -> bool:  # pragma: no cover
-    return is_nemo_gym_fastapi_worker() and file.endswith(getenv(IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME))
-
-
-def set_is_nemo_gym_fastapi_entrypoint(file: str) -> None:  # pragma: no cover
-    environ[IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME] = file
-
-
-def get_nemo_gym_fastapi_num_workers() -> int:  # pragma: no cover
-    return int(getenv(NEMO_GYM_FASTAPI_NUM_WORKERS, "1"))
-
-
-def set_nemo_gym_fastapi_num_workers(num_workers: int) -> None:  # pragma: no cover
-    environ[NEMO_GYM_FASTAPI_NUM_WORKERS] = str(num_workers)
-
 
 #: Base class name -> the Gym server-type directory it lives in. Matched against the MRO
 #: rather than imported, because base_resources_server and friends import *this* module.
@@ -1557,6 +1554,9 @@ def install_trace_context_path(app: FastAPI) -> None:
 
 class ClientDisconnectCancellationMiddleware:
     """Cancel an in-flight HTTP request when its client disconnects."""
+
+    # Direct MCP dispatch has no client connection to monitor.
+    skipped_on_direct_mcp_dispatch = True
 
     def __init__(self, app: ASGIApp) -> None:
         self.app = app
@@ -1897,6 +1897,9 @@ class SimpleServer(BaseServer):
                 del session[SESSION_ID_KEY]
             return response
 
+        # Direct MCP dispatch materializes the session itself.
+        add_session_id.skipped_on_direct_mcp_dispatch = True
+
         session_middleware_key = self.get_session_middleware_key()
         app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
 
@@ -1929,6 +1932,9 @@ repr(e): {repr(e)}"""
                     f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
                 )
                 return JSONResponse(content="An unknown error occurred", status_code=500)
+
+        # Direct MCP dispatch handles exceptions in the /mcp request itself.
+        exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
 
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)
@@ -2343,3 +2349,7 @@ def setup_server_client(head_server_config: Optional[BaseServerConfig] = None) -
         set_global_aiohttp_client(cfg=GlobalAIOHTTPAsyncClientConfig.model_validate(server_client.global_config_dict))
 
     return server_client
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

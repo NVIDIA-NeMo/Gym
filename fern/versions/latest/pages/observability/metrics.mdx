@@ -129,7 +129,7 @@ A Gym server answers every request on one asyncio event loop. When synchronous w
 | `gym.server.requests.cancelled_total` | Counter | count | Requests cancelled because the client disconnected before the response finished, by `http.route` and `nemo.gym.request.phase`. |
 | `gym.server.requests.unhandled_exceptions_total` | Counter | count | Requests whose handler raised an exception that no middleware turned into a response. A handled error, such as an `HTTPException`, is a response and is counted in `gym.server.responses_total` instead. |
 | `gym.server.responses_total` | Counter | count | Responses the server started sending, by `http.response.status_code`. It does not depend on the FastAPI instrumentor, so it reports 4xx and 5xx responses in any run with metrics on. |
-| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` still waiting for their response headers. |
+| `gym.http.client.requests.in_flight` | Up/down counter | count | Outbound calls through `server_utils.request` that have not returned or raised, including retries and eligible response-body reads. |
 
 `gym.server.requests.cancelled_total` uses registered route templates such as `/work/{item_id}`, never raw paths or rollout IDs. Rollout prefixes are removed before matching a template; requests without a matching route use `<unmatched>`. The phase is `before_response_start` until the ASGI `http.response.start` message has been sent, then `response_started`. A headers-only response and an SSE keepalive both count as `response_started`; this does not imply a model token was produced. Model-call capture's `ttft_ms` supplies token timing when capture is enabled.
 

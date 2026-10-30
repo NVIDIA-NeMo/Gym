@@ -25,7 +25,7 @@ latest attempt, an interrupted one counts and hides older failures; one never st
 
 from typing import Any, Dict, Mapping
 
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 
 
 _FAILURE_MESSAGE_KEY = "_ng_failure_message"

@@ -31,7 +31,7 @@ from app import (
     string_match_part_single,
 )
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

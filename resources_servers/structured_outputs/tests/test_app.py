@@ -20,7 +20,7 @@ import xmltodict
 import yaml
 from pytest import fixture
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
