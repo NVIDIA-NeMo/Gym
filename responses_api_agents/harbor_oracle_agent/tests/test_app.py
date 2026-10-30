@@ -11,9 +11,9 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.transfer import TRANSFER_USER
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.publish import answer_write_command
 from nemo_gym.testing.failure_assertions import raises_agent_failure
 from responses_api_agents.harbor_oracle_agent import app as module

@@ -20,9 +20,9 @@ from fastapi import Response
 
 import responses_api_agents.scicode_agent.app as app
 from nemo_gym.base_resources_server import AggregateMetricsRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.scicode_agent.app import (
     TOKEN_USAGE_VERSION,
     ModelServerRef,

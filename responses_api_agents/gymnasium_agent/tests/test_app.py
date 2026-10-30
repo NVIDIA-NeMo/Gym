@@ -19,9 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 import anyio
 import pytest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 

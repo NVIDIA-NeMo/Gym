@@ -114,7 +114,7 @@ from nemo_gym.responses_converter import (
     _RESPONSE_NON_BOUNDARY_TYPES,
     _RESPONSE_OUTPUT_BOUNDARY_TYPES,
 )
-from nemo_gym.rollout_observability import AgentInvocation
+from nemo_gym.trajectory.trajectory_record import AgentInvocation
 
 
 def _response_with_output(output: list) -> dict:

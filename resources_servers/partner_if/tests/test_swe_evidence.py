@@ -12,8 +12,8 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest, ReverifyMode
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.partner_if.swe_app import SWEIFResourcesServer
 

@@ -11,6 +11,7 @@ from aiohttp.test_utils import TestServer
 from fastapi import Body
 from omegaconf import OmegaConf
 
+import nemo_gym.client.http_client
 import nemo_gym.openai_utils as openai_utils_module
 import nemo_gym.server_utils
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
@@ -76,7 +77,7 @@ async def _collect(monkeypatch, statuses: list[int]):
     app.router.add_route("POST", "/{tail:.*}", model)
     servers = []
     async with TestServer(app) as model_server, ClientSession() as session:
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+        monkeypatch.setattr(nemo_gym.client.http_client, "_GLOBAL_AIOHTTP_CLIENT", session)
         agent = _ModelAgent(
             config=BaseResponsesAPIAgentConfig(host="127.0.0.1", port=0, entrypoint="", name="my_agent"),
             server_client=MagicMock(spec=ServerClient),

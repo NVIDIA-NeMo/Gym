@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from resources_servers.tavily_search import app as module
 from resources_servers.tavily_search.app import (
     DEFAULT_EXCLUDE_DOMAINS_PRIORITY,

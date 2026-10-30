@@ -10,8 +10,8 @@ import yaml
 from omegaconf import OmegaConf
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig, get_first_server_config_dict
-from nemo_gym.server_utils import ServerClient
 
 
 def test_frozen_history_cannot_dispatch_live_tools():

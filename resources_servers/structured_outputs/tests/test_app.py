@@ -20,6 +20,7 @@ import xmltodict
 import yaml
 from pytest import fixture
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -28,7 +29,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.structured_outputs.app import (
     SchemaType,
     StructuredOutputsResourcesServer,

@@ -16,8 +16,8 @@
 import asyncio
 import json
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
 
 
 async def main():

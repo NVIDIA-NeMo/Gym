@@ -10,6 +10,7 @@ from aiohttp.test_utils import TestServer
 from fastapi import Body, FastAPI, Response
 from omegaconf import OmegaConf
 
+import nemo_gym.client.http_client
 import nemo_gym.openai_utils as openai_utils_module
 import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
@@ -123,7 +124,7 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
     app.router.add_route("POST", "/{tail:.*}", model)
     servers = []
     async with TestServer(app) as model_server, ClientSession() as session:
-        monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", session)
+        monkeypatch.setattr(nemo_gym.client.http_client, "_GLOBAL_AIOHTTP_CLIENT", session)
         try:
             agent = _SessionModelAgent(
                 config=BaseResponsesAPIAgentConfig(host="127.0.0.1", port=0, entrypoint="", name="agent"),

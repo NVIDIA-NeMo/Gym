@@ -13,7 +13,7 @@ from nemo_gym.base_resources_server import (
     ResourcesVerifyRequest,
 )
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, validate_failure_kind
-from nemo_gym.rollout_observability import AgentObservationBundle
+from nemo_gym.trajectory import AgentObservationBundle
 from resources_servers.nemo_user_sim.task_data import TaskData as UserSimTaskInput  # noqa: F401  (task contract)
 from resources_servers.nemo_user_sim.task_data import (
     UserSimAgentRole,

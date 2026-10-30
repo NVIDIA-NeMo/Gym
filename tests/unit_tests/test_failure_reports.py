@@ -371,8 +371,8 @@ async def test_selected_judge_details_and_http_error_identity_survive_observatio
 
     from aiohttp.test_utils import TestServer
 
+    from nemo_gym.client.http_client import raise_for_status
     from nemo_gym.judge import _judge_error
-    from nemo_gym.server_utils import raise_for_status
     from nemo_gym.typed_exceptions import agent_route_failure
 
     sdk = aiohttp.ClientResponseError(

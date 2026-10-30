@@ -105,8 +105,8 @@ from nemo_gym.base_resources_server import (
     mcp_session_token_payload,
     mcp_session_token_serializer,
 )
+from nemo_gym.client.server_client import SESSION_ID_KEY
 from nemo_gym.core.episode import current_episode_id
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 LOG = logging.getLogger(__name__)

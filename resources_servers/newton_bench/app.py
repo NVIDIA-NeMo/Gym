@@ -35,7 +35,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.newton_bench.newton_bench_utils.sandbox import (
     SessionHandle,
     validate_python_code,

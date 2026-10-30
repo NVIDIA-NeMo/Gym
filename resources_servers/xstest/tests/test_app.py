@@ -24,6 +24,7 @@ from app import (
     _parse_wildguard_verdict,
 )
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -32,7 +33,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.judge import is_judge_failure
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 

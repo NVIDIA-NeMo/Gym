@@ -40,8 +40,6 @@ from openai.types.responses.response_function_call_output_item_list_param import
 from openai.types.responses.response_input_text_content_param import ResponseInputTextContentParam
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.atif_json import strict_json_loads
-from nemo_gym.atif_v1_7 import AtifTrajectoryV1_7
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
@@ -56,6 +54,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.trajectory.atif_json import strict_json_loads
+from nemo_gym.trajectory.atif_v1_7 import AtifTrajectoryV1_7
 
 
 # A native Gym response carries these request fields back alongside the model's

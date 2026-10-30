@@ -10,9 +10,9 @@ from fastapi import HTTPException
 
 from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_FILE
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason

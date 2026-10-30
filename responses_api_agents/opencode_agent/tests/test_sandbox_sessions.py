@@ -19,8 +19,8 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from nemo_gym.testing.failure_assertions import raises_agent_failure
@@ -1103,7 +1103,7 @@ async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
 
 
 def test_malformed_later_artifact_keeps_partial_output(setup):
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     agent, _ = setup
     export = json.loads(events())

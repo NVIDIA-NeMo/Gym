@@ -72,6 +72,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.client import request as http_request
 from nemo_gym.config import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     MODEL_REQUEST_ERROR,
@@ -92,7 +94,9 @@ from nemo_gym.exception_inspection import explicit_causes
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
 from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON
-from nemo_gym.rollout_observability import (
+from nemo_gym.session_routing import SESSION_OWNER_HEADER
+from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -101,10 +105,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status, rollout_path_prefix
-from nemo_gym.server_utils import request as http_request
-from nemo_gym.session_routing import SESSION_OWNER_HEADER
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 

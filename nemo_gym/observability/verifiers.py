@@ -22,7 +22,7 @@ from nemo_gym.core.episode import (
     verifier_invocation_context,
 )
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
-from nemo_gym.rollout_observability import NG_VERIFIER_INVOCATIONS_KEY, ModelCallRef, VerifierInvocation
+from nemo_gym.trajectory.trajectory_record import NG_VERIFIER_INVOCATIONS_KEY, ModelCallRef, VerifierInvocation
 
 
 logger = logging.getLogger(__name__)

@@ -226,8 +226,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
 
             environment_cls = LegacyAgentEnvironmentServer
             environment_config_cls = LegacyAgentEnvironmentServerConfig
+        from nemo_gym.client import get_global_aiohttp_client, setup_server_client
         from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-        from nemo_gym.server_utils import get_global_aiohttp_client, setup_server_client
 
         client = setup_server_client()
         agent = agent_cls(
