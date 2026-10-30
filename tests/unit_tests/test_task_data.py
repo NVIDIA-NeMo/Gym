@@ -929,7 +929,7 @@ class TestExternalCwdThroughTheProcessor:
     def _processor_and_configs(self, tmp_path, monkeypatch, rows):
         from omegaconf import DictConfig
 
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config.global_config import GlobalConfigDictParser
         from nemo_gym.train_data_utils import TrainDataProcessorConfig
 
         rel_path = Path("resources_servers") / "example_session_state_mgmt" / "data" / "rows.jsonl"
