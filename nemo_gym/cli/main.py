@@ -597,7 +597,7 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 
     from nemo_gym.config_types import ConfigError
     from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-    from nemo_gym.orchestration.submit import submit
+    from nemo_gym.orchestration.submit import submit, supports_job_commands
 
     _reject_scratch_namespace_additions(overrides)
     config_path = Path(args.config).resolve()
@@ -685,11 +685,23 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
                     f"[green]submitted[/green] {benchmark.benchmark} → {executor_label} "
                     f"[bold]{benchmark.job_id}[/bold]"
                 )
+        if any(benchmark.job_id for benchmark in record.benchmarks) and supports_job_commands(record):
+            # Plain print: rich would wrap a long id at 80 columns when stdout is not a terminal.
+            print("\n".join(_next_steps(record.gym_job_id)))
 
     if record.failed:
         names = ", ".join(b.benchmark for b in record.failed)
         print(f"Error: {len(record.failed)} benchmark(s) failed to submit: {names}", file=sys.stderr)
         sys.exit(1)
+
+
+def _next_steps(gym_job_id: str) -> list[str]:
+    """What to type after a submit: the id the other `gym job` commands take, and where to find them."""
+    return [
+        f"Submission: {gym_job_id}",
+        f"Check on it: gym job status {gym_job_id}",
+        "All job commands: gym job --help",
+    ]
 
 
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
