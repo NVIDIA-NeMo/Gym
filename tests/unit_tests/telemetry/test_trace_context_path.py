@@ -22,16 +22,14 @@ trace_context=True)`` names the agent's current span in the URL instead, and
 opens the server span.
 """
 
-import re
-
 import pytest
 from fastapi import FastAPI
 from fastapi.responses import RedirectResponse
 from fastapi.testclient import TestClient
 
+from nemo_gym.correlation import TRACEPARENT_PATTERN
 from nemo_gym.rollout_correlation import RolloutContextMiddleware, current_rollout_id
 from nemo_gym.server_utils import (
-    _TRACEPARENT_PATTERN,
     TraceContextPathMiddleware,
     apply_rollout_prefix,
     install_request_context_isolation,
@@ -79,7 +77,7 @@ class TestProducer:
         assert no_rollout == f"http://m:8000/ng-trace/{traceparent}"
         assert shared == "http://m:8000", "a URL reused across rollouts must not pin them to this span"
         assert shared_with_rollout == "http://m:8000/ng-rollout/0-0"
-        assert re.fullmatch(_TRACEPARENT_PATTERN, traceparent)
+        assert TRACEPARENT_PATTERN.match(traceparent)
 
 
 class TestMiddlewarePathRewrite:
@@ -106,6 +104,10 @@ class TestMiddlewarePathRewrite:
                 "/ng-rollout/0-0/training-token-capture/v1/chat/completions",
             ),
             (f"/ng-trace/{TRACEPARENT}/v1/models", "/v1/models"),
+            (
+                f"/ng-rollout/0-0/ng-agent-instance/judge.1/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+                "/ng-rollout/0-0/ng-agent-instance/judge.1/training-token-capture/v1/responses",
+            ),
         ],
     )
     async def test_strips_the_segment_and_adds_the_header(self, recorded, path, routed):
@@ -129,7 +131,7 @@ class TestMiddlewarePathRewrite:
         "path",
         [
             "/ng-rollout/0-0/v1/responses",
-            "/ng-trace/not-a-traceparent/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/judge/v1/responses",
             f"/v1/ng-trace/{TRACEPARENT}/responses",
         ],
     )
@@ -138,6 +140,27 @@ class TestMiddlewarePathRewrite:
         await app({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, None, None)
         assert seen["path"] == path
         assert seen["headers"] == []
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize(
+        "path",
+        [
+            "/ng-trace/not-a-traceparent/v1/responses",
+            "/ng-rollout/0-0/training-token-capture/ng-agent-instance/judge/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/Judge/v1/responses",
+            "/ng-rollout/0-0/ng-agent-instance/v1/responses",
+        ],
+    )
+    async def test_answers_a_malformed_prefix_with_400(self, recorded, path):
+        seen, app = recorded
+        sent = []
+
+        async def send(message):
+            sent.append(message)
+
+        await app({"type": "http", "path": path, "raw_path": path.encode(), "headers": []}, None, send)
+        assert seen == {}
+        assert sent[0]["status"] == 400
 
 
 class TestRedirectLocation:
@@ -162,6 +185,10 @@ class TestRedirectLocation:
             (
                 "http://m:8000/ng-rollout/0-0/training-token-capture/v1/responses",
                 f"http://m:8000/ng-rollout/0-0/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
+            ),
+            (
+                "/ng-rollout/0-0/ng-agent-instance/user/training-token-capture/v1/responses",
+                f"/ng-rollout/0-0/ng-agent-instance/user/training-token-capture/ng-trace/{TRACEPARENT}/v1/responses",
             ),
         ],
     )
