@@ -71,11 +71,17 @@ async def start_python_sandbox(
 
 
 async def run_python(
-    sandbox: AsyncSandbox, config: PythonSandboxConfig, code: str, *, timeout_s: float, max_chars: int
+    sandbox: AsyncSandbox,
+    config: PythonSandboxConfig,
+    code: str,
+    *,
+    timeout_s: float,
+    max_chars: int,
+    max_image_size: int = 4096,
 ) -> str:
     """Run one cell and return its JSON text/image output; the cell's own exceptions are part of that output."""
     await upload_text(sandbox, path=f"{config.workdir}/.ipython_kernel/cell.py", text=code)
-    command = _kernel(config, f"run --timeout {timeout_s:g} --max-chars {max_chars}")
+    command = _kernel(config, f"run --timeout {timeout_s:g} --max-chars {max_chars} --max-image-size {max_image_size}")
     # Room for a kernel restart on top of the cell's own timeout.
     return _stdout(await sandbox.exec(command, timeout_s=timeout_s + 150))
 

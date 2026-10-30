@@ -14,11 +14,15 @@
 # limitations under the License.
 """Tests for the gdp_pdf resources server and its data preparation helpers."""
 
+import base64
+import io
 import json
 import os
 import signal
+import struct
 import sys
 import time
+import zlib
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
@@ -27,6 +31,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi.testclient import TestClient
+from PIL import Image
 from pytest import approx, fixture, raises
 
 from benchmarks.gdp_pdf import prepare_python
@@ -67,6 +72,7 @@ from resources_servers.gdp_pdf.app import (
     _extract_generated_answer,
     _parse_criterion_result,
 )
+from resources_servers.gdp_pdf.ipython_kernel import image_output
 
 
 SERVER_DIR = Path(__file__).resolve().parents[1]
@@ -619,6 +625,14 @@ def _process_ended(pid: int) -> bool:
 
 
 class TestPythonTool:
+    def test_unsafe_image_header_is_rejected_before_decoding(self) -> None:
+        header = b"IHDR" + struct.pack(">IIBBBBB", 20000, 14000, 8, 2, 0, 0, 0)
+        png = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + header + struct.pack(">I", zlib.crc32(header))
+        parts = image_output(base64.b64encode(png).decode(), "image/png", 4096)
+        assert len(parts) == 1
+        assert parts[0]["type"] == "input_text"
+        assert "too large to decode safely" in parts[0]["text"]
+
     def test_failed_execution_is_not_replayed_or_graded(
         self, python_server: GdpPdfResourcesServer, python_client: TestClient, monkeypatch
     ) -> None:
@@ -725,6 +739,30 @@ class TestPythonTool:
         assert _process_ended(pid)
         assert python_client.post("/python", json={"code": "1"}).status_code == 404
         assert python_client.delete("/python").json() == {"released": True}
+
+    def test_large_display_is_resized_and_the_kernel_keeps_its_state(self, python_client: TestClient) -> None:
+        response = python_client.post(
+            "/python",
+            json={
+                "code": "from PIL import Image\nfrom IPython.display import display\n"
+                "x = 42\ndisplay(Image.new('RGB', (8192, 128), 'red'))"
+            },
+        )
+        assert response.status_code == 200
+        parts = response.json()["content"]
+        assert "resized from (8192, 128) to (4096, 64)" in parts[0]["text"]
+        with Image.open(io.BytesIO(base64.b64decode(parts[1]["image_url"].split(",", 1)[1]))) as image:
+            assert image.size == (4096, 64)
+            assert image.getpixel((0, 0)) == (255, 0, 0)
+        assert _python(python_client, "x") == "42\n"
+
+    def test_invalid_display_returns_feedback_without_losing_the_episode(self, python_client: TestClient) -> None:
+        output = _python(
+            python_client, "from IPython.display import display\ndisplay({'image/png': 'bm90IGFuIGltYWdl'}, raw=True)"
+        )
+        assert "Cannot display image" in output
+        assert "crop" in output
+        assert _python(python_client, "1 + 1") == "2\n"
 
     def test_verify_stops_the_sandbox_and_its_kernel(
         self, python_server: GdpPdfResourcesServer, python_client: TestClient, tmp_path: Path

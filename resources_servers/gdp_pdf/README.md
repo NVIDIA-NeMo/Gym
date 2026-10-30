@@ -109,6 +109,7 @@ the agent raises an error naming the exact command to run.
 | `documents_base_dir` | `data` | Base of `source_pdf`, relative to this directory |
 | `python_timeout_s` | 120 | A longer cell is interrupted; the kernel keeps its state |
 | `python_max_output_chars` | 20000 | Tool output beyond this is truncated |
+| `python_max_image_size` | 4096 | Maximum displayed-image edge in pixels; larger images are resized with a notice. Invalid or unsafe images return tool feedback. |
 
 ## Grading
 

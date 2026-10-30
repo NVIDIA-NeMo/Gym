@@ -140,6 +140,7 @@ class GdpPdfConfig(BaseResourcesServerConfig):
     documents_base_dir: str = "data"
     python_timeout_s: float = 120
     python_max_output_chars: int = 20_000
+    python_max_image_size: int = Field(default=4096, gt=0)
 
 
 # ---------------------------------------------------------------------------
@@ -368,6 +369,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                 body.code,
                 timeout_s=self.config.python_timeout_s,
                 max_chars=self.config.python_max_output_chars,
+                max_image_size=self.config.python_max_image_size,
             )
             return JSONResponse(json.loads(output))
         except Exception as error:

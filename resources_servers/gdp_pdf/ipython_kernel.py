@@ -13,7 +13,9 @@ The resources server places this file in ``<workdir>/.ipython_kernel/`` and runs
 """
 
 import argparse
+import base64
 import contextlib
+import io
 import json
 import os
 import re
@@ -27,6 +29,7 @@ from queue import Empty
 
 from jupyter_client import BlockingKernelClient
 from jupyter_client.connect import write_connection_file
+from PIL import Image
 
 
 KERNEL_DIR = Path(__file__).resolve().parent
@@ -44,6 +47,9 @@ RESTARTED = "[The Python kernel was restarted; variables from earlier cells are 
 def connect(timeout: float) -> BlockingKernelClient:
     client = BlockingKernelClient(connection_file=str(CONNECTION_FILE))
     client.load_connection_file()
+    # A busy shared CPU can miss the default one-second heartbeat while the
+    # kernel is still alive. Use the same deadline as the readiness request.
+    client.hb_channel.time_to_dead = timeout
     client.start_channels()
     try:
         client.wait_for_ready(timeout=timeout)
@@ -96,7 +102,39 @@ def asked_to_exit(client: BlockingKernelClient, msg_id: str) -> bool:
     return False
 
 
-def run(timeout: float, max_chars: int) -> None:
+def image_output(data: str, mime: str, max_size: int) -> list[dict[str, str]]:
+    """Bound displayed images before they reach the model, retaining aspect ratio."""
+    try:
+        with Image.open(io.BytesIO(base64.b64decode(data))) as image:
+            if max(image.size) <= max_size:
+                image.load()
+                return [{"type": "input_image", "image_url": f"data:{mime};base64,{data}", "detail": "auto"}]
+            original_size = image.size
+            image.thumbnail((max_size, max_size), Image.Resampling.LANCZOS)
+            buffer = io.BytesIO()
+            image.save(buffer, format="PNG")
+            encoded = base64.b64encode(buffer.getvalue()).decode()
+            return [
+                {
+                    "type": "input_text",
+                    "text": f"[Displayed image resized from {original_size} to {image.size}; "
+                    "crop a region to inspect finer detail.]\n",
+                },
+                {"type": "input_image", "image_url": f"data:image/png;base64,{encoded}", "detail": "auto"},
+            ]
+    except (ValueError, OSError, Image.DecompressionBombError):
+        # A malformed or unreasonably large display is a tool error the model
+        # can correct, not a failed episode or an inference-engine crash.
+        return [
+            {
+                "type": "input_text",
+                "text": "[Cannot display image: invalid or too large to decode safely. "
+                "Render a crop or use a lower resolution.]\n",
+            }
+        ]
+
+
+def run(timeout: float, max_chars: int, max_image_size: int) -> None:
     output, size, dropped, notes = [], 0, 0, []
     # An unexpected loss between calls invalidates the episode. Only intentional exit() or a
     # timed-out cell below resets the kernel with explicit model-visible feedback.
@@ -139,13 +177,7 @@ def run(timeout: float, max_chars: int) -> None:
                 data = content["data"]
                 image_type = next((mime for mime in ("image/png", "image/jpeg") if mime in data), None)
                 if image_type and data[image_type]:
-                    output.append(
-                        {
-                            "type": "input_image",
-                            "image_url": f"data:{image_type};base64,{data[image_type]}",
-                            "detail": "auto",
-                        }
-                    )
+                    output.extend(image_output(data[image_type], image_type, max_image_size))
                 elif image_type:
                     text = "[Cannot display image: the image data is empty.]\n"
                 elif "text/plain" in data:
@@ -173,10 +205,11 @@ if __name__ == "__main__":
     parser.add_argument("command", choices=["start", "run", "stop"])
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--max-chars", type=int, default=20_000)
+    parser.add_argument("--max-image-size", type=int, default=4096)
     args = parser.parse_args()
     if args.command == "start":
         start().stop_channels()
     elif args.command == "run":
-        run(args.timeout, args.max_chars)
+        run(args.timeout, args.max_chars, args.max_image_size)
     else:
         stop()
