@@ -49,6 +49,7 @@ from nemo_gym.sandbox.providers import (
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
     SupportsSandboxSidecars,
+    SupportsSandboxSnapshot,
     create_provider,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span, safe_set_span_attributes
@@ -496,8 +497,10 @@ class AsyncSandbox:
         self,
         spec: SandboxSpec | None = None,
         *,
+        snapshot_id: str | None = None,
         span_attributes: Mapping[str, Any] | None = None,
     ) -> "AsyncSandbox":
+        """Create the sandbox from ``spec``, or with ``snapshot_id`` from that snapshot in place of the image."""
         if self._closed:
             raise RuntimeError("Sandbox has been stopped")
         if self._handle is not None and not self._stopped:
@@ -508,6 +511,14 @@ class AsyncSandbox:
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        if snapshot_id is not None and not isinstance(self._provider, SupportsSandboxSnapshot):
+            provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support snapshots")
+
+        async def create() -> SandboxHandle:
+            if snapshot_id is None:
+                return await self._provider.create(requested_spec)
+            return await self._provider.create_from_snapshot(snapshot_id, requested_spec)
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
@@ -517,14 +528,14 @@ class AsyncSandbox:
                 "gym.sandbox.start",
                 **{"nemo.gym.sandbox.provider": provider_name, **default_span_attributes(span_attributes)},
             ) as span:
-                handle = await self._provider.create(requested_spec)
+                handle = await create()
                 if span is not None:
                     safe_set_span_attributes(span, {"nemo.gym.sandbox.id": _sandbox_id(handle)})
             record_sandbox_startup((time.perf_counter() - started) * 1000.0, provider=provider_name)
             record_sandbox_active(1, provider=provider_name)
             self._counted_active = True
         else:
-            handle = await self._provider.create(requested_spec)
+            handle = await create()
         self._handle = handle
         self._spec = requested_spec
         self._stopped = False
