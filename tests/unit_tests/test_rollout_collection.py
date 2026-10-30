@@ -812,6 +812,50 @@ class TestRolloutCollection:
         assert alpha["aggregate"][AGGREGATION_ERROR_KEY]["http_status"] == 500
         assert orjson.loads((complete_dir / "beta.json").read_bytes())["aggregation_status"] == "complete"
 
+    @pytest.mark.parametrize("retain_results_in_memory", [False, True])
+    async def test_agent_completion_file_reads_repeats_in_rollout_order(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        retain_results_in_memory: bool,
+    ) -> None:
+        """A metric over a task's first repeat is the same whichever repeat finishes first."""
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(self._write_agent_inputs(tmp_path, ("alpha", "beta"))),
+            output_jsonl_fpath=str(tmp_path / "rollouts.jsonl"),
+            disable_health_check=True,
+            num_repeats=3,
+            retain_results_in_memory=retain_results_in_memory,
+        )
+
+        def first_repeat_reward(tasks: list[list[dict]]) -> dict:
+            return {"first_repeat_reward": tasks[0][0]["reward"]}
+
+        async def post(server_name: str, url_path: str, json, **kwargs) -> FakeResponse:
+            if url_path == "/aggregate_metrics":
+                aggregate = compute_aggregate_metrics(
+                    [dict(r) for r in json.verify_responses], compute_metrics_fn=first_repeat_reward
+                )
+                return FakeResponse(200, aggregate.model_dump())
+            rollout_index = json[ROLLOUT_INDEX_KEY_NAME]
+            if server_name == "alpha_environment_server" and rollout_index == 0:
+                await asyncio.sleep(0.2)  # the first repeat is the last of the agent to finish
+            return FakeResponse(200, {"reward": 1.0 if rollout_index == 0 else 0.0})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha", "beta"))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        alpha = orjson.loads((tmp_path / "rollouts_agent_complete" / "alpha.json").read_bytes())
+        assert alpha["completed_rollouts"] == 3
+        assert alpha["aggregate"]["agent_metrics"]["first_repeat_reward"] == 1.0
+        run_aggregate = {
+            entry[AGENT_REF_KEY_NAME]["name"]: entry
+            for entry in orjson.loads((tmp_path / "rollouts_aggregate_metrics.json").read_bytes())
+        }
+        assert alpha["aggregate"] == run_aggregate["alpha"]
+
     async def test_a_failed_completion_file_write_does_not_stop_the_run_aggregate(
         self,
         tmp_path: Path,

@@ -4574,6 +4574,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 results = [r for r in persisted_results if (r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) in keys]
             else:
                 results = await _read_jsonl_for_keys(output_fpath, keys)
+            # Rows land in completion order. The run-wide aggregate reads them by (task, rollout), and
+            # metrics over a task's first repeats depend on that order, so this entry must match it.
+            results.sort(key=_rollout_order_key)
             scored_keys = {(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME]) for r in results}
             if scored_keys != keys:
                 raise RuntimeError(
