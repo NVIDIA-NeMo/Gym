@@ -36,6 +36,10 @@ from nemo_gym.openai_utils import (
     PermanentEndpointError,
     ReasoningEffort,
 )
+from responses_api_models.openai_model.provider_refusals import (
+    provider_refusal,
+    refusal_response,
+)
 
 
 LOG = logging.getLogger(__name__)
@@ -104,6 +108,10 @@ class SimpleModelServerConfig(BaseResponsesAPIModelConfig):
     openai_model: str
 
     extra_body: Dict[str, Any] = Field(default_factory=dict)
+    provider_refusal_codes: frozenset[Literal["bio_policy", "content_filter", "content_policy_violation"]] = Field(
+        default_factory=frozenset,
+        description="Opt-in HTTP 400 policy-refusal codes represented as refusal content, preserving error evidence and unknown usage.",
+    )
     openai_default_headers: Dict[str, str] = Field(default_factory=dict)
     max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
     max_rate_limit_wait_seconds: float = Field(default=3600.0, ge=0)
@@ -339,7 +347,14 @@ class SimpleModelServer(SimpleResponsesAPIModel):
                 ]
 
         async def create_and_validate() -> NeMoGymResponse:
-            response_dict = await self._client.create_response(**body_dict)
+            try:
+                response_dict = await self._client.create_response(**body_dict)
+            except ClientResponseError as error:
+                raw_body = getattr(error, "response_content", None)
+                refusal = provider_refusal(error.status, raw_body, self.config.provider_refusal_codes)
+                if refusal is None:
+                    raise
+                return NeMoGymResponse.model_validate(refusal_response(self.config.openai_model, refusal, raw_body))
             reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (
                 self.config.reasoning_effort_none_replacement is not None
