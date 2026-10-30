@@ -195,6 +195,9 @@ def render_write_file_from_base64(content: str, dest_path: str) -> str:
     return f"printf '%s' '{encoded}' | base64 -d > {shlex.quote(dest_path)}"
 
 
+# What the driver step runs for each export, with the exporter's name and its overrides as arguments.
+EXPORT_STEP_MODULE = "nemo_gym.orchestration.export_step"
+
 # Set for a driver whose script has exports: a file this attempt creates once its evaluation has succeeded. The
 # job script watches the services only until then (see `_render_watched_driver`).
 EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
@@ -203,12 +206,12 @@ EVAL_SUCCEEDED_MARKER_ENV = "GYM_EVAL_SUCCEEDED_MARKER"
 def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) -> str:
     """Render the part of the driver script that runs `gym eval run`, then each export of its rollouts.
 
-    `exports` pairs an exporter name with its shell-quoted `gym eval export` arguments. The run is a child, not
+    `exports` pairs an exporter name with its shell-quoted override arguments for `EXPORT_STEP_MODULE`. The run is a child, not
     `exec`'d, so the script can go on to the exports; TERM, which is what the driver gets at the time limit, is
     passed on to it, so an interrupted run behaves as it did when it was `exec`'d. The run's exit code goes to
     `<bench_dir>/eval.exit` and is the script's exit code: the exports are reported in their own result files
     and cannot change it. They run only after a successful run, so a partial run is never exported, and an
-    export that already succeeded is not repeated (`gym eval export` decides that from its result file).
+    export that already succeeded is not repeated (the export step decides that from its result file).
     """
     bench = shlex.quote(str(bench_dir))
     lines = [
@@ -226,7 +229,10 @@ def render_export_tail(bench_dir: Path, exports: list[tuple[str, list[str]]]) ->
         f'echo "$gym_run_rc" > {bench}/eval.exit || true',
         'if [ "$gym_run_rc" -eq 0 ]; then',
         f'    [ -z "${{{EVAL_SUCCEEDED_MARKER_ENV}:-}}" ] || : > "${EVAL_SUCCEEDED_MARKER_ENV}" || true',
-        *(f"    gym eval export {shlex.quote(name)} {' '.join(args)} || true" for name, args in exports),
+        *(
+            f"    python3 -m {EXPORT_STEP_MODULE} {shlex.quote(name)} {' '.join(args)} || true"
+            for name, args in exports
+        ),
         "fi",
         'exit "$gym_run_rc"',
     ]
