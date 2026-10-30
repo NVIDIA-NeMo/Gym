@@ -73,6 +73,7 @@ from nemo_gym.sandbox.providers.base import (
     ConnectableProvider,
     SandboxHandle,
     SandboxProvider,
+    SandboxSnapshotNotFoundError,
     SandboxSpec,
     SupportsSandboxSnapshot,
 )
@@ -587,30 +588,28 @@ class SandboxSessionCheckpointer:
     async def _fork(
         self, key: str, state: SandboxCheckpointState, spec: SandboxSpec, created: dict[str, AsyncSandbox]
     ) -> None:
-        # A snapshot replaces the image: OpenSandbox requires exactly one of the two.
-        fork_spec = dataclasses.replace(
-            spec,
-            image=None,
-            files={},
-            provider_options={**spec.provider_options, "snapshot_id": state.snapshot_id},
-        )
+        # The snapshot replaces the image and holds the files the spec delivered.
+        fork_spec = dataclasses.replace(spec, image=None, files={})
         for attempt in range(FORK_NOT_FOUND_RETRIES + 1):
             sandbox = AsyncSandbox(self._provider, fork_spec, owns_provider=False)
             try:
                 async with self._semaphore:
-                    await sandbox.start()
+                    await sandbox.start(snapshot_id=state.snapshot_id)
                 break
+            except SandboxSnapshotNotFoundError as error:
+                if attempt == FORK_NOT_FOUND_RETRIES:
+                    raise SandboxCheckpointError(
+                        key, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
+                    ) from error
+                LOGGER.warning(
+                    "snapshot %s of %s not found on attempt %d; retrying in %.0fs",
+                    state.snapshot_id,
+                    key,
+                    attempt + 1,
+                    FORK_NOT_FOUND_BACKOFF_S,
+                )
+                await asyncio.sleep(FORK_NOT_FOUND_BACKOFF_S)
             except Exception as error:
-                if "NOT_FOUND" in repr(error) and attempt < FORK_NOT_FOUND_RETRIES:
-                    LOGGER.warning(
-                        "snapshot %s of %s not found on attempt %d; retrying in %.0fs",
-                        state.snapshot_id,
-                        key,
-                        attempt + 1,
-                        FORK_NOT_FOUND_BACKOFF_S,
-                    )
-                    await asyncio.sleep(FORK_NOT_FOUND_BACKOFF_S)
-                    continue
                 raise SandboxCheckpointError(
                     key, f"could not be re-created from snapshot {state.snapshot_id!r}: {error}"
                 ) from error
