@@ -27,6 +27,10 @@ from nemo_gym.openai_utils import (
 )
 
 
+# Claude Code reports a model stop_reason "refusal" as an is_error result with subtype "success" and this text.
+USAGE_POLICY_REFUSAL = "appears to violate our Usage Policy"
+
+
 def _extract_text(content: list[Any]) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
 
@@ -66,8 +70,12 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     output_items: list[Any] = []
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
     buffered_think: str | None = None
-    total_input = 0
-    total_output = 0
+    # Token usage. The result event carries the run's cumulative usage, so it is the total when present.
+    # Without one (the CLI was killed or timed out), sum the assistant messages' usage, once per message:
+    # stream-json emits one assistant event per content block, each repeating its message's usage.
+    result_usage: Optional[tuple[int, int]] = None
+    message_usage: dict[str, tuple[int, int]] = {}
+    unidentified_input = unidentified_output = 0
     num_turns: Optional[int] = None
     result_metadata: dict[str, Any] = {}
     compacting_sessions: set[str] = set()
@@ -78,9 +86,13 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         etype = event.get("type")
 
         if etype == "result":
-            usage = event.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
+            usage = event.get("usage")
+            if isinstance(usage, dict) and ("input_tokens" in usage or "output_tokens" in usage):
+                previous = result_usage or (0, 0)
+                result_usage = (
+                    previous[0] + int(usage.get("input_tokens") or 0),
+                    previous[1] + int(usage.get("output_tokens") or 0),
+                )
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
@@ -88,6 +100,8 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
                 result_metadata["subtype"] = event["subtype"]
             if isinstance(event.get("is_error"), bool):
                 result_metadata["is_error"] = event["is_error"]
+            if event.get("is_error") is True and isinstance(event.get("result"), str) and event["result"]:
+                result_metadata["error_message"] = event["result"][:2000]
             duration_ms = event.get("duration_ms")
             if isinstance(duration_ms, (int, float)) and not isinstance(duration_ms, bool) and duration_ms >= 0:
                 result_metadata["duration_ms"] = float(duration_ms)
@@ -96,8 +110,13 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
             message = event.get("message", {})
             content = message.get("content") or []
             usage = message.get("usage") or {}
-            total_input += int(usage.get("input_tokens") or 0)
-            total_output += int(usage.get("output_tokens") or 0)
+            counts = (int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
+            message_id = message.get("id")
+            if isinstance(message_id, str) and message_id:
+                message_usage[message_id] = counts
+            else:
+                unidentified_input += counts[0]
+                unidentified_output += counts[1]
 
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
             # but never let their text or tool ids testify to the main conversation's terminal call.
@@ -204,6 +223,11 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     compaction_attempts.extend(
         {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
     )
+    if result_usage is not None:
+        total_input, total_output = result_usage
+    else:
+        total_input = unidentified_input + sum(counts[0] for counts in message_usage.values())
+        total_output = unidentified_output + sum(counts[1] for counts in message_usage.values())
     metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
     if terminal_response_id:
         metadata["terminal_response_id"] = terminal_response_id
@@ -219,8 +243,10 @@ def _invocation_outcome(metadata: dict[str, Any], returncode: int | None) -> tup
     subtype = metadata.get("subtype")
     if subtype == "error_max_turns":
         return "incomplete", subtype
-    if metadata.get("is_error") is True or (isinstance(subtype, str) and subtype.startswith("error_")):
-        return "failed", subtype if isinstance(subtype, str) else "agent_error"
+    if isinstance(subtype, str) and subtype.startswith("error_"):
+        return "failed", subtype
+    if metadata.get("is_error") is True:
+        return "failed", "refusal" if USAGE_POLICY_REFUSAL in metadata.get("error_message", "") else "agent_error"
     if returncode not in (0, None):
         return "failed", f"process_exit_{returncode}"
     if subtype == "success":

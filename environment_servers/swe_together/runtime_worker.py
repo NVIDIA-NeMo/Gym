@@ -36,7 +36,7 @@ def publish(target: Path, staging: Path, count: int, expected: str):
 
 
 def python_install(archive_path: Path) -> Path:
-    """Unpack the complete install once; role trees reuse immutable hardlinks."""
+    """Unpack the complete install once; task sandboxes mount it read-only."""
     installed = archive_path.with_name(archive_path.name + ".python")
     if (installed / ".ready").is_file():
         return installed
@@ -58,18 +58,10 @@ def python_install(archive_path: Path) -> Path:
             shutil.rmtree(temporary)
 
 
-def prepare(root: Path, roles: dict, owner: str):
-    root.mkdir(parents=True, exist_ok=True)
-    for role, artifacts in roles.items():
-        target = root / role
-        target.mkdir(exist_ok=True)
-        for name, source in artifacts.items():
-            source = Path(source)
-            if name == "python":
-                shutil.copytree(python_install(source) / "python", target / "python", copy_function=os.link)
-            else:
-                os.link(source, target / name)
-        (target / "owner").write_text(owner)
+def prepare(root: Path, roles: list[str]):
+    """Create only the mutable per-session directories; runtime files stay in the cache."""
+    root.mkdir(parents=True)
+    for role in roles:
         submission = root / ("submission-" + role)
         submission.mkdir()
         submission.chmod(0o777 if role == "candidate" else 0o755)
@@ -107,8 +99,10 @@ def main():
         print(int(verify(Path(args[0]), args[1])))
     elif action == "publish":
         publish(Path(args[0]), Path(args[1]), int(args[2]), args[3])
+    elif action == "install":
+        python_install(Path(args[0]))
     elif action == "prepare":
-        prepare(Path(args[0]), json.loads(args[1]), args[2])
+        prepare(Path(args[0]), json.loads(args[1]))
     elif action == "seal":
         seal(Path(args[0]), json.loads(args[1]))
     elif action == "release":

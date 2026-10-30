@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import tempfile
+import time
 from collections.abc import Mapping, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -178,6 +179,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     trajectory: TrajectoryRecord | None = None
     activation_trajectory: TrajectoryRecord | None = None
     activation_id: int | None = None
+    close_requested_at: float | None = None
     export_dir: str | None = None
     # POSIX sh that gives OpenCode's import and export their environment (see ``cli_environment``).
     opencode_environment: str = ""
@@ -279,6 +281,8 @@ class OpenCodeSandboxSession(AgentSessionState):
 
     async def close(self, timeout: float) -> None:
         """Capture and release before cancelling the HTTP activation."""
+        if self.close_requested_at is None:
+            self.close_requested_at = time.time()
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -497,6 +501,7 @@ class OpenCodeSandboxSession(AgentSessionState):
         return await asyncio.to_thread(stored_sessions, database)
 
     async def _collect_artifacts(self, directory: Path, *, timeout: float) -> str:
+        capture_started_at = time.time()
         previous_session_id = self.harness_session_id
         try:
             self.stderr = (await self.read_text("stderr.log"))[-16000:]
@@ -542,6 +547,22 @@ class OpenCodeSandboxSession(AgentSessionState):
                 model_ref=self.model_ref,
                 message_ids=set(export.get("activation_message_ids", [])) if scoped else None,
             )
+            lifecycle = json.dumps(
+                {
+                    "capture_started_at": capture_started_at,
+                    "parse_completed_at": time.time(),
+                    "close_requested_at": self.close_requested_at,
+                    "cleanup": {
+                        key: self.session.cleanup.get(key) for key in ("cleanup_confirmed", "timed_out", "return_code")
+                    }
+                    if self.session.cleanup is not None
+                    else None,
+                },
+                separators=(",", ":"),
+            )
+            for gap in trajectory.gaps:
+                if gap.code == "turns_unavailable":
+                    gap.detail = (gap.detail or "") + "; capture_lifecycle=" + lifecycle
             if self.is_continuation:
                 assert self.activation_id is not None
                 scope_opencode_activation(

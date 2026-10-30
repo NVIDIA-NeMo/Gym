@@ -243,7 +243,7 @@ git checkout -- resources_servers/other_server/
 
 ## Adding a harness instead
 
-Follow [Harness conformance](../../../fern/versions/latest/pages/observability/harness-conformance.mdx) and [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Register the harness, run `python scripts/run_harness_conformance.py --harness <name> --output <new dir>`, fix each failing evidence row, then regenerate the [capability matrix](../../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx) with `python -m scripts.harness_conformance.table --commit <40-char sha> --output <abs dir>`. Add `inspect_harness_conformance.py` to the harness's CI. The health and evidence checks above apply too, on live rollouts: the probes use scripted replies and no real sandbox.
+Use the [`add-harness`](../add-harness/SKILL.md) skill. It covers the session contract, pairing configuration, harness conformance, real pairing runs, and the harness exit checks. The health and evidence checks above apply to harness work too, on live rollouts: the conformance probes use scripted replies and no real sandbox. An Evaluation-level adapter fails the evidence check by design; `add-harness` says what to record instead.
 
 ## Constraints
 

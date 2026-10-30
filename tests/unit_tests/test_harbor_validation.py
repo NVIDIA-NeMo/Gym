@@ -589,6 +589,53 @@ def test_validate_resume_rejects_results_another_agent_wrote(
 
 
 @pytest.mark.usefixtures("validation_cli")
+def test_validate_renders_a_template_where_eval_run_does(tmp_path, monkeypatch, capsys):
+    """A template is rendered into results/harbor/<taskset>/rendered/ by `gym dataset validate` as by `gym eval run`:
+    the rendered folder is the dataset root prepare records into, so one copy means one manifest and a template's
+    image built and pushed once, while the oracle's rows and results still live under results/harbor/validation/."""
+    from nemo_gym.tasks.harbor.records import read_built_images
+    from tests.unit_tests.test_harbor_authoring import write_template
+
+    write_template(tmp_path / "ds")
+    monkeypatch.setattr(global_config, "gethostbyname", lambda _: "192.0.2.20")
+    outputs = []
+
+    def collect(target, tokens):
+        monkeypatch.setattr(sys, "argv", ["e2e", *tokens])
+        output = Path(global_config.get_global_config_dict().output_jsonl_fpath)
+        outputs.append(output.resolve())
+        write_jsonl(output, [result("q-1"), result("q-2", index=1)])
+
+    monkeypatch.setattr(main_module, "dispatch", collect)
+    monkeypatch.setattr(sys, "argv", ["gym", "dataset", "validate", str(tmp_path / "ds"), "--sandbox", "docker"])
+    main_module.main()
+    rendered = (tmp_path / "results/harbor/ds/rendered").resolve()
+    assert sorted(p.name for p in rendered.iterdir() if p.is_dir()) == ["q-1", "q-2"]
+    assert not (tmp_path / "results/harbor/validation/ds/rendered").exists()
+    assert outputs == [(tmp_path / "results/harbor/validation/ds/rollouts.jsonl").resolve()]
+    out = capsys.readouterr().out
+    assert (
+        f"Rendered 2 task(s) from {tmp_path / 'ds'} into {rendered}" in out and "q-2 [repeat 0]\toracle solved" in out
+    )
+    manifest = (rendered / "manifest.toml").read_bytes()
+    built = {"abc": {"image": "registry.invalid/hb__abc", "tasks": ["q-1", "q-2"], "tool": "buildah", "pushed": True}}
+    (rendered / "built-images.json").write_text(json.dumps(built))
+    inodes = {p.name: p.stat().st_ino for p in rendered.iterdir()}
+
+    # The model run prepares the same template into the same folder: the manifest, the built image and every rendered
+    # task folder are the ones validate left, and its rows and results are its own.
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    model = ["gym", "eval", "run", str(tmp_path / "ds"), "--agent", "hermes_agent", "--sandbox", "docker"]
+    model += ["--model-type", "vllm_model", "+policy_model_name=m", "+policy_base_url=http://localhost:1"]
+    monkeypatch.setattr(sys, "argv", [*model, "+policy_api_key=none"])
+    main_module.main()
+    assert outputs[-1] == (tmp_path / "results/harbor/ds/rollouts.jsonl").resolve()
+    assert (rendered / "manifest.toml").read_bytes() == manifest and read_built_images(rendered) == built
+    assert {p.name: p.stat().st_ino for p in rendered.iterdir()} == inodes
+    assert sorted(p.name for p in (tmp_path / "results/harbor").iterdir()) == ["ds", "validation"]
+
+
+@pytest.mark.usefixtures("validation_cli")
 def test_eval_run_with_the_oracle_is_a_validation_run(tmp_path, monkeypatch, capsys):
     """`gym eval run --agent harbor_oracle` writes under results/harbor/validation/ like `gym dataset validate`, so a
     model run on the same target, resumed or not, never finds the reference solution's rewards as its own."""

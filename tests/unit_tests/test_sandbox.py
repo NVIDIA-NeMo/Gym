@@ -1285,7 +1285,7 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
         def __init__(self) -> None:
             self.calls = 0
 
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> FakeExecution:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> FakeExecution:
             del command, opts
             self.calls += 1
             if self.calls <= 2:
@@ -1337,7 +1337,7 @@ async def _assert_opensandbox_command_retries_default_to_disabled(monkeypatch) -
         def __init__(self) -> None:
             self.calls = 0
 
-        async def run(self, command: str, *, opts: FakeRunCommandOpts) -> None:
+        async def run(self, command: str, *, opts: FakeRunCommandOpts, handlers: Any = None) -> None:
             del command, opts
             self.calls += 1
             raise ConnectionError("transient connection failure")

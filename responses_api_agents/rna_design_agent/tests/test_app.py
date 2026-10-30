@@ -175,7 +175,7 @@ class TestWorkerPython:
         assert "RNA_WORKER_PYTHON" not in caplog.text
 
     def test_the_shipped_config_leaves_it_to_the_environment(self) -> None:
-        text = (AGENT_DIR.parents[1] / "environments" / "rna_design" / "config_agent.yaml").read_text()
+        text = (AGENT_DIR.parents[1] / "environments" / "rna_design" / "custom_agent.yaml").read_text()
         assert "worker_python: ${oc.env:RNA_WORKER_PYTHON,null}" in text
 
 
