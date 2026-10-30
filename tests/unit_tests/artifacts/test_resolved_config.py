@@ -154,4 +154,4 @@ def test_no_serve_collection_saves_the_config_before_collecting(tmp_path: Path, 
     attempt["n"] = 2
     cli_eval.collect_rollouts()
     assert seen["yaml"]["attempt"] == 2
-    assert sorted(p.name for p in tmp_path.iterdir()) == ["run_resolved_config.yaml"]
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["run_resolved_config.yaml", "run_server_logs.json"]

@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.artifacts.exporters import exporter_extras
-from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
+from nemo_gym.config.global_config import (
+    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    SERVICE_LOG_DIR_ENV,
+)
 from nemo_gym.data.gitlab_utils import gitlab_storage_extras
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
@@ -1125,7 +1129,8 @@ def build_sbatch_script(
     output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
-    driver_env = dict(config.driver.env)
+    # Where every step of this job logs, so the run can record where its service (vLLM) logs are.
+    driver_env = {SERVICE_LOG_DIR_ENV: str(remote_bench_dir / "logs"), **config.driver.env}
     if instrumented:
         driver_env = {
             **driver_telemetry_env(
