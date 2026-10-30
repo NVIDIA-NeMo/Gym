@@ -57,7 +57,7 @@ misalignment_monitor:
 
       # Layer 2: the security and alignment investigators. With a sandbox provider they can also run Python
       # over the evidence. null leaves that tool out.
-      investigator_max_steps: 8
+      investigator_max_steps: 16
       sandbox_provider: null
       sandbox_config:
         image: python:3.12-slim

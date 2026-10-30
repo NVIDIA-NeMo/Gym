@@ -111,7 +111,7 @@ class MisalignmentMonitorConfig(BaseResourcesServerConfig):
     jspace_concepts: list[str] = Field(default_factory=list)
     jspace_top_k: int = Field(default=10, gt=0)
 
-    investigator_max_steps: int = Field(default=8, gt=0)
+    investigator_max_steps: int = Field(default=16, gt=0)
     sandbox_provider: Optional[str] = Field(
         default=None, description="Sandbox for the investigators' run_python tool. null leaves the tool out."
     )
