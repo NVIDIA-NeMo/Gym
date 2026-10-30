@@ -63,10 +63,16 @@ _PYTHON_DOWNLOADS = "https://github.com/astral-sh/python-build-standalone/releas
 _PYTHON_FILE = "cpython-{version}%2B{release}-{arch}-unknown-linux-{libc}-install_only_stripped.tar.gz"
 _SITE_PACKAGES = f"python/lib/python{PYTHON_VERSION.rsplit('.', 1)[0]}/site-packages"
 _INSTALLER = Path(__file__).with_name("install_python_runtime.sh")
-# Kernel, machine, then "musl" or the glibc version. musl images ship the loader under /lib/ld-musl-*.so.1.
+# Prefer glibc evidence: Debian/Ubuntu can also install a musl loader alongside their system libc.
+# ldd is the fallback when getconf is absent; musl's ldd may print its version and exit nonzero.
 _PLATFORM_PROBE = (
-    "uname -s; uname -m; if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; "
-    "else getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>&1 | head -n 1; fi"
+    "uname -s; uname -m; "
+    "libc=$(getconf GNU_LIBC_VERSION 2>/dev/null || ldd --version 2>&1 | head -n 1); "
+    'case "$libc" in '
+    '*glibc*|*GLIBC*|*"GNU libc"*) printf \'%s\\n\' "$libc";; '
+    "*musl*) echo musl;; "
+    "*) if ls /lib/ld-musl-*.so.1 >/dev/null 2>&1; then echo musl; else printf '%s\\n' \"$libc\"; fi;; "
+    "esac"
 )
 _MACHINES = {"x86_64": "x86_64", "amd64": "x86_64", "aarch64": "aarch64", "arm64": "aarch64"}
 # glibc 2.17 is the oldest python-build-standalone supports; uv names these manylinux levels in --python-platform.
