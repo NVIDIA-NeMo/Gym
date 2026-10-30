@@ -13121,7 +13121,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
 
     from nemo_gym.agent_outcome import OutcomeAction
     from nemo_gym.episode_types import FailureBoundary
-    from nemo_gym.failure_kinds import POLICY_MODEL_RESPONSE_TIMEOUT
+    from nemo_gym.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
     from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
     from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
@@ -13191,7 +13191,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
             name="my_agent",
             model_server={"type": "responses_api_models", "name": "model"},
             resources_server={"type": "resources_servers", "name": "resources"},
-            outcome_policy={"by_failure_kind": {POLICY_MODEL_RESPONSE_TIMEOUT: action}},
+            outcome_policy={"by_failure_kind": {MODEL_POLICY_RESPONSE_TIMEOUT: action}},
         )
 
     client = MagicMock(spec=ServerClient)
@@ -13206,7 +13206,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
         )
     assert client.post.await_count == 1  # The model's two attempts did not become another agent model call.
     failure = classified.value
-    assert failure.boundary == FailureBoundary.AGENT and failure.failure_kind == POLICY_MODEL_RESPONSE_TIMEOUT
+    assert failure.boundary == FailureBoundary.AGENT and failure.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT
     report = failure_report_for(failure).merged(upstream)
     facts = {k: v.model_dump(mode="json") for k, v in report.events.items()}
     monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
