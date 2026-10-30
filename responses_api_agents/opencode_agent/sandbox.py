@@ -20,8 +20,10 @@ from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 from nemo_gym.agents import (
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
     AgentSessionState,
     NothingCapturedError,
+    RestoredLaunch,
     SandboxCommand,
     SandboxSession,
     exec_idempotent,
@@ -50,6 +52,12 @@ LOG = logging.getLogger(__name__)
 # Reads of the conversation a relaunch may reprompt: how many, and the wait before the second (doubled for the third).
 _CONVERSATION_READ_ATTEMPTS = 3
 _CONVERSATION_READ_RETRY_DELAY_S = 2.0
+
+# The model relay a launch runs on a sandbox whose snapshots keep processes (harness_runner.sh starts it): the
+# script in the session root, and per launch directory its endpoint (``{"gen", "upstream"}``) and status files.
+MODEL_RELAY_SCRIPT = HARNESS_RUNNER_SCRIPT.with_name("model_relay.py")
+RELAY_ENDPOINT_FILE = "relay-endpoint.json"
+RELAY_STATUS_FILE = "relay-status.json"
 
 
 class UnparsableConversationError(Exception):
@@ -186,6 +194,11 @@ class OpenCodeSandboxSession(AgentSessionState):
     reprompting the conversation kept in the root. A session a restore installed has no sandbox
     connection (``session`` is ``None``) until its replacement attempt's seed re-binds it;
     ``restored`` keeps what the checkpoint exported until then.
+
+    On a sandbox whose snapshots keep processes (``keeps_processes``), the pause holds the harness's model calls
+    instead of stopping it, and OpenCode reaches the model through a relay in the sandbox: a restore brings the
+    launch back running, ``adoption`` names the held pause it is taken over from, and ``relay_gen`` is the
+    generation of the relay's endpoint, raised when a restore points it at the replacement attempt.
     """
 
     session: SandboxSession[str] | None
@@ -246,6 +259,9 @@ class OpenCodeSandboxSession(AgentSessionState):
     completed_reply: dict[str, JsonValue] | None = None
     completed_request_digest: str | None = None
     restored: dict[str, JsonValue] | None = None
+    keeps_processes: bool = False
+    relay_gen: int = 0
+    adoption: RestoredLaunch | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -468,6 +484,30 @@ class OpenCodeSandboxSession(AgentSessionState):
             raise asyncio.CancelledError
         return artifacts
 
+    async def adopt(
+        self, *, pause_seq: int, timeout: float, close_timeout: float, pause_allowance_s: float = 0.0
+    ) -> str:
+        """Take over the launch a restore brought back holding pause ``pause_seq``, as ``execute`` finishes one."""
+        artifacts = await self.session.adopt(
+            pause_seq=pause_seq,
+            collect=lambda: self.collect_artifacts(timeout=close_timeout),
+            timeout=timeout,
+            close_timeout=close_timeout,
+            pause_allowance_s=pause_allowance_s,
+        )
+        if self.session.closing:
+            raise asyncio.CancelledError
+        return artifacts
+
+    async def point_relay(self, upstream: str) -> None:
+        """Point the current launch's model relay at ``upstream`` as its next endpoint generation."""
+        self.relay_gen += 1
+        await upload_text(
+            self.session.sandbox,
+            path=f"{self.session.session_dir}/{RELAY_ENDPOINT_FILE}",
+            text=json.dumps({"gen": self.relay_gen, "upstream": upstream}),
+        )
+
     async def stage_activation(
         self, payload: dict[str, JsonValue], *, media: Sequence[MediaFile] = ()
     ) -> SandboxCommand:
@@ -524,6 +564,22 @@ class OpenCodeSandboxSession(AgentSessionState):
         if payload.get("raise_oom_score_adj"):
             # OpenCode and its tools inherit the score; execd and the supervisor keep the sandbox's own.
             params["setup"] += prefer_oom_kill_setup()
+        relay = payload.get("relay")
+        if relay is not None:
+            # The runner starts the relay; without one (no Python 3.6+ in the image) OpenCode calls the model
+            # directly, under the fallback environment.
+            await upload_text(
+                self.session.sandbox,
+                path=f"{directory}/{RELAY_ENDPOINT_FILE}",
+                text=json.dumps({"gen": self.relay_gen, "upstream": relay["upstream"]}),
+            )
+            params |= {
+                "MODEL_RELAY_PORT": str(relay["port"]),
+                "MODEL_RELAY_ENDPOINT": f"{directory}/{RELAY_ENDPOINT_FILE}",
+                "MODEL_RELAY_STATUS": f"{directory}/{RELAY_STATUS_FILE}",
+                "MODEL_RELAY_SCRIPT": f"{self.persistent_directory}/{MODEL_RELAY_SCRIPT.name}",
+                "MODEL_RELAY_FALLBACK_ENV": relay["fallback_env"],
+            }
         await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(
             argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
