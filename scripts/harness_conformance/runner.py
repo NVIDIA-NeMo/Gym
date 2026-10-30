@@ -8,12 +8,10 @@ import hashlib
 import json
 import math
 import os
-import subprocess
 import sys
-import time
 from pathlib import Path
 
-import psutil
+from scripts.check_suites.process import run_process as run_worker
 
 from nemo_gym import harness_capabilities
 from nemo_gym.harness_capabilities.behavior import inspect_behavior
@@ -42,60 +40,11 @@ def _fingerprint(request: dict, status: int, response: dict) -> str:
 
 
 def run_process(command: list[str], *, directory: Path, timeout: float) -> dict:
-    """Keep logs and reap the worker and its descendants, including new process groups."""
-    with (directory / "episode.log").open("wb") as log:
-        # Probe the checkout being reported, even when another editable Gym or
-        # extra component root is present in the caller's environment.
-        env = {**os.environ, "PYTHONPATH": str(ROOT), "NEMO_GYM_EXTRA_ROOTS": str(ROOT)}
-        proc = subprocess.Popen(
-            command,
-            cwd=ROOT,
-            env=env,
-            stdin=subprocess.DEVNULL,
-            stdout=log,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-        )
-        tracked = {}
-        timed_out = False
-        try:
-            deadline = time.monotonic() + timeout
-            while proc.poll() is None:
-                # CLIs may start their own sessions, so killing only our process group
-                # would leave their children alive after a worker timeout.
-                try:
-                    for child in psutil.Process(proc.pid).children(recursive=True):
-                        tracked[(child.pid, child.create_time())] = child
-                except psutil.NoSuchProcess:
-                    pass
-                remaining = deadline - time.monotonic()
-                if remaining <= 0:
-                    timed_out = True
-                    break
-                try:
-                    proc.wait(timeout=min(0.1, remaining))
-                except subprocess.TimeoutExpired:
-                    pass
-        finally:
-            if proc.poll() is None:
-                proc.terminate()
-            for child in reversed(list(tracked.values())):
-                try:
-                    child.terminate()
-                except psutil.NoSuchProcess:
-                    pass
-            _, alive = psutil.wait_procs(list(tracked.values()), timeout=2)
-            for child in alive:
-                try:
-                    child.kill()
-                except psutil.NoSuchProcess:
-                    pass
-            try:
-                proc.wait(timeout=3)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-                proc.wait()
-    return {"returncode": proc.returncode, "timed_out": timed_out}
+    """Run one episode worker against this checkout, logging to the scenario directory."""
+    # Probe the checkout being reported, even when another editable Gym or
+    # extra component root is present in the caller's environment.
+    env = {**os.environ, "PYTHONPATH": str(ROOT), "NEMO_GYM_EXTRA_ROOTS": str(ROOT)}
+    return run_worker(command, cwd=ROOT, env=env, log_path=directory / "episode.log", timeout=timeout)
 
 
 def inspect_episode(scenario: Scenario, directory: Path, execution: dict) -> dict:
