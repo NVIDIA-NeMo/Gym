@@ -528,6 +528,55 @@ class TestRolloutCollection:
         ]
         empty_global_config.assert_called_once_with()
 
+    @pytest.mark.parametrize(
+        ("num_samples_in_parallel", "expected_limit"),
+        [pytest.param(None, None, id="no limit reports no limit"), pytest.param(2, 2, id="limit of two")],
+    )
+    async def test_run_from_config_dispatches_inside_a_metered_driver_limit(
+        self,
+        tmp_path: Path,
+        monkeypatch: pytest.MonkeyPatch,
+        empty_global_config: MagicMock,
+        num_samples_in_parallel: int | None,
+        expected_limit: int | None,
+    ) -> None:
+        from nemo_gym.telemetry import concurrency
+
+        concurrency._reset_for_testing()
+        input_fpath = tmp_path / "input.jsonl"
+        input_fpath.write_text(
+            "\n".join(
+                json.dumps({AGENT_REF_KEY_NAME: {"name": "alpha"}, "responses_create_params": {"input": []}})
+                for _ in range(3)
+            )
+            + "\n"
+        )
+        config = RolloutCollectionConfig(
+            input_jsonl_fpath=str(input_fpath),
+            output_jsonl_fpath=str(tmp_path / "output.jsonl"),
+            num_samples_in_parallel=num_samples_in_parallel,
+            disable_aggregation=True,
+            disable_health_check=True,
+        )
+        states_during_dispatch = []
+
+        async def post(server_name: str, url_path: str, json: dict) -> FakeResponse:
+            states_during_dispatch.append(dict(concurrency._limit_states()))
+            await asyncio.sleep(0)
+            return FakeResponse(200, {"response": {}})
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha",))
+
+        await RolloutCollectionHelper().run_from_config(config)
+
+        driver_key = concurrency._LimitKey("rollout_driver", "rollouts", None)
+        if expected_limit is None:
+            assert states_during_dispatch == [{}] * 3
+        else:
+            assert {state[driver_key].limit for state in states_during_dispatch} == {expected_limit}
+            assert all(1 <= state[driver_key].active <= expected_limit for state in states_during_dispatch)
+        concurrency._reset_for_testing()
+
     @pytest.mark.parametrize("resume_from_cache", [False, True])
     @pytest.mark.parametrize("route_failures_to_sidecar", [False, True])
     @pytest.mark.parametrize("retain_results_in_memory", [False, True])
