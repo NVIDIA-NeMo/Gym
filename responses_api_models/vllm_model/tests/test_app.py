@@ -4485,6 +4485,20 @@ class TestVLLMConverter:
         assert response.status_code == 200
         assert {field: captured_kwargs[field] for field in extensions} == extensions
 
+    def test_replayed_reasoning_under_both_keys_reaches_the_endpoint_once(self):
+        """An assistant message that replays reasoning as `reasoning` passes ingress validation, which refused the key,
+        and reaches the endpoint under the key ``reasoning_field`` selects only."""
+        client, captured_kwargs = self._chat_client_capturing_upstream(reasoning_field="reasoning_content")
+        assistant = {"role": "assistant", "content": "act", "reasoning": "reason", "reasoning_content": "reason"}
+
+        response = client.post(
+            "/v1/chat/completions",
+            json={"messages": [{"role": "user", "content": "hi"}, assistant, {"role": "user", "content": "next"}]},
+        )
+
+        assert response.status_code == 200
+        assert captured_kwargs["messages"][1] == {"role": "assistant", "content": "act", "reasoning_content": "reason"}
+
     def test_metadata_chat_template_kwargs_override(self, monkeypatch: MonkeyPatch):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -4781,6 +4795,49 @@ class TestReasoningFieldConfig:
 
         assert {key for key in ("reasoning", "reasoning_content") if key in assistant} == expected_keys
         assert all(assistant[key] == "reason" for key in expected_keys)
+
+    @mark.parametrize(
+        "reasoning_field,expected_keys",
+        [
+            ("both", {"reasoning", "reasoning_content"}),
+            ("reasoning", {"reasoning"}),
+            ("reasoning_content", {"reasoning_content"}),
+        ],
+    )
+    @mark.parametrize(
+        "replayed",
+        [
+            {"reasoning": "reason"},
+            {"reasoning": "reason", "reasoning_content": "reason"},
+            {"reasoning": "other", "reasoning_content": "reason"},
+        ],
+        ids=["reasoning", "both-keys", "reasoning-content-wins"],
+    )
+    def test_replayed_reasoning_key_goes_on_under_the_selected_keys(
+        self, monkeypatch: MonkeyPatch, reasoning_field: str, expected_keys: set[str], replayed: dict[str, str]
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        body = self._body("act")
+        body["messages"][0] |= replayed
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), body)["messages"][0]
+
+        assert {
+            key: assistant[key] for key in ("reasoning", "reasoning_content") if key in assistant
+        } == dict.fromkeys(expected_keys, "reason")
+        assert assistant["content"] == "act"
+
+    @mark.parametrize("reasoning_field", ["both", "reasoning", "reasoning_content"])
+    def test_replayed_reasoning_content_alone_is_forwarded_as_it_came(
+        self, monkeypatch: MonkeyPatch, reasoning_field: str
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        model = _make_reasoning_history_model(preserve_content=False, reasoning_field=reasoning_field)
+        body = self._body("act")
+        body["messages"][0]["reasoning_content"] = "reason"
+        assistant = model._preprocess_chat_completion_create_params(MagicMock(), body)["messages"][0]
+
+        assert assistant == {"role": "assistant", "content": "act", "reasoning_content": "reason"}
 
     @mark.parametrize("env_value,expected", [(None, "both"), ("", "both"), ("  reasoning ", "reasoning")])
     def test_default_falls_back_to_env_var(self, monkeypatch: MonkeyPatch, env_value: Any, expected: str) -> None:

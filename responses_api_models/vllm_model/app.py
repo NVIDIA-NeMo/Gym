@@ -1094,6 +1094,17 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
 
+        # A harness may replay an assistant message's reasoning as `reasoning`, alone or beside `reasoning_content`.
+        # Such a message goes on with one copy under the key(s) ``reasoning_field`` selects, as reasoning parsed from
+        # <think> tags does, so a server that rejects a message carrying both keys can be configured for;
+        # `reasoning_content` wins when the two differ. A message with `reasoning_content` alone goes on as it came.
+        for message_dict in body_dict["messages"]:
+            if message_dict.get("role") == "assistant" and "reasoning" in message_dict:
+                reasoning_content = message_dict.pop("reasoning_content", None)
+                reasoning = message_dict.pop("reasoning")
+                if reasoning_content or reasoning:
+                    _set_reasoning(message_dict, reasoning_content or reasoning, self.config.reasoning_field)
+
         body_dict["model"] = self.config.model
 
         chat_template_kwargs = {}

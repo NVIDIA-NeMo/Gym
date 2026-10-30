@@ -1408,8 +1408,10 @@ class NeMoGymChatCompletionAssistantMessageParam(ChatCompletionAssistantMessageP
     # Override the iterable which is annoying to work with.
     content: Union[str, List[ContentArrayOfContentPart], None]
     tool_calls: Optional[NeMoGymChatCompletionMessageToolCallsParam] = None
-    # Some harnesses replay reasoning on assistant history in Chat Completions.
+    # Some harnesses replay reasoning on assistant history in Chat Completions, under either name:
+    # `reasoning_content` (DeepSeek's API, vLLM before 0.16.0) or `reasoning` (vLLM from 0.16.0, OpenRouter).
     reasoning_content: str | None
+    reasoning: str | None
 
 
 class NeMoGymChatCompletionAssistantMessageForTrainingParam(
