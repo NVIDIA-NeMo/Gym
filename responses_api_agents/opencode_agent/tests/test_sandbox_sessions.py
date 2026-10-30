@@ -411,6 +411,39 @@ def test_unsupported_request_is_not_silently_ignored(setup, override):
     sandbox.launch.assert_not_awaited()
 
 
+def test_sampling_the_model_server_pins_is_accepted(setup):
+    """A training framework stamps its sampling and output budget on every row; the policy server pins the same
+    sampling on every engine request and the agent's output budget is tighter, so honoring them changes nothing."""
+    agent, sandbox = setup
+    agent.server_client.global_config_dict["policy"]["responses_api_models"]["openai_model"]["sampling_overrides"] = {
+        "temperature": 1,
+        "top_p": 1,
+    }
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        request = {"input": "Fix the code", "temperature": 1.0, "top_p": 1.0, "max_output_tokens": 196608}
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json=request)
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"]["output"] == 4096
+        client.post("/v1/agent_sessions/close", json=close_body(session_id))
+
+
+@pytest.mark.parametrize("override", [{"temperature": 0.7}, {"top_p": 0.95}])
+def test_sampling_other_than_the_pinned_values_is_refused(setup, override):
+    agent, sandbox = setup
+    agent.server_client.global_config_dict["policy"]["responses_api_models"]["openai_model"]["sampling_overrides"] = {
+        "temperature": 1,
+        "top_p": 1,
+    }
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task", **override})
+        assert result.status_code == 422, result.text
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+    sandbox.launch.assert_not_awaited()
+
+
 def test_rejected_request_does_not_consume_activation(setup):
     agent, sandbox = setup
     with TestClient(agent.setup_webserver()) as client:

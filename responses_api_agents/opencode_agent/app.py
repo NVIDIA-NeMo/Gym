@@ -1160,8 +1160,17 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             agent_session_id=state.request.agent_session_id, agent_observations=observations
         )
 
+    def _pinned_sampling(self) -> Mapping[str, Any]:
+        """The sampling params the agent's model server puts on every engine request (``sampling_overrides``)."""
+        global_config = getattr(self.server_client, "global_config_dict", None) or {}
+        instance = global_config.get(self.config.model_server.name) or {}
+        for server in (instance.get("responses_api_models") or {}).values():
+            return server.get("sampling_overrides") or {}
+        return {}
+
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
         supported = {"input", "instructions", "model"}
+        pinned = self._pinned_sampling()
         for key, field in type(body).model_fields.items():
             if key in supported:
                 continue
@@ -1169,6 +1178,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             if key in ("stream", "background") and value is False:
                 continue
             if key == "metadata" and value and set(value) <= {AGENT_TIMEOUT_METADATA_KEY}:
+                continue
+            # A request field is accepted only when honoring it changes nothing: the model server pins this exact
+            # sampling value on every engine request, or the agent's own output budget is already tighter.
+            if key in ("temperature", "top_p") and key in pinned and value == pinned[key]:
+                continue
+            if key == "max_output_tokens" and value is not None and value >= self.config.max_output_tokens:
                 continue
             if value != field.get_default(call_default_factory=True):
                 raise HTTPException(
