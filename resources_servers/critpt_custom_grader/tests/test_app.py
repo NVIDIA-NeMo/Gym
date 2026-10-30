@@ -1342,7 +1342,7 @@ async def test_token_limit_is_scored_zero_without_regeneration(make_server, has_
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error"])
+@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error", "token_limit_with_error"])
 async def test_uncompleted_response_needs_regeneration(make_server, mode):
     # An uncompleted, incomplete, or error response has no usable source. It carries needs_regeneration, not
     # verifier_unavailable, because reverify would reach the same verdict. The class is not terminal.
@@ -1354,6 +1354,9 @@ async def test_uncompleted_response_needs_regeneration(make_server, mode):
         row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     else:
         row["response"]["error"] = {"code": "server_error", "message": "synthetic"}
+        if mode == "token_limit_with_error":
+            row["response"]["status"] = "incomplete"
+            row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["mask_sample"] is True
