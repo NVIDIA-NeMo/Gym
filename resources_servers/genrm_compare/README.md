@@ -442,11 +442,11 @@ placeholders; `include` is an explicit research ablation. Top-level field ingest
 migration work, so retain the nested field until that migration is complete. Gym HTTP tests do not prove
 zero policy loss or correct advantage statistics in a downstream trainer.
 
-A late request to a retained failed explicit-ID group receives its original failure, even if it contains a
-regenerated answer. To judge again, advance the group attempt for every member. Preserving answers does
-not enable individual judge-only reverification: reconstructing and retrying a full group remains the
-caller's responsibility. The batch `/compare` endpoint returns HTTP 503 when a response keeps no
-successful comparison.
+A late request to a retained failed explicit-ID group, or to a member masked alone in a retained completed
+group, receives its recorded failure, even if it contains a regenerated answer. To judge again, advance the
+group attempt for every member. Preserving answers does not enable individual judge-only reverification:
+reconstructing and retrying a full group remains the caller's responsibility. The batch `/compare` endpoint
+returns HTTP 503 for judge failures.
 
 Failure and server shutdown release waiters and discard stored response bodies. Owned judge tasks are
 cancelled and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their
@@ -486,8 +486,10 @@ this.
   members only.
 - **Consumer requirement:** a masked member's reward is a placeholder. A trainer must keep it out of the
   group's baseline and normalization. In NeMo RL, set `grpo.masked_reward_policy` to `exclude_infra`
-  (`judge_failed` is not a policy failure kind) or to `exclude`. Under `include`, the placeholder 0.0 still
-  counts in the group mean and std, and it shifts the advantages of the member's siblings.
+  (`judge_failed` is not a policy failure kind) or to `exclude`. Under `include`, NeMo RL's default, the
+  placeholder 0.0 still counts in the group mean and std, and it shifts the advantages of the member's
+  siblings. Also keep `env.should_mask_flagged_samples` on, its default. With it off, NeMo RL trains the
+  masked members on their 0.0 rewards.
 - **Reporting:**
   - `/verify` reports `genrm_failed_comparison_rate_per_group` and `genrm_masked_rollout_rate_per_group` on
     each scored member.

@@ -175,7 +175,7 @@ class _CompletedMemberState(BaseModel):
     # Exactly one of these: a completed cohort's reward, or a judge failure, which the caller records as a masked row.
     result: Optional[Dict[str, Any]] = None
     judge_failure: Optional[str] = None
-    # The judge failure masked only this member, which lost a comparison; the rest of the cohort completed.
+    # One of this member's comparisons failed, so it was masked, but its cohort completed.
     masked_alone: bool = False
 
     @model_validator(mode="after")
@@ -506,7 +506,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 self._raise_cohort_failure(body, cohort)
             member = cohort.members.get(rollout_index)
             if member is not None:
-                if member.response_digest != response_digest:
+                # Like a failed group, a member masked alone gets its recorded failure even for a regenerated answer.
+                if member.response_digest != response_digest and rollout_index not in cohort.member_failures:
                     raise HTTPException(
                         status_code=409,
                         detail=(
@@ -816,7 +817,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 raise RuntimeError(f"GenRM returned {len(rewards)} rewards for {len(sorted_indices)} cohort members")
             if len(member_failures) == len(sorted_indices):
                 # No member can be scored, so the whole group fails as a judge failure.
-                raise JudgeError(member_failures[min(member_failures)])
+                first = member_failures[min(member_failures)]
+                raise JudgeError(f"GenRM masked all {len(member_failures)} rollouts of the group; first: {first}")
             if not all(isfinite(reward) for position, reward in enumerate(rewards) if position not in member_failures):
                 raise ValueError("GenRM returned non-finite cohort rewards")
             results_by_index = {
@@ -1433,7 +1435,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
-    ) -> Tuple[List[Optional[ComparisonResult]], List[Tuple[int, int, int]]]:
+    ) -> Tuple[List[ComparisonOutcome], List[Tuple[int, int, int]]]:
         cfg = self.config
         comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, len(response_objs))
         tasks = []

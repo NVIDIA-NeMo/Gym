@@ -86,16 +86,17 @@ async def test_one_failed_comparison_masks_its_two_rollouts(server, caplog):
 
 async def test_neighbors_of_a_masked_rollout_keep_both_comparisons(server):
     """Rollout 4 is still scored from (3, 4) and (4, 5), although rollout 5 is masked by (5, 6)."""
-    seen = []
-    judge = judge_failing({(5, 6)})
 
-    async def recording_judge(*args, pair_idx, **kwargs):
-        seen.append(pair_idx)
-        return await judge(*args, pair_idx=pair_idx, **kwargs)
+    async def judge(_conversation, _response_1, _response_2, *, pair_idx, **_kwargs):
+        if pair_idx == (5, 6):
+            raise genrm.JudgeError(NO_VERDICT)
+        # A rollout gets 0.5 more than its score as response_1 and 0.5 less as response_2,
+        # so its reward is its score only when both of its comparisons count.
+        i, j = pair_idx
+        return comparison_result(SCORES[i] + 0.5, SCORES[j] - 0.5, 3.5)
 
-    server._run_single_comparison = recording_judge
+    server._run_single_comparison = judge
     results = await verify_cohort(server, 16)
-    assert (4, 5) in seen and (6, 7) in seen
     assert results[4].reward == approx(SCORES[4]) and results[7].reward == approx(SCORES[7])
 
 
@@ -134,6 +135,35 @@ async def test_a_non_judge_error_cancels_the_comparisons_still_running(server):
     results = await asyncio.wait_for(verify_cohort(server, 4), 1)
     assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in results)
     assert cancelled == {(2, 3), (3, 0)}
+
+
+@pytest.mark.parametrize("ending", ["non_judge_error", "group_deadline"])
+async def test_a_failed_comparison_is_logged_before_the_group_ends(server, caplog, ending):
+    """The group error names only what ended the group, so each failed comparison is logged as it fails."""
+    if ending == "group_deadline":
+        # A short group deadline, so this case ends well inside the wait_for below.
+        server.config.cohort_evaluation_timeout_s = 0.2
+
+    async def judge(_conversation, _response_1, _response_2, *, pair_idx, **_kwargs):
+        if pair_idx == (1, 2):
+            raise genrm.JudgeError(NO_VERDICT)
+        if pair_idx == (2, 3):
+            # Ends the group after (1, 2) has failed.
+            await asyncio.sleep(0.05)
+            if ending == "non_judge_error":
+                raise ValueError("bad comparison")
+            await asyncio.Event().wait()
+        i, j = pair_idx
+        return comparison_result(SCORES[i], SCORES[j], 3.5)
+
+    server._run_single_comparison = judge
+    with caplog.at_level("WARNING"):
+        results = await asyncio.wait_for(verify_cohort(server, 4), 1)
+    if ending == "non_judge_error":
+        assert all(isinstance(r, HTTPException) and r.status_code == 503 for r in results)
+    else:
+        assert all(isinstance(r, genrm.JudgeError) and "deadline exceeded" in str(r) for r in results)
+    assert "dropped comparison (1, 2)" in caplog.text
 
 
 async def test_masked_rollouts_do_not_shift_group_adjustments(server):
@@ -239,3 +269,16 @@ async def test_fixed_baseline_cohort_masks_the_member_through_verify(server):
     )
     assert isinstance(first, genrm.JudgeError) and "rollout_index=0" in str(first)
     assert second.reward == approx(5.0) and not second.mask_sample
+
+
+async def test_a_regenerated_answer_for_a_masked_member_gets_its_judge_failure(server):
+    server._run_single_comparison = judge_failing({(0, 1)})
+    await verify_cohort(server, 4)
+    server._run_single_comparison = judge_failing(set(), error=AssertionError("judged again"))
+    # Like a failed group, a masked member answers a regenerated response with its recorded failure.
+    with pytest.raises(genrm.JudgeError, match="rollout_index=1 lost a comparison"):
+        await server.verify(request_with_session(), member(1, response_id="regenerated-1"))
+    # A scored member still refuses a different response for its slot.
+    with pytest.raises(HTTPException) as raised:
+        await server.verify(request_with_session(), member(3, response_id="regenerated-3"))
+    assert raised.value.status_code == 409
