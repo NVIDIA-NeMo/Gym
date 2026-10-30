@@ -59,7 +59,7 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
+from nemo_gym.episode_types import EpisodeId, TaskId, is_materialized_task_row
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
@@ -649,10 +649,13 @@ def _trajectory_identity(row: dict[str, Any]) -> tuple[str, str]:
         rollout_id = identity.get("rollout_id")
         if isinstance(task_id, str) and task_id and isinstance(rollout_id, str) and rollout_id:
             return task_id, rollout_id
-    task_id = next(
-        (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
-        str(row[TASK_INDEX_KEY_NAME]),
-    )
+    if is_materialized_task_row(row):
+        task_id = TaskId.model_validate(row["task_id"]).task_id
+    else:
+        task_id = next(
+            (str(row[key]) for key in TASK_ID_FIELDS if row.get(key) is not None),
+            str(row[TASK_INDEX_KEY_NAME]),
+        )
     rollout_id = maybe_rollout_id_from_run_body(row) or f"{row[TASK_INDEX_KEY_NAME]}-{row[ROLLOUT_INDEX_KEY_NAME]}"
     return task_id, rollout_id
 
