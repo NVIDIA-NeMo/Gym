@@ -25,10 +25,15 @@ dwrl_pairwise_compare_resources_server:
         type: responses_api_models
         name: dwrl_model
       
-      # Cohort-based verify (Difference 1): number of rollouts per prompt before running comparison.
-      # When > 1, verify() buffers by prompt and returns relative rewards when cohort is full.
+      # Cohort-based verify (Difference 1): number of rollouts per prompt before rewards are computed.
+      # When > 1, verify() groups the rollouts of a prompt (by task index, prompt and principle) and returns
+      # relative rewards once all of them have been judged. Rewards are a joint Bradley-Terry fit over the
+      # comparisons of the cohort, so they cannot be returned rollout by rollout.
       # Ensure rollout data has this many rows per prompt (e.g. num_repeats in rollout collection).
+      # The rollouts of a prompt are grouped in memory, so this server must run as a single process
+      # (leave num_workers unset or 1).
       num_rollouts_per_prompt: ???
+      num_workers: 1
       
       # Generation params for GenRM calls
       genrm_responses_create_params:
@@ -60,10 +65,14 @@ dwrl_pairwise_compare_resources_server:
       # Shorter responses get bonus, longer get penalty (mean-centered)
       group_reasoning_length_penalty_coeff: 0.0
       group_answer_length_penalty_coeff: 0.0
+      # Group-relative style penalty coefficient
+      # Responses with a higher density of formatting (headers, lists, bold, emojis) get a lower reward (mean-centered)
+      group_style_penalty_coeff: 0.0
       
-      # Default scores when parsing fails
+      # Defaults when parsing or judging fails.
+      # default_ranking is the probability that response 1 is better, so it must be between 0 and 1.
       default_score: 3.0
-      default_ranking: 3.5
+      default_ranking: 0.5
       
       # DWRL-specific
       bt_prompt: "Based on your evaluation, which response is better? Answer with only a single character: 1 or 2"
@@ -73,7 +82,7 @@ dwrl_pairwise_compare_resources_server:
       debug_logging: false
       
       # Parse retry configuration
-      genrm_parse_retries: 3
+      genrm_parse_retries: 0
       genrm_parse_retry_sleep_s: 0.2
       
       # Server metadata
@@ -184,7 +193,7 @@ genrm_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+        jsonl_fpath: resources_servers/dwrl_genrm_compare_pairwise/data/example.jsonl
 
 genrm_simple_agent_reasoning_off:
   responses_api_agents:
@@ -199,4 +208,4 @@ genrm_simple_agent_reasoning_off:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+        jsonl_fpath: resources_servers/dwrl_genrm_compare_pairwise/data/example.jsonl

@@ -20,8 +20,8 @@ This module provides:
 - Comparison pair generation strategies (circular, all_pairs)
 - GenRM output parsing (JSON score extraction)
 - Response API object text extraction
-- Score aggregation with tiebreaker logic
-- Length-based bonus/penalty computation
+- Score aggregation: a Bradley-Terry (Elo) fit of the pairwise judgments of one prompt's rollouts
+- Style-density penalty computation (length bonuses/penalties exist but are disabled in aggregate_scores)
 """
 
 from __future__ import annotations
@@ -384,6 +384,184 @@ def extract_output_text(response_obj: Dict[str, Any]) -> str:
 
 
 # =============================================================================
+# Style Element Counting (Arena-Hard style + emoji)
+# =============================================================================
+
+# Regex pattern to match code blocks (excluded from style counting)
+# NOTE: Non-greedy, matches across newlines, and tolerates backticks inside code.
+_CODE_BLOCK_PATTERN = re.compile(r"```[\s\S]*?```", re.MULTILINE)
+
+# Emoji detection pattern - covers most common emoji ranges
+_EMOJI_CHAR_PATTERN = re.compile(
+    "["
+    "\U0001f600-\U0001f64f"  # emoticons
+    "\U0001f300-\U0001f5ff"  # symbols & pictographs
+    "\U0001f680-\U0001f6ff"  # transport & map symbols
+    "\U0001f1e0-\U0001f1ff"  # flags
+    "\U00002702-\U000027b0"  # dingbats
+    "\U000024c2-\U0001f251"  # enclosed characters
+    "\U0001f900-\U0001f9ff"  # supplemental symbols
+    "\U0001fa00-\U0001fa6f"  # chess symbols
+    "\U0001fa70-\U0001faff"  # symbols and pictographs extended-A
+    "\U00002600-\U000026ff"  # misc symbols
+    "\U00002700-\U000027bf"  # dingbats
+    "]",
+    re.UNICODE,
+)
+
+
+def count_style_elements(text: str) -> Dict[str, int]:
+    """Count style elements in text (Arena-Hard style + emoji).
+
+    Counts markdown formatting elements and emojis, excluding code blocks.
+
+    Args:
+        text: Text to analyze
+
+    Returns:
+        Dictionary with counts for each style element type:
+        - header_count: Total headers (h1-h6)
+        - list_count: Total list items (ordered + unordered)
+        - bold_count: Total bold text occurrences
+        - emoji_count: Total emoji occurrences
+    """
+    # Remove code blocks before counting (same as Arena-Hard)
+    text_no_code = _CODE_BLOCK_PATTERN.sub("", text)
+
+    # Count headers (h1-h6)
+    header_count = len(re.findall(r"^#{1,6}\s", text_no_code, re.MULTILINE))
+
+    # Count lists (ordered + unordered)
+    ordered_list = len(re.findall(r"^\s*\d+\.\s", text_no_code, re.MULTILINE))
+    unordered_list = len(re.findall(r"^\s*[-*+]\s", text_no_code, re.MULTILINE))
+    list_count = ordered_list + unordered_list
+
+    # Count bold text
+    bold_asterisk = len(re.findall(r"\*\*[^*\n]+\*\*", text_no_code))
+    bold_underscore = len(re.findall(r"__[^_\n]+__", text_no_code))
+    bold_count = bold_asterisk + bold_underscore
+
+    # Count emojis
+    # NOTE: this counts individual emoji codepoints in common emoji ranges.
+    # It will *not* perfectly count grapheme clusters for ZWJ sequences, but it
+    # avoids undercounting when multiple emojis appear back-to-back.
+    emoji_count = len(_EMOJI_CHAR_PATTERN.findall(text_no_code))
+
+    return {
+        "header_count": header_count,
+        "list_count": list_count,
+        "bold_count": bold_count,
+        "emoji_count": emoji_count,
+    }
+
+
+def compute_style_density(text: str) -> float:
+    """Compute style density (total style elements / text length).
+
+    Args:
+        text: Text to analyze
+
+    Returns:
+        Style density value (elements per character). Returns 0 if text is empty.
+    """
+    # Keep numerator/denominator consistent: exclude code blocks from both.
+    text_no_code = _CODE_BLOCK_PATTERN.sub("", text)
+    text_len = len(text_no_code.strip())
+    if text_len <= 0:
+        return 0.0
+
+    counts = count_style_elements(text_no_code)
+    total_elements = sum(counts.values())
+
+    return total_elements / text_len
+
+
+def _compute_style_density_weights(densities: List[float]) -> List[float]:
+    """Compute zero-centered weights where lower density = higher weight.
+
+    Similar to _compute_length_weights but for style density.
+    Lower style density (less formatting) gets positive weight (bonus).
+    Higher style density (more formatting) gets negative weight (penalty).
+
+    Args:
+        densities: List of style density values
+
+    Returns:
+        List of weights, zero-centered (sum to ~0)
+    """
+    max_density = max(densities)
+    min_density = min(densities)
+
+    if max_density == min_density:
+        return [0.0] * len(densities)
+
+    span = max_density - min_density
+    # Lower density = weight closer to 1, higher density = weight closer to 0
+    raw_weights = [1.0 - ((density - min_density) / span) for density in densities]
+    # Zero-center
+    mean_weight = sum(raw_weights) / len(raw_weights)
+    return [w - mean_weight for w in raw_weights]
+
+
+def apply_style_penalties(
+    scores: List[float],
+    response_objs: List[Dict[str, Any]],
+    group_style_penalty_coeff: float,
+) -> Tuple[List[float], List[float]]:
+    """Apply style-based penalties to scores.
+
+    Penalizes responses with higher style density (more formatting elements
+    relative to text length). This controls for "style hacking" where models
+    produce verbose formatting to appear more helpful.
+
+    Style elements counted (following Arena-Hard):
+    - Headers (h1-h6)
+    - Lists (ordered and unordered)
+    - Bold text
+    - Emojis (extension beyond Arena-Hard)
+
+    Args:
+        scores: Base scores to adjust (modified in place)
+        response_objs: Response API objects to extract text from
+        group_style_penalty_coeff: Coefficient for style density penalty.
+            Higher values penalize formatting more heavily.
+
+    Returns:
+        Tuple of (adjusted_scores, style_adjustments_per_response)
+    """
+    num_responses = len(response_objs)
+
+    if num_responses < 2 or group_style_penalty_coeff <= 0:
+        return scores, [0.0] * len(scores)
+
+    # Compute style density for each response
+    style_adjustments = [0.0] * num_responses
+    answer_densities: List[float] = []
+
+    for obj in response_objs:
+        _, answer = extract_from_response_obj(obj)
+        density = compute_style_density(answer)
+        answer_densities.append(density)
+
+    logger.info(f"[StyleControl] Densities: {[f'{d:.6f}' for d in answer_densities]}")
+    logger.info(f"[StyleControl] Scores before: {[f'{s:.4f}' for s in scores]}")
+
+    # Compute zero-centered weights (lower density = higher/positive weight)
+    style_weights = _compute_style_density_weights(answer_densities)
+
+    for idx in range(num_responses):
+        adjustment = style_weights[idx] * group_style_penalty_coeff
+        if adjustment != 0:
+            scores[idx] += adjustment
+            style_adjustments[idx] = adjustment
+
+    logger.info(f"[StyleControl] Scores after: {[f'{s:.4f}' for s in scores]}")
+    logger.info(f"[StyleControl] Adjustments: {[f'{a:+.4f}' for a in style_adjustments]}")
+
+    return scores, style_adjustments
+
+
+# =============================================================================
 # Length-Based Bonuses
 # =============================================================================
 
@@ -517,35 +695,48 @@ def aggregate_scores(
     top_percentile: float,
     group_reasoning_length_penalty_coeff: float,
     group_answer_length_penalty_coeff: float,
+    group_style_penalty_coeff: float = 0.0,
     ref_answer_last: bool = False,
 ) -> Tuple[List[float], Dict[str, float], List[float], List[float]]:
     """Aggregate pairwise comparison results into per-response rewards.
 
-    For "simple_tiebreaker" method:
-    - When score_1 == score_2, use ranking to break the tie
-    - ranking < 3.5 means response_1 is better → boost score_1, penalize score_2
-    - ranking > 3.5 means response_2 is better → boost score_2, penalize score_1
+    In the DWRL pairwise setup the third value of each comparison result is not a 1-6 ranking: it is the probability
+    that the GenRM gives to `score_token` for "response 1 is better" (a number in [0, 1]). Every comparison adds that
+    probability as a fractional win of response i over response j, and 1 minus it as a fractional win of j over i. The
+    reward of a response is its Bradley-Terry (Elo) rating, fitted jointly over all comparisons of the prompt (see
+    `get_elo_scores`). Each reward therefore depends on every comparison in the group, not only on the ones that
+    involve that response.
+
+    Without a reference answer the ratings sum to zero. With `ref_answer_last` the last response is the reference
+    answer: it takes part in the fit, its rating is the zero point of the scale, and it is not rewarded.
+
+    The 1-5 scores (score_1, score_2) do not influence the rewards; they only go into the metrics.
 
     Args:
-        comparison_results: List of (score_1, score_2, ranking) from pairwise comparisons
+        comparison_results: List of (score_1, score_2, win_probability) from pairwise comparisons
         comparison_metadata: List of (response_i, response_j, judge_idx) for each comparison
-        response_objs: Raw Response API objects for length bonus computation
-        aggregator_method: Only "simple_tiebreaker" is supported
-        default_score: Default score when no comparisons exist for a response
-        reasoning_bonus: Bonus for shortest reasoning among top performers
-        answer_bonus: Bonus for shortest answer among top performers
-        top_percentile: Percentile threshold for length bonuses
-        group_reasoning_length_penalty_coeff: Coefficient for reasoning length penalty
-        group_answer_length_penalty_coeff: Coefficient for answer length penalty
+        response_objs: Raw Response API objects (the reference answer last, if `ref_answer_last`)
+        aggregator_method: Only "simple_tiebreaker" is supported (the name is a leftover: ratings are fitted)
+        default_score: Unused: every response has to take part in at least one comparison
+        reasoning_bonus: Unused (length bonuses are disabled)
+        answer_bonus: Unused (length bonuses are disabled)
+        top_percentile: Unused (length bonuses are disabled)
+        group_reasoning_length_penalty_coeff: Unused (length bonuses are disabled)
+        group_answer_length_penalty_coeff: Unused (length bonuses are disabled)
+        group_style_penalty_coeff: Coefficient for style density penalty.
+            Penalizes responses with higher density of formatting elements
+            (headers, lists, bold, emojis) relative to text length.
+        ref_answer_last: The last of `response_objs` is the reference answer
 
     Returns:
         Tuple of:
-        - final_scores: Per-response rewards after all adjustments
-        - metrics: Aggregation statistics (mean, std, tiebreak rate)
-        - base_scores: Scores before length bonuses
-        - bonuses: Length bonus applied to each response
+        - final_scores: Per-response rewards after all adjustments (without the reference answer)
+        - metrics: Aggregation statistics (mean and std of the 1-5 scores, tiebreak rate)
+        - base_scores: Scores before the style adjustment
+        - bonuses: Style adjustment applied to each response
 
     Raises:
+        AssertionError: If a response took part in no comparison, or the fit diverged
         ValueError: If aggregator_method is not supported
     """
     if aggregator_method not in SUPPORTED_AGGREGATOR_METHODS:
@@ -596,8 +787,8 @@ def aggregate_scores(
     print("#### ELO_SCORES: ", final_scores, flush=True)
     print("#### ELO_SUM: ", sum(final_scores), flush=True)
 
-    # Store base scores before length adjustments
-    base_scores = final_scores
+    # Store base scores before adjustments
+    base_scores = list(final_scores)
     bonuses = [0.0] * (num_responses - int(ref_answer_last))
 
     # Apply length bonuses if any are configured
@@ -620,6 +811,15 @@ def aggregate_scores(
             group_answer_length_penalty_coeff=group_answer_length_penalty_coeff,
         )
     '''
+
+    # Apply style penalties if configured. The reference answer (if any) is not rewarded, so it has no style score.
+    if group_style_penalty_coeff > 0:
+        final_scores, style_adjustments = apply_style_penalties(
+            scores=final_scores,
+            response_objs=response_objs[: len(final_scores)],
+            group_style_penalty_coeff=group_style_penalty_coeff,
+        )
+        bonuses = [b + sa for b, sa in zip(bonuses, style_adjustments)]
 
     # Compute metrics
     metrics: Dict[str, float] = {}

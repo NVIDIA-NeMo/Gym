@@ -1,18 +1,16 @@
 # DWRL GenRM Pointwise Comparison Resources Server Config
 #
-# This server compares multiple candidate responses using a GenRM model.
-# The GenRM model uses a special chat template with roles 'response_1', 'response_2',
-# and optionally 'principle' (see use_principle and default_principle below).
+# This server judges every rollout on its own with a GenRM model: the GenRM evaluates the response against the
+# principle (see default_principle below), and the reward is the probability that it then answers "yes" (score_token)
+# to bt_prompt. Rollouts are never compared with each other.
 #
-# The GenRM model server is defined by the top-level "genrm_model" block below (same
+# The GenRM model server is defined by the top-level "dwrl_model" block below (same
 # structure as responses_api_models/genrm_model/configs/genrm_model.yaml). Override
 # genrm_model_server.name to use a different model server (e.g. from another config).
 #
-# Expected GenRM output format (JSON):
+# Expected GenRM output format (JSON). It does not influence the reward:
 # {
-#     "score_1": <1-5>,  # Individual helpfulness score for response 1
-#     "score_2": <1-5>,  # Individual helpfulness score for response 2
-#     "ranking": <1-6>   # 1=R1 much better, 6=R2 much better
+#     "score_1": <1-5>  # Helpfulness score of the response
 # }
 
 dwrl_pointwise_compare_resources_server:
@@ -34,6 +32,7 @@ dwrl_pointwise_compare_resources_server:
       
       # Number of judge passes per pair (for majority voting)
       num_judges_per_comparison: 1
+      num_workers: 1
       
       # Principle-based comparison
       use_principle: true
@@ -54,7 +53,10 @@ dwrl_pointwise_compare_resources_server:
       group_answer_length_penalty_coeff: 0.0
       
       # Default scores when parsing fails
-      default_score: -100.0
+      default_score: 3.0
+      # Reward (BT score) of a judge pass whose GenRM call failed. 0.0 so that a failure is never worth more
+      # than a real judgment: the rewards are probabilities that are mostly well below 0.5.
+      default_ranking: 0.0
       
       # DWRL-specific
       bt_prompt: "Based on your evaluation, is the original response good? Answer with only a single word: yes or no"
@@ -64,7 +66,7 @@ dwrl_pointwise_compare_resources_server:
       debug_logging: false
       
       # Parse retry configuration
-      genrm_parse_retries: 3
+      genrm_parse_retries: 0
       genrm_parse_retry_sleep_s: 0.2
       
       # Server metadata
@@ -160,7 +162,7 @@ genrm_simple_agent:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+        jsonl_fpath: resources_servers/dwrl_genrm_compare_pointwise/data/example.jsonl
 
 genrm_simple_agent_reasoning_off:
   responses_api_agents:
@@ -175,4 +177,4 @@ genrm_simple_agent_reasoning_off:
       datasets:
       - name: example
         type: example
-        jsonl_fpath: resources_servers/genrm_compare/data/example.jsonl
+        jsonl_fpath: resources_servers/dwrl_genrm_compare_pointwise/data/example.jsonl

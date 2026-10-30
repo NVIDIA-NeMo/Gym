@@ -14,19 +14,20 @@
 # limitations under the License.
 
 """
-GenRM Pairwise Comparison Resources Server.
+DWRL Pointwise GenRM Resources Server.
 
-Compares multiple candidate responses using a GenRM model via pairwise comparisons.
-The GenRM model expects OpenAI-format messages with special roles 'response_1' and 'response_2'.
+Rewards each rollout by asking a GenRM model to judge that one response on its own. The judge first writes an
+evaluation of the response, then a 1-token call reads the probability that the GenRM gives to `score_token` ("yes").
+That probability is the BT score, and the mean over the judge passes is the reward.
 
-Input:
-- conversation_history: List of user/assistant messages
-- response_objs: List of N candidate Response API objects to compare
+Input (/verify, once per rollout):
+- responses_create_params: The conversation that the rollout answers
+- response: The rollout's Response API object
+- principle: Optional evaluation plan
 
 Output:
-- Per-response rewards after pairwise aggregation
+- The rollout's reward, returned as soon as its judgment is done
 """
-
 from __future__ import annotations
 
 import json
@@ -36,8 +37,7 @@ import math
 import logging
 from typing import Any, Dict, List, Optional, Tuple
 
-from fastapi import FastAPI
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import ConfigDict, Field
 
 from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
@@ -48,7 +48,6 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.config_types import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
-    NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionUserMessageParam,
@@ -56,10 +55,8 @@ from nemo_gym.openai_utils import (
 )
 from resources_servers.dwrl_genrm_compare_pointwise.utils import (
     GenRMOutputParseError,
-    aggregate_scores,
     compute_reward,
     extract_output_text,
-    generate_comparison_pairs,
     parse_genrm_output,
 )
 
@@ -98,7 +95,6 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     Attributes:
         genrm_model_server: Target GenRM model server (default: genrm_model from config)
         genrm_responses_create_params: Base create params for GenRM calls
-        comparison_strategy: "all_pairs" or "circular"
         num_judges_per_comparison: Number of judge passes per pair (majority voting)
         aggregator_method: Method for aggregating scores
         reasoning_bonus: Bonus for shortest reasoning content among top performers
@@ -107,9 +103,10 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
         group_reasoning_length_penalty_coeff: Coefficient for reasoning length penalty
         group_answer_length_penalty_coeff: Coefficient for answer length penalty
         default_score: Default neutral score when parsing fails
-        default_ranking: Default neutral ranking when parsing fails
+        default_ranking: BT score (the reward) of a judge pass whose GenRM call failed
         debug_logging: Enable verbose logging for debugging
-        genrm_parse_retries: Number of retries on parse failures
+        genrm_parse_retries: How many times a judge pass is repeated (both GenRM calls) when its evaluation cannot be
+            parsed. 0 (the default): not repeated, an unparseable evaluation only gets default_score for its 1-5 score
         genrm_parse_retry_sleep_s: Sleep duration between parse retries
         use_principle: Enable principle-based comparison
         default_principle: Default principle when none provided in request
@@ -151,15 +148,17 @@ class GenRMCompareConfig(BaseResourcesServerConfig):
     group_reasoning_length_penalty_coeff: float = 0.0
     group_answer_length_penalty_coeff: float = 0.0
 
-    # Default neutral scores when parsing fails
+    # Defaults when parsing or judging fails. `default_score` stands in for an unparseable 1-5 score. `default_ranking`
+    # is the reward of a pass whose GenRM call failed: 0.0, so that a failure is never worth more than a real score.
     default_score: float = 3.0
-    default_ranking: float = 0.5
+    default_ranking: float = 0.0
 
     # Debug logging
     debug_logging: bool = False
 
-    # Retry config for parse failures
-    genrm_parse_retries: int = 3
+    # Retry config for parse failures. Parsing only raises, and so only triggers a retry, if genrm_parse_retries > 0.
+    # The 1-5 score does not influence the reward, so by default (0) a parse failure only costs a warning.
+    genrm_parse_retries: int = 0
     genrm_parse_retry_sleep_s: float = 0.2
     
     # DWRL specific
@@ -174,22 +173,6 @@ class GenRMCompareVerifyRequest(BaseVerifyRequest):
     model_config = ConfigDict(extra="allow")
 
     principle: Optional[str] = None  # Principle for principle-based GenRM; forwarded by agent when provided
-
-
-class GenRMCompareRequest(BaseModel):
-    """Request payload for GenRM pairwise comparison."""
-
-    conversation_history: List[Dict[str, str]]  # User/assistant messages before the responses
-    response_objs: List[Dict[str, Any]]  # Raw Response API objects from policy model
-    principle: Optional[str] = None  # Principle for principle-based GenRM (e.g., "The response should be helpful")
-
-
-class GenRMCompareResponse(BaseModel):
-    """Response payload with per-response rewards."""
-
-    rewards: List[float]  # One reward per response, in same order as input
-    comparison_results: Optional[List[Dict[str, Any]]] = None  # Detailed pairwise results
-    metrics: Optional[Dict[str, float]] = None  # Aggregation metrics
 
 
 def _input_to_conversation_history(input_messages: Any) -> List[Dict[str, str]]:
@@ -219,7 +202,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
     - /verify: every rollout is judged on its own, and the reward is returned as soon as its judgment is done.
       Nothing is shared between rollouts, so a rollout that never arrives, arrives twice or arrives late cannot
       affect (or block) any other rollout, and the server can run any number of worker processes.
-    - Batch /compare: Direct comparison of N response_objs (legacy pairwise path, e.g. for tests).
     """
 
     config: GenRMCompareConfig
@@ -242,11 +224,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             reward=compute_reward(judge_results),
         )
 
-    def setup_webserver(self) -> FastAPI:
-        app = super().setup_webserver()
-        app.post("/compare")(self.compare)
-        return app
-
     async def _judge_rollout(
         self,
         conversation_history: List[Dict[str, str]],
@@ -261,84 +238,6 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             ]
         )
         return list(results)
-
-    async def _run_compare(
-        self,
-        conversation_history: List[Dict[str, str]],
-        response_objs: List[Dict[str, Any]],
-        principle: Optional[str] = None,
-    ) -> Tuple[List[float], Dict[str, float], List[Tuple[float, float, float]], List[Tuple[int, int, int]]]:
-        """Run pairwise comparison; return (rewards, metrics, comparison_results, comparison_metadata)."""
-        cfg = self.config
-        num_responses = len(response_objs)
-        if num_responses < 2:
-            return [cfg.default_score] * num_responses, {}, [], []
-
-        comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, num_responses)
-        comparison_tasks = []
-        comparison_metadata: List[Tuple[int, int, int]] = []
-        for judge_idx in range(cfg.num_judges_per_comparison):
-            for i, j in comparison_pairs:
-                comparison_tasks.append(
-                    self._run_single_comparison(
-                        conversation_history,
-                        response_objs[i],
-                        response_objs[j],
-                        pair_idx=(i, j),
-                        principle=principle,
-                    )
-                )
-                comparison_metadata.append((i, j, judge_idx))
-        comparison_results = await asyncio.gather(*comparison_tasks)
-        rewards, metrics, _, _ = aggregate_scores(
-            comparison_results=list(comparison_results),
-            comparison_metadata=comparison_metadata,
-            response_objs=response_objs,
-            aggregator_method=cfg.aggregator_method,
-            default_score=cfg.default_score,
-            reasoning_bonus=cfg.reasoning_bonus,
-            answer_bonus=cfg.answer_bonus,
-            top_percentile=cfg.top_percentile,
-            group_reasoning_length_penalty_coeff=cfg.group_reasoning_length_penalty_coeff,
-            group_answer_length_penalty_coeff=cfg.group_answer_length_penalty_coeff,
-        )
-        return rewards, metrics, list(comparison_results), comparison_metadata
-
-    async def compare(self, body: GenRMCompareRequest) -> GenRMCompareResponse:
-        """Compare multiple responses using GenRM pairwise comparisons (batch API)."""
-        cfg = self.config
-        response_objs = body.response_objs
-        conversation_history = body.conversation_history
-        num_responses = len(response_objs)
-        if cfg.debug_logging:
-            logger.info(f"[GenRM] Compare request: {num_responses} responses")
-        if num_responses < 2:
-            return GenRMCompareResponse(
-                rewards=[cfg.default_score],
-                comparison_results=None,
-                metrics=None,
-            )
-        rewards, metrics, comparison_results, comparison_metadata = await self._run_compare(
-            conversation_history, response_objs, principle=body.principle
-        )
-        detailed_results = [
-            {
-                "response_i": i,
-                "response_j": j,
-                "judge_idx": judge_idx,
-                "score_1": score_1,
-                "score_2": score_2,
-                "ranking": ranking,
-            }
-            for (score_1, score_2, ranking), (i, j, judge_idx) in zip(comparison_results, comparison_metadata)
-        ]
-        if cfg.debug_logging:
-            logger.info(f"[GenRM] Final rewards: {[f'{r:.4f}' for r in rewards]}")
-        return GenRMCompareResponse(
-            rewards=rewards,
-            comparison_results=detailed_results,
-            metrics=metrics,
-        )
 
     async def _run_single_comparison(
         self,
@@ -413,22 +312,18 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 #thought_raw_str = raw_response_thought['output'][0]['content'][0]['text']
                 thought_raw_str = raw_response_thought['choices'][0]['message']['content']
 				
-                init_msg.append(NeMoGymEasyInputMessage(
-                    role="assistant",
-                    content=thought_raw_str,
-                    type="message",
-                ))
-                init_msg.append(NeMoGymEasyInputMessage(
-                    role="user",
-                    content=cfg.bt_prompt,
-                    type="message",
-                ))
+                # The second turn continues this attempt's evaluation. It is built here, not appended to init_msg,
+                # so that a later attempt does not see the evaluations of the earlier ones.
+                second_turn_msg = init_msg + [
+                    NeMoGymEasyInputMessage(role="assistant", content=thought_raw_str, type="message"),
+                    NeMoGymEasyInputMessage(role="user", content=cfg.bt_prompt, type="message"),
+                ]
 				
                 responses_second_turn = cfg.genrm_responses_create_params.model_copy(deep=True)
                 #responses_second_turn = NeMoGymChatCompletionCreateParamsNonStreaming(messages=convert_to_chat_completion_format(init_msg))
                 #responses_second_turn.model = "model"
                 #responses_second_turn.input = init_msg
-                responses_second_turn.messages = convert_to_chat_completion_format(init_msg)
+                responses_second_turn.messages = convert_to_chat_completion_format(second_turn_msg)
                 responses_second_turn.logprobs = True
                 responses_second_turn.metadata = {"chat_template_kwargs": json.dumps({"enable_thinking": False}), "extra_body": json.dumps({"chat_template_kwargs": {"enable_thinking": False}})}
                 responses_second_turn.top_p = 1.0
@@ -472,13 +367,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     score_1 = parse_genrm_output(
                         resp_no_thinking2,
                         cfg.default_score,
-                        raise_on_fail=False,
+                        raise_on_fail=cfg.genrm_parse_retries > 0,
                     )
                     print(f"Score_1: {score_1}", flush=True)
                     return score_1, score
 
                 except GenRMOutputParseError as e:
                     if attempt_idx < max_attempts - 1:
+                        logger.warning(
+                            f"[GenRM] Parse failed (attempt {attempt_idx + 1} of {max_attempts}); retrying. {e}"
+                        )
                         await asyncio.sleep(float(cfg.genrm_parse_retry_sleep_s))
                         continue
 

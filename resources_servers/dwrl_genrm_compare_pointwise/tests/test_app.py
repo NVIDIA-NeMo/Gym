@@ -47,9 +47,7 @@ from nemo_gym.openai_utils import (
 from resources_servers.dwrl_genrm_compare_pointwise import app as app_module
 from resources_servers.dwrl_genrm_compare_pointwise.app import (
     GenRMCompareConfig,
-    GenRMCompareRequest,
     GenRMCompareResourcesServer,
-    GenRMCompareResponse,
     GenRMCompareVerifyRequest,
     _input_to_conversation_history,
     convert_to_chat_completion_format,
@@ -139,8 +137,8 @@ class TestGenRMCompareConfig:
         assert config.use_principle is False
         assert config.aggregator_method == "simple_tiebreaker"
         assert config.default_score == 3.0
-        assert config.default_ranking == 0.5
-        assert config.genrm_parse_retries == 3
+        assert config.default_ranking == 0.0
+        assert config.genrm_parse_retries == 0
         assert config.debug_logging is False
 
     @pytest.mark.parametrize("missing", ["score_token", "bt_prompt", "dwrl_prompt"])
@@ -185,6 +183,9 @@ class TestGenRMCompareConfig:
         assert config.genrm_model_server.name == "dwrl_model"
         assert config.score_token == "yes"
         assert config.aggregator_method == "simple_tiebreaker"
+        # A failed GenRM call must not be worth more than a real judgment.
+        assert "default_ranking" in server_config
+        assert config.default_ranking == 0.0
         # The prompts must contain the placeholders that _run_single_comparison fills in.
         for placeholder in ("{context}", "{response}", "{principle}"):
             assert placeholder in config.dwrl_prompt
@@ -193,23 +194,6 @@ class TestGenRMCompareConfig:
 
 
 class TestRequestAndResponseModels:
-    def test_compare_request(self):
-        request = GenRMCompareRequest(
-            conversation_history=[{"role": "user", "content": "What is 2+2?"}],
-            response_objs=[_response_obj("4"), _response_obj("Four")],
-            principle="Be concise",
-        )
-
-        assert len(request.conversation_history) == 1
-        assert len(request.response_objs) == 2
-        assert request.principle == "Be concise"
-
-    def test_compare_response(self):
-        response = GenRMCompareResponse(rewards=[0.7, 0.2], metrics={"mean_individual_score": 0.45})
-
-        assert response.rewards == approx([0.7, 0.2])
-        assert response.comparison_results is None
-
     def test_verify_request_principle_is_optional(self):
         assert _make_verify_request("4").principle is None
         assert _make_verify_request("4", principle="Be concise").principle == "Be concise"
@@ -557,26 +541,43 @@ class TestRunSingleComparison:
         assert score_1 == approx(-100.0)
         assert bt_score == approx(0.75)
 
-    def test_unparseable_evaluation_is_not_retried(self):
-        # genrm_parse_retries only matters if parsing raises, which it does not here (raise_on_fail=False).
-        server, client = self._make(evaluation="I could not decide.", genrm_parse_retries=3)
+    def test_unparseable_evaluation_is_not_retried_by_default(self):
+        # The 1-5 score does not influence the reward, so unless retries are configured a retry would only cost
+        # GenRM calls.
+        server, client = self._make(evaluation="I could not decide.")
         self._run(server)
 
+        assert server.config.genrm_parse_retries == 0
         assert client.post.call_count == 2
+
+    def test_unparseable_evaluation_logs_the_parser_warning_when_there_are_no_retries(self, caplog):
+        server, _ = self._make(evaluation="I could not decide.")
+        with caplog.at_level(logging.WARNING):
+            self._run(server)
+
+        assert "No parseable JSON found in GenRM output" in caplog.text
+        assert "retrying" not in caplog.text
 
     def test_server_error_returns_default_results(self):
         client = MagicMock()
         client.post = AsyncMock(side_effect=RuntimeError("GenRM server is down"))
-        server = _make_server(_make_config(default_score=-100.0, default_ranking=0.5), client)
+        server = _make_server(_make_config(default_score=-100.0), client)
 
-        assert self._run(server) == (-100.0, 0.5)
+        assert self._run(server) == (-100.0, 0.0)
+
+    def test_the_result_of_a_failed_call_is_the_configured_default_ranking(self):
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=RuntimeError("GenRM server is down"))
+        server = _make_server(_make_config(default_score=-100.0, default_ranking=0.2), client)
+
+        assert self._run(server) == (-100.0, 0.2)
 
     def test_malformed_server_response_returns_default_results(self):
         client = MagicMock()
         client.post = AsyncMock(return_value=_http_response({"unexpected": "shape"}))
-        server = _make_server(_make_config(default_score=-100.0, default_ranking=0.5), client)
+        server = _make_server(_make_config(default_score=-100.0), client)
 
-        assert self._run(server) == (-100.0, 0.5)
+        assert self._run(server) == (-100.0, 0.0)
 
     def test_missing_logprobs_returns_default_results(self):
         client = MagicMock()
@@ -586,9 +587,122 @@ class TestRunSingleComparison:
                 _http_response({"choices": [{"message": {"content": "yes"}}]}),
             ]
         )
-        server = _make_server(_make_config(default_score=-100.0, default_ranking=0.5), client)
+        server = _make_server(_make_config(default_score=-100.0), client)
 
-        assert self._run(server) == (-100.0, 0.5)
+        assert self._run(server) == (-100.0, 0.0)
+
+
+class TestRunSingleComparisonWithParseRetries:
+    """With `genrm_parse_retries > 0` an evaluation that cannot be parsed is repeated: both GenRM calls, from scratch.
+    Every attempt has to be an independent evaluate-then-score exchange."""
+
+    UNPARSEABLE = "cut off before any json"
+
+    @staticmethod
+    def _make(probabilities, evaluations, retries=1, **config):
+        """The GenRM answers attempt k with evaluations[k] and a probability of "yes" of probabilities[k]."""
+        responses = []
+        for evaluation, probability in zip(evaluations, probabilities):
+            responses.append(_http_response(_evaluation_payload(evaluation)))
+            responses.append(
+                _http_response(_score_payload(("yes", math.log(probability)), ("no", math.log(1 - probability))))
+            )
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=responses)
+        config.setdefault("genrm_parse_retry_sleep_s", 0.0)
+        config = _make_config(genrm_parse_retries=retries, **config)
+        return _make_server(config, client), client
+
+    @staticmethod
+    def _run(server):
+        return asyncio.run(server._run_single_comparison([{"role": "user", "content": "q"}], _response_obj("a")))
+
+    def test_a_retry_uses_the_result_of_the_later_attempt(self):
+        server, client = self._make([0.9, 0.2], [self.UNPARSEABLE, JUDGE_JSON])
+
+        assert self._run(server) == (4.0, approx(0.2))
+        assert client.post.call_count == 4
+
+    def test_no_retry_when_the_first_attempt_parses(self):
+        server, client = self._make([0.9], [JUDGE_JSON], retries=3)
+
+        assert self._run(server) == (4.0, approx(0.9))
+        assert client.post.call_count == 2
+
+    def test_the_second_attempt_does_not_see_the_first_one(self):
+        server, client = self._make([0.9, 0.2], [self.UNPARSEABLE, "second evaluation " + JUDGE_JSON])
+        self._run(server)
+
+        second_score_request = client.post.call_args_list[3].kwargs["json"]
+        assert [m["role"] for m in second_score_request.messages] == ["user", "assistant", "user"]
+        assert second_score_request.messages[1]["content"].startswith("second evaluation")
+        assert second_score_request.messages[2]["content"] == BT_PROMPT
+
+    def test_every_attempt_evaluates_the_same_prompt(self):
+        server, client = self._make([0.9, 0.2], [self.UNPARSEABLE, JUDGE_JSON])
+        self._run(server)
+
+        first, second = (client.post.call_args_list[i].kwargs["json"].messages for i in (0, 2))
+        assert first == second
+        assert len(first) == 1
+
+    def test_the_number_of_attempts_is_the_number_of_retries_plus_one(self):
+        server, client = self._make([0.5] * 3, [self.UNPARSEABLE] * 3, retries=2)
+        self._run(server)
+
+        assert client.post.call_count == 2 * 3
+
+    def test_giving_up_keeps_the_bt_score_of_the_last_attempt(self, caplog):
+        server, client = self._make([0.9, 0.2], [self.UNPARSEABLE] * 2, default_score=-100.0)
+        with caplog.at_level(logging.WARNING, logger=app_module.logger.name):
+            result = self._run(server)
+
+        assert result == (-100.0, approx(0.2))
+        assert client.post.call_count == 4
+        assert "after 2 attempts; falling back to defaults" in caplog.text
+
+    def test_every_retry_is_logged(self, caplog):
+        server, _ = self._make([0.5] * 3, [self.UNPARSEABLE] * 3, retries=2)
+        with caplog.at_level(logging.WARNING, logger=app_module.logger.name):
+            self._run(server)
+
+        retries = [r.getMessage() for r in caplog.records if "retrying" in r.getMessage()]
+        assert len(retries) == 2
+        assert "attempt 1 of 3" in retries[0]
+        assert "attempt 2 of 3" in retries[1]
+
+    def test_a_successful_retry_is_logged_but_does_not_give_up(self, caplog):
+        server, _ = self._make([0.9, 0.2], [self.UNPARSEABLE, JUDGE_JSON])
+        with caplog.at_level(logging.WARNING, logger=app_module.logger.name):
+            self._run(server)
+
+        assert "retrying" in caplog.text
+        assert "falling back to defaults" not in caplog.text
+
+    @pytest.mark.parametrize("retries, raises", [(0, False), (1, True), (3, True)])
+    def test_the_parser_raises_only_if_retries_are_configured(self, monkeypatch, retries, raises):
+        seen = []
+        real_parse = app_module.parse_genrm_output
+
+        def spy(*args, **kwargs):
+            seen.append(kwargs["raise_on_fail"])
+            return real_parse(*args, **kwargs)
+
+        monkeypatch.setattr(app_module, "parse_genrm_output", spy)
+        server, _ = self._make([0.9] * (retries + 1), [self.UNPARSEABLE] * (retries + 1), retries=retries)
+        self._run(server)
+
+        assert seen == [raises] * (retries + 1)
+
+    def test_the_sleep_between_retries_is_the_configured_one(self, monkeypatch):
+        sleep = AsyncMock()
+        monkeypatch.setattr(app_module.asyncio, "sleep", sleep)
+        server, _ = self._make(
+            [0.9, 0.2], [self.UNPARSEABLE, JUDGE_JSON], genrm_parse_retry_sleep_s=0.5
+        )
+        self._run(server)
+
+        sleep.assert_awaited_once_with(0.5)
 
 
 class TestJudgeRollout:
@@ -846,6 +960,33 @@ class TestVerifyFailures:
         for i in range(NUM_ROLLOUTS):
             if i != 2:
                 assert results[i].reward == approx(BT_SCORES[i])
+
+
+class TestVerifyGenRMFailure:
+    def test_a_rollout_whose_genrm_call_failed_gets_a_reward_of_zero(self):
+        client = MagicMock()
+        client.post = AsyncMock(side_effect=RuntimeError("GenRM server is down"))
+        server = _make_server(_make_config(), client)
+
+        result = _run(server.verify(_make_verify_request("4")))
+
+        assert result.reward == 0.0
+
+    def test_every_pass_of_a_failed_call_counts_in_the_mean(self):
+        # One pass fails (0.0) and the other judges the rollout 0.8: the mean is 0.4.
+        client = MagicMock()
+        client.post = AsyncMock(
+            side_effect=[
+                RuntimeError("GenRM server is down"),
+                _http_response(_evaluation_payload(JUDGE_JSON)),
+                _http_response(_score_payload(("yes", math.log(0.8)), ("no", math.log(0.2)))),
+            ]
+        )
+        server = _make_server(_make_config(num_judges_per_comparison=2), client)
+
+        result = _run(server.verify(_make_verify_request("4")))
+
+        assert result.reward == approx(0.4)
 
 
 class TestVerifyRandomizedSchedules:

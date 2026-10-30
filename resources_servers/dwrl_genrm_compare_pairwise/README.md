@@ -1,89 +1,136 @@
-# GenRM Pairwise Comparison Resources Server
+# DWRL Pairwise GenRM Resources Server
 
-A resources server that compares multiple candidate responses using a **Generative Reward Model (GenRM)** via pairwise comparisons. This module is designed for RLHF (Reinforcement Learning from Human Feedback) training workflows, particularly for GRPO (Group Relative Policy Optimization).
+A resources server that rewards the rollouts of a prompt by comparing them **in pairs** with a **Generative Reward Model (GenRM)** and fitting **Bradley-Terry (Elo) ratings** to the comparisons. It is used as the reward source for RLHF-style GRPO training (DWRL: the GenRM is a trained judge that is asked which of two responses is better). Its counterpart `dwrl_genrm_compare_pointwise` judges every rollout on its own instead.
 
-## Overview
+## At a glance
 
-The GenRM compare server evaluates multiple candidate responses by:
+- **The rollouts of a prompt are rewarded together.** `/verify` is called once per rollout, but the rollouts of one prompt are grouped into a *cohort*, their responses are compared in pairs, and each rollout's reward is its rating in a model fitted to all of the cohort's comparisons.
+- **A reward depends on the whole cohort.** Changing one comparison changes the rating of every response, including ones not in that comparison. This is why `/verify` returns only when the whole cohort has been judged, and why this server (unlike the pointwise one) must run as a single process.
+- **The reward is a rating in log-odds units**, not a probability and not a 1-5 score. Without a reference answer the ratings of a cohort sum to zero; with one, a reward is the rating relative to the reference answer.
+- **The GenRM is the cost.** A comparison is two GenRM calls (a long evaluation and a 1-token call). A cohort of N rollouts with the `circular` strategy takes N comparisons, plus N more if there is a reference answer.
 
-1. **Generating comparison pairs** based on a configurable strategy
-2. **Sending pairs to a GenRM model** using special roles (`response_1`, `response_2`)
-3. **Parsing JSON scores** from the GenRM output
-4. **Aggregating pairwise results** into per-response rewards
+## How a pair is judged
 
-### Architecture
+For a comparison of responses `i` and `j` (and each of the `num_judges_per_comparison` passes):
+
+### 1. The evaluation call
+
+The server fills `dwrl_prompt` and sends it to the GenRM as a single user message through `/v1/chat/completions` (sampling parameters from `genrm_responses_create_params`, e.g. `temperature: 1.0`, `max_tokens: 16384`). The placeholders are:
+
+| Placeholder | Filled with |
+|---|---|
+| `{context}` | The conversation that the rollouts answer, flattened to text as `System: ...`, `User: ...`, `Assistant: ...`, separated by blank lines. Thinking (`<think>...</think>`, and an unterminated `...</think>` prefix) is removed from assistant turns. |
+| `{response_1}`, `{response_2}` | The **final answers** of the two responses (the text of their `output_text` parts). Reasoning items are not shown to the judge. An empty answer becomes the placeholder `None`. |
+| `{principle}` | The `principle` of the request if it has one, else `default_principle` from the config. |
+
+The GenRM answers with an analysis of both responses followed by a JSON object, e.g. `{"response_1_analysis": "...", "response_2_analysis": "...", "score_1": 4, "score_2": 3, "ranking": 2}`.
+
+### 2. The score call
+
+The evaluation is appended to the conversation as an assistant turn, followed by the user message `bt_prompt` (*"Based on your evaluation, which response is better? Answer with only a single character: 1 or 2"*). A second call with `max_tokens: 1`, `logprobs: true`, `top_logprobs: 20`, `temperature: 1.0`, `top_p: 1.0` and thinking turned off asks for a single token.
+
+The result of the comparison is the probability `p` that this token is `score_token` (`"1"`, i.e. "response 1 is better"):
+
+1. a top logprob whose token is exactly `score_token`, else
+2. one whose token matches after `.lower().strip()` (e.g. `" 1"`), else
+3. **0.0, with a warning in the log.** A token outside the top 20 has a probability of at most 1/20, so 0 is the right order of magnitude. This is also what happens for *every* comparison if `score_token` does not match the GenRM's tokens.
+
+### 3. The scores in the JSON are not used
+
+The JSON is parsed for `score_1`, `score_2` and `ranking` (thinking removed first), but **none of them influences the reward**. They only feed the metrics of `/compare`. If the JSON cannot be parsed, a warning is logged and `default_score` is used for the two scores. By default (`genrm_parse_retries: 0`) nothing is retried, since the scores do not influence the reward and a retry would only cost GenRM calls. If `genrm_parse_retries` is greater than 0, an evaluation that cannot be parsed is judged again (the same pair), from scratch (both GenRM calls, with a fresh evaluation), up to that many more times, waiting `genrm_parse_retry_sleep_s` seconds between attempts. The result of the comparison is then the probability from the first attempt that parses, or from the last attempt if none does. An unparseable evaluation is usually one that was cut off at `max_tokens`, so a retry gives it a second chance to complete; each retry costs two more GenRM calls.
+
+### Position of the responses
+
+The probability is that of "response 1 is better", so a GenRM that prefers whatever comes first would bias it. Which responses are shown first depends on the strategy:
+
+- `circular`: every response is response 1 in one comparison and response 2 in another, which balances a position bias.
+- `all_pairs`: the response that arrived earlier is always response 1.
+- The reference answer is always response 2.
+
+## Rewards
+
+### The Bradley-Terry fit
+
+Every comparison of `i` and `j` with result `p` adds `p` as a fractional win of `i` over `j`, and `1 - p` as a fractional win of `j` over `i`. The reward of a response is its rating `r` in the Bradley-Terry model
 
 ```
-GenRM Compare Resources Server
-    ├── Pair Generation (circular or all_pairs)
-    ├── Message Formatting (response_1, response_2 roles)
-    ├── Call GenRM Model (/v1/responses) for each pair
-    ├── Parse JSON scores from GenRM output
-    └── Aggregate into per-response rewards
+P(i beats j) = sigmoid(r_i - r_j)
 ```
 
-**Key Design:** Uses the GenRM Response API Model (server name `genrm_model` by default) which properly handles custom roles through `GenRMConverter`. The default config includes a `genrm_model` block (local vLLM); set `genrm_model_server.name` to another server if you use a separate model config or remote endpoint.
+fitted to all comparisons of the cohort by unregularized logistic regression (`get_elo_scores` in `utils.py`; scale 1, natural log). Passes of several judges add up, so they act as their mean probability.
 
-### Expected GenRM Output Format
+- With one comparison of `p = 0.8` between two responses, their ratings differ by `ln(0.8 / 0.2) = 1.39` and are `+0.69` and `-0.69`.
+- Without a reference answer the ratings of a cohort sum to zero.
+- With a reference answer, it takes part in the fit as an extra response with the highest index (always response 2 in its comparisons), its rating is the zero point, and it is not rewarded. A reward above 0 means that the GenRM prefers the rollout to the reference answer.
+- Ratings can be large if the GenRM is very sure: a probability of `1 - 1e-9` is about 20 log-odds. The server asserts that every rating stays below 100 in magnitude.
 
-The GenRM model should output JSON in the following format:
+### Style penalty (optional)
 
-```json
-{
-    "score_1": 4,    // Individual helpfulness score for response 1 (1-5)
-    "score_2": 3,    // Individual helpfulness score for response 2 (1-5)
-    "ranking": 2     // Relative ranking: 1=R1 much better, 6=R2 much better
-}
-```
+If `group_style_penalty_coeff > 0`, rollouts with a higher *style density* than the others in the cohort get a lower reward. The density is the number of headers, list items, bold spans and emojis (code blocks excluded) per character of the answer. The rollouts' densities are turned into zero-centered weights (lowest density: highest weight) and `weight * group_style_penalty_coeff` is added to each rating. It is off by default and the reference answer is not part of it.
 
-### Score Interpretation
+### Length bonuses are disabled
 
-- **Individual helpfulness scores** (`score_1`, `score_2`): Range from 1 to 5, where higher means better.
-- **Ranking score**: Range from 1 to 6:
-  - 1 = Response 1 is much better than Response 2
-  - 2 = Response 1 is better than Response 2
-  - 3 = Response 1 is slightly better than Response 2
-  - 4 = Response 2 is slightly better than Response 1
-  - 5 = Response 2 is better than Response 1
-  - 6 = Response 2 is much better than Response 1
+`reasoning_bonus`, `answer_bonus`, `top_percentile` and the two `group_*_length_penalty_coeff` settings are accepted, but the code that applies them is switched off in `aggregate_scores`.
 
-### Compatible GenRM Models
+## Cohorts
 
-| Model | Principle Support | Notes |
-|-------|-------------------|-------|
-| [nvidia/Qwen3-Nemotron-235B-A22B-GenRM](https://huggingface.co/nvidia/Qwen3-Nemotron-235B-A22B-GenRM) | ❌ No | 235B MoE model (22B active). Used for training Nemotron-3-Nano. Supports `response_1` and `response_2` roles. |
+### Grouping
 
-> **Note**: The GenRM model must have a chat template that supports the special roles `response_1` and `response_2`. The conversation history should use standard `user` and `assistant` roles, with the last turn being a user turn.
+`verify()` groups rollouts by a key made of the task index (`_ng_task_index`, or else `prompt_id`, when there is one) and a hash of the prompt, the principle and the reference answer. Rollouts are numbered in arrival order. A cohort is full at `num_rollouts_per_prompt` members; the next rollout with the same key starts a new cohort (the same prompt twice in a batch, or in a later epoch). The reference answer is part of the key, so rollouts compared against different reference answers never share a cohort.
 
-## Quick Start
+If `num_rollouts_per_prompt` is 1 or less, `verify()` returns `default_score` without judging anything.
 
-### 1. Configuration
+### Who judges what
 
-Create or modify the config file to point to your GenRM model:
+A comparison is judged as soon as both of its responses have arrived, by the request that arrived last of the two. A comparison against the reference answer is judged by the request of the rollout, as soon as it arrives. Each comparison is therefore judged exactly once, and the GenRM is busy while the cohort is still filling. For a cohort of 4 with the `circular` strategy:
 
-```yaml
-genrm_compare:
-  resources_servers:
-    genrm_compare:
-      entrypoint: app.py
-      
-      genrm_model_server:
-        type: responses_api_models
-        name: genrm_model  # Default: use the genrm_model block from config (or another loaded config)
-      
-      genrm_responses_create_params:
-        input: []
-        max_output_tokens: 16384
-        temperature: 0.6
-        top_p: 0.95
-      
-      comparison_strategy: circular
-      num_judges_per_comparison: 1
-```
+| Arrival | Judges | Total comparisons started |
+|---|---|---|
+| rollout 0 | nothing (with a reference: 0 vs reference) | 0 |
+| rollout 1 | 0 vs 1 | 1 |
+| rollout 2 | 1 vs 2 | 2 |
+| rollout 3 | 2 vs 3 and 3 vs 0 | 4 |
 
-### 2. API Usage
+### Completion
 
-Send a POST request to the `/compare` endpoint:
+The rewards are computed by whichever request finishes judging last, not by the one that arrived last. Judging takes a long and highly variable time, so these are generally different requests: the last arrival can finish before an earlier one is done. Until then no request returns. When the last comparison is in, the ratings are fitted and every waiting request is given its rollout's reward.
+
+### Repeated requests
+
+A request can be delivered twice (for example a client that retries after a dropped connection). A request that repeats one that is being handled (same cohort key, same `_ng_rollout_index` and the same response) takes no slot in the cohort and is not judged again: it waits for the reward of the request it repeats. This also covers a repeat that arrives after the cohort has filled up but before it has been finished. If the original request failed, the repeat fails as well. Cancelling a repeat does not cancel the original. A repeat that arrives after the cohort has been finished is not recognized.
+
+### Failures
+
+| What happens | Result |
+|---|---|
+| A GenRM call fails (connection error, HTTP error, malformed answer) | The comparison gets the neutral probability `default_ranking` (0.5), with an error in the log |
+| `score_token` is not in the top 20 logprobs | The comparison gets 0.0, with a warning |
+| The evaluation JSON cannot be parsed, and no retries are configured (the default) | No effect on the reward (a warning is logged) |
+| The evaluation JSON cannot be parsed, and `genrm_parse_retries > 0` | The evaluation is repeated (the same pair) up to `genrm_parse_retries` times. The comparison uses the probability of the first attempt that parses, or of the last one if none does |
+| A request fails or is cancelled (e.g. the client disconnects) | The comparisons that it was to judge are filled in with the neutral result so the rest of the cohort is not left waiting. That request fails, and the others get their rewards |
+| The rewards of a cohort cannot be computed (a response with no comparison, or a fit that diverges) | Every request of the cohort fails, instead of waiting forever |
+
+### Known limitations
+
+- **A rollout that never reaches `verify()`** (for example because its generation failed) leaves the other members of its cohort waiting for it. There is no timeout.
+- **A late repeat** (after the cohort was finished) starts a cohort of its own and waits for members that never come.
+- **Single process.** The cohorts are kept in memory, so with `num_rollouts_per_prompt > 1` a config with `num_workers > 1` is rejected at startup.
+
+## Endpoints
+
+### POST `/verify`
+
+Called by the agent for every rollout. The request is the usual verify request (`responses_create_params`, `response`) plus any fields of the dataset row, since the agent forwards the whole row. The ones that matter here:
+
+- `principle` (optional): the evaluation plan for this prompt. Default: `default_principle`.
+- `ref_answer` (optional): the reference answer. Every rollout is also compared with it.
+- `_ng_task_index`, `_ng_rollout_index` (added by Gym) and `prompt_id` (optional): identify the cohort and the rollout.
+
+The response is the usual verify response with `reward` set.
+
+### POST `/compare`
+
+A batch API that judges the given responses as a single group, without any grouping or waiting. It uses the configured strategy and has no reference answer.
 
 ```json
 {
@@ -98,197 +145,183 @@ Send a POST request to the `/compare` endpoint:
 }
 ```
 
-### 3. Response Format
+The response has the rewards and the result of every comparison. `ranking` is the win probability of response `i`, and the metrics summarize the parsed 1-5 scores:
 
 ```json
 {
-    "rewards": [3.5, 4.2],
+    "rewards": [0.42, -0.42],
     "comparison_results": [
-        {
-            "response_i": 0,
-            "response_j": 1,
-            "judge_idx": 0,
-            "score_1": 3.0,
-            "score_2": 4.0,
-            "ranking": 4.0
-        }
+        {"response_i": 0, "response_j": 1, "judge_idx": 0, "score_1": 4.0, "score_2": 3.0, "ranking": 0.7},
+        {"response_i": 1, "response_j": 0, "judge_idx": 0, "score_1": 3.0, "score_2": 4.0, "ranking": 0.3}
     ],
-    "metrics": {
-        "mean_individual_score": 3.5,
-        "std_individual_score": 0.5,
-        "tiebreak_usage_rate": 0.0
-    }
+    "metrics": {"mean_individual_score": 3.5, "std_individual_score": 0.5, "tiebreak_usage_rate": 0.0}
 }
 ```
 
-## Configuration Options
+## Configuration
+
+See `configs/dwrl_genrm_compare_pairwise.yaml`. `num_rollouts_per_prompt` has to be supplied (it is `???`), normally the number of generations per prompt of the training run.
+
+```yaml
+dwrl_pairwise_compare_resources_server:
+  resources_servers:
+    dwrl_genrm_compare_pairwise:
+      entrypoint: app.py
+
+      genrm_model_server:        # The model server that runs the GenRM (the dwrl_model block of the same file)
+        type: responses_api_models
+        name: dwrl_model
+
+      num_rollouts_per_prompt: 8   # = grpo.num_generations_per_prompt
+      comparison_strategy: circular
+      num_judges_per_comparison: 1
+
+      score_token: "1"
+      bt_prompt: "Based on your evaluation, which response is better? Answer with only a single character: 1 or 2"
+      dwrl_prompt: |
+        ... {context} ... {response_1} ... {response_2} ... {principle} ...
+```
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `genrm_model_server` | ModelServerRef | *required* | Reference to the GenRM model server (default: `genrm_model`) |
-| `genrm_responses_create_params` | object | *required* | Generation parameters for GenRM calls |
-| `comparison_strategy` | string | `"circular"` | Pair generation strategy: `"circular"` or `"all_pairs"` |
-| `num_judges_per_comparison` | int | `1` | Number of judge passes per pair (for majority voting) |
-| `use_principle` | bool | `false` | Enable principle-based comparison |
-| `default_principle` | string | *(see config)* | Default principle when none provided in request |
-| `aggregator_method` | string | `"simple_tiebreaker"` | Score aggregation method |
-| `reasoning_bonus` | float | `0.0` | Bonus for shortest reasoning among top performers |
-| `answer_bonus` | float | `0.0` | Bonus for shortest answer among top performers |
-| `top_percentile` | float | `0.2` | Percentile threshold for applying bonuses |
-| `group_reasoning_length_penalty_coeff` | float | `0.0` | Coefficient for reasoning length penalty |
-| `group_answer_length_penalty_coeff` | float | `0.0` | Coefficient for answer length penalty |
-| `default_score` | float | `3.0` | Default score when parsing fails |
-| `default_ranking` | float | `3.5` | Default ranking when parsing fails |
-| `debug_logging` | bool | `false` | Enable verbose logging |
-| `genrm_parse_retries` | int | `3` | Number of retries on parse failures |
-| `genrm_parse_retry_sleep_s` | float | `0.2` | Sleep duration between retries |
+| `genrm_model_server` | ModelServerRef | *required* | The model server that runs the GenRM |
+| `genrm_responses_create_params` | object | *required* | Parameters of the evaluation call. The score call copies them and overrides `max_tokens`, `temperature`, `top_p`, `logprobs` and `top_logprobs` |
+| `score_token` | string | *required* | The token whose probability is the probability that response 1 is better |
+| `bt_prompt` | string | *required* | The question asked after the evaluation to read that probability |
+| `dwrl_prompt` | string | *required* | Template of the evaluation prompt with `{context}`, `{response_1}`, `{response_2}`, `{principle}`. Literal braces (e.g. in the JSON example) are written `{{` and `}}` |
+| `num_rollouts_per_prompt` | int | `1` | Size of a cohort. At `1` or less `verify()` returns `default_score` without judging |
+| `comparison_strategy` | string | `"circular"` | `"circular"` (N comparisons) or `"all_pairs"` (N(N-1)/2) |
+| `num_judges_per_comparison` | int | `1` | Number of independent judge passes per pair (at least 1). Each is a full evaluation sampled separately; their probabilities are averaged in the fit |
+| `default_principle` | string | *(see config)* | Evaluation plan when the request has none |
+| `group_style_penalty_coeff` | float | `0.0` | Style density penalty. `0` disables it |
+| `default_ranking` | float | `0.5` | Win probability of a comparison that could not be judged. Must be between 0 and 1: it is added to the win counts that the ratings are fitted to |
+| `default_score` | float | `3.0` | The 1-5 scores of an unparseable evaluation, and the reward when `num_rollouts_per_prompt <= 1` |
+| `genrm_parse_retries` | int | `0` | How many times an evaluation that cannot be parsed is repeated (the same pair). `0` disables retries. Each retry is two more GenRM calls |
+| `genrm_parse_retry_sleep_s` | float | `0.2` | Seconds to wait between a failed attempt and its retry |
 
-## Comparison Strategies
+Accepted but with no effect on `/verify`: `use_principle`, `aggregator_method` (only `"simple_tiebreaker"` is accepted, whatever it says), `reasoning_bonus`, `answer_bonus`, `top_percentile`, `group_reasoning_length_penalty_coeff`, `group_answer_length_penalty_coeff`, and `debug_logging` (only `/compare` reads it).
 
-### Circular Strategy (`circular`)
+### The GenRM server
 
-Each response is compared with the next in a circular fashion. For N responses, this produces exactly N comparisons.
+The packaged yaml also defines `dwrl_model`, a `local_vllm_model` that serves the GenRM in the Gym process group. Set `model` (the GenRM checkpoint), `hf_home`, and `vllm_serve_kwargs` (`tensor_parallel_size`, `data_parallel_size`, `max_model_len`, ...) to fit the nodes it runs on. The prompts (conversation plus two responses plus plan) are long, so the context length has to be comfortably above the longest pair of rollouts. The yaml also defines the `genrm_simple_agent` agents that call this server, with the example dataset.
 
-```
-Responses: [R0, R1, R2, R3]
-Pairs: (0,1), (1,2), (2,3), (3,0)
-```
+## Logs and diagnostics
 
-**Use case**: Efficient for large batches where full pairwise comparison is too expensive.
+| Output | Meaning |
+|---|---|
+| `### BT_SCORE:  0.0123` | The probability read from the score call, one line per comparison |
+| `Score_1: 4.0   Score_2: 3.0` | The parsed 1-5 scores, one line per comparison |
+| `#### ELO_SCORES:` / `#### ELO_SUM:` | The fitted ratings of a cohort, and their sum (about 0 without a reference answer) |
+| `Score token '...' not found in the top N logprobs` | The score token was not among the top logprobs. Many of these means a wrong `score_token` |
+| `No parseable JSON found in GenRM output` | An evaluation without a parsable JSON, usually cut off at `max_tokens`. Logged by the parser when `genrm_parse_retries` is 0. Harmless for the reward |
+| `[GenRM] Parse failed for pair (i, j) (attempt N of M); retrying` | An evaluation could not be parsed and is being repeated (only with `genrm_parse_retries > 0`) |
+| `[GenRM] Parse failed for pair (i, j) after M attempts; falling back to defaults` | Every attempt failed to parse. The 1-5 scores take `default_score` and the probability of the last attempt is used |
+| `[GenRM] Error in comparison for pair (i, j)` | A GenRM call failed; that comparison got `default_ranking` |
+| `[GenRM] Repeated verify request for rollout_index=...` | A repeated request was recognized and is waiting for the original |
+| `[GenRM] Failed to aggregate cohort scores` | The ratings of a cohort could not be computed; every request of that cohort failed. The traceback follows |
 
-### All Pairs Strategy (`all_pairs`)
+## Differences from the other GenRM servers
 
-Every pair of responses is compared. For N responses, this produces C(N,2) = N×(N-1)/2 comparisons.
+| | `genrm_compare` | `dwrl_genrm_compare_pairwise` (this) | `dwrl_genrm_compare_pointwise` |
+|---|---|---|---|
+| Judge input | Two responses | Two responses | One response |
+| GenRM output used | 1-5 scores and 1-6 ranking from JSON | Probability that response 1 is better (second call) | Probability of "yes" (second call) |
+| Reward | Mean of scores with a ranking tiebreak, relative to the group | Bradley-Terry rating fitted over the group's comparisons | The probability itself |
+| Depends on other rollouts | Yes | Yes | No |
+| Groups rollouts of a prompt | Yes | Yes (cohorts) | No |
+| Reference answer | No | Optional, as an anchor of the ratings | No |
+| Worker processes | 1 | 1 | Any |
 
-```
-Responses: [R0, R1, R2, R3]
-Pairs: (0,1), (0,2), (0,3), (1,2), (1,3), (2,3)
-```
-
-**Use case**: More accurate rankings when computational budget allows.
-
-## Score Aggregation
-
-### Simple Tiebreaker Method
-
-The `simple_tiebreaker` aggregator:
-
-1. **Collects scores** from all pairwise comparisons for each response
-2. **Breaks ties** using the ranking field when `score_1 == score_2`:
-   - `ranking < 3.5` → response_1 is better (boost score_1, penalize score_2)
-   - `ranking > 3.5` → response_2 is better (boost score_2, penalize score_1)
-3. **Averages scores** across all comparisons for each response
-4. **Applies length bonuses** (if configured)
-
-### Length-Based Adjustments
-
-Two types of length adjustments are supported:
-
-1. **Top-performer bonuses**: Shortest reasoning/answer among top scorers gets a bonus
-2. **Group-relative penalties**: Scores adjusted based on relative length within the group (shorter = bonus, longer = penalty, zero-centered)
-
-## Principle-Based Comparison
-
-When `use_principle: true`, a principle message is added to the GenRM input, guiding the comparison criteria. The principle can be:
-
-- Provided per-request via the `principle` field
-- Defaulted to `default_principle` in config
-
-Example principle:
-> "The response should be helpful, relevant, and concise. Prefer responses that correctly answer the question without unnecessary verbosity."
-
-> **Note**: Your GenRM model's chat template must support the `principle` role for this feature to work. The server sends a message with `role: "principle"` containing the principle text. If your model's chat template does not handle this role, the principle will be ignored or may cause errors.
-
-## File Structure
+## File structure
 
 ```
-genrm_compare/
+dwrl_genrm_compare_pairwise/
 ├── __init__.py
-├── app.py                         # Main Resources Server implementation
-├── comparison_strategies.py       # Comparison strategy infrastructure (GenRMStrategy)
-├── utils.py                       # Utility functions (parsing, aggregation, etc.)
+├── app.py                         # Resources server: /verify with cohorts, /compare, the GenRM calls
+├── cohort.py                      # Cohort bookkeeping: grouping, comparison slots, repeated requests
+├── utils.py                       # Prompt keys, output parsing, Bradley-Terry fit, style penalty
 ├── configs/
-│   └── genrm_compare.yaml        # Default configuration
+│   └── dwrl_genrm_compare_pairwise.yaml   # Default configuration (including the GenRM model block)
+├── data/
+│   ├── example.jsonl              # 5 example input rows
+│   ├── example_metrics.json       # Statistics of example.jsonl (generated by gym dataset collate)
+│   └── example_rollouts.jsonl     # 5 example rollouts (generated from a live run)
 ├── tests/
 │   ├── __init__.py
-│   ├── test_app.py               # Server tests
-│   ├── test_comparison_strategies.py  # Strategy tests
-│   └── test_utils.py             # Utility function tests
-└── README.md                     # This file
+│   ├── test_app.py                # Server tests: GenRM calls, verify() schedules, failures, repeats
+│   ├── test_cohort.py             # Cohort bookkeeping tests
+│   └── test_utils.py              # Parsing, prompt keys, Bradley-Terry fit, style penalty tests
+└── README.md                      # This file
 ```
 
-## API Endpoints
+## Example data
 
-### POST `/compare`
+`data/` holds the three example files that Gym expects from every resources server (see `CONTRIBUTING.md`, and `_validate_data_single` in `nemo_gym/cli/env.py`, which `gym env test` runs):
 
-Compare multiple candidate responses.
+| File | What it is | How it is made |
+|---|---|---|
+| `example.jsonl` | Exactly 5 input rows, the first 5 rows of a training dataset | Hand-maintained. This is the input of everything below |
+| `example_metrics.json` | Statistics of `example.jsonl` (number of examples, tools, turns and words, plus a count of every other column) | Generated by `gym dataset collate`. Do not edit it by hand: Gym writes a `*_conflict.json` file if the metrics it computes differ from the checked-in ones |
+| `example_rollouts.jsonl` | Exactly 5 rollouts: the example rows run through the agent, so each row also has the policy model's `response` and the server's `reward` | Generated from a live policy model and GenRM (see "Regenerating the files") |
 
-**Request Body** (`GenRMCompareRequest`):
-- `conversation_history`: List of `{"role": str, "content": str}` messages
-- `response_objs`: List of Response API objects to compare
-- `principle` (optional): Custom principle for this comparison
+`example_metrics.json` is found through the `datasets` entry of the agents in `configs/dwrl_genrm_compare_pairwise.yaml`, whose `jsonl_fpath` has to point at this folder's own `example.jsonl`.
 
-**Response** (`GenRMCompareResponse`):
-- `rewards`: List of rewards (one per response, same order as input)
-- `comparison_results`: Detailed pairwise comparison results
-- `metrics`: Aggregation statistics
+### The rows
 
-### POST `/verify`
+A row is a Gym run request: the conversation to answer and the agent that answers it. Everything else on the row is forwarded to `/verify`.
 
-Stub endpoint for base class compatibility. Returns the default score.
+```json
+{
+    "responses_create_params": {"input": [{"role": "user", "content": "What is \"SKILL\"?"}], "tools": [], "parallel_tool_calls": false},
+    "agent_ref": {"type": "responses_api_agents", "name": "genrm_simple_agent"},
+    "dataset": "hs3"
+}
+```
 
-## Error Handling
+- `agent_ref.name` is one of the agents that the config defines: `genrm_simple_agent` (policy model with reasoning on) or `genrm_simple_agent_reasoning_off`.
+- `principle` (optional): the evaluation plan of this row. Without it `default_principle` is used, which is what the training data does.
+- `ref_answer` (optional): a reference answer. Every rollout of the row is also compared with it, and rewards are relative to it. Without it the rollouts are only compared with each other.
 
-The server handles failures gracefully:
+### Regenerating the files
 
-- **Parse failures**: Retries up to `genrm_parse_retries` times with sleep between attempts
-- **Connection errors**: Falls back to default scores
-- **Single response**: Returns default score (no comparison possible)
+Both generated files need Gym's servers, so they are regenerated where the policy model and the GenRM can run, not by hand. Things that are easy to miss: the agents in the config use the model servers `policy_model` and `policy_model_reasoning_off`, and only `policy_model` comes from a Gym config (`responses_api_models/vllm_model/configs`), so define the second one as the training configs do; `dwrl_model` has `model: ???`, which has to be given; and `num_rollouts_per_prompt` is `???` too, which has to be given even to compute the metrics.
+
+```bash
+# example_metrics.json (writes data/example_metrics.json next to example.jsonl)
+gym dataset collate "+config_paths=[<policy model config>,resources_servers/dwrl_genrm_compare_pairwise/configs/dwrl_genrm_compare_pairwise.yaml]" \
+    +dwrl_pairwise_compare_resources_server.resources_servers.dwrl_genrm_compare_pairwise.num_rollouts_per_prompt=5 \
+    +output_dirpath=data/dwrl_genrm_compare_pairwise \
+    +mode=example_validation
+```
+
+**Rollouts need a cohort.** Rewards are fitted over all rollouts of a prompt, and `verify()` waits until `num_rollouts_per_prompt` of them have arrived. The 5 example rows are 5 different prompts, so running them once each would leave every cohort short of rollouts and the run would hang. To get exactly 5 rollouts that form one cohort, run the first row 5 times:
+
+```bash
+gym env start "+config_paths=[<policy model config>,resources_servers/dwrl_genrm_compare_pairwise/configs/dwrl_genrm_compare_pairwise.yaml]" \
+    +dwrl_pairwise_compare_resources_server.resources_servers.dwrl_genrm_compare_pairwise.num_rollouts_per_prompt=5
+gym eval run --no-serve +agent_name=genrm_simple_agent \
+    +input_jsonl_fpath=resources_servers/dwrl_genrm_compare_pairwise/data/example.jsonl \
+    +output_jsonl_fpath=resources_servers/dwrl_genrm_compare_pairwise/data/example_rollouts.jsonl \
+    +limit=1 +num_repeats=5
+```
+
+The 5 rows of the result are then 5 rollouts of the first example row, and their `reward` values are the ratings of that one cohort.
+
+The metrics in the repository were produced by Gym's own metrics code (`nemo_gym.train_data_utils`) on the checked-in `example.jsonl`. The `gym` commands above are the generic Gym flow and have not been run for this server.
+
+**How the checked-in `example_rollouts.jsonl` was made:** not with the commands above, but by running the first example row 5 times through the DWRL training setup in NeMo-RL (`env.nemo_gym.is_trajectory_collection=true`, which writes each rollout's `/run` result to `trajectory_collection.jsonl`), with `num_rollouts_per_prompt=5` and the GRPO reward penalties switched off so that `reward` is the server's reward. These are 5 real rollouts of one prompt from a policy model with reasoning on, judged by the GenRM as one cohort. The example row has no `ref_answer`, so the ratings are relative to each other and sum to 0. Two edits were made to the output: the `prompt_str` and `generation_str` fields that vLLM adds to each message were removed (they duplicate the content), and `response.model` was replaced by `policy_model` (it held a checkpoint path).
 
 ## Development
 
-### Running Tests
-
 ```bash
-cd resources_servers/genrm_compare
-pytest tests/ -v
+pytest resources_servers/dwrl_genrm_compare_pairwise/tests -v
 ```
 
-### Running the Server
+## Related components
 
-```bash
-python app.py --config configs/genrm_compare.yaml
-```
-
-## Comparison Strategies Integration
-
-The `comparison_strategies.py` module provides the infrastructure for integrating this Resources Server with rollout collection workflows (e.g., GRPO training):
-
-**Key Components:**
-
-- **`ComparisonStrategy` Protocol**: Interface for comparison strategies
-- **`GenRMStrategy`**: Implementation that calls this Resources Server
-- **`GenRMStrategyConfig`**: Configuration for strategy behavior
-- **Utility functions**: For prompt grouping, text extraction, response generation
-
-**Integration with Rollout Collection:**
-
-When configured in `rollout_collection.py`, the strategy:
-1. Generates N responses per prompt using the policy model
-2. Buffers responses by prompt+principle
-3. Calls this Resources Server's `/compare` endpoint
-4. Attaches rewards and metrics to results
-
-See `examples/genrm_grpo_example.yaml` for complete configuration.
-
-## Related Components
-
-- **GenRM Model**: `responses_api_models/genrm_model/` - Response API model with custom roles (`response_1`, `response_2`, `principle`); default config uses server name `genrm_model` (local vLLM)
-- **Comparison Strategies**: `comparison_strategies.py` (in this package) - Strategy infrastructure
-- **Base VLLM Model**: `responses_api_models/vllm_model/` - Generic model (unchanged)
-- **Type Definitions**: `nemo_gym/openai_utils.py` - Custom role type support
-- **Rollout Collection**: `nemo_gym/rollout_collection.py` - Integrates comparison strategies
-- **Design Doc**: `docs/design_notes/genrm_reward_model_refactoring.md`
+- **Pointwise counterpart**: `resources_servers/dwrl_genrm_compare_pointwise/` - judges every rollout on its own, so rewards are returned as soon as the rollout is judged
+- **Original server**: `resources_servers/genrm_compare/` - the 1-6 ranking based version these servers were derived from
+- **Model server**: `responses_api_models/local_vllm_model/` - serves the GenRM
 
 ## License
 
