@@ -23,14 +23,20 @@ class ResumeDecision:
     payload: Optional[dict[str, Any]] = None
 
 
+def _message_id(message: dict[str, Any]) -> str:
+    """A message's id: the export keeps it beside ``info``, because OpenCode stores it on the row, not in the data."""
+    return message.get("id") or message["info"]["id"]
+
+
 def resume_payload(messages: list[dict[str, Any]]) -> dict[str, Any]:
     """Re-enter the last user message, keeping its model and agent settings, with no new parts."""
-    users = [message["info"] for message in messages if message["info"].get("role") == "user"]
+    users = [message for message in messages if message["info"].get("role") == "user"]
     if not users:
         raise ValueError("cannot resume an OpenCode session without a saved user turn")
     # Message IDs order the conversation; a resume updates the user message's timestamps.
-    user = max(users, key=lambda info: info["id"])
-    payload: dict[str, Any] = {"messageID": user["id"], "parts": []}
+    latest = max(users, key=_message_id)
+    user = latest["info"]
+    payload: dict[str, Any] = {"messageID": _message_id(latest), "parts": []}
     for name in ("agent", "system", "format", "tools"):
         if user.get(name) is not None:
             payload[name] = user[name]
