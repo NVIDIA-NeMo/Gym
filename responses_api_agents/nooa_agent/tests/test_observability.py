@@ -963,3 +963,28 @@ def test_without_atom_session_context_the_reported_parent_call_is_kept() -> None
     trace.after_agent_call(context=child, exception=None)
     trace.after_agent_call(context=root, exception=None)
     assert trace._invocations["child"].parent_invocation_id == "root"
+
+
+def test_the_root_atom_session_is_parented_to_the_trace_session_that_opened_it(monkeypatch) -> None:
+    pytest.importorskip("nooa.tracing._session")
+    from nooa.tracing import _session
+    from opentelemetry import context as otel_context
+
+    from responses_api_agents.nooa_agent import observability
+
+    attributes: dict[str, str] = {}
+    monkeypatch.setattr(_session, "get_span_attributes", lambda context=None: attributes)
+    monkeypatch.setattr(
+        otel_context, "get_value", lambda key, context=None: "trace-1" if key == "session.id" else None
+    )
+
+    # Entry calls before Atom opens a session: the trace session stands in.
+    assert observability._current_atom_session() == ("trace-1", None)
+    # The root Atom session (no Atom parent) hangs off the trace session.
+    attributes.update({observability.ATOM_SESSION_ID_ATTR: "root-atom"})
+    assert observability._current_atom_session() == ("root-atom", "trace-1")
+    # A delegated session keeps its Atom parent.
+    attributes.update(
+        {observability.ATOM_SESSION_ID_ATTR: "child", observability.ATOM_SESSION_PARENT_ATTR: "root-atom"}
+    )
+    assert observability._current_atom_session() == ("child", "root-atom")

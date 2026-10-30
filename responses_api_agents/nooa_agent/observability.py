@@ -61,10 +61,11 @@ TRACE_SESSION_ID_ATTR = "session.id"
 
 
 def _current_atom_session() -> tuple[str | None, str | None]:
-    """(Atom session id, parent session id) of the current trace context; the root has no parent.
+    """(session id, parent session id) of the current trace context.
 
-    Atom stamps child sessions' spans with `nooa.atom.session.*` through NOOA's trace context; the root session
-    carries only the trace session id, which Atom sets to the root session's id. Without NOOA tracing, (None, None).
+    Atom stamps its sessions' spans with `nooa.atom.session.*` through NOOA's trace context (the root Atom session
+    has no Atom parent). Calls made before any Atom session opens carry only NOOA's trace session id, which stands
+    in as their session and as the root Atom session's parent. Without NOOA tracing, (None, None).
     """
     try:
         from nooa.tracing._session import get_span_attributes
@@ -72,10 +73,15 @@ def _current_atom_session() -> tuple[str | None, str | None]:
     except ImportError:
         return None, None
     attributes = get_span_attributes()
+    trace_session_id = otel_context.get_value(TRACE_SESSION_ID_ATTR)
     session_id = attributes.get(ATOM_SESSION_ID_ATTR)
     if session_id is None:
-        session_id = otel_context.get_value(TRACE_SESSION_ID_ATTR)
+        session_id = trace_session_id
     parent_id = attributes.get(ATOM_SESSION_PARENT_ATTR)
+    if parent_id is None and trace_session_id is not None and str(session_id) != str(trace_session_id):
+        # The root Atom session has no Atom parent; the entry calls (solve, send_message) that opened it carry
+        # only the trace session id, so they are its parent.
+        parent_id = trace_session_id
     return (str(session_id) if session_id is not None else None, str(parent_id) if parent_id is not None else None)
 
 
