@@ -1,0 +1,32 @@
+name: agentic_vbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: agent
+description: Agentic-VBench, 100 pinned video-editing tasks (Repair, Assembly, Sequencing,
+  Repurpose) run verbatim through upstream Harbor 0.6.6 / OpenCode 1.14.39 in task
+  containers and scored by each task's native verifier.
+modality: text, image, video, audio
+licensing: Apache-2.0
+authors:
+- arushig
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: null
+agent_server: agentic_vbench_agent
+datasets:
+- name: agentic_vbench
+  type: benchmark
+  jsonl_fpath: benchmarks/agentic_vbench/data/agentic_vbench_benchmark.jsonl
+  prepare_script: benchmarks/agentic_vbench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+# The agent hands the task's own prompt to OpenCode inside the container.
+prompt_source: agent
+lifecycle: active
