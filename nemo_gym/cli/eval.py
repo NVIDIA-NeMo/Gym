@@ -664,12 +664,17 @@ def e2e_rollout_collection():  # pragma: no cover
         finally:
             rh.shutdown()
     _exit_if_terminated()
-    _check_collection_completion(
-        output_fpath,
-        require_complete=rollout_collection_config.require_complete,
-        completed=collection_completed,
-        interrupted=interrupted,
-    )
+    try:
+        _check_collection_completion(
+            output_fpath,
+            require_complete=rollout_collection_config.require_complete,
+            completed=collection_completed,
+            interrupted=interrupted,
+        )
+    except BaseException:
+        # A custom driver can return normally while saved coverage still rejects completion.
+        mark_run_failed()
+        raise
 
 
 _terminated = False
