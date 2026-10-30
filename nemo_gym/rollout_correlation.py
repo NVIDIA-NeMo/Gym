@@ -142,6 +142,9 @@ def verifier_invocation_context(invocation_id: str) -> Iterator[None]:
 class RolloutContextMiddleware:
     """Strip a rollout prefix and expose it to downstream Gym calls for this request."""
 
+    # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
+    skipped_on_direct_mcp_dispatch = True
+
     # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
     # Anchor the id between the prefix and the remaining path.
     _PREFIX = re.compile(

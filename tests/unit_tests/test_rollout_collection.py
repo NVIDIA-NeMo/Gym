@@ -26,6 +26,7 @@ import warnings
 import weakref
 from asyncio import Future
 from collections import Counter, defaultdict
+from collections.abc import Awaitable, Callable
 from contextlib import nullcontext
 from copy import deepcopy
 from pathlib import Path
@@ -37,7 +38,13 @@ import orjson
 import pytest
 import uvicorn
 import yaml
-from aiohttp import ClientConnectorError, ClientResponseError, ClientSession, ServerDisconnectedError
+from aiohttp import (
+    ClientConnectorError,
+    ClientPayloadError,
+    ClientResponseError,
+    ClientSession,
+    ServerDisconnectedError,
+)
 from anyio import CancelScope
 from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
@@ -205,6 +212,28 @@ class FakeResponse:
 
     def release(self) -> None:
         self.released = True
+
+    async def read(self) -> bytes:
+        return orjson.dumps(self.payload)
+
+
+def _guarded_replies(replies: list) -> Callable[..., Awaitable]:
+    """A transport side effect that returns `replies` in order and fails the test on any request past them.
+
+    `AsyncMock(side_effect=list)` raises StopAsyncIteration when the list runs out, which the request retry loop
+    treats as a failed attempt and retries, so an unexpected extra request would hang instead of failing.
+    """
+    remaining = list(replies)
+
+    async def send(*_args, **_kwargs):
+        if not remaining:
+            pytest.fail(f"unexpected extra request after {len(replies)} expected")
+        reply = remaining.pop(0)
+        if isinstance(reply, BaseException):
+            raise reply  # As AsyncMock does for an exception in its side_effect list.
+        return reply
+
+    return send
 
 
 def http_error(status: int, message: str = "boom", body: bytes | None = None) -> ClientResponseError:
@@ -1731,6 +1760,100 @@ class TestRolloutCollection:
         for call in transport.request.call_args_list:
             assert call.kwargs["url"] == "http://agent:1234/run"
             assert "_resend_after_disconnect" not in call.kwargs
+
+    @pytest.mark.parametrize("route_failures_to_sidecar", [False, True])
+    @pytest.mark.parametrize("retry_requests", [True, False])
+    async def test_run_reply_cut_off_mid_body_is_one_failed_attempt(
+        self, monkeypatch: pytest.MonkeyPatch, retry_requests: bool, route_failures_to_sidecar: bool
+    ) -> None:
+        """Each /run sent starts an episode, so a cut-off reply is not resent; collection's failure handling owns it.
+
+        It ends the run, or with ``route_failures_to_sidecar`` it is a failure row that resume retries within
+        ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``. The server answered 200, so the rollout ran.
+        """
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update({"host": "agent", "port": 1234})
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        # The real read: collection's own read of the reply is the step under test.
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", nemo_gym.server_utils.get_response_json)
+        replies = []
+        for _ in range(3):
+            cut_off = FakeResponse(200, {"reward": 0})
+            cut_off.read = AsyncMock(side_effect=ClientPayloadError("Response payload is not completed"))
+            replies.append(cut_off)
+        transport = MagicMock(request=AsyncMock(side_effect=_guarded_replies(replies)))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: transport)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        run = RolloutCollectionHelper().run_examples(
+            [failing_row()], retry_requests=retry_requests, route_failures_to_sidecar=route_failures_to_sidecar
+        )
+        if route_failures_to_sidecar:
+            _, result = await next(run)
+            assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+            assert result["_ng_failure_type"] == "ClientPayloadError"
+            assert result["_ng_failure_http_status"] == 200
+            assert NG_TERMINAL_KEY not in result
+            assert replies[0].released
+        else:
+            with pytest.raises(ClientPayloadError):
+                await next(run)
+        assert transport.request.await_count == 1
+
+    @pytest.mark.parametrize(
+        ("reply", "reward", "failure_body"),
+        [
+            pytest.param(
+                b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 39\r\n\r\n"
+                b'{"detail": "verifier failed: KeyError"}',
+                None,
+                '{"detail": "verifier failed: KeyError"}',
+                id="complete-500",
+            ),
+            pytest.param(
+                b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{"reward": 1.0}',
+                1.0,
+                None,
+                id="complete-200",
+            ),
+        ],
+    )
+    async def test_a_complete_run_reply_over_http_reaches_collection_unchanged(
+        self, monkeypatch: pytest.MonkeyPatch, reply: bytes, reward: float | None, failure_body: str | None
+    ) -> None:
+        """A complete error reply keeps its body in the failure row; a complete success reply keeps its result."""
+        requests = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            requests.append(1)
+            if len(requests) > 1:
+                writer.write(b"HTTP/1.1 599 Unexpected Extra Request\r\nContent-Length: 0\r\n\r\n")
+            else:
+                writer.write(reply)
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        config = install_fake_server_client(monkeypatch, AsyncMock()).global_config_dict
+        config.my_environment_server.environment_servers.legacy_agent.update(
+            {"host": "127.0.0.1", "port": server.sockets[0].getsockname()[1]}
+        )
+        client = ServerClient(head_server_config=BaseServerConfig(host="head", port=11000), global_config_dict=config)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "setup_server_client_utils", lambda *_args, **_kwargs: client)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "get_response_json", nemo_gym.server_utils.get_response_json)
+        monkeypatch.setattr(nemo_gym.rollout_collection, "raise_for_status", nemo_gym.server_utils.raise_for_status)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            run = RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True)
+            _, result = await next(run)
+        if failure_body is None:
+            assert result["reward"] == reward and NG_FAILURE_CLASS_KEY not in result
+        else:
+            assert result[NG_FAILURE_CLASS_KEY] == AGENT_RUN_ERROR_FAILURE_CLASS
+            assert result["_ng_failure_http_status"] == 500
+            assert result["_ng_failure_response_body"] == failure_body
+        assert len(requests) == 1
 
     @pytest.mark.parametrize("error", [RuntimeError("dispatcher bug"), asyncio.CancelledError()])
     async def test_run_examples_propagates_non_request_failures(

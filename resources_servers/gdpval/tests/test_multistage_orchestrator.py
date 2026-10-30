@@ -3584,6 +3584,171 @@ class TestPrepareResume:
         assert [s["eval_elo"] for s in again] == [s["eval_elo"] for s in base]
 
 
+class TestCompletionContract:
+    """`require_complete` (set by `gym eval submit`) on the multistage driver: accepted stages pass, open ones fail."""
+
+    TASK_IDS = [f"t{i}" for i in range(20)]
+    POLICY = {
+        "min_per_reference_success_fraction": 0.5,
+        "min_successful_rows_per_reference": 1,
+        "tolerate_unresolved": True,
+    }
+    LOST = {NG_FAILURE_CLASS_KEY: "kill_shaped", NG_NO_PERSIST_KEY: True}
+
+    async def _run(self, out_dir: Path, monkeypatch: pytest.MonkeyPatch, result_for, *, resume: bool = False):
+        """Run stages ``[10 @ 90%, 20 tasks x 2 refs @ 95%]``; ``result_for(row, position)`` answers each row."""
+        dispatched: List[Dict[str, Any]] = []
+        scored = _fake_run_rollouts_factory()
+        task_ids = self.TASK_IDS
+
+        class FakeHelper:
+            def _preprocess_rows_from_config(self, config):
+                return _materialized_rows(task_ids)
+
+            def _run_examples_with_metadata(self, rows, **kwargs):
+                dispatched.extend(dict(row) for row in rows)
+
+                async def done(row, position):
+                    result = result_for(row, position)
+                    if result == "success":
+                        ((_, result),) = await scored([row])
+                    return rollout_collection_module._CompletedRollout(
+                        row=row, result=dict(result), rollout_latency_ms=None
+                    )
+
+                return [done(row, position) for position, row in enumerate(rows)]
+
+            async def _call_aggregate_metrics(self, results, rows, output_fpath):
+                return out_dir / "aggregate.json"
+
+        monkeypatch.setattr(rollout_collection_module, "RolloutCollectionHelper", FakeHelper)
+        monkeypatch.setattr(
+            "resources_servers.gdpval.multistage_orchestrator.ensure_distribution",
+            lambda *args, **kwargs: (_distribution(task_ids), None),
+        )
+        config = rollout_collection_module.RolloutCollectionConfig(
+            input_jsonl_fpath=str(out_dir / "input.jsonl"),
+            output_jsonl_fpath=str(out_dir / "rollouts.jsonl"),
+            resume_from_cache=resume,
+            route_failures_to_sidecar=True,
+            require_complete=True,
+        )
+        stages = [
+            {"num_tasks": 10, "partial_completion": {"min_success_fraction": 0.9, **self.POLICY}},
+            {"num_tasks": 20, "num_models": 2, "partial_completion": {"min_success_fraction": 0.95, **self.POLICY}},
+        ]
+        global_config = {
+            "multistage": {"enabled": True, "stages": stages, "seed": 0, "reuse_cached_deliverables": False},
+            "gdpval": {
+                "resources_servers": {
+                    "gdpval": {"reference_models": {key: {"elo": elo} for key, elo in REF_ELOS.items()}}
+                }
+            },
+        }
+        await run_e2e_multistage(config, global_config)
+        return dispatched
+
+    @staticmethod
+    def _rows(path: Path) -> List[Dict[str, Any]]:
+        return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
+
+    async def test_stages_accepted_partial_pass_the_completion_check(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # One retryable failure per stage: 9/10 meets 90% and 19/20 meets 95%, so both stages are accepted.
+        await self._run(
+            tmp_path,
+            monkeypatch,
+            lambda row, position: {NG_FAILURE_CLASS_KEY: "agent_timeout"} if position == 0 else "success",
+        )
+
+        plans, outcomes, _ = read_journal(journal_path_for(tmp_path / "rollouts.jsonl"))
+        assert {index: outcome["status"] for index, outcome in outcomes.items()} == {
+            0: "partial_complete",
+            1: "partial_complete",
+        }
+        assert [len(outcomes[index]["omitted_keys"]) for index in (0, 1)] == [1, 1]
+        rows = self._rows(tmp_path / "rollouts.jsonl")
+        assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [9, 19]
+
+    async def test_a_stage_left_open_with_retryable_rows_fails_the_run(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Stage 0: 2 rows return and 8 are lost with their worker, so 2/10 misses 90% and stage 1 is never planned.
+        with pytest.raises(RuntimeError, match="2/10 samples completed"):
+            await self._run(tmp_path, monkeypatch, lambda row, position: "success" if position < 2 else self.LOST)
+
+        assert [row["stage_index"] for row in self._rows(tmp_path / "rollouts.jsonl")] == [0, 0]
+        plans, _, _ = read_journal(journal_path_for(tmp_path / "rollouts.jsonl"))
+        assert set(plans) == {0}
+
+    async def test_a_resume_finishes_only_the_open_rows_and_then_passes(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with pytest.raises(RuntimeError, match="2/10 samples completed"):
+            await self._run(tmp_path, monkeypatch, lambda row, position: "success" if position < 2 else self.LOST)
+        saved = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row
+            for row in self._rows(tmp_path / "rollouts.jsonl")
+        }
+
+        dispatched = await self._run(tmp_path, monkeypatch, lambda row, position: "success", resume=True)
+
+        resumed = [
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in dispatched if row["stage_index"] == 0
+        ]
+        assert len(resumed) == 8 and not set(resumed) & set(saved)
+        rows = self._rows(tmp_path / "rollouts.jsonl")
+        stage0 = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row for row in rows if row["stage_index"] == 0
+        }
+        assert all(stage0[key] == row for key, row in saved.items())
+        assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [10, 20]
+
+    async def test_a_resume_reuses_an_accepted_partial_stage_and_owes_only_its_accepted_size(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Stage 0 is accepted at 9/10 with one terminal omission; stage 1 loses 18/20 rows and stays open.
+        def first_run(row, position):
+            if row["stage_index"] == 0:
+                return {NG_FAILURE_CLASS_KEY: "skipped", NG_TERMINAL_KEY: True} if position == 0 else "success"
+            return "success" if position < 2 else self.LOST
+
+        with pytest.raises(RuntimeError, match="11/29 samples completed"):
+            await self._run(tmp_path, monkeypatch, first_run)
+        _, outcomes, _ = read_journal(journal_path_for(tmp_path / "rollouts.jsonl"))
+        assert outcomes[0]["status"] == "partial_complete" and 1 not in outcomes
+        first_rows = self._rows(tmp_path / "rollouts.jsonl")
+        assert [sum(row["stage_index"] == index for row in first_rows) for index in (0, 1)] == [9, 2]
+        saved = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row
+            for row in first_rows
+            if row["stage_index"] == 0
+        }
+
+        cached_summaries: List[Dict[str, Any]] = []
+        resume_complete_stage = multistage_module._resume_complete_stage
+
+        def spy(index, *args):
+            elo = resume_complete_stage(index, *args)
+            cached_summaries.append(args[-2][-1])
+            return elo
+
+        monkeypatch.setattr(multistage_module, "_resume_complete_stage", spy)
+        dispatched = await self._run(tmp_path, monkeypatch, lambda row, position: "success", resume=True)
+
+        assert [sum(row["stage_index"] == index for row in dispatched) for index in (0, 1)] == [0, 18]
+        assert [(s["stage_index"], s["cached"], s["partial"], s["num_successful"]) for s in cached_summaries] == [
+            (0, True, True, 9)
+        ]
+        rows = self._rows(tmp_path / "rollouts.jsonl")
+        stage0 = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row for row in rows if row["stage_index"] == 0
+        }
+        assert stage0 == saved
+        assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [9, 20]
+
+
 class TestIntegrationWiring:
     async def test_multistage_forwards_one_budget_and_shared_tracker(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -523,8 +523,9 @@ def test_mcp_tool_timeout_must_be_positive_and_within_the_run_timeout(setup, val
     CodexAgentConfig(**(agent.config.model_dump() | {"timeout": 600, "mcp_tool_timeout_seconds": 600}))
 
 
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("started", [False, True])
-def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
+def test_startup_failure_reports_the_codex_stderr_tail(setup, started, native):
     agent, sandbox = setup
     # Codex repeats a failed server's error body, up to 8 KiB, after the line's start that names the server.
     stderr = (
@@ -543,6 +544,12 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
     def publish_with_stderr():
         publish()
         sandbox.files[f"{sandbox.directory}/stderr.log"] = stderr
+        if native:
+            # Observations then come from Codex's own transcript instead of the CLI events. Codex 0.144.4 writes
+            # none before a startup failure, but the stderr tail and its gap must not depend on the path.
+            sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+                [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
+            )
 
     sandbox.publish = publish_with_stderr
     with TestClient(agent.setup_webserver()) as client:
@@ -551,18 +558,21 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
     assert result.status_code == 502
     detail = result.json()["detail"]
-    gaps = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}
+    gaps = closed["agent_observations"]["gaps"]
+    # Only the CLI-events path lacks the model-call join key, so this shows which path built the observations.
+    assert ("model_call_join_key_unavailable" in [gap["code"] for gap in gaps]) is not native
+    startup_gaps = [gap["detail"] for gap in gaps if gap["code"] == "agent_startup_failed"]
     if started:
         # A turn started, so the event stream explains the failure; stderr is not appended.
         assert "stderr:" not in detail
-        assert "agent_startup_failed" not in gaps
+        assert startup_gaps == []
     else:
         assert "required MCP servers failed to initialize: gdpval_resources_server" in detail
         assert detail.endswith(" (-32603)")
         assert len(detail) < 2100, "the stderr tail is bounded"
         assert "x" * 600 not in detail, "long stderr lines are shortened"
         # Environment Servers record the observations, not the 502 body.
-        assert gaps["agent_startup_failed"] in detail
+        assert len(startup_gaps) == 1 and startup_gaps[0] in detail
 
 
 def test_startup_failure_stderr_hides_the_grant_tokens(setup):
