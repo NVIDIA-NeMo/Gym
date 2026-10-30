@@ -18,6 +18,7 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+from nemo_gym.agent_utils.sandbox_python import SandboxPythonRuntime
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import CLEANUP_PHASE_COUNT, STOP_REQUEST_FILE, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
@@ -745,6 +746,74 @@ async def test_stop_before_launch_closes_without_starting_a_worker(agent, state,
         await asyncio.gather(state.task, return_exceptions=True)
 
 
+async def test_seed_import_check_ignores_task_hermes_home(tmp_path):
+    private_home, task_home = tmp_path / "runtime-home", tmp_path / "task-home"
+    private_home.mkdir()
+    task_home.mkdir()
+    code = (
+        hermes_sandbox._HERMES_RUNTIME.import_check + "; import json; print(json.dumps(str(run_agent._hermes_home)))"
+    )
+    process = await asyncio.create_subprocess_exec(
+        sys.executable,
+        "-I",
+        "-c",
+        code,
+        cwd=task_home,
+        env={**os.environ, "HOME": str(private_home), "HERMES_HOME": str(task_home / ".hermes")},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=30)
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert json.loads(stdout.splitlines()[-1]) == str(private_home / ".hermes")
+    assert not list(task_home.iterdir())
+
+
+async def test_the_runner_ignores_task_python_settings_but_preserves_them_for_tools(state, tmp_path, monkeypatch):
+    harness, task = tmp_path / "harness", tmp_path / "task"
+    harness.mkdir()
+    task.mkdir()
+    (harness / "sibling.py").write_text("VALUE = 'trusted'\n")
+    # These modules must not be imported by the harness, even when PYTHONPATH includes the task.
+    (task / "json.py").write_text("raise RuntimeError('task json imported')\n")
+    (task / "task_only.py").write_text("VALUE = 'task'\n")
+    runner = harness / "runner.py"
+    runner.write_text(
+        "import importlib.util, json, subprocess, sibling\n"
+        "assert sibling.VALUE == 'trusted'\n"
+        "assert importlib.util.find_spec('task_only') is None\n"
+        "print(json.dumps(subprocess.check_output(['python'], text=True).splitlines()))\n"
+    )
+    task_python = task / "python"
+    task_python.write_text(
+        '#!/bin/sh\nprintf "%s\\n" "task-python" "$HOME" "$PATH" "$VIRTUAL_ENV" '
+        '"$PYTHONPATH" "$PYTHONHOME" "$PYTHONUSERBASE"\npwd\n'
+    )
+    task_python.chmod(0o755)
+    task_env = {
+        "HOME": str(task / "home"),
+        "PATH": f"{task}:{os.environ['PATH']}",
+        "VIRTUAL_ENV": str(task / "venv"),
+        "PYTHONPATH": str(task),
+        "PYTHONHOME": str(task / "not-a-python-install"),
+        "PYTHONUSERBASE": str(task / "user-site"),
+    }
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_PYTHON", sys.executable)
+    monkeypatch.setattr(hermes_sandbox, "_SANDBOX_RUNNER", str(runner))
+    state.upload_json = AsyncMock()
+    command = await state.stage_activation({})
+    process = await asyncio.create_subprocess_exec(
+        *command.argv,
+        cwd=task,
+        env={**os.environ, **task_env},
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.PIPE,
+    )
+    stdout, stderr = await asyncio.wait_for(process.communicate(), timeout=10)
+    assert process.returncode == 0, stderr.decode(errors="replace")
+    assert json.loads(stdout) == ["task-python", *task_env.values(), str(task)]
+
+
 def test_cleanup_and_runtime_are_independent():
     cleanup = {"return_code": 0, "timed_out": False, "cleanup_confirmed": True, "error": None}
     assert parse_cleanup_receipt(cleanup) == cleanup
@@ -1423,12 +1492,11 @@ async def test_failed_setup_retains_handle_until_cleanup_confirmed(
     monkeypatch.setattr(module, "get_global_config_dict", lambda: {})
     monkeypatch.setattr(module, "resolve_provider_config", lambda *args: {})
     monkeypatch.setattr(module, "create_provider", lambda config: AsyncMock())
-    monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
+    monkeypatch.setattr(SandboxPythonRuntime, "install", AsyncMock(side_effect=RuntimeError("installer failed")))
     ok = SimpleNamespace(return_code=0, stdout="", stderr="", error_type=None)
-    failed = SimpleNamespace(return_code=1, stdout="", stderr="installer failed")
-    # Prepare paths, detect a missing runtime, probe the architecture for uv, fail installation, then
-    # remove session files.
-    sandbox.exec.side_effect = [ok, failed, ok, failed, ok]
+    failed = SimpleNamespace(return_code=1, stdout="", stderr="")
+    # Prepare paths, detect a missing runtime, fail installation, then remove session files.
+    sandbox.exec.side_effect = [ok, failed, ok]
     cleanup = sandbox.stop if owns_sandbox else sandbox.disconnect
     if cleanup_fails:
         cleanup.side_effect = RuntimeError("cleanup unavailable")

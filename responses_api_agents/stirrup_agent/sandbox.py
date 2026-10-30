@@ -3,30 +3,37 @@
 """Agent-server side of Stirrup execution in a borrowed task sandbox."""
 
 import asyncio
-import hashlib
 import importlib.metadata
 import json
-import sys
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from typing import Any
 
+from nemo_gym.agent_utils.sandbox_python import SandboxPythonRuntime
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.uv_bootstrap import uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.utils import read_text, upload_text
 from nemo_gym.tool_access import DirectHTTPToolAccess
 
 
-# The sandbox runs the Python and Stirrup versions installed with this server.
-PYTHON_VERSION = f"{sys.version_info.major}.{sys.version_info.minor}"
+# The sandbox runs the Stirrup version installed with this server, with its dependencies at this server's versions.
+# Those versions resolve only with the overrides this server's environment is installed with.
 STIRRUP_REQUIREMENT = f"stirrup=={importlib.metadata.version('stirrup')}"
-_RUNTIME_KEY = hashlib.sha256(f"{PYTHON_VERSION} {STIRRUP_REQUIREMENT}".encode()).hexdigest()[:12]
+RUNTIME = SandboxPythonRuntime(
+    harness="stirrup",
+    requirements=(STIRRUP_REQUIREMENT,),
+    import_check="import stirrup",
+    overrides=tuple(
+        line
+        for line in Path(__file__).with_name("overrides.txt").read_text().splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    ),
+)
 # Outside the working directory, so the model's files stay its own.
-RUNTIME_DIR = f"/tmp/nemo-gym-stirrup-runtime-{_RUNTIME_KEY}"
-SANDBOX_PYTHON = f"{RUNTIME_DIR}/venv/bin/python"
+RUNTIME_DIR = RUNTIME.directory
+SANDBOX_PYTHON = RUNTIME.python
 _PACKAGE_DIR = f"{RUNTIME_DIR}/harness/responses_api_agents/stirrup_agent"
 # The runner and the modules it imports; the rest of this package needs Gym, which the sandbox lacks.
 HARNESS_FILES = ("nemo_agent.py", "nemo_client.py", "stirrup_utils.py", "sandbox_runner.py")
@@ -44,37 +51,16 @@ class StirrupSessionState(AgentSessionState):
         """Reuse or install the Stirrup runtime and stage the harness files."""
         sandbox = self.session.sandbox
         prepared = await sandbox.exec(
-            f"mkdir -p {quote(_PACKAGE_DIR)} {quote(self.session.session_dir)}", timeout_s=30
+            f"mkdir -p {quote(_PACKAGE_DIR)} {quote(self.session.session_dir)}", cwd="/", timeout_s=30
         )
         if prepared.return_code != 0:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Stirrup sandbox paths")
-        if not await self._runtime_installed():
-            await self._install_runtime(timeout)
+        if not await RUNTIME.is_installed(sandbox):
+            await RUNTIME.install(sandbox, timeout_s=timeout)
         for name in HARNESS_FILES:
             await sandbox.upload(Path(__file__).with_name(name), f"{_PACKAGE_DIR}/{name}")
         for package in (_PACKAGE_DIR, str(Path(_PACKAGE_DIR).parent)):
             await upload_text(sandbox, path=f"{package}/__init__.py", text="")
-
-    async def _runtime_installed(self) -> bool:
-        check = await self.session.sandbox.exec(f"{quote(SANDBOX_PYTHON)} -c 'import stirrup'", timeout_s=120)
-        return check.return_code == 0
-
-    async def _install_runtime(self, timeout: float) -> None:
-        uv_path = await uv_for_sandbox(self.session.sandbox, self.session.workdir)
-        uv = f"{RUNTIME_DIR}/uv"
-        await self.session.sandbox.upload(uv_path, uv)
-        venv = quote(f"{RUNTIME_DIR}/venv")
-        # uv downloads the server's Python version if the image lacks it.
-        install = await self.session.sandbox.exec(
-            f"export UV_CACHE_DIR={quote(f'{RUNTIME_DIR}/uv-cache')} "
-            f"UV_PYTHON_INSTALL_DIR={quote(f'{RUNTIME_DIR}/python')} && "
-            f"chmod 755 {quote(uv)} && rm -rf {venv} && "
-            f"{quote(uv)} venv {venv} --python {PYTHON_VERSION} && "
-            f"{quote(uv)} pip install --python {quote(SANDBOX_PYTHON)} {quote(STIRRUP_REQUIREMENT)}",
-            timeout_s=timeout,
-        )
-        if install.return_code != 0 or not await self._runtime_installed():
-            raise RuntimeError(install.stderr or install.stdout or "Stirrup sandbox installation failed")
 
     async def execute(self, payload: dict[str, Any], *, timeout: float, close_timeout: float) -> dict[str, Any]:
         """Run the harness once and return its output, raising the runner's error."""
@@ -83,8 +69,9 @@ class StirrupSessionState(AgentSessionState):
 
         async def stage() -> SandboxCommand:
             await upload_text(self.session.sandbox, path=input_path, text=json.dumps(payload))
+            # Ignore task Python settings without changing the environment inherited by tool subprocesses.
             return SandboxCommand(
-                argv=[SANDBOX_PYTHON, f"{_PACKAGE_DIR}/sandbox_runner.py", input_path, output_path],
+                argv=[SANDBOX_PYTHON, "-E", "-s", f"{_PACKAGE_DIR}/sandbox_runner.py", input_path, output_path],
             )
 
         async def collect() -> dict[str, Any]:

@@ -12,8 +12,8 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
+from nemo_gym.agent_utils.sandbox_python import SandboxPythonRuntime
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
-from nemo_gym.agent_utils.uv_bootstrap import DEFAULT_UV_CACHE_DIR, uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -23,28 +23,35 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 LOG = logging.getLogger(__name__)
 
 
-def _sandbox_hermes_install() -> tuple[str, str]:
-    """Return the requirement the sandbox installs and the key that names its runtime directory.
+def _sandbox_hermes_requirement() -> str:
+    """Return the requirement the sandbox runtime is built from.
 
-    Both come from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
-    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so the sandbox
+    It comes from the Hermes installed with this server, so ``requirements.txt`` is the only version pin and
+    the sandbox runs the same Hermes as the host. A git install is fetched as a GitHub archive, so building it
     does not need git. The ``mcp`` extra carries Hermes' MCP client, which episode tool grants use.
     """
     distribution = importlib.metadata.distribution("hermes-agent")
     direct_url = json.loads(distribution.read_text("direct_url.json") or "{}")
     commit = (direct_url.get("vcs_info") or {}).get("commit_id")
     if commit is None:
-        return f"hermes-agent[mcp]=={distribution.version}", distribution.version
+        return f"hermes-agent[mcp]=={distribution.version}"
     url = str(direct_url.get("url") or "").removesuffix(".git")
     if not url.startswith("https://github.com/"):
         raise RuntimeError(f"Cannot build a sandbox install URL for hermes-agent installed from {url!r}")
-    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz", commit[:12]
+    return f"hermes-agent[mcp] @ {url}/archive/{commit}.tar.gz"
 
 
-_HERMES_REQUIREMENT, _HERMES_RUNTIME_KEY = _sandbox_hermes_install()
-_SANDBOX_RUNTIME_DIR = f"/tmp/nemo-gym-hermes-runtime-{_HERMES_RUNTIME_KEY}"
-_SANDBOX_UV = f"{_SANDBOX_RUNTIME_DIR}/uv"
-_SANDBOX_PYTHON = f"{_SANDBOX_RUNTIME_DIR}/venv/bin/python"
+_HERMES_RUNTIME = SandboxPythonRuntime(
+    harness="hermes",
+    # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
+    requirements=(_sandbox_hermes_requirement(), "mcp>=1.28.1,<2"),
+    import_check=(
+        "import os; os.environ['HERMES_HOME'] = os.path.join(os.environ['HOME'], '.hermes'); "
+        "import run_agent; from mcp.client.streamable_http import streamablehttp_client"
+    ),
+)
+_SANDBOX_RUNTIME_DIR = _HERMES_RUNTIME.directory
+_SANDBOX_PYTHON = _HERMES_RUNTIME.python
 _SANDBOX_RUNNER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_runner.py"
 _SANDBOX_OBSERVER = f"{_SANDBOX_RUNTIME_DIR}/sandbox_observer.py"
 _SANDBOX_MODEL_KWARGS = f"{_SANDBOX_RUNTIME_DIR}/model_kwargs.py"
@@ -78,48 +85,22 @@ class HermesSandboxSession(AgentSessionState):
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
 
-    async def install_runtime(self, *, install_timeout: float, uv_cache_dir: str = DEFAULT_UV_CACHE_DIR) -> None:
-        """Reuse or install the pinned runtime and stage the Hermes harness files."""
+    async def install_runtime(self, *, install_timeout: float) -> None:
+        """Reuse or install the pinned runtime and stage the Hermes harness files.
+
+        The runtime directory is keyed by its inputs, so a runtime an earlier session left in this sandbox is
+        reused when it passes the import check.
+        """
         prepared = await self.session.sandbox.exec(
-            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}",
-            cwd=self.session.workdir,
-            timeout_s=30,
+            f"mkdir -p {quote(_SANDBOX_RUNTIME_DIR)} {quote(self.session.session_dir)}", cwd="/", timeout_s=30
         )
         if prepared.return_code != 0:
             raise RuntimeError(prepared.stderr or prepared.stdout or "Failed to prepare Hermes sandbox paths")
-        if not await self._runtime_installed():
-            await self._install_runtime(install_timeout, uv_cache_dir)
+        if not await _HERMES_RUNTIME.is_installed(self.session.sandbox):
+            await _HERMES_RUNTIME.install(self.session.sandbox, timeout_s=install_timeout)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), _SANDBOX_RUNNER)
         await self.session.sandbox.upload(Path(__file__).with_name("sandbox_observer.py"), _SANDBOX_OBSERVER)
         await self.session.sandbox.upload(Path(__file__).with_name("model_kwargs.py"), _SANDBOX_MODEL_KWARGS)
-
-    async def _runtime_installed(self) -> bool:
-        """Whether the pinned Hermes and its MCP client import from its runtime path.
-
-        The path is keyed by the pinned commit, so a runtime baked into the image or left by an earlier
-        session in this sandbox is reused.
-        """
-        check = await self.session.sandbox.exec(
-            f"{quote(_SANDBOX_PYTHON)} -c 'import run_agent; from mcp.client.streamable_http import streamablehttp_client'",
-            cwd=self.session.workdir,
-            timeout_s=120,
-        )
-        return check.return_code == 0
-
-    async def _install_runtime(self, timeout: float, uv_cache_dir: str) -> None:
-        uv_path = await uv_for_sandbox(self.session.sandbox, self.session.workdir, uv_cache_dir)
-        await self.session.sandbox.upload(uv_path, _SANDBOX_UV)
-        venv = quote(_SANDBOX_RUNTIME_DIR + "/venv")
-        # A runtime that failed the import check is incomplete, so rebuild it rather than reuse it.
-        install = await self.session.sandbox.exec(
-            f"chmod 755 {quote(_SANDBOX_UV)} && rm -rf {venv} && "
-            f"{quote(_SANDBOX_UV)} venv {venv} --python 3.13 && "
-            f"{quote(_SANDBOX_UV)} pip install --python {quote(_SANDBOX_PYTHON)} {quote(_HERMES_REQUIREMENT)} 'mcp>=1.28.1,<2'",
-            cwd=self.session.workdir,
-            timeout_s=timeout,
-        )
-        if install.return_code != 0 or not await self._runtime_installed():
-            raise RuntimeError(install.stderr or install.stdout or "Hermes sandbox installation failed")
 
     async def upload_json(self, name: str, payload: dict[str, JsonValue]) -> None:
         """Write a Hermes input under the session directory using file transfer."""
@@ -169,6 +150,9 @@ class HermesSandboxSession(AgentSessionState):
         return SandboxCommand(
             argv=[
                 _SANDBOX_PYTHON,
+                # Ignore task Python settings without changing the environment inherited by tool subprocesses.
+                "-E",
+                "-s",
                 _SANDBOX_RUNNER,
                 f"{self.session.session_dir}/input.json",
                 f"{self.session.session_dir}/output.json",

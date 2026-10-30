@@ -22,7 +22,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils import uv_bootstrap
+from nemo_gym.agent_utils.sandbox_python import SandboxPythonRuntime
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import (
     AGENT_SESSION_COOKIE_KEY,
@@ -58,7 +58,11 @@ from responses_api_agents.hermes_agent.app import (
     _trajectory_to_output_items,
 )
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver
-from responses_api_agents.hermes_agent.sandbox import HermesSandboxSession, _sandbox_hermes_install
+from responses_api_agents.hermes_agent.sandbox import (
+    _HERMES_RUNTIME,
+    HermesSandboxSession,
+    _sandbox_hermes_requirement,
+)
 
 
 class _FakeResponse:
@@ -135,10 +139,9 @@ class TestSanity:
         resolve = MagicMock(return_value=provider_config)
         provider = AsyncMock()
         sandbox = AsyncMock()
-        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
         monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         connect = AsyncMock(return_value=sandbox)
-        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda name: "/test/uv")
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -185,17 +188,16 @@ class TestSanity:
         }
 
     async def test_seed_installs_hermes_when_it_does_not_import(self, monkeypatch) -> None:
-        hermes = HermesAgent(config=_config(), server_client=MagicMock(spec=ServerClient))
+        hermes = HermesAgent(
+            config=_config(sandbox_install_timeout_seconds=123), server_client=MagicMock(spec=ServerClient)
+        )
         sandbox = AsyncMock()
-        import_results = iter([1, 0])
-
-        async def exec_(command, **_kwargs):
-            if "import run_agent" in command:
-                return MagicMock(return_code=next(import_results), stdout="", stderr="")
-            return MagicMock(return_code=0, stdout="", stderr="")
-
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
+        is_installed = AsyncMock(return_value=False)
+        install = AsyncMock()
+        monkeypatch.setattr(SandboxPythonRuntime, "is_installed", is_installed)
+        monkeypatch.setattr(SandboxPythonRuntime, "install", install)
         monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
-        sandbox.exec.side_effect = exec_
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.get_global_config_dict",
             lambda: {"runtime": {}},
@@ -205,7 +207,6 @@ class TestSanity:
         monkeypatch.setattr(
             "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
         )
-        monkeypatch.setattr("nemo_gym.agent_utils.uv_bootstrap.shutil.which", lambda _name: "/usr/bin/uv")
 
         hermes._session_records["session"] = _AgentSessionRecord()
         await hermes._initialize_agent_session_state(
@@ -221,13 +222,17 @@ class TestSanity:
             ),
         )
 
-        commands = [call.args[0] for call in sandbox.exec.await_args_list]
-        install = [command for command in commands if "pip install" in command]
-        assert len(install) == 1 and "rm -rf" in install[0]
-        assert "mcp>=1.28.1,<2" in install[0]
-        # The import is checked before installing and again after.
-        assert sum("import run_agent" in command for command in commands) == 2
-        assert sandbox.upload.await_args_list[0].args[0] == Path("/usr/bin/uv")
+        is_installed.assert_awaited_once_with(sandbox)
+        install.assert_awaited_once_with(sandbox, timeout_s=123)
+        # The pinned Hermes client requires the MCP 1 Streamable HTTP API.
+        assert "mcp>=1.28.1,<2" in _HERMES_RUNTIME.requirements
+        # Seeding prepares paths from the root; it never runs in, or writes to, the task's working directory.
+        assert [call.kwargs["cwd"] for call in sandbox.exec.await_args_list] == ["/"]
+        assert {call.args[0].name for call in sandbox.upload.await_args_list} == {
+            "sandbox_runner.py",
+            "sandbox_observer.py",
+            "model_kwargs.py",
+        }
 
     @pytest.mark.parametrize(
         "sandbox_config, install_timeout, runner_timeout, expected_ttl",
@@ -258,7 +263,7 @@ class TestSanity:
         )
         provider = AsyncMock()
         sandbox = AsyncMock()
-        sandbox.exec.return_value = MagicMock(return_code=0, stdout="", stderr="")
+        sandbox.exec.return_value = SandboxExecResult(stdout="", stderr="", return_code=0)
         monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
         sandbox_factory = MagicMock(return_value=sandbox)
         original_config = hermes.config.sandbox_config.copy()
@@ -1002,8 +1007,8 @@ class TestResultClassification:
             assert response.usage.total_tokens == sum(totals)
 
 
-class TestSandboxHermesInstall:
-    """The sandbox installs whatever Hermes this server has installed, so requirements.txt is the only pin."""
+class TestSandboxHermesRequirement:
+    """The sandbox runtime is built from the Hermes this server has installed; requirements.txt is the only pin."""
 
     @staticmethod
     def _installed(monkeypatch, *, version: str, direct_url: dict | None) -> None:
@@ -1013,7 +1018,7 @@ class TestSandboxHermesInstall:
         )
         monkeypatch.setattr("importlib.metadata.distribution", lambda name: distribution)
 
-    def test_git_install_becomes_a_github_archive_keyed_by_commit(self, monkeypatch) -> None:
+    def test_git_install_becomes_a_github_archive(self, monkeypatch) -> None:
         commit = "a" * 40
         self._installed(
             monkeypatch,
@@ -1021,15 +1026,15 @@ class TestSandboxHermesInstall:
             direct_url={"url": "https://github.com/cmunley1/hermes-agent.git", "vcs_info": {"commit_id": commit}},
         )
 
-        requirement, key = _sandbox_hermes_install()
-
-        assert requirement == f"hermes-agent[mcp] @ https://github.com/cmunley1/hermes-agent/archive/{commit}.tar.gz"
-        assert key == commit[:12]
+        assert (
+            _sandbox_hermes_requirement()
+            == f"hermes-agent[mcp] @ https://github.com/cmunley1/hermes-agent/archive/{commit}.tar.gz"
+        )
 
     def test_release_install_pins_the_version(self, monkeypatch) -> None:
         self._installed(monkeypatch, version="0.7.1", direct_url=None)
 
-        assert _sandbox_hermes_install() == ("hermes-agent[mcp]==0.7.1", "0.7.1")
+        assert _sandbox_hermes_requirement() == "hermes-agent[mcp]==0.7.1"
 
     def test_git_install_outside_github_is_rejected(self, monkeypatch) -> None:
         self._installed(
@@ -1039,7 +1044,7 @@ class TestSandboxHermesInstall:
         )
 
         with pytest.raises(RuntimeError, match="gitlab.example.com"):
-            _sandbox_hermes_install()
+            _sandbox_hermes_requirement()
 
 
 class TestSplitInputToUserAndHistory:
@@ -1407,56 +1412,6 @@ class TestObservability:
                     rollout_id="rid",
                 )
             )
-
-
-class TestSandboxUv:
-    """Seed uploads the uv build chosen for the sandbox's platform (see tests/unit_tests/test_uv_bootstrap.py)."""
-
-    async def test_seed_passes_the_configured_uv_cache_dir(self, monkeypatch, tmp_path) -> None:
-        hermes = HermesAgent(config=_config(uv_cache_dir=str(tmp_path)), server_client=MagicMock(spec=ServerClient))
-        sandbox = AsyncMock()
-        import_results = iter([1, 0])
-
-        async def exec_(command, **_kwargs):
-            if "import run_agent" in command:
-                return MagicMock(return_code=next(import_results), stdout="", stderr="")
-            if command == uv_bootstrap._PLATFORM_PROBE:
-                return MagicMock(return_code=0, stdout="Linux\nx86_64\ngnu\n", stderr="")
-            return MagicMock(return_code=0, stdout="", stderr="")
-
-        sandbox.exec.side_effect = exec_
-        monkeypatch.setattr(HermesAgent, "resolve_model_base_url", lambda *args: "http://model:8000/v1")
-        monkeypatch.setattr(uv_bootstrap.shutil, "which", lambda name: "/usr/bin/uv")
-        monkeypatch.setattr(uv_bootstrap.platform, "machine", lambda: "aarch64")
-        monkeypatch.setattr(uv_bootstrap.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(uv_bootstrap, "_host_uv_version", lambda uv: "0.12.3")
-        monkeypatch.setattr(
-            uv_bootstrap, "_download_uv", lambda v, t, d: (d.parent.mkdir(parents=True), d.write_bytes(b"uv"))
-        )
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.get_global_config_dict", lambda: {"runtime": {}})
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.resolve_provider_config", MagicMock())
-        monkeypatch.setattr("responses_api_agents.hermes_agent.app.create_provider", lambda config: AsyncMock())
-        monkeypatch.setattr(
-            "responses_api_agents.hermes_agent.app.AsyncSandbox.connect", AsyncMock(return_value=sandbox)
-        )
-
-        hermes._session_records["session"] = _AgentSessionRecord()
-        await hermes._initialize_agent_session_state(
-            "session",
-            AgentSeedSessionRequest(
-                agent_session_id="session",
-                episode_id=EpisodeId(rollout_id="rollout"),
-                task_id=TaskId(taskset="test", task_id="task"),
-                sandbox_access=SandboxAccess(
-                    connection=DirectSandboxConnection(provider_config_ref="runtime", descriptor={}),
-                    workdir="/app",
-                ),
-            ),
-        )
-
-        uploaded = sandbox.upload.await_args_list[0].args[0]
-        # An aarch64 host driving an x86_64 glibc pod uploads the static musl build for x86_64.
-        assert uploaded == tmp_path / "0.12.3" / "x86_64-unknown-linux-musl" / "uv"
 
 
 @pytest.mark.parametrize("status", [400, 401, 429, 503])
