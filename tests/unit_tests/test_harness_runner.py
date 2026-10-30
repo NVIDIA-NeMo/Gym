@@ -198,3 +198,101 @@ def test_events_mode_forwards_term_and_ignores_a_detached_stdout_holder(tmp_path
                 os.kill(int((tmp_path / "holder.pid").read_text()), signal.SIGKILL)
             except ProcessLookupError:
                 pass
+
+
+# -- the model relay ---------------------------------------------------------------------------------------------
+
+RELAY_CHECK = r"""
+import json, os, socket, sys
+status = json.load(open(sys.argv[1]))
+socket.create_connection(("127.0.0.1", status["port"]), timeout=5).close()
+comm = open("/proc/%d/comm" % status["pid"]).read().strip()
+cmdline = open("/proc/%d/cmdline" % status["pid"]).read().replace("\0", " ")
+print(os.environ.get("NEMO_GYM_MODEL_RELAY"), comm, "python" in cmdline.lower())
+"""
+
+RELAY_RESTART = r"""
+import json, os, signal, sys, time
+path = sys.argv[1]
+first = json.load(open(path))
+os.kill(first["pid"], signal.SIGKILL)
+deadline = time.time() + 10
+while time.time() < deadline:
+    try:
+        now = json.load(open(path))
+    except (OSError, ValueError):
+        now = {}
+    if now.get("pid") not in (None, first["pid"]) and now.get("port") == first["port"]:
+        print("restarted on", now["port"])
+        break
+    time.sleep(0.1)
+"""
+
+
+def _relay_params(tmp_path: Path, script: str, **values) -> tuple[Path, Path]:
+    from nemo_gym.agents.utils.model_relay import __file__ as relay_script
+
+    (tmp_path / "relay").mkdir()
+    status = tmp_path / "relay" / "status.json"
+    (tmp_path / "endpoint.json").write_text(json.dumps({"gen": 1, "upstream": "http://127.0.0.1:9/v1"}))
+    defaults = {
+        "command": [sys.executable, "-c", script, str(status)],
+        "MODEL_RELAY_PORT": "0",
+        "MODEL_RELAY_ENDPOINT": str(tmp_path / "endpoint.json"),
+        "MODEL_RELAY_STATUS": str(status),
+        "MODEL_RELAY_SCRIPT": relay_script,
+        "MODEL_RELAY_PYTHONS": [sys.executable],
+    }
+    return _params(tmp_path, **(defaults | values)), status
+
+
+def _process_ends(pid: int, timeout: float = 5.0) -> bool:
+    deadline = time.time() + timeout
+    while time.time() < deadline:
+        try:
+            state = Path(f"/proc/{pid}/stat").read_text().rsplit(") ", 1)[1][0]
+        except (OSError, IndexError):
+            return True
+        if state in "ZX":
+            return True
+        time.sleep(0.05)
+    return False
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_the_runner_starts_the_model_relay_under_a_neutral_name(tmp_path: Path) -> None:
+    params, status = _relay_params(tmp_path, RELAY_CHECK)
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().split() == ["1", "gym-model-relay", "False"]
+    assert _process_ends(json.loads(status.read_text())["pid"]), "the relay ends with the command"
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_a_relay_that_dies_is_restarted_on_the_same_port(tmp_path: Path) -> None:
+    params, _ = _relay_params(tmp_path, RELAY_RESTART)
+
+    result = _run(params)
+
+    assert result.returncode == 0, (result.stderr, (tmp_path / "stderr.log").read_text())
+    assert (tmp_path / "stdout.log").read_text().startswith("restarted on ")
+    assert "restarting it on port" in (tmp_path / "relay" / "relay.log").read_text()
+
+
+@pytest.mark.skipif(not Path("/proc/self/stat").exists(), reason="the relay watchdog reads /proc")
+def test_without_a_usable_interpreter_the_command_runs_on_the_fallback_environment(tmp_path: Path) -> None:
+    script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
+    params, _ = _relay_params(
+        tmp_path,
+        script,
+        MODEL_RELAY_PYTHONS=[str(tmp_path / "missing" / "python3")],
+        MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
+    )
+
+    result = _run(params)
+
+    assert result.returncode == 0, result.stderr
+    assert (tmp_path / "stdout.log").read_text().split() == ["None", "http://model.example/v1"]
+    assert (tmp_path / "relay" / "unavailable").exists()
