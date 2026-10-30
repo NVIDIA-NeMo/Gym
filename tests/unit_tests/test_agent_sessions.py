@@ -268,3 +268,32 @@ def test_agent_session_seed_carries_the_tasks_agent_timeout() -> None:
     assert timed.agent_timeout_sec == 900.0
     with pytest.raises(ValidationError):
         AgentSeedSessionRequest.model_validate({**seed.model_dump(mode="json"), "agent_timeout_sec": 0})
+
+
+def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():
+    class LegacyAgent(SimpleResponsesAPIAgent):
+        pass
+
+    class SeedOnlyAgent(LegacyAgent):
+        async def _seed_agent_session_state(self, body):
+            raise RuntimeError("setup failed")
+
+    class SessionAgent(SeedOnlyAgent):
+        async def _close_agent_session_state(self, state):
+            raise RuntimeError("cleanup failed")
+
+    class InheritedSessionAgent(SessionAgent):
+        pass
+
+    class PublicSessionAgent(LegacyAgent):
+        async def seed_agent_session(self, body, request):
+            raise RuntimeError("setup failed")
+
+        async def close_agent_session(self, body, request):
+            raise RuntimeError("cleanup failed")
+
+    assert not LegacyAgent.supports_agent_sessions()
+    assert not SeedOnlyAgent.supports_agent_sessions()
+    assert SessionAgent.supports_agent_sessions()
+    assert InheritedSessionAgent.supports_agent_sessions()
+    assert PublicSessionAgent.supports_agent_sessions()

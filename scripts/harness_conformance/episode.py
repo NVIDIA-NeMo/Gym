@@ -20,7 +20,6 @@ import uvicorn
 import yaml
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 
@@ -53,19 +52,6 @@ def check_runtime(harness: str, *, use_agent_sessions: bool = False) -> dict:
         [harness, "--version"], capture_output=True, text=True, errors="replace", timeout=10, check=True
     )
     return {"executable": shutil.which(harness), "version": version.stdout.strip()}
-
-
-def _supports_agent_sessions(agent_cls: type[SimpleResponsesAPIAgent]) -> bool:
-    # Every SimpleResponsesAPIAgent exposes session routes, including legacy agents
-    # whose handlers raise NotImplementedError. Check implementations, not route presence.
-    return all(
-        getattr(agent_cls, handler) is not getattr(SimpleResponsesAPIAgent, handler)
-        or getattr(agent_cls, hook) is not getattr(SimpleResponsesAPIAgent, hook)
-        for handler, hook in (
-            ("seed_agent_session", "_seed_agent_session_state"),
-            ("close_agent_session", "_close_agent_session_state"),
-        )
-    )
 
 
 def _config(
@@ -161,7 +147,7 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
     agent_cls = getattr(module, HARNESSES[harness])
     config_cls = getattr(module, HARNESSES[harness] + "Config")
-    use_agent_sessions = _supports_agent_sessions(agent_cls)
+    use_agent_sessions = agent_cls.supports_agent_sessions()
     if use_agent_sessions and harness != "simple" and sys.platform != "linux":
         raise RuntimeError(
             "Conformance probes using agent sessions require Linux; run the probes on a Linux host or in a container"
