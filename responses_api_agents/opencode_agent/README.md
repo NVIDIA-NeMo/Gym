@@ -629,6 +629,7 @@ opencode_agent:
 | --- | --- | --- |
 | `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on storage the sandbox snapshot covers. Each session keeps its supervisor files and OpenCode's HOME and data, with the saved conversation, in a directory under it. A restore that does not find the conversation starts the task afresh. |
 | `checkpoint_pause_allowance_seconds` | `3600` | Bounds the time a launch spends paused (see "Pause limits"). Size it to cover the longest checkpoint commit. `0` extends nothing and sets no limit on one pause. |
+| `sandbox_model_relay_port` | `18431` | Sandbox port of the model relay, on providers whose snapshots keep processes. |
 
 - **At a checkpoint** the activation parks and OpenCode is paused in place: the process supervisor sends `SIGSTOP` to
   every process the launch reaches and `SIGCONT` once the checkpoint resumes. Nothing is copied; the resources server
@@ -667,6 +668,26 @@ opencode_agent:
 - **Permissions.** `opencode run` rejects permission requests. The reprompt helper rejects them the same way, so a
   relaunch behaves like a first launch for configs with `ask` rules.
 
+On a sandbox whose snapshots keep its processes (an AgentENV memory snapshot, `snapshot_keeps_processes`), nothing is
+relaunched when it need not be:
+
+- **At a checkpoint** OpenCode keeps running: the supervisor holds the pause without signalling anything, and OpenCode's
+  model calls wait. OpenCode reaches the model through a relay in the sandbox (`nemo_gym/agents/utils/model_relay.py`, on
+  `127.0.0.1:sandbox_model_relay_port`), which holds new calls while a pause is open.
+- **After a crash** the restored sandbox is still running the launch. The re-bind checks, in one command, that its
+  supervisor, its held pause and its relay survived. If so, the activation points the relay at the replacement
+  attempt's model URL, continues the pause and waits for the launch to finish: the relay re-sends the call the
+  checkpoint cut, byte for byte, and OpenCode sees only a slow call. A launch that had already ended is collected the
+  same way. Otherwise the launch is killed, nothing of it continuing, and relaunched as above.
+- **Without Python 3.6 or later in the task image** there is no relay: OpenCode calls the model server directly, and a
+  restore relaunches it.
+- **The wall clock** is the provider's to keep: OpenCode orders a conversation by message IDs it makes from the clock,
+  so a clock that jumps while OpenCode runs can put a message out of order. On AgentENV set the provider's
+  `snapshots.keep_guest_clock`, and a restored sandbox continues from the clock its snapshot was taken at.
+
+The agent logs `OpenCode resumed in place:`, `OpenCode cannot resume in place:` and `OpenCode abandoned a restored
+launch:` at WARNING.
+
 These sessions are restart-only, so their episodes start over after a crash: sandboxes the agent owns, multi-turn
 continuation sessions, sessions that continue an imported conversation (`session_import_path`), and OpenCode 2
 sessions (the reprompt uses OpenCode 1's server API and store). Local calls (unseeded requests and `/run`) are
@@ -675,4 +696,5 @@ restarts too.
 A checkpointed session's reply carries `metadata.harness_launches`, the number of OpenCode launches for the
 activation: `"1"` means no checkpoint or crash caused a relaunch. The session's checkpoint export keeps one record
 per launch: `launch`, `reprompted`, `interrupted_tool_calls`, `outcome` (`finished` or `stopped`), `return_code` and
-`paused_s`, the time the activation has spent parked so far.
+`paused_s`, the time the activation has spent parked so far. The record of a launch that a restore brought back and the
+activation took over where it was also has `resumed_in_place: true`.
