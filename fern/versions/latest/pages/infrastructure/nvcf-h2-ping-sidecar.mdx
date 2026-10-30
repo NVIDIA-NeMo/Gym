@@ -65,7 +65,8 @@ sidecar:
     - name: genrm
       upstream: https://<function-id>.invocation.api.nvcf.nvidia.com
       listen: 127.0.0.1:1250
-  # Gym builds the sidecar on first use (needs Go on PATH). To use a prebuilt one instead:
+  # The Gym container image ships a prebuilt sidecar. Elsewhere, Gym builds it on first use (needs Go on PATH).
+  # To use a binary of your own instead:
   # binary: /abs/path/to/h2-ping-sidecar
 ```
 
@@ -94,6 +95,21 @@ Gym waits for each sidecar to bind its port before starting servers, then checks
 startup with a message that says so. If something else already starts a sidecar on those ports (for example
 a Slurm launcher script), remove one of them.
 
+## Prebuilt binary
+
+The Gym container image ships the sidecar at `/opt/nemo-gym/bin/h2-ping-sidecar`, built in the image, so it
+needs no Go. When `binary` is not set, Gym looks for a prebuilt binary in this order:
+
+1. The executable that the `NEMO_GYM_H2_PING_SIDECAR_BINARY` environment variable names. Set it to use
+   a copy installed somewhere else, such as in another image. An empty value counts as unset. If the
+   path is set but is not an executable file, Gym says so and goes on to step 3.
+2. `/opt/nemo-gym/bin/h2-ping-sidecar`.
+3. The binary built from the sources under `<cache_dir>`, built on first use when it is missing.
+
+A prebuilt binary is used as it is and never rebuilt, so edits to `nemo_gym/tools/sidecar/*.go` inside an
+image do not reach it. Gym prints which binary it uses. To run edited sources, set `binary` to your own build, or
+to a path that does not exist yet, which Gym builds from the sources when `build_if_missing` is true (needs Go).
+
 ## Settings
 
 All keys are optional except `enabled` and `instances`.
@@ -102,7 +118,7 @@ All keys are optional except `enabled` and `instances`.
 |-----|---------|-------------|
 | `enabled` | `false` | Master switch. When false Gym starts nothing and leaves every URL untouched. |
 | `instances` | (required) | List of `{name, upstream, listen}`. `listen` defaults to `127.0.0.1:1250`; give each instance its own port. |
-| `binary` | `<cache_dir>/h2-ping-sidecar/<sources hash>/<go version>/h2-ping-sidecar` | Path to the compiled sidecar. When it is missing Gym builds it here. The path contains a hash of the Go sources and, when Go is on PATH, the exact Go version, so a binary built from older sources or an older Go is never reused. Without Go on PATH, Gym uses the newest binary already built from the current sources, so a node with no Go can run a cache built elsewhere. |
+| `binary` | `<cache_dir>/h2-ping-sidecar/<sources hash>/<go version>/h2-ping-sidecar` | Path to the compiled sidecar. When unset, Gym first uses a [prebuilt binary](#prebuilt-binary) if there is one. Otherwise this default applies, and Gym builds the binary there when it is missing. The path contains a hash of the Go sources and, when Go is on PATH, the exact Go version, so a binary built from older sources or an older Go is never reused. Without Go on PATH, Gym uses the newest binary already built from the current sources, so a node with no Go can run a cache built elsewhere. |
 | `build_if_missing` | `true` | Run `go build` when `binary` does not exist. Needs Go on PATH (1.25 or newer; see `nemo_gym/tools/sidecar/go.mod`). Set `false` to require a prebuilt binary. |
 | `ping_interval` | `60s` | Idle time before a PING. Must be below 340s. |
 | `ping_timeout` | `15s` | Close the upstream connection if a PING is not acknowledged in time. See [Limits](#limits). |
@@ -140,7 +156,8 @@ some headroom. A value below it slows the sidecar down instead of capping its me
 ## Try it
 
 ```bash
-# 1. Optional: build and test the sidecar yourself (Go 1.25+). Gym builds it on first use otherwise.
+# 1. Optional: build and test the sidecar yourself (Go 1.25+). The Gym container image ships one, and
+#    Gym builds it on first use otherwise.
 cd nemo_gym/tools/sidecar
 go vet ./... && go test ./...
 go build -buildvcs=false -trimpath -o h2-ping-sidecar .

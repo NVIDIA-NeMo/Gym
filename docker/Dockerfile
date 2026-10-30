@@ -19,12 +19,27 @@
 #
 
 ARG BASE_IMAGE=nvcr.io/nvidia/cuda-dl-base:26.03-cuda13.2-devel-ubuntu24.04
+# Go used to build the h2-ping-sidecar (see the sidecar-build stage).
+ARG GO_VERSION=1.27.3
 
 # Source stage: clones Gym from GitHub. Override with --build-context nemo-gym=.
 # to inject a local checkout instead.
 FROM scratch AS nemo-gym
 ARG GYM_GIT_REF=main
 ADD --keep-git-dir=true https://github.com/NVIDIA-NeMo/Gym.git#${GYM_GIT_REF} /
+
+# h2-ping-sidecar (nemo_gym/tools/sidecar): a static Go binary, so the run-time image needs no Go.
+# Build with the newest Go patch release: the proxy is mostly Go's own net/http and crypto/tls, so
+# standard-library security fixes only reach the binary through the toolchain that compiled it.
+# go.mod sets the minimum Go version, not this one. The build runs on the builder's own platform and
+# cross-compiles, so a multi-arch build needs no emulation.
+FROM --platform=$BUILDPLATFORM golang:${GO_VERSION} AS sidecar-build
+ARG TARGETOS
+ARG TARGETARCH
+WORKDIR /src
+COPY --from=nemo-gym nemo_gym/tools/sidecar/ ./
+RUN CGO_ENABLED=0 GOOS=${TARGETOS} GOARCH=${TARGETARCH} GOTOOLCHAIN=local \
+    go build -buildvcs=false -trimpath -o /out/h2-ping-sidecar .
 
 FROM ${BASE_IMAGE} AS base
 ENV NEMO_GYM_CONTAINER=1
@@ -215,6 +230,12 @@ COPY --from=nemo-gym --chown=${RUNTIME_UID}:${RUNTIME_GID} \
 RUN chown root:root /opt/nemo-gym && \
     UV_LINK_MODE=symlink uv sync --locked --extra vllm --extra telemetry --extra dev --extra ray
 
+# The prebuilt sidecar. Copied after the project install above so that install still sees the source
+# tree exactly as it was copied in. The launcher (nemo_gym/h2_ping_sidecar/launcher.py) uses the
+# binary this variable names before it would build one.
+COPY --from=sidecar-build --chmod=0755 /out/h2-ping-sidecar /opt/nemo-gym/bin/h2-ping-sidecar
+ENV NEMO_GYM_H2_PING_SIDECAR_BINARY=/opt/nemo-gym/bin/h2-ping-sidecar
+
 # Seed the runtime uv cache with the full dependency set (including the dev
 # extra and the project itself) so that CI scripts can run offline: setup_dev.sh
 # resolves `uv sync --extra dev --offline` from this cache in a fresh venv.
@@ -320,6 +341,9 @@ RUN export HOME=/home/nemo-runtime \
     test -x /usr/local/bin/uv && \
     test -x /usr/local/bin/uvx && \
     test -x /opt/nemo_gym_venv/bin/python && \
+    # The binary must exist and print its usage (`-h` exits 0 and writes to stderr).
+    test -x "${NEMO_GYM_H2_PING_SIDECAR_BINARY}" && \
+    "${NEMO_GYM_H2_PING_SIDECAR_BINARY}" -h 2>&1 | grep -q -- -ping-interval && \
     venv_site_packages="$(python -c 'import site; print(site.getsitepackages()[0])')" && \
     rm "${venv_site_packages}/.nonroot-uninstall-probe" && \
     touch "${HOME}/.nonroot-write-probe" \
