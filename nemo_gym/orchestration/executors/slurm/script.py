@@ -20,7 +20,11 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.artifacts.exporters import exporter_extras
-from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSERVABILITY_ENABLED_KEY_NAME
+from nemo_gym.config.global_config import (
+    MODEL_CALL_CAPTURE_DIR_ENV,
+    MODEL_CALL_CAPTURE_DIR_KEY_NAME,
+    OBSERVABILITY_ENABLED_KEY_NAME,
+)
 from nemo_gym.data.gitlab_utils import gitlab_storage_extras
 from nemo_gym.eval.recovery.markers import DRIVER_FAILURE_ENV
 from nemo_gym.orchestration.api import (
@@ -1087,13 +1091,18 @@ def reverify_steps(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> lis
     return steps
 
 
-def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path) -> dict[str, str]:
+def _command_env(benchmark: BenchmarkRunConfig, remote_bench_dir: Path, driver_env: dict[str, str]) -> dict[str, str]:
     """Environment a `command` benchmark gets in place of `gym eval run` arguments.
 
     Values are already literal here (driver.env prefixes were resolved at
-    validation time), so they are passed through as-is.
+    validation time), so they are passed through as-is. The model-call capture
+    directory is the one `gym eval run` would get; Gym processes the command
+    starts read it as their default. A value in driver.env wins, and an empty
+    one turns capture off.
     """
     env = {"NEMO_GYM_BENCH_DIR": str(remote_bench_dir)}
+    if MODEL_CALL_CAPTURE_DIR_ENV not in driver_env:
+        env[MODEL_CALL_CAPTURE_DIR_ENV] = str(remote_bench_dir / "model-calls")
     for key, name in (
         ("policy_base_url", "NEMO_GYM_POLICY_BASE_URL"),
         ("policy_model_name", "NEMO_GYM_POLICY_MODEL_NAME"),
@@ -1329,7 +1338,7 @@ def build_sbatch_script(
         # to reach the policy, which it gets as environment variables rather than
         # as a calling convention it would have to parse.
         gym_cmd = ""
-        driver_env |= _command_env(benchmark, remote_bench_dir)
+        driver_env |= _command_env(benchmark, remote_bench_dir, driver_env)
     # Host PWD can resolve to an alias that is absent from the container bind mounts.
     driver_env["NEMO_GYM_BENCH_DIR"] = str(remote_bench_dir)
     exports = effective_exports(config, benchmark_name)
