@@ -35,7 +35,7 @@
 # Gym commit this recipe is frozen at; run.sh pins the checkout to it (PIN_GYM=0 to skip).
 gym_commit: PENDING-UNTIL-FREEZE
 # NOOA revision the agent's requirements.txt must pin (labs-OO-Agents dev/atom with the Atom harness).
-nooa_commit: 94c6b1db495df2cc9d3ddaae542520f6e12fb619  # pragma: allowlist secret
+nooa_commit: ec92597ae49df66d8905412476140db6f7085592  # pragma: allowlist secret
 
 # Rows come from the benchmark split of the dataset; metrics conflicts across repeats are overwritten.
 split: benchmark
