@@ -695,9 +695,32 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
-    from nemo_gym.orchestration.submit import resubmit
+    from nemo_gym.orchestration.submit import recover, resubmit
 
     try:
+        score_key = getattr(args, "score_key", None)
+        if score_key is not None:
+            score_key = json.loads(score_key)
+            if not isinstance(score_key, list) or not score_key or not all(isinstance(k, str) for k in score_key):
+                args._parser.error('--score-key must be a JSON list of metric keys, e.g. \'["agent", "mean/reward"]\'')
+        if (
+            score_key is not None
+            or getattr(args, "max_unhealthy_fraction", None) is not None
+            or getattr(args, "mlflow_status", None) is not None
+        ) and not getattr(args, "recover", False):
+            args._parser.error("--score-key and --max-unhealthy-fraction need --recover")
+        if getattr(args, "recover", False):
+            outcome = recover(
+                args.gym_job_id,
+                args.benchmark,
+                score_key=score_key,
+                max_unhealthy_fraction=getattr(args, "max_unhealthy_fraction", None),
+                mlflow_status=getattr(args, "mlflow_status", None),
+            )
+            print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
+            if not outcome.ok:
+                sys.exit(1)
+            return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)
     except (ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
@@ -1646,6 +1669,36 @@ COMMANDS = {
                 ),
             ),
             Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--recover",
+                    action="store_true",
+                    help="Decide from the run's persisted evidence first: do nothing when it is complete, re-judge "
+                    "saved answers when only judge failures remain, queue only within the stored retry budget.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--score-key",
+                    metavar="JSON",
+                    help="With --recover: the canonical metric's path in rollouts_aggregate_metrics.json, as a JSON list.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-unhealthy-fraction",
+                    type=float,
+                    metavar="FRACTION",
+                    help="With --recover: the configured response-health criterion; without it health is not evaluated.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--mlflow-status",
+                    metavar="STATUS",
+                    help="With --recover: the tracking run's terminal status as read from the MLflow server.",
+                ),
+            ),
         ),
     ),
     "eval compare": Command(

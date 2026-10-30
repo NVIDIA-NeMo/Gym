@@ -22,6 +22,7 @@ import yaml
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
+from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, RecoveryDecision, RecoveryOutcome
 
 
 class UnsupportedOperationError(RuntimeError):
@@ -44,6 +45,35 @@ class BaseExecutor(ABC):
         anything is submitted; every other path either returns a record or
         raises.
         """
+
+    def recovery_evidence(
+        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str] | None = None
+    ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
+        """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
+        return self.recovery_decision(record, benchmark), None
+
+    def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
+        """Decide from the run's persisted evidence whether ``resubmit`` may queue it; without a collector, stop."""
+        return RecoveryDecision(
+            action=RecoveryAction.STOP,
+            reason=f"{type(self).__name__} cannot collect the run's evidence, so a resubmit is not decided",
+            expected=0,
+            counts={},
+            identities={},
+            evidence=[],
+        )
+
+    def reverify_judge_failures(
+        self, record: SubmissionRecord, benchmark: str, decision: RecoveryDecision
+    ) -> RecoveryOutcome:
+        """Re-judge the run's saved judge-failed answers; executors without a saved-answer path report that."""
+        return RecoveryOutcome(
+            decision=decision,
+            ok=False,
+            dispatched=None,
+            unsupported=f"{type(self).__name__} has no saved-answer re-judgment; run `gym eval reverify "
+            "--judge-failed-only` on the run's artifacts. The policy is not queued.",
+        )
 
     @abstractmethod
     def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:

@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import getpass
+import json
 import os
 import re
 import shlex
@@ -39,7 +40,7 @@ from nemo_gym.orchestration.executors.otel import (
     validate_destination,
     validate_gym_telemetry,
 )
-from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
+from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV, _walltime_to_seconds
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -49,6 +50,13 @@ from nemo_gym.orchestration.jobs import (
     new_gym_job_id,
     utc_now,
     utc_timestamp,
+)
+from nemo_gym.orchestration.recovery import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+    RecoveryAction,
+    RecoveryDecision,
+    decide_from_collected,
 )
 
 
@@ -230,6 +238,41 @@ class SlurmExecutor(BaseExecutor):
                 self.persist(record, config, conn.write_text)
 
         return record
+
+    def recovery_evidence(
+        self, record: SubmissionRecord, benchmark: str, *, score_key: list[str] | None = None
+    ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
+        """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH."""
+        job_dir = Path(record.benchmark_job(benchmark).job_dir)
+        with get_connection(record.hostname) as conn:
+            config = self._saved_config(conn, Path(record.run_dir))
+            resume = config.driver.benchmarks[benchmark].resume_config
+            if resume is None:
+                stop = RecoveryDecision(
+                    action=RecoveryAction.STOP,
+                    reason=f"{benchmark} stores no resume_config, so its infra-retry budget is unknown",
+                    expected=0,
+                    counts={},
+                    identities={},
+                    evidence=[],
+                )
+                return stop, None
+            args = [shlex.quote(str(job_dir))] + ([shlex.quote(json.dumps(score_key))] if score_key else [])
+            collected = CollectedEvidence.model_validate_json(
+                conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
+            )
+            workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=resume.max_retries,
+            max_walltime_s=_walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None,
+            live_job=str(job_dir) in workdirs,
+        )
+        return decision, collected
+
+    def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
+        """The decision of ``recovery_evidence`` without a score key."""
+        return self.recovery_evidence(record, benchmark)[0]
 
     def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.

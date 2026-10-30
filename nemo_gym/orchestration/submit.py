@@ -18,6 +18,12 @@ from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConf
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
+from nemo_gym.orchestration.recovery import (
+    RecoveryAction,
+    RecoveryOutcome,
+    gate_summary_from_collected,
+    gate_task_summary,
+)
 
 
 _EXECUTORS = {
@@ -52,3 +58,55 @@ def resubmit(gym_job_id: str, benchmark: str) -> BenchmarkJob:
     if executor_cls is None:
         raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
     return executor_cls().resubmit(record, benchmark)
+
+
+@experimental
+def recover(
+    gym_job_id: str,
+    benchmark: str,
+    *,
+    score_key: list[str] | None = None,
+    max_unhealthy_fraction: float | None = None,
+    mlflow_status: str | None = None,
+) -> RecoveryOutcome:
+    """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
+
+    The executor collects identities, results, failures, the quality summary, the ``score_key`` metric and the job
+    chain's stored budget; ``decide_recovery`` picks one action, which runs here: ``noop`` dispatches nothing;
+    ``reverify`` re-judges saved answers through the executor (never the policy) or reports that the executor cannot;
+    ``resubmit`` queues the run with the existing ``resubmit``, whose Gym resume runs only missing and retryable
+    identities; ``stop`` dispatches nothing and says why. Every outcome carries the Day-0 gate task entry, where
+    response/trial health is judged only against ``max_unhealthy_fraction``. Plain ``resubmit`` is unchanged.
+    """
+    record = load_submission_record(gym_job_id)
+    executor_cls = _EXECUTORS_BY_NAME.get(record.executor)
+    if executor_cls is None:
+        raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
+    executor = executor_cls()
+    decision, collected = executor.recovery_evidence(record, benchmark, score_key=score_key)
+    gate_task = (
+        gate_summary_from_collected(
+            decision, collected, max_unhealthy_fraction=max_unhealthy_fraction, mlflow_status=mlflow_status
+        )
+        if collected is not None
+        else gate_task_summary(
+            decision,
+            score=None,
+            fe_valid=None,
+            fe_reasons=["no evidence collected"],
+            health_passed=None,
+            health_reasons=["no evidence collected"],
+        )
+    )
+    mlflow = {"local": collected.mlflow if collected is not None else None, "observed_status": mlflow_status}
+    if decision.action == RecoveryAction.NOOP:
+        return RecoveryOutcome(decision=decision, ok=True, dispatched=None, gate_task=gate_task, mlflow=mlflow)
+    if decision.action == RecoveryAction.REVERIFY:
+        outcome = executor.reverify_judge_failures(record, benchmark, decision)
+        return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
+    if decision.action == RecoveryAction.RESUBMIT:
+        job = executor.resubmit(record, benchmark)
+        return RecoveryOutcome(
+            decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow
+        )
+    return RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=gate_task, mlflow=mlflow)
