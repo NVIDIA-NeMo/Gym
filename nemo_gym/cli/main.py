@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
-from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error
+from nemo_gym.cli.utils import did_you_mean, exit_cleanly_on_config_error, hydra_quote
 from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 
 
@@ -80,19 +80,6 @@ def dispatch(target: str, overrides: list[str]) -> None:
     func()
 
 
-def _hydra_quote(value: str) -> str:
-    """Single-quote `value` as a literal for Hydra's override grammar, so it parses back to the same string.
-
-    `json.dumps` is not that encoder: Hydra keeps `\\uXXXX`, `\\t` and a doubled backslash literally, so a Unicode
-    or backslash-containing filename would reach the command under another name. Hydra un-escapes a backslash
-    only when its run ends at a quote character, so only those runs (and the quote itself) are escaped here.
-    Everything else, Unicode included, is passed through unchanged.
-    """
-    escaped = re.sub(r"(\\*)(')", lambda m: m.group(1) * 2 + "\\'", value)
-    escaped = re.sub(r"(\\+)$", lambda m: m.group(1) * 2, escaped)
-    return f"'{escaped}'"
-
-
 def _value_flag(
     name: str,
     hydra_key: str,
@@ -104,13 +91,13 @@ def _value_flag(
 ) -> Flag:
     """A `--name VALUE` flag that maps to the Hydra override `+<hydra_key>=VALUE` (omitted when unset).
 
-    `quote=True` passes VALUE as a literal string (see `_hydra_quote`), for filenames and free text.
+    `quote=True` passes VALUE as a literal string (see `hydra_quote`), for filenames and free text.
     """
     dest = name.replace("-", "_")
     return Flag(
         register=lambda p: p.add_argument(f"--{name}", *aliases, dest=dest, choices=choices, help=flag_help),
         translate_to_hydra=lambda args: (
-            [f"+{hydra_key}={_hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
+            [f"+{hydra_key}={hydra_quote(getattr(args, dest)) if quote else getattr(args, dest)}"]
             if getattr(args, dest) is not None
             else []
         ),
@@ -266,7 +253,7 @@ SEARCH_TERMS = Flag(
             help="Text matched (substring or fuzzy) against a component's name, description, and key metadata.",
         ),
     ),
-    translate_to_hydra=lambda args: [f"+query={_hydra_quote(args.query)}"] if getattr(args, "query", None) else [],
+    translate_to_hydra=lambda args: [f"+query={hydra_quote(args.query)}"] if getattr(args, "query", None) else [],
 )
 
 

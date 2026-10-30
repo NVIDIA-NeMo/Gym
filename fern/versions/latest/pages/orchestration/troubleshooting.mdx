@@ -177,6 +177,8 @@ The service did not answer its health endpoint in time (`timeout_seconds / 5` at
 
 Read that service's log for the cause. The rollouts that were in flight left no row, so they run again when the job resumes or is resubmitted.
 
+This only applies while the evaluation runs. When a benchmark has [exports](/orchestration/configuration#export), the job creates `<benchmark dir>/eval.succeeded.<Slurm job id>` as soon as `gym eval run` exits with 0, and from then on a service that exits no longer stops the job: the exports do not use the model service, and the job ends with the evaluation's own exit code. The file belongs to one attempt, so one left by an earlier attempt does not affect a resumed job.
+
 ### The driver cannot find Gym
 
 **Symptom:** the driver log shows `gym: command not found` or an import error for `nemo_gym`.

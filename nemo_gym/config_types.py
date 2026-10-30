@@ -972,6 +972,22 @@ class MLFlowConfig(ExporterConfig):
         )
 
 
+class MLflowExportConfig(RunExportConfig, MLFlowConfig, UploadRolloutsConfigMixin):
+    """Settings of `gym eval export mlflow`."""
+
+
+class WandbExportConfig(RunExportConfig, WANDBConfig, UploadRolloutsConfigMixin):
+    """Settings of `gym eval export wandb`."""
+
+    @property
+    def is_available(self) -> bool:
+        # A post-run export can authenticate from WANDB_API_KEY in the environment, so the key is optional here.
+        # A key that is given must still be real (not empty, not masked).
+        if self.wandb_api_key is None:
+            return bool(self.wandb_project and self.wandb_name)
+        return super().is_available
+
+
 ########################################
 # Aggregate Metrics
 ########################################
