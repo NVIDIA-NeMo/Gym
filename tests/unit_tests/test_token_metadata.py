@@ -2,10 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import copy
+import json
 
 import pytest
 
+from nemo_gym.core.responses_api_types import TOKEN_METADATA_FIELDS, NeMoGymResponseOutputMessageForTraining
 from nemo_gym.observability.token_metadata import strip_duplicate_token_metadata
+from nemo_gym.rollout_observability import AgentInvocation, TrajectoryRecord
 
 
 IDS = {"prompt_token_ids": [1, 2, 3], "generation_token_ids": [4, 5], "generation_log_probs": [-0.1, -0.2]}
@@ -71,14 +74,15 @@ def test_a_repeated_item_with_another_id_is_left_alone():
     assert result["ng_trajectory"]["turns"][0]["question"][1] == _item("msg-0", **IDS)
 
 
-def test_metadata_is_never_removed_without_a_canonical_twin_that_holds_the_same_field():
+def test_a_copy_keeps_its_complete_metadata_when_the_canonical_twin_holds_only_part_of_it():
     result = _result()
     del result["response"]["output"][0]["generation_log_probs"]
 
-    strip_duplicate_token_metadata(result)
+    removed = strip_duplicate_token_metadata(result)
 
-    answer = result["ng_trajectory"]["turns"][0]["answer"][0]
-    assert answer == _item(generation_log_probs=IDS["generation_log_probs"])
+    # Removing only the arrays the twin has would leave an item that no longer validates, so none is removed.
+    assert result["ng_trajectory"]["turns"][0]["answer"][0] == _item(**IDS)
+    assert removed == 0
 
 
 def test_routed_experts_is_kept_once_like_the_token_ids():
@@ -143,3 +147,65 @@ def test_long_lists_of_numbers_on_a_replayed_copy_are_not_walked():
     # The replayed item has no canonical twin, so it keeps its metadata and costs nothing to pass over.
     assert len(replayed["generation_token_ids"]) == 100
     assert removed == 4 * len(IDS)
+
+
+def _training_item(**extra):
+    """An output item as a full dump of the validated model writes it, with the null routed_experts placeholder."""
+    return NeMoGymResponseOutputMessageForTraining(
+        id="msg_1",
+        role="assistant",
+        status="completed",
+        type="message",
+        content=[{"type": "output_text", "text": "ok", "annotations": []}],
+        **IDS,
+        **extra,
+    ).model_dump(mode="json")
+
+
+def _record_with_a_validated_conversation(response_item, conversation_item):
+    invocation = AgentInvocation(invocation_id="root", conversation=[conversation_item]).model_dump(mode="json")
+    trajectory = TrajectoryRecord(task_id="t", rollout_id="r", invocations=[invocation]).model_dump(mode="json")
+    return {"response": {"output": [response_item]}, "ng_trajectory": trajectory}
+
+
+def _stripped_trajectory_still_validates(result):
+    TrajectoryRecord.model_validate(json.loads(json.dumps(result["ng_trajectory"])))
+
+
+def test_a_stripped_copy_that_carries_a_null_placeholder_still_validates_as_a_trajectory():
+    result = _record_with_a_validated_conversation(_training_item(), _training_item())
+    assert result["ng_trajectory"]["invocations"][0]["conversation"][0]["routed_experts"] is None
+
+    removed = strip_duplicate_token_metadata(result)
+
+    copy_ = result["ng_trajectory"]["invocations"][0]["conversation"][0]
+    assert not TOKEN_METADATA_FIELDS.intersection(copy_)
+    assert removed == len(TOKEN_METADATA_FIELDS)
+    assert {field: result["response"]["output"][0][field] for field in IDS} == IDS
+    _stripped_trajectory_still_validates(result)
+
+
+def test_real_routed_experts_on_both_copies_are_kept_once_and_the_copy_validates():
+    experts = [[[1, 2]], [[3, 4]]]
+    result = _record_with_a_validated_conversation(
+        _training_item(routed_experts=experts), _training_item(routed_experts=experts)
+    )
+
+    strip_duplicate_token_metadata(result)
+
+    assert result["response"]["output"][0]["routed_experts"] == experts
+    assert not TOKEN_METADATA_FIELDS.intersection(result["ng_trajectory"]["invocations"][0]["conversation"][0])
+    _stripped_trajectory_still_validates(result)
+
+
+def test_routed_experts_only_on_the_copy_keep_its_whole_group_so_it_still_validates():
+    experts = [[[1, 2]], [[3, 4]]]
+    result = _record_with_a_validated_conversation(_training_item(), _training_item(routed_experts=experts))
+
+    removed = strip_duplicate_token_metadata(result)
+
+    copy_ = result["ng_trajectory"]["invocations"][0]["conversation"][0]
+    assert removed == 0
+    assert copy_["routed_experts"] == experts
+    assert {field: copy_[field] for field in IDS} == IDS
+    _stripped_trajectory_still_validates(result)
