@@ -22,6 +22,7 @@
 #
 #   recipes/nooa-atom/run.sh terminal-bench-2.1                   # full benchmark
 #   LIMIT=1 recipes/nooa-atom/run.sh terminal-bench-2.1           # one row
+#   ONLY_TASKS=code-from-image recipes/nooa-atom/run.sh terminal-bench-2.1   # named tasks (gym eval run --only-tasks)
 #   OUT=<dir> PARALLEL=<n> recipes/nooa-atom/run.sh terminal-bench-2.1
 #   RESUME=1 recipes/nooa-atom/run.sh terminal-bench-2.1          # continue an interrupted run
 #
@@ -34,7 +35,7 @@ export RECIPES_DIR="$PWD/$RECIPES"
 
 BENCH="${1:-}"
 if [ -z "$BENCH" ]; then
-  echo "usage: $RECIPES/run.sh <recipe>   (LIMIT, OUT, PARALLEL, RESUME optional)" >&2
+  echo "usage: $RECIPES/run.sh <recipe>   (LIMIT, ONLY_TASKS, OUT, PARALLEL, RESUME optional)" >&2
   echo "recipes:" >&2
   (cd "$RECIPES" && ls -- *.yaml | sed 's/\.yaml$//; s/^/  /') >&2
   exit 1
@@ -79,5 +80,6 @@ gym eval run \
   --output "$OUT/evaluator_rollouts.jsonl" \
   ${RESUME:+--resume} \
   ${LIMIT:+--limit "$LIMIT"} \
+  ${ONLY_TASKS:+--only-tasks "$ONLY_TASKS"} \
   ${PARALLEL:+--concurrency "$PARALLEL"} \
   "${HYDRA[@]}"
