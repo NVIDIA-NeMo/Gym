@@ -1214,8 +1214,6 @@ class SimpleAgent(SimpleResponsesAPIAgent):
             )
         if self._closes_after_verify(legacy_run, resources_verify_step_type) and not self.config.skip_verification:
             await self._close_legacy_resources_session(body, cookies)
-        if verification_skipped is not None:
-            result["verification_skipped"] = verification_skipped
         if trajectory is not None:
             for invocation in trajectory.invocations:
                 invocation.verification_skipped = verification_skipped
