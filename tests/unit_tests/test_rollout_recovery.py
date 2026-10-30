@@ -1772,8 +1772,8 @@ async def test_interruption_failures_do_not_spend_budget_or_create_retry_progres
 
 
 async def test_non_json_http_200_is_persisted_as_terminal_protocol_failure(runner_config, monkeypatch):
+    from nemo_gym.client.http_client import get_response_json
     from nemo_gym.rollout_recovery import IncompleteEvaluationError
-    from nemo_gym.server_utils import get_response_json
 
     response = FakeResponse(200)
     response.read = AsyncMock(return_value=b"<html>not JSON</html>")

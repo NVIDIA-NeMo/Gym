@@ -16,7 +16,7 @@ from pathlib import Path
 import psutil
 
 from nemo_gym import harness_capabilities
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config import ConfigError
 from nemo_gym.harness_capabilities.behavior import inspect_behavior
 from nemo_gym.harness_capabilities.checker import NAMES, EvidenceScope, inspect_record
 from nemo_gym.harness_capabilities.cli import digest_file, inspect_bundle, json_rows
