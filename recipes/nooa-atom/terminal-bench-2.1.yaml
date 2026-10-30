@@ -55,6 +55,9 @@ agent:
       # Keep NOOA's own OTLP JSONL trace per rollout under <artifacts_dir>/<rollout_id>/ for debugging.
       trace_jsonl: true
       artifacts_dir: ${oc.env:NOOA_ARTIFACTS_DIR,nooa-artifacts}
+      # Kimi K3 at inference-api.nvidia.com accepts image inputs (probed 2026-10-30 over Chat and Responses); video,
+      # audio and PDF are not offered there, so Atom replaces those with a text note.
+      media_inputs: [image]
       nooa:
         init_kwargs:
           # Atom's root turn method: handle_batch (one agent, unattended) or handle_orchestrate (the root may
