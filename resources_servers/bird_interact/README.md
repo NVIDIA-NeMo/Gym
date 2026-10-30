@@ -100,8 +100,9 @@ and compares rows in order when `conditions.order` is set, or as sets otherwise.
 <db>/<db>_kb.jsonl
 ```
 
-`data/example.jsonl` has three tasks on `data/example_databases/bookshop`, a synthetic database written for this
-server. `bookshop_3` has a follow-up question.
+`data/example.jsonl` has five tasks on `data/example_databases/bookshop`, a synthetic database written for this
+server. `bookshop_3` and `bookshop_4` have a follow-up question. `bookshop_4` and `bookshop_5` have two critical
+ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge.
 
 The public BIRD-Interact releases (Mini-Interact, Lite, Full) withhold `sol_sql` and `test_cases`. The authors
 send them on request. A seed for a row without `sol_sql` is refused with HTTP 422. Mini-Interact uses SQLite, so its
