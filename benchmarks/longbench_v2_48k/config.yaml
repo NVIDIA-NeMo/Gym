@@ -1,0 +1,23 @@
+# Chain to the LongBench v2 resources server config, which brings up the
+# rule-based scorer and the single-turn simple_agent.
+config_paths:
+  - resources_servers/longbench/configs/longbench.yaml
+
+longbench_benchmark_resources_server:
+  _inherit_from: longbench
+
+longbench_benchmark_simple_agent:
+  _inherit_from: longbench_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: longbench_benchmark_resources_server
+      datasets:
+      - name: longbench
+        type: benchmark
+        jsonl_fpath: benchmarks/longbench/data/longbench_benchmark.jsonl
+        # Rows carry a fully rendered prompt, so no template is applied.
+        prompt_config: null
+        prepare_script: benchmarks/longbench/prepare.py
+        num_repeats: 1
+        license: Apache 2.0
