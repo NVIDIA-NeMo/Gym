@@ -24,8 +24,6 @@ import pytest
 from pydantic import ValidationError
 from pytest import approx
 
-from nemo_gym import judge as judge_module
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -34,8 +32,11 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import is_judge_failure, judge_failsafe
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification import judge as judge_module
+from nemo_gym.verification import judge_failsafe
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.beam.app import (
     ABILITIES,
     BEAMResourcesServer,
@@ -113,7 +114,7 @@ def _mock_judge(
 ) -> List[Dict[str, Any]]:
     """Route /v1/responses to ``judge(messages)``; the first calls get ``statuses`` (e.g. 500) instead.
 
-    Patches the HTTP helpers ``nemo_gym.judge.call_judge`` uses, so failures surface as judge failures (``is_judge_failure``).
+    Patches the HTTP helpers ``nemo_gym.verification.judge.call_judge`` uses, so failures surface as judge failures (``is_judge_failure``).
     """
     calls: List[Dict[str, Any]] = []
     pending = list(statuses)
@@ -587,7 +588,7 @@ def test_compute_metrics_runs_keyed_by_rollout_index() -> None:
 
 async def test_task_group_keeps_unrelated_canonical_failures():
     """A failure that is not a judge failure leaves the task group as itself, not as a judge failure."""
-    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent
 
     unrelated = NgFailureEvent(
@@ -607,7 +608,7 @@ async def test_task_group_keeps_a_judge_failures_own_cause_and_cancels_siblings(
     import asyncio
 
     from nemo_gym.core import JUDGE_FAILED
-    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.typed_exceptions import failure_report_for
 
     model = NgFailureEvent(

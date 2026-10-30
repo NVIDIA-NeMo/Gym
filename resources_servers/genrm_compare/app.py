@@ -45,20 +45,21 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
 from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JUDGE_FAILURES, JudgeError, is_judge_failure
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
+)
+from nemo_gym.verification import JudgeError
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,

@@ -28,7 +28,9 @@ from pydantic import BaseModel, Field, TypeAdapter, ValidationError, model_valid
 from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
+from nemo_gym.artifacts.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, _rollout_for_export
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -52,20 +54,16 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollout_collection import (
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_RESULT_TYPE_KEY,
     _coverage_report,
     _get_max_rollout_attempts,
-    _rollout_for_export,
     _rollout_request_debug_summary,
     is_omitted_rollout_row,
     is_terminal_failure,
 )
+from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest, ReverifyMode
 from nemo_gym.trajectory.atif_json import strict_json_loads
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,

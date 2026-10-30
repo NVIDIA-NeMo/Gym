@@ -41,14 +41,6 @@ from typing import Any
 from fastapi import Request
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
@@ -58,6 +50,14 @@ from nemo_gym.sandbox import (
     cpu_cap_env,
     resolve_provider_config,
     resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.denovo_swe.verification import (

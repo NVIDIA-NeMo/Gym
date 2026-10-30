@@ -8,7 +8,7 @@ from typing import Self
 from pydantic import BaseModel, ConfigDict, field_validator
 
 from nemo_gym.core import validate_failure_kind
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
+from nemo_gym.server_runtime import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
 from resources_servers.nemo_user_sim.episode_contracts import (
     USERSIM_EPISODE_PROTOCOL,
     UserSimInvocation,

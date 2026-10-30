@@ -16,12 +16,18 @@ from fastapi.testclient import TestClient
 
 import nemo_gym.client.http_client as http_client
 import nemo_gym.server_utils as server_utils
-from nemo_gym.base_environment_server import handled_episode_failure, is_retryable_dependency_error
-from nemo_gym.episode_types import BaseEpisodeResponse, EpisodeFailure, FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, report_for_current_request
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_retryable_dependency_error
+from nemo_gym.server_runtime.episode_types import (
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    FailureBoundary,
+    FailureEvent,
+    FailureReport,
+)
 from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
-from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+from tests.unit_tests.server_runtime.test_environment_server import _environment_server, _EnvironmentServer, _request
 
 
 class _EvidenceFailure(EpisodeFailure):

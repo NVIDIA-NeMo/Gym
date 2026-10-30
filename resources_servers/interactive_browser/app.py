@@ -39,7 +39,9 @@ from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -56,8 +58,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.core import EpisodeId, TaskId
 
 
 logger = logging.getLogger(__name__)

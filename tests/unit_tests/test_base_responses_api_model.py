@@ -1385,7 +1385,7 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
     # The id becomes a path segment.
     # Middleware must return every accepted id unchanged.
@@ -1807,8 +1807,8 @@ def test_a_handled_upstream_error_reply_names_its_failure():
     original model failure as the final one."""
     from aiohttp import ClientResponseError
 
-    from nemo_gym.episode_types import FailureBoundary
     from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent
 
     model = NgFailureEvent(

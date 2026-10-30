@@ -34,8 +34,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import is_judge_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.math_with_autograder.app import (
     MathWithAutograderResourcesServer,
     MathWithAutograderResourcesServerConfig,

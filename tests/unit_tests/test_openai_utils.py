@@ -648,7 +648,7 @@ class TestExhaustedAttemptCause:
 
     async def test_the_last_attempt_becomes_the_explicit_cause(self, monkeypatch: pytest.MonkeyPatch) -> None:
         from nemo_gym import openai_utils
-        from nemo_gym.episode_types import FailureBoundary
+        from nemo_gym.server_runtime.episode_types import FailureBoundary
         from nemo_gym.typed_exceptions import NgFailureEvent
 
         error = self._http_error()
@@ -710,9 +710,9 @@ async def test_a_forwarded_permanent_failure_is_the_cause_of_only_the_call_it_en
 
     from aiohttp import web
 
-    from nemo_gym.episode_types import FailureBoundary
     from nemo_gym.failure_transport import FailureHeader
     from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
     remote = NgFailureEvent(

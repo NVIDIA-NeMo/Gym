@@ -17,17 +17,6 @@ from fastapi import FastAPI, Request
 from omegaconf import ListConfig
 from pydantic import Field, PrivateAttr, SecretStr
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    ResourcesCloseSessionRequest,
-    ResourcesCloseSessionResponse,
-    ReverifyMode,
-    SimpleResourcesServer,
-)
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.sandbox import (
@@ -37,6 +26,17 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ReverifyMode,
+    SimpleResourcesServer,
 )
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 

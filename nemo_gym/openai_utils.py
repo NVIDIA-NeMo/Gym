@@ -50,8 +50,8 @@ from nemo_gym.client.http_client import (
 )
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.failure_transport import FailureHeader, observe_failure
+from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.server_utils import ClientResponseError
 from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 

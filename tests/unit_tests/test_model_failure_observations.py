@@ -14,9 +14,9 @@ from aiohttp.test_utils import TestServer
 
 import nemo_gym.client.http_client as http_client
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON, NeMoGymAsyncOpenAI, PermanentEndpointError
+from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.typed_exceptions import failure_report_for
 
 

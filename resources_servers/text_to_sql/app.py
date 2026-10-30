@@ -28,20 +28,21 @@ from typing import Any, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JUDGE_FAILURES, call_judge, is_judge_failure
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.verification import call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.text_to_sql.prompts import SQL_JUDGE_PROMPT_TEMPLATE, SQL_JUDGE_SYSTEM_MESSAGE
 
 

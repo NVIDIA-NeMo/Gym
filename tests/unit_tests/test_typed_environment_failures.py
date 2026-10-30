@@ -23,14 +23,14 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
-from nemo_gym.episode_types import FailureReport, MaterializedTask
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.server_runtime.episode_types import FailureReport, MaterializedTask
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from tests.unit_tests.test_agent_environment_collection_failures import _serve
 
 
@@ -161,7 +161,7 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
                 env_app = environment.setup_webserver()
                 environment.setup_exception_middleware(env_app)
                 servers.append(await _serve(env_app))
-                reply = await nemo_gym.server_utils.request(
+                reply = await nemo_gym.client.http_client.request(
                     method="POST",
                     url=f"http://127.0.0.1:{servers[-1][2]}/run",
                     json=_request().model_dump(mode="json"),
@@ -264,9 +264,13 @@ def test_an_unhandled_environment_error_owns_its_report_without_borrowing_the_ca
     from fastapi.testclient import TestClient
 
     from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-    from nemo_gym.episode_types import EpisodeFailure, FailureBoundary
+    from nemo_gym.server_runtime.episode_types import EpisodeFailure, FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent
-    from tests.unit_tests.test_environment_server import _environment_server, _EnvironmentServer, _request
+    from tests.unit_tests.server_runtime.test_environment_server import (
+        _environment_server,
+        _EnvironmentServer,
+        _request,
+    )
 
     provider = RuntimeError("unexpected dependency failure")
     model = NgFailureEvent(

@@ -17,13 +17,13 @@ from app import (
     strip_inline_reasoning,
 )
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.judge import is_judge_failure
+from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
+from nemo_gym.verification.judge import is_judge_failure
 
 
 async def test_verifier_fixture() -> None:

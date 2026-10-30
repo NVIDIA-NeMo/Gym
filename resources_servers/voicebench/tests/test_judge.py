@@ -9,8 +9,8 @@ import pytest
 import yaml
 
 from nemo_gym.client import ServerClient
-from nemo_gym.judge import is_judge_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.voicebench.scorers.open_judge import JudgeSettings, OpenJudgeScorer, parse_score, score_outputs
 from resources_servers.voicebench.scorers.reference_qa import ReferenceQAScorer
 
