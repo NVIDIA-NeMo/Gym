@@ -15,7 +15,8 @@
 """`gym eval resubmit` decides from the run's own evidence before it queues anything.
 
 The job dirs here are injected fixtures in the layout rollout collection and the job chain write; none is provider
-evidence. The collector is the real ``COLLECT_SCRIPT``, run as the executor runs it on a login node.
+evidence. Integration cases run the real ``COLLECT_SCRIPT`` as on a login node. Tests of quality arithmetic or
+presentation supply explicit ``unit_quality`` inputs at the gate boundary instead of forging persisted reports.
 """
 
 import hashlib
@@ -53,7 +54,9 @@ class _StartsWith:
 
 
 # A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
-HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['response: the health report has no verified response")
+HEALTH_UNKNOWN = _StartsWith(
+    "response/trial health unknown: ['response: population not verified for every scored rollout"
+)
 
 
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
@@ -395,9 +398,10 @@ def test_gate_summary_complete_run_succeeds_and_keeps_model_zeros_as_warnings(tm
     assert t["warnings"] and "final evaluated-model" in t["warnings"][0]
 
 
-def write_quality(job: Path, *, expected, healthy, verdicts, partial=False, reasons=()) -> None:
-    run = {
-        "rollouts": ["rollouts.jsonl"],
+def unit_quality(*, expected, healthy=True, verdicts=None, partial=False, reasons=(), **facts) -> dict:
+    """Explicit input to the quality/gate unit boundary, never a persisted producer report."""
+    return {
+        "source_matches": True,
         "artifacts": {
             "expected": expected,
             "missing": 0,
@@ -405,9 +409,16 @@ def write_quality(job: Path, *, expected, healthy, verdicts, partial=False, reas
             "unhealthy_reasons": list(reasons),
             "partial": partial,
         },
-        "verdicts": verdicts,
+        "verdicts": verdicts if verdicts is not None else {"healthy": expected, "unhealthy": 0, "unobserved": 0},
+        **facts,
     }
-    (job / "artifacts" / "quality_summary.json").write_text(json.dumps({"run": run}))
+
+
+def produce_quality(job: Path) -> None:
+    """Use current raw saved rows; a grade-only fixture has unobserved response/trial health."""
+    from nemo_gym.rollout_health import run_health_checks
+
+    run_health_checks(job / "artifacts" / "rollouts.jsonl", workers=1)
 
 
 def collect_with_score(job_dir: Path, key: str) -> CollectedEvidence:
@@ -461,15 +472,14 @@ GOOD_VERDICTS = {"healthy": 4, "unhealthy": 0, "unobserved": 0}
         (dict(expected=4, healthy=True, verdicts=GOOD_VERDICTS), 0.02, True, True),
     ],
 )
-def test_quality_reader_keeps_validity_and_health_apart_and_fails_closed(
+def test_quality_inputs_keep_validity_and_health_apart_and_fail_closed(
     tmp_path, quality, criterion, fe, health
 ) -> None:
     from nemo_gym.orchestration.recovery import quality_inputs
 
     job = complete_job(tmp_path)
-    if quality is not None:
-        write_quality(job, **quality)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    collected.quality = unit_quality(**quality) if quality is not None else None
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     got_fe, _, got_health, reasons = quality_inputs(d, collected, max_unhealthy_fraction=criterion)
     assert (got_fe, got_health) == (fe, health) and reasons
@@ -479,7 +489,7 @@ def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     job = complete_job(tmp_path)
-    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    produce_quality(job)
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(
@@ -576,23 +586,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
 ) -> None:
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0), ident(1, reward=0.0)], failures=[])
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.5}}))
-    (job / "artifacts" / "quality_summary.json").write_text(
-        json.dumps(
-            {
-                "run": {
-                    "rollouts": ["rollouts.jsonl"],
-                    "artifacts": {
-                        "expected": 2,
-                        "missing": 0,
-                        "healthy": True,
-                        "unhealthy_reasons": [],
-                        "partial": False,
-                    },
-                    "verdicts": {"healthy": 2, "unhealthy": 0, "unobserved": 0},
-                }
-            }
-        )
-    )
+    produce_quality(job)
     write_postrun_receipt(job)
     fake_executor.job_dir = job
     code, out = run_cli(
@@ -616,7 +610,8 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
     assert code == 0 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["status"] == "FAILED" and out["gate_task"]["score"] == 0.5
     assert out["gate_task"]["errors"] == [HEALTH_UNKNOWN]
-    assert out["gate_task"]["warnings"][0].startswith("per-rollout health within the configured criterion")
+    assert out["gate_task"]["warnings"][0].startswith("per-rollout health not judged against the configured criterion")
+    assert "2 unobserved" in out["gate_task"]["warnings"][0]
 
 
 def test_cli_recover_without_score_or_criterion_fails_closed(tmp_path, fake_executor, capsys) -> None:
@@ -696,23 +691,7 @@ def test_stopped_incomplete_chain_is_named_in_the_gate_errors(tmp_path, fake_exe
 def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
     """A finished run whose MLflow files are the ones each producer leaves (or a damaged version of them)."""
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
-    (job / "artifacts" / "quality_summary.json").write_text(
-        json.dumps(
-            {
-                "run": {
-                    "rollouts": ["rollouts.jsonl"],
-                    "artifacts": {
-                        "expected": 1,
-                        "missing": 0,
-                        "healthy": True,
-                        "unhealthy_reasons": [],
-                        "partial": False,
-                    },
-                    "verdicts": {"healthy": 1, "unhealthy": 0, "unobserved": 0},
-                }
-            }
-        )
-    )
+    produce_quality(job)
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 1.0}}))
     if mode in ("live", "both"):
         # MLflowExporter.setup records the run it opened; teardown sets its status and writes nothing else.
@@ -774,9 +753,14 @@ def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_exe
         mlflow_run_id="postrun-run",
     )
     assert out.dispatched is None and fake_executor.calls == ["decide"]
-    # No case accepts: response/trial health has no producer. Only a current post-run receipt with FINISHED has no
-    # MLflow error.
-    assert out.gate_task["status"] == "FAILED" and out.gate_task["errors"] == [HEALTH_UNKNOWN] + mlflow
+    # Grade-only rows have unobserved response/trial health. Mutating a row also invalidates both content bindings.
+    health_errors = [HEALTH_UNKNOWN]
+    if mode == "stale":
+        health_errors = [
+            'FE validity unknown: ["quality summary is not bound to this run\'s sole rollouts.jsonl source"]',
+            _StartsWith("response/trial health unknown: ['response: the health report has no verified response"),
+        ]
+    assert out.gate_task["status"] == "FAILED" and out.gate_task["errors"] == health_errors + mlflow
 
 
 def test_mlflow_status_for_a_run_without_an_mlflow_id_is_contradictory(tmp_path, fake_executor) -> None:
@@ -859,7 +843,7 @@ def test_an_unavailable_score_is_an_explicit_blocker(tmp_path) -> None:
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     job = complete_job(tmp_path)
-    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    produce_quality(job)
     collected = collect(job)
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02)
@@ -872,8 +856,8 @@ def test_verdict_counts_that_do_not_cover_the_inventory_make_health_unknown(tmp_
     from nemo_gym.orchestration.recovery import quality_inputs
 
     job = complete_job(tmp_path)
-    write_quality(job, expected=4, healthy=True, verdicts={"healthy": 9, "unhealthy": 0, "unobserved": 0})
     collected = collect(job)
+    collected.quality = unit_quality(expected=4, verdicts={"healthy": 9, "unhealthy": 0, "unobserved": 0})
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     _, _, health, reasons = quality_inputs(d, collected, max_unhealthy_fraction=0.02)
     assert health is None and "do not cover" in reasons[0]
@@ -884,7 +868,7 @@ def test_a_nonfinite_aggregate_score_cannot_be_accepted(tmp_path, score) -> None
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     job = complete_job(tmp_path)
-    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    produce_quality(job)
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": score}}))
     out = subprocess.run(
         [sys.executable, "-c", COLLECT_SCRIPT, str(job), json.dumps(["agent", "mean/reward"])],
@@ -997,8 +981,8 @@ def test_health_criterion_and_counts_are_strict(tmp_path, verdicts, criterion, h
     from nemo_gym.orchestration.recovery import quality_inputs
 
     job = write_job_dir(tmp_path / "job", n=100, results=[ident(t, reward=1.0) for t in range(100)], failures=[])
-    write_quality(job, expected=100, healthy=True, verdicts=verdicts)
     collected = collect(job)
+    collected.quality = unit_quality(expected=100, verdicts=verdicts)
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert quality_inputs(d, collected, max_unhealthy_fraction=criterion)[2] is health
 
@@ -1007,7 +991,7 @@ def test_absent_mlflow_evidence_never_passes(tmp_path) -> None:
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     job = complete_job(tmp_path)
-    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    produce_quality(job)
     (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
@@ -1036,23 +1020,18 @@ def test_an_omitted_agent_error_without_interruption_class_stops(tmp_path, fake_
 def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path) -> None:
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
-    # Shape of a real run (chartqapro, inc52): nonzero issues below the limit and an unobserved run-level check.
     job = complete_job(tmp_path)
-    write_quality(job, expected=4, healthy=True, verdicts={"healthy": 3, "unhealthy": 1, "unobserved": 0})
-    summary_path = job / "artifacts" / "quality_summary.json"
-    summary = json.loads(summary_path.read_text())
-    summary["run"]["issues"] = {
-        "model_call_runaway_generation": 1,
-        "task_consistently_unhealthy": 1,
-        "agent_turn_hollow": 0,
-    }
-    summary["run"]["ignored_checks"] = []
-    summary["run"]["artifacts"]["coverage"] = {
-        "model_call_runaway_generation": {"evaluated": 4, "unobserved": 0, "ignored": 0},
-        "run_excessive_failures": {"evaluated": 0, "unobserved": 1, "ignored": 0},
-    }
-    summary_path.write_text(json.dumps(summary))
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    collected.quality = unit_quality(
+        expected=4,
+        verdicts={"healthy": 3, "unhealthy": 1, "unobserved": 0},
+        issues={"model_call_runaway_generation": 1, "task_consistently_unhealthy": 1, "agent_turn_hollow": 0},
+        ignored_checks=[],
+        coverage={
+            "model_call_runaway_generation": {"evaluated": 4, "unobserved": 0, "ignored": 0},
+            "run_excessive_failures": {"evaluated": 0, "unobserved": 1, "ignored": 0},
+        },
+    )
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(
         d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
@@ -1135,32 +1114,23 @@ def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> N
     )
 
 
-def gate_job(
-    tmp_path: Path, *, expected: int, final_zeros: int, missing: int = 0, responses: dict | None = None
-) -> Path:
-    """Reader fixture (hand-written report): scored rows, settled zeros and a quality summary."""
+def gate_job(tmp_path: Path, *, expected: int, final_zeros: int, missing: int = 0) -> Path:
+    """Saved row/score fixture for gate unit tests; quality is supplied separately."""
     scored = expected - final_zeros - missing
     results = [ident(t, reward=float(t % 2)) for t in range(scored)]
     failures = [final_model_zero(t, 0) for t in range(scored, scored + final_zeros)]
     job = write_job_dir(tmp_path / "job", n=expected, results=results, failures=failures)
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.5}}))
-    write_quality(
-        job, expected=expected, healthy=True, verdicts={"healthy": expected, "unhealthy": 0, "unobserved": 0}
-    )
-    if responses is not None:
-        path = job / "artifacts" / "quality_summary.json"
-        summary = json.loads(path.read_text())
-        summary["run"]["stats"] = {"responses": responses}
-        path.write_text(json.dumps(summary))
     write_postrun_receipt(job)
     return job
 
 
-def gate_of(job: Path) -> tuple:
+def gate_of(job: Path, *, quality: dict | None = None) -> tuple:
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    collected.quality = quality if quality is not None else unit_quality(expected=d.expected)
     return d, gate_summary_from_collected(
         d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
     )
@@ -1202,7 +1172,10 @@ def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_bel
 def test_the_response_gate_reads_the_reported_population_strictly_below_two_percent(
     tmp_path, responses, state
 ) -> None:
-    d, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0, responses=responses))
+    d, task = gate_of(
+        gate_job(tmp_path, expected=100, final_zeros=0),
+        quality=unit_quality(expected=100, responses=responses),
+    )
     assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED"
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     within = [w for w in task["warnings"] if w.startswith("health gate within the bounded failure policy: response:")]
@@ -1224,26 +1197,24 @@ def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
 
 def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_question(tmp_path) -> None:
     job = gate_job(tmp_path, expected=100, final_zeros=1)
-    path = job / "artifacts" / "quality_summary.json"
-    summary = json.loads(path.read_text())
-    summary["run"]["provenance"] = {
-        "resolved_config": "read",
-        "route_failures_to_sidecar": None,
-        "servers": {
-            "a": {
-                "kind": "responses_api_agents",
-                "implementation": "scicode_agent",
-                "resources_server": "r",
-                "skip_verification": None,
-            }
+    quality = unit_quality(
+        expected=100,
+        provenance={
+            "resolved_config": "read",
+            "route_failures_to_sidecar": None,
+            "servers": {
+                "a": {
+                    "kind": "responses_api_agents",
+                    "implementation": "scicode_agent",
+                    "resources_server": "r",
+                    "skip_verification": None,
+                }
+            },
         },
-    }
-    summary["run"]["stats"] = {
-        "model_call_errors": {"ended_on_error": 0, "verification_skipped": {"true": 0, "false": 0, "absent": 100}}
-    }
-    path.write_text(json.dumps(summary))
-    write_postrun_receipt(job)
-    d, task = gate_of(job)
+        ended_on_failed_model_call=0,
+        verification_skipped={"true": 0, "false": 0, "absent": 100},
+    )
+    d, task = gate_of(job, quality=quality)
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
     assert "known failures are a lower bound" in health and "route_failures_to_sidecar None" in health
@@ -1287,13 +1258,7 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
     tmp_path, counts, reported
 ) -> None:
     job = gate_job(tmp_path, expected=100, final_zeros=0)
-    path = job / "artifacts" / "quality_summary.json"
-    summary = json.loads(path.read_text())
-    if counts is not None:
-        summary["run"]["stats"] = {"model_call_errors": {"context_window_exceeded": counts}}
-    path.write_text(json.dumps(summary))
-    write_postrun_receipt(job)
-    d, task = gate_of(job)
+    d, task = gate_of(job, quality=unit_quality(expected=100, context_window_exceeded=counts))
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert d.action == RecoveryAction.NOOP and task["score"] == 0.5 and task["status"] == "FAILED"
     # A context-window signal is never read as proven clipping: the trial gate stays unknown, not failed.
@@ -1313,13 +1278,12 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
 def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_path, configured, message) -> None:
     job = gate_job(tmp_path, expected=100, final_zeros=0)
     (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
-    path = job / "artifacts" / "quality_summary.json"
-    summary = json.loads(path.read_text())
-    summary["run"]["provenance"] = {"resolved_config": "read", "servers": {}, "mlflow": {"configured": configured}}
-    path.write_text(json.dumps(summary))
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    collected.quality = unit_quality(
+        expected=100, provenance={"resolved_config": "read", "servers": {}, "mlflow": {"configured": configured}}
+    )
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status=None)
     mlflow = [e for e in task["errors"] if "MLflow" in e]
@@ -1372,7 +1336,7 @@ def aggregate_list_job(tmp_path: Path) -> Path:
     job = complete_job(tmp_path)
     entries = [{"agent_ref": {"name": "agent"}, "agent_metrics": {"mean/reward": 0.75}, "key_metrics": {}}]
     (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps(entries))
-    write_quality(job, expected=4, healthy=True, verdicts=GOOD_VERDICTS)
+    produce_quality(job)
     write_postrun_receipt(job)
     return job
 
@@ -1542,8 +1506,8 @@ def test_review_boolean_expected_count_is_not_one(tmp_path):
     from nemo_gym.orchestration.recovery import quality_inputs
 
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
-    write_quality(job, expected=True, healthy=True, verdicts={"healthy": 1, "unhealthy": 0, "unobserved": 0})
     got = collect(job)
+    got.quality = unit_quality(expected=True, verdicts={"healthy": 1, "unhealthy": 0, "unobserved": 0})
     decision = decide_from_collected(got, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert quality_inputs(decision, got, max_unhealthy_fraction=0.02)[0] is not True
 
@@ -1562,7 +1526,7 @@ def test_review_quality_from_another_rollout_is_not_accepted(tmp_path, sources):
     from nemo_gym.orchestration.recovery import quality_inputs
 
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
-    write_quality(job, expected=1, healthy=True, verdicts={"healthy": 1, "unhealthy": 0, "unobserved": 0})
+    produce_quality(job)
     path = job / "artifacts" / "quality_summary.json"
     payload = json.loads(path.read_text())
     payload["run"]["rollouts"] = sources
@@ -2246,3 +2210,123 @@ def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, cas
         assert decision.identities["unknown"] == [(0, 0)] and decision.action == RecoveryAction.STOP
     assert decision.evidence[0].attempts == 1 and decision.evidence[0].max_attempts == 3
     assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}
+
+
+# A rollout store's attempt manifest as its producer writes it (selected fields; the guard reads none of them).
+MANAGED_MANIFEST = {
+    "schema_version": 2,
+    "selection_policy": "latest_allocated",
+    "next_attempt": {"0-0": 2},
+    "max_rollout_attempts": 3,
+    "retry_terminal_timeouts": False,
+    "run_id": "controlled-managed-run",
+    "source_digest": "0" * 64,
+    "materialized_digest": "1" * 64,
+    "config_digest": "2" * 64,
+    "legacy_import": False,
+    "identity_overridden": False,
+}
+
+
+@pytest.mark.parametrize(
+    "marker", ["manifest", "empty_manifest", "malformed_manifest", "journal_only", "tagged_result", "tagged_failure"]
+)
+def test_a_rollout_store_run_stops_instead_of_selecting_a_saved_attempt(tmp_path, fake_executor, marker) -> None:
+    """An earlier saved success must not make a store-managed run look complete: only the store selects attempts."""
+    tagged = {"_ng_run_id": "controlled-managed-run"}
+    results = [ident(0, reward=1.0, _ng_attempt_index=0, **(tagged if marker == "tagged_result" else {}))]
+    failures = (
+        [ident(0, _ng_attempt_index=1, failure_kind="provider_unavailable", **tagged)]
+        if marker == "tagged_failure"
+        else []
+    )
+    job = write_job_dir(tmp_path / "job", n=1, results=results, failures=failures)
+    manifest = job / "artifacts" / "rollouts_manifest.json"
+    if marker == "manifest":
+        manifest.write_text(json.dumps(MANAGED_MANIFEST))
+    elif marker == "empty_manifest":
+        manifest.write_text("")
+    elif marker == "malformed_manifest":
+        manifest.write_text("{not json")
+    elif marker == "journal_only":
+        (job / "artifacts" / "rollouts_attempts.jsonl").write_text('{"reserved": "0-0"}\n')
+    out = subprocess.run([sys.executable, "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True)
+    assert "controlled-managed-run" not in out.stdout
+    fake_executor.job_dir = job
+    recovered = submit.recover("gym-job-a", "bench")
+    assert recovered.decision.action == RecoveryAction.STOP
+    assert "rollout store" in recovered.decision.reason
+    assert recovered.dispatched is None and fake_executor.calls == ["decide"]
+    # The known inventory stays the denominator; no saved row is read as an outcome.
+    assert recovered.decision.expected == 1 and recovered.decision.counts == {"unknown": 1}
+    assert recovered.decision.identities == {"unknown": [(0, 0)]}
+    # Nothing on the run host changes.
+    assert (job / "artifacts" / "rollouts.jsonl").read_text() == "".join(json.dumps(r) + "\n" for r in results)
+
+
+@pytest.mark.parametrize("reward", [1.0, 0.0])
+def test_a_run_without_a_rollout_store_keeps_its_complete_noop(tmp_path, fake_executor, reward) -> None:
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=1, results=[ident(0, reward=reward, _ng_run_id=None)], failures=[]
+    )
+    recovered = submit.recover("gym-job-a", "bench")
+    assert recovered.ok and recovered.decision.action == RecoveryAction.NOOP
+
+
+# The sidecar record rollout collection writes for a failed /run with route_failures_to_sidecar off.
+UNROUTED_DISPATCH_ERROR = {
+    "_ng_failure_class": "agent_run_error",
+    "_ng_failure_type": "ClientResponseError",
+    "_ng_failure_http_status": 400,
+    "_ng_elapsed_s": 8.475396316498518e-05,
+    "_ng_task_index": 0,
+    "_ng_rollout_index": 0,
+    "_ng_environment_server": "my_environment_server",
+    "_ng_result_type": "legacy_agent",
+    "_ng_failure_events": {
+        "7becf785f445465b9a6e92b7247153b6": {
+            "event_id": "7becf785f445465b9a6e92b7247153b6",
+            "boundary": "collection",
+            "failure_reason": "Rollout dispatch failed: ClientResponseError",
+            "failure_kind": "collection_dispatch_failed",
+            "operation": "collection.run",
+            "foreign_error": {
+                "exception_type": "aiohttp.client_exceptions.ClientResponseError",
+                "message": "boom",
+                "http_status": 400,
+            },
+        }
+    },
+    "_ng_failure_id": "7becf785f445465b9a6e92b7247153b6",
+    "_ng_omitted_rollout": True,
+    "_ng_unrouted_run_error": True,
+}
+
+
+def test_an_unrouted_dispatch_error_without_a_standing_outcome_is_unknown_not_missing(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[], failures=[UNROUTED_DISPATCH_ERROR])
+    out = submit.recover("gym-job-a", "bench")
+    assert out.decision.action == RecoveryAction.STOP and out.dispatched is None
+    assert out.decision.identities.get("missing") is None and out.decision.identities["unknown"] == [(0, 0)]
+    (evidence,) = out.decision.evidence
+    assert evidence.failure_id == "7becf785f445465b9a6e92b7247153b6" and evidence.attempts == 0
+    assert evidence.events == [("collection", "collection.run", None, None, None)]
+
+
+def test_an_unrouted_dispatch_error_keeps_other_evidence_in_charge(tmp_path, fake_executor) -> None:
+    # Never dispatched: still missing, and the policy runs it.
+    fake_executor.job_dir = write_job_dir(tmp_path / "missing", n=1, results=[], failures=[])
+    assert submit.recover("gym-job-a", "bench").decision.identities["missing"] == [(0, 0)]
+    # A saved grade stands over a later unrouted error.
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "graded", n=1, results=[ident(0, reward=0.0)], failures=[UNROUTED_DISPATCH_ERROR]
+    )
+    assert submit.recover("gym-job-a", "bench").decision.action == RecoveryAction.NOOP
+    # A standing typed failure keeps its own decision; the unrouted record spends no attempt.
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "typed", n=1, results=[], failures=[ident(0, **INFRA), UNROUTED_DISPATCH_ERROR]
+    )
+    decision = submit.recover("gym-job-a", "bench").decision
+    assert decision.identities.get("unknown") is None
+    (evidence,) = decision.evidence
+    assert evidence.attempts == 1 and evidence.failure_kind == "provider_unavailable"

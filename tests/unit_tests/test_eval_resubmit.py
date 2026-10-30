@@ -960,3 +960,33 @@ def test_recover_refuses_unbounded_saved_prologue_before_dispatch(tmp_path, slur
         recover(*_handle(job_dir))
     assert not (slurm_bin / "env").exists()
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+@pytest.mark.parametrize("recover_budget", [True, False])
+def test_resubmit_refuses_a_chain_without_scheduler_cause_admission_before_dispatch(
+    tmp_path: Path, slurm_bin: Path, recover_budget: bool
+) -> None:
+    # A job.sh rendered before scheduler-cause admission retries FAILED, OUT_OF_MEMORY and DEADLINE jobs.
+    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    old = script.replace(SCHEDULER_CAUSE_MARKER + "\n", "")
+    assert old != script
+    (job_dir / "job.sh").write_text(old)
+    with pytest.raises(RuntimeError, match="predates scheduler-cause retry admission"):
+        recover(*_handle(job_dir)) if recover_budget else resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / "job.sh").read_text() == old
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+
+
+def test_recover_keeps_an_eligible_infrastructure_retry_and_spent_budgets(tmp_path: Path, slurm_bin: Path) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (slurm_bin / "accounting").write_text("100|PREEMPTED|7200\n101|NODE_FAIL|60\n")
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"

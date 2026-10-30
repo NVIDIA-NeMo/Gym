@@ -45,6 +45,8 @@ RESUBMIT_ENV = "GYM_RESUBMIT"
 KEEP_BUDGET_ENV = "GYM_RESUBMIT_KEEP_BUDGET"
 # Capability of the generated script, not evidence that a particular run completed.
 BOUNDED_BUDGET_MARKER = "# --- Bounded resume budgets v1 ---"
+# Capability: only PREEMPTED, NODE_FAIL and BOOT_FAIL admit an infra retry; FAILED, OUT_OF_MEMORY and DEADLINE stop.
+SCHEDULER_CAUSE_MARKER = "# --- Scheduler-cause retry admission v1 ---"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -83,6 +85,7 @@ if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
 fi
 
 {bounded_budget_marker}
+{scheduler_cause_marker}
 # Counters are data, never shell arithmetic expressions. An absent counter denotes a fresh chain.
 _gym_accumulated=0
 _retries=0
@@ -293,5 +296,6 @@ def render_resume_prologue(resume: ResumeConfig) -> str:
         keep_budget_env=KEEP_BUDGET_ENV,
         max_retries=resume.max_retries,
         bounded_budget_marker=BOUNDED_BUDGET_MARKER,
+        scheduler_cause_marker=SCHEDULER_CAUSE_MARKER,
         max_walltime_check=max_walltime_check,
     )

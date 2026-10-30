@@ -659,3 +659,9 @@ def test_a_failure_without_scheduler_infrastructure_cause_stops_and_keeps_its_el
     assert not (tmp_path / ".gym_job_chain").exists()
     if saved_output:
         assert (tmp_path / "rollouts.jsonl").read_text() == '{"reward": 0.0}\n'
+
+
+def test_the_prologue_carries_the_scheduler_cause_capability():
+    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+
+    assert SCHEDULER_CAUSE_MARKER in render_resume_prologue(ResumeConfig(max_retries=1)).splitlines()

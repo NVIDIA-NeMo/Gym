@@ -301,7 +301,12 @@ def decide_recovery(
     ``is_non_superseding_rollout_row`` names are skipped, and an interrupted omitted row means the rollout is missing.
     Only rows at or after ``resubmit_offset`` count towards the attempt cap. The rows are only read.
     """
-    from nemo_gym.rollout_collection import is_non_superseding_rollout_row, is_omitted_rollout_row, is_terminal_failure
+    from nemo_gym.rollout_collection import (
+        NG_UNROUTED_RUN_ERROR_KEY,
+        is_non_superseding_rollout_row,
+        is_omitted_rollout_row,
+        is_terminal_failure,
+    )
 
     policy = outcome_policy or RecoveryOutcomePolicyConfig()
 
@@ -374,6 +379,21 @@ def decide_recovery(
             )
             continue
         standing = [row for row in sidecar.get(identity, []) if not is_non_superseding_rollout_row(row)]
+        unrouted = [row for row in sidecar.get(identity, []) if row.get(NG_UNROUTED_RUN_ERROR_KEY) is True]
+        if not standing and unrouted:
+            # A failed /run kept as evidence is no outcome, but the rollout did not simply never start either:
+            # its cause is unknown here, so it is not restarted as missing. This observation debits no attempt.
+            last = unrouted[-1]
+            evidence.append(
+                IdentityEvidence(
+                    identity=identity,
+                    state=IdentityState.UNKNOWN,
+                    failure_kind=last.get("failure_kind"),
+                    failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
+                    events=_events(last),
+                )
+            )
+            continue
         if not standing:
             # No attempt ran, or the latest one was interrupted: the input restarts.
             evidence.append(IdentityEvidence(identity=identity, state=IdentityState.MISSING))
@@ -551,12 +571,15 @@ COLLECT_SCRIPT = r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
 a = os.path.join(d, "artifacts")
-KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
+KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status")
 # Only saved-answer presence leaves the run host.
 SAVED = "_ng_collected_saved_answer"
+# A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
+# attempts. Only their presence leaves the run host, never their content or the run id.
+managed_store = [os.path.exists(os.path.join(a, n)) for n in ("rollouts_manifest.json", "rollouts_attempts.jsonl")]
 def trial_refs(items):
     if not isinstance(items, list):
         return None
@@ -596,6 +619,8 @@ def rows(name, skip=0):
                 raise
             if name == "rollouts_failures.jsonl":
                 r["_line"] = i
+            if isinstance(r, dict) and r.get("_ng_run_id") is not None:
+                managed_store.append(True)
             selected = {k: r[k] for k in KEEP if k in r}
             if r.get("_ng_failure_class") == "judge_failed":
                 selected[SAVED] = isinstance(r.get("response"), dict) and bool(r["response"])
@@ -649,6 +674,8 @@ RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml
                  "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
                  "failures_jsonl_fpath": "rollouts_failures.jsonl",
                  "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl"}
+source_files = (*RECEIPT_FILES.values(), "quality_summary.json")
+source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 mlflow = {"live_run_id": None, "receipt": None}
 try:
     mlflow["live_run_id"] = open(os.path.join(a, "rollouts_mlflow_run_id")).read().strip()
@@ -682,6 +709,15 @@ try:
     sources = run.get("rollouts")
     source_matches = (isinstance(sources, list) and len(sources) == 1 and isinstance(sources[0], str)
                       and os.path.abspath(os.path.join(a, sources[0])) == os.path.abspath(os.path.join(a, "rollouts.jsonl")))
+    provenance = run.get("provenance")
+    bindings = provenance.get("rollout_artifact_digests") if isinstance(provenance, dict) else None
+    binding = bindings[0] if isinstance(bindings, list) and len(bindings) == 1 else None
+    expected_files = {k: v for k, v in RECEIPT_FILES.items() if k != "aggregate_metrics_json_fpath"}
+    binding_valid = (isinstance(binding, dict) and set(binding) == set(expected_files)
+                     and all(value is None or isinstance(value, str) and len(value) == 64
+                             and all(c in "0123456789abcdef" for c in value) for value in binding.values())
+                     and isinstance(binding.get("rollouts_jsonl_fpath"), str))
+    source_matches = source_matches and binding_valid and binding == {k: sha256(os.path.join(a, n)) for k, n in expected_files.items()}
     quality = {"source_matches": source_matches, "rollouts": sources, "artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
                "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
                "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses"),
@@ -723,13 +759,16 @@ if len(sys.argv) > 2:
         score = value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
-print(json.dumps({"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
+collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
                   "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
                   "infra_retries_state": num(".gym_infra_retries")[1],
                   "walltime_used_s": num(".gym_accumulated_walltime")[0],
                   "walltime_state": num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
-                  "quality": quality, "score": score, "mlflow": mlflow}))
+                  "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store)}
+if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
+    quality["source_matches"] = False
+print(json.dumps(collected))
 """
 
 
@@ -748,6 +787,7 @@ class CollectedEvidence(BaseModel):
     quality: dict[str, Any] | None = None
     score: float | None = None
     mlflow: dict[str, Any] | None = None
+    managed_store: bool = False
 
 
 def decide_from_collected(
@@ -789,6 +829,21 @@ def decide_from_collected(
         live_job=live_job,
         job_chain=collected.job_chain,
     )
+    if collected.managed_store:
+        # Selecting from these files here could pick a superseded attempt or lose a reservation, so every known
+        # input stays unknown and no saved row is read as its outcome.
+        known = sorted({i for i in map(_identity, collected.materialized or []) if i is not None})
+        return RecoveryDecision(
+            action=RecoveryAction.STOP,
+            reason=(
+                "the run was written by a rollout store (an attempt manifest, an attempt journal or run-tagged rows); "
+                "this Gym version has no rollout store reader to select its attempts, so recovery stops until one does"
+            ),
+            expected=len(known),
+            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
+            identities={IdentityState.UNKNOWN.value: known} if known else {},
+            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+        )
     if collected.materialized is None:
         return RecoveryDecision(
             action=RecoveryAction.STOP,

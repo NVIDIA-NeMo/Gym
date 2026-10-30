@@ -46,6 +46,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
     RESUBMIT_ENV,
+    SCHEDULER_CAUSE_MARKER,
     _walltime_to_seconds,
 )
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
@@ -376,6 +377,12 @@ class SlurmExecutor(BaseExecutor):
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
+                        # An older chain retries FAILED, OUT_OF_MEMORY and DEADLINE as infrastructure failures.
+                        # Refuse it before anything in the job dir changes.
+                        f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
+                        f"&& ! grep -qxF -- {shlex.quote(SCHEDULER_CAUSE_MARKER)} job.sh; then "
+                        'fail "job.sh in $PWD predates scheduler-cause retry admission, so its chain would retry '
+                        'FAILED, OUT_OF_MEMORY and DEADLINE jobs; stage a new job script"; fi',
                         # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
                         # `gym eval run` on a line of its own (see `render_gym_cmd`).
                         "if [ -s artifacts/rollouts.jsonl ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "

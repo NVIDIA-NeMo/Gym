@@ -3243,6 +3243,20 @@ def test_an_unverified_selected_call_leaves_the_response_population_unknown(tmp_
     assert json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]["unknown"] == 1
 
 
+def _assert_report_input_digests(summary: dict, rollout_path: Path) -> None:
+    import hashlib
+
+    files = {
+        "rollouts_jsonl_fpath": rollout_path,
+        "failures_jsonl_fpath": rollout_path.with_name("rollouts_failures.jsonl"),
+        "materialized_inputs_jsonl_fpath": rollout_path.with_name("rollouts_materialized_inputs.jsonl"),
+        "resolved_config_yaml_fpath": rollout_path.with_name("rollouts_resolved_config.yaml"),
+    }
+    assert summary["run"]["provenance"].pop("rollout_artifact_digests") == [
+        {key: hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None for key, path in files.items()}
+    ]
+
+
 def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: Path) -> None:
     rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
     (tmp_path / "rollouts_resolved_config.yaml").write_text(
@@ -3264,6 +3278,7 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
         "output_jsonl_fpath: rollouts.jsonl\n"
     )
     summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    _assert_report_input_digests(summary, rollout_path)
     assert summary["run"]["provenance"] == {
         "resolved_config": "read",
         # Not written, so unknown: never defaulted to the collector's False.
@@ -3294,6 +3309,7 @@ def test_run_provenance_without_a_readable_resolved_config_is_not_guessed(tmp_pa
     if content is not None:
         (tmp_path / "rollouts_resolved_config.yaml").write_text(content)
     summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    _assert_report_input_digests(summary, rollout_path)
     assert summary["run"]["provenance"] == {"resolved_config": state}
 
 

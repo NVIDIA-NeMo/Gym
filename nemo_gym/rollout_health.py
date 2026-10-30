@@ -885,6 +885,22 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         yield row if calls is None else {**row, "ng_model_call_capture": {"calls": calls}}
 
 
+def _health_artifact_digests(paths: Sequence[Path]) -> list[dict[str, str | None]]:
+    """Bind gate facts to saved rollout inputs, not to external captures or observation completeness."""
+    return [
+        {
+            name: _sha256(source) if source.is_file() else None
+            for name, source in {
+                "rollouts_jsonl_fpath": path,
+                "failures_jsonl_fpath": failures_path_for(path),
+                "materialized_inputs_jsonl_fpath": materialized_path_for(path),
+                "resolved_config_yaml_fpath": resolved_config_path_for(path),
+            }.items()
+        }
+        for path in paths
+    ]
+
+
 def run_health_checks(
     rollout_paths: Path | Sequence[Path],
     *,
@@ -908,6 +924,7 @@ def run_health_checks(
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
+    source_digests = _health_artifact_digests(paths)
     lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
@@ -1048,6 +1065,8 @@ def run_health_checks(
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
     summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
     summary["run"]["provenance"] = run_provenance(paths[0])
+    if source_digests == _health_artifact_digests(paths):
+        summary["run"]["provenance"]["rollout_artifact_digests"] = source_digests
     report_dir = output_dir or paths[0].parent
     summary["run"][QUALITY_SUMMARY_SOURCES_KEY] = _report_sources(paths, report_dir)
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
