@@ -377,13 +377,16 @@ async def test_real_harbor_decisions_survive_saved_projection(
         assert [turn["step_count"] for turn in turns] == [0, 0]
 
 
-@pytest.mark.parametrize(("mode", "call_count"), [("success", 2), ("compaction", 6)])
-def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count):
+@pytest.mark.parametrize(
+    ("mode", "call_count", "rebuilt_ids"),
+    [("success", 2, ["resp_0", "resp_1"]), ("compaction", 6, ["resp_0", "resp_1", "resp_5"])],
+)
+def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, call_count, rebuilt_ids):
     """seed -> responses -> close: the close carries the run's own decisions and the saved record keeps them.
 
     The environment server forwards the close's trajectory on its result. Without it the collector rebuilds
-    one turn per captured model call, so the context-recovery and summarization calls of a compaction count
-    as decisions and the command-batch counts behind each decision are lost.
+    turns from captured model calls. It excludes referenced compaction helpers, but cannot recover the
+    producer's decision grouping or command-batch counts; the unclassified context-recovery call remains.
     """
     execution.mode.value = mode
     turn, close = execution.session_run()
@@ -434,13 +437,14 @@ def test_session_decisions_survive_saved_projection(execution, tmp_path, mode, c
             ref["response_id"] for turn in turns for ref in turn["model_calls"]
         )
 
-    # The symptom this guards against: with the trajectory dropped, every captured call becomes a decision
-    # and no decision keeps its command-batch count.
+    # Dropping the trajectory loses decision grouping and command-batch counts, even though the
+    # compaction observations still exclude their three referenced helpers from rebuilt turns.
     rebuilt_dir = tmp_path / "without_trajectory"
     rebuilt_dir.mkdir()
     rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
-    assert len(rebuilt["turns"]) == call_count
-    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * call_count
+    assert len(rebuilt["model_calls"]) == call_count
+    assert [ref["response_id"] for turn in rebuilt["turns"] for ref in turn["model_calls"]] == rebuilt_ids
+    assert [turn["step_count"] for turn in rebuilt["turns"]] == [0] * len(rebuilt_ids)
 
 
 @pytest.mark.parametrize(
@@ -511,7 +515,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
         )
 
     # The symptom this guards against: a failure row without the trajectory rebuilds a decision from every
-    # captured call that got an answer, helper calls included, and no decision keeps its command-batch count.
+    # answered call without a compaction reference, and no decision keeps its command-batch count.
     rebuilt_dir = tmp_path / "without_trajectory"
     rebuilt_dir.mkdir()
     rebuilt, _ = save_and_check(execution, without_trajectory, rebuilt_dir)
