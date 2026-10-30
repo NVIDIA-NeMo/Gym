@@ -18,6 +18,7 @@ import json
 import os
 import shlex
 import sys
+from collections import Counter
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
@@ -1111,6 +1112,16 @@ def run(
     rh.run_forever()
 
 
+def _example_rollout_taskset(line: str) -> Optional[str]:
+    """The taskset in an example rollout's task ID, or None for a rollout without one or a row that is not JSON."""
+    try:
+        row = json.loads(line)
+    except json.JSONDecodeError:
+        return None
+    task_id = row.get("_ng_task_id") if isinstance(row, dict) else None
+    return task_id.get("taskset") if isinstance(task_id, dict) else None
+
+
 def _validate_data_single(test_config: TestConfig) -> None:  # pragma: no cover
     if not test_config.should_validate_data:
         return
@@ -1184,9 +1195,13 @@ gym eval run --no-serve +agent_name=example_multi_step_simple_agent \
 head -1 resources_servers/example_multi_step/data/example_rollouts.jsonl
 ```
 """
+    # Tasksets that run the examples under different Environment Servers (such as two modes of one benchmark) each
+    # need their own five rollouts. Rollouts without a taskset count as one group.
     with open(example_rollouts_fpath) as f:
-        count = sum(1 for _ in f)
-    assert count == 5, f"Expected 5 example rollouts in {example_rollouts_fpath}, but got {count}"
+        counts = Counter(_example_rollout_taskset(line) for line in f)
+    assert counts and set(counts.values()) == {5}, (
+        f"Expected 5 example rollouts for each taskset in {example_rollouts_fpath}, but got {dict(counts)}"
+    )
 
     print(f"The data for {test_config.dir_path} has been successfully validated!")
 

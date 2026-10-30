@@ -40,6 +40,7 @@ from nemo_gym.cli.env import (
     _resolve_server_dir,
     _select_shard,
     _test_single,
+    _validate_data_single,
     dump_config,
     init_environment,
     init_resources_server,
@@ -372,6 +373,50 @@ class TestResolveServerDir:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")
         assert cfg.resolved_dir_path == PARENT_DIR / "resources_servers" / "arc_agi"
+
+
+class TestValidateExampleData:
+    """`gym env test +should_validate_data=true` wants five example rollouts for each taskset."""
+
+    @staticmethod
+    def _rollout(taskset: str | None) -> str:
+        task_id = {"taskset": taskset, "task_id": "t"} if taskset else None
+        return json.dumps({"_ng_task_id": task_id, "reward": 1.0})
+
+    def _validate(self, tmp_path: Path, monkeypatch, rollouts: list[str]) -> None:
+        data = tmp_path / "resources_servers" / "my_server" / "data"
+        data.mkdir(parents=True)
+        (data.parent / "requirements.txt").write_text("nemo-gym\n")
+        (data / "example.jsonl").write_text("{}\n" * 5)
+        (data / "example_metrics.json").write_text(json.dumps({"Number of examples": 5}))
+        (data / "example_rollouts.jsonl").write_text("".join(f"{line}\n" for line in rollouts))
+        monkeypatch.chdir(tmp_path)
+        _validate_data_single(
+            EnvironmentTestConfig(entrypoint="resources_servers/my_server", should_validate_data=True)
+        )
+
+    @pytest.mark.parametrize(
+        "rollouts",
+        [
+            pytest.param([_rollout(None)] * 5, id="no-taskset"),
+            pytest.param(["<PLACEHOLDER ROW>"] * 5, id="placeholder-rows"),
+            pytest.param([_rollout("bench:mode_a")] * 5 + [_rollout("bench:mode_b")] * 5, id="two-tasksets"),
+        ],
+    )
+    def test_accepts_five_rollouts_for_each_taskset(self, tmp_path: Path, monkeypatch, rollouts: list[str]) -> None:
+        self._validate(tmp_path, monkeypatch, rollouts)
+
+    @pytest.mark.parametrize(
+        "rollouts",
+        [
+            pytest.param([_rollout(None)] * 10, id="ten-without-taskset"),
+            pytest.param([_rollout("bench:mode_a")] * 5 + [_rollout("bench:mode_b")] * 4, id="one-taskset-short"),
+            pytest.param([], id="empty"),
+        ],
+    )
+    def test_rejects_other_counts(self, tmp_path: Path, monkeypatch, rollouts: list[str]) -> None:
+        with pytest.raises(AssertionError, match="Expected 5 example rollouts for each taskset"):
+            self._validate(tmp_path, monkeypatch, rollouts)
 
 
 class TestRunHelperDryRunSpinup:
