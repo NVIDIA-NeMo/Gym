@@ -340,6 +340,19 @@ class AnySweAgentConfig(BaseResponsesAPIAgentConfig):
     swebench_agent_timeout: int = 2700
     save_eval_output: bool = False
     concurrency: int = 256
+    sanitize_git_history: bool = Field(
+        default=False,
+        description=(
+            "Before the agent starts, keep only the git history reachable from HEAD in the task repository: delete "
+            "every other ref, reflog and remote and prune unreachable objects. Some task images ship the full "
+            "upstream clone checked out at the base commit, so the fix commit is reachable through other refs. "
+            "Grading runs in a fresh sandbox and is unaffected."
+        ),
+    )
+    sanitize_git_history_timeout_s: int = Field(
+        default=300,
+        description="Budget for pruning; past it the history is replaced by a single commit of the current tree.",
+    )
 
 
 class AnySweServerConfig(BaseModel):
@@ -609,6 +622,66 @@ class AnySweAgent(SimpleResponsesAPIAgent):
         }
 
     @staticmethod
+    def _git_history_sanitizer_script(repo_path: str, timeout_s: int) -> str:
+        """POSIX shell script that leaves ``repo_path`` with only the history reachable from HEAD.
+
+        Deletes every ref except the checked-out branch (a detached HEAD gets a branch first), all reflogs and
+        remotes, then ``git gc --prune=now`` drops the unreachable objects so neither ``git log --all`` nor
+        ``git fsck --unreachable`` can reach a future commit. If gc exceeds the budget, the history is replaced by
+        one commit of the current tree instead. The working tree is untouched either way.
+        """
+        return f"""set -eu
+g() {{ git "$@"; }}
+cd {shlex.quote(repo_path)} || exit 0
+[ -e .git ] || [ -L .git ] || exit 0
+# A task must own its Git metadata and object store; never modify a sibling worktree.
+if [ ! -d .git ] || [ -L .git ] || [ -e .git/commondir ] || [ -d .git/worktrees ] ||
+   [ -L .git/objects ] || [ -s .git/objects/info/alternates ] || [ -s .git/objects/info/http-alternates ] ||
+   [ -n "${{GIT_ALTERNATE_OBJECT_DIRECTORIES:-}}" ] || [ -n "${{GIT_OBJECT_DIRECTORY:-}}" ]; then
+  echo 'unsupported shared Git repository; refusing to sanitize' >&2; exit 1
+fi
+repo=$(pwd -P)
+[ "$(g rev-parse --absolute-git-dir)" = "$repo/.git" ] || {{ echo 'external Git directory' >&2; exit 1; }}
+[ "$(cd "$(g rev-parse --git-common-dir)" && pwd -P)" = "$repo/.git" ] || {{ echo 'shared Git directory' >&2; exit 1; }}
+g rev-parse --verify HEAD >/dev/null
+before=$(g rev-list --count --all)
+cur=$(g symbolic-ref -q HEAD || true)
+if [ -z "$cur" ]; then g checkout -q -B anyswe_base; cur=refs/heads/anyswe_base; fi
+remotes=$(g remote)
+for remote in $remotes; do g remote remove "$remote"; done
+refs=$(g for-each-ref --format='%(refname)')
+printf '%s\n' "$refs" | while IFS= read -r ref; do
+  if [ -n "$ref" ] && [ "$ref" != "$cur" ]; then g update-ref --no-deref -d "$ref"; fi
+done
+g reflog expire --expire=now --all
+rm -f .git/FETCH_HEAD .git/ORIG_HEAD
+gc='git gc --prune=now --quiet'
+command -v timeout >/dev/null 2>&1 && gc="timeout {int(timeout_s)} $gc"
+if ! $gc; then
+  echo '>>>>> git gc failed or exceeded the budget; replacing history with a single commit'
+  tracked_files=$(mktemp)
+  trap 'rm -f "$tracked_files"' 0
+  g ls-files --cached -z > "$tracked_files"
+  rm -rf .git
+  g init -q
+  g add -A
+  # Force-add previously tracked files even if ignore rules now match them.
+  # NUL-delimited literal paths preserve whitespace and Git pathspec characters.
+  xargs -0 -r sh -c 'for file do
+    if [ -e "$file" ] || [ -L "$file" ]; then
+      git --literal-pathspecs add -f -- "$file" || exit 1
+    fi
+  done' sh < "$tracked_files"
+  g -c user.email=anyswe@localhost -c user.name=anyswe -c commit.gpgsign=false commit -q -m base --allow-empty
+fi
+g rev-parse --verify HEAD >/dev/null
+# Successful gc can still retain unreachable objects (for example in a kept/promisor pack).
+remaining=$(g fsck --full --no-reflogs --unreachable)
+if [ -n "$remaining" ]; then echo "$remaining" >&2; exit 1; fi
+echo ">>>>> git history sanitized: $before -> $(g rev-list --count --all) commits reachable"
+"""
+
+    @staticmethod
     def _instance_dict(params: AnySweInstanceConfig) -> Dict[str, Any]:
         value = params.problem_info["instance_dict"]
         return json.loads(value) if isinstance(value, str) else dict(value)
@@ -797,6 +870,21 @@ class AnySweAgent(SimpleResponsesAPIAgent):
                 )
                 if unpacked.return_code != 0:
                     raise RuntimeError(f"agent runtime extraction failed: {(unpacked.stderr or '')[:300]}")
+            if params.sanitize_git_history:
+                sanitized = await sandbox.exec(
+                    self._git_history_sanitizer_script(
+                        params.sandbox_spec.get("workdir", "/testbed"), params.sanitize_git_history_timeout_s
+                    ),
+                    timeout_s=params.sanitize_git_history_timeout_s + 120,
+                    user="root",
+                )
+                (params.persistent_dir / "git_sanitize.txt").write_text(
+                    "\n".join(part for part in (sanitized.stdout, sanitized.stderr) if part)[-20_000:]
+                )
+                if sanitized.return_code != 0:
+                    raise RuntimeError(
+                        f"git history sanitizer failed: {(sanitized.stderr or sanitized.stdout or '')[-300:]}"
+                    )
             if _dataset_family(params.problem_info.get("dataset_name", "")) == "r2e":
                 await sandbox.exec(
                     "rm -rf /r2e_tests /root/r2e_tests /testbed/r2e_tests; "
