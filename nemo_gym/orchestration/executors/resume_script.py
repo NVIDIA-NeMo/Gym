@@ -63,6 +63,15 @@ _gym_stop_incomplete() {{
     exit 1
 }}
 
+# A Slurm requeue restarts the same job id and may restart its allocation clock. The persisted counters
+# do not identify elapsed time of that prior incarnation. Stop before resets/accounting/work instead of
+# charging the predecessor twice or granting an unaccounted allocation.
+_gym_restart_count="${{SLURM_RESTART_COUNT:-0}}"
+[[ "$_gym_restart_count" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_incomplete "Slurm restart accounting is unknown."
+if (( 10#$_gym_restart_count > 0 )); then
+    _gym_stop_incomplete "Requeued allocation elapsed time is unknown; recover only after complete terminal accounting."
+fi
+
 # A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
 # stopped at the walltime cap says "resubmit to continue". One queued by `--recover` keeps both. The variables
 # are read once and unset, so the follow-up queued below (which inherits this environment) is an ordinary hop.

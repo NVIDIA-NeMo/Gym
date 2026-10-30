@@ -159,6 +159,8 @@ def _run_prologue(
     scontrol_fails: bool = False,
     keep_budget: bool = False,
     update_result: str = "",
+    restart_count: str = "0",
+    manual_resubmit: bool = False,
 ) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -183,6 +185,8 @@ def _run_prologue(
         "FAKE_ELAPSED": elapsed,
         "FAKE_TIME_LIMIT": time_limit,
         "FAKE_UPDATE_RESULT": update_result,
+        "SLURM_RESTART_COUNT": restart_count,
+        **({"GYM_RESUBMIT": "1"} if manual_resubmit else {}),
         **({"FAKE_SCONTROL_FAILS": "1"} if scontrol_fails else {}),
         **({"GYM_RESUBMIT": "1", "GYM_RESUBMIT_KEEP_BUDGET": "1"} if keep_budget else {}),
         **({"FAKE_SBATCH_FAILS": "1"} if sbatch_fails else {}),
@@ -592,3 +596,42 @@ def test_unlimited_or_multiday_allocation_is_capped(tmp_path, limit):
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), None, time_limit=limit)
     assert result.returncode == 0 and "REACHED_WORK" in result.stdout
     assert (tmp_path / "time_limit").read_text().strip() == "01:00:00"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("restart_count", ["1", "2", "-1", "unknown"])
+@pytest.mark.parametrize("keep_budget", [False, True])
+def test_requeue_with_unaccounted_previous_incarnation_stops_without_recounting(tmp_path, restart_count, keep_budget):
+    # Same job id, predecessor and queued follow-up as before Slurm requeued the allocation.
+    (tmp_path / ".gym_job_chain").write_text("100\n200\n")
+    (tmp_path / ".gym_followup_queued.200").write_text("999\n")
+    (tmp_path / "pending").write_text(f"999|afternotok:200(unfulfilled)|{tmp_path}\n")
+    (tmp_path / ".gym_accumulated_walltime").write_text("600\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    answer = tmp_path / "saved-answer.jsonl"
+    answer.write_text('{"reward":0,"answer":"saved"}\n')
+    before = {p.name: p.read_bytes() for p in tmp_path.iterdir() if p.is_file()}
+    result = _run_prologue(
+        tmp_path,
+        ResumeConfig(max_retries=3, max_walltime="04:00:00"),
+        "NODE_FAIL",
+        restart_count=restart_count,
+        keep_budget=keep_budget,
+    )
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / "sacct_calls").exists()
+    assert not (tmp_path / "scontrol_calls").exists()
+    assert all((tmp_path / name).read_bytes() == contents for name, contents in before.items())
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_requeued_manual_resubmit_does_not_reset_spent_history_again(tmp_path):
+    (tmp_path / ".gym_accumulated_walltime").write_text("600\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    result = _run_prologue(
+        tmp_path, ResumeConfig(max_walltime="04:00:00"), None, restart_count="1", manual_resubmit=True
+    )
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert (tmp_path / ".gym_accumulated_walltime").read_text() == "600\n"
+    assert (tmp_path / ".gym_infra_retries").read_text() == "1\n"
