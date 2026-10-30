@@ -18,7 +18,7 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.conversational_tool_use_simulation.app import ConversationalToolUseSeedSessionRequest
 from resources_servers.conversational_tool_use_simulation.scripts.build_conversational_tool_use_dataset import (
     ArtifactValidationError,

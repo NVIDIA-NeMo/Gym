@@ -12,7 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.nemo_user_sim import prepare as prepare_module
-from nemo_gym.config_types import DatasetConfig
+from nemo_gym.config import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
 from resources_servers.nemo_user_sim.task_data import TaskData

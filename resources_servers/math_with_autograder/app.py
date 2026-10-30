@@ -50,8 +50,8 @@ from typing import Any, ClassVar, Optional
 
 from pydantic import Field
 
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,

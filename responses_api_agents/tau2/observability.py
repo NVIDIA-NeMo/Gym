@@ -6,7 +6,7 @@
 import json
 from collections import defaultdict
 
-from nemo_gym.openai_utils import NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import (
     AgentInvocation,
     AgentObservationBundle,

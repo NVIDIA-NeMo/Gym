@@ -139,10 +139,49 @@ def _chars(line: str, byte_offset: int) -> int:
 _PINNED_LINK_PREFIX_RE = re.compile(r"/(?:blob|tree|raw)/[0-9a-f]{7,40}/\Z")
 
 
-class Migrator:
-    """Rewrites old paths given module moves (`old -> new`) and name moves (`module -> {name -> (module, name)}`)."""
+LIBRARY = Path(__file__).resolve().parents[1] / "nemo_gym"
 
-    def __init__(self, modules: Mapping[str, str], names: Mapping[str, Mapping[str, tuple[str, str]]]) -> None:
+
+def _load_public_apis() -> dict[str, dict[str, str]]:
+    """Each package's `_PUBLIC_API` (name -> submodule), read from its `__init__.py` without importing it."""
+    apis = {}
+    for init in sorted(LIBRARY.glob("*/__init__.py")):
+        for node in ast.parse(init.read_text()).body:
+            target = (
+                node.target
+                if isinstance(node, ast.AnnAssign)
+                else (node.targets[0] if isinstance(node, ast.Assign) else None)
+            )
+            if isinstance(target, ast.Name) and target.id == "_PUBLIC_API" and node.value is not None:
+                apis[init.parent.name] = ast.literal_eval(node.value)
+    return apis
+
+
+def _outside_library(path: str) -> bool:
+    """Whether `path` is code outside nemo_gym/ and its own tests (tests/), which import like the library."""
+    resolved = Path(path).resolve()
+    return (
+        path != "<source>"
+        and not resolved.is_relative_to(LIBRARY)
+        and not resolved.is_relative_to(LIBRARY.parent / "tests")
+    )
+
+
+class Migrator:
+    """Rewrites old paths given module moves (`old -> new`) and name moves (`module -> {name -> (module, name)}`).
+
+    In code outside nemo_gym/, a name that its package's public API exports is imported from the package
+    (`public_apis` maps each package to its `_PUBLIC_API`).
+    """
+
+    def __init__(
+        self,
+        modules: Mapping[str, str],
+        names: Mapping[str, Mapping[str, tuple[str, str]]],
+        *,
+        public_apis: Optional[Mapping[str, Mapping[str, str]]] = None,
+    ) -> None:
+        self.public_apis = {package: dict(api) for package, api in (public_apis or {}).items()}
         self.modules = dict(modules)
         self.names = {module: dict(moved) for module, moved in names.items()}
         # A module that names left can move later too; code then imports those names from its new path.
@@ -166,14 +205,17 @@ class Migrator:
         self._slashed_re = (
             re.compile(rf"(?<![\w.])(?<!nemo-gym/)({alternatives})(?=\.py\b|/|(?!\w|\.\w))") if slashed else None
         )
-        # One-line `from <module> import <names>` written as text, for modules that names were split out of.
-        alternatives = "|".join(re.escape(module) for module in sorted(self.names, key=len, reverse=True))
+        # One-line `from <module> import <names>` written as text, for modules that names were split out of and for
+        # modules that moved whole, so docs get the same public API form as code.
+        alternatives = "|".join(
+            re.escape(module) for module in sorted({*self.names, *self.modules}, key=len, reverse=True)
+        )
         self._text_import_re = (
             re.compile(
                 rf"^(?P<indent>[ \t]*)from (?P<module>{alternatives}) import (?P<names>[^\n#()\\]+?)(?P<comment>[ \t]*#[^\n]*)?$",
                 re.M,
             )
-            if self.names
+            if self.names or self.modules
             else None
         )
 
@@ -186,16 +228,18 @@ class Migrator:
             old = old.rpartition(".")[0]
         return module
 
-    def rewrite_dotted(self, text: str) -> str:
+    def rewrite_dotted(self, text: str, *, public: bool = False) -> str:
         """Rewrite dotted mentions (`nemo_gym.old.name`) and filesystem paths (`nemo_gym/old.py`) of moved code.
 
         One-line `from <module> import <names>` text, such as a code sample in docs or a template in a string, is rewritten too.
         """
         if KEEP_LINE_MARKER in text:
             lines = text.splitlines(keepends=True)
-            return "".join(line if KEEP_LINE_MARKER in line else self.rewrite_dotted(line) for line in lines)
+            return "".join(
+                line if KEEP_LINE_MARKER in line else self.rewrite_dotted(line, public=public) for line in lines
+            )
         if self._text_import_re is not None:
-            text = self._text_import_re.sub(self._rewrite_text_import, text)
+            text = self._text_import_re.sub(lambda match: self._rewrite_text_import(match, public=public), text)
         if self._dotted_re is not None:
             text = self._dotted_re.sub(lambda match: self._dotted[match.group(1)], text)
         if self._slashed_re is not None:
@@ -208,8 +252,13 @@ class Migrator:
             return match.group(0)
         return self._slashed[match.group(1)]
 
-    def _destinations(self, module: str, names: list[tuple[str, Optional[str]]]) -> dict[str, list[str]]:
-        """Group `(name, asname)` pairs imported from `module` by the module each now lives in."""
+    def _destinations(
+        self, module: str, names: list[tuple[str, Optional[str]]], *, public: bool = False
+    ) -> dict[str, list[str]]:
+        """Group `(name, asname)` pairs imported from `module` by the module each now lives in.
+
+        With `public`, a name its package's public API exports from that module comes from the package.
+        """
         groups: dict[str, list[str]] = {}
         for name, asname in names:
             if name in self.names.get(module, {}):
@@ -220,17 +269,23 @@ class Migrator:
             else:
                 # Covers `from nemo_gym import old_module` and names of a module that moved whole.
                 target_module, _, target_name = self.module_path(f"{module}.{name}").rpartition(".")
+            if public and target_module != module:
+                _, package, submodule = (target_module.split(".", 2) + ["", ""])[:3]
+                if self.public_apis.get(package, {}).get(target_name) == submodule:
+                    target_module = f"nemo_gym.{package}"
             spelled = target_name if target_name == name and asname is None else f"{target_name} as {asname or name}"
             groups.setdefault(target_module, []).append(spelled)
         return groups
 
-    def _rewrite_import_from(self, node: ast.ImportFrom, statement: str, line_prefix: str) -> Optional[str]:
+    def _rewrite_import_from(
+        self, node: ast.ImportFrom, statement: str, line_prefix: str, *, public: bool = False
+    ) -> Optional[str]:
         """Rewrite one `from nemo_gym... import ...` statement, keeping its formatting when nothing splits.
 
         `line_prefix` is the text before the statement on its first line.
         """
         module = node.module
-        groups = self._destinations(module, [(alias.name, alias.asname) for alias in node.names])
+        groups = self._destinations(module, [(alias.name, alias.asname) for alias in node.names], public=public)
         original = [alias.name if alias.asname is None else f"{alias.name} as {alias.asname}" for alias in node.names]
         if len(groups) == 1:
             [(target, spelled)] = groups.items()
@@ -244,7 +299,7 @@ class Migrator:
         # on its line (`if flag: from ...`, `x = 1; from ...`) stays in that line's statement list.
         return f"\n{line_prefix}".join(lines) if not line_prefix.strip() else "; ".join(lines)
 
-    def _rewrite_text_import(self, match: re.Match) -> str:
+    def _rewrite_text_import(self, match: re.Match, *, public: bool = False) -> str:
         """Rewrite a one-line `from <module> import <names>` written as text, such as a code sample in docs."""
         module = match.group("module")
         names = []
@@ -253,7 +308,7 @@ class Migrator:
             if not name.isidentifier() or (asname and not asname.strip().isidentifier()):
                 return match.group(0)
             names.append((name, asname.strip() or None))
-        groups = self._destinations(module, names)
+        groups = self._destinations(module, names, public=public)
         if list(groups) == [module]:
             return match.group(0)
         indent, comment = match.group("indent"), match.group("comment") or ""
@@ -262,6 +317,7 @@ class Migrator:
 
     def rewrite_python(self, source: str, *, path: str = "<source>") -> tuple[str, list[str]]:
         """Return the rewritten source and notes about what it left for a person to check."""
+        public = _outside_library(path)
         with warnings.catch_warnings():
             warnings.simplefilter("ignore", SyntaxWarning)  # invalid escapes in files being rewritten
             tree = ast.parse(source)
@@ -316,7 +372,7 @@ class Migrator:
             prefix = source[line_start:start]
             if node.lineno > 1 and lines[node.lineno - 2].rstrip("\r\n").endswith("\\"):
                 prefix = "\\" + prefix  # continues the previous line's statement, as `if flag: \`
-            new = self._rewrite_import_from(node, source[start:end], prefix)
+            new = self._rewrite_import_from(node, source[start:end], prefix, public=public)
             if new is None:
                 continue
             split = new.count("from ") > 1
@@ -361,9 +417,9 @@ class Migrator:
         # module path updated.
         pieces, last = [], 0
         for start, end, new in sorted(edits + [(s, e, k) for s, e, k in _outermost(kept)]):
-            pieces += [self.rewrite_dotted(source[last:start]), new]
+            pieces += [self.rewrite_dotted(source[last:start], public=public), new]
             last = end
-        pieces.append(self.rewrite_dotted(source[last:]))
+        pieces.append(self.rewrite_dotted(source[last:], public=public))
         return "".join(pieces), notes
 
     def _relative_import_reaches_moved_code(self, node: ast.ImportFrom, path: str) -> bool:
@@ -458,7 +514,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     parser.add_argument("paths", nargs="+", type=Path)
     parser.add_argument("--check", action="store_true", help="Report files that would change; change nothing.")
     args = parser.parse_args(argv)
-    migrator = Migrator(*_load_moves())
+    migrator = Migrator(*_load_moves(), public_apis=_load_public_apis())
     changed, noted = [], False
     for path in _iter_files(args.paths):
         if path.resolve().as_posix().endswith(KEEP_OLD_PATHS) or RELEASED_DOCS.search(path.as_posix()):
@@ -493,7 +549,7 @@ def main(argv: Optional[list[str]] = None) -> int:
                     )
                     continue
         else:
-            new = migrator.rewrite_dotted(source)
+            new = migrator.rewrite_dotted(source, public=_outside_library(str(path)))
         if new != source:
             changed.append(path)
             if not args.check:

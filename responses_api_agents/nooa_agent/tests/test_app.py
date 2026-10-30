@@ -14,13 +14,13 @@ from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    current_rollout_id,
 )
-from nemo_gym.rollout_correlation import current_rollout_id
 from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import app as app_module

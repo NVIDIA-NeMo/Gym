@@ -50,8 +50,8 @@ from nemo_gym._checkpoint.control import (
 )
 from nemo_gym._checkpoint.errors import AdmissionClosedError, ControlError, RolloutIdRequiredError, StaleAttemptError
 from nemo_gym._checkpoint.steps import Boundary, EpisodeSteps, StepType
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.rollout_correlation import RolloutContextMiddleware
 
 
 BoundarySnapshot = Callable[[], dict[str, JsonValue]]

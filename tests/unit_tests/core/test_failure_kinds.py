@@ -17,8 +17,8 @@
 import logging
 import re
 
-from nemo_gym import failure_kinds
-from nemo_gym.failure_kinds import (
+from nemo_gym.core import failure_kinds
+from nemo_gym.core.failure_kinds import (
     FAILURE_KINDS,
     is_namespaced,
     is_registered,
