@@ -1082,3 +1082,22 @@ async def test_access_names_the_current_sandbox_which_a_restore_replaces(state_d
     refreshed = await fresh.access("s1", provider_config_ref="sandbox", workdir="/work")
     assert refreshed.connection.descriptor["sandbox_id"] != "sb-1"
     assert refreshed.connection.descriptor["sandbox_id"] == fresh.get("s1").handle.sandbox_id
+
+
+async def test_an_export_records_whether_the_providers_snapshots_keep_processes(state_dir: Path) -> None:
+    files_only = await (await seeded(FakeSnapshotProvider(), state_dir / "files", "s1")).export(
+        ["s1"], checkpoint_id="c1"
+    )
+    assert state_of(files_only, "s1").keeps_processes is False
+
+    keeping = FakeSnapshotProvider()
+    keeping.snapshot_keeps_processes = True  # type: ignore[attr-defined]
+    exported = await (await seeded(keeping, state_dir / "vm", "s1")).export(["s1"], checkpoint_id="c1")
+    assert state_of(exported, "s1").keeps_processes is True
+
+
+def test_a_state_written_before_keeps_processes_existed_reads_as_files_only() -> None:
+    state = SandboxCheckpointState.model_validate(
+        {"provider_name": "p", "descriptor": {}, "snapshot_id": "snap-1", "spec": {}, "snapshot_at": 0.0}
+    )
+    assert state.keeps_processes is False

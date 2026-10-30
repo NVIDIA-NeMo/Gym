@@ -123,6 +123,10 @@ class SandboxCheckpointState(BaseModel):
 
     ``spec`` is written as the fork needs it, which includes the sandbox environment (``env``) in plain text: a
     checkpoint directory holds whatever the sandboxes were started with.
+
+    ``keeps_processes`` says the provider's snapshot kept the sandbox's running processes as well as its files, so
+    the fork starts with them running (``snapshot_keeps_processes`` on the provider). States written before the
+    field existed read as files only.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -132,6 +136,7 @@ class SandboxCheckpointState(BaseModel):
     snapshot_id: str
     spec: dict[str, JsonValue]
     snapshot_at: float
+    keeps_processes: bool = False
 
 
 class SandboxCheckpointError(RuntimeError):
@@ -502,6 +507,7 @@ class SandboxSessionCheckpointer:
             snapshot_id=snapshot_id,
             spec=spec_to_json(entry.spec),
             snapshot_at=time.time(),
+            keeps_processes=getattr(self._provider, "snapshot_keeps_processes", False) is True,
         )
         return state.model_dump(mode="json")
 

@@ -23,6 +23,10 @@ continue.request      Continue shell       Holds sequence number N to continue a
 continued.json        Supervisor           Acknowledges continue N once the processes run again
 ===================== ==================== ===========================================
 
+A supervisor launched with ``pause_mode="hold"``, for a sandbox whose snapshot keeps its processes,
+acknowledges a pause without stopping anything; the harness keeps running and its model calls are held
+instead.
+
 Pause and continue are re-armable: each checkpoint writes a sequence number greater than the last,
 and an acknowledgement names the number it answers, so a request is never mistaken for an earlier
 one and no file has to be removed. A pause written before the launch holds the launch until its
@@ -101,12 +105,23 @@ class CleanupReceipt(TypedDict):
 
 
 class PauseAcknowledgement(TypedDict):
-    """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``."""
+    """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``.
+
+    ``mode`` is the supervisor's pause mode and ``identity`` its ``PID.START``, ``None`` before it launched;
+    acknowledgements written before either existed have neither.
+    """
 
     seq: int
     confirmed: bool
     pids: list[int]
     error: str | None
+    mode: NotRequired[Literal["stop", "hold"]]
+    identity: NotRequired[str | None]
+
+
+# How a supervisor pauses: ``stop`` sends SIGSTOP and SIGCONT to every process it reaches; ``hold`` sends nothing,
+# for a sandbox whose snapshot keeps its processes running.
+PauseMode = Literal["stop", "hold"]
 
 
 # What a pause or continue request found:
@@ -215,6 +230,7 @@ def supervised_launch_command(
     timeout: float,
     cleanup_timeout: float,
     pausable: bool = False,
+    pause_mode: PauseMode = "stop",
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -227,7 +243,7 @@ def supervised_launch_command(
     TERM disposition.
 
     With ``pausable``, the supervisor also serves pause and continue requests in
-    ``session_dir`` (see ``request_pause`` and ``request_continue``).
+    ``session_dir`` (see ``request_pause`` and ``request_continue``), in ``pause_mode``.
     """
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
     pause_options = (
@@ -235,6 +251,7 @@ def supervised_launch_command(
         f"--paused {quote(f'{session_dir}/{PAUSED_FILE}')} "
         f"--continue-file {quote(f'{session_dir}/{CONTINUE_REQUEST_FILE}')} "
         f"--continued {quote(f'{session_dir}/{CONTINUED_FILE}')} "
+        + (f"--pause-mode {pause_mode} " if pause_mode != "stop" else "")
         if pausable
         else ""
     )

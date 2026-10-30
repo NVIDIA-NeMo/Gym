@@ -59,14 +59,16 @@ Seed, verify and close are the base's: `seed_task_sandbox_session`, `verify_task
 A commit snapshots each session's task sandbox through the provider and indexes the snapshot under
 `<checkpoint.state_dir>/<server>/snapshots/<checkpoint id>/`. It exports the seed, the agent's working directory, the
 patch verify captured (if it has) and the task state. The snapshot is the restore point: a restore forks it into a new
-sandbox, whatever happened to the original since. The snapshot keeps **files, not processes**.
+sandbox, whatever happened to the original since. What the snapshot keeps depends on the provider: always the
+sandbox's **files**, and its **running processes** too when the provider's `snapshot_keeps_processes` says so (a VM
+memory snapshot). The checkpoint records which it was (`keeps_processes`).
 
 - **Grade a captured patch, not a live sandbox.** Declare `checkpoint_verify = "replay"`: a checkpoint does not wait
   for grading, and a verify that runs again after a restore grades the saved patch instead of capturing it again. A
   session past its capture exports no sandbox.
-- **In-place graders** that need processes the agent started declare `restore_policy = "before_agent_close"`. The seed
-  reply says so, and the environment server makes the episode a restart once its agent has closed, instead of
-  continuing it in a fork that has none of those processes.
+- **In-place graders** that need processes the agent started declare `restore_policy = "before_agent_close"` on a
+  provider whose snapshots keep files only. The seed reply says so, and the environment server makes the episode a
+  restart once its agent has closed, instead of continuing it in a fork that has none of those processes.
 - After a restore, the environment server seeds the session again under the replacement attempt. The session answers
   with the forked sandbox and does not set the task up again.
 
