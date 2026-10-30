@@ -50,6 +50,8 @@ DIRECT_RAY_COMPONENTS = {
 }
 
 INHERITED_RAY_DECLARATIONS = {
+    # The sandbox-only entrypoint opts out of its code_gen parent's Ray execution path.
+    ("resources_servers/code_gen/sandbox_app.py", "CompCodingSandboxResourcesServer"): False,
     ("resources_servers/legal_agent_bench/harbor_bridge.py", "LegalAgentBenchHarborBridge"): True,
     ("responses_api_models/genrm_model/app.py", "GenRMModel"): True,
 }
