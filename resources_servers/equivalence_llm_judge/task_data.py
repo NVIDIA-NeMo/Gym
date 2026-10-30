@@ -45,6 +45,11 @@ class TaskData(BaseModel):
         description="Task identifier (openqa rows); declared on the wire but never read.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     options: Optional[List[Dict[str, str]]] = Field(
         default=None,
         description=(

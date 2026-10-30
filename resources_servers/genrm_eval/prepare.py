@@ -23,7 +23,7 @@ def make_task(
         "responses_create_params": {
             "input": turns,
             "metadata": {"response_1": first, "response_2": second},
-            "temperature": 0.6,
+            "temperature": 1.0,
             "top_p": 0.95,
             "max_output_tokens": 16384,
         },
@@ -54,7 +54,7 @@ def download_prepared_dataset(
     validate_metadata: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
     """Fetch preprocessed Gym tasks from the private GitLab registry."""
-    from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig
+    from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
     from nemo_gym.gitlab_utils import download_jsonl_dataset
 
     output = Path(output_fpath)

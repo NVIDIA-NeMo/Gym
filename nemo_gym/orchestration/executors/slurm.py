@@ -25,7 +25,7 @@ from pathlib import Path
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
@@ -260,11 +260,14 @@ class SlurmExecutor(BaseExecutor):
                     + [
                         'fail() { echo "Error: $*" >&2; exit 1; }',
                         f"cd {shlex.quote(str(job_dir))} || fail 'cannot enter the job dir'",
-                        # mkdir, not flock: it is atomic on shared filesystems that do not support flock.
-                        f'mkdir {_RESUBMIT_LOCK} 2>/dev/null || fail "another resubmit holds $PWD/{_RESUBMIT_LOCK}; '
-                        'remove it if no resubmit is running"',
-                        f"trap 'rmdir {_RESUBMIT_LOCK}' EXIT",
-                        "workdirs=$(squeue --me --noheader --format=%Z) || fail 'squeue failed'",
+                        # bash's noclobber creates the lock with O_EXCL, which is atomic on shared filesystems
+                        # that do not support flock. Not mkdir: uutils mkdir (Ubuntu 26.04's default) can
+                        # report success to two concurrent callers.
+                        f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
+                        f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
+                        f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+                        # --all: without it squeue does not list jobs, ours included, in a hidden partition.
+                        "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
                         # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
@@ -273,6 +276,12 @@ class SlurmExecutor(BaseExecutor):
                         "&& ! grep -qF -- ++resubmit=True job.sh; then "
                         'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
                         'rollouts; submit the run again instead"; fi',
+                        # Saved runners may predate normalization of the resume flag. Upgrade only the built-in
+                        # resubmit command, under the same lock, before queueing the existing script.
+                        "if grep -qx -- '[[:space:]]*gym eval run' job.sh "
+                        "&& grep -qF -- 'GYM_CMD+=(++resubmit=True)' job.sh; then "
+                        "sed -i 's/GYM_CMD+=(++resubmit=True)/GYM_CMD+=(++resubmit=True ++resume_from_cache=True)/g' "
+                        "job.sh || fail 'cannot normalize resubmit flags in job.sh'; fi",
                         *collector_update,
                         f"export {RESUBMIT_ENV}=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
@@ -291,7 +300,7 @@ class SlurmExecutor(BaseExecutor):
         """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""
         resolved = run_dir / RESOLVED_CONFIG_NAME
         text = conn.run([f"cat {shlex.quote(str(resolved))}"])
-        return SubmitConfig.model_validate(yaml.safe_load(text))
+        return SubmitConfig.model_validate(yaml.safe_load(text), context={SAVED_CONFIG: True})
 
     def _build_record(
         self,

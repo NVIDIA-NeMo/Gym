@@ -35,8 +35,10 @@ import pytest
 import uvicorn
 from aiohttp import ClientSession
 from fastapi import FastAPI
+from omegaconf import OmegaConf
 
 from nemo_gym import server_utils
+from nemo_gym.config import global_config
 from nemo_gym.telemetry import setup as telemetry_setup
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from tests.unit_tests.telemetry.conftest import requires_lens
@@ -277,10 +279,11 @@ async def test_lazy_client_initialization_failure_is_inside_the_client_span(
     monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY", False)
     monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: 4)
     monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-    monkeypatch.setattr(
-        server_utils,
-        "get_global_config_dict",
-        lambda **_kwargs: {"global_aiohttp_connector_limit": 1, "global_aiohttp_connector_limit_per_host": 1},
+    # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setenv(
+        global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+        OmegaConf.to_yaml({"global_aiohttp_connector_limit": 1, "global_aiohttp_connector_limit_per_host": 1}),
     )
 
     with pytest.raises(ValueError, match="must remain at least 1"):

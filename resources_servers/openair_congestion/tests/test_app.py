@@ -28,7 +28,7 @@ from unittest.mock import MagicMock
 import httpx
 import pytest
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,

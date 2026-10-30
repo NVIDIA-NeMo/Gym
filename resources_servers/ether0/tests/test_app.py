@@ -20,7 +20,7 @@ from app import (
 )
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

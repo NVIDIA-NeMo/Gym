@@ -34,8 +34,8 @@ from scipy import stats
 if TYPE_CHECKING:
     from wandb import Histogram
 
-from nemo_gym.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import AggregateMetrics, BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
@@ -639,7 +639,9 @@ def compute_pass_majority_metrics(
                         if a is not None and name in s
                     ]
                     if not valid:
-                        majority_values.append(0)
+                        # No answer to vote on: the task is wrong for every score,
+                        # but it is exactly what majority@k/no_answer counts.
+                        majority_values.append(1 if name == "no_answer" else 0)
                         continue
                     counter = Counter(valid)
                     max_count = counter.most_common(1)[0][1]
@@ -1302,7 +1304,7 @@ def compute_aggregate_metrics(
 
 # Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

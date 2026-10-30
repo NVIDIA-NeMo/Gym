@@ -35,7 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
@@ -47,7 +47,7 @@ from aiohttp import ClientResponseError
 from fastapi import Body, FastAPI, HTTPException, Request, Response
 from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
 from nemo_gym._checkpoint.control import install_control_routes, install_participant
 from nemo_gym._checkpoint.model import (
@@ -69,28 +69,27 @@ from nemo_gym._checkpoint.model_workers import (
 from nemo_gym._checkpoint.settings import checkpoint_settings
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.openai_utils import (
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
+    is_responses_lifecycle_chunk,
     restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
+    synthesize_responses_keepalive_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
-from nemo_gym.server_utils import (
-    BaseRunServerInstanceConfig,
-    BaseServer,
-    SimpleServer,
-    is_nemo_gym_fastapi_worker,
-)
+from nemo_gym.rollout_correlation import scope_with_routed_path
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -110,16 +109,22 @@ from nemo_gym.token_id_capture import (
 from nemo_gym.token_id_capture.config import NonGeneratingRequest, token_id_capture_config
 from nemo_gym.token_id_capture.control_routes import install_rollout_control_routes
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore
-from nemo_gym.token_id_capture.protocols import CaptureLedger, LineageResolver
-from nemo_gym.token_id_capture.records import UNCOMMITTED_CALL_REASON
+from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
+    CaptureInputError,
+    CaptureLedger,
+    LineageResolver,
+    ParentResolutionMode,
+)
+from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
 logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
 _SSE_KEEPALIVE = SSE_KEEPALIVE
-
 # A model server sets this attribute on an engine refusal it propagates on purpose (a length
 # refusal under its propagation setting). Its value is the envelope's string code:
 # ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` when the engine's message names the context window,
@@ -129,9 +134,6 @@ _SSE_KEEPALIVE = SSE_KEEPALIVE
 # answers with OpenAI's error envelope, and the chat-SSE error event reports it with the same
 # message and code.
 PROPAGATED_REFUSAL_CODE_ATTRIBUTE = "nemo_gym_propagated_refusal_code"
-# OpenAI's error code for a request that exceeds the model's context window; OpenAI-compatible
-# harnesses (Codex, OpenCode) compact their history and retry when they see it.
-CONTEXT_LENGTH_EXCEEDED_ERROR_CODE = "context_length_exceeded"
 
 
 def is_propagated_refusal(error: BaseException) -> bool:
@@ -209,11 +211,12 @@ def _request_messages(body: Any) -> list[dict]:
         turns = [m if isinstance(m, dict) else m.model_dump() for m in messages if m is not None]
     else:
         items = getter("input", None)
-        turns = (
-            [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
-            if isinstance(items, list)
-            else []
-        )
+        if isinstance(items, str):
+            turns = [{"role": "user", "content": items}]
+        elif isinstance(items, list):
+            turns = [i if isinstance(i, dict) else i.model_dump() for i in items if i is not None]
+        else:
+            turns = []
     return _request_envelope(getter) + turns
 
 
@@ -269,6 +272,20 @@ def _orjson_dispatch_response(content: Any) -> Any:
     return Response(content=orjson.dumps(content), media_type="application/json")
 
 
+class ModelCheckpointConfig(BaseModel):
+    """A model server instance's ``checkpoint`` block."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    # Only the policy instance drains during a partial-rollout checkpoint.
+    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
+    policy: bool = False
+    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
+    # so a restored call continues it instead of regenerating.
+    # Requires external token staging on workers that implement the generation-cut endpoint.
+    generation_cuts: bool = False
+
+
 class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
     # Exact successful routes whose responses cannot contain policy-generated content.
     token_id_capture_non_generating_requests: list[NonGeneratingRequest] = Field(default_factory=list)
@@ -291,13 +308,46 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
-    # Only the policy instance drains during a partial-rollout checkpoint.
-    # Judge and simulator instances keep serving so accepted tool and verifier calls can finish.
-    checkpoint_policy: bool = False
-    # Ask inference workers to stage the prefix of each in-flight call at a checkpoint,
-    # so a restored call continues it instead of regenerating.
-    # Requires external token staging on workers that implement the generation-cut endpoint.
-    checkpoint_generation_cuts: bool = False
+    stream_keepalive_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Hold streaming /v1/responses requests open with keepalive events while the backend computes. "
+            "Responses streaming is buffered, so a client sees no event until the whole generation returns, "
+            "and a client that bounds the silence between events (the Codex CLI's stream_idle_timeout_ms, "
+            "300 s by default) abandons a long turn and re-sends it. SSE comments do not help: such a client's "
+            "event parser drops them. When set, a call still running after this many seconds opens the stream "
+            "with response.created and then sends response.in_progress every this many seconds; the item and "
+            "terminal events that follow are unchanged. These events name the response before it exists, so "
+            "the response the stream serves (and capture records) takes the id they announced; servers whose "
+            "response ids come from an upstream Responses API refuse the setting at startup. A call that fails "
+            "after the stream opened ends with response.failed instead of an HTTP error status. Off (null) by "
+            "default, which sends nothing until the response is complete."
+        ),
+    )
+    custom_tool_strategy: CustomToolStrategy = Field(
+        default="passthrough",
+        description=(
+            "How a Responses ``custom`` (free-form) tool reaches a backend whose chat schema admits "
+            "function tools only. ``passthrough`` sends the converted request unchanged and the backend "
+            "decides (``drop_custom_tools`` remains the kill switch). ``function_bridge`` lowers each "
+            "custom tool to a function tool with one required plain-string parameter, replays "
+            "``custom_tool_call``/``custom_tool_call_output`` history in the lowered form, lifts a "
+            "returned call whose name the request declared as custom back into a ``custom_tool_call`` "
+            "item, and hoists custom entries from a streaming harness's ``additional_tools`` carrier "
+            "instead of dropping them. The Responses-to-Chat conversion implements it, so the setting "
+            "takes effect on the servers that convert: ``vllm_model`` and its subclasses (the compaction "
+            "and GenRM servers included), ``inference_provider``, and ``azure_openai_model``. A native "
+            "Responses path never runs the conversion, so the setting has no effect there; ``vllm_model`` "
+            "rejects ``function_bridge`` together with ``is_responses_native``, whose route renders "
+            "function tools only. The bridged payload's wire form depends on the backend's tool parser: "
+            "an XML-style parser (``qwen3_coder``, ``nemotron_v3``) carries it as raw text, while a "
+            "JSON-format parser (``hermes``, ``llama3_json``, ``mistral``) requires the model to "
+            "JSON-escape it inside the arguments object."
+        ),
+    )
+    # This instance's part in partial-rollout checkpoints, which the global ``checkpoint`` block turns on.
+    checkpoint: ModelCheckpointConfig = Field(default_factory=ModelCheckpointConfig)
 
 
 class BaseResponsesAPIModel(BaseServer):
@@ -308,11 +358,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
+    _capture_lineage: LineageResolver | None = PrivateAttr(default=None)
     # Main process of a multi-worker policy server under checkpointing: coordinates the workers.
     _policy_coordinator: Optional[PolicyCoordinator] = PrivateAttr(default=None)
 
     async def _finalize_served_response(self, response: Any) -> None:
         """Finalize capture after conversion to the response returned to the client."""
+
+    def _validate_capture_request(
+        self, body: NeMoGymResponseCreateParamsNonStreaming | NeMoGymChatCompletionCreateParamsNonStreaming
+    ) -> None:
+        """Validate server-specific request options before recording capture intent."""
 
     async def _stream_served_response(self, response: Any, events: Iterable[str | bytes]) -> StreamingResponse:
         """Serialize buffered SSE before committing externally staged capture."""
@@ -331,7 +387,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Allow adapters to retain an explicit upstream-status compatibility policy."""
         return True
 
+    def _mints_response_ids(self) -> bool:
+        """Whether the ids of the responses ``responses()`` returns are this server's own.
+
+        A keepalive stream (``stream_keepalive_s``) names its response before ``responses()`` returns,
+        so that response takes the announced id. An id an upstream Responses API issued must reach the
+        client unchanged, so a server that serves those cannot keep a stream alive.
+        """
+        return False
+
     def setup_webserver(self) -> FastAPI:
+        if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
+            raise ValueError(
+                f"stream_keepalive_s is not supported on {type(self).__name__}: its responses carry the ids "
+                "an upstream Responses API issued, which a keepalive stream cannot announce before they exist"
+            )
         app = FastAPI()
 
         @app.exception_handler(ClientResponseError)
@@ -348,14 +418,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         self.setup_session_middleware(app)
         capture_config = ModelCallCaptureConfig.model_validate(self.server_client.global_config_dict)
-        capture_ledger = install_model_call_capture(
+        self._capture_lineage = capture_ledger = install_model_call_capture(
             app,
             capture_config,
             model_server_name=self.config.name,
             assistant_message_header=self.server_client.assistant_message_header(self.config.name),
             global_config_dict=self.server_client.global_config_dict,
             num_workers=self.config.num_workers,
+            # Embedding vectors never contain policy-generated text, so an embeddings call under a
+            # rollout's token-capture prefix must not mark that rollout incomplete.
             non_generating_requests=self.non_generating_model_routes
+            | {("POST", "/v1/embeddings")}
             | frozenset(
                 (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
             ),
@@ -380,6 +453,11 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             traced_endpoint(GymSpanGroup.MODEL_CALL, "gym.model.messages", self.messages, model_attributes)
         )
 
+        # OpenAI-compatible embeddings. Servers backed by an embeddings-capable provider
+        # (e.g. openai_model, inference_provider) override embeddings(); the base default
+        # returns 501 so a policy-only server advertises the route but rejects the call.
+        app.post("/v1/embeddings")(self.embeddings)
+
         self.setup_policy_checkpoint(app, capture_ledger)
         return app
 
@@ -389,20 +467,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if settings is not None and capture_ledger is not None:
             # Every model server sharing the run's capture ledger checks, so one outside the gate refuses to start.
             reject_ungated_ledger_writers(global_config_dict)
-        if settings is None or not self.config.checkpoint_policy:
+        if settings is None or not self.config.checkpoint.policy:
             return
         capture_settings = token_id_capture_config(global_config_dict)
         if capture_settings is not None and capture_settings.enabled and capture_ledger is None:
             raise ValueError(
-                "checkpoint_policy with token_id_capture requires external_staging: only the token-free "
+                "checkpoint.policy with token_id_capture requires external_staging: only the token-free "
                 "capture ledger is checkpointed, and the training framework owns the staged tokens"
             )
         if capture_ledger is not None and not isinstance(capture_ledger, CheckpointableLedger):
-            raise ValueError(f"checkpoint_policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
+            raise ValueError(f"checkpoint.policy requires a checkpointable capture ledger, got {type(capture_ledger)}")
         cut_requester = None
-        if self.config.checkpoint_generation_cuts:
+        if self.config.checkpoint.generation_cuts:
             if capture_ledger is None:
-                raise ValueError("checkpoint_generation_cuts requires token_id_capture with external_staging")
+                raise ValueError("checkpoint.generation_cuts requires token_id_capture with external_staging")
             cut_requester = generation_cut_requester(
                 capture_settings.token_id_capture.resolve_control_auth_token(),
                 control_root=self.generation_cut_control_root,
@@ -474,6 +552,20 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
         pass
 
+    def _sanitize_streaming_responses_body(self, body: dict) -> tuple[dict, NamespaceMap]:
+        """Apply this server's tool policy while mapping a streaming body to the strict shape.
+
+        Every ``/v1/responses`` dispatch that accepts the streaming wire dialect sanitizes
+        through here, so the config's ``drop_custom_tools``, ``drop_hosted_tools`` and
+        ``custom_tool_strategy`` settings reach the sanitizer on each of them.
+        """
+        return sanitize_streaming_responses_body(
+            body,
+            drop_custom_tools=self.config.drop_custom_tools,
+            drop_hosted_tools=self.config.drop_hosted_tools,
+            hoist_carrier_custom_tools=self.config.custom_tool_strategy == "function_bridge",
+        )
+
     async def responses_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/responses`` entrypoint shared by every Gym model server.
 
@@ -486,8 +578,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
         retain their status before the stream starts. Other ``responses()`` failures become terminal
-        ``response.failed`` events; bad-request validation still fails eagerly.
+        ``response.failed`` events; bad-request validation still fails eagerly. With
+        ``stream_keepalive_s`` set, a call that outlasts it opens the stream early and keeps it alive
+        with ``response.in_progress`` events, and any later failure becomes ``response.failed``.
         """
+        context = current_capture_context()
+        if context is not None and context.parent_resolution_mode == "source_history":
+            # ``stream: true`` is allowed: the streaming branch below makes exactly one
+            # non-streaming ``responses()`` call and re-emits the completed response as
+            # synthesized SSE, so the engine-bound request stays non-streaming (external
+            # capture refuses a streamed backend request) and ``_stream_served_response``
+            # finalizes the capture before the stream is committed. SSE-only harnesses
+            # such as the Codex CLI thereby run under source-history capture. Server-held
+            # history is still refused: it hides part of the context from capture.
+            if body.get("previous_response_id") or body.get("conversation"):
+                raise HTTPException(status_code=422, detail="Framework context requires explicit history")
         if not body.get("stream"):
             params = _validate_responses_params(body)
             response = await self._invoke_responses(request, params)
@@ -495,11 +600,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             await self._finalize_served_response(response)
             return dispatched
 
-        cleaned, ns_map = sanitize_streaming_responses_body(
-            body,
-            drop_custom_tools=self.config.drop_custom_tools,
-            drop_hosted_tools=self.config.drop_hosted_tools,
-        )
+        cleaned, ns_map = self._sanitize_streaming_responses_body(body)
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
@@ -511,13 +612,35 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
     ) -> StreamingResponse:
         """Serve the same converted response to capture and Responses SSE clients."""
+        keepalive_s = self.config.stream_keepalive_s
+        if keepalive_s is None:
+            return await self._stream_buffered_responses(request, self._invoke_responses(request, params), ns_map)
+
+        # Keepalive events name the response before it exists, so the response takes this id.
+        response_id = f"resp_{uuid4().hex}"
+        pending = asyncio.create_task(self._invoke_responses(request, params, response_id=response_id))
         try:
-            response = await self._invoke_responses(request, params)
-            response_json = (
-                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
-            )
-            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
-            return await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
+            # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
+            # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
+            done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+        except BaseException:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+        if done:
+            return await self._stream_buffered_responses(request, pending, ns_map)
+        return StreamingResponse(
+            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _stream_buffered_responses(
+        self, request: Request, invocation: Awaitable[Any], ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Stream a completed response; until it completes nothing is sent to the client."""
+        try:
+            return await self._serve_responses_sse(request, await invocation, ns_map)
         except (ClientResponseError, HTTPException):
             # Generation is buffered: no headers or SSE bytes have been sent yet.
             # Let the shared HTTP handler retain the upstream error code and body.
@@ -530,6 +653,80 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
             )
+
+    async def _responses_keepalive_events(
+        self,
+        request: Request,
+        pending: "asyncio.Task[Any]",
+        ns_map: NamespaceMap,
+        keepalive_s: float,
+        response_id: str,
+    ) -> AsyncIterator[str | bytes]:
+        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes."""
+        try:
+            for event in synthesize_responses_keepalive_sse(response_id, include_created=True):
+                yield event
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+                if done:
+                    break
+                for event in synthesize_responses_keepalive_sse(response_id, include_created=False):
+                    yield event
+            try:
+                served = await self._serve_responses_sse(request, pending.result(), ns_map, include_created=False)
+            except Exception as exc:
+                # The stream is already open, so only a terminal event can report the failure.
+                code, message = self._streamed_responses_failure(exc)
+                for event in synthesize_responses_failure_sse(
+                    message, code=code, response_id=response_id, include_created=False
+                ):
+                    yield event
+                return
+            async for event in served.body_iterator:
+                yield event
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    def _streamed_responses_failure(self, exc: Exception) -> tuple[Optional[str], str]:
+        """The ``(code, message)`` of the ``response.failed`` event that reports a failure after keepalives.
+
+        Mirrors what the client would have seen before the stream opened: a refusal the server
+        propagates keeps its OpenAI error code (``context_length_exceeded`` tells a harness to compact
+        and retry), and an upstream HTTP error follows the server's propagation policy. Upstream
+        errors never report their request URL.
+        """
+        if is_propagated_refusal(exc):
+            message, code, _ = context_overflow_error_fields(exc)
+            logger.warning("responses() refused a streaming request after keepalive events with %s: %s", code, message)
+            return code, message
+        logger.exception("responses() failed after streaming keepalive events were sent")
+        if isinstance(exc, ClientResponseError):
+            if not self._should_propagate_upstream_http_error(exc):
+                return "server_error", "HTTP 500: Model request failed"
+            detail = getattr(exc, "response_content", None) or exc.message
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            return "server_error", f"Upstream HTTP {exc.status}: {detail}"
+        if isinstance(exc, HTTPException):
+            return "server_error", f"HTTP {exc.status_code}: {exc.detail}"
+        return "server_error", str(exc)
+
+    async def _serve_responses_sse(
+        self, request: Request, response: Any, ns_map: NamespaceMap, *, include_created: bool = True
+    ) -> StreamingResponse:
+        response_json = (
+            response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+        )
+        response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+        streamed = await self._stream_served_response(
+            response_json, synthesize_responses_sse(response_json, include_created=include_created)
+        )
+        if "usage" in response_json:
+            # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
+            request.state.nemo_gym_internal_usage = response_json["usage"]
+        return streamed
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -549,6 +746,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (e.g. ``"false"`` or ``1``) stays on the strict non-streaming path, which rejects the
         malformed ``stream`` with the same 422 as before.
         """
+        context = current_capture_context()
+        if (
+            context is not None
+            and context.parent_resolution_mode == "source_history"
+            and body.get("n") not in (None, 1)
+        ):
+            raise HTTPException(status_code=422, detail="Framework context requires one Chat completion")
         if body.get("stream") is not True:
             params = _validate_chat_params(body)
             response = await self._invoke_chat_completions(request, params)
@@ -650,9 +854,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
         if current_capture_context() is not None:
+            self._validate_capture_request(params)
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
+            try:
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.chat_completions).parameters:
@@ -664,6 +874,18 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             request_messages=request_messages,
         )
         return completion
+
+    async def embeddings(self, body: dict = Body()) -> dict:
+        """OpenAI-compatible ``POST /v1/embeddings`` default: 501 unless a server overrides it.
+
+        Servers backed by an embeddings-capable provider (e.g. ``openai_model``,
+        ``inference_provider``) override this to pass ``body`` through to the provider and
+        return the provider's JSON unchanged.
+        """
+        raise HTTPException(
+            status_code=501,
+            detail="This model server does not support the embeddings endpoint.",
+        )
 
     async def messages(self, request: Request, body: dict = Body()):
         """Default Anthropic Messages <-> Responses mapping shared by every Gym model server.
@@ -688,23 +910,37 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return dispatched
 
     async def _invoke_responses(
-        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, *, response_id: Optional[str] = None
     ) -> NeMoGymResponse:
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
         # all of them.
         # Resolve the parent from the received request before dispatch.
         # Exact prefix supply and capture share this decision.
-        if current_capture_context() is not None:
+        context = current_capture_context()
+        if context is not None:
+            self._validate_capture_request(params)
             request_messages = _request_messages(params)
-            await resolve_parent(request_messages)
-            await register_call_intent()
+            try:
+                await resolve_parent(request_messages)
+                await register_call_intent()
+            except CaptureAdmissionError as error:
+                raise HTTPException(status_code=409, detail=str(error)) from error
+            except CaptureInputError as error:
+                raise HTTPException(status_code=422, detail=str(error)) from error
         else:
             request_messages = None
         if "request" in inspect.signature(self.responses).parameters:
             response = await self.responses(request=request, body=params)
         else:
             response = await self.responses(body=params)
+        if response_id is not None:
+            # A keepalive stream announced this id; capture records it and the client keeps it.
+            response = (
+                response.model_copy(update={"id": response_id})
+                if isinstance(response, BaseModel)
+                else {**response, "id": response_id}
+            )
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
@@ -776,9 +1012,10 @@ def _validate_rollout_id(rollout_id: str) -> str:
 class CaptureStore:
     """Append-only, rollout-keyed JSONL sink for model exchanges."""
 
-    def __init__(self, root: str | Path) -> None:
+    def __init__(self, root: str | Path, *, create: bool = True) -> None:
         self._root = Path(root)
-        self._root.mkdir(parents=True, exist_ok=True)
+        if create:
+            self._root.mkdir(parents=True, exist_ok=True)
 
     @property
     def root(self) -> Path:
@@ -1231,6 +1468,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    verifier_invocation_id: Optional[str] = None,
     client_session_id: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
@@ -1272,6 +1510,8 @@ def _record(
             "request": request_body,
             "response": response_body,
         }
+        if verifier_invocation_id is not None:
+            exchange["verifier_invocation_id"] = verifier_invocation_id
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
         if execution is not None:
@@ -1294,15 +1534,21 @@ def _record(
 
 
 async def _fail_uncommitted_external_call(context: CaptureContext | None) -> None:
-    """Record a failure when an admitted worker call returns without commit coordinates."""
+    """Record a failure when an admitted worker call returns without commit coordinates.
+
+    A call the engine refused is skipped: ``capture_engine_refusal`` already wrote its definite reason.
+    """
     if (
         context is None
         or not context.external_staging
         or context.capture_admission is None
         or context.committed
+        or context.refused
+        or (context.parent_resolution_mode == "source_history" and not context.intent_registered)
         # A checkpoint gate owns a deferred row: it publishes it when the response starts,
         # and a call whose response never starts made no answer to record, so it is not poisoned.
         or context.deferred_commit is not None
+        or context.engine_refusal_recorded
         or context.lineage_store is None
     ):
         return
@@ -1315,11 +1561,8 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         )
         return
     try:
-        await ledger.record_failure(
-            context.rollout_id,
-            context.model_call_id,
-            UNCOMMITTED_CALL_REASON,
-        )
+        # A disconnected caller must not cancel the write before it reaches the ledger.
+        await asyncio.shield(ledger.record_failure(context.rollout_id, context.model_call_id, UNCOMMITTED_CALL_REASON))
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
@@ -1352,6 +1595,7 @@ class _CaptureMiddleware:
         lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
         external_staging: bool = False,
+        parent_resolution_mode: ParentResolutionMode = "fingerprint",
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -1371,6 +1615,7 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
+        self._parent_resolution_mode = parent_resolution_mode
         self._capture_ledger: CaptureLedger | None = (
             lineage_store if external_staging and isinstance(lineage_store, CaptureLedger) else None
         )
@@ -1415,6 +1660,18 @@ class _CaptureMiddleware:
         # Installed sinks are resolved for each request.
         token_sink = self._configured_sink or installed_token_sink() or self._token_store
         capture_wanted = token_capture_requested and (token_sink is not None or self._token_capture_enabled)
+        if (
+            capture_wanted
+            and self._parent_resolution_mode == "source_history"
+            and dialect is not None
+            and dialect not in ("responses", "chat")
+        ):
+            await Response(
+                content='{"detail":"Source-history capture currently requires Responses or Chat"}',
+                status_code=422,
+                media_type="application/json",
+            )(scope, receive, send)
+            return
         if token_capture_requested and dialect is None and token_sink is not None:
             marked_incomplete = False
             response_started = False
@@ -1453,7 +1710,8 @@ class _CaptureMiddleware:
                 await send(message)
 
             try:
-                await self._app(scope, receive, _send_unobserved)
+                with rollout_context(rollout_from_path):
+                    await self._app(scope, receive, _send_unobserved)
             except asyncio.CancelledError:
                 if not known_non_generating and not response_started:
                     await _mark_unobserved_incomplete("was cancelled before starting a response")
@@ -1475,6 +1733,9 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        verifier_invocation_id = _unique_request_header(
+            scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
+        )
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
@@ -1497,6 +1758,7 @@ class _CaptureMiddleware:
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
                 external_staging=self._external_staging,
+                parent_resolution_mode=self._parent_resolution_mode,
                 admitted_at=time.time(),
             )
             sink_token = set_token_sink(capture_context)
@@ -1560,7 +1822,13 @@ class _CaptureMiddleware:
                 state["streaming"] = content_type.startswith(b"text/event-stream")
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if chunk and chunk != _SSE_KEEPALIVE and state["ttft_ms"] is None:
+                if (
+                    chunk
+                    and chunk != _SSE_KEEPALIVE
+                    # Lifecycle events open a `stream_keepalive_s` stream long before the first output item.
+                    and not is_responses_lifecycle_chunk(chunk)
+                    and state["ttft_ms"] is None
+                ):
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
@@ -1600,6 +1868,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -1648,6 +1917,9 @@ class _CaptureMiddleware:
                     )
                     if not isinstance(response_body, dict):
                         response_body = None
+                    elif streaming and "nemo_gym_internal_usage" in request_state:
+                        # Keep unknown detail counts as None, as non-streaming capture does.
+                        response_body["usage"] = request_state["nemo_gym_internal_usage"]
                 except Exception:
                     response_body = None
             error_category = _classify_status(status) if status is not None else None
@@ -1673,6 +1945,7 @@ class _CaptureMiddleware:
                     dialect,
                     model_server_name,
                     request_bytes,
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -1802,6 +2075,9 @@ def install_model_call_capture(
         lineage_store=lineage_store,
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
         external_staging=external_staging,
+        parent_resolution_mode=(
+            capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
+        ),
         token_capture_enabled=capture_settings.enabled if capture_settings is not None else False,
         non_generating_requests=non_generating_requests,
     )
@@ -1809,7 +2085,7 @@ def install_model_call_capture(
 
 
 # Preserve old reader imports during deprecation without eagerly importing the reader back here.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(
@@ -1840,6 +2116,6 @@ __getattr__ = moved_attr_getter(
             ),
             "nemo_gym.observability.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_correlation",
+        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
     },
 )

@@ -8,9 +8,10 @@ from urllib.parse import urlsplit
 
 import pytest
 from aiohttp import ClientSession, ClientTimeout, TCPConnector, web
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym import server_utils
+from nemo_gym.config import global_config
 from nemo_gym.telemetry import connection_pool, gym_metrics
 from nemo_gym.telemetry import setup as telemetry_setup
 
@@ -95,13 +96,16 @@ async def _lazy_client(monkeypatch, *, metrics_enabled: bool = True, workers: in
     monkeypatch.setattr(connection_pool, "is_metrics_exporter_active", lambda: metrics_enabled)
     monkeypatch.setattr(server_utils, "get_nemo_gym_fastapi_num_workers", lambda: workers)
     monkeypatch.setattr(server_utils, "is_nemo_gym_fastapi_worker", lambda: True)
-    monkeypatch.setattr(
-        server_utils,
-        "get_global_config_dict",
-        lambda **_kwargs: {
-            "global_aiohttp_connector_limit": aggregate_limit,
-            "global_aiohttp_connector_limit_per_host": aggregate_limit,
-        },
+    # A server worker reads the config its parent puts in its environment, and nothing is cached yet.
+    monkeypatch.setattr(global_config, "_GLOBAL_CONFIG_DICT", None)
+    monkeypatch.setenv(
+        global_config.NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+        OmegaConf.to_yaml(
+            {
+                "global_aiohttp_connector_limit": aggregate_limit,
+                "global_aiohttp_connector_limit_per_host": aggregate_limit,
+            }
+        ),
     )
     try:
         yield

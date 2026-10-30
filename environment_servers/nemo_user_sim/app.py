@@ -29,6 +29,9 @@ from nemo_gym.base_environment_server import (
     CleanupContext,
     CleanupHandle,
     HandledEpisodeError,
+    dependency_failure,
+    is_retryable_dependency_error,
+    is_retryable_dependency_status,
 )
 from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
@@ -41,17 +44,18 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.config import (
     TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
+    get_first_server_config_dict,
 )
-from nemo_gym.failure_kinds import FailureStage
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    FailureStage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -609,12 +613,12 @@ class UserSimEnvironmentServer(BaseEnvironmentServer[UserSimEpisodeRequest, User
         *,
         terminal: bool | None = None,
     ) -> HandledEpisodeError:
-        return HandledEpisodeError(
-            UserSimEpisodeFailure(
-                stage=stage,
-                failure_reason=f"{type(error).__name__}: {format_exception_with_response_body(error)}"[:2000],
-                terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
-            )
+        return dependency_failure(
+            error,
+            failure_model=UserSimEpisodeFailure,
+            stage=stage,
+            terminal=not _is_retryable_dependency_error(error) if terminal is None else terminal,
+            name_error_type=True,
         )
 
 
@@ -857,21 +861,30 @@ def _cookies(response: Any) -> dict[str, str]:
     return {str(name): str(morsel.value) for name, morsel in response.cookies.items()}
 
 
+# A participant activation also retries these statuses from its agent session; they never score the assistant.
+_RETRYABLE_ACTIVATION_STATUSES = frozenset({404, 409})
+
+
 def _is_retryable_dependency_error(error: Exception) -> bool:
     if isinstance(error, _ParticipantActivationError):
         original = error.error
-        if isinstance(original, ClientResponseError):
-            return original.status in {404, 408, 409, 425, 429} or original.status >= 500
-        return isinstance(original, (ClientError, TimeoutError))
-    if isinstance(error, ClientResponseError):
-        return error.status in {408, 425, 429} or error.status >= 500
-    return isinstance(error, (ClientError, TimeoutError))
+        if isinstance(original, ClientResponseError) and original.status in _RETRYABLE_ACTIVATION_STATUSES:
+            return True
+        return is_retryable_dependency_error(original)
+    return is_retryable_dependency_error(error)
 
 
 def _is_scorable_assistant_activation_error(error: _ParticipantActivationError) -> bool:
     original = error.error
     if isinstance(original, ClientResponseError):
-        return 400 <= original.status < 500 and original.status not in {404, 408, 409, 425, 429}
+        return (
+            400 <= original.status < 500
+            and original.status not in _RETRYABLE_ACTIVATION_STATUSES
+            and not is_retryable_dependency_status(original.status)
+        )
+    # InvalidURL is also a ValueError, but a dependency failure is not an assistant mistake.
+    if isinstance(original, ClientError):
+        return False
     return isinstance(original, (AttributeError, TypeError, ValueError))
 
 

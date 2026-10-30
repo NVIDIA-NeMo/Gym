@@ -12,7 +12,7 @@ from typing import Literal
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
@@ -101,12 +101,17 @@ def parse_codex_observations(
     tools = {}
     patch_outcomes = {}
     gaps = list(gaps or [])
+    # A record that could not be read may have been a tool call, unless it is a native event (token usage, a patch
+    # outcome): then the tool history read is not complete, and its timing is unknown.
+    tool_history_complete = True
     for line in (transcript or "").splitlines():
+        native_event = False
         try:
             event = json.loads(line)
             if not isinstance(event, dict):
                 raise ValueError("expected a Codex CLI session record")
             if event.get("type") == "event_msg":
+                native_event = True
                 payload = event.get("payload") or {}
                 if not isinstance(payload, dict):
                     raise ValueError("expected a native event payload")
@@ -126,6 +131,7 @@ def parse_codex_observations(
             timestamp = datetime.fromisoformat(event["timestamp"].replace("Z", "+00:00")).timestamp()
         except (ValueError, TypeError, KeyError, ValidationError):
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable", invocation_id=invocation_id))
+            tool_history_complete = tool_history_complete and native_event
             continue
         if item.get("type") in {"function_call", "custom_tool_call"}:
             tools[item["call_id"]] = ToolCallObservation(
@@ -168,6 +174,8 @@ def parse_codex_observations(
             gaps.append(
                 ObservationGap(code="tool_outcome_unavailable", invocation_id=invocation_id, detail=tool.tool_call_id)
             )
+    if not tool_history_complete:
+        gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=invocation_id))
     if transcript is None:
         gaps.append(ObservationGap(code="agent_artifact_unavailable", invocation_id=invocation_id))
     if status is None:

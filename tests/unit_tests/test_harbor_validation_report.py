@@ -62,13 +62,13 @@ class TestValidationSummary:
         report = summarize_validation(rollouts, ["never_ran"])
 
         lines = report.text.splitlines()
-        assert lines[0] == "task_id\tstatus\treward"
-        assert "solved\toracle solved\t1.0" in lines
-        assert "wrong\toracle solved (harbor:missing_reward)\t0.0" in lines
-        assert "skipped\tunvalidated (no solution/)\t-" in lines
-        assert "broken\tfailed: seed exploded\t-" in lines
-        assert "masked\tmasked (provider_unavailable)\t-" in lines
-        assert "never_ran\tunvalidated (no solution/)\t-" in lines
+        assert lines[0] == "task_id\tstatus\treward\tverify_s\tnetwork"
+        assert "solved\toracle solved\t1.0\t-\t-" in lines
+        assert "wrong\toracle solved (harbor:missing_reward)\t0.0\t-\t-" in lines
+        assert "skipped\tunvalidated (no solution/)\t-\t-\t-" in lines
+        assert "broken\tfailed: seed exploded\t-\t-\t-" in lines
+        assert "masked\tmasked (provider_unavailable)\t-\t-\t-" in lines
+        assert "never_ran\tunvalidated (no solution/)\t-\t-\t-" in lines
         assert report.ok is False
 
     def test_all_good_is_ok(self, tmp_path):
@@ -150,7 +150,7 @@ class TestValidationRows:
         assert _validation_rows(path) == [self.record("a")]
 
     def test_bytes_that_are_not_utf8_inside_the_file_are_reported_by_line(self, tmp_path):
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
         from nemo_gym.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"
@@ -166,7 +166,7 @@ class TestValidationRows:
         assert _validation_rows(path) == [self.record("a"), self.record("b")]
 
     def test_a_damaged_interior_record_is_reported_by_line(self, tmp_path):
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
         from nemo_gym.tasks.harbor.validation_report import _validation_rows
 
         path = tmp_path / "rollouts.jsonl"

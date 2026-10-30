@@ -65,6 +65,7 @@ jobs:
           files: |
             nemo_gym/session_routing.py
             nemo_gym/server_utils.py
+            nemo_gym/utils/server_process.py
             nemo_gym/base_responses_api_agent.py
             nemo_gym/base_resources_server.py
             nemo_gym/mcp_auto_exposure.py
@@ -75,7 +76,7 @@ jobs:
     name: Core + sandbox (shard ${{ matrix.shard }})
     needs: detect
     if: needs.detect.outputs.run_full == 'true' || needs.detect.outputs.run_servers == 'true'
-    runs-on: ubuntu-24.04
+    runs-on: nemo-ci-aws-cpu-4-16
     timeout-minutes: 45
     strategy:
       fail-fast: false
@@ -83,6 +84,8 @@ jobs:
         shard: [0, 1, 2, 3]
     env:
       CORE_NUM_SHARDS: "4"
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     steps:
       - name: Checkout repository
         uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
@@ -102,12 +105,10 @@ jobs:
 
       - name: Install system test dependencies
         timeout-minutes: 20
-        run: |
-          for i in 1 2 3 4; do
-            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
-            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
-          done
-          exit 1
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       - name: Core + sandbox unit tests
         run: |
@@ -244,8 +245,11 @@ jobs:
     name: Server suite (shard ${{ matrix.shard }})
     needs: detect
     if: needs.detect.outputs.run_full == 'true'
-    runs-on: ubuntu-latest
+    runs-on: nemo-ci-aws-cpu-4-16
     timeout-minutes: 45
+    env:
+      NEMO_GYM_TEST_DATA_ROOT: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1
+      NLTK_DATA: /mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1/nltk_data
     strategy:
       fail-fast: false
       matrix:
@@ -269,12 +273,10 @@ jobs:
 
       - name: Install system test dependencies
         timeout-minutes: 20
-        run: |
-          for i in 1 2 3 4; do
-            timeout 5m sudo bash -c "apt-get update && apt-get install -y --no-install-recommends git curl ca-certificates" && exit 0
-            echo "apt-get attempt $i/4 failed or timed out after 5m; retrying"
-          done
-          exit 1
+        run: bash scripts/ci/install_test_dependencies.sh
+
+      - name: Check shared test-data inventory
+        run: python3 scripts/ci/check_test_data.py --nltk-cache "$HOME/.cache/gym-test-data"
 
       - name: Server tests (shard ${{ matrix.shard }}/${{ env.NUM_SHARDS }})
         run: ./scripts/ci/server_tests.sh "${{ matrix.shard }}" "${{ env.NUM_SHARDS }}"

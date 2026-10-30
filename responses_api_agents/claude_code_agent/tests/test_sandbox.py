@@ -4,6 +4,7 @@
 import asyncio
 import io
 import json
+import subprocess
 import tarfile
 import threading
 from types import SimpleNamespace
@@ -13,7 +14,7 @@ import pytest
 from fastapi import HTTPException, Request
 
 from nemo_gym.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY, AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.claude_code_agent import app
 from responses_api_agents.claude_code_agent import sandbox as adapter
@@ -71,6 +72,19 @@ async def test_seed_installs_inside_sandbox_and_preserves_ownership(monkeypatch,
     if borrowed:
         constructor.connect.assert_awaited_once_with({"id": "borrowed"}, provider=provider)
         assert not any(command.startswith("mkdir -p -- /app") for command in commands)
+
+
+def test_setup_without_bash_names_it(tmp_path):
+    # A non-root image without bash must fail at setup with a message, not with a bare 127 later.
+    bindir = tmp_path / "bin"
+    bindir.mkdir()
+    (bindir / "id").write_text("#!/bin/sh\necho 1000\n")
+    (bindir / "id").chmod(0o755)
+    result = subprocess.run(
+        ["/bin/sh", "-c", app._BASH_BOOTSTRAP], env={"PATH": str(bindir)}, capture_output=True, text=True, timeout=10
+    )
+    assert result.returncode == 1
+    assert "require bash" in result.stderr
 
 
 @pytest.mark.asyncio
@@ -199,7 +213,9 @@ async def test_artifact_capture_reads_separate_stdout_and_process_info(monkeypat
 @pytest.mark.asyncio
 async def test_close_returns_gap_without_activation_and_honors_cleanup_error():
     instance = agent()
-    session = SimpleNamespace(close=AsyncMock(side_effect=RuntimeError("unconfirmed")), artifacts=None)
+    session = SimpleNamespace(
+        close=AsyncMock(side_effect=RuntimeError("unconfirmed")), artifacts=None, cleanup_confirmed=True
+    )
     state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
     with pytest.raises(RuntimeError, match="unconfirmed"):
         await instance._close_agent_session_state(state)
@@ -273,6 +289,7 @@ async def test_close_joins_captured_observations_during_parsing(monkeypatch, par
             artifacts=artifacts,
             cleanup={"timed_out": False, "return_code": 0, "cleanup_confirmed": True},
             close=AsyncMock(),
+            cleanup_confirmed=True,
         ),
     )
     monkeypatch.setattr(adapter.ClaudeCodeSandboxSession, "execute", AsyncMock(return_value=artifacts))
@@ -478,7 +495,6 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
         request=seed(), runtime="/runtime", session=SimpleNamespace(session_dir="/tmp/session", sandbox=remote)
     )
     payload = {
-        "directory": "/tmp/session",
         "command": ["/runtime/claude"],
         "cwd": "/app",
         "env": {},
@@ -491,7 +507,8 @@ async def test_skills_are_staged_before_launch_and_disable_bare(monkeypatch, tmp
     command = await state.stage_activation(payload)
     assert files["/tmp/session/config/skills/example/helper.sh"] == b"echo helper\n"
     assert "SKILL.md" in " ".join(files)
-    assert command.python == "python3"
+    assert command.argv == ["bash", "/tmp/session/harness_runner.sh", "/tmp/session/params.sh"]
+    assert "/runtime/claude" in files["/tmp/session/params.sh"].decode()
     runner_payload = staged.await_args.args[1]
     assert "skills_path" not in runner_payload
     instance = agent()
@@ -570,3 +587,29 @@ def test_sandbox_rejects_request_instructions_that_local_mode_ignores():
 )
 def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
     agent()._validate_sandbox_request(NeMoGymResponseCreateParamsNonStreaming(input=input))
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("confirmed", [True, False])
+async def test_close_distinguishes_borrowed_release_from_confirmed_termination(confirmed):
+    from nemo_gym.agent_utils.sandbox_session import SandboxSession
+    from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+
+    remote = SimpleNamespace(exec=AsyncMock(return_value=result()), disconnect=AsyncMock())
+    session = SandboxSession(sandbox=remote, session_dir="/tmp/session", workdir="/app", harness="Claude Code")
+    session.launch_started = True
+    receipt = {
+        "cleanup_confirmed": confirmed,
+        "timed_out": False,
+        "return_code": 0,
+        "error": None if confirmed else "process survived",
+    }
+    if confirmed:
+        session.cleanup = receipt
+    else:
+        session.termination_error = HarnessTerminationError(harness="Claude Code", receipt=receipt)
+    state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
+    close = await agent()._close_agent_session_state(state)
+    remote.disconnect.assert_awaited_once()
+    assert close.cleanup_confirmed is confirmed
+    assert close.model_dump(mode="json")["cleanup_confirmed"] is confirmed

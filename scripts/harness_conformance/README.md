@@ -48,8 +48,9 @@ installation in `ci.install_runtime` as well as its episode configuration.
 
 Scheduled CI runs every four hours. A separate job with read-only credentials
 renders the measured checks with the shared table renderer and uploads one `harness-conformance-docs-<run>-<attempt>`
-artifact. Fern inserts that block into the main capability matrix; the page and
-table are the published output. No generation report is retained for this job.
+artifact. Fern inserts that block at the top of the
+[Harness Conformance page](../../fern/versions/latest/pages/observability/harness-conformance.mdx#results);
+the page and table are the published output. No generation report is retained for this job.
 
 Periodic publication uses the triggering run and attempt, independently of its P0
 conclusion. An unavailable artifact stops that update. Ordinary docs pushes, tags,
@@ -82,12 +83,14 @@ python scripts/run_harness_conformance.py \
 ```
 
 Run from a Gym checkout with Gym and the selected agents' Python requirements
-installed. Probes using agent sessions require Linux and install the adapter's
+installed. Simple Agent (`--harness simple`) uses Gym's Python implementation and
+a direct HTTP shell tool; it needs `sh` and does not require a sandbox provider.
+Other probes using agent sessions require Linux and install the adapter's
 pinned runtime during session setup, using Gym's local subprocess sandbox provider.
 Legacy probes require the selected `codex`, `pi`, and `opencode` executables on
 `PATH`; Hermes must be importable in the same Python environment. Missing
 dependencies or unsuccessful runtime installation are execution failures.
-Omitting `--harness` selects all four.
+Omitting `--harness` selects all registered harnesses.
 
 No model service or model credentials are needed. Each scenario starts fresh
 local model, resources, agent, and compatibility environment servers on dynamically assigned loopback ports.
@@ -133,6 +136,7 @@ python scripts/run_harness_conformance.py --harness codex \
 | `retry_429` | Two 429 replies before the tool sequence | TE-1–TE-9, including distinct attempts with identical request bodies |
 | `retry_500` | One 500 reply before the tool sequence | TE-1–TE-9, including retained error payloads |
 | `model_error` | Persistent 400 reported to EnvServer as a failed response with the original error | TE-1, TE-2, TE-4, TE-7, TE-8; no grading-policy requirement |
+| `judge_verifier` | Final policy answer graded by a separate scripted judge; the saved grade references its verifier-owned call, which has no policy step | TE-1–TE-4, TE-6–TE-9 |
 | `verifier_failure` | Completed tool sequence graded zero | TE-1–TE-9, including a known verifier failure |
 
 Both Chat Completions and Responses are supported, including streaming. Supplied
@@ -148,6 +152,7 @@ reports a failed response with the model error to EnvServer; it does not re-rais
 the model failure. The runner witnesses that response before grading. EnvServer
 owns verification and masking policy, so this scenario does not prescribe a grade
 or require verification. Retained model-call evidence is still required.
+
 Every applicable individual P0 check must pass;
 TE labels group results and do not determine priority or grant exemptions.
 
@@ -204,3 +209,16 @@ its launch settings in `episode._config`, and make its advertised shell-tool
 schema consumable by `provider.Probe._tool` and, if it ends episodes on a finish tool, that
 tool's schema consumable by `provider.Probe._finish`. Keep expectations and witnesses out
 of the task input and preserve the normal Gym collection path.
+
+Registration also means adding the harness name to hard-coded tuples. `episode._config`
+passes the probe's `--timeout` as the agent's `timeout` only to the harnesses in its
+`("opencode", "pi")` tuple; add a harness whose adapter has a `timeout` field, so that
+the harness uses the probe timeout instead of the adapter's default. `ci.install_runtime`
+installs the adapter's `requirements.txt` and then returns early only for the harnesses
+in its `("hermes", "stirrup", "simple")` tuple: Hermes comes from those requirements,
+Stirrup installs in the task sandbox during session setup, and Simple Agent is built in.
+For any other harness it installs a
+pinned npm package through `responses_api_agents/<harness>_agent/setup_<harness>.py`,
+so add a harness that installs its runtime in the task sandbox to that tuple. A
+data-driven registry entry could carry these per-harness settings and remove the
+tuples; the runner does not have one yet.

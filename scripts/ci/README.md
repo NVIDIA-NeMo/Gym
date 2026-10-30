@@ -40,6 +40,48 @@ suite runs offline too when the provider sets `UV_OFFLINE=1` for the nested inst
 whose Git source, direct or transitive, is not pinned to a full commit (a branch, a tag, an
 abbreviated SHA, or no ref) still needs the network, because `uv` must fetch to resolve it.
 
+## Shared server-test data
+
+IFBench source and NLTK resources live under
+`s3://nemo-ci-storage-31ff58e3-a555-4c8b-ad91-c453ce311bbd/nemo-fw/TestData/nemo_gym/v1/`.
+GitHub test jobs use the existing `nemo-ci-aws-cpu-4-16` ARC runner pool, which already mounts
+that bucket read-only at `/mnt/s3-data-ro`. Jobs set `NEMO_GYM_TEST_DATA_ROOT` to
+`/mnt/s3-data-ro/nemo-fw/TestData/nemo_gym/v1`, set `NLTK_DATA` to its `nltk_data` child, and
+run `scripts/ci/check_test_data.py`. The preflight requires 14 nonempty files and the pinned
+IFBench revision before tests start. Its `--nltk-cache` option copies the NLTK resources into a
+private cache and exports that path for the job: NLTK 3.10 refuses foreign-UID or writable shared
+trees. Missing packages can download into the private cache. Compiler and browser dependencies
+are installed by `install_test_dependencies.sh`; the S3 mount is supplied by ARC.
+
+TF-States owns recurring S3 → GCS → Singapore GCS transfers. Its existing `gpu-datasets-sync`
+CronJob copies the complete `nemo-fw/TestData` parent to the read-only dataset export and verifies
+the Gym bundle's checksums. CI-Events' `nemo-gym` profile mounts the same versioned subtree at
+`/mnt/gcs-data-ro/nemo-fw/TestData/nemo_gym/v1` and checks each required file during inventory,
+before admitting test shards. The existing dataset root is mounted so inventory can also report
+an absent Gym subtree.
+These declarations require artifact seeding, infrastructure apply, and a pod-launcher release
+before they can supply a running job.
+
+Prepare the bundle locally while online:
+
+```bash
+uv run --no-project --with 'nltk>=3.10.0' --with regex --with defusedxml \
+  python scripts/ci/seed_test_data.py cache/gym-test-data/v1
+(cd cache/gym-test-data/v1 && sha256sum --strict -c SHA256SUMS)
+```
+
+Upload all files beneath that directory to the S3 prefix, with `SHA256SUMS` last. Preserve the
+relative paths across both GCS mirrors and the dataset export. Use a new versioned prefix for
+future incompatible bundles and update consumers together.
+
+For a supplied filesystem tree, set `NEMO_GYM_TEST_DATA_ROOT` to the versioned root and `NLTK_DATA`
+to its `nltk_data` child. IFBench copies mounted source into its private `.ifbench` cache before
+patching; an absent source path falls back to its pinned online clone. Existing NLTK resources
+are read from the supplied paths; missing ones download into `$XDG_CACHE_HOME/nltk_data` (default
+`~/.cache/nltk_data`). Supplied directories may be read-only. Scoring checks use cached resources
+without fetching NLTK's package index. Aviary lifecycle tests use local synthetic GSM8K rows.
+Other servers can still require their own external data or tools.
+
 Both CI providers run `core_unit_tests.sh` in its deterministic `dev`-only environment. GitHub then
 installs its public-only sandbox dependencies and runs the sandbox-marked tests as a separate
 coverage pass.

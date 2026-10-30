@@ -14,6 +14,7 @@
 # limitations under the License.
 import importlib
 import json
+import re
 from types import MappingProxyType, SimpleNamespace
 from unittest.mock import MagicMock
 
@@ -32,17 +33,32 @@ from nemo_gym.base_responses_api_model import (
     ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
     _orjson_dispatch_response,
+    _request_messages,
     install_model_call_capture,
     make_capture_store,
 )
-from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.openai_utils import (
+from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.observability.model_calls import read_model_call_records
 from nemo_gym.server_utils import ServerClient, apply_rollout_prefix, rollout_path_prefix
+from nemo_gym.token_id_capture.replay import replay_context
+
+
+@pytest.mark.parametrize("text", ["What is 2 + 2?", ""])
+@pytest.mark.parametrize("typed", [False, True])
+def test_responses_string_input_matches_explicit_user_history(text: str, typed: bool) -> None:
+    body = {"input": text, "instructions": "Be concise."}
+    explicit = {**body, "input": [{"role": "user", "content": text}]}
+    if typed:
+        body = NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
+        explicit = NeMoGymResponseCreateParamsNonStreaming.model_validate(explicit)
+    assert replay_context(_request_messages(body)) == replay_context(_request_messages(explicit))
+    assert _request_messages(body)[-1] == {"role": "user", "content": text}
 
 
 class TestBaseResponsesAPIModel:
@@ -69,6 +85,30 @@ class TestBaseResponsesAPIModel:
         model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
         model.setup_webserver()
 
+    def test_embeddings_default_not_implemented(self) -> None:
+        # A policy-only server exposes /v1/embeddings but the base default rejects it with 501,
+        # since it has no embeddings backend to pass the request through to.
+        config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="")
+
+        class TestSimpleResponsesAPIModel(SimpleResponsesAPIModel):
+            async def chat_completions(
+                self, request: NeMoGymResponseCreateParamsNonStreaming
+            ) -> NeMoGymChatCompletion:
+                raise NotImplementedError
+
+            async def responses(self, request: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+                raise NotImplementedError
+
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {}
+        model = TestSimpleResponsesAPIModel(config=config, server_client=server_client)
+        client = TestClient(model.setup_webserver())
+
+        response = client.post("/v1/embeddings", json={"input": "hello", "model": "text-embedding-3-small"})
+
+        assert response.status_code == 501
+        assert "does not support the embeddings endpoint" in response.json()["detail"]
+
 
 @pytest.mark.parametrize(
     ("name", "module"),
@@ -76,12 +116,12 @@ class TestBaseResponsesAPIModel:
         ("ModelCallRecord", "nemo_gym.observability.model_calls"),
         ("read_model_call_records", "nemo_gym.observability.model_calls"),
         ("aggregate_model_call_metrics", "nemo_gym.observability.model_calls"),
-        ("maybe_rollout_id_from_run_body", "nemo_gym.rollout_correlation"),
+        ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode"),
     ],
 )
 def test_model_call_legacy_import_resolves_with_deprecation(name, module):
     legacy = importlib.import_module("nemo_gym.base_responses_api_model")
-    with pytest.warns(DeprecationWarning, match=f"{module}.{name}"):
+    with pytest.warns(DeprecationWarning, match=re.escape(f"has moved to `{module}.{name}`")):
         value = getattr(legacy, name)
     assert value is getattr(importlib.import_module(module), name)
 
@@ -304,6 +344,8 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
 
     assert forwarded_headers == request_headers
     [exchange] = store.read("header-round-trip")
+    assert "verifier_invocation_id" not in exchange
+    assert "verifier_invocation" not in exchange
     assert exchange.get("client_assistant_message_id") == expected
     if expected is None:
         assert "client_assistant_message_id" not in exchange
@@ -696,8 +738,8 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
     """The shared accessor agents use to derive the rollout id from a /run request body."""
     from pydantic import BaseModel, ConfigDict
 
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     mapping = MappingProxyType({TASK_INDEX_KEY_NAME: 3, ROLLOUT_INDEX_KEY_NAME: 1})
     assert maybe_rollout_id_from_run_body(mapping) == "3-1"
@@ -1090,6 +1132,34 @@ def test_stream_without_terminal_event_is_truncated(tmp_path, path, payload):
     assert exchange["error_category"] == "stream_truncated"
 
 
+def test_responses_lifecycle_events_do_not_count_toward_time_to_first_token(tmp_path):
+    """Keepalive events (``stream_keepalive_s``) open a Responses stream long before its first item."""
+    import asyncio
+
+    from fastapi.responses import StreamingResponse
+
+    app = FastAPI()
+    response = {"id": "resp_1", "object": "response", "status": "completed", "output": []}
+
+    @app.post("/v1/responses")
+    async def _stream(body: dict = Body()) -> StreamingResponse:
+        async def gen():
+            yield _sse("response.created", {"type": "response.created", "response": response})
+            yield _sse("response.in_progress", {"type": "response.in_progress", "response": response})
+            await asyncio.sleep(0.2)
+            yield _sse("response.completed", {"type": "response.completed", "response": response})
+
+        return StreamingResponse(gen(), media_type="text/event-stream")
+
+    _install_capture(app, tmp_path)
+
+    assert TestClient(app).post("/ng-rollout/keepalive/v1/responses", json={"stream": True}).status_code == 200
+
+    [call] = read_model_call_records(CaptureStore(tmp_path), "keepalive")
+    assert call.error_category is None
+    assert call.latency_ttft_ms >= 200
+
+
 def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
     """Streamed (SSE) /v1/messages calls are forwarded unchanged AND reassembled into the final
     response, so token stats / tool calls / reasoning are captured like a non-streamed call."""
@@ -1272,7 +1342,7 @@ def test_reconstruct_streamed_response_best_effort_none():
 
 
 def test_maybe_rollout_id_from_run_body_attempt_suffix():
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     assert maybe_rollout_id_from_run_body(base) == "3-2"  # no attempt -> bare key
@@ -1285,7 +1355,7 @@ def test_maybe_rollout_id_from_run_body_attempt_suffix():
 
 
 def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     base = {"_ng_task_index": 3, "_ng_rollout_index": 2}
     # Restarted index numbering derives the same id twice.
@@ -1300,7 +1370,7 @@ def test_maybe_rollout_id_from_run_body_prefers_an_explicit_id():
 
 @pytest.mark.parametrize("bad", [".hidden", "has/slash", "has space", "", 7, None])
 def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     body = {"_ng_task_index": 3, "_ng_rollout_index": 2, "_ng_rollout_id": bad}
     if bad is None:
@@ -1314,7 +1384,8 @@ def test_maybe_rollout_id_from_run_body_refuses_an_unusable_explicit_id(bad):
 
 
 def test_explicit_rollout_ids_round_trip_through_the_path_prefix():
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware, maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+    from nemo_gym.rollout_correlation import RolloutContextMiddleware
 
     # The id becomes a path segment.
     # Middleware must return every accepted id unchanged.
@@ -1493,7 +1564,7 @@ def _run_capture_middleware_on(path: str, *, token_store, sent: list | None = No
 def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
     # The middleware cannot capture tokens from /v1/completions.
     # Its output can still feed later prompts.
-    from nemo_gym.token_id_capture import TokenCaptureStore
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, sent = _run_capture_middleware_on(
@@ -1519,7 +1590,7 @@ def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
 
 
 def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
-    from nemo_gym.token_id_capture import TokenCaptureStore
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, _sent = _run_capture_middleware_on(
@@ -1642,3 +1713,77 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
         assert len(store.read("r-inflight")) == 1
 
     asyncio.run(run())
+
+
+@pytest.mark.asyncio
+async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observations(tmp_path):
+    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    statuses = iter([400, 200])
+
+    async def app(scope, receive, send):
+        await receive()
+        status = next(statuses)
+        await send({"type": "http.response.start", "status": status, "headers": []})
+        body = b'{"error":"rejected"}' if status == 400 else b'{"id":"judge-response","output":[]}'
+        await send({"type": "http.response.body", "body": body, "more_body": False})
+
+    async def receive():
+        return {"type": "http.request", "body": b'{"input":"grade this"}', "more_body": False}
+
+    async def send(_message):
+        pass
+
+    middleware = _CaptureMiddleware(app, store=store, model_server_name="judge_model")
+    for _ in range(2):
+        await middleware(
+            {
+                "type": "http",
+                "path": "/ng-rollout/judge-retry/v1/responses",
+                "headers": [(VERIFIER_INVOCATION_HEADER.encode("ascii"), b"verification-1")],
+            },
+            receive,
+            send,
+        )
+    exchanges = store.read("judge-retry")
+    assert len(exchanges) == 2
+    assert all(exchange["verifier_invocation_id"] == "verification-1" for exchange in exchanges)
+    assert all("verifier_invocation" not in exchange for exchange in exchanges)
+    assert exchanges[0]["model_call_id"] != exchanges[1]["model_call_id"]
+    record = {"_ng_rollout_id": "judge-retry", "ng_agent_observations": {"source": "agent", "records": []}}
+    merge_model_call_capture_into_record(record, [tmp_path], include_payloads=True)
+    capture = record["ng_model_call_capture"]
+    calls = capture["calls"]
+    assert [call["status_code"] for call in calls] == [400, 200]
+    assert calls[0]["response_id"] is None
+    assert len(capture["verifier_invocations"]) == 1
+    verifier = capture["verifier_invocations"][0]
+    assert verifier["invocation_id"] == "verification-1"
+    assert {ref["model_call_id"] for ref in verifier["model_calls"]} == {call["model_call_id"] for call in calls}
+    assert verifier["status"] == "unknown"  # Capture does not establish the final grade.
+    assert record["ng_agent_observations"]["records"] == []
+    assert record["ng_agent_observations"]["gaps"] == []
+    assert all("client_invocation_role" not in call for call in calls)
+
+
+@pytest.mark.parametrize("invocation_id", ["", "  ", 42, {}])
+def test_invalid_verifier_id_does_not_hide_the_captured_call(tmp_path, invocation_id):
+    from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
+
+    store = CaptureStore(tmp_path)
+    store.record(
+        "judge-invalid",
+        {
+            "model_call_id": "actual-call",
+            "status_code": 400,
+            "verifier_invocation_id": invocation_id,
+        },
+    )
+    record = {"_ng_rollout_id": "judge-invalid"}
+    merge_model_call_capture_into_record(record, [tmp_path])
+    capture = record["ng_model_call_capture"]
+    assert [call["model_call_id"] for call in capture["calls"]] == ["actual-call"]
+    assert not capture.get("verifier_invocations")
+    assert "model_call_capture_records_unreadable" in {gap["code"] for gap in capture["gaps"]}

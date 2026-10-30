@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import logging
+import re
 from typing import Any, ClassVar, Literal
 
 from aiohttp import ClientTimeout
@@ -27,13 +28,14 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import Domain, ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import Domain, ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import get_response_json
+from nemo_gym.judge import reraise_judge_errors
+from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,
@@ -73,7 +75,7 @@ class ArenaResourcesServerConfig(BaseResourcesServerConfig):
     # lmarena_v3 treats both-bad as a tie; lmarena_v2 excludes it.
     score_both_bad_as_tie: bool
     # lmarena_v2 uses Bradley-Terry; lmarena_v3 uses reference-length style control.
-    style_control_method: Literal["bradley_terry", "reference_length"]
+    style_control_method: Literal["bradley_terry", "reference_length", "none"]
     # Accepted policy/reference token ratio for reference-length style control.
     style_length_ratio_range: tuple[float, float] | None
     # Optional lmarena_v3 short-reference rule; both limits must be set to enable it.
@@ -179,8 +181,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
         }
         body.prompt_slices = prompt_slices
 
-        # Automatic model-name matching is enabled only for lmarena_v3.
-        if self.config.style_control_method == "reference_length":
+        # Detect baseline self-comparisons.
+        if body.category in {"lmarena_v3", "vision_arena_v1"}:
             body.self_comparison = body.self_comparison or self._is_self_comparison(body)
 
         # Skip judging when the evaluated model also supplied the baseline answer.
@@ -204,9 +206,9 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 games=None,
             )
 
-        # lmarena_v3 scores truncated responses as zero without spending judge tokens.
+        # LMArena v3 and Vision Arena score truncated policy outputs zero.
         if (
-            self.config.style_control_method == "reference_length"
+            body.category in {"lmarena_v3", "vision_arena_v1"}
             and body.response.incomplete_details
             and body.response.incomplete_details.reason == "max_output_tokens"
         ):
@@ -234,11 +236,36 @@ class ArenaResourcesServer(SimpleResourcesServer):
             self.config.judge_system_message_by_category.get(body.category or "") or self.config.judge_system_message
         )
 
-        # Run both game orderings concurrently to reduce latency.
-        game1, game2 = await asyncio.gather(
-            self._run_judge_game(body.question, policy_answer, body.baseline_answer, system_message, prompt_template),
-            self._run_judge_game(body.question, body.baseline_answer, policy_answer, system_message, prompt_template),
-        )
+        images = []
+        if body.category == "vision_arena_v1":
+            for message in body.responses_create_params.model_dump()["input"]:
+                content = message.get("content")
+                if isinstance(content, list):
+                    images.extend(part for part in content if part.get("type") == "input_image")
+            if not images:
+                raise ValueError("vision_arena_v1 requires prompt images")
+
+        # Run both game orderings concurrently to reduce latency. If one fails, the other is cancelled and
+        # awaited before the failure propagates, so it does not keep a judge slot after the row is returned.
+        orderings = [
+            asyncio.ensure_future(
+                self._run_judge_game(
+                    body.question, policy_answer, body.baseline_answer, system_message, prompt_template, images=images
+                )
+            ),
+            asyncio.ensure_future(
+                self._run_judge_game(
+                    body.question, body.baseline_answer, policy_answer, system_message, prompt_template, images=images
+                )
+            ),
+        ]
+        try:
+            game1, game2 = await asyncio.gather(*orderings)
+        except BaseException:
+            for ordering in orderings:
+                ordering.cancel()
+            await asyncio.gather(*orderings, return_exceptions=True)
+            raise
 
         # Game 1: policy is A. Game 2: policy is B.
         # Strong verdicts (>>) are counted `verdict_weight` times.
@@ -303,6 +330,8 @@ class ArenaResourcesServer(SimpleResourcesServer):
         answer_b: str,
         system_message: str,
         prompt_template: str,
+        *,
+        images: list[dict[str, Any]] | None = None,
     ) -> ArenaGame:
         """Run one judge game comparing answer_a against answer_b for the given question.
 
@@ -320,33 +349,28 @@ class ArenaResourcesServer(SimpleResourcesServer):
             )
             responses_create_params.input = [
                 NeMoGymEasyInputMessage(role="system", content=system_message),
-                NeMoGymEasyInputMessage(role="user", content=judge_prompt),
+                NeMoGymEasyInputMessage.model_validate(
+                    {
+                        "role": "user",
+                        "content": [{"type": "input_text", "text": judge_prompt}, *images] if images else judge_prompt,
+                    }
+                ),
             ]
 
-            try:
+            async def call_judge() -> NeMoGymResponse:
                 response = await self.server_client.post(
                     server_name=config.judge_model_server.name,
                     url_path="/v1/responses",
                     json=responses_create_params,
                     timeout=ClientTimeout(total=config.judge_timeout_secs),
                 )
-                judge_response = NeMoGymResponse.model_validate(await get_response_json(response))
-            except Exception as exc:
-                logger.warning("Judge call failed (question skipped): %s", exc)
-                return ArenaGame(
-                    responses_create_params=responses_create_params,
-                    response=NeMoGymResponse(
-                        id="error",
-                        created_at=0.0,
-                        model="",
-                        object="response",
-                        output=[],
-                        parallel_tool_calls=False,
-                        tool_choice="none",
-                        tools=[],
-                    ),
-                    verdict=None,
-                )
+                # An HTTP error is the judge failure it is (its status and body kept), not a parse error of its body.
+                await raise_for_status(response)
+                return NeMoGymResponse.model_validate(await get_response_json(response))
+
+            # A judge outage is not a lost game: let judge_failsafe return an unresolved judge failure
+            # with the existing answer instead of constructing a zero-valued game.
+            judge_response = await reraise_judge_errors(call_judge())
 
             verdict: str | None = None
             if judge_response.output:
@@ -354,7 +378,11 @@ class ArenaResourcesServer(SimpleResourcesServer):
                 if last_output.type == "message" and last_output.content:
                     last_content = last_output.content[-1]
                     if last_content.type == "output_text":
-                        verdict = _extract_verdict(last_content.text)
+                        verdict_text = last_content.text
+                        if images:
+                            # The published VisionArena prompt includes spaces inside verdict labels.
+                            verdict_text = re.sub(r"\s+", "", verdict_text)
+                        verdict = _extract_verdict(verdict_text)
 
             return ArenaGame(
                 responses_create_params=responses_create_params,

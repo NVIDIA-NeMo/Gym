@@ -17,7 +17,7 @@ from nemo_gym.base_resources_server import (
     BaseResourcesServerConfig,
     mcp_session_token_serializer,
 )
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.mcp_auto_exposure import maybe_auto_expose
 from nemo_gym.server_utils import ServerClient
 from tests.unit_tests.test_checkpoint_resources import AUTH, SEED, CounterServer, control, signal_waits, until
@@ -83,7 +83,7 @@ async def restore(client: httpx.AsyncClient, checkpoint_dir: Path, episode: dict
 
 
 def refused(response: httpx.Response) -> bool:
-    return response.status_code == 409 and response.json()["error"]["code"] == "stale_attempt"
+    return response.status_code == 409 and response.json()["error"]["code"] == "checkpoint_stale_attempt"
 
 
 async def increment(client: httpx.AsyncClient, token: str) -> httpx.Response:
@@ -245,7 +245,7 @@ async def test_a_refused_stale_call_does_not_claim_a_restored_session(tmp_path: 
         await restore(fresh, tmp_path, {"rollout_id": "r"})
         stale = await increment(fresh, token)
         # Still unclaimed, so a commit that no longer continues the episode deletes the session.
-        unclaimed = await server._checkpoint.restored_pending()
+        unclaimed = await server._checkpoint.unclaimed()
 
     assert refused(stale)
     assert unclaimed == [EpisodeId(rollout_id="r", attempt=1)]
@@ -272,6 +272,6 @@ async def test_a_late_tool_call_over_mcp_for_a_retired_attempt_is_refused_until_
         late = await increment(client, token)
         await client.post("/ng-control/v1/checkpoint/forget", json=control("forget", rollout_ids=["r"]), headers=AUTH)
 
-    assert late.status_code == 409 and late.json()["error"]["code"] == "stale_attempt"
+    assert late.status_code == 409 and late.json()["error"]["code"] == "checkpoint_stale_attempt"
     # Nothing was recreated for the retired session.
     assert server.counters == {}

@@ -20,13 +20,44 @@ These adapters run a coding harness inside a task sandbox that a Resources serve
 | --- | --- | --- | --- | --- | --- |
 | Hermes (`hermes_agent`) | Chat Completions | MCP only | Returned in a result file that the model can also write; evaluation only | Declared | Not declared |
 | Pi (`pi_agent`) | Chat Completions | None | Not wired up; evaluation only | Declared | Declared |
-| Codex (`codex_agent`) | Responses (streaming) | None | Not wired up; evaluation only | Declared | Declared |
+| Codex (`codex_agent`) | Responses (streaming) | MCP only | Not wired up; evaluation only | Declared | Declared |
+| Kilo (`kilocode_agent`) | Chat Completions | MCP only | Not wired up; evaluation only | Declared | Not declared |
 | OpenCode (`opencode_agent`) | Chat Completions | None | Off by default; the session path is evaluation only | Not declared | Declared |
 | OpenClaw (`openclaw_agent`) | Chat Completions | None | Not wired up; evaluation only | Not declared | Declared |
 
 *Declared* means the benchmark's Resources server lists the agent in `allowed_agents`. Gym rejects any other pairing unless you pass `--allow-unsupported-pairing`. Declared support is not a validation: it says nothing about accuracy or training readiness. Check that a pairing works with a real model and the benchmark's verifier before you rely on it.
 
 The `allowed_agents` lists also name older adapters, such as `opencode_sandboxed_agent` and `terminus_2_sandboxed_agent`. They run the whole episode themselves behind a `legacy_agent` Environment Server, and shipped recipes such as `terminal_bench_2_1/opencode` use them. To run them or swap one for another, see [Compare Harnesses](/main/evaluation/harness).
+
+<Warning>
+This legacy `/run` path is deprecated and will be removed after the Environment Server migration. Do not build new benchmarks, agents, or configs on `opencode_sandboxed_agent`, `pi_sandboxed_agent`, or `hermes_sandboxed_agent`, or on the `/run` path of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`. Use a harness from the table above instead. Each of these agents logs a deprecation warning when it starts on this path. Episode sessions of `terminus_2_sandboxed_agent` and `miniswe_sandboxed_agent`, which [Harbor Tasks](/main/data/harbor-tasks) use, are not deprecated.
+</Warning>
+
+### Kilo MCP and sandbox ownership
+
+Kilo's session adapter accepts remote MCP grants from Resources. Set the Environment Server's `resources_tool_transports: [mcp]` to expose Resources tools through MCP. Grant URLs and headers must be reachable and valid from the task sandbox. Required direct HTTP grants are still rejected; this does not make a recipe configured with `[direct_http]` compatible with Kilo.
+
+The adapter configures Kilo's remote MCP clients with each grant's URL and headers and disables interactive OAuth. Before accepting a session with required MCP grants, it runs a supervised CLI check that connects to those servers and discovers tools without requesting a model completion. The activation's CLI process connects again, and the bundled plugin confirms the required connections before its first model request. Kilo does not refresh connection status after that, so a server lost mid-run surfaces as failed tool calls. A failed connection or a missing readiness receipt fails the session or activation. Optional MCP connection failures do not fail this readiness check. Kilo cancels an MCP tool call after `kilo_config.experimental.mcp_timeout` milliseconds; `kilocode_sandboxed.yaml` sets 300000 (five minutes) instead of the MCP SDK's 60-second default, so keep it above your slowest Resources tool and within `timeout`. Static servers in `kilo_config.mcp` remain available, but their names must not collide with grant names, including after Kilo replaces punctuation other than `-` and `_` with `_`.
+
+When Resources supplies `sandbox_access`, Kilo borrows that sandbox and leaves its destruction to Resources. When Resources supplies no sandbox, configure an agent-owned sandbox explicitly. For example, add these imports and overrides to an experiment that already defines `policy_model`, `policy_model_name`, and the Environment Server's Resources/agent bindings:
+
+```yaml
+config_paths:
+  - responses_api_agents/kilocode_agent/configs/kilocode_sandboxed.yaml
+  - nemo_gym/sandbox/providers/docker/configs/docker.yaml
+
+kilocode_agent:
+  responses_api_agents:
+    kilocode_agent:
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.13-slim
+        workdir: /app
+```
+
+The Docker provider needs a local Docker daemon. Configure the Gym host and network so the sandbox can reach both the Gym Model Server and the MCP endpoints; a host loopback URL is not reachable from Docker's default bridge network. The Linux image must meet Kilo's [runtime requirements](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/kilocode_agent/README.md#runtime-and-ownership), including network access for the pinned CLI installation.
+
+Agent-owned sandboxes inherit provider metadata defaults, then `sandbox_config.metadata`, with Gym's agent/session/rollout labels taking precedence. The agent stops its sandbox on close or failed setup. If neither Resources sandbox access nor `sandbox_provider` is available, seed fails with a configuration error.
 
 ## Run an integrated agent on a benchmark
 
@@ -150,7 +181,7 @@ The taskset route selects the Environment Server, and its `agent_server` referen
 
 Before you increase concurrency, inspect the response, reward, failure sidecar, and cleanup evidence. When you raise `--concurrency`, raise `max_concurrent_episodes` to match and set `queue_timeout_seconds` above the expected episode duration; otherwise queued episodes fail admission after 60 seconds. A configuration that resolves has not yet been validated: resolution does not check task-image installation, model and tool behavior, or verification.
 
-For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint. New experiments should use the taskset configuration above.
+For callers that still submit flat rows, `single_agent_turn_legacy` wraps the same session lifecycle as a migration adapter. Name both `resources_server` and `agent_server` in its block. The separate `legacy_agent` implementation delegates to the agent's old `/run` endpoint and names only `agent_server`. New experiments should use the taskset configuration above.
 
 ### Swap the agent or the benchmark
 
@@ -203,6 +234,29 @@ To swap a component, change the imported configuration and its matching implemen
 
 For where the harness runs and who cleans up, including borrowed and agent-owned sandboxes and host execution, see [Select an execution mode](/main/agent-server/add-or-update-a-harness#select-an-execution-mode).
 
+### Run Codex on Terminal-Bench-Science
+
+[Terminal-Bench-Science v0.1](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md) ships a ready-made Codex profile, `terminal_bench_science/codex`, so you do not write the four files above. Unlike the Terminal Bench 2.1 adapters, its Resources Server is `terminal_bench_4`: it provisions each pinned task, lends the task sandbox to `codex_agent`, and grades in a separate offline verifier sandbox. The profile composes `single_agent_turn_legacy`, so it reads flat rows rather than a taskset. Like the other session paths, it is for evaluation only.
+
+Before you run it:
+
+- **Build the task images.** Upstream publishes none. Build each task's agent and verifier image, push them to a registry that your sandbox deployment can pull from, and pass them as a `tbsci_task_images` map or as `tbsci_agent_image` and `tbsci_verifier_image` templates. See [Images](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#images).
+- **Prepare the rows.** Each row carries the task's official instruction, read from the pinned package after its hashes are checked. The check needs `pathspec`, which Gym's own environment leaves out, so `gym eval prepare --benchmark terminal_bench_science/codex` runs it in the Resources Server's environment and sets that environment up first if needed, as [the README shows](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#codex-in-the-task-sandbox).
+- **Bind Gym to a reachable address.** Codex calls Gym's model server from inside the task sandbox, so pass `++default_host` with an address that the sandboxes can reach, as with `GYM_HOST` above.
+
+`codex_deepseek_flash.yaml` is the run configuration for the leaderboard's DeepSeek V4.1 Flash row, served by your own chat-completions server. Pass your images in a second `--config` file, here `tbsci-images.yaml`, that sets `tbsci_task_images`:
+
+```bash
+export POLICY_API_KEY=...  # any string if the server has no auth
+gym eval run --config benchmarks/terminal_bench_science/codex_deepseek_flash.yaml \
+  --config tbsci-images.yaml \
+  --split benchmark --model-url http://SERVER_HOST:PORT/v1 \
+  --output results/tbsci-deepseek/rollouts.jsonl --concurrency 8 \
+  ++default_host=$GYM_HOST
+```
+
+The profile runs one trial per task. The leaderboard's protocol is three trials per task, 210 in all: add `++num_repeats=3`. For the Codex defaults and the model server settings, see [Codex with DeepSeek V4.1 Flash](https://github.com/NVIDIA-NeMo/Gym/blob/main/benchmarks/terminal_bench_science/README.md#codex-with-deepseek-v41-flash).
+
 ## Resuming harness sessions
 
 OpenCode can resume its saved session across multiple activations in either
@@ -240,6 +294,27 @@ carry only new output, usage and evidence; close supplies the cumulative record.
 termination receipt fails the activation and skips verification; close releases
 the borrowed connection and returns `cleanup_confirmed: false`. Failures to release
 the connection remain retryable.
+
+## NOOA worker checkpoints
+
+The [NOOA sandbox worker](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/nooa_agent/sandbox_entrypoint.py)
+publishes `checkpoint.json` as partial evidence at model-response and completed-tool boundaries.
+It projects and deeply copies the evidence on the rollout event loop, then uses a single background
+writer for JSON serialization, file writes, `fsync`, and atomic replacement. Projection and copying
+still run synchronously and grow with transcript length, including JSON conversion within trajectory
+projection. The writer never reads the live trace.
+
+Only one snapshot is being written and one latest snapshot can be pending. New boundaries replace
+the pending snapshot; writes remain ordered. Normal completion flushes the pending evidence before
+publishing `result.json`. Cancellation waits for writes to finish before shutdown returns. An abrupt
+kill may lose the pending or in-progress update, but leaves the previous published checkpoint valid.
+Checkpoint failures are logged and do not fail an otherwise successful run.
+
+Checkpoints carry `partial: true` and an incomplete response; they do not establish completion or
+authorize grading. A valid final result takes precedence. Missing or malformed final evidence with
+unsuccessful worker termination is an infrastructure failure. Callers must enforce a process deadline,
+including enough shutdown grace for pending writes; the worker has no independent deadline. Artifacts
+use mode `0600` and require the worker UID or privileged access for collection.
 
 ## Tools in Agent vs. Resources Server
 

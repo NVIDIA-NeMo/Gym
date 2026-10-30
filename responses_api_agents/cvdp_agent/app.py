@@ -43,9 +43,8 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -616,7 +615,8 @@ class CVDPAgent(SimpleResponsesAPIAgent):
             image=image,
             workdir=wd,
             env={
-                "NV_MODEL_URL": self._model_url(),
+                # The harness in the sandbox sends no traceparent: the URL carries the rollout prefix and this run's span.
+                "NV_MODEL_URL": self.base_url_for_run(self._model_url(), body) if self._model_url() else "",
                 "NV_MODEL_NAME": body.responses_create_params.model or "model",
                 "NV_AGENT_KWARGS": json.dumps(self.config.agent_kwargs),
                 "NV_AGENT_HOME": f"{wd.rstrip('/')}/.home",

@@ -17,9 +17,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
@@ -137,6 +137,17 @@ class TestApp:
         # Unset means off: only configs that opt in (GDPVal's benchmark config) get recovery nudges.
         assert payload["client"]["truncation_recovery"] is bool(truncation_recovery)
 
+    @pytest.mark.parametrize("code_exec", [None, False, True])
+    @pytest.mark.asyncio
+    async def test_code_exec_is_forwarded_to_the_rollout(self, code_exec) -> None:
+        fields = {} if code_exec is None else {"code_exec": code_exec}
+        body = NeMoGymResponseCreateParamsNonStreaming(input="ignored", model="policy")
+
+        payload = await _runner_payload(_make_config(**fields), body)
+
+        # Unset keeps the shell, as before the option existed.
+        assert payload["code_exec"] is (code_exec is not False)
+
     @pytest.mark.asyncio
     async def test_runtime_knobs_shape_the_model_requests_the_runner_makes(self) -> None:
         config = _make_config(
@@ -225,12 +236,15 @@ class TestApp:
 
         assert (response.status, response.usage) == ("completed", None)
         assert "stop_reason" not in response.metadata
+        assert AGENT_OUTCOME_METADATA_KEY not in response.metadata
 
     @pytest.mark.asyncio
-    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self) -> None:
+    @pytest.mark.parametrize("status", [400, 413, 422])
+    async def test_a_run_ended_by_a_rejected_request_is_a_failed_response_that_used_no_tokens(self, status) -> None:
         report = _report(
             stop_reason="model_error",
-            model_error="Error code: 400 - rejected",
+            model_error="rejected",
+            model_error_status=status,
             observations={"status": "failed", "model_response_ids": []},
         )
 
@@ -239,8 +253,11 @@ class TestApp:
         )
 
         assert response.status == "failed"
-        assert (response.error.code, response.error.message) == ("server_error", "Error code: 400 - rejected")
+        assert (response.error.code, response.error.message) == ("server_error", "rejected")
         assert response.metadata["stop_reason"] == "model_error"
+        assert AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]) == AgentOutcome(
+            failure_kind=MODEL_REQUEST_ERROR, status_code=status
+        )
         assert (response.usage.input_tokens, response.usage.output_tokens, response.usage.total_tokens) == (0, 0, 0)
         assert response.usage.input_tokens_details.cached_tokens is None
         assert response.usage.output_tokens_details.reasoning_tokens is None
@@ -269,6 +286,10 @@ class TestApp:
         )
 
         assert (response.status, response.usage) == ("failed", None)
+        # A report without a structured status must not guess from the error message.
+        assert (
+            AgentOutcome.model_validate_json(response.metadata[AGENT_OUTCOME_METADATA_KEY]).failure_kind == "unknown"
+        )
 
     @pytest.mark.asyncio
     async def test_usage_without_detail_fields_has_no_cached_or_reasoning_counts(self) -> None:

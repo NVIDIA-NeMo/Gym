@@ -17,7 +17,16 @@ codex_agent:
       timeout: 600
       system_prompt: null  # inserted as a developer message via `developer_instructions`
       reasoning_effort: null  # passed as `model_reasoning_effort` (e.g. low, medium, high)
+      model_server_forwards_reasoning_effort: false  # sandbox sessions: true only if the model server forwards it (see README)
+      inherit_sandbox_environment: false  # sandbox sessions: give Codex the task sandbox's full environment
+      verify_after_agent_error: false  # sandbox sessions: grade a failed run while its sandbox still runs (see README)
+      raise_oom_score_adj: false  # sandbox sessions: make Codex and its tools the OOM killer's preferred victims
       codex_version: 0.144.4  # required: npm version pinned on auto-install for reproducibility
       cwd: null  # working root for `codex exec --cd`; null -> fresh temp dir per request
       stream_idle_timeout_ms: null  # provider stream idle budget; null -> timeout * 1000
+      request_max_retries: null  # provider retries before a stream starts; null -> Codex's default
+      stream_max_retries: null  # provider reconnects after a stream drops; null -> Codex's default
       extra_config: {}  # extra config.toml content deep-merged over the generated base config
+      features:  # config.toml [features]; null leaves a feature at the CLI default
+        multi_agent: false
+        code_mode: false

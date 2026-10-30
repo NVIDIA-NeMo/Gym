@@ -407,6 +407,106 @@ The benchmark config sets these Stirrup agent keys on
 | `min_compaction_summary_words` | `50` | `1` | Minimum words in a context-compaction summary, which rejects near-empty summaries that would erase progress on long sessions. After 3 rejected attempts the agent raises an error instead of replacing its history. |
 | `truncation_recovery` | `true` | `false` | After a call spends its whole completion budget without a usable tool call, run the next call with thinking disabled and a one-time instruction to act now. The budget is unchanged and the instruction is not recorded in the trajectory. Disabling thinking needs a model server that forwards request `chat_template_kwargs` (`forward_request_chat_template_kwargs: true` on `vllm_model`); otherwise only the instruction is sent. |
 
+## Run another harness
+
+`benchmarks/gdpval/pi.yaml` runs [Pi](../../responses_api_agents/pi_agent/README.md) in place of Stirrup, with the
+same resources server, judges and multi-stage driver as `config.yaml`:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_pi/deliverables
+gym eval prepare --benchmark gdpval/pi
+gym eval run \
+    --model-type vllm_model \
+    --benchmark gdpval/pi \
+    --split benchmark \
+    --output results/gdpval_pi.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name> \
+    ++policy_model.responses_api_models.vllm_model.propagate_context_overflow_errors=true \
+    '++policy_model.responses_api_models.vllm_model.sampling_overrides={temperature: 1.0, top_p: 0.95}'
+```
+
+- Pi runs in the task sandbox the resources server lends it, with `/root` as its working directory. It installs
+  Node.js and Pi there at the start of each episode, from nodejs.org and the npm registry.
+- It calls `finish`, `abandon_task_finish`, `web_search` and `fetch_web_page` over MCP: the resources server sets
+  `expose_tools_over_mcp: true` and the environment server sets `resources_tool_transports: [mcp]`. The model sees
+  them as `gdpval_resources_server_<tool>`, and rollouts record the calls as `mcp__gdpval_resources_server__<tool>`.
+- The rows come from `data/gdpval_benchmark_harness_neutral.jsonl`, written by `prepare_harness_neutral.py`: the rows
+  `prepare.py` writes, without the tool list, and rendered with `prompts/harness-neutral.yaml`. Stirrup takes its tools
+  from that list, while Pi and Codex get them over the MCP grant and reject a tool list in the request. It is a
+  separate script because a dataset cannot pass its own arguments to its prepare script: `gym eval prepare` gives
+  every dataset the same top-level `prepare_script_args`, and the file the script writes must be the dataset's
+  `jsonl_fpath`.
+- `propagate_context_overflow_errors=true` passes the model server's context-length error to Pi, which then compacts
+  its context and continues. By default `vllm_model` returns an empty, length-capped completion instead, and the
+  episode ends at the context limit without a submission. With `openai_model`, set
+  `propagate_upstream_http_status_codes: [400]` (by default it returns HTTP 500).
+- Pi sends no temperature or top_p, so the engine's defaults apply unless the model server sets them.
+  `sampling_overrides` above pins the Stirrup agent's values; with `openai_model`, put them in `extra_body`.
+- Pi rejects sampling and output limits in the request, so every row fails if `gym eval run` gets `--temperature`,
+  `--top-p` or `--max-output-tokens`. Change Pi's own settings, such as `max_output_tokens`, with
+  `++gdpval_pi_agent.responses_api_agents.pi_agent.<key>=<value>`.
+- Deliverables are stored by task and repeat only, so give each run its own `PERSIST_DELIVERABLES_DIR`, for example
+  by changing `gdpval_pi` in the export above. A run into another run's directory replaces that run's files, and
+  re-judging the earlier run then judges the later one's.
+- A Pi run that reaches its `timeout` while still working, before a successful `finish` or `abandon_task_finish`,
+  reports `stop_reason: wall_time`, as Stirrup does, so GDPVal masks it as `agent_timeout` and `--resume` reruns it.
+  A run that reaches its `timeout` after such a call, or after a last reply that ended the run without a tool call, is
+  judged as usual. Pi has no turn limit like Stirrup's `agent_max_turns`, so a Pi run that keeps
+  calling tools without submitting runs until its `timeout` and stays out of the score, where Stirrup would stop and
+  be judged. In rubric mode, `+count_failure_classes_as_zero=[agent_timeout]` counts such runs as 0.
+- The prompt and the harness differ from the certified Stirrup setup, so these are not AA v2 scores.
+
+`benchmarks/gdpval/codex.yaml` runs [Codex](../../responses_api_agents/codex_agent/README.md) the same way. Codex sends
+no sampling or output limit to a Gym model server, so set them on the model server, for example on `openai_model` in
+front of vLLM:
+
+```bash
+export PERSIST_DELIVERABLES_DIR=$PWD/output/gdpval_codex/deliverables
+gym eval prepare --benchmark gdpval/codex
+gym eval run \
+    --model-type openai_model \
+    --benchmark gdpval/codex \
+    --split benchmark \
+    --output results/gdpval_codex.jsonl \
+    --model-url <vllm_base_url> \
+    --model-api-key <vllm_api_key> \
+    --model <served_model_name> \
+    '++policy_model.responses_api_models.openai_model.extra_body={temperature: 1.0, top_p: 0.95, max_output_tokens: 32768}' \
+    '++policy_model.responses_api_models.openai_model.propagate_upstream_http_status_codes=[400]'
+```
+
+- The rows, the task tools and the deliverables directory work as for Pi, and these are not AA v2 scores either.
+  Codex installs Node.js and Codex in the task sandbox at the start of each episode, from nodejs.org and the npm
+  registry (about 190 MB). The model sees the tools as `mcp__gdpval_resources_server__<tool>`, and rollouts record
+  the calls by the tool name alone, such as `finish`. Codex keeps about 12 KB of each tool result, so the model sees
+  only the start and end of a long `fetch_web_page` result.
+- `extra_body` pins the Stirrup agent's temperature and top_p and limits each model call to 32,768 output tokens.
+- Codex checks `model_auto_compact_token_limit` after each reply that calls a tool, so the context can pass it by
+  about a reply and its tool output before Codex compacts, and the compaction call reserves 32,768 tokens for its own
+  reply. So keep the limit at about the window minus twice the output limit or lower: `codex.yaml` uses 196,608 for
+  a 262,144-token window. A near-full reply with a large tool result can still overflow the compaction call.
+- Codex does not compact on a context-length error, so the run ends there. With
+  `propagate_upstream_http_status_codes: [400]` it ends within seconds with vLLM's message, and the environment
+  server's default `agent_outcome_policy` sends a run that failed with HTTP 400 to `/verify`: the run is judged on its
+  last `finish` or `abandon_task_finish`, or as an empty submission without one. By default `openai_model` returns
+  HTTP 500 instead; Codex sends the request 30 times and fails with a "high demand" error. That run is not judged: it
+  is a failure that `--resume` runs again.
+- `finish` does not end a Codex run: Codex continues until the model replies without a tool call, and a later
+  `finish` or `abandon_task_finish` replaces the recorded call. The files are collected when the run ends, so they are
+  judged as they are then.
+- Codex sets no `stop_reason: wall_time`, so GDPVal's `agent_timeout` mask does not apply to it. A Codex run that
+  reaches its `timeout` is judged on its last `finish` or `abandon_task_finish`, with the files as they are when it
+  stops, or as an empty submission without one. It is not retried, unless Codex also reported an error during the
+  run, which makes it a failure that `--resume` runs again; the `Reconnecting...` notices Codex prints while it
+  retries a model call do not count. So a Codex run that times out before `finish` scores as an empty submission,
+  where a Pi or Stirrup run is masked.
+- The Codex agent rejects sampling and output limits in the request, so every row fails if `gym eval run` gets
+  `--temperature`, `--top-p` or `--max-output-tokens`. Change Codex's own settings, such as `model_context_window`
+  and `model_auto_compact_token_limit` for another window, with
+  `++gdpval_codex_agent.responses_api_agents.codex_agent.<key>=<value>`.
+
 ## Multi-judge panel
 
 By default every GDPVal deliverable is graded by a **panel** of frontier LLM

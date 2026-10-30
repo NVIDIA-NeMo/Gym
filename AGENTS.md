@@ -20,6 +20,15 @@ Humans: see [Development Setup → Use of AI and LLM Tools](https://docs.nvidia.
 - Docs live under `fern/versions/latest/pages/`. Bleeding-edge nav is `fern/versions/main.yml`. See `fern/README.md` and the `nemo-gym-docs` skill.
 - Do not introduce licenses incompatible with Apache-2.0. New source files need the standard NVIDIA SPDX header.
 
+## Code provenance
+
+- Avoid copying or adapting code from other repositories. Write an independent implementation whenever possible.
+- When copying or adapting external code is necessary, you **must** record the source URL, exact revision (commit SHA),
+  and applicable license in **both the PR description and the header of every file containing that code**. Identify
+  the original source file(s) and the affected Gym files in the PR description.
+- Retain all required copyright notices, license notices, and attribution. Follow the Apache-2.0 compatibility and
+  vendoring requirements in [CONTRIBUTING.md](CONTRIBUTING.md#licensing-of-contributions).
+
 ## Pull Requests
 
 - For normal authored PRs, use a Conventional Commit-style title: `type(optional-scope): imperative summary`.
@@ -179,6 +188,19 @@ gym dev test
 # Dump merged config
 gym env resolve --config ...
 ```
+
+## Imports from nemo_gym
+
+- Code outside `nemo_gym/` and its tests (servers and their tests, benchmarks, scripts, and code samples in docs
+  and skills) imports public names from the package's public API: `from nemo_gym.<package> import Name`. If such
+  code needs a name the package does not export, add it to the package's `_PUBLIC_API` in its `__init__.py` rather
+  than importing the submodule. `scripts/migrate_imports.py` writes this form, and a unit test checks it.
+- Code inside `nemo_gym/` and its tests (`tests/`) imports from the module that defines each name
+  (`from nemo_gym.<package>.<module> import Name`), never a package's public API, so the import-linter contract in
+  `pyproject.toml` sees every dependency and a test reads what it patches. A package imports only packages below it.
+- A `mock.patch` or `monkeypatch.setattr` target names the module the code under test looks the name up in: the
+  module that defines it, or the module that imports it by name and calls it. Never a package's public API or an
+  old path.
 
 ## Code Style
 

@@ -18,6 +18,7 @@ import orjson
 import pytest
 from pydantic import BaseModel, ConfigDict
 
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe, normalize_math_judge_verdict, reraise_judge_errors
 
 
@@ -150,3 +151,25 @@ class TestJudgeFailsafe:
         assert len(data["failure_reason"]) == 2000
         assert data["_ng_failure_judge_error"] == data["failure_reason"]
         assert request.model_dump() == original
+
+
+@pytest.mark.asyncio
+async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
+    from nemo_gym.core.episode import verifier_invocation_context
+
+    client = _client(status=200, body=b'{"verdict":"CORRECT"}')
+    await _call(client)
+    assert "headers" not in client.post.call_args.kwargs
+    with verifier_invocation_context("verify-one"):
+        await _call(client)
+        await _call(client)
+        assert all(
+            call.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
+            for call in client.post.call_args_list[1:]
+        )
+        failed = _client(status=400, body=b'{"error":"rejected"}')
+        with pytest.raises(JudgeError):
+            await _call(failed)
+        assert failed.post.call_args.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
+    await _call(client)
+    assert "headers" not in client.post.call_args.kwargs

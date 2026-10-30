@@ -24,8 +24,7 @@ from pydantic import ValidationError
 from nemo_gym._checkpoint.control import CheckpointRecord, JsonPayload
 from nemo_gym._checkpoint.errors import CheckpointStateError
 from nemo_gym._checkpoint.store import participant_dir, read_participant_state, write_participant_state
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
 from tests.unit_tests.test_checkpoint_control import FakeParticipant, body, make_client
 
 
@@ -215,7 +214,7 @@ async def test_restore_refuses_a_corrupt_manifest_with_a_typed_error(corruption:
             json=body("r1", checkpoint_dir=str(tmp_path), episode_ids=[{"rollout_id": "r"}]),
         )
 
-    assert response.status_code == 422 and response.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert response.status_code == 422 and response.json()["error"]["code"] == "checkpoint_invalid_state"
     assert participant.executions == {} and participant.accepting is True
 
 
@@ -229,7 +228,7 @@ async def test_commit_into_a_directory_that_cannot_hold_state_is_a_typed_error(t
         await client.post("/ng-control/v1/checkpoint/prepare", json=body())
         response = await client.post("/ng-control/v1/checkpoint/commit", json=body(checkpoint_dir=str(blocked)))
 
-    assert response.status_code == 422 and response.json()["error"]["code"] == "invalid_checkpoint_state"
+    assert response.status_code == 422 and response.json()["error"]["code"] == "checkpoint_invalid_state"
 
 
 def test_a_payload_nested_deeper_than_python_recurses_is_refused_not_crashing() -> None:

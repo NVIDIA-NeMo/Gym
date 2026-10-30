@@ -7,7 +7,6 @@ import io
 import os
 import shutil
 import subprocess
-import sys
 import tarfile
 from pathlib import Path
 
@@ -56,7 +55,6 @@ def sandbox(tmp_path: Path) -> tuple[Path, dict[str, str]]:
         if executable is None:
             pytest.skip(f"Installer test requires {name}")
         (bindir / name).symlink_to(executable)
-    (bindir / "python3").symlink_to(sys.executable)
     archive = _node_archive()
     (tmp_path / ARCHIVE).write_bytes(archive)
     (tmp_path / "SHASUMS256.txt").write_text(f"{hashlib.sha256(archive).hexdigest()}  {ARCHIVE}\n")

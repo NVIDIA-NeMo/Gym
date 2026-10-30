@@ -6,15 +6,15 @@ from copy import deepcopy
 import pytest
 
 from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record, read_model_call_records
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_observability import (
     AgentObservationBundle,
     ContextCompactionObservation,
     TrajectoryRecord,
+    join_agent_model_calls,
     join_assistant_message_calls,
-    join_model_call_observations,
 )
 from responses_api_agents.opencode_agent.app import _parse_opencode_session
 from responses_api_agents.opencode_agent.tests.test_app import _session_db
@@ -237,7 +237,7 @@ def test_association_is_idempotent_and_does_not_mutate_inputs(tmp_path, parse):
     _capture(store, "turn", "m0")
     _capture(store, "summary", "m2")
     calls = read_model_call_records(store, "0-0")
-    observations = join_model_call_observations(observations, calls)
+    observations = join_agent_model_calls(observations, calls)
     before = deepcopy((observations, trajectory, calls))
 
     first = join_assistant_message_calls(observations, trajectory, calls)

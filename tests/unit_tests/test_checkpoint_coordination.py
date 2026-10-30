@@ -20,7 +20,7 @@ from nemo_gym._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym._checkpoint.coordination import CoordinationError
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.server_utils import BaseServerConfig, ServerClient
 
 
@@ -30,6 +30,7 @@ TOKEN = "t"
 class Recorder(CheckpointParticipant):
     """A participant that is ready unless told otherwise and records the calls it receives."""
 
+    mode = "exported"
     record_model = CheckpointRecord
 
     def __init__(self, kind: str, events: list[str], name: str) -> None:
@@ -178,7 +179,7 @@ async def test_prepare_stops_at_an_unready_stage_until_the_controller_retires_it
     missed = await coordination.prepare(participants, "c1", deadline_ts=deadline(0.2))
     later_stage_untouched = "close res" not in events
     # A straggler is retired after the checkpoint is abandoned, never while it is open.
-    with pytest.raises(CoordinationError, match="invalid_phase"):
+    with pytest.raises(CoordinationError, match="checkpoint_invalid_phase"):
         await coordination.retire(participants, "c1", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
     await coordination.resume(participants, "c1", deadline_ts=deadline())
     await coordination.retire(participants, "retire", [EpisodeId(rollout_id="r", attempt=1)], deadline_ts=deadline())
@@ -239,7 +240,7 @@ async def test_resume_after_a_partial_prepare_fences_the_participants_it_never_r
         client=client, auth_token=TOKEN, members=tuple(m for m in participants.members if m.kind == "resources")
     )
 
-    with pytest.raises(CoordinationError, match="stale_checkpoint"):
+    with pytest.raises(CoordinationError, match="checkpoint_stale"):
         await coordination.prepare(res_only, "c1", deadline_ts=deadline())
 
 
@@ -407,6 +408,31 @@ async def test_discover_reports_a_server_that_never_replies(monkeypatch: pytest.
 
     with pytest.raises(CoordinationError, match="env: no status reply within 0.05 seconds"):
         await asyncio.wait_for(coordination.discover(client, auth_token=TOKEN), 5)
+
+
+async def test_discover_reads_each_participants_checkpoint_mode() -> None:
+    """A controller can tell from discovery alone which servers' rollouts start over after a crash."""
+    client, recorders, _ = deployment(*FULL)
+    recorders["res"].mode = "restart_only"
+    recorders["env"].mode = "stateless"
+
+    participants = await coordination.discover(client, auth_token=TOKEN)
+
+    assert {member.server_name: member.mode for member in participants.members} == {
+        "env": "stateless",
+        "policy": "exported",
+        "agent": "exported",
+        "res": "restart_only",
+    }
+
+
+async def test_discover_reports_a_participant_whose_status_names_no_checkpoint_mode() -> None:
+    client, recorders, _ = deployment(*FULL)
+    # As a server from before the mode was reported would answer.
+    recorders["agent"].mode = None
+
+    with pytest.raises(CoordinationError, match="agent: participant reports no checkpoint mode"):
+        await coordination.discover(client, auth_token=TOKEN)
 
 
 async def test_discover_reports_a_participant_of_an_unknown_kind() -> None:

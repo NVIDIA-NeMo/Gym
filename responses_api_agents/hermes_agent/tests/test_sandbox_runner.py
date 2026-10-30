@@ -21,10 +21,9 @@ import uvicorn
 from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE
+from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
@@ -390,7 +389,7 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 "chatcmpl-summary",
             ]
         else:
-            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+            from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
             agent = HermesAgent(
                 config=HermesAgentConfig(
@@ -492,7 +491,7 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["deadline", "close"])
 def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"
@@ -528,9 +527,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
 """
     process = subprocess.Popen(
         [
-            sys.executable,
-            "-I",
-            process_supervisor.__file__,
+            "bash",
+            str(SUPERVISOR_SCRIPT),
             "--timeout",
             "2" if ending == "deadline" else "10",
             "--cleanup-timeout",
@@ -561,8 +559,8 @@ raise SystemExit(sandbox_runner._run_worker(pathlib.Path(sys.argv[2]), pathlib.P
             while not (tmp_path / "model.patch").exists() and process.poll() is None and time.monotonic() < deadline:
                 time.sleep(0.01)
             assert (tmp_path / "model.patch").exists()
+            # Production sends no signal; the stop file alone must stop the supervisor.
             stop_request_path.touch()
-            process.terminate()
         _, stderr = process.communicate(timeout=10)
         assert process.returncode == 0, stderr
     finally:

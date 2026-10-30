@@ -732,11 +732,21 @@ def test_render_driver_entrypoint_with_gym_install():
     assert "checkout main" in out
     assert "uv venv --seed .venv" in out
     assert "source .venv/bin/activate" in out
-    assert "uv pip install -e ." in out
+    assert 'uv pip install -e ".[ray]"' in out
     assert "--system" not in out
     assert "--break-system-packages" not in out
     assert 'exec "$@"' in out
     assert '"${GYM_CMD[@]}"' in out
+
+
+def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
+    # The uv installer does not write $HOME/.local/bin/env when that directory is
+    # already on PATH, so sourcing it would abort the `set -e` preamble.
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert ".local/bin/env" not in out
+    assert 'export PATH="$HOME/.local/bin:$PATH"' in out
+    assert out.index("astral.sh/uv/install.sh") < out.index('export PATH="$HOME/.local/bin:$PATH"')
+    assert out.index('export PATH="$HOME/.local/bin:$PATH"') < out.index("uv venv --seed .venv")
 
 
 def test_render_driver_entrypoint_installs_git_if_missing():
