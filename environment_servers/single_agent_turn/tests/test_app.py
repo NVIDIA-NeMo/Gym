@@ -38,10 +38,12 @@ from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, Resources
 from nemo_gym.core import (
     MODEL_TRANSPORT_ERROR,
     EpisodeId,
+    ModelCallSampling,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NgFailureEvent,
     TaskId,
+    encode_model_sampling,
 )
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
@@ -67,6 +69,19 @@ def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPa
     )
 
     assert namespace["app"] is worker_app
+
+
+@pytest.mark.parametrize("token_capture", [False, True])
+def test_the_trained_agents_activation_carries_the_episodes_sampling_values(token_capture: bool) -> None:
+    environment_server, _ = _environment_server(token_capture=token_capture)
+    sampling = ModelCallSampling(temperature=0.6, top_p=0.95, max_output_tokens=64)
+    capture = "/training-token-capture" if token_capture else ""
+
+    path = environment_server._agent_responses_path(_request().model_copy(update={"model_sampling": sampling}))
+
+    assert path == f"/ng-rollout/rollout-a2{capture}/ng-sampling/{encode_model_sampling(sampling)}/v1/responses"
+    # Gym-only evaluation sends no values and gets the path it always had.
+    assert environment_server._agent_responses_path(_request()) == f"/ng-rollout/rollout-a2{capture}/v1/responses"
 
 
 async def test_single_agent_turn_with_direct_resources_tools() -> None:

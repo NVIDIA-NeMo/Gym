@@ -115,7 +115,9 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NgFailureEvent,
     TaskId,
+    encode_model_sampling,
     failure_kinds,
+    model_sampling_path_segment,
     sdk_error_details,
 )
 from nemo_gym.data.tasks.harbor import (
@@ -2083,7 +2085,13 @@ class HarborEnvironmentServer(
             bool(block.get("all_agents", False)) or bool(agent_config.get("token_id_capture", False))
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
-        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}/v1/responses"
+        # The agent is the one the training framework trains, so its model calls carry the episode's values.
+        sampling_segment = (
+            model_sampling_path_segment(encode_model_sampling(request.model_sampling))
+            if request.model_sampling is not None
+            else ""
+        )
+        return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
     def _failure(
