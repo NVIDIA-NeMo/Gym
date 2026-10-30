@@ -335,8 +335,9 @@ def file_auth(server: OfficeEnvResourcesServer, session_id: str = "rs-1") -> dic
 
 
 def configured_mcp_settings() -> dict:
-    """The MCP settings configs/officeenv_sandbox.yaml gives the server."""
-    settings = yaml.safe_load(SANDBOX_CONFIG.read_text())["oe"]["resources_servers"]["officeenv"]
+    """The MCP settings the sandbox configs give the server (configs/officeenv_sandbox_episodes.yaml)."""
+    episodes = SANDBOX_CONFIG.with_name("officeenv_sandbox_episodes.yaml")
+    settings = yaml.safe_load(episodes.read_text())["oe"]["resources_servers"]["officeenv"]
     return {key: settings[key] for key in ("mcp_server_name", "mcp_bearer_token")}
 
 
@@ -2434,6 +2435,80 @@ def test_the_rows_name_the_company_api_as_the_sandbox_does() -> None:
         # every file app's content goes through the file API, and mail attaches workspace files by their path
         assert "between the workspace and the apps with the file API" in system and "Google Drive with" not in system
         assert "attach workspace files to email by their path" in system
+
+
+def load_prepare_rows():
+    """sandbox/prepare_rows.py as a module."""
+    import importlib.util
+
+    path = Path(officeenv_app.__file__).parent / "sandbox" / "prepare_rows.py"
+    spec = importlib.util.spec_from_file_location("prepare_rows", path)
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def test_row_prompts_name_the_company_api_and_how_each_surface_reaches_the_apps() -> None:
+    prepare_rows = load_prepare_rows()
+    assert (
+        prepare_rows.system_prompt()
+        == prepare_rows.SYSTEM_PROMPT
+        == json.loads(SANDBOX_ROWS.read_text().splitlines()[0])["responses_create_params"]["input"][0]["content"]
+    )  # the committed rows' prompt
+    for surface in SANDBOX_SURFACES:
+        prompt = prepare_rows.system_prompt(surface)
+        assert "/workspace/README.md" in prompt and "COMPANY_API_URL" in prompt and "COMPANY_API_TOKEN" in prompt
+        assert "in a shell without them, run `. /etc/company-api.env` first" in prompt  # Codex's shell, for one
+        assert "attach workspace files to email by their path" in prompt
+        assert not ENVIRONMENT_NAMES.search(prompt), prompt
+    assert "run `user complete-task --answer=" in prepare_rows.system_prompt("cli")
+    assert "your mcp__company__api_search tool" in prepare_rows.system_prompt("api_search", "mcp__company__")
+
+
+@pytest.mark.parametrize("surface", ["cli", "api_search"])
+def test_prepared_rows_seed_as_sandboxed_episodes_on_their_surface(sandboxes, surface: str) -> None:
+    """prepare_rows.py --exposure: every sandbox task, its prompt saying how its apps are reached, seeds as an
+    episode of that surface on the pinned OfficeEnv, with the grant and the guide of that surface."""
+    rows = load_prepare_rows().rows(surface)
+    assert {row["officeenv"]["exposure"]["mode"] for row in rows} == {surface}
+    server = make_server()
+    with mcp_client(server) as client:
+        for index, row in enumerate(rows):
+            seed = ResourcesSeedSessionRequest(
+                resources_session_id=f"rs-{index}",
+                episode_id=EpisodeId(rollout_id=f"r{index}"),
+                task_id=TaskId(taskset="oe", task_id=row["task_id"]),
+                task_data={key: value for key, value in row.items() if key != "responses_create_params"},
+            )
+            seeded = client.post("/seed_session", json=seed.model_dump(mode="json"))
+            assert seeded.status_code == 200, (row["task_id"], seeded.text)
+            grant = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
+            tools = {tool["name"] for tool in rpc(client, "tools/list", {}, grant).json()["result"]["tools"]}
+            assert tools == ({"api_search", "api_fetch"} if surface == "api_search" else set()), row["task_id"]
+            episode = server._episodes[f"rs-{index}"]
+            guide = sandboxes.started[-1].spec.files["/workspace/README.md"]
+            assert guide == workspace_guide(8192, episode.apps, surface=surface)
+
+
+def test_each_harness_config_binds_its_harness_to_the_shared_episodes() -> None:
+    """Pi on MCP tools, Codex and mini-SWE on commands: each config composes the same episodes
+    (configs/officeenv_sandbox_episodes.yaml) with its harness, and no other harness."""
+    configs = SANDBOX_CONFIG.parent
+    for name, agent, transports in [
+        ("officeenv_sandbox.yaml", "pi_agent", ["mcp"]),
+        ("officeenv_sandbox_codex.yaml", "codex_agent", []),
+        ("officeenv_sandbox_miniswe.yaml", "miniswe_sandboxed_agent", []),
+    ]:
+        config = yaml.safe_load((configs / name).read_text())
+        assert config["config_paths"] == [
+            "resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml",
+            f"responses_api_agents/{agent}/configs/{agent}.yaml",
+            "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
+        ], name
+        binding = config["single_agent_turn_legacy"]["environment_servers"]["single_agent_turn_legacy"]
+        assert binding["agent_server"]["name"] == agent and binding["resources_server"]["name"] == "oe", name
+        assert binding["resources_tool_transports"] == transports, name
+        assert set(config) - {"config_paths", "oe", "single_agent_turn_legacy"} == {agent}, name
 
 
 # The committed rows.

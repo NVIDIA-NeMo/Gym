@@ -144,8 +144,12 @@ separator; a seed whose tools differ from what the endpoint serves fails with 40
 ## Sandboxed harnesses
 
 Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
-`configs/officeenv_sandbox.yaml` runs OfficeEnv episodes for Pi in agent-session mode behind the
-`single_agent_turn_legacy` Environment Server, with the tools over MCP as above. Each episode also:
+`configs/officeenv_sandbox_episodes.yaml` is the resources server for sandboxed episodes, and each
+harness config composes it with a harness in agent-session mode behind the
+`single_agent_turn_legacy` Environment Server: `configs/officeenv_sandbox.yaml` runs Pi, with the
+tools over MCP as above; `configs/officeenv_sandbox_codex.yaml` (Codex CLI) and
+`configs/officeenv_sandbox_miniswe.yaml` (mini-SWE) run rows whose apps are commands (below), with
+no MCP tools. Each episode also:
 
 1. borrows a sandbox: the seed starts one from `sandbox_config.image` (built from
    `sandbox/Dockerfile`) with Gym's sandbox provider named by `sandbox_provider`, and lends it to
@@ -240,7 +244,30 @@ for Pi). `/verify` adds `sandbox_commands`, `sandbox_commands_refused` and
 Rows come from OfficeEnv's sandbox example tasks: `sandbox/prepare_rows.py` writes
 `data/sandbox_pilot.jsonl` with the OfficeEnv it imports (its five sandbox tasks). A
 row holds a system and a user message and the TaskSpec, and no tool list, since the harness takes
-its tools from the MCP grant.
+its tools from the MCP grant. `--exposure cli` or `--exposure api_search` writes the same tasks in
+that exposure, with a prompt that says how the apps are reached, to
+`data/sandbox_pilot_<exposure>_prepare.jsonl`; `--tool-prefix` names the MCP tools as the harness
+lists them (`company_`, Pi's, by default; `mcp__company__` for Codex).
+
+To run the commands' rows with another harness, use its config and pass `--agent` to the
+collection, for Codex CLI:
+
+```bash
+python resources_servers/officeenv/sandbox/prepare_rows.py --exposure cli
+gym env start --config resources_servers/officeenv/configs/officeenv_sandbox_codex.yaml \
+  --config nemo_gym/sandbox/providers/docker/configs/docker.yaml <model and host arguments as above>
+gym eval run --no-serve <the same --config and arguments> --agent codex_agent \
+  --input resources_servers/officeenv/data/sandbox_pilot_cli_prepare.jsonl --output results/codex_cli.jsonl
+```
+
+mini-SWE runs the same way with `configs/officeenv_sandbox_miniswe.yaml` and
+`--agent miniswe_sandboxed_agent`. Pi runs these rows with `configs/officeenv_sandbox.yaml` and
+`++single_agent_turn_legacy.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
+and `api_search` rows with its MCP transport as it is; on both, no MCP tool ends the task, so Pi
+takes `++pi_agent.responses_api_agents.pi_agent.finish_tool_names=[]` and ends when the model stops.
+Any of Gym's harnesses that borrow an episode's sandbox and run a shell can be paired the same way
+(the agent's config, `agent_server.name`, no MCP transports); what each needs in the sandbox image
+(its own runtime, when sandboxes have no internet) is the harness's.
 
 What a sandbox reads of this server names a company's API, never the environment behind it or
 Gym: the variables above, the `/v1/...` routes, the workspace's `README.md`, the answers and
@@ -261,8 +288,8 @@ A sandbox can reach this server, so sandbox mode guards it:
   from this node and from `trusted_networks` (CIDR, empty by default), and others as routes that
   do not exist (404); no generated docs (`/openapi.json`, `/docs`) are served. Sandboxes keep the
   MCP endpoint, the file API and their surface's routes (`/v1/cli`, `/v1/<app>/<op>`), whose
-  tokens name their episode. When Gym's other servers call
-  this one from other nodes, list their network in `trusted_networks`;
+  tokens name their episode. When Gym's other servers call this one from other nodes, list their
+  network in `trusted_networks`;
 - session cookies and MCP tokens are signed with a secret drawn when the server starts
   (`get_session_secret`), not with Gym's default key, which anyone can derive from the server's
   name, so code in a sandbox cannot sign a token for another episode or for more tools. The secret
@@ -316,8 +343,9 @@ command.
 
 Known limits: Pi installs Node and its own package in every sandbox at session start (network
 access to nodejs.org and npm); token-ID capture through Pi needs a vLLM model server and is not
-validated here; OpenCode's sandbox sessions refuse MCP tool grants, so Pi is the harness these
-episodes run. What a sandbox still reads of Gym:
+validated here. Pi, Codex and Hermes take MCP tool grants in sandbox sessions; OpenCode and Claude
+Code refuse them, so they run only the commands' rows. Codex installs Node and its package, and
+mini-SWE its Python packages, in each sandbox at session start. What a sandbox still reads of Gym:
 
 - the policy's URL, which Gym's agents hand the harness with Gym's own path names:
   `/ng-rollout/<id>` from rollout correlation (`ROLLOUT_PATH_PREFIX`), `/training-token-capture`
@@ -327,7 +355,11 @@ episodes run. What a sandbox still reads of Gym:
   findings; making the two path names configurable is a further core change;
 - Pi's own names: its session and runtime directories, the `NEMO_GYM_PI_*` variables its shell
   inherits, the model provider `nemo`, its supervisor's process names, and a system prompt that
-  states the sandbox clock's date. Changing those is Pi agent work.
+  states the sandbox clock's date. Changing those is Pi agent work;
+- the other harnesses' own names, which their Gym adapters fix: Codex's session and runtime
+  folders (`/tmp/nemo-gym-codex-sessions/<id>`, `/tmp/nemo-gym-codex-node-22.19.0-<version>`), and
+  mini-SWE's task file and working folder (`/tmp/.nemo-gym/task.json`,
+  `/tmp/nemo-gym-miniswe-<id>`). Changing those is adapter work.
 
 The caller check is not a network boundary: a gateway that exposes only MCP and the file API to
 sandboxes would be one.
