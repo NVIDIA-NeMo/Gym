@@ -110,6 +110,10 @@ Gym servers communicate over async HTTP (aiohttp) with:
 
 Sandbox execution and file transfer are not Gym HTTP calls. They use the configured sandbox provider's transport, such as HTTP, gRPC, a Docker CLI, or a local subprocess.
 
+## Where the Code Lives
+
+The `nemo_gym` library is split into layered packages. Each server base lives in the package for its server type: the resources server and environment server bases in `nemo_gym.server_runtime`, the agent server base in `nemo_gym.agents`, and the model server base in `nemo_gym.models`. Servers and benchmarks import from these packages, such as `from nemo_gym.server_runtime import SimpleResourcesServer`. For a summary of every package, the order in which packages may import each other, and the import rules, see [Package Layout](/api/reference/api-reference#package-layout).
+
 ## Next Steps
 
 <Cards>
