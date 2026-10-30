@@ -475,6 +475,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # Moved, and still imported by batch_status for its own use.
         **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
     },
+    "nemo_gym.mcp_auto_exposure": {
+        # Renamed when Environment Servers started to build MCP results with it.
+        "_to_result": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure:to_call_tool_result", since="0.8.0"),
+    },
 }
 
 # Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that
