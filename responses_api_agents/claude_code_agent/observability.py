@@ -9,6 +9,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
+from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Literal
@@ -262,15 +263,35 @@ def _tool_result(block: dict[str, Any], status: str) -> NeMoGymFunctionCallOutpu
     )
 
 
-def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int, dict[str, Any]]]:
+@dataclass
+class ClaudeCodeTranscripts:
+    """The records of Claude Code's session and subagent transcripts below one ``CLAUDE_CONFIG_DIR``.
+
+    Read once and shared: token usage reads every record, observation extraction the ones that carry a session
+    id. ``files_read`` counts the transcript files that could be opened; with none, the transcripts are unavailable.
+    """
+
+    records: list[dict[str, Any]] = field(default_factory=list)
+    gaps: list[ObservationGap] = field(default_factory=list)
+    files_read: int = 0
+
+    @property
+    def usage_records(self) -> list[dict[str, Any]] | None:
+        """``records`` when any transcript could be read; None otherwise, so token usage falls back to the stream."""
+        return self.records if self.files_read else None
+
+
+def read_transcripts(config_dir: Path) -> ClaudeCodeTranscripts:
+    """Parse every JSON record of the transcripts below ``config_dir/projects``, noting what could not be read."""
+    transcripts = ClaudeCodeTranscripts()
     if not config_dir.is_dir():
-        gaps.append(_gap("transcript_dir_missing"))
-        return []
+        transcripts.gaps.append(_gap("transcript_dir_missing"))
+        return transcripts
 
     transcript_dir = config_dir / "projects"
     if not transcript_dir.is_dir():
-        gaps.append(_gap("transcript_dir_missing", detail="projects"))
-        return []
+        transcripts.gaps.append(_gap("transcript_dir_missing", detail="projects"))
+        return transcripts
 
     try:
         # Claude Code stores session and subagent transcripts below ``projects``.
@@ -278,32 +299,39 @@ def _read_events(config_dir: Path, gaps: list[ObservationGap]) -> list[tuple[int
         # unrelated CLI state and must not be interpreted as rollout evidence.
         paths = sorted(transcript_dir.rglob("*.jsonl"))
     except OSError:
-        gaps.append(_gap("transcript_dir_unreadable"))
-        return []
+        transcripts.gaps.append(_gap("transcript_dir_unreadable"))
+        return transcripts
 
-    events: list[tuple[int, dict[str, Any]]] = []
     for path in paths:
         try:
             lines = path.open(encoding="utf-8", errors="replace")
         except OSError:
-            gaps.append(_gap("transcript_unreadable", detail=path.name))
+            transcripts.gaps.append(_gap("transcript_unreadable", detail=path.name))
             continue
-        with lines:
-            for line_number, line in enumerate(lines, start=1):
-                if not line.strip():
-                    continue
-                try:
-                    event = json.loads(line)
-                except (json.JSONDecodeError, UnicodeError):
-                    gaps.append(_gap("malformed_transcript_line", detail=f"{path.name}:{line_number}"))
-                    continue
-                if not isinstance(event, dict):
-                    gaps.append(_gap("invalid_transcript_record", detail=f"{path.name}:{line_number}"))
-                    continue
-                if not isinstance(event.get("sessionId"), str):
-                    continue
-                events.append((len(events), event))
-    return events
+        transcripts.files_read += 1
+        try:
+            with lines:
+                for line_number, line in enumerate(lines, start=1):
+                    if not line.strip():
+                        continue
+                    try:
+                        record = json.loads(line)
+                    except (json.JSONDecodeError, UnicodeError):
+                        transcripts.gaps.append(_gap("malformed_transcript_line", detail=f"{path.name}:{line_number}"))
+                        continue
+                    if not isinstance(record, dict):
+                        transcripts.gaps.append(_gap("invalid_transcript_record", detail=f"{path.name}:{line_number}"))
+                        continue
+                    transcripts.records.append(record)
+        except OSError:
+            # The records read before the failure are kept.
+            transcripts.gaps.append(_gap("transcript_unreadable", detail=path.name))
+    return transcripts
+
+
+def _read_events(transcripts: ClaudeCodeTranscripts, gaps: list[ObservationGap]) -> list[tuple[int, dict[str, Any]]]:
+    gaps.extend(transcripts.gaps)
+    return list(enumerate(record for record in transcripts.records if isinstance(record.get("sessionId"), str)))
 
 
 def _would_create_parent_cycle(
@@ -322,8 +350,9 @@ def _would_create_parent_cycle(
 
 
 def extract_claude_code_observations(
-    config_dir: Path,
+    config_dir: Path | None = None,
     *,
+    transcripts: ClaudeCodeTranscripts | None = None,
     model_ref: ModelServerRef | None = None,
     root_status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown",
     root_duration_ms: float | None = None,
@@ -334,10 +363,13 @@ def extract_claude_code_observations(
 
     Transcript IDs and timestamps are used directly. Missing or ambiguous evidence
     is reported as a gap; the extractor never joins calls by text or proximity.
+    ``transcripts``, when given, are those already read from ``config_dir``.
     """
 
     gaps: list[ObservationGap] = []
-    raw_events = _read_events(Path(config_dir), gaps)
+    if transcripts is None:
+        transcripts = read_transcripts(Path(config_dir))
+    raw_events = _read_events(transcripts, gaps)
     attempts = [
         ContextCompactionObservation(
             invocation_id=attempt["invocation_id"],

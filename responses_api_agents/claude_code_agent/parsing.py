@@ -14,7 +14,9 @@
 # limitations under the License.
 
 import json
-from typing import Any, Optional
+import logging
+from collections.abc import Iterable, Mapping
+from typing import Any, NamedTuple, Optional
 from uuid import uuid4
 
 from nemo_gym.openai_utils import (
@@ -27,12 +29,97 @@ from nemo_gym.openai_utils import (
 )
 
 
+LOG = logging.getLogger(__name__)
+
 # Claude Code reports a model stop_reason "refusal" as an is_error result with subtype "success" and this text.
 USAGE_POLICY_REFUSAL = "appears to violate our Usage Policy"
 
 
 def _extract_text(content: list[Any]) -> str:
     return "".join(b.get("text", "") for b in content if isinstance(b, dict) and b.get("type") == "text")
+
+
+# (input, cached input, output) tokens. Input includes the prompt cache's writes and reads, which an Anthropic
+# usage object reports apart from ``input_tokens``. Cached input is None when no cache count was reported.
+UsageCounts = tuple[int, Optional[int], int]
+
+
+def _add(a: UsageCounts, b: UsageCounts) -> UsageCounts:
+    cached = None if a[1] is None and b[1] is None else (a[1] or 0) + (b[1] or 0)
+    return a[0] + b[0], cached, a[2] + b[2]
+
+
+def _reported_counts(
+    usage: Any, *, input_key: str, output_key: str, read_key: str, write_key: str
+) -> Optional[UsageCounts]:
+    """The counts in one usage record, or None unless it reports input or output tokens and every count it reports
+    is a non-negative integer. A count that is absent or null was not reported."""
+    if not isinstance(usage, Mapping):
+        return None
+    reported = {key: usage[key] for key in (input_key, output_key, read_key, write_key) if usage.get(key) is not None}
+    if input_key not in reported and output_key not in reported:
+        return None
+    if any(type(value) is not int or value < 0 for value in reported.values()):
+        return None
+    read, written = reported.get(read_key), reported.get(write_key)
+    cached = None if read is None and written is None else read or 0
+    return reported.get(input_key, 0) + (written or 0) + (read or 0), cached, reported.get(output_key, 0)
+
+
+def _usage_counts(usage: Any) -> Optional[UsageCounts]:
+    """An Anthropic Messages usage object's counts."""
+    return _reported_counts(
+        usage,
+        input_key="input_tokens",
+        output_key="output_tokens",
+        read_key="cache_read_input_tokens",
+        write_key="cache_creation_input_tokens",
+    )
+
+
+def _model_usage_counts(model_usage: Any) -> Optional[UsageCounts]:
+    """The result event's ``modelUsage`` summed over models: every call the CLI made, its subagents' included.
+
+    None unless every model's record is valid, so the result event's ``usage`` is used instead.
+    """
+    if not isinstance(model_usage, Mapping) or not model_usage:
+        return None
+    totals: UsageCounts = (0, None, 0)
+    for usage in model_usage.values():
+        counts = _reported_counts(
+            usage,
+            input_key="inputTokens",
+            output_key="outputTokens",
+            read_key="cacheReadInputTokens",
+            write_key="cacheCreationInputTokens",
+        )
+        if counts is None:
+            return None
+        totals = _add(totals, counts)
+    return totals
+
+
+class TranscriptCall(NamedTuple):
+    usage: Optional[UsageCounts]
+    finished: bool
+
+
+def transcript_calls(records: Iterable[Any]) -> dict[str, TranscriptCall]:
+    """Each model call in Claude Code's session transcripts, by message id: its last usage and whether it finished.
+
+    Claude Code writes an entry per content block. Once the message has finished, the entries carry its stop
+    reason and its final usage, output included. An entry written before then carries neither: the usage known
+    when the message started, with no output. A message whose last entry has no stop reason was cut off in flight.
+    """
+    calls: dict[str, TranscriptCall] = {}
+    for record in records:
+        if not isinstance(record, Mapping) or record.get("type") != "assistant":
+            continue
+        message = record.get("message")
+        if not isinstance(message, Mapping) or not isinstance(message.get("id"), str) or not message["id"]:
+            continue
+        calls[message["id"]] = TranscriptCall(_usage_counts(message.get("usage")), bool(message.get("stop_reason")))
+    return calls
 
 
 def _extract_thinking(content: list[Any]) -> str:
@@ -45,8 +132,22 @@ def _extract_thinking(content: list[Any]) -> str:
     return "\n".join(p for p in parts if p)
 
 
-def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[Any], dict]:
+def parse_stream_json(
+    stdout: str,
+    *,
+    fold_thinking: bool = True,
+    transcript_records: Optional[Iterable[Mapping[str, Any]]] = None,
+) -> tuple[list[Any], dict]:
     """Convert claude -p --output-format=stream-json stdout into (output_items, usage).
+
+    Usage counts every model call the CLI made, subagents' included, with the prompt cache's reads and writes in
+    the input. It comes from the result event when there is one. Without it (the CLI was killed), each call is
+    counted once by message id, from the run's transcript records (``transcript_records``, None when none could
+    be read): a call that finished counts its final usage, and a call cut off in flight counts the input it was
+    sent with, from its transcript entry or the stream, but no output, which is reported only when a call ends.
+    Context compaction, which Claude Code leaves out of its transcripts and stream, is not counted. Without
+    transcripts, the stream's per-message usage is all there is, which on servers that send output only at the end
+    of a message (vLLM) holds input alone. ``cached_tokens`` is None when no cache count was reported.
 
     ``fold_thinking=True`` (eval default) prefixes each assistant message with the model's thinking as
     ``<think>...</think>`` text. Under training-token capture that must be off: Gym attributes the finished
@@ -71,11 +172,11 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
     pending_calls: dict[str, NeMoGymResponseFunctionToolCall] = {}
     buffered_think: str | None = None
     # Token usage. The result event carries the run's cumulative usage, so it is the total when present.
-    # Without one (the CLI was killed or timed out), sum the assistant messages' usage, once per message:
-    # stream-json emits one assistant event per content block, each repeating its message's usage.
-    result_usage: Optional[tuple[int, int]] = None
-    message_usage: dict[str, tuple[int, int]] = {}
-    unidentified_input = unidentified_output = 0
+    # Without one (the CLI was killed or timed out) and without transcripts, sum the stream's assistant messages
+    # once each: stream-json emits one event per content block, each repeating the usage its message started with.
+    result_usage: Optional[UsageCounts] = None
+    message_usage: dict[str, UsageCounts] = {}
+    unidentified: UsageCounts = (0, None, 0)
     num_turns: Optional[int] = None
     result_metadata: dict[str, Any] = {}
     compacting_sessions: set[str] = set()
@@ -86,13 +187,12 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         etype = event.get("type")
 
         if etype == "result":
-            usage = event.get("usage")
-            if isinstance(usage, dict) and ("input_tokens" in usage or "output_tokens" in usage):
-                previous = result_usage or (0, 0)
-                result_usage = (
-                    previous[0] + int(usage.get("input_tokens") or 0),
-                    previous[1] + int(usage.get("output_tokens") or 0),
-                )
+            # ``usage`` covers the main conversation only; ``modelUsage`` adds its subagents' calls.
+            counts = _model_usage_counts(event.get("modelUsage"))
+            if counts is None:
+                counts = _usage_counts(event.get("usage"))
+            if counts is not None:
+                result_usage = _add(result_usage or (0, None, 0), counts)
             # Claude Code's authoritative turn counter (what --max-turns bounds).
             if event.get("num_turns") is not None:
                 num_turns = int(event["num_turns"])
@@ -109,14 +209,12 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         elif etype == "assistant":
             message = event.get("message", {})
             content = message.get("content") or []
-            usage = message.get("usage") or {}
-            counts = (int(usage.get("input_tokens") or 0), int(usage.get("output_tokens") or 0))
+            counts = _usage_counts(message.get("usage"))
             message_id = message.get("id")
-            if isinstance(message_id, str) and message_id:
+            if counts is not None and isinstance(message_id, str) and message_id:
                 message_usage[message_id] = counts
-            else:
-                unidentified_input += counts[0]
-                unidentified_output += counts[1]
+            elif counts is not None:
+                unidentified = _add(unidentified, counts)
 
             # Subagent frames belong to a different captured chain. Keep their usage accounting,
             # but never let their text or tool ids testify to the main conversation's terminal call.
@@ -224,11 +322,23 @@ def parse_stream_json(stdout: str, *, fold_thinking: bool = True) -> tuple[list[
         {"invocation_id": session_id, "outcome": "unknown"} for session_id in compacting_sessions
     )
     if result_usage is not None:
-        total_input, total_output = result_usage
+        totals = result_usage
+    elif transcript_records is not None:
+        calls = transcript_calls(transcript_records)
+        totals = (0, None, 0)
+        for message_id in sorted(calls.keys() | message_usage.keys()):
+            call = calls.get(message_id)
+            if call is not None and call.finished and call.usage is not None:
+                totals = _add(totals, call.usage)
+                continue
+            started = call.usage if call is not None and call.usage is not None else message_usage.get(message_id)
+            if started is not None:
+                totals = _add(totals, (started[0], started[1], 0))
     else:
-        total_input = unidentified_input + sum(counts[0] for counts in message_usage.values())
-        total_output = unidentified_output + sum(counts[1] for counts in message_usage.values())
-    metadata: dict = {"input_tokens": total_input, "output_tokens": total_output}
+        totals = unidentified
+        for counts in message_usage.values():
+            totals = _add(totals, counts)
+    metadata: dict = {"input_tokens": totals[0], "cached_tokens": totals[1], "output_tokens": totals[2]}
     if terminal_response_id:
         metadata["terminal_response_id"] = terminal_response_id
     if num_turns is not None:
