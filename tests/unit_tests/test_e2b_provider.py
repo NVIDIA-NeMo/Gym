@@ -77,6 +77,13 @@ class FakeCommandResult:
 class FakeConnectionConfig:
     integrations: list[str] = []
 
+    def __init__(self, api_key=None, api_url=None, headers=None, api_headers=None, request_timeout=None, **_) -> None:
+        # The attributes the REST create path reads, resolved like the SDK's.
+        self.api_key = api_key
+        self.api_url = api_url or "https://api.e2b.app"
+        self.headers = {**(headers or {}), **(api_headers or {}), "User-Agent": "fake-e2b"}
+        self.request_timeout = 60.0 if request_timeout is None else request_timeout
+
     @classmethod
     def set_integration(cls, integration: str) -> None:
         cls.integrations.append(integration)
@@ -239,6 +246,36 @@ def _spec(**kwargs) -> SandboxSpec:
     return SandboxSpec(**kwargs)
 
 
+_NETWORK = {"deny_out": ["0.0.0.0/0"], "allow_out": ["pypi.org", "deb.debian.org"]}
+
+
+class FakeResponse:
+    def __init__(self, status: int, payload: object) -> None:
+        self.status = status
+        self.ok = status < 400
+        self._payload = payload
+
+    async def json(self) -> object:
+        return self._payload
+
+    async def text(self) -> str:
+        return str(self._payload)
+
+
+def _fake_rest_api(monkeypatch: pytest.MonkeyPatch, response: FakeResponse) -> list[dict]:
+    """Replace Gym's shared HTTP client; return the recorded requests."""
+    from nemo_gym import server_utils
+
+    calls: list[dict] = []
+
+    async def request(method: str, url: str, **kwargs) -> FakeResponse:
+        calls.append({"method": method, "url": url, **kwargs})
+        return response
+
+    monkeypatch.setattr(server_utils, "request", request)
+    return calls
+
+
 # --------------------------------------------------------------------------
 # Registration
 # --------------------------------------------------------------------------
@@ -366,6 +403,9 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     connection = e2b.ConnectionConfig()
     products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
+    # The REST create path reads these attributes.
+    configured = e2b.ConnectionConfig(api_key="k", api_url="http://gw:8080", request_timeout=30)
+    assert (configured.api_key, configured.api_url, configured.request_timeout) == ("k", "http://gw:8080", 30)
     envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
     for transport in (client_async.get_transport(connection), envd_client._transport):
         assert isinstance(transport, GymAiohttpTransport)
@@ -379,8 +419,9 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
         metadata={},
         secure=True,
         allow_internet_access=True,
+        network={"allow_out": ["pypi.org"], "deny_out": ["0.0.0.0/0"]},
     )
-    inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", timeout=60, request_timeout=30)
     inspect.signature(e2b.AsyncSandbox.kill).bind(
         object(),
         **dict.fromkeys(_API_PARAM_KEYS),
@@ -805,6 +846,63 @@ class TestCreateAndLifecycle:
         with pytest.raises(E2BCreateError, match="gateway exploded"):
             await provider.create(_spec())
 
+    async def test_network_is_passed_to_sdk_create_only_when_set(self) -> None:
+        default = await E2BProvider(create={"template": "base"}).create(_spec())
+        assert "network" not in default.raw.create_kwargs
+
+        handle = await E2BProvider(create={"template": "base", "network": _NETWORK}).create(_spec())
+        assert handle.raw.create_kwargs["network"] == _NETWORK
+
+    async def test_extension_params_create_through_rest_api_then_connect(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        calls = _fake_rest_api(monkeypatch, FakeResponse(201, {"sandboxID": "sbx-rest"}))
+        provider = E2BProvider(
+            connection={"api_key": "secret-key", "api_url": "http://gw:8080", "request_timeout_s": 30.0},
+            create={"template": "base", "network": _NETWORK, "custom_extension_params": {"sandbank": "all"}},
+        )
+        handle = await provider.create(_spec(ttl_s=120, env={"FOO": "bar"}, metadata={"run": "1"}))
+
+        [call] = calls
+        assert (call["method"], call["url"]) == ("POST", "http://gw:8080/sandboxes")
+        assert call["headers"]["X-API-Key"] == "secret-key"
+        assert call["json"] == {
+            "templateID": "base",
+            "timeout": 120,
+            "secure": True,
+            "allow_internet_access": True,
+            "network": {"denyOut": ["0.0.0.0/0"], "allowOut": ["pypi.org", "deb.debian.org"]},
+            "envVars": {"FOO": "bar"},
+            "metadata": {"run": "1"},
+            "customExtensionParams": {"sandbank": "all"},
+        }
+        # Sent once, like the SDK create: a replayed POST can leak a sandbox.
+        assert call["_max_num_tries"] == 1
+        assert call["_resend_after_disconnect"] is False
+        assert call["timeout"].total == 30.0
+        # Attached with connect (keeping the create timeout), not created twice.
+        assert [sandbox.sandbox_id for sandbox in FakeSandbox.instances] == ["sbx-rest"]
+        assert handle.sandbox_id == "sbx-rest"
+        assert handle.raw.create_kwargs["timeout"] == 120
+        assert handle.raw.create_kwargs["api_key"] == "secret-key"
+
+    async def test_rest_create_failure_is_wrapped_once_without_the_api_key(
+        self, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        caplog.set_level("DEBUG")
+        calls = _fake_rest_api(monkeypatch, FakeResponse(400, "unknown template"))
+        provider = E2BProvider(
+            connection={"api_key": "secret-key"},
+            create={"template": "base", "custom_extension_params": {"sandbank": "all"}},
+            operations={"retries": 3, "retry_delay_s": 0},
+        )
+        with pytest.raises(E2BCreateError, match="HTTP 400: unknown template") as exc_info:
+            await provider.create(_spec())
+
+        assert len(calls) == 1
+        assert FakeSandbox.instances == []
+        assert "secret-key" not in str(exc_info.value) + caplog.text
+
     async def test_status_and_close(self) -> None:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec())
@@ -1053,6 +1151,20 @@ def test_unknown_config_keys_are_rejected() -> None:
 )
 def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
     with pytest.raises((TypeError, ValueError), match=r"create\.template"):
+        E2BProvider(create=create)
+
+
+@pytest.mark.parametrize(
+    ("create", "message"),
+    [
+        ({"network": ["0.0.0.0/0"]}, "create.network must be a mapping"),
+        ({"network": {"allow": ["pypi.org"]}}, "Unknown create.network keys: allow"),
+        ({"network": {"deny_out": "0.0.0.0/0"}}, "create.network.deny_out must be a list of strings"),
+        ({"custom_extension_params": "sandbank"}, "create.custom_extension_params must be a mapping"),
+    ],
+)
+def test_invalid_network_config_is_rejected(create: dict[str, object], message: str) -> None:
+    with pytest.raises((TypeError, ValueError), match=re.escape(message)):
         E2BProvider(create=create)
 
 
