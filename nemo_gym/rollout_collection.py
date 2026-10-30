@@ -28,7 +28,7 @@ import time
 import warnings
 from asyncio import Future, Semaphore
 from collections import Counter, defaultdict, deque
-from collections.abc import Iterable, Mapping
+from collections.abc import Iterable, Mapping, Sequence
 from contextlib import ExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
 from dataclasses import dataclass
@@ -111,6 +111,7 @@ from nemo_gym.rollout_observability import (
     NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
+    ContextCompactionObservation,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
@@ -693,13 +694,17 @@ def _turns_from_model_calls(
     resolved: Any,
     *,
     verifier_invocations: Iterable[VerifierInvocation] = (),
+    compactions: Sequence[ContextCompactionObservation] = (),
 ) -> list[TrajectoryTurn]:
-    """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
+    """Build policy turns from captured calls for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
-    a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
+    or auxiliary calls that do not belong to the agent. Compaction helpers remain invocation-owned
+    calls for token accounting, but never become policy turns, even when agent ownership claims
+    conflict. Preserve those claims for validation rather than choosing which owner is correct.
+    Explicit verifier ownership also excludes a call from turns when an agent incorrectly references it;
+    retain both ownership claims for validation.
     """
     verifier_call_ids = {
         ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
@@ -712,6 +717,20 @@ def _turns_from_model_calls(
                 invocation_by_call_id[ref.model_call_id] = invocation.invocation_id
             if ref.response_id:
                 invocation_by_response_id[ref.response_id] = invocation.invocation_id
+
+    compaction_calls: set[int] = set()
+    for compaction in compactions:
+        for ref in compaction.model_calls:
+            matches = [
+                call
+                for call in model_calls
+                if (ref.model_call_id is None or ref.model_call_id == call.model_call_id)
+                and (ref.model_ref is None or ref.model_ref == call.response_metadata.model_ref)
+                and (ref.response_id is None or ref.response_id == call.response_metadata.response_id)
+            ]
+            # Unresolved or ambiguous references must not silently hide policy calls.
+            if len(matches) == 1:
+                compaction_calls.add(id(matches[0]))
 
     turns: list[TrajectoryTurn] = []
     turn_counts: Counter = Counter()
@@ -726,7 +745,7 @@ def _turns_from_model_calls(
         invocation_id = invocation_by_call_id.get(call.model_call_id or "") or invocation_by_response_id.get(
             metadata.response_id or ""
         )
-        if invocation_id is None:
+        if invocation_id is None or id(call) in compaction_calls:
             continue
         question, answer, reasoning, tool_calls = _turn_content(call.request, call.response)
         turn_counts[invocation_id] += 1
@@ -764,6 +783,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
+    compactions: list[ContextCompactionObservation] = []
 
     producer_turns_observed = False
     raw_trajectory = result.get(NG_TRAJECTORY_KEY)
@@ -799,6 +819,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if raw_observations is not None:
         try:
             observations = AgentObservationBundle.model_validate(raw_observations)
+            compactions = [
+                record for record in observations.records if isinstance(record, ContextCompactionObservation)
+            ]
             gaps.extend(observations.gaps)
             observed_invocations = [record for record in observations.records if isinstance(record, AgentInvocation)]
             producer_invocation_ids = {record.invocation_id for record in invocations}
@@ -940,6 +963,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             model_calls,
             result.get("resolved"),
             verifier_invocations=verifier_invocations,
+            compactions=compactions,
         )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
