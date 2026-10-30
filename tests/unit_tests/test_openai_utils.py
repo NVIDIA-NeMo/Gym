@@ -212,6 +212,26 @@ class TestOpenAIUtils:
         assert captured["timeout"].total == 300
         assert captured["timeout"].connect == 60
 
+    async def test_no_resend_retry_cap_and_time_budget_both_reach_transport(self, monkeypatch) -> None:
+        captured = {}
+
+        async def fake_request(**kwargs):
+            captured.update(kwargs)
+            return SimpleNamespace(status=200)
+
+        monkeypatch.setattr(openai_utils_module, "request", fake_request)
+        client = NeMoGymAsyncOpenAI(
+            api_key="abc",
+            base_url="https://api.openai.com/v1",
+            connection_retry_timeout_s=30.0,
+        )
+
+        await client._request(method="POST", url="https://example.test", _resend_after_disconnect=False)
+
+        assert captured["_resend_after_disconnect"] is False
+        assert captured["_max_connection_retries"] == openai_utils_module.MAX_NUM_TRIES
+        assert captured["_connection_retry_timeout_s"] == 30.0
+
     async def test_request_id_names_the_rollout_inside_a_rollout_context(self, monkeypatch) -> None:
         captured = {}
 

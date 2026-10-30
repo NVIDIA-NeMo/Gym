@@ -498,6 +498,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
 
+    # Optional wall-clock cap for connection-error retries, including rebuilt endpoint clients.
+    # None preserves unlimited waiting so a training run can ride out an engine restart.
+    endpoint_connection_retry_timeout_s: Optional[float] = Field(default=None, gt=0)
+
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
     # schema, and strict OpenAI-compatible backends reject it, so this is off by default and
@@ -794,6 +798,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 ),
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
             )
             for base_url in self.config.base_url
         ]
@@ -2227,6 +2232,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                 api_key=self.config.api_key,
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
+                connection_retry_timeout_s=self.config.endpoint_connection_retry_timeout_s,
                 max_rate_limit_wait_seconds=0,
             )
         ]

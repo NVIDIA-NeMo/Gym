@@ -19,6 +19,7 @@ import os
 import pickle
 import socket
 import sys
+import time
 from concurrent.futures import ProcessPoolExecutor
 from contextlib import nullcontext
 from types import SimpleNamespace
@@ -26,7 +27,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError, TCPConnector
+from aiohttp import (
+    ClientConnectorError,
+    ClientOSError,
+    ClientResponseError,
+    ClientSession,
+    RequestInfo,
+    ServerDisconnectedError,
+    TCPConnector,
+)
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
@@ -2212,6 +2221,46 @@ class TestServerUtils:
         response = await nemo_gym.server_utils.request("POST", "http://flaky-host:1/v1")
         assert response is client.success_response
         assert client.request.await_count == 5
+
+    @staticmethod
+    def _refused_url() -> str:
+        with socket.socket() as sock:
+            sock.bind(("127.0.0.1", 0))
+            port = sock.getsockname()[1]
+        return f"http://127.0.0.1:{port}/v1"
+
+    @mark.parametrize("tracing_enabled", [False, True])
+    async def test_request_to_a_refused_port_raises_within_the_retry_timeout(
+        self, monkeypatch: MonkeyPatch, tracing_enabled: bool
+    ) -> None:
+        monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _group: tracing_enabled)
+        async with ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            started = time.monotonic()
+            with raises(ClientConnectorError):
+                await nemo_gym.server_utils.request("POST", self._refused_url(), _connection_retry_timeout_s=1.0)
+            elapsed = time.monotonic() - started
+        # One 0.5 s back-off past the cap at most.
+        assert 1.0 <= elapsed < 2.5
+
+    async def test_request_to_a_refused_port_retries_forever_without_the_timeout(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        async with ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            with raises(asyncio.TimeoutError):
+                await asyncio.wait_for(nemo_gym.server_utils.request("POST", self._refused_url()), timeout=2.0)
+
+    async def test_request_retry_timeout_bounds_dropped_connections(self, monkeypatch: MonkeyPatch) -> None:
+        client = MagicMock()
+        client.request = AsyncMock(side_effect=ServerDisconnectedError())
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+
+        with raises(ServerDisconnectedError):
+            await nemo_gym.server_utils.request("POST", "http://dead-host:1/v1", _connection_retry_timeout_s=0.2)
+
+        # The first error starts the clock; the retry after one 0.5 s back-off is past the cap.
+        assert client.request.await_count == 2
 
     @mark.parametrize("tracing_enabled", [False, True])
     async def test_request_retry_cap_bounds_internal_callers(
