@@ -1629,6 +1629,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                     ):
                         raise RuntimeError("Message-level token metadata disagrees with vLLM response token IDs.")
                 message_dict.update(message_bundle)
+                choice_dict.pop("logprobs", None)
             else:
                 logprob_token_ids, generation_log_probs = self._extract_choice_logprobs(choice_dict)
                 if response_token_ids is not None:
@@ -1718,6 +1719,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         }
         if "routed_experts" in bundle:
             normalized["routed_experts"] = bundle["routed_experts"]
+        for field in ("score_centering_ids", "score_centering_logprobs"):
+            if field in bundle:
+                normalized[field] = bundle[field]
 
         if len(normalized["generation_token_ids"]) != len(normalized["generation_log_probs"]):
             raise RuntimeError(

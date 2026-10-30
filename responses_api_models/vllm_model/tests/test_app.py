@@ -6542,11 +6542,13 @@ class TestTopLogprobsHandling:
             "prompt_token_ids": [10, 20],
             "generation_token_ids": [123],
             "generation_log_probs": [-0.1],
+            "score_centering_ids": [[123, 456]],
+            "score_centering_logprobs": [[-0.1, -1.2]],
         }
 
         async def mock_create_chat_completion(**kwargs):
             return self._capture_chat_completion_dict(
-                logprobs=None,
+                logprobs={"content": [{"token": "token_id:123", "logprob": -0.1, "bytes": None, "top_logprobs": []}]},
                 message_extra=token_bundle,
                 choice_extra={"token_ids": [123]},
                 response_extra={"prompt_token_ids": [10, 20]},
@@ -6565,9 +6567,11 @@ class TestTopLogprobsHandling:
         )
 
         assert response.status_code == 200
-        message = response.json()["choices"][0]["message"]
+        choice = response.json()["choices"][0]
+        message = choice["message"]
         for field, value in token_bundle.items():
             assert message[field] == value
+        assert choice["logprobs"] is None
         mock_client.create_tokenize.assert_not_awaited()
 
     def test_capture_path_rejects_disagreeing_duplicate_ids(self) -> None:
