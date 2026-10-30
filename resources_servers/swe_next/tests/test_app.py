@@ -28,6 +28,7 @@ failed once real traffic hit them, so the same tests are written here from the s
 """
 
 import json
+import shutil
 import subprocess
 from types import SimpleNamespace
 
@@ -425,3 +426,14 @@ class TestMultiWorkerEntrypoint:
                 assert "is_nemo_gym_fastapi_entrypoint(__file__)" in self._source(), (
                     f"{name} sets num_workers={workers} but the entrypoint has no module-level app"
                 )
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash is not installed")
+def test_the_eval_script_reports_its_stderr_on_stdout_in_order() -> None:
+    """E2B returns a command's stdout and stderr apart: the graded region between the markers must hold both."""
+    header = build_eval_script(_inputs()).split("\ncd ", 1)[0]
+    result = subprocess.run(
+        ["bash", "-c", header + "\necho first\necho second >&2\necho third\n"], capture_output=True, text=True
+    )
+    assert result.stdout.splitlines() == ["first", "second", "third"]
+    assert result.stderr == ""
