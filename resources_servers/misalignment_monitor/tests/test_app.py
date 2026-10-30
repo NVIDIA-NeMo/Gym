@@ -485,6 +485,8 @@ async def test_per_turn_replaces_a_waiting_review_with_the_next_window(tmp_path:
         _call("7-2", tmp_path, summary, DONE)
         await server._read_captures()
         await asyncio.sleep(0)
+        # One queued review per window the agent kept, not one per call.
+        assert len(server._backlog) == 2
     await _settle(server)
     # The first turn's window is inside the second's, so it is not reviewed. The summary replaced the second
     # window, so that review stays, and the third turn's is reviewed too.

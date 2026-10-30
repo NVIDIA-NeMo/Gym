@@ -306,7 +306,7 @@ class _Case:
     windows: list[str]
     record: dict[str, Any]
     reading: Optional[dict[str, Any]] = None
-    superseded: bool = False
+    started: bool = False
 
 
 class MisalignmentMonitorServer(SimpleResourcesServer):
@@ -468,7 +468,7 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
         state = self._rollouts.setdefault(rollout_id, _Rollout())
         per_turn = self.config.review_schedule == "per_turn"
         record = {"rollout_id": rollout_id}
-        # Each case is built now, so a later call that replaces the latest window cannot change what it reviews.
+        # Each case is built now, so a later call cannot change what it reviews, except a queued per-turn review.
         cases = []
         if len(context) < state.item_count:
             # The context was summarized or dropped. Keep the replaced window and, per turn, review it before it is gone.
@@ -494,11 +494,15 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
             state.reviewed_latest = cases[-1] is this_call
             state.last_review = time.time()
         if per_turn and state.reviewed_latest:
-            # A queued review of an earlier window is dropped for this one, which contains it. This keeps the judge
-            # up with agents whose every call ends a turn.
-            if state.waiting is not None:
-                state.waiting.superseded = True
-            state.waiting = this_call
+            if state.waiting is not None and not state.waiting.started:
+                # The queued review takes this window, which holds the earlier one. Agents whose every call ends a
+                # turn would otherwise queue a review per call.
+                state.waiting.window, state.waiting.windows = this_call.window, this_call.windows
+                state.waiting.reason = this_call.reason
+                cases.pop()
+                self._counts["superseded"] += 1
+            else:
+                state.waiting = this_call
         path = _activation_path(dialect, response) if self.config.activation_source == "engine" else None
         if cases or path:
             task = asyncio.create_task(self._review_call(state, cases, path, this_call))
@@ -767,11 +771,9 @@ class MisalignmentMonitorServer(SimpleResourcesServer):
     ########################################
 
     async def _review_and_record(self, case: _Case) -> None:
-        # Reviews beyond the judge's concurrency wait here, where a newer window can replace them.
+        # Reviews beyond the judge's concurrency wait here, where a queued per-turn review can move to a newer window.
         async with self._review_slots:
-            if case.superseded:
-                self._counts["superseded"] += 1
-                return
+            case.started = True
             try:
                 report = await self.review(case)
             except Exception as e:
