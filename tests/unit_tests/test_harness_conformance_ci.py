@@ -29,7 +29,6 @@ def test_adapter_changes_select_only_that_harness(harness):
         "nemo_gym/cli/_compat.py",
         "nemo_gym/cli/utils.py",
         "nemo_gym/prompts/system.md",
-        "responses_api_agents/shared/prompts.md",
         "environment_servers/legacy_agent/app.py",
         "environment_servers/single_agent_turn/app.py",
         "environment_servers/single_agent_turn_legacy/app.py",
@@ -47,6 +46,7 @@ def test_adapter_changes_select_only_that_harness(harness):
         "uv.lock",
         ".python-version",
         ".github/workflows/harness-conformance.yml",
+        ".github/workflows/cicd-main.yml",
         "new_shared_module.py",
     ],
 )
@@ -72,6 +72,12 @@ def test_shared_or_unknown_dependencies_run_all(path):
         ["responses_api_models/vllm_model/app.py"],
         ["environment_servers/unrelated/app.py"],
         ["benchmarks/example/config.yaml"],
+        ["nemo_gym/orchestration/api.py"],
+        ["environments/arc_agi/app.py"],
+        ["docker/Dockerfile"],
+        [".agents/skills/example/SKILL.md"],
+        [".github/workflows/unit-tests.yml"],
+        ["responses_api_agents/shared/prompts.md"],
     ],
 )
 def test_unrelated_components_do_not_expand_adapter_selection(paths):
