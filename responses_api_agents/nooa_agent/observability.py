@@ -55,6 +55,30 @@ if TYPE_CHECKING:
     from nooa.agent import Agent
 
 
+ATOM_SESSION_ID_ATTR = "nooa.atom.session.id"
+ATOM_SESSION_PARENT_ATTR = "nooa.atom.session.parent_id"
+TRACE_SESSION_ID_ATTR = "session.id"
+
+
+def _current_atom_session() -> tuple[str | None, str | None]:
+    """(Atom session id, parent session id) of the current trace context; the root has no parent.
+
+    Atom stamps child sessions' spans with `nooa.atom.session.*` through NOOA's trace context; the root session
+    carries only the trace session id, which Atom sets to the root session's id. Without NOOA tracing, (None, None).
+    """
+    try:
+        from nooa.tracing._session import get_span_attributes
+        from opentelemetry import context as otel_context
+    except ImportError:
+        return None, None
+    attributes = get_span_attributes()
+    session_id = attributes.get(ATOM_SESSION_ID_ATTR)
+    if session_id is None:
+        session_id = otel_context.get_value(TRACE_SESSION_ID_ATTR)
+    parent_id = attributes.get(ATOM_SESSION_PARENT_ATTR)
+    return (str(session_id) if session_id is not None else None, str(parent_id) if parent_id is not None else None)
+
+
 def _json_output(value: Any) -> str:
     return value if isinstance(value, str) else to_json(value, serialize_unknown=True).decode()
 
@@ -93,6 +117,7 @@ class GymTraceHooks:
         self._python_outputs: dict[tuple[str, str], str] = {}
         self._captured_python_outputs: dict[tuple[str, str], str] = {}
         self._python_output_gaps: set[tuple[str, str]] = set()
+        self._session_openers: dict[str, str] = {}
         self._on_progress = on_progress
 
     def _invocation(self, identity: str) -> AgentInvocation:
@@ -116,8 +141,19 @@ class GymTraceHooks:
         )
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
+        # A delegated Atom session runs its own method calls with no traced caller, so NOOA reports no parent
+        # call. Atom's session tree (the trace context attributes) still names the parent session; link the
+        # invocation to the invocation that opened that session so root and child cells stay separable.
+        session_id, parent_session_id = _current_atom_session()
+        if parent_call_id is None and parent_session_id is not None:
+            parent_call_id = self._session_openers.get(parent_session_id)
+        if session_id is not None:
+            self._session_openers.setdefault(session_id, call_id)
         self._invocations[call_id] = AgentInvocation(
-            invocation_id=call_id, parent_invocation_id=parent_call_id, status="incomplete"
+            invocation_id=call_id,
+            parent_invocation_id=parent_call_id,
+            harness_session_id=session_id,
+            status="incomplete",
         )
         return _AgentCall(call_id, perf_counter(), self._current.set(call_id))
 

@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
 
@@ -38,6 +39,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
+from responses_api_agents.nooa_agent.provenance import provenance_metadata
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
     InProcessNOOARunner,
@@ -68,6 +70,11 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+
+    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
+        """Stamp the NOOA pin and adapter commit on every response, then attach outcome evidence as the base does."""
+        response = super().report_outcome(response, native_result)
+        return response.model_copy(update={"metadata": {**(response.metadata or {}), **provenance_metadata()}})
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
         """Report a trusted model rejection; the environment owns grading and retry policy."""

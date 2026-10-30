@@ -26,6 +26,7 @@ from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import sandbox_entrypoint as entrypoint
 from responses_api_agents.nooa_agent.app import NOOAAgent
+from responses_api_agents.nooa_agent.provenance import provenance_metadata
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 from responses_api_agents.nooa_agent.tests.test_app import agent, close, open_session, result
 from responses_api_agents.nooa_agent.tests.test_config import agent_config, invocation_config
@@ -216,6 +217,8 @@ async def test_reported_rejection_preserves_other_response_metadata(monkeypatch:
     assert response.metadata == {
         "existing": "retained",
         AGENT_OUTCOME_METADATA_KEY: '{"failure_kind":"model_request_error","status_code":422}',
+        **provenance_metadata(),
     }
+    assert "nooa_commit" in response.metadata
     assert rejected.episode.response.metadata == {"existing": "retained"}
     await close(instance)

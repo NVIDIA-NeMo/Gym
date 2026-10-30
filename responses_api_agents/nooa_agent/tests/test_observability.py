@@ -933,3 +933,33 @@ def test_final_root_outcome_preserves_child_and_checkpoint_outcomes(invalid_outp
     # Projection never revisits the shared, now mutated exception or its frames.
     _, unchanged = trace.project(**projection)
     assert [invocation.status for invocation in unchanged.invocations] == ["incomplete", "incomplete", "completed"]
+
+
+def test_delegated_sessions_link_to_the_invocation_that_opened_the_parent_session(monkeypatch) -> None:
+    from responses_api_agents.nooa_agent import observability
+
+    sessions = iter([("root-session", None), ("child-session", "root-session"), ("grandchild", "child-session")])
+    monkeypatch.setattr(observability, "_current_atom_session", lambda: next(sessions))
+    trace = GymTraceHooks()
+    root = trace.before_agent_call(call_id="call-root", parent_call_id=None)
+    # NOOA reports no traced caller for a delegated session's own method calls.
+    child = trace.before_agent_call(call_id="call-child", parent_call_id=None)
+    grandchild = trace.before_agent_call(call_id="call-grandchild", parent_call_id=None)
+    for context in (grandchild, child, root):
+        trace.after_agent_call(context=context, exception=None)
+
+    invocations = trace._invocations
+    assert invocations["call-root"].parent_invocation_id is None
+    assert invocations["call-root"].harness_session_id == "root-session"
+    assert invocations["call-child"].parent_invocation_id == "call-root"
+    assert invocations["call-child"].harness_session_id == "child-session"
+    assert invocations["call-grandchild"].parent_invocation_id == "call-child"
+
+
+def test_without_atom_session_context_the_reported_parent_call_is_kept() -> None:
+    trace = GymTraceHooks()
+    root = trace.before_agent_call(call_id="root", parent_call_id=None)
+    child = trace.before_agent_call(call_id="child", parent_call_id="root")
+    trace.after_agent_call(context=child, exception=None)
+    trace.after_agent_call(context=root, exception=None)
+    assert trace._invocations["child"].parent_invocation_id == "root"
