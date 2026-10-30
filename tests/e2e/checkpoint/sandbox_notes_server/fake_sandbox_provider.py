@@ -19,7 +19,13 @@ from pathlib import Path
 from typing import Any, Optional
 
 from nemo_gym.client.http_client import request
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import (
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxSnapshotNotFoundError,
+    SandboxSpec,
+    SandboxStatus,
+)
 from nemo_gym.sandbox.providers.registry import register_provider
 
 
@@ -48,11 +54,14 @@ class PlainRemoteFakeSandboxProvider:
             return payload
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
+        return await self._create(spec, snapshot_id=None)
+
+    async def _create(self, spec: SandboxSpec, *, snapshot_id: str | None) -> SandboxHandle:
         ttl_s = self.lease_ttl_s if self.lease_ttl_s is not None else spec.ttl_s
         payload = await self._call(
             "POST",
             "/sandboxes",
-            {"image": spec.image, "snapshot_id": spec.provider_options.get("snapshot_id"), "timeout": ttl_s},
+            {"image": None if snapshot_id else spec.image, "snapshot_id": snapshot_id, "timeout": ttl_s},
         )
         sandbox_id = payload["id"]
         if self.renew_interval_s is not None and ttl_s is not None:
@@ -142,6 +151,14 @@ class RemoteFakeSandboxProvider(PlainRemoteFakeSandboxProvider):
 
     async def delete_snapshot(self, snapshot_id: str) -> None:
         await self._call("DELETE", f"/v1/snapshots/{snapshot_id}", tolerate=(404,))
+
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
+        try:
+            return await self._create(spec, snapshot_id=snapshot_id)
+        except RuntimeError as error:
+            if "HTTP 404" in str(error):
+                raise SandboxSnapshotNotFoundError(str(error)) from error
+            raise
 
     async def list_snapshots(self, prefix: str) -> list[dict[str, Any]]:
         listed = await self._call("GET", "/v1/snapshots")

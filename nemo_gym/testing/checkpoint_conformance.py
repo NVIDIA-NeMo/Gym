@@ -5,7 +5,7 @@
 :func:`check_sandbox_owner` drives a ``SandboxOwnerResourcesServer`` subclass through its real routes,
 checkpoint control routes and middleware, in process, against :class:`FakeSnapshotProvider`, a provider with
 durable snapshots that behaves like OpenSandbox's: a snapshot is an independent copy that lives until deleted,
-and ``create`` with ``provider_options["snapshot_id"]`` forks it under a new id. A server's own tests call it with
+and ``create_from_snapshot`` forks it under a new id. A server's own tests call it with
 a factory that builds the server on the provider it is given, and one seed request the server accepts.
 """
 
@@ -15,7 +15,13 @@ from collections.abc import Awaitable, Callable, Mapping
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import (
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxSnapshotNotFoundError,
+    SandboxSpec,
+    SandboxStatus,
+)
 from nemo_gym.server_runtime.base_resources_server import ResourcesSeedSessionRequest
 
 
@@ -56,17 +62,15 @@ class FakeSandboxProvider:
         return sum(1 for box in self.boxes.values() if box["from_snapshot"] is None)
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        snapshot_id = spec.provider_options.get("snapshot_id")
-        if (spec.image is None) == (snapshot_id is None):
-            raise ValueError("exactly one of image or snapshot_id must be specified")
-        commands = list(self._snapshot_commands(snapshot_id)) if snapshot_id is not None else []
+        if spec.image is None:
+            raise ValueError("create needs an image; a fork goes through create_from_snapshot")
+        return self._add_box([], from_snapshot=None)
+
+    def _add_box(self, commands: list[str], *, from_snapshot: Optional[str]) -> SandboxHandle:
         sandbox_id = self._next_id("sb")
         self.calls.append(("create", sandbox_id))
-        self.boxes[sandbox_id] = {"state": "running", "commands": commands, "from_snapshot": snapshot_id}
+        self.boxes[sandbox_id] = {"state": "running", "commands": commands, "from_snapshot": from_snapshot}
         return SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=None)
-
-    def _snapshot_commands(self, snapshot_id: str) -> list[str]:
-        raise RuntimeError(f"provider {self.name!r} has no snapshot {snapshot_id!r}")
 
     async def exec(self, handle: SandboxHandle, command: str, **kwargs: Any) -> SandboxExecResult:
         self._box(handle.sandbox_id)["commands"].append(command)
@@ -116,11 +120,11 @@ class FakeSnapshotProvider(FakeSandboxProvider):
         self.snapshots: dict[str, dict[str, Any]] = {}
         self.fail_snapshots = 0
 
-    def _snapshot_commands(self, snapshot_id: str) -> list[str]:
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
         snapshot = self.snapshots.get(snapshot_id)
         if snapshot is None:
-            return super()._snapshot_commands(snapshot_id)
-        return snapshot["commands"]
+            raise SandboxSnapshotNotFoundError(f"provider {self.name!r} has no snapshot {snapshot_id!r}")
+        return self._add_box(list(snapshot["commands"]), from_snapshot=snapshot_id)
 
     async def snapshot(self, handle: SandboxHandle, *, name: Optional[str] = None) -> str:
         self.calls.append(("snapshot", handle.sandbox_id))
