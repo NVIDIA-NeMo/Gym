@@ -72,6 +72,14 @@ MANIFEST_NAME = "gym-job.json"
 RESOLVED_CONFIG_NAME = "resolved-config.yaml"
 
 
+# State files a job writes into its job directory. An executor returns the ones it can read in
+# `ObservedStatus.files`, and the status operation reads them. `.gym_chain_incomplete` holds a
+# reason and is written when a chain of resumed jobs stops before the run finished; `eval.exit`
+# holds the exit code of `gym eval run`.
+CHAIN_INCOMPLETE_FILE = ".gym_chain_incomplete"
+EVAL_EXIT_FILE = "eval.exit"
+
+
 # The nemo_gym package directory of the code that is running, however it got
 # onto sys.path: an install, an editable checkout, or a plain source tree.
 _PACKAGE_DIR = Path(__file__).resolve().parents[1]
@@ -321,9 +329,10 @@ class ObservedStatus(BaseModel):
 
     `state` is set by the executor from its own vocabulary, and `detail` keeps the native
     string (a Slurm `TIMEOUT`, say). `job_id` is the id actually observed, which can differ
-    from the record's when a job was resumed or started outside Gym. `files` holds the state
-    files the job wrote into its directory, by name, read in the same call as the scheduler's
-    answer; a file that is missing or unreadable is absent.
+    from the record's when a job was resumed or started outside Gym, and `job_ids` is every job
+    id seen for the benchmark, oldest first (the whole chain when a run was resumed). `files` holds
+    the state files the job wrote into its directory, by name, read in the same call as the
+    scheduler's answer; a file that is missing or unreadable is absent.
     """
 
     state: JobState
@@ -331,6 +340,7 @@ class ObservedStatus(BaseModel):
     exit_code: int | None = None
     reason: str | None = None
     job_id: str | None = None
+    job_ids: list[str] = []
     files: dict[str, str] = {}
 
 
@@ -435,6 +445,23 @@ def local_index_dir() -> Path:
     """Where this machine remembers its own submissions."""
     base = os.environ.get("XDG_CACHE_HOME") or (Path.home() / ".cache")
     return Path(base) / "nemo-gym" / "jobs"
+
+
+def list_submissions(*, limit: int | None = None) -> list[SubmissionRecord]:
+    """The submissions in this machine's job index, newest first, at most `limit` of them.
+
+    Reads the index only, so it needs no executor and no network. A file that cannot be read as a
+    record is skipped with a warning: one bad file must not hide the rest.
+    """
+    index = local_index_dir()
+    records: list[SubmissionRecord] = []
+    for path in sorted(index.glob("*.json")) if index.is_dir() else []:
+        try:
+            records.append(SubmissionRecord.load(json.loads(path.read_text(encoding="utf-8"))))
+        except (OSError, ValueError) as error:
+            logger.warning("Skipping %s in the job index: %s", path, error)
+    records.sort(key=lambda record: record.submitted_at, reverse=True)
+    return records if limit is None else records[:limit]
 
 
 def load_submission_record(gym_job_id: str) -> SubmissionRecord:

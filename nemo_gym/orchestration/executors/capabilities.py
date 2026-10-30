@@ -73,8 +73,9 @@ class Inspectable(ABC):
         scheduler once for all of them. The record locates a job and the scheduler decides: look the job
         up by where it runs, not by the recorded id, so a job started by hand or resubmitted from another
         machine is still seen. When several jobs belong to one benchmark, aggregate them into one status
-        whose `job_id` is the one observed. `state` is the executor's own mapping onto `JobState`; an
-        unreachable scheduler yields `UNKNOWN` with the reason in `detail`, not an exception.
+        whose `job_id` is the one observed. `state` is the executor's own mapping onto `JobState`. A scheduler
+        that answers with an error yields `UNKNOWN` with the reason in `detail`; a connection that cannot be
+        opened may raise, and the caller then reports `UNKNOWN` for every job of the group.
         """
 
     def read_run_files(self, record: SubmissionRecord, paths: list[Path]) -> dict[Path, str | None]:
