@@ -2608,13 +2608,16 @@ def test_a_task_that_needs_document_tools_keeps_that_in_its_row(sandboxes, tmp_p
 
 
 def test_each_harness_config_binds_its_harness_to_the_shared_episodes() -> None:
-    """Pi on MCP tools, Codex and mini-SWE on commands: each config composes the same episodes
-    (configs/officeenv_sandbox_episodes.yaml) with its harness, and no other harness."""
+    """Pi on MCP tools, Codex, mini-SWE, OpenCode, OpenClaw and Terminus 2 on commands: each config composes the same
+    episodes (configs/officeenv_sandbox_episodes.yaml) with its harness, and no other harness."""
     configs = SANDBOX_CONFIG.parent
     for name, agent, transports in [
         ("officeenv_sandbox.yaml", "pi_agent", ["mcp"]),
         ("officeenv_sandbox_codex.yaml", "codex_agent", []),
         ("officeenv_sandbox_miniswe.yaml", "miniswe_sandboxed_agent", []),
+        ("officeenv_sandbox_opencode.yaml", "opencode_agent", []),
+        ("officeenv_sandbox_openclaw.yaml", "openclaw_agent", []),
+        ("officeenv_sandbox_terminus_2.yaml", "terminus_2_sandboxed_agent", []),
     ]:
         config = yaml.safe_load((configs / name).read_text())
         assert config["config_paths"] == [

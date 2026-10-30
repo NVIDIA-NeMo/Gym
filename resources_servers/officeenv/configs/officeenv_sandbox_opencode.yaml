@@ -1,0 +1,23 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for OpenCode, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). OpenCode borrows each episode's sandbox and refuses an
+# episode's required MCP tools there, so the episode grants none. Compose and run as configs/officeenv_sandbox.yaml
+# shows, with this config and `--agent opencode_agent`. OpenCode installs its release in each sandbox at session start
+# (from GitHub), so its sandboxes need the internet, or the `opencode` image of sandbox/Dockerfile.harness.
+config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/opencode_agent/configs/opencode_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      timeout: 1800
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: oe
+      agent_server:
+        name: opencode_agent
+      resources_tool_transports: []

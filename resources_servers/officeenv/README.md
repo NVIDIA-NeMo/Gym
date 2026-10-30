@@ -147,9 +147,11 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
 `configs/officeenv_sandbox_episodes.yaml` is the resources server for sandboxed episodes, and each
 harness config composes it with a harness in agent-session mode behind the
 `single_agent_turn_legacy` Environment Server: `configs/officeenv_sandbox.yaml` runs Pi, with the
-tools over MCP as above; `configs/officeenv_sandbox_codex.yaml` (Codex CLI) and
-`configs/officeenv_sandbox_miniswe.yaml` (mini-SWE) run rows whose apps are commands (below), with
-no MCP tools. Each episode also:
+tools over MCP as above; `configs/officeenv_sandbox_codex.yaml` (Codex CLI),
+`configs/officeenv_sandbox_miniswe.yaml` (mini-SWE), `configs/officeenv_sandbox_opencode.yaml`
+(OpenCode), `configs/officeenv_sandbox_openclaw.yaml` (OpenClaw) and
+`configs/officeenv_sandbox_terminus_2.yaml` (Terminus 2) run rows whose apps are commands (below),
+with no MCP tools. Each episode also:
 
 1. borrows a sandbox: the seed starts one from `sandbox_config.image` (built from
    `sandbox/Dockerfile`), or from another configured image when the row needs tools that one
@@ -347,8 +349,9 @@ gym eval run --no-serve <the same --config and arguments> --agent codex_agent \
   --input resources_servers/officeenv/data/sandbox_pilot_cli_prepare.jsonl --output results/codex_cli.jsonl
 ```
 
-mini-SWE runs the same way with `configs/officeenv_sandbox_miniswe.yaml` and
-`--agent miniswe_sandboxed_agent`. Pi runs these rows with `configs/officeenv_sandbox.yaml` and
+mini-SWE, OpenCode, OpenClaw and Terminus 2 run the same way with their configs and
+`--agent miniswe_sandboxed_agent`, `opencode_agent`, `openclaw_agent` or
+`terminus_2_sandboxed_agent`. Pi runs these rows with `configs/officeenv_sandbox.yaml` and
 `++single_agent_turn_legacy.environment_servers.single_agent_turn_legacy.resources_tool_transports=[]`,
 and `api_search` rows with its MCP transport as it is; on both, no MCP tool ends the task, so Pi
 takes `++pi_agent.responses_api_agents.pi_agent.finish_tool_names=[]` and ends when the model stops.

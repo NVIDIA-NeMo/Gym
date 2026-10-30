@@ -1,0 +1,26 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for Terminus 2, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). Terminus 2 runs its agent on Gym's host and types into a
+# tmux session in each episode's sandbox, taking no MCP tools, so the episode grants none. Compose and run as
+# configs/officeenv_sandbox.yaml shows, with this config and `--agent terminus_2_sandboxed_agent`. It installs tmux in
+# a sandbox that lacks it (with apt-get, from the internet), or the `terminus-2` image of sandbox/Dockerfile.harness
+# has it.
+config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/terminus_2_sandboxed_agent/configs/terminus_2_sandboxed_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+terminus_2_sandboxed_agent:
+  responses_api_agents:
+    terminus_2_sandboxed_agent:
+      resources_server:
+        type: resources_servers
+        name: oe
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: oe
+      agent_server:
+        name: terminus_2_sandboxed_agent
+      resources_tool_transports: []
