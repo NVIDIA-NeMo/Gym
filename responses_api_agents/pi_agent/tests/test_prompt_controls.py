@@ -6,7 +6,7 @@ from unittest.mock import patch
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from responses_api_agents.pi_agent.tests.test_app import _make_agent
 from responses_api_agents.pi_agent.tests.test_sandbox import (
     _finish_tool_server,

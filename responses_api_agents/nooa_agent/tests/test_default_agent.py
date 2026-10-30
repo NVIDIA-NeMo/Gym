@@ -9,7 +9,7 @@ import pytest
 import yaml
 from nooa_bench.bench_agent import TaskResult
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result
@@ -96,11 +96,8 @@ async def test_default_benchagent_runs_and_serializes_module_locals(
     assert json.loads(observations.model_dump_json())["records"]
 
 
-def test_server_rejects_sandboxed_execution_until_sessions_are_wired() -> None:
-    from pydantic import ValidationError
-
+def test_server_accepts_sandboxed_sessions() -> None:
     config = default_config()
     values = config.model_dump()
     values["nooa"]["execution_mode"] = "sandboxed"
-    with pytest.raises(ValidationError, match="execution_mode='sandboxed'.*unavailable"):
-        NOOAAgentConfig.model_validate(values)
+    assert NOOAAgentConfig.model_validate(values).nooa.execution_mode == "sandboxed"

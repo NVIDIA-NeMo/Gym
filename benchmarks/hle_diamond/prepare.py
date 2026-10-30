@@ -154,7 +154,7 @@ def prepare(text_only: bool = False, limit: Optional[int] = None) -> Path:
     """
     validate_limit(limit)
 
-    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
+    from nemo_gym.config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
 
     global_config_dict = maybe_get_global_config_dict()
     hf_token = global_config_dict.get(HF_TOKEN_KEY_NAME) if global_config_dict is not None else None

@@ -18,7 +18,7 @@ import logging
 import os
 import re
 from collections import ChainMap
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import Any
 
@@ -216,6 +216,11 @@ def parse_env_file(text: str) -> dict[str, str]:
     return {key: value.replace("$", "$$") for key, value, _ in env_file_entries(text)}
 
 
+# Resolves one ``env_file`` entry: ``(path as written, service name) -> the file``. The task's rule is
+# :func:`under_task_folder`; the job-level overlay has its own (``compose_overlay.overlay_env_file_resolver``).
+EnvFileResolver = Callable[[str, str], Path]
+
+
 def _env_file_path(base_dir: Path, path: str, service: str) -> Path:
     """``path`` resolved under ``base_dir`` (Harbor's ``${CONTEXT_DIR}/x.env`` is absolute and lands there too).
     A path that resolves outside, or a symlink, is refused: task folders are third-party content and the
@@ -236,8 +241,101 @@ def _env_file_path(base_dir: Path, path: str, service: str) -> Path:
     return file
 
 
-def inline_env_files(document: dict, base_dir: Path, variables: dict[str, str] | None = None) -> dict:
-    """Read each service's ``env_file`` entries (relative to ``base_dir``) into its ``environment`` mapping.
+def under_task_folder(base_dir: Path) -> EnvFileResolver:
+    """The task file's resolver: entries relative to ``base_dir`` (the task's ``environment`` folder) and kept under
+    it, see :func:`_env_file_path`."""
+
+    def resolve(path: str, service: str) -> Path:
+        return _env_file_path(base_dir, path, service)
+
+    return resolve
+
+
+def _resolved_already(path: str, service: str) -> Path:
+    """The resolver of entries :func:`resolve_env_files` wrote: absolute paths already checked by their own rule."""
+    return Path(path)
+
+
+def _env_file_entries(service: str, entries: Any) -> list[tuple[str, bool]]:
+    """A service's ``env_file`` entries (a path, a list of paths or long-syntax mappings) as ``(path, required)``
+    pairs, in order. An entry with no path raises :class:`ComposeSubstitutionError`; so does one with a ``format``,
+    as only the default dotenv format is read."""
+    if isinstance(entries, (str, dict)):
+        entries = [entries]
+    if not isinstance(entries, list):
+        raise ComposeSubstitutionError("env_file", f"service {service!r} env_file must be a path or a list of paths")
+    pairs: list[tuple[str, bool]] = []
+    for entry in entries:
+        required = True
+        path = entry
+        if isinstance(entry, dict):
+            path = entry.get("path")
+            required = bool(entry.get("required", True))
+        if not isinstance(path, str) or not path:
+            raise ComposeSubstitutionError("env_file", f"service {service!r} has an env_file entry with no path")
+        if isinstance(entry, dict) and entry.get("format") is not None:
+            raise ComposeSubstitutionError(
+                path,
+                f"service {service!r} env_file {path!r}: format {entry['format']!r} is not supported "
+                "(only the default dotenv format is)",
+            )
+        pairs.append((str(path), required))
+    return pairs
+
+
+def resolve_env_file_entries(service: str, entries: Any, resolve: EnvFileResolver) -> list[str | dict[str, Any]]:
+    """A service's ``env_file`` entries with each path resolved by ``resolve`` to the absolute path of the file, the
+    file not checked to exist: a required entry becomes its absolute path, an optional one (``required: false``)
+    ``{"path": ..., "required": False}``, so the reading (:func:`env_file_paths`) can skip it when it is absent.
+    Compose resolves each ``-f`` file's paths before the merge and reads the env files of the merged document after
+    it, so a file an earlier document names and a later file drops (``env_file: !reset []``) is never required to
+    exist; what ``resolve`` refuses (a task's entry outside its folder) is refused here, at the file's own rule."""
+    resolved: list[str | dict[str, Any]] = []
+    for path, required in _env_file_entries(service, entries):
+        file = str(resolve(path, service))
+        resolved.append(file if required else {"path": file, "required": False})
+    return resolved
+
+
+def env_file_paths(service: str, entries: Any, resolve: EnvFileResolver) -> list[str]:
+    """A service's ``env_file`` entries (a path, a list of paths or long-syntax mappings) as the absolute paths of the
+    files to read, in order, each resolved by ``resolve`` and existing. A missing required file raises
+    :class:`ComposeSubstitutionError` naming the entry as written and, when it differs, where it resolved to; an
+    entry with ``required: false`` is dropped when absent, as Compose skips it; an entry with a ``format`` is refused,
+    as only the default dotenv format is read."""
+    files: list[str] = []
+    for path, required in _env_file_entries(service, entries):
+        file = resolve(path, service)
+        if not file.is_file():
+            if required:
+                where = f" (at {file})" if str(file) != path else ""
+                raise ComposeSubstitutionError(path, f"service {service!r} env_file {path!r} not found{where}")
+            continue
+        files.append(str(file))
+    return files
+
+
+def resolve_env_files(document: dict, resolve: EnvFileResolver) -> dict:
+    """Each service's ``env_file`` entries replaced by what :func:`resolve_env_file_entries` resolves them to (absolute
+    paths, an optional entry keeping its ``required: false``), the list's type kept, the files not read or checked to
+    exist yet. Compose resolves a file's relative paths against that file before it merges the ``-f`` files and reads
+    the env files once after the merge, so a missing file is reported then, if the merged document still names it;
+    :func:`inline_env_files` with ``base_dir=None`` is that reading. Mutates and returns ``document``."""
+    services = document.get("services") if isinstance(document, dict) else None
+    if not isinstance(services, dict):
+        return document
+    for name, service in services.items():
+        if isinstance(service, dict) and "env_file" in service:
+            entries = service["env_file"]
+            resolved = resolve_env_file_entries(name, entries, resolve)
+            service["env_file"] = type(entries)(resolved) if isinstance(entries, list) else resolved
+    return document
+
+
+def inline_env_files(document: dict, base_dir: Path | None, variables: dict[str, str] | None = None) -> dict:
+    """Read each service's ``env_file`` entries into its ``environment`` mapping: relative to ``base_dir`` under the
+    task's rule (:func:`under_task_folder`), or, with ``base_dir=None``, the absolute paths
+    :func:`resolve_env_files` wrote, each file's own rule applied already.
 
     Every service's ``environment`` becomes a mapping of strings. A service's own entries win over its
     files, as in Compose. A bare ``NAME`` entry in a list-form ``environment`` (or ``NAME:`` with no value in
@@ -248,6 +346,7 @@ def inline_env_files(document: dict, base_dir: Path, variables: dict[str, str] |
     does not parse raises with the service, the file and the line number, never the line.
     """
     variables = variables or {}
+    resolve = _resolved_already if base_dir is None else under_task_folder(base_dir)
     services = document.get("services") if isinstance(document, dict) else None
     if not isinstance(services, dict):
         return document
@@ -256,36 +355,9 @@ def inline_env_files(document: dict, base_dir: Path, variables: dict[str, str] |
             continue
         merged: dict[str, str | None] = {}
         if "env_file" in service:
-            entries = service.pop("env_file")
-            if isinstance(entries, (str, dict)):
-                entries = [entries]
-            if not isinstance(entries, list):
-                raise ComposeSubstitutionError(
-                    "env_file", f"service {name!r} env_file must be a path or a list of paths"
-                )
-            for entry in entries:
-                required = True
-                path = entry
-                if isinstance(entry, dict):
-                    path = entry.get("path")
-                    required = bool(entry.get("required", True))
-                if not isinstance(path, str) or not path:
-                    raise ComposeSubstitutionError("env_file", f"service {name!r} has an env_file entry with no path")
-                if isinstance(entry, dict) and entry.get("format") is not None:
-                    raise ComposeSubstitutionError(
-                        path,
-                        f"service {name!r} env_file {path!r}: format {entry['format']!r} is not supported "
-                        "(only the default dotenv format is)",
-                    )
-                file = _env_file_path(base_dir, path, name)
-                if not file.is_file():
-                    if required:
-                        raise ComposeSubstitutionError(
-                            path, f"service {name!r} env_file {path!r} not found under the task's environment folder"
-                        )
-                    continue
+            for path in env_file_paths(name, service.pop("env_file"), resolve):
                 try:
-                    merged.update(parse_env_file(file.read_text()))
+                    merged.update(parse_env_file(Path(path).read_text()))
                 except ComposeSubstitutionError as exc:
                     raise ComposeSubstitutionError(path, f"service {name!r} env_file {path!r}: {exc}") from exc
         if merged or "environment" in service:
@@ -399,20 +471,7 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
     """
     environment = task.config.environment
     context = task.path / "environment"
-    infra: dict[str, str] = {"MAIN_IMAGE_NAME": task.image or "", "CONTEXT_DIR": str(context), "TEST_DIR": TEST_DIR}
-    if context.is_dir():
-        # Not the runtime project name (Harbor: the trial session id; Gym: the adapter's compose-<uuid>). A stable
-        # per-task value, so files like o11y-bench's `o11y-stack-${COMPOSE_PROJECT_NAME}` alias and URL agree.
-        infra["COMPOSE_PROJECT_NAME"] = f"hb__{task.context_id or context_digest(context)}"
-    if environment.docker_image:
-        infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
-    if environment.cpus:
-        infra["CPUS"] = str(environment.cpus)
-    if environment.memory_mb:
-        infra["MEMORY"] = f"{environment.memory_mb}M"
-    for suffix, path in LOG_MOUNT_PATHS.items():
-        infra[f"HOST_{suffix}_PATH"] = path
-        infra[f"ENV_{suffix}_PATH"] = path
+    infra = infrastructure_variables(task)
     host = {key: _literal(value) for key, value in os.environ.items()}
     above = {
         **host,
@@ -424,6 +483,29 @@ def compose_variables(task: HarborTask, *, unset: set[str] | None = None) -> dic
     if unset is None:
         _warn_unset(task, collected)
     return variables
+
+
+def infrastructure_variables(task: HarborTask) -> dict[str, str]:
+    """Gym's infrastructure set for ``task`` (source 1 of :func:`compose_variables`, the one Harbor's
+    ``merge_compose_env`` puts above every other), as raw values: the caller escapes them for the document."""
+    environment = task.config.environment
+    context = task.path / "environment"
+    infra: dict[str, str] = {"MAIN_IMAGE_NAME": task.image or "", "CONTEXT_DIR": str(context), "TEST_DIR": TEST_DIR}
+    if context.is_dir():
+        # Not the runtime project name (Harbor: the trial session id; Gym: the adapter's compose-<uuid>). A stable
+        # per-task value, so files like o11y-bench's `o11y-stack-${COMPOSE_PROJECT_NAME}` alias and URL agree.
+        # load_task hashed the folder once for the task; the fallback serves a HarborTask built without it.
+        infra["COMPOSE_PROJECT_NAME"] = f"hb__{task.context_id or context_digest(context)}"
+    if environment.docker_image:
+        infra["PREBUILT_IMAGE_NAME"] = environment.docker_image
+    if environment.cpus:
+        infra["CPUS"] = str(environment.cpus)
+    if environment.memory_mb:
+        infra["MEMORY"] = f"{environment.memory_mb}M"
+    for suffix, path in LOG_MOUNT_PATHS.items():
+        infra[f"HOST_{suffix}_PATH"] = path
+        infra[f"ENV_{suffix}_PATH"] = path
+    return infra
 
 
 def _literal(value: str) -> str:

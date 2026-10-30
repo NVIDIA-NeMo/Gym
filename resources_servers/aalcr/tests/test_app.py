@@ -18,13 +18,13 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 from fastapi.responses import JSONResponse
 
-from nemo_gym.judge import JudgeError, judge_failsafe
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
+from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.server_utils import ServerClient
 from resources_servers.aalcr.app import (
     LEGACY_JUDGE_PROTOCOL,

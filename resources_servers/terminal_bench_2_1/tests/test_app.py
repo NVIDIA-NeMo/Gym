@@ -13,7 +13,7 @@ import pytest
 from fastapi import Request
 
 import resources_servers.terminal_bench_2_1.app as terminal_bench_app
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,

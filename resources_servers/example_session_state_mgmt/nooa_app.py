@@ -14,7 +14,8 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, is_nemo_gym_fastapi_entrypoint
+from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.example_session_state_mgmt.app import (
     GetCounterValueResponse,
     IncrementCounterRequest,

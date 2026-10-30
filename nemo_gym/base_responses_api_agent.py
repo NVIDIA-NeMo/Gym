@@ -63,19 +63,18 @@ from nemo_gym.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.global_config import (
     OBSERVABILITY_ENABLED_KEY_NAME,
     TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
 from nemo_gym.sandbox.access import SandboxAccess
 from nemo_gym.server_utils import (
@@ -187,6 +186,20 @@ class AgentSeedSessionResponse(BaseModel):
         if self.capabilities is None:
             result.pop("capabilities", None)
         return result
+
+
+class AgentSessionCapabilitiesResponse(BaseModel):
+    """What this adapter's sessions can do, asked before any session is seeded.
+
+    An environment server reads it to refuse a run before provisioning anything: a multi-step task whose turns
+    must continue one harness session needs ``continuation``, as Harbor's multi-step trial refuses
+    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_task_tool_context: bool = False
+    continuation: AgentContinuationCapabilities | None = None
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -642,8 +655,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.post("/v1/agent_sessions")(self.seed_agent_session)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
+        app.get("/v1/agent_sessions/capabilities")(self.agent_session_capabilities)
 
         return app
+
+    async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
+        """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
+        multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
+        implement no sessions at all)."""
+        return AgentSessionCapabilitiesResponse(
+            supports_task_tool_context=self.supports_task_tool_context(),
+            continuation=self._agent_continuation_capabilities(),
+        )
 
     async def seed_agent_session(
         self,

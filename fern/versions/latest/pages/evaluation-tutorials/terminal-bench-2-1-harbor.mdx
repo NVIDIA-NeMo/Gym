@@ -46,10 +46,16 @@ gym eval run harbor:terminal-bench/terminal-bench-2-1 --agent terminus_2_sandbox
 ```
 
 The plain reference resolves the store's `latest` tag, writes the task folders into `environments/harbor/terminal-bench-2-1/`
-and records the package and the version it resolved in the `manifest.toml` there. A later fetch keeps every folder
+and records the package and the version it resolved in the `manifest.toml` there. `gym dataset pull <reference>`
+makes the same fetch on its own, printing the folder, the task count and the dataset digest, and the committed
+entry `environments/harbor/terminal_bench_2_1/` pins the version below as its `[gym] source`, so
+`gym dataset pull terminal_bench_2_1` fetches it into that folder and `gym dataset validate terminal_bench_2_1
+--sandbox opensandbox` then runs it by name. A later fetch keeps every folder
 whose content still matches, and once `latest` has moved on it refuses the folder and names both versions, so a
-stale copy is never mixed with a newer one. To pin the version, name its content hash; the folder then carries the
-first twelve characters of the hash (`environments/harbor/terminal-bench-2-1-7d7bdc1cbeda/`):
+stale copy is never mixed with a newer one. To pin the version, name its content hash. The pin below is the
+`terminal_bench_2_1` entry's `[gym] source`, so it lands in `environments/harbor/terminal_bench_2_1/`
+(`gym dataset pull terminal_bench_2_1` is the short form of the same fetch); a pin no entry declares lands in a
+folder named after the first twelve characters of its hash (`environments/harbor/<name>-<12 digest chars>/`) instead:
 
 ```bash
 gym dataset validate harbor:terminal-bench/terminal-bench-2-1@sha256:7d7bdc1cbedad549fc1140404bd4dc45e5fd0ea7c4186773687d177ad3a0699a \

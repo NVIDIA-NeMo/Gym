@@ -134,7 +134,7 @@ class TestAudioVideoBlock:
     def test_every_supported_audio_extension_passes_proxy_ingress(self) -> None:
         """The judge proxy validates content parts strictly; every audio format
         Gym itself emits must survive ingress, not only the SDK's wav/mp3."""
-        from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
         from resources_servers.gdpval.judge_panel import AUDIO_EXTS
         from resources_servers.gdpval.media_conversion import audio_video_block
 

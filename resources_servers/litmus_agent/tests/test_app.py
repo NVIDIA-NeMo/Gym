@@ -23,7 +23,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,

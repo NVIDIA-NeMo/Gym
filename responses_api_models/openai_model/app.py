@@ -26,16 +26,14 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.openai_utils import (
-    MAX_NUM_TRIES,
-    NeMoGymAsyncOpenAI,
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
     ReasoningEffort,
 )
+from nemo_gym.openai_utils import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
 
 
 LOG = logging.getLogger(__name__)
@@ -227,6 +225,9 @@ class SimpleModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             default_headers=self.config.openai_default_headers,
             max_num_tries=self.config.upstream_max_num_tries,
+            # A provider that refuses connections fails the call after max_http_attempts tries, like an HTTP
+            # error; left unset, the transport would retry the connection forever.
+            max_connection_retries=self.config.max_http_attempts,
             request_timeout_seconds=self.config.upstream_request_timeout_seconds,
             connect_timeout_seconds=self.config.upstream_connect_timeout_seconds,
             max_http_attempts=self.config.max_http_attempts,

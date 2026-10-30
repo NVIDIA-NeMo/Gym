@@ -15,8 +15,8 @@ from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.mcp_auto_exposure import harvest_tools
-from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient, SimpleServer, entrypoint_ray_enabled
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from nemo_gym.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
