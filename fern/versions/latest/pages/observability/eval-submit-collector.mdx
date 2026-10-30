@@ -96,7 +96,7 @@ that is not Gym's is left alone, and an id the span already carries is never ove
 
 | Source | How | Notes |
 | --- | --- | --- |
-| Model services (`type: vllm`, ...) | Prometheus scrape of `localhost:<port>/metrics` | `vllm:<name>` is renamed to `vllm_<name>` after parsing so histogram and counter types survive |
+| Model services (`type: vllm`, ...) | Prometheus scrape of `localhost:<port>/metrics` | `vllm:<name>` is renamed to `vllm_<name>` after parsing so histogram and counter types survive. Every series carries `gym_service` (the service's name) and, in a prefill/decode pair, `gym_pool_role` (`prefill`, `decode` or `router`) |
 | `dcgm-exporter`, `node_exporter` | Prometheus scrape on the node when the ports are set | per-GPU activity, memory and power; CPU, memory, network |
 | vLLM request spans (`vllm_traces: true`) | `vllm serve --otlp-traces-endpoint` to the collector's OTLP/HTTP port | one `llm_request` span per request with queue, prefill, decode and end-to-end time, time to first token and token counts; a child of the Gym model server's call, so it sits inside the rollout's trace. Needs the OpenTelemetry SDK in the vLLM image (the `vllm/vllm-openai` images have it); off by default because it roughly doubles a run's span volume |
 | Gym's servers (nemo-lens) | OTLP on `localhost:4317` (gRPC) and `:4318` (HTTP) | `gym.rollout.duration_ms`, `gym.verify.*`, FastAPI request metrics, one trace per rollout, log records with trace ids; see [Metrics](/main/observability/metrics) and [Span Groups](/main/observability/span-groups) |
@@ -111,6 +111,68 @@ defaults), and the node scrapes carry `dcgm` and `node`.
 Telemetry is always written to `<job dir>/otel/{metrics,traces,logs}.jsonl` while the collector is enabled, so a run can be
 inspected without backend access. The rendered collector configuration is at
 `<job dir>/otel/collector.yaml`; `gym eval submit --dry-run` prints it without submitting.
+
+## Service declaration
+
+GPU and node series say which node and GPU they measure, not which model service used it. To tie them
+to a service, every Slurm job with a model service writes
+`<job dir>/artifacts/rollouts_service_declaration.json` when it starts, before the services do. It
+does not depend on the collector being enabled.
+
+```json
+{
+  "schema_version": 1,
+  "status": "available",
+  "run_id": "gym-job-20261022T100000Z-abc123",
+  "benchmark": "swebench_pro",
+  "slurm_job_id": "4242",
+  "services": [
+    {"service": "gym-vllm/policy-prefill", "gym_service": "policy-prefill", "kind": "vllm_pd_tier",
+     "pool_role": "prefill", "node_pool": "prefill", "node_indices": [0, 1, 2, 3], "port": 8001,
+     "tensor_parallel_size": 4, "pipeline_parallel_size": 1, "data_parallel_size": 4,
+     "ray_serve": false, "server_per_node": false, "gpus_per_node": 4},
+    {"service": "gym-vllm/policy", "gym_service": "policy", "kind": "vllm_pd_router",
+     "pool_role": "router", "node_indices": [0], "port": 8000, "gpus_per_node": 0}
+  ],
+  "nodes": [
+    {"index": 0, "hostname": "nid001234", "services": ["gym-vllm/policy-prefill", "gym-vllm/policy"],
+     "gpus_observed": true}
+  ],
+  "gpus": [
+    {"gpu_uuid": "GPU-5b0f...", "node_index": 0, "gpu_index": 0, "services": ["gym-vllm/policy-prefill"]}
+  ]
+}
+```
+
+- **`services`**: one entry per deployed model service, including each tier and the router of a
+  `vllm_pd` service. `service` is the scrape job name, so it equals the engine series'
+  `service.name.override`; `gym_service` equals their `gym_service` label. `node_indices` index the
+  allocation's node list in `scontrol show hostnames` order. The layout fields come from the service's
+  configuration; `data_parallel_size` is `number_of_instances`, which are independent replicas when
+  `ray_serve` is true. `gpus_per_node` is how many GPUs the launch uses on each of the service's
+  nodes, and is absent when Ray decides the split (one replica across nodes, or the Ray Serve gateway).
+- **`nodes`**: each node a declared service runs on, with its Slurm node name.
+- **`gpus`**: one row per GPU that `nvidia-smi` lists in a job step on a declared service's node, with
+  the GPU UUID, the NVML index and every GPU-using service on that node. Gym does not assign GPUs to
+  services, so two services sharing a node are both listed on each of its GPUs. A node whose GPUs
+  cannot be listed (no `nvidia-smi` on the node, a timeout) has `gpus_observed: false`, a
+  `gpus_unavailable_reason` and no rows.
+
+Values Gym does not know are absent, never guessed. A run whose services were not placed by
+`gym eval submit` on Slurm (a local `gym eval run`, a Kubernetes job) writes
+`<output stem>_service_declaration.json` next to its rollouts with `"status": "unavailable"` and the
+reason. The driver keeps the job's declaration only when its `slurm_job_id` is the current job's, so
+a run folder reused by a later run never keeps an earlier job's placement. Each job of an auto-resume
+chain may land on other nodes and rewrites the file when it starts, so it describes the latest job;
+every job's declaration is also kept at `<job dir>/logs/service_declaration-<slurm job id>.json`, and the
+`nvidia-smi` errors of the GPU listing go to `<job dir>/logs/service_declaration-<slurm job id>.log`.
+
+**Joining GPU series to services.** DCGM exporter series carry the GPU's UUID in their `UUID` label
+and the NVML index in `gpu`. Match `UUID` to `gpus[].gpu_uuid` and the series' `slurm_job_id` resource
+attribute to the declaration's `slurm_job_id`; the row's `services` names the service, whose entry in
+`services` gives the layout. Engine series join on `service.name.override` (or `gym_service`) directly.
+GPU series are not relabelled with the service: the collector's configuration is written at submit
+time, before the GPU UUIDs are known.
 
 ## The token
 

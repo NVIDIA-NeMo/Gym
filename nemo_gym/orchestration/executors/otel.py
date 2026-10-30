@@ -34,6 +34,7 @@ from pathlib import Path
 import yaml
 
 from nemo_gym.orchestration.api import BaseModelServiceConfig, SubmitConfig
+from nemo_gym.orchestration.executors.service_declaration import pool_role
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 
 
@@ -177,11 +178,12 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
     interval = f"{obs.scrape_interval_seconds}s"
 
     # The job name is what scraped data carries as `service.name`, and so becomes its display identity.
+    # Both it and `gym_service` match the service's entry in the run's service declaration.
     scrape_configs = [
         {
             "job_name": f"{obs.component}/{name}",
             "scrape_interval": interval,
-            "static_configs": [{"targets": [f"localhost:{port}"], "labels": {"gym_service": name}}],
+            "static_configs": [{"targets": [f"localhost:{port}"], "labels": _engine_labels(name, config)}],
         }
         for name, port in scrape_targets(config).items()
     ]
@@ -341,3 +343,9 @@ def render_collector_config(config: SubmitConfig, benchmark_name: str, remote_be
         for signal in ("metrics", "traces", "logs"):
             del doc["service"]["pipelines"][signal]
     return yaml.safe_dump(doc, sort_keys=False)
+
+
+def _engine_labels(name: str, config: SubmitConfig) -> dict[str, str]:
+    """Labels on every series scraped from one model service: its name, and its prefill/decode role in a pair."""
+    role = pool_role(config.deployed_services[name])
+    return {"gym_service": name, **({"gym_pool_role": role} if role is not None else {})}

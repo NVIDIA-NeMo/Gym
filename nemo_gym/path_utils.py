@@ -65,3 +65,8 @@ def exporter_run_id_path_for(output_fpath: Path, exporter: str) -> Path:
 def export_done_path_for(output_fpath: Path, exporter: str) -> Path:
     """`results/rollouts.jsonl`, `mlflow` -> `results/rollouts_mlflow_export_done`: set once the run was exported."""
     return output_fpath.with_name(f"{output_fpath.stem}_{exporter}_export_done")
+
+
+def service_declaration_path_for(output_fpath: Path) -> Path:
+    """`results/rollouts.jsonl` -> `results/rollouts_service_declaration.json`."""
+    return output_fpath.with_stem(output_fpath.stem + "_service_declaration").with_suffix(".json")

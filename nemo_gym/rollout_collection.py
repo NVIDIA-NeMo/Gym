@@ -95,6 +95,7 @@ from nemo_gym.observability.model_calls import (
     model_call_capture_dirs_from_config,
     observability_enabled_from_config,
 )
+from nemo_gym.observability.service_declaration import record_service_declaration
 from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,
@@ -3469,6 +3470,8 @@ class RolloutCollectionHelper(BaseModel):
         # write -- a user pointing --output at a not-yet-existing directory is the common case
         # outside a git clone.
         output_fpath.parent.mkdir(parents=True, exist_ok=True)
+        # Which service ran where: kept when `gym eval submit` wrote it for this job, else recorded as unavailable.
+        record_service_declaration(output_fpath)
 
         persisted_success_keys = self._landed_keys
         persisted_success_keys.clear()
