@@ -5,7 +5,9 @@ import base64
 import io
 import json
 import logging
+import random
 import threading
+import time
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -34,7 +36,13 @@ from nemo_gym.tasks.harbor.image_configs import (
     record_compose_images,
     with_built_images,
 )
-from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, write_json_record
+from nemo_gym.tasks.harbor.records import (
+    BUILT_IMAGES_FILE,
+    entry_lock_path,
+    read_image_configs,
+    record_lock,
+    write_json_record,
+)
 from nemo_gym.tasks.harbor.registry import ImageConfigError, RegistryClient, parse_image_ref
 from nemo_gym.tasks.harbor.task import discover_tasks
 
@@ -549,6 +557,156 @@ class TestRegistryClient:
         assert len(attempts) == 3
 
 
+class FlakyRegistry:
+    """A :class:`FakeRegistry` whose first answers to chosen URLs are the failures a rate-limited or ailing
+    registry gives: ``failures`` maps a URL fragment to the list of ``(status, headers)`` it fails with, in
+    order, before the real answer."""
+
+    def __init__(self, failures: dict[str, list[tuple[int, dict[str, str]]]], **kwargs):
+        self.registry = FakeRegistry(**kwargs)
+        self.failures = {fragment: list(statuses) for fragment, statuses in failures.items()}
+        self.requests = self.registry.requests
+
+    def __call__(self, request, timeout=None):
+        url = request.full_url
+        for fragment, pending in self.failures.items():
+            if fragment in url and pending:
+                status, headers = pending.pop(0)
+                self.requests.append((url, dict(request.header_items())))
+                raise urllib.error.HTTPError(url, status, "Failure", headers, io.BytesIO(b""))
+        return self.registry(request, timeout)
+
+
+@pytest.fixture
+def sleeps(monkeypatch) -> list[float]:
+    """Record what the client would sleep instead of sleeping."""
+    recorded: list[float] = []
+    monkeypatch.setattr(registry_module.time, "sleep", recorded.append)
+    return recorded
+
+
+class TestRegistryRetries:
+    """D1: HTTP 429 and 5xx are tried again with backoff, honouring Retry-After, within bounded attempts."""
+
+    def test_a_429_with_retry_after_seconds_is_retried_after_that_wait_and_logged_once(
+        self, monkeypatch, sleeps, caplog
+    ):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": "7"}), (429, {"Retry-After": "3"})]})
+        patch_opener(monkeypatch, fake)
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.registry"):
+            entry = RegistryClient().image_config("redis:7-alpine")
+        assert entry["image"] == "library/redis@sha256:index-of-7-alpine"
+        assert sleeps == [7.0, 3.0], "the registry's Retry-After is the wait, not the backoff"
+        manifest_requests = [url for url, _ in fake.requests if url.endswith("/manifests/7-alpine")]
+        # One failed anonymous attempt, the token's challenge is not reached by a 429; then the two retries.
+        assert len(manifest_requests) == 4
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert len(warnings) == 1, "one WARNING per image, however many retries it takes"
+        assert warnings[0].startswith(
+            "redis:7-alpine: registry returned HTTP 429 for manifests/7-alpine; retrying in 7s"
+        )
+
+    def test_a_5xx_then_200_uses_the_exponential_backoff(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"/blobs/sha256:cfg-amd64": [(503, {}), (502, {}), (500, {})]})
+        patch_opener(monkeypatch, fake)
+        entry = RegistryClient().image_config("redis:7-alpine")
+        assert entry["config_digest"] == "sha256:cfg-amd64"
+        assert sleeps == [1.0, 2.0, 4.0]
+
+    def test_a_permanent_429_gives_up_after_the_bounded_attempts_naming_the_status(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": "1"})] * 50})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError) as info:
+            RegistryClient(retries=2).image_config("redis:7-alpine")
+        assert str(info.value) == (
+            "library/redis: registry returned HTTP 429 for manifests/7-alpine (gave up after 3 attempts)"
+        )
+        assert isinstance(info.value.__cause__, urllib.error.HTTPError) and info.value.__cause__.code == 429
+        assert sleeps == [1.0, 1.0]
+        assert len([url for url, _ in fake.requests if url.endswith("/manifests/7-alpine")]) == 3
+
+    def test_the_default_is_eight_attempts(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {})] * 50})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError, match=r"HTTP 429 .*gave up after 8 attempts"):
+            RegistryClient().image_config("redis:7-alpine")
+        assert sleeps == [1.0, 2.0, 4.0, 8.0, 16.0, 32.0, 60.0]
+
+    def test_a_retry_after_http_date_is_honoured(self, monkeypatch, sleeps):
+        from email.utils import format_datetime
+
+        later = format_datetime(registry_module.datetime.now(registry_module.timezone.utc), usegmt=True)
+        # The date is "now" or a second past: the wait is clamped at zero, never negative, and the retry happens.
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": later})]})
+        patch_opener(monkeypatch, fake)
+        RegistryClient().image_config("redis:7-alpine")
+        assert len(sleeps) == 1 and 0.0 <= sleeps[0] <= 2.0
+
+    def test_a_retry_after_past_the_wait_budget_fails_at_once_naming_the_status_and_the_budget(
+        self, monkeypatch, sleeps
+    ):
+        fake = FlakyRegistry({"/manifests/7-alpine": [(429, {"Retry-After": "3600"})] * 5})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError) as info:
+            RegistryClient(max_wait_s=600).image_config("redis:7-alpine")
+        message = str(info.value)
+        assert message.startswith("library/redis: registry returned HTTP 429 for manifests/7-alpine; ")
+        assert "wait 3600s, past the 600s wait budget" in message and "gave up after 1 attempts" in message
+        assert sleeps == []
+
+    def test_a_404_is_not_retried(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError, match="library/redis: registry returned HTTP 404 for manifests/missing$"):
+            RegistryClient().image_config("redis:missing")
+        assert sleeps == []
+
+    def test_the_token_endpoint_is_retried_too(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"auth.example/token": [(429, {"Retry-After": "2"})]})
+        patch_opener(monkeypatch, fake)
+        RegistryClient().image_config("redis:7-alpine")
+        assert sleeps == [2.0]
+        token_requests = [url for url, _ in fake.requests if url.startswith("https://auth.example/token")]
+        assert len(token_requests) == 2
+
+    def test_a_token_endpoint_403_is_final(self, monkeypatch, sleeps):
+        fake = FlakyRegistry({"auth.example/token": [(403, {})]})
+        patch_opener(monkeypatch, fake)
+        with pytest.raises(ImageConfigError, match="token request failed with HTTP 403"):
+            RegistryClient().image_config("redis:7-alpine")
+        assert sleeps == []
+
+    def test_the_warning_is_logged_again_for_the_next_image(self, monkeypatch, sleeps, caplog):
+        fake = FlakyRegistry(
+            {"/manifests/7-alpine": [(429, {"Retry-After": "1"})], "ghcr.io/v2/org/app/manifests": [(503, {})]}
+        )
+        patch_opener(monkeypatch, fake)
+        client = RegistryClient()
+        with caplog.at_level(logging.WARNING, logger="nemo_gym.tasks.harbor.registry"):
+            client.image_config("redis:7-alpine")
+            client.image_config("ghcr.io/org/app@sha256:m-amd64")
+        warnings = [record.getMessage() for record in caplog.records if record.levelno == logging.WARNING]
+        assert [message.split(":")[0] for message in warnings] == ["redis", "ghcr.io/org/app@sha256"]
+
+    @pytest.mark.parametrize(
+        ("value", "expected"),
+        [(None, None), ("", None), ("  ", None), ("12", 12.0), ("1.5", 1.5), ("-3", 0.0), ("soon", None)],
+    )
+    def test_parse_retry_after(self, value, expected):
+        assert registry_module.parse_retry_after(value) == expected
+
+    def test_parse_retry_after_reads_an_http_date_in_the_future(self):
+        from datetime import timedelta
+        from email.utils import format_datetime
+
+        when = registry_module.datetime.now(registry_module.timezone.utc) + timedelta(seconds=90)
+        wait = registry_module.parse_retry_after(format_datetime(when, usegmt=True))
+        assert wait is not None and 85.0 <= wait <= 90.0
+        # A date in the past is a wait of zero.
+        past = registry_module.datetime.now(registry_module.timezone.utc) - timedelta(seconds=90)
+        assert registry_module.parse_retry_after(format_datetime(past, usegmt=True)) == 0.0
+
+
 class TestComposeImageReferences:
     def test_lists_the_task_image_first_then_each_sidecar_once(self, tmp_path):
         write_task(tmp_path, "ctr", compose=COMPOSE)
@@ -706,6 +864,18 @@ class FakeClient:
             "os": "linux",
             "record_version": 2,
         }
+
+
+def image_locks(folder: Path) -> list[str]:
+    """The per-image lock files in ``folder`` (``compose-images.json.<hash>.lock``, not the record's own
+    ``compose-images.json.lock``), by name."""
+    return sorted(
+        path.name
+        for path in folder.iterdir()
+        if path.name.startswith("compose-images.json.")
+        and path.name.endswith(".lock")
+        and path.name != "compose-images.json.lock"
+    )
 
 
 class TestComposeVariablesAndEnvFile:
@@ -1749,19 +1919,29 @@ class TestRecordImageConfigsUnderTheLock:
 
         class RacingClient(FakeClient):
             def image_config(self, reference: str) -> dict:
-                # Another process records the same reference, and one more, while this lookup is in flight.
+                # Another Gym process records the same reference, and one more, while this lookup is in flight:
+                # as every writer does, it merges into the file under the lock rather than replacing it.
                 if reference == "redis:7-alpine":
-                    write_json_record(record_path, {"redis:7-alpine": competitor, "busybox:1": competitor})
+                    with record_lock(record_path):
+                        merged = read_image_configs(tmp_path)
+                        merged.update({"redis:7-alpine": competitor, "busybox:1": competitor})
+                        write_json_record(record_path, merged)
                 return super().image_config(reference)
 
         client = RacingClient()
-        assert record_compose_images(discover_tasks(tmp_path), tmp_path, client=client) == record_path
+        resolved_now: list[str] = []
+        assert (
+            record_compose_images(discover_tasks(tmp_path), tmp_path, client=client, resolved_now=resolved_now)
+            == record_path
+        )
         recorded = json.loads(record_path.read_text())
         # Neither writer's entries are lost, and the first recording of a reference is the one kept.
         assert sorted(recorded) == sorted([MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine", "busybox:1"])
         assert recorded["redis:7-alpine"] == competitor and recorded["busybox:1"] == competitor
         assert recorded[MAIN_IMAGE]["image"] == MAIN_IMAGE
         assert client.resolved == [MAIN_IMAGE, SIDECAR_IMAGE, "redis:7-alpine"]
+        # The lookup of redis:7-alpine was in flight when the competitor won it, so it is not counted as resolved here.
+        assert resolved_now == [MAIN_IMAGE, SIDECAR_IMAGE]
         assert (tmp_path / "compose-images.json.lock").is_file()
         assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
 
@@ -1957,3 +2137,172 @@ class TestComposeFields:
             "deployment platform linux/amd64",
         ):
             check_task_compose_fields(tasks[0], load_compose_document(tasks[0]), platform="linux/x86_64")
+
+
+class TestResumableRecords:
+    """Each image's record is written as soon as it resolves, so a run that dies keeps its progress and
+    concurrent preparations of one folder share it."""
+
+    def three_base_images(self, root: Path) -> Path:
+        write_task(root, "a", image=None, dockerfile="FROM alpha:1\nRUN true\n")
+        write_task(root, "b", image=None, dockerfile="FROM beta:2\nRUN true\n")
+        write_task(root, "c", image=None, dockerfile="FROM gamma:3\nRUN true\n")
+        return root / "compose-images.json"
+
+    def test_a_failure_after_k_images_leaves_k_records_and_the_next_run_resolves_only_the_rest(self, tmp_path):
+        record_path = self.three_base_images(tmp_path)
+
+        class DiesOnTheThird(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                if reference == "gamma:3":
+                    raise ImageConfigError(
+                        "gamma: registry returned HTTP 429 for manifests/3 (gave up after 8 attempts)"
+                    )
+                return super().image_config(reference)
+
+        with pytest.raises(ImageConfigError, match=r"base image 'gamma:3' \(used by task\(s\) c\): gamma: .*HTTP 429"):
+            record_base_images(tmp_path, client=DiesOnTheThird())
+        recorded = json.loads(record_path.read_text())
+        assert sorted(recorded) == ["alpha:1", "beta:2"], "the two images resolved before the failure are on disk"
+        assert recorded["alpha:1"]["image"] == "alpha:1" and recorded["alpha:1"]["record_version"] == 2
+        # The recorded images' lock files are gone; the one of the image nobody recorded stays until someone does.
+        assert image_locks(tmp_path) == [entry_lock_path(record_path, "gamma:3").name]
+        # The next run reads the partial record and asks the registry for the missing image only.
+        client = FakeClient()
+        resolved_now: list[str] = []
+        assert record_base_images(tmp_path, client=client, resolved_now=resolved_now) == record_path
+        assert client.resolved == ["gamma:3"] and resolved_now == ["gamma:3"]
+        assert sorted(json.loads(record_path.read_text())) == ["alpha:1", "beta:2", "gamma:3"]
+        assert image_locks(tmp_path) == []
+        # And a third run, with a complete record, makes no registry request at all.
+        client = FakeClient()
+        resolved_now = []
+        record_base_images(tmp_path, client=client, resolved_now=resolved_now)
+        assert client.resolved == [] and resolved_now == []
+
+    def test_a_partial_record_on_disk_means_only_the_missing_images_are_fetched(self, tmp_path):
+        record_path = self.three_base_images(tmp_path)
+        write_json_record(record_path, {"beta:2": FakeClient().image_config("beta:2")})
+        client = FakeClient()
+        resolved_now: list[str] = []
+        record_base_images(tmp_path, client=client, resolved_now=resolved_now)
+        assert client.resolved == ["alpha:1", "gamma:3"] and resolved_now == ["alpha:1", "gamma:3"]
+        assert sorted(json.loads(record_path.read_text())) == ["alpha:1", "beta:2", "gamma:3"]
+
+    def test_a_second_preparation_takes_the_free_images_and_waits_for_the_one_in_flight_instead_of_asking(
+        self, tmp_path
+    ):
+        """Two threads prepare the same folder. The first one's lookup of alpha:1 is held while the second runs:
+        the second finds alpha:1 locked, records beta:2 and gamma:3 meanwhile, then blocks on alpha:1 until
+        the first has written it, reads the record and asks for nothing more."""
+        record_path = self.three_base_images(tmp_path)
+        first_asked = threading.Event()
+        release_first = threading.Event()
+
+        class HeldClient(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                assert reference == "alpha:1"
+                first_asked.set()
+                assert release_first.wait(timeout=10), "the first preparation was never released"
+                return super().image_config(reference)
+
+        first_client, second_client = HeldClient(), FakeClient()
+        first_resolved: list[str] = []
+        second_resolved: list[str] = []
+        errors: list[BaseException] = []
+
+        def prepare(client, resolved_now):
+            try:
+                record_base_images(tmp_path, client=client, resolved_now=resolved_now)
+            except BaseException as exc:  # pragma: no cover - surfaced by the assertion below
+                errors.append(exc)
+
+        first = threading.Thread(target=prepare, args=(first_client, first_resolved))
+        first.start()
+        assert first_asked.wait(timeout=10)
+        assert entry_lock_path(record_path, "alpha:1").is_file(), "the image in flight is locked"
+        second = threading.Thread(target=prepare, args=(second_client, second_resolved))
+        second.start()
+        # The second records the two free images while the first's lookup is in flight, then waits on alpha:1.
+        deadline = time.monotonic() + 10
+        while len(second_client.resolved) < 2 and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert second_client.resolved == ["beta:2", "gamma:3"]
+        assert second.is_alive() and not second.join(timeout=0.3) and second.is_alive(), "blocked on alpha:1"
+        release_first.set()
+        first.join(timeout=10)
+        second.join(timeout=10)
+        assert not first.is_alive() and not second.is_alive() and errors == []
+        recorded = json.loads(record_path.read_text())
+        assert sorted(recorded) == ["alpha:1", "beta:2", "gamma:3"]
+        assert all(recorded[reference]["record_version"] == 2 for reference in recorded)
+        # Three images, three lookups in all: the second never asked for alpha:1.
+        assert first_client.resolved == ["alpha:1"] and first_resolved == ["alpha:1"]
+        assert second_client.resolved == ["beta:2", "gamma:3"] and second_resolved == ["beta:2", "gamma:3"]
+        assert image_locks(tmp_path) == []
+        assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+    @pytest.mark.parametrize("preparations", [2, 7])
+    def test_simultaneous_preparations_of_one_folder_cost_one_lookup_per_image(self, tmp_path, preparations):
+        """Equally fast preparations started together (the Slurm jobs of a fan-out) share the work: N images cost
+        N registry lookups in all, each image is resolved by exactly one of them, and they spread over different
+        images rather than queueing on the same one."""
+        images = [f"img{index}:1" for index in range(12)]
+        for index, image in enumerate(images):
+            write_task(tmp_path, f"t{index:02d}", image=None, dockerfile=f"FROM {image}\nRUN true\n")
+        record_path = tmp_path / "compose-images.json"
+
+        class JitteredClient(FakeClient):
+            """A registry whose answers take 20-60 ms, so lookups overlap and no preparation runs ahead."""
+
+            def __init__(self, seed: int):
+                super().__init__()
+                self.random = random.Random(seed)
+
+            def image_config(self, reference: str) -> dict:
+                time.sleep(self.random.uniform(0.02, 0.06))
+                return super().image_config(reference)
+
+        clients = [JitteredClient(seed) for seed in range(preparations)]
+        resolved_now: list[list[str]] = [[] for _ in clients]
+        errors: list[BaseException] = []
+
+        def prepare(client, resolved):
+            try:
+                record_base_images(tmp_path, client=client, resolved_now=resolved)
+            except BaseException as exc:  # pragma: no cover - surfaced by the assertion below
+                errors.append(exc)
+
+        threads = [threading.Thread(target=prepare, args=pair) for pair in zip(clients, resolved_now)]
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join(timeout=30)
+        assert not any(thread.is_alive() for thread in threads) and errors == []
+        lookups = [reference for client in clients for reference in client.resolved]
+        assert sorted(lookups) == sorted(images), f"{len(lookups)} lookups for {len(images)} images: {lookups}"
+        assert sorted(reference for resolved in resolved_now for reference in resolved) == sorted(images)
+        assert all(client.resolved == resolved for client, resolved in zip(clients, resolved_now))
+        assert sum(1 for resolved in resolved_now if resolved) > 1, "the work was shared, not done by one"
+        recorded = json.loads(record_path.read_text())
+        assert sorted(recorded) == sorted(images)
+        assert all(recorded[image]["image"] == image and recorded[image]["record_version"] == 2 for image in images)
+        assert image_locks(tmp_path) == []
+        assert not [path for path in tmp_path.iterdir() if path.name.endswith(".tmp")]
+
+    def test_each_image_is_on_disk_before_the_next_is_asked_for_and_locked_while_it_is_asked(self, tmp_path):
+        record_path = self.three_base_images(tmp_path)
+        seen: list[list[str]] = []
+        locked: list[list[str]] = []
+
+        class Watching(FakeClient):
+            def image_config(self, reference: str) -> dict:
+                seen.append(sorted(json.loads(record_path.read_text())) if record_path.exists() else [])
+                locked.append(image_locks(tmp_path))
+                return super().image_config(reference)
+
+        record_base_images(tmp_path, client=Watching())
+        assert seen == [[], ["alpha:1"], ["alpha:1", "beta:2"]]
+        # Only the image being asked for is locked, and no per-image lock file is left once all are recorded.
+        assert locked == [[entry_lock_path(record_path, image).name] for image in ("alpha:1", "beta:2", "gamma:3")]
+        assert image_locks(tmp_path) == []

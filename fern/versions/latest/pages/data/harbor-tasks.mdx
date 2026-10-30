@@ -461,11 +461,47 @@ gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed
 | `--concurrency N` | Maximum number of concurrent tasks. |
 | `--output`, `-o` | Output rollouts JSONL file. |
 
+## `gym eval prepare` with a task target
+
+`gym eval prepare` takes the same targets as `gym eval run` and does its preparation alone: it fetches a `harbor:`
+reference, records the configuration of every image the tasks start from (the base image of each Dockerfile and
+every Compose sidecar, read from the registry into `compose-images.json` next to the task folders), builds the
+Dockerfiles that need a build, writes the rows under `results/harbor/<taskset>/` and the list of distinct images,
+and stops. No server starts and no rollout runs.
+
+```bash
+gym eval prepare my-dataset
+gym eval prepare harbor:swe-bench-pro --only-tasks 'django*'
+```
+
+| Option | Description |
+| --- | --- |
+| `TARGET` | A task folder, a folder of task folders, or `harbor:<dataset>[@<version>]`, as for `gym eval run`. |
+| `--only-tasks`, `--exclude-tasks` | Select tasks by name or glob; only the selected tasks' images are recorded and built. |
+| `--config PATH` | Extra config file to load, for the `builds:` block. |
+
+Prepare first when several runs will start on one dataset, for example a fan-out of Slurm jobs over a large
+dataset: run `gym eval prepare <target>` once, then the jobs. A `gym eval run` or `gym dataset validate` on the same
+target then finds the records complete, reuses them and contacts no image registry; only the rows are written again.
+Without it, every job records the images itself, and the jobs race one another for the same registry budget.
+
+<Note title="Registry rate limits">
+Recording an image's configuration takes about two registry requests. Docker Hub's anonymous limit is 100 pulls
+per hour and per IP address, which a login node's jobs share, so a dataset of hundreds of images runs into
+HTTP 429. Prepare retries 429 and 5xx answers with exponential backoff (honouring `Retry-After`, up to eight
+attempts per request) and writes each image's record as soon as it resolves, so a preparation that gives up or is
+killed keeps what it recorded; start it again and it resolves only the missing images. Preparations that run at
+the same time on one folder share the work: each image is resolved under its own lock file next to the record, so one
+that another preparation is fetching is waited for and then read from the record, never asked for twice, and the
+preparations spread over different images instead of queueing on the same one.
+</Note>
+
 ## `gym eval run` with a task target
 
 `gym eval run` takes the same targets in place of a benchmark name. Gym prepares the dataset (recording the base
 images the Dockerfiles resolve against, loading every task, writing the rows and the per-taskset environment
-server configuration), then starts the servers and collects rollouts as for any benchmark.
+server configuration), then starts the servers and collects rollouts as for any benchmark. A dataset prepared with
+`gym eval prepare` is not prepared again: the recorded images are reused without a registry request.
 
 ```bash
 gym eval run my-dataset --agent hermes_agent --sandbox opensandbox \

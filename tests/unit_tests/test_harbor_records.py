@@ -9,7 +9,14 @@ The sidecar lock, the atomic replace and the read that retries once against a to
 import pytest
 
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.records import read_json_record, record_lock, write_json_record
+from nemo_gym.tasks.harbor.records import (
+    discard_entry_lock,
+    entry_lock,
+    entry_lock_path,
+    read_json_record,
+    record_lock,
+    write_json_record,
+)
 
 
 class TestRecordFiles:
@@ -79,3 +86,40 @@ class TestRecordFiles:
         released.set()
         worker.join(timeout=5)
         assert not worker.is_alive()
+
+    def test_the_entry_lock_is_per_key_non_blocking_on_request_and_discarded_by_its_holder(self, tmp_path):
+        import threading
+
+        path = tmp_path / "compose-images.json"
+        redis, postgres = entry_lock_path(path, "redis:7"), entry_lock_path(path, "postgres:16")
+        assert redis.parent == tmp_path and redis.name.startswith("compose-images.json.") and redis.suffix == ".lock"
+        assert redis != postgres and entry_lock_path(path, "redis:7") == redis
+        entered = threading.Event()
+        released = threading.Event()
+        second_taken: list[bool] = []
+
+        def second():
+            with entry_lock(path, "redis:7", blocking=False) as taken:
+                second_taken.append(taken)
+            with entry_lock(path, "redis:7") as taken:
+                second_taken.append(taken)
+                entered.set()
+                released.wait(timeout=5)
+
+        with entry_lock(path, "redis:7") as taken:
+            assert taken is True and redis.is_file()
+            # Another key's lock is free while this one is held.
+            with entry_lock(path, "postgres:16", blocking=False) as other:
+                assert other is True
+            worker = threading.Thread(target=second)
+            worker.start()
+            # The non-blocking request answers False at once; the blocking one waits for the holder.
+            assert not entered.wait(timeout=0.3)
+            assert second_taken == [False]
+        assert entered.wait(timeout=5) and second_taken == [False, True]
+        released.set()
+        worker.join(timeout=5)
+        # The holder discards the lock file once its entry is recorded; discarding twice is fine.
+        discard_entry_lock(path, "redis:7")
+        assert not redis.exists()
+        discard_entry_lock(path, "redis:7")

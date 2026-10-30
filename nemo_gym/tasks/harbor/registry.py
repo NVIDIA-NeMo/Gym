@@ -5,21 +5,25 @@
 
 Parses Docker-style references with Docker Hub defaults, selects the platform's manifest from
 an index, follows the bearer token challenge, drops authorization across redirects, retries
-transient failures and returns the configuration keys the records keep, pinned to the digest
-of the manifest the reference named. Nothing here knows about tasks or Compose. The module
-keeps the record key list, the platform constants and ImageConfigError, which the rest of the
-package imports from here.
+transient failures (connection errors, HTTP 429 and 5xx, with exponential backoff that honours
+``Retry-After``) and returns the configuration keys the records keep, pinned to the digest of the
+manifest the reference named. Nothing here knows about tasks or Compose. The module keeps the
+record key list, the platform constants and ImageConfigError, which the rest of the package
+imports from here.
 """
 
 import base64
+import email.utils
 import hashlib
 import json
+import logging
 import re
 import time
 import urllib.error
 import urllib.parse
 import urllib.request
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any
 
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
@@ -43,6 +47,15 @@ INDEX_MEDIA_TYPES = {
 }
 DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 PLATFORM = ("linux", "amd64")
+# The answers a registry gives for a moment, not for the reference: the anonymous pull limit (Docker Hub
+# answers 429 once an IP has pulled 100 manifests in an hour, and a login node's address is shared by every
+# job on it) and server-side trouble. Anything else (401 without a challenge, 403, 404) is final.
+RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+# Exponential backoff between attempts when the registry names no ``Retry-After``: 1, 2, 4 ... seconds, capped.
+BACKOFF_BASE_S = 1.0
+BACKOFF_CAP_S = 60.0
+
+LOGGER = logging.getLogger(__name__)
 
 # containerd's platform normalisation (``platforms.Normalize``), the rule ``docker --platform`` matches an index
 # entry by: Docker's architecture aliases fold to GOARCH names, an arm64 entry with no variant is ``v8`` (the
@@ -223,6 +236,12 @@ class RegistryClient:
     ``(os, architecture, variant)`` an image reference is resolved for (linux/amd64 by default), kept normalised
     (:func:`normalize_platform_parts`): the manifest an index names for it, matched as ``docker --platform``
     matches one, and the only one a single-platform reference may be.
+
+    A request that fails for the moment (the connection, a timeout, HTTP 429 or a 5xx) is tried again
+    up to ``retries`` more times (``retries + 1`` attempts in all, 8 by default), waiting the registry's
+    ``Retry-After`` (seconds or an HTTP date) when it names one and an exponential backoff otherwise,
+    and never more than ``max_wait_s`` in all for one request. The first retry of an image is logged at
+    WARNING; the final failure is an :class:`ImageConfigError` naming the status and the attempts.
     """
 
     def __init__(
@@ -230,18 +249,24 @@ class RegistryClient:
         credentials: dict[str, tuple[str, str]] | None = None,
         *,
         timeout_s: float = 60,
-        retries: int = 3,
         platform: tuple[str, ...] = PLATFORM,
+        retries: int = 7,
+        max_wait_s: float = 900,
     ) -> None:
         self.credentials = credentials or {}
         self.timeout_s = timeout_s
         self.retries = retries
         self.platform = normalize_platform_parts(*platform)
+        self.max_wait_s = max_wait_s
         self._tokens: dict[tuple[str, str], str] = {}
         self._opener = urllib.request.build_opener(_RedirectHandler())
+        # The image whose requests are in flight and whether a retry of it was logged: one WARNING per image.
+        self._current: str | None = None
+        self._warned = False
 
     def image_config(self, reference: str) -> dict[str, Any]:
         """One ``compose-images.json`` entry for ``reference``."""
+        self._current, self._warned = reference, False
         ref = parse_image_ref(reference)
         manifest, manifest_digest = self._manifest(ref, ref.manifest_ref)
         # The pin is the digest of the manifest the reference named. Behind a tag that is the multi-arch
@@ -294,7 +319,41 @@ class RegistryClient:
         return json.loads(body), digest
 
     def _get(self, ref: ImageRef, path: str, *, accept: str) -> tuple[bytes, dict[str, str]]:
+        """``GET /v2/<repository>/<path>`` with the repository's token, retrying what may pass.
+
+        One attempt is :meth:`_authorized_get`; a retryable HTTP status or a connection failure is tried
+        again after :meth:`_wait_before_retry` until the attempts or the wait budget run out, when the
+        last failure is reported with the status (or the connection error) and the attempts made.
+        """
         url = f"https://{ref.registry}/v2/{ref.repository}/{path}"
+        attempts = self.retries + 1
+        deadline = time.monotonic() + self.max_wait_s
+        for attempt in range(1, attempts + 1):
+            cause: Exception
+            try:
+                return self._authorized_get(ref, url, accept)
+            except urllib.error.HTTPError as exc:
+                cause = exc
+                failure = f"registry returned HTTP {exc.code} for {path}"
+                final = f"{failure} (gave up after {attempt} attempts)"
+                retry_after = exc.headers.get("Retry-After") if exc.headers is not None else None
+                if exc.code not in RETRYABLE_STATUSES:
+                    raise ImageConfigError(f"{ref.pinned_repository}: {failure}") from exc
+            except (urllib.error.URLError, TimeoutError, OSError) as exc:
+                cause = exc
+                failure = f"registry unreachable: {url} ({exc})"
+                final = f"registry unreachable after {attempt} attempts: {url} ({exc})"
+                retry_after = None
+            if attempt == attempts:
+                raise ImageConfigError(f"{ref.pinned_repository}: {final}") from cause
+            try:
+                self._wait_before_retry(ref, attempt, retry_after, deadline, failure)
+            except ImageConfigError as bound:
+                raise bound from cause
+        raise AssertionError("unreachable")
+
+    def _authorized_get(self, ref: ImageRef, url: str, accept: str) -> tuple[bytes, dict[str, str]]:
+        """One GET of ``url``, following the registry's bearer challenge once when it answers 401 with one."""
         headers = {"Accept": accept}
         token = self._tokens.get((ref.registry, ref.repository))
         if token:
@@ -304,16 +363,33 @@ class RegistryClient:
         except urllib.error.HTTPError as exc:
             challenge = exc.headers.get("WWW-Authenticate", "") if exc.code == 401 else ""
             if not challenge:
-                raise ImageConfigError(
-                    f"{ref.pinned_repository}: registry returned HTTP {exc.code} for {path}"
-                ) from exc
+                raise
         token = self._token(ref, challenge)
         self._tokens[(ref.registry, ref.repository)] = token
         headers["Authorization"] = f"Bearer {token}"
-        try:
-            return self._open(url, headers)
-        except urllib.error.HTTPError as exc:
-            raise ImageConfigError(f"{ref.pinned_repository}: registry returned HTTP {exc.code} for {path}") from exc
+        return self._open(url, headers)
+
+    def _wait_before_retry(
+        self, ref: ImageRef, attempt: int, retry_after: str | None, deadline: float, failure: str
+    ) -> None:
+        """Sleep before attempt ``attempt + 1``: the registry's ``Retry-After`` when it names one, else the
+        exponential backoff; refuse (as :class:`ImageConfigError`) a wait that would pass the request's budget."""
+        wait = parse_retry_after(retry_after)
+        if wait is None:
+            wait = min(BACKOFF_BASE_S * 2 ** (attempt - 1), BACKOFF_CAP_S)
+        remaining = deadline - time.monotonic()
+        if wait > remaining:
+            raise ImageConfigError(
+                f"{ref.pinned_repository}: {failure}; the registry asks to wait {wait:.0f}s, past the "
+                f"{self.max_wait_s:.0f}s wait budget of one request (gave up after {attempt} attempts)"
+            )
+        if not self._warned:
+            LOGGER.warning(
+                f"{self._current or ref.pinned_repository}: {failure}; retrying in {wait:.0f}s "
+                f"(attempt {attempt} of {self.retries + 1}; later retries of this image are not logged)"
+            )
+            self._warned = True
+        time.sleep(wait)
 
     def _token(self, ref: ImageRef, challenge: str) -> str:
         params = dict(re.findall(r'(\w+)="([^"]*)"', challenge))
@@ -330,6 +406,8 @@ class RegistryClient:
         try:
             body, _ = self._open(f"{realm}?{urllib.parse.urlencode(query)}", headers)
         except urllib.error.HTTPError as exc:
+            if exc.code in RETRYABLE_STATUSES:
+                raise  # the token endpoint is rate limited like the registry: let _get try the request again
             raise ImageConfigError(f"{ref.pinned_repository}: token request failed with HTTP {exc.code}") from exc
         payload = json.loads(body)
         token = payload.get("token") or payload.get("access_token")
@@ -348,18 +426,26 @@ class RegistryClient:
         return self.credentials[max(matching, key=len)]
 
     def _open(self, url: str, headers: dict[str, str]) -> tuple[bytes, dict[str, str]]:
-        """One GET; connection-level failures (not HTTP errors) are retried with a short backoff."""
+        """One GET, redirects followed; HTTP errors and connection failures propagate for :meth:`_get` to retry."""
         request = urllib.request.Request(url, headers=headers)
-        for attempt in range(self.retries + 1):
-            try:
-                with self._opener.open(request, timeout=self.timeout_s) as response:
-                    return response.read(), dict(response.headers)
-            except urllib.error.HTTPError:
-                raise
-            except (urllib.error.URLError, TimeoutError, OSError) as exc:
-                if attempt == self.retries:
-                    raise ImageConfigError(
-                        f"registry unreachable after {attempt + 1} attempts: {url} ({exc})"
-                    ) from exc
-                time.sleep(2**attempt)
-        raise AssertionError("unreachable")
+        with self._opener.open(request, timeout=self.timeout_s) as response:
+            return response.read(), dict(response.headers)
+
+
+def parse_retry_after(value: str | None) -> float | None:
+    """The seconds a ``Retry-After`` header asks for: a delay in seconds or an HTTP date (RFC 9110), clamped at
+    zero; ``None`` for a missing or unreadable header, which leaves the wait to the backoff."""
+    if value is None or not value.strip():
+        return None
+    value = value.strip()
+    try:
+        return max(float(value), 0.0)
+    except ValueError:
+        pass
+    try:
+        when = email.utils.parsedate_to_datetime(value)
+    except (TypeError, ValueError, IndexError):
+        return None
+    if when.tzinfo is None:
+        when = when.replace(tzinfo=timezone.utc)
+    return max((when - datetime.now(timezone.utc)).total_seconds(), 0.0)
