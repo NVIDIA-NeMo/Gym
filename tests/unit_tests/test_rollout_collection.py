@@ -12633,9 +12633,9 @@ class TestEnrichRunResult:
 
         seen = []
 
-        async def enrich(row: dict, result: dict, rollout_latency_ms) -> None:
-            seen.append(row[ROLLOUT_ID_KEY_NAME])
-            result["enriched"] = True
+        async def enrich(completed) -> None:
+            seen.append(completed.row[ROLLOUT_ID_KEY_NAME])
+            completed.result["enriched"] = True
 
         [outcome] = await _RowResultIterator(Completions(), enrich=enrich).aclose_and_drain()
         _, result = await outcome
@@ -12660,3 +12660,158 @@ class TestEnrichRunResult:
         await _enrich_returned_result(row, reply, None, capture_dirs=[], observability_enabled=False)
 
         assert reply[ATTEMPT_INDEX_KEY_NAME] == 2
+
+
+class TestRunRecordWriter:
+    """``RunRecordWriter`` lays out a shard the way ``ng_collect_rollouts`` lays out a run."""
+
+    @staticmethod
+    def _lines(fpath: Path) -> list[dict]:
+        return [orjson.loads(line) for line in fpath.read_bytes().splitlines()] if fpath.exists() else []
+
+    @pytest.mark.parametrize("record_omitted", [False, True], ids=["omitted rows off", "omitted rows on"])
+    def test_each_outcome_goes_where_collection_puts_it(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_omitted: bool
+    ) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        writer = RunRecordWriter(tmp_path, "step_000007-w0", record_omitted_rollouts=record_omitted)
+        scored = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
+        failed = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
+        interrupted = {
+            TASK_INDEX_KEY_NAME: 2,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_FAILURE_CLASS_KEY: "kill_shaped",
+            NG_NO_PERSIST_KEY: True,
+        }
+
+        for result in (scored, failed, interrupted):
+            writer.write(result)
+
+        assert writer.rollouts_fpath == tmp_path / "rollouts-step_000007-w0.jsonl"
+        assert self._lines(writer.rollouts_fpath) == [scored]
+        failures = self._lines(writer.failures_fpath)
+        assert failures[0] == {**failed, NG_FAILURE_MAX_ATTEMPTS_KEY: 3}
+        assert len(failures) == (2 if record_omitted else 1)
+        if record_omitted:
+            assert failures[1][TASK_INDEX_KEY_NAME] == 2 and failures[1][NG_OMITTED_ROLLOUT_KEY] is True
+
+    def test_reopening_a_shard_replaces_it(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        RunRecordWriter(tmp_path, "step_1").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
+        replayed = RunRecordWriter(tmp_path, "step_1")
+        replayed.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        assert [row["reward"] for row in self._lines(replayed.rollouts_fpath)] == [1.0]
+
+    @pytest.mark.parametrize("label", ["", "../escape", "step 1", "-step", "one_failures", "x_materialized_inputs"])
+    def test_a_shard_label_that_is_not_a_plain_name_is_refused(self, tmp_path: Path, label: str) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        with pytest.raises(ValueError, match="shard label"):
+            RunRecordWriter(tmp_path, label)
+
+    async def test_run_examples_writes_each_enriched_record_to_its_shard(self, tmp_path: Path) -> None:
+        capture_dir = tmp_path / "capture"
+        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "c1", "first")
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+        row = TestEnrichRunResult._row()
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(row=examples[0], result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0)
+                )
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(Helper().run_examples([row], record_output_dir=run_dir, record_shard="step_3"))
+        _, returned = await completion
+
+        [written] = self._lines(run_dir / "rollouts-step_3.jsonl")
+        assert written == returned
+        assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["c1"]
+        # The routing fields readers group by are stamped as collection stamps them.
+        assert written[AGENT_REF_KEY_NAME] == {"name": "agent"}
+        assert (written[TASK_INDEX_KEY_NAME], written[ROLLOUT_INDEX_KEY_NAME]) == (3, 1)
+
+        with pytest.raises(ValueError, match="record_shard"):
+            Helper().run_examples([row], record_output_dir=run_dir)
+        # A call refused for its options leaves the existing shard as it was.
+        with pytest.raises(ValueError, match="delete_model_call_capture"):
+            Helper().run_examples(
+                [row],
+                record_output_dir=run_dir,
+                record_shard="step_3",
+                include_model_call_payloads=False,
+                delete_model_call_capture=True,
+            )
+        assert self._lines(run_dir / "rollouts-step_3.jsonl") == [written]
+
+    def test_a_shard_whose_every_rollout_failed_still_has_its_rollouts_file(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        writer = RunRecordWriter(tmp_path, "step_9")
+        writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"})
+
+        assert writer.rollouts_fpath.exists() and writer.rollouts_fpath.read_bytes() == b""
+        assert len(self._lines(writer.failures_fpath)) == 1
+
+    def test_a_writer_whose_shard_was_reopened_by_another_refuses_to_write(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        first = RunRecordWriter(tmp_path, "step_4")
+        second = RunRecordWriter(tmp_path, "step_4")
+        second.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            first.write({TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
+        assert [row[TASK_INDEX_KEY_NAME] for row in self._lines(second.rollouts_fpath)] == [0]
+
+    async def test_the_written_record_joins_the_capture_its_row_names(self, tmp_path: Path) -> None:
+        capture_dir = tmp_path / "capture"
+        TestEnrichRunResult._store_call(capture_dir, "g1_g0_a0", "mine", "first")
+        TestEnrichRunResult._store_call(capture_dir, "someone-else", "theirs", "other")
+        global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture_dir)}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict=global_config)
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                future = Future()
+                reply = {"reward": 1.0, ROLLOUT_ID_KEY_NAME: "someone-else"}
+                future.set_result(_CompletedRollout(row=examples[0], result=reply, rollout_latency_ms=1.0))
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples([TestEnrichRunResult._row()], record_output_dir=run_dir, record_shard="s")
+        )
+        await completion
+
+        [written] = self._lines(run_dir / "rollouts-s.jsonl")
+        assert written[ROLLOUT_ID_KEY_NAME] == "g1_g0_a0"
+        assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["mine"]
+
+    def test_a_call_refused_by_dispatch_validation_keeps_the_existing_shard(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        RunRecordWriter(tmp_path, "s").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                raise ValueError("unknown agent")
+
+        with pytest.raises(ValueError, match="unknown agent"):
+            Helper().run_examples([TestEnrichRunResult._row()], record_output_dir=tmp_path, record_shard="s")
+        assert [row["reward"] for row in self._lines(tmp_path / "rollouts-s.jsonl")] == [1.0]
