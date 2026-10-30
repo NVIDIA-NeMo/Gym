@@ -60,7 +60,7 @@ from nemo_gym.artifacts.rollout_rows import (
     _strip_capture_payloads,
 )
 from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
-from nemo_gym.batch_status import BatchStatusTracker
+from nemo_gym.batch_status import BatchStatusTracker, _atomic_write_json, _read_aggregate_entries
 from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -190,6 +190,7 @@ from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
+    batch_status_path_for,
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
@@ -809,7 +810,14 @@ def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dic
     """Keep status identities and failure classes without retaining rollout payloads."""
     status_row = {
         key: result[key]
-        for key in (AGENT_REF_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, NG_FAILURE_CLASS_KEY)
+        for key in (
+            AGENT_REF_KEY_NAME,
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            NG_FAILURE_CLASS_KEY,
+            NG_OMITTED_ROLLOUT_KEY,
+            NG_DISPATCH_DRAINED_KEY,
+        )
         if key in result
     }
     if AGENT_REF_KEY_NAME not in status_row:
@@ -3031,6 +3039,57 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
+def _latest_status_failure_rows(failures_fpath: Path, agent_refs_by_key: Dict[Tuple[int, int], Dict]) -> List[Dict]:
+    """The latest started attempt per rollout in a failures sidecar, compacted to status rows as it is read.
+
+    Unlike ``_latest_failure_rows`` it keeps an interrupted attempt's omitted-rollout row, so run status can clear the
+    older failure it hides, and it never holds a failed rollout's full payload.
+    """
+    latest: Dict[Tuple[Any, Any], Dict] = {}
+    if not failures_fpath.exists():
+        return []
+    with failures_fpath.open("rb") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            row = _batch_status_row(loads_jsonl_line(line, failures_fpath, line_no), agent_refs_by_key)
+            if not is_unstarted_rollout_row(row):
+                latest[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
+    return list(latest.values())
+
+
+def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+    """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
+
+    EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
+    """
+    entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    for path in input_paths:
+        status_fpath = batch_status_path_for(Path(path))
+        # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
+        # reason to fail the aggregation or hide its own error.
+        try:
+            status = orjson.loads(status_fpath.read_bytes())
+            members = status.get("members")
+            if status.get("tracking") != "enabled" or not isinstance(members, dict):
+                continue
+            for agent, member in members.items():
+                entry = entries.get(agent)
+                failed = (
+                    aggregate_metrics_fpath is None
+                    or artifact_error
+                    or entry is None
+                    or AGGREGATION_ERROR_KEY in entry
+                )
+                member["aggregation_status"] = "error" if failed else "complete"
+            _atomic_write_json(status_fpath, status)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            logger.warning(f"Could not update the run status at {status_fpath}.", exc_info=True)
+
+
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
     """The last failed attempt recorded for each rollout across the failures sidecars.
 
@@ -4766,7 +4825,7 @@ class RolloutCollectionHelper(BaseModel):
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
 
-                if batch_tracker is not None:
+                if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
                 agent_name = dispatch_name
@@ -4968,7 +5027,7 @@ class RolloutCollectionHelper(BaseModel):
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
             )
 
-        if batch_tracker is not None:
+        if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
             batch_tracker.write_status(
                 batch_completed_rows,
                 batch_failure_rows,
@@ -6421,6 +6480,8 @@ class RolloutAggregationHelper(BaseModel):
                 aggregate_metrics_fpath=aggregate_metrics_fpath,
                 force=True,
             )
+        else:
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
