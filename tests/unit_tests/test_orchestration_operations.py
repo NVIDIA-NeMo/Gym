@@ -496,3 +496,245 @@ def test_info_says_why_the_config_is_not_available(run_files, reason):
 
     assert described.config is None
     assert reason in described.config_unavailable
+
+
+# --- cancel and cancel_submission ------------------------------------------------------------------------------
+
+
+class _Controller(Terminable, LogReadable):
+    """Answers from a table, stops jobs, reads logs, and keeps the order in which it was asked."""
+
+    def __init__(self, answers=None, *, after=None, refuse=(), job_id=None, lines=("one", "two", "three")):
+        self.answers = answers or {}
+        self.after = after or {}
+        self.refuse = set(refuse)
+        self.job_id = job_id
+        self.lines = lines
+        self.events: list[tuple] = []
+        self.terminated: set[str] = set()
+        self.streamed: list[dict] = []
+
+    def connection_key(self, record):
+        return "local"
+
+    def query_states(self, refs):
+        self.events.append(("query", [ref.job.benchmark for ref in refs]))
+        answered = {}
+        for ref in refs:
+            table = self.after if ref.job.benchmark in self.terminated and ref.key in self.after else self.answers
+            answered[ref.key] = table.get(ref.key, ObservedStatus(state=JobState.SUCCEEDED, job_id=self.job_id))
+        return answered
+
+    def terminate(self, record, job):
+        self.events.append(("terminate", job.benchmark))
+        if job.benchmark in self.refuse:
+            raise PermissionError("scancel: error: Access/permission denied")
+        self.terminated.add(job.benchmark)
+
+    def stream_logs(self, record, job, *, source, tail, follow):
+        self.streamed.append({"source": source, "tail": tail, "follow": follow})
+        return iter(self.lines)
+
+
+def _state(state: JobState, **fields) -> ObservedStatus:
+    return ObservedStatus(state=state, **fields)
+
+
+def test_cancel_asks_then_stops_then_reports_what_it_sees_next():
+    key = ("a", "gsm8k")
+    controller = _Controller({key: _state(JobState.RUNNING)}, after={key: _state(JobState.CANCELLED)})
+
+    result = operations.cancel(controller, _submission("a"), "gsm8k")
+
+    assert controller.events == [("query", ["gsm8k"]), ("terminate", "gsm8k"), ("query", ["gsm8k"])]
+    assert result.state is JobState.CANCELLED
+
+
+def test_cancel_may_see_the_job_still_running_because_the_scheduler_takes_a_moment():
+    key = ("a", "gsm8k")
+    controller = _Controller({key: _state(JobState.RUNNING)})
+
+    assert operations.cancel(controller, _submission("a"), "gsm8k").state is JobState.RUNNING
+
+
+@pytest.mark.parametrize("finished", [JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED])
+def test_cancel_leaves_a_job_that_has_finished_alone(finished):
+    controller = _Controller({("a", "gsm8k"): _state(finished)})
+
+    result = operations.cancel(controller, _submission("a"), "gsm8k")
+
+    assert result.state is finished
+    assert [event for event in controller.events if event[0] == "terminate"] == []
+
+
+def test_cancel_tries_a_job_the_scheduler_does_not_know_about():
+    controller = _Controller({("a", "gsm8k"): _state(JobState.UNKNOWN)})
+
+    operations.cancel(controller, _submission("a"), "gsm8k")
+
+    assert ("terminate", "gsm8k") in controller.events
+
+
+def test_a_refusal_from_the_scheduler_is_raised_for_the_caller_to_report():
+    controller = _Controller({("a", "gsm8k"): _state(JobState.RUNNING)}, refuse=("gsm8k",))
+
+    with pytest.raises(PermissionError, match="permission denied"):
+        operations.cancel(controller, _submission("a"), "gsm8k")
+
+
+def test_cancelling_a_benchmark_that_is_not_there_names_the_known_ones_before_asking_anything():
+    controller = _Controller()
+
+    with pytest.raises(ValueError, match="has no benchmark 'nope'; it has: gsm8k"):
+        operations.cancel(controller, _submission("a"), "nope")
+
+    assert controller.events == []
+
+
+def test_cancelling_a_whole_submission_needs_its_id_and_asks_nothing_without_it():
+    controller = _Controller()
+
+    with pytest.raises(ValueError, match="needs its id as confirmation; got 'wrong'"):
+        operations.cancel_submission(controller, _submission("a"), confirm="wrong")
+
+    assert controller.events == []
+
+
+def test_cancelling_a_whole_submission_stops_only_the_live_benchmarks_and_keeps_the_record_order():
+    record = _submission("a", benchmarks=("done", "running", "queued"))
+    controller = _Controller(
+        {
+            ("a", "done"): _state(JobState.SUCCEEDED),
+            ("a", "running"): _state(JobState.RUNNING),
+            ("a", "queued"): _state(JobState.QUEUED),
+        },
+        after={("a", "running"): _state(JobState.CANCELLED), ("a", "queued"): _state(JobState.CANCELLED)},
+    )
+
+    results = operations.cancel_submission(controller, record, confirm="a")
+
+    assert [event for event in controller.events if event[0] == "terminate"] == [
+        ("terminate", "running"),
+        ("terminate", "queued"),
+    ]
+    assert [(job.benchmark, job.state) for job in results] == [
+        ("done", JobState.SUCCEEDED),
+        ("running", JobState.CANCELLED),
+        ("queued", JobState.CANCELLED),
+    ]
+
+
+def test_one_benchmark_that_cannot_be_stopped_is_reported_on_its_own_and_the_others_still_are():
+    record = _submission("a", benchmarks=("refused", "fine"))
+    controller = _Controller(
+        {("a", "refused"): _state(JobState.RUNNING), ("a", "fine"): _state(JobState.RUNNING)},
+        after={("a", "fine"): _state(JobState.CANCELLED)},
+        refuse=("refused",),
+    )
+
+    refused, fine = operations.cancel_submission(controller, record, confirm="a")
+
+    assert refused.state is JobState.RUNNING
+    assert refused.failure.category is FailureCategory.CANCELLED
+    assert "permission denied" in refused.failure.message
+    assert (fine.state, fine.failure) == (JobState.CANCELLED, None)
+
+
+def test_cancelling_a_submission_whose_benchmarks_all_finished_stops_nothing():
+    controller = _Controller()
+
+    results = operations.cancel_submission(controller, _submission("a", benchmarks=("x", "y")), confirm="a")
+
+    assert [job.state for job in results] == [JobState.SUCCEEDED, JobState.SUCCEEDED]
+    assert [event for event in controller.events if event[0] == "terminate"] == []
+
+
+# --- logs ------------------------------------------------------------------------------------------------------
+
+
+def _logged() -> SubmissionRecord:
+    return _record(
+        log_sources=[
+            LogSource(name="driver", kind="driver", location="logs/driver-{job_id}.log"),
+            LogSource(name="vllm", kind="service", location="logs/vllm-{job_id}.log"),
+            LogSource(name="worker", kind="service", instance="0", location="logs/worker-0-{job_id}.log"),
+            LogSource(name="worker", kind="service", instance="1", location="logs/worker-1-{job_id}.log"),
+        ]
+    )
+
+
+def test_logs_fill_the_observed_job_id_into_the_location_and_hand_over_tail_and_follow():
+    record = _logged()
+    controller = _Controller({(record.gym_job_id, "gsm8k"): _state(JobState.RUNNING, job_id="12400")})
+
+    lines = list(operations.logs(controller, record, "gsm8k", tail=50, follow=True))
+
+    assert lines == ["one", "two", "three"]
+    (call,) = controller.streamed
+    assert call["source"].location == "logs/driver-12400.log"
+    assert (call["tail"], call["follow"]) == (50, True)
+
+
+def test_logs_fall_back_to_the_recorded_job_id_when_the_scheduler_reports_none():
+    record = _logged()
+    controller = _Controller({(record.gym_job_id, "gsm8k"): _state(JobState.UNKNOWN)})
+
+    list(operations.logs(controller, record, "gsm8k", source="vllm"))
+
+    assert controller.streamed[0]["source"].location == "logs/vllm-12345.log"
+
+
+def test_logs_of_a_benchmark_that_was_never_queued_say_so():
+    record = _submission("a", error="sbatch: error: bad account")
+    record = record.model_copy(
+        update={
+            "benchmarks": [
+                record.benchmarks[0].model_copy(
+                    update={"log_sources": [LogSource(name="driver", kind="driver", location="logs/d-{job_id}.log")]}
+                )
+            ]
+        }
+    )
+
+    with pytest.raises(ValueError, match="No job was queued for gsm8k of a"):
+        operations.logs(_Controller({("a", "gsm8k"): _state(JobState.FAILED)}), record, "gsm8k")
+
+
+@pytest.mark.parametrize(
+    ("source", "instance", "message"),
+    [
+        ("nope", None, r"No log source 'nope' for gsm8k; known: driver, vllm, worker\."),
+        ("worker", None, r"worker has instances: 0, 1; pick one with --instance\."),
+        ("vllm", "0", r"No instance '0' of vllm for gsm8k; instances: none, this source is not split by instance\."),
+        ("worker", "9", r"No instance '9' of worker for gsm8k; instances: 0, 1\."),
+    ],
+)
+def test_a_log_request_that_matches_nothing_lists_what_exists_before_any_output(source, instance, message):
+    controller = _Controller()
+
+    with pytest.raises(ValueError, match=message):
+        operations.logs(controller, _logged(), "gsm8k", source=source, instance=instance)
+
+    assert controller.events == []
+
+
+def test_an_instance_picks_that_instances_log():
+    record = _logged()
+    controller = _Controller({(record.gym_job_id, "gsm8k"): _state(JobState.RUNNING, job_id="7")})
+
+    list(operations.logs(controller, record, "gsm8k", source="worker", instance="1"))
+
+    source = controller.streamed[0]["source"]
+    assert (source.instance, source.location) == ("1", "logs/worker-1-7.log")
+
+
+def test_a_submission_that_recorded_no_log_sources_points_at_the_logs_directory():
+    record = _record()
+
+    with pytest.raises(ValueError, match="submitted before they were tracked.*gsm8k/logs on the cluster"):
+        operations.logs(_Controller(), record, "gsm8k")
+
+
+def test_logs_of_a_benchmark_that_is_not_there_name_the_known_ones():
+    with pytest.raises(ValueError, match="has no benchmark 'nope'; it has: gsm8k"):
+        operations.logs(_Controller(), _logged(), "nope")
