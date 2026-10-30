@@ -600,3 +600,46 @@ async def test_task_group_keeps_unrelated_canonical_failures():
     with pytest.raises(ExceptionGroup) as caught:
         await _gather_or_cancel([fail(unrelated)])
     assert caught.value.exceptions == (unrelated,)
+
+
+async def test_task_group_keeps_a_judge_failures_own_cause_and_cancels_siblings():
+    """The first judge failure leaves the task group with its own cause, and its siblings are cancelled."""
+    import asyncio
+
+    from nemo_gym.core import JUDGE_FAILED
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import failure_report_for
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
+    )
+    judge = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind=JUDGE_FAILED, failure_reason="judge failed"
+    )
+    sibling_cancelled = asyncio.Event()
+
+    async def fail():
+        raise judge from model
+
+    async def sibling():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await _gather_or_cancel([sibling(), fail()])
+
+    assert caught.value is judge and caught.value.__cause__ is model
+    assert caught.value.__suppress_context__  # the TaskGroup's own exception group is not chained in
+    assert sibling_cancelled.is_set()
+    report = failure_report_for(caught.value)
+    assert report.failure_id == judge.event_id and model.event_id in report.events
+
+
+async def test_task_group_returns_results_in_order():
+    async def value(v):
+        return v
+
+    assert await _gather_or_cancel([value(1), value(2)]) == [1, 2]

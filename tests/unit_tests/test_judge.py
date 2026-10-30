@@ -253,3 +253,68 @@ async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
         assert failed.post.call_args.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
     await _call(client)
     assert "headers" not in client.post.call_args.kwargs
+
+
+async def test_a_judge_failure_a_caller_retries_past_stays_an_observation():
+    """A consumer that retries after a judge failure and then succeeds still reports that failure, once."""
+    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.judge import reraise_judge_errors
+
+    async def unreachable():
+        raise ConnectionError("judge unreachable")
+
+    async def verdict():
+        return "verdict"
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await reraise_judge_errors(unreachable())
+        # A canonical judge failure passed through again is the same event, not a second one.
+        with pytest.raises(NgFailureEvent):
+            await reraise_judge_errors(_raise(caught.value))
+        assert await reraise_judge_errors(verdict()) == "verdict"
+        report = log.reply_report(None)
+
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    assert report.failure_id is None  # the request succeeded
+    assert list(report.events) == [caught.value.event_id]
+
+
+async def test_a_recovered_judge_failure_keeps_its_model_cause_in_the_success_report():
+    """MODEL -> JUDGE: the observation a successful retry leaves names the model failure as the judge's cause."""
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.judge import reraise_judge_errors
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model refused"
+    )
+
+    async def verdict():
+        return "verdict"
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await reraise_judge_errors(_raise(model))
+        assert await reraise_judge_errors(verdict()) == "verdict"
+        report = log.reply_report(None)
+
+    judge = caught.value
+    assert judge is not model and judge.__cause__ is model
+    assert report.failure_id is None
+    assert set(report.events) == {judge.event_id, model.event_id}
+    assert report.events[judge.event_id].cause_id == model.event_id
+
+
+async def test_a_parser_judge_error_is_not_observed():
+    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.judge import reraise_judge_errors
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(JudgeError):
+            await reraise_judge_errors(_raise(JudgeError("no verdict tag")))
+        assert log.reply_report(None).events == {}
+
+
+async def _raise(error: BaseException):
+    raise error

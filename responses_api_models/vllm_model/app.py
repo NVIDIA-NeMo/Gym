@@ -59,6 +59,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.responses_converter import (
     VLLMConverter,
@@ -80,6 +81,7 @@ from nemo_gym.token_id_capture.external_capture import (
     validate_framework_context_options,
 )
 from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
+from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -703,6 +705,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                             }
                         },
                         status_code=error.status,
+                        headers=FailureHeader.encode(failure_report_for(error)),
                     )
                 raise
 

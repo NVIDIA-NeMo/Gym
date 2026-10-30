@@ -52,7 +52,7 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.exception_inspection import bounded_text
-from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
+from nemo_gym.failure_transport import FailureReportRow, observe_failure, report_for_current_request
 from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 
@@ -121,9 +121,15 @@ async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
     try:
         return await coro
     except Exception as e:
-        if is_judge_failure(e):
+        failure = e if is_judge_failure(e) else _judge_error(e)
+        if failure is not e:
+            failure.__cause__ = e  # set before recording, so the observation carries the cause chain
+        # Recorded before the caller decides: a retry that then succeeds keeps it as an observation.
+        if isinstance(failure, NgFailureEvent):
+            observe_failure(failure)
+        if failure is e:
             raise
-        raise _judge_error(e) from e
+        raise failure from e
 
 
 async def call_judge(

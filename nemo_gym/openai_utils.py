@@ -53,7 +53,7 @@ from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.failure_transport import FailureHeader, observe_failure
 from nemo_gym.server_utils import ClientResponseError
-from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors
@@ -387,7 +387,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # A Gym server's reply already forwards its own record; it is not recorded twice.
             forwarded = FailureHeader.decode(getattr(response, "headers", None))
             if forwarded is not None and forwarded.failure_id is not None:
-                return None
+                return rebuild_failure(forwarded)
             failure = _model_attempt_failure(
                 f"HTTP {response.status} from the model server",
                 operation_id=operation_id,

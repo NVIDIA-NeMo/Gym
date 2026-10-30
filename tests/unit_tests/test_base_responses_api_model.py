@@ -1800,3 +1800,49 @@ def test_invalid_verifier_id_does_not_hide_the_captured_call(tmp_path, invocatio
     assert [call["model_call_id"] for call in capture["calls"]] == ["actual-call"]
     assert not capture.get("verifier_invocations")
     assert "model_call_capture_records_unreadable" in {gap["code"] for gap in capture["gaps"]}
+
+
+def test_a_handled_upstream_error_reply_names_its_failure():
+    """A 422 the model server answers itself keeps its status and body, and its failure header names the
+    original model failure as the final one."""
+    from aiohttp import ClientResponseError
+
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="HTTP 422 from the model",
+        operation="model_request",
+        http_status=422,
+    )
+    reply_body = b'{"error":{"message":"context length exceeded"}}'
+
+    class UpstreamRejects(SimpleResponsesAPIModel):
+        async def chat_completions(self, request, body):
+            raise NotImplementedError
+
+        async def responses(self, request, body):
+            error = ClientResponseError(
+                SimpleNamespace(real_url="http://upstream"),
+                (),
+                status=422,
+                message="Unprocessable Entity",
+                headers={"Content-Type": "application/json"},
+            )
+            error.response_content = reply_body
+            raise error from model
+
+    config = BaseResponsesAPIModelConfig(host="", port=0, openai_api_key="123", entrypoint="", name="policy")
+    server_client = MagicMock(spec=ServerClient)
+    server_client.global_config_dict = {}
+    app = UpstreamRejects(config=config, server_client=server_client).setup_webserver()
+
+    response = TestClient(app).post("/v1/responses", json={"input": "x"})
+
+    assert response.status_code == 422 and response.content == reply_body
+    assert response.headers["content-type"].startswith("application/json")
+    report = FailureHeader.decode(response.headers)
+    assert report is not None and report.failure_id == model.event_id

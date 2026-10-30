@@ -77,6 +77,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
@@ -118,6 +119,7 @@ from nemo_gym.token_id_capture.protocols import (
 )
 from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
@@ -414,6 +416,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 content=getattr(error, "response_content", error.message),
                 status_code=error.status,
                 media_type=(error.headers or {}).get("Content-Type", "application/json"),
+                # The handled error ends the request: its own failure chain is the reply's final failure.
+                headers=FailureHeader.encode(failure_report_for(error)),
             )
 
         self.setup_session_middleware(app)

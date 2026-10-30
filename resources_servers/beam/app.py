@@ -253,7 +253,8 @@ async def _gather_or_cancel(coros: List[Awaitable[Any]]) -> List[Any]:
         _, other = group.split(is_judge_failure)
         if other is not None:
             raise
-        raise group.exceptions[0] from None
+        first = group.exceptions[0]
+        raise first from first.__cause__
     return [t.result() for t in tasks]
 
 
