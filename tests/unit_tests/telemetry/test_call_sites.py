@@ -611,7 +611,7 @@ def test_dispatch_span_omits_a_repeat_that_is_not_an_index(recorded_spans):
 def _write_rollout_input(tmp_path, n: int):
     import json as _json
 
-    from nemo_gym.global_config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+    from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
 
     path = tmp_path / "input.jsonl"
     path.write_text(

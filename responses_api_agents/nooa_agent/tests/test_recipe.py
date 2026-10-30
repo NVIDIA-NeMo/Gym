@@ -87,7 +87,7 @@ def test_swe_recipe_uses_borrowed_sandbox_and_single_agent_turn_environment() ->
     from omegaconf import OmegaConf
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionHelper
     from nemo_gym.sandbox import AsyncSandbox
     from resources_servers.swebench_pro.app import SWEBenchProResourcesServerConfig

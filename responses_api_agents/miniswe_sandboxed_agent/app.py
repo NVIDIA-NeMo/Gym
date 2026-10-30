@@ -10,6 +10,7 @@ from collections.abc import Mapping
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
+from functools import cache
 from pathlib import Path
 from time import monotonic, time
 from typing import Any, ClassVar, Literal
@@ -27,19 +28,23 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import OBSERVABILITY_ENABLED_KEY_NAME, get_global_config_dict
+from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
 from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.transfer import SandboxUnavailableError
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxUnavailableError,
+    create_provider,
+    resolve_provider_config,
+)
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     get_response_json,
     get_server_url,
     is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
     raise_for_status,
 )
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
@@ -59,6 +64,24 @@ from responses_api_agents.miniswe_sandboxed_agent.models import (
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Episode sessions under an environment server are not deprecated; only the flat /run path, which a configured
+# resources_server selects, is.
+DEPRECATION_WARNING = (
+    "DEPRECATED: miniswe_sandboxed_agent is configured for its legacy /run path (resources_server is set), which "
+    "will be removed after the environment-server migration. Run Harbor tasks on episode sessions instead "
+    "(gym eval run <tasks> --agent miniswe_sandboxed_agent; for TB4, gym eval run terminal_bench_4 --agent "
+    "miniswe_sandboxed_agent). Terminal-Bench-Science has no session path yet and keeps working here. "
+    "See responses_api_agents/miniswe_sandboxed_agent/README.md#harbor-episodes."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
+
 
 # The harbor resources server leaves the task's in-sandbox tool declarations here at seed time.
 TASK_CONTEXT_FILE = "/tmp/.nemo-gym/task.json"
@@ -209,6 +232,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: object) -> None:
         super().model_post_init(context)
+        if self.config.resources_server is not None:
+            _warn_deprecated_once()
         self._runs = {}
         self._sessions: dict[tuple[str, str], MiniSWESession] = {}
         self._finalizers = set()

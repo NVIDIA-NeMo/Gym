@@ -8,7 +8,7 @@ import logging
 import pytest
 
 import nemo_gym.exporters as exporters_module
-from nemo_gym.global_config import reset_global_config_dict
+from nemo_gym.config.global_config import reset_global_config_dict
 
 
 @pytest.fixture(autouse=True)

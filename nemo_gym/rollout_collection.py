@@ -49,7 +49,7 @@ from tqdm.asyncio import tqdm
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
@@ -59,12 +59,7 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureReport, is_materialized_task_row
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.failure_kinds import CANCELLED, COLLECTION_DISPATCH_FAILED, JUDGE_FAILED, is_namespaced, is_registered
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -88,6 +83,11 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.episode_types import EpisodeId, FailureBoundary, FailureReport, is_materialized_task_row
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.failure_kinds import CANCELLED, COLLECTION_DISPATCH_FAILED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -4559,7 +4559,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """Stamp an agent_ref onto every row that carries only a task_source.
 
         task_source names the config instance that declared the row's dataset. Resolution is
-        :func:`~nemo_gym.global_config.resolve_dataset_agent` — the same rules benchmark
+        :func:`~nemo_gym.config.global_config.resolve_dataset_agent` — the same rules benchmark
         discovery uses, so dispatch can never disagree with the listing. Conflicting `agent:`
         pins across one instance's datasets are a hard error (rows carry only the instance
         name), as are unknown/non-routable instances; +agent_map is the disambiguator.

@@ -12,7 +12,8 @@ import pytest
 from nemo_gym.agent_utils import supervisor_client
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession, shell_assignments
 from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 

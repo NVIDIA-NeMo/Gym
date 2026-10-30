@@ -104,16 +104,21 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
 )
-from nemo_gym.config_types import TOKEN_CAPTURE_PATH_SEGMENT, AgentServerRef, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.config import (
+    TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
+    AgentServerRef,
+    AggregateMetrics,
+    AggregateMetricsRequest,
+    get_first_server_config_dict,
+    get_global_config_dict,
+)
 from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, FailureBoundary, TaskId
 from nemo_gym.failure_kinds import EPISODE_FAILED
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict, get_global_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse
 from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose
-from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.sandbox.providers.base import sandbox_credentials_rejected
+from nemo_gym.sandbox import AsyncSandbox, AsyncSandboxCompose, SandboxAccess, sandbox_credentials_rejected
 from nemo_gym.server_utils import (
     get_response_json,
     is_nemo_gym_fastapi_entrypoint,

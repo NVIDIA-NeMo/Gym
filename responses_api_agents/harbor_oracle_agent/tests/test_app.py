@@ -11,7 +11,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.transfer import TRANSFER_USER
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.publish import answer_write_command

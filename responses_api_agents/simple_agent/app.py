@@ -72,7 +72,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ROLLOUT_PATH_PREFIX, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, FailureBoundary
 from nemo_gym.exception_inspection import explicit_causes
 from nemo_gym.failure_kinds import (

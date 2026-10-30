@@ -70,7 +70,7 @@ from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 
 from nemo_gym import WORKING_DIR
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     DEFAULT_UVICORN_BACKLOG,
     ROLLOUT_PATH_PREFIX,
     TOKEN_CAPTURE_PATH_SEGMENT,
@@ -79,8 +79,7 @@ from nemo_gym.config_types import (
     BaseServerConfig,
     HeadServerUnreachableError,
 )
-from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, observe_reply
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -94,6 +93,7 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
+from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, observe_reply
 from nemo_gym.profiling import Profiler
 from nemo_gym.rollout_correlation import (
     ROUTED_PATH_STATE_KEY,

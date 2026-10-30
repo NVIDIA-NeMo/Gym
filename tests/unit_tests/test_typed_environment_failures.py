@@ -22,7 +22,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
+from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, FailureReport, MaterializedTask, TaskId
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, NeMoGymResponse

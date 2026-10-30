@@ -12,7 +12,7 @@ from time import perf_counter
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.judge import call_judge
 from nemo_gym.openai_utils import NeMoGymChatCompletion, NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient

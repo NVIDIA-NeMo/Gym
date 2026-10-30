@@ -55,51 +55,49 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture import (
-    TOKEN_ENTRY_MIN_SCHEMA_VERSION,
-    TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
-    TOKEN_FIELDS,
-    CaptureContext,
-    LineageResolution,
-    ParentResolutionStatus,
-    TokenCaptureStore,
-    TokenEntry,
-    TokenIdCaptureConfig,
-    capture_engine_refusal,
-    capture_tokens,
-    commit_entry,
-    compute_digest,
-    cumulative_tokens,
-    current_capture_context,
-    extract_token_fields,
-    install_token_sink,
-    register_call_intent,
-    reset_token_sink,
-    resolve_parent,
-    set_token_sink,
-    stamp_continuation,
-    stamp_lineage,
-)
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.config import TokenIdCaptureConfig, token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.external_capture import TOKEN_FIELDS
 from nemo_gym.token_id_capture.fingerprint import assistant_fingerprint, conversation_digest
 from nemo_gym.token_id_capture.lineage import (
     FileLineageStore,
     LineageIndex,
     RolloutLineage,
+    stamp_continuation,
 )
 from nemo_gym.token_id_capture.protocols import (
     LineageMatch,
+    LineageResolution,
     TokenCaptureFrozenError,
     TokenCaptureRetiredError,
     TokenSource,
+    install_token_sink,
 )
 from nemo_gym.token_id_capture.records import (
     ENGINE_REFUSED_CALL_REASON,
+    TOKEN_ENTRY_MIN_SCHEMA_VERSION,
+    TOKEN_ENTRY_RECORD_SCHEMA_VERSION,
     UNCOMMITTED_CALL_REASON,
     UNSERVED_CALL_FAILURE_REASONS,
+    ParentResolutionStatus,
+    TokenEntry,
+    compute_digest,
+    cumulative_tokens,
+    extract_token_fields,
     response_finish_reason,
+    stamp_lineage,
 )
-from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.token_id_capture.sink import (
+    CaptureContext,
+    capture_engine_refusal,
+    capture_tokens,
+    commit_entry,
+    current_capture_context,
+    register_call_intent,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+)
+from nemo_gym.token_id_capture.store import TokenCaptureStore, make_token_store
 
 
 _ASSISTANT_TURN = {
@@ -1936,7 +1934,7 @@ def test_a_sink_without_mark_incomplete_is_refused_at_install():
         async def put(self, entry):
             raise RuntimeError("transport down")
 
-    from nemo_gym.token_id_capture import installed_token_sink
+    from nemo_gym.token_id_capture.protocols import installed_token_sink
 
     with pytest.raises(TypeError, match="mark_incomplete"):
         install_token_sink(_PutOnlySink())
@@ -2995,7 +2993,7 @@ def test_a_programmatically_installed_sink_does_not_reach_a_spawned_worker():
 
 def _report_installed_sink(queue) -> None:
     # Runs in the spawned process, which re-imports rather than inheriting.
-    from nemo_gym.token_id_capture import installed_token_sink
+    from nemo_gym.token_id_capture.protocols import installed_token_sink
 
     queue.put(repr(installed_token_sink()))
 

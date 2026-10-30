@@ -31,7 +31,7 @@ from environment_servers.nemo_user_sim.app import (
 )
 from environment_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest, UserSimEpisodeResult
 from nemo_gym.base_environment_server import is_handled_episode_failure
-from nemo_gym.config_types import AgentServerRef, ModelServerRef, ResourcesServerRef
+from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.rollout_collection import _episode_record
 from nemo_gym.server_utils import SESSION_ID_KEY, BaseServerConfig, ServerClient
