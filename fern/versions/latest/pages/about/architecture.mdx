@@ -110,6 +110,10 @@ Gym servers communicate over async HTTP (aiohttp) with:
 
 Sandbox execution and file transfer are not Gym HTTP calls. They use the configured sandbox provider's transport, such as HTTP, gRPC, a Docker CLI, or a local subprocess.
 
+## Where the Code Lives
+
+Each server type has its own top-level directory: `resources_servers/`, `responses_api_agents/`, `responses_api_models/`, and `environment_servers/`. What they share lives in the `nemo_gym` library, which is split into layered packages. For the full map, see [Repository Layout](/api/reference/api-reference#repository-layout).
+
 ## Next Steps
 
 <Cards>
