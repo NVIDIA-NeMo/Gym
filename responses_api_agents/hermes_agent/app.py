@@ -592,7 +592,15 @@ class HermesAgent(SimpleResponsesAPIAgent):
                     ToolCallObservation.model_validate(tool) for tool in raw_observations.get("tools") or []
                 )
                 records.extend(
-                    ContextCompactionObservation.model_validate(compaction)
+                    ContextCompactionObservation.model_validate(
+                        {
+                            **compaction,
+                            "model_calls": [
+                                {**ref, "model_ref": self.config.model_server}
+                                for ref in compaction.get("model_calls", [])
+                            ],
+                        }
+                    )
                     for compaction in raw_observations.get("compactions") or []
                 )
                 return AgentObservationBundle(
