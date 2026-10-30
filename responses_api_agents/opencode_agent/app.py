@@ -963,10 +963,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             raise HTTPException(
                 422, "OpenCode sandbox max_output_tokens must be positive and not exceed context_window"
             )
-        unsupported = self.config.opencode_config.keys() - {"permission", "tools"}
+        # Provider and other host settings must not be copied into the task sandbox; compaction is OpenCode's own
+        # history handling, which training runs turn off so the captured conversation stays the one the model saw.
+        unsupported = self.config.opencode_config.keys() - {"permission", "tools", "compaction"}
         if unsupported:
             raise HTTPException(
-                422, f"OpenCode sandbox config supports permission/tools only; unsupported: {sorted(unsupported)}"
+                422,
+                f"OpenCode sandbox config supports permission/tools/compaction only; unsupported: {sorted(unsupported)}",
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")

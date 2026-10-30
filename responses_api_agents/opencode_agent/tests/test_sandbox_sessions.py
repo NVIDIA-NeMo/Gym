@@ -841,6 +841,20 @@ def test_invalid_seed_never_connects(setup, option):
     sandbox.exec.assert_not_awaited()
 
 
+def test_compaction_settings_reach_the_sandboxed_opencode(setup):
+    """A training recipe turns OpenCode's history compaction off; the sandbox session must honor it."""
+    agent, sandbox = setup
+    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        result = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "Fix the code"})
+        assert result.status_code == 200, result.text
+        config = json.loads(sandbox.params()["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["compaction"] == {"auto": False, "prune": False}
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
+
+
 def test_several_workers_seed_sessions(setup):
     """Session routing sends a session's later requests to the worker that seeded it."""
     agent, sandbox = setup

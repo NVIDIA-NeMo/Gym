@@ -182,7 +182,7 @@ def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F81
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=body)
     assert response.status_code == 422
-    assert "permission/tools only" in response.json()["detail"]
+    assert "permission/tools/compaction only" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
 
 
