@@ -1090,6 +1090,23 @@ def test_workspace_paths_take_one_segment_per_name() -> None:
     assert saved_download("gdrive", "list_files", {}, answer, folder="/w", limit=10, file_id="F1", name=None) is None
 
 
+def test_an_export_to_an_office_format_is_saved_under_its_extension() -> None:
+    office = "application/vnd.openxmlformats-officedocument"
+    for mime_type, extension in [
+        (f"{office}.wordprocessingml.document", ".docx"),
+        (f"{office}.spreadsheetml.sheet", ".xlsx"),
+        (f"{office}.presentationml.presentation", ".pptx"),
+    ]:
+        answer = {"mimeType": mime_type, "contentBase64": base64.b64encode(b"PK\x03\x04").decode()}
+        params = {"file_id": "F_DOC", "mime_type": mime_type}
+        saved = saved_download(
+            "gdrive", "export_file", params, answer, folder="/w/drive", limit=8192, file_id="F_DOC", name="Policy"
+        )
+        assert saved is not None
+        out, target, data = saved
+        assert target == f"/w/drive/F_DOC/Policy{extension}" and data == b"PK\x03\x04" and "content" not in out
+
+
 # Box, SharePoint and OneDrive: their file content stays out of the conversation as Drive's does.
 
 SP_DOCS, OD_ME = "b!opsdocs", "b!alexdrive"
