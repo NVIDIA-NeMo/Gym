@@ -144,9 +144,9 @@ def test_server_suite_exit_status(tmp_path: Path, monkeypatch: MonkeyPatch, capf
     config = OmegaConf.create({"uv_cache_dir": str(tmp_path / "uv-cache")})
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.cli.setup_command.get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.cli.setup_command.stdout", sys.stdout)
-    monkeypatch.setattr("nemo_gym.cli.setup_command.stderr", sys.stderr)
+    monkeypatch.setattr("nemo_gym.orchestration.server_venv.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stderr", sys.stderr)
     monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
     # Reuse this interpreter's pytest instead of installing a venv for each synthetic server.
     monkeypatch.setattr(
@@ -209,9 +209,9 @@ def test_server_suite_setup_only_installs_every_venv_without_running_tests(
 
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.cli.setup_command.get_global_config_dict", lambda: config)
-    monkeypatch.setattr("nemo_gym.cli.setup_command.stdout", sys.stdout)
-    monkeypatch.setattr("nemo_gym.cli.setup_command.stderr", sys.stderr)
+    monkeypatch.setattr("nemo_gym.orchestration.server_venv.get_global_config_dict", lambda: config)
+    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stdout", sys.stdout)
+    monkeypatch.setattr("nemo_gym.orchestration.server_venv.stderr", sys.stderr)
     monkeypatch.setattr(nemo_gym.cli.env, "component_search_roots", lambda: [tmp_path])
     monkeypatch.setattr(nemo_gym.cli.env, "setup_env_command", fake_setup)
 
