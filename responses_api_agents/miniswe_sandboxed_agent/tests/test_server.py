@@ -968,7 +968,7 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     from omegaconf import OmegaConf
 
     from nemo_gym.client import server_client
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core import rollout_context
     from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
     from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
     from nemo_gym.orchestration.recovery import _policy_evidence
@@ -1147,8 +1147,7 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     from omegaconf import OmegaConf
 
     from nemo_gym.client import server_client
-    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.core.episode import rollout_context
+    from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, rollout_context
     from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
     from nemo_gym.failure_transport import FailureReportRow
     from nemo_gym.orchestration.recovery import _policy_evidence, _policy_replay_is_unsupported

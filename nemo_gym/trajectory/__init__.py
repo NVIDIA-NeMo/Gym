@@ -41,6 +41,7 @@ if TYPE_CHECKING:
         TrajectoryToolCall,
         TrajectoryTurn,
         VerifierInvocation,
+        failure_observations,
     )
 
 
@@ -67,6 +68,7 @@ _PUBLIC_API = {
     "TrajectoryTurn": "trajectory_record",
     "VerifierInvocation": "trajectory_record",
     "encode_atif_trajectory": "atif_export",
+    "failure_observations": "trajectory_record",
     "transcript_to_atif": "atif_export",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
