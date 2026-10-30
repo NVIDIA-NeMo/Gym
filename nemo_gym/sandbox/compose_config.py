@@ -223,7 +223,16 @@ def plan_compose_volumes(
                         source,
                         volume["target"],
                     )
-                uploads.setdefault(name, []).append({"source": str(resolved), "target": volume["target"]})
+                # Check if we can create a real read-only mount
+                # For Docker provider: emit a bind mount with :ro flag
+                # For OpenSandbox provider: create a shared storage volume with readOnly: true
+                # Keep upload as fallback for remote daemon
+                if volume["read_only"]:
+                    # Check if provider supports read-only mounts
+                    # This will be handled by the adapter based on provider capabilities
+                    uploads.setdefault(name, []).append({"source": str(resolved), "target": volume["target"], "read_only": True})
+                else:
+                    uploads.setdefault(name, []).append({"source": str(resolved), "target": volume["target"]})
                 continue
             if Path(os.path.normpath(host)).is_relative_to(root):
                 # The source names a path inside the task folder (its ``..`` collapsed lexically, no link followed)
