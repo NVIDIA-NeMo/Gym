@@ -12,13 +12,17 @@ Looking to use an existing environment rather than build your own? See the [Avai
 </Tip>
 
 <Note>
-These guides focus on resources server implementation — tools, state management, and verification logic. For verification pattern reference (equivalence match, execution-based checking, LLM-as-Judge, reward models), see [Verification Patterns](/build-verifiers/verification-patterns). For data preparation, see [Prepare Data](/data). For agent harness setup, see [Agent Server](/agent-server). For running and analyzing evaluations, see [Evaluation](/evaluation).
+These guides define tasks as JSONL rows plus a Resources Server, and focus on the Resources Server's implementation — tools, state management, and verification logic. For verification pattern reference (equivalence match, execution-based checking, LLM-as-Judge, reward models), see [Verification Patterns](/build-verifiers/verification-patterns). For data preparation, see [Prepare Tasks](/data). For agent harness setup, see [Agent Server](/agent-server). For running and analyzing evaluations, see [Evaluation](/evaluation).
 </Note>
+
+<Info>
+NeMo Gym also runs tasks defined as task folders in the Harbor format. Each folder holds the task's instruction, container environment, and verifier, and the `harbor` Environment Server runs it with no Resources Server to write. To build tasks that way, start with [Author Task Folders](/main/data/harbor-tasks). To see how Environment Servers, `harbor` included, order an episode, see [Design Agent Interactions](/main/agent-interactions).
+</Info>
 
 <Accordion title="Key Concepts">
 Before diving in, review these foundational pages:
 
-- [Environment Components](/about/architecture) — Model, Resources, and Agent servers
+- [Environment Components](/about/architecture) — Environment, Agent, Model, and Resources Servers
 - [Verification Patterns](/build-verifiers/verification-patterns) — common scoring approaches (equivalence match, execution and state match, LLM-as-Judge, and more)
 </Accordion>
 

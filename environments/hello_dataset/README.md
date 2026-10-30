@@ -21,7 +21,7 @@ The two tasks are independent. Open either directory and you will find its instr
 export OPENAI_API_KEY="<api-key>"
 
 gym eval run environments/hello_dataset \
-  --agent opencode \
+  --agent opencode_agent \
   --model openai/gpt-5 \
   --sandbox docker
 ```

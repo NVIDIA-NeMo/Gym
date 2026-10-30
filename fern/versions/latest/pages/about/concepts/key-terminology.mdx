@@ -9,7 +9,7 @@ Deeper treatment: [Environments](/about/concepts/environments), [Evaluation](/ab
 
 ## Overview
 
-A **dataset** is a JSONL file of **tasks** (one row = one problem). Running the agent on a task produces a **rollout** (also called a **trajectory**) — one attempt and its record.
+A **dataset** is a JSONL file of **tasks** (one row = one problem) or a folder of **task folders** (one folder = one problem). Running the agent on a task produces a **rollout** (also called a **trajectory**) — one attempt and its record.
 
 Each run follows:
 
@@ -30,9 +30,9 @@ The **model** (also called the **policy**) is what you call for generation — l
 
 | Concept | In NeMo Gym |
 | --- | --- |
-| Dataset | JSONL rows with `responses_create_params` + `verifier_metadata` — [Prepare Data](/data) |
+| Dataset | JSONL rows with `responses_create_params` + `verifier_metadata`, or task folders in the Harbor format — [Prepare Tasks](/main/data) |
 | Agent harness | Implemented by the **Agent server** (`responses_api_agents/`) — [Agent Server](/agent-server) |
-| Verifier, per-attempt state, env tools | Implemented by the **Resources server** (`resources_servers/`): `seed_session()` initializes state; tools mutate it; `verify()` scores the attempt — [Build Verifiers](/build-verifiers) |
+| Verifier, per-attempt state, env tools | Implemented by the **Resources server** (`resources_servers/`): `seed_session()` initializes state; tools mutate it; `verify()` scores the attempt — [Build Verifiers](/build-verifiers). For task folders, the `harbor` **Environment Server** runs the task's own verifier in its sandbox — [Harbor Environment Server](/main/agent-interactions/harbor) |
 | Model | Served by the **Model server** (`responses_api_models/`) — wraps local or remote endpoints — [Model Server](/model-server) |
 | Protocol | **Responses API** (Chat Completions converted via middleware when needed) |
 
@@ -42,8 +42,9 @@ The **model** (also called the **policy**) is what you call for generation — l
 
 | Term | Definition |
 | --- | --- |
-| **Task** | One problem for the agent to solve — one dataset row (`responses_create_params` + `verifier_metadata`). |
-| **Dataset** | Collection of tasks plus metadata needed for scoring (usually JSONL). See [Prepare Data](/data). |
+| **Task** | One problem for the agent to solve — one dataset row (`responses_create_params` + `verifier_metadata`) or one task folder. |
+| **Dataset** | Collection of tasks plus metadata needed for scoring (usually JSONL, or a folder of task folders). See [Prepare Tasks](/main/data). |
+| **Task folder** | One task in the [Harbor](https://github.com/harbor-framework/harbor) format: `task.toml`, `instruction.md`, `environment/`, `tests/` and an optional `solution/`. It carries its own verifier, so no Resources Server takes part. See [Author Task Folders](/main/data/harbor-tasks). |
 | **Rollout / trajectory** | **Rollout** (verb): execute an agent in an environment — take actions and record what happens. **Rollout** (noun) / **trajectory**: the ordered record of one attempt (states, actions, rewards). In Gym these names are aliases; architecture calls the resulting trajectory a *rollout*. Multiple rollouts per task support metrics like pass@k. See [trajectory capabilities](/reference/trajectory-capabilities). |
 | **Task attempt** | One rollout for a specific task. Multiple attempts per task capture different approaches and support pass@k. |
 | **Trace** | Debug-oriented log of a rollout (timing, tool I/O, metadata) beyond the scored trajectory. |
@@ -55,8 +56,9 @@ The **model** (also called the **policy**) is what you call for generation — l
 | Term | Definition |
 | --- | --- |
 | **Environment** | Everything required for an agent to complete a task, excluding the model: `Dataset + Agent Harness + Verifier + State`. See [Environments](/about/concepts/environments) and [Build Environments](/environment-tutorials). |
+| **Environment Server** | Receives each episode and orders it: seed, agent turn, verification and cleanup. See [Design Agent Interactions](/main/agent-interactions). |
 | **State** | Per-attempt mutable world (files, DB, tool results, and so on). `seed_session()` starts a clean session; tools update that session; it is not a snapshot of the whole environment config. |
-| **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server. Also called scorer or grader. See [Build Verifiers](/build-verifiers). |
+| **Verifier** | Scores a task attempt into a **reward** (typically 0–1) via `verify()` on the resources server, or by a task folder's own `tests/` in its sandbox. Also called scorer or grader. See [Build Verifiers](/build-verifiers) and [Task Folder Verifiers](/main/data/task-folder-verifiers). |
 | **Reward** | Numerical score (typically 0.0–1.0) for how well the attempt did — used as eval metrics and as the RL learning signal. |
 | **Sandbox** | Runtime with isolated execution per attempt (e.g. one container). Broader runtimes (local process, Docker, Apptainer) host execution. See [Sandboxes](/infrastructure/sandbox). |
 

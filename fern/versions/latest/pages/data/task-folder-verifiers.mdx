@@ -1,0 +1,174 @@
+---
+title: "Task Folder Verifiers"
+description: "The contract a task folder's tests/ must meet: reward files, Python verifiers, reference answers, sidecar inputs and shared or separate verification."
+position: 7
+---
+
+# Task Folder Verifiers
+
+A task folder carries its own verifier in `tests/`. After the agent's session closes, the `harbor` Environment
+Server runs it inside a sandbox and reads the reward it writes. No Resources Server takes part. This page is the
+contract a verifier must meet. The `[verifier]` fields are listed in
+[Task settings](/main/data/task-folder-format#task-settings).
+
+## How the verifier runs
+
+In the default shared mode, the server does this in the agent's sandbox:
+
+1. Runs the task's `[[verifier.collect]]` hooks.
+2. Empties `/tests` and `/logs/verifier`, apart from declared [sidecar inputs](#sidecar-inputs), so the agent
+   cannot plant a reward, a helper or a test report. Ship helpers in the task's `tests/` folder, not in the
+   image's `/tests`.
+3. Uploads `tests/` to `/tests` and makes `test.sh` executable.
+4. Writes the agent's transcript to `/logs/agent/trajectory.json` in
+   [ATIF v1.7](/main/reference/trajectory-capabilities#atif-export), the format Harbor's verifiers read.
+5. Runs `bash /tests/test.sh` from the working directory under `timeout`, with its output in
+   `/logs/verifier/test-stdout.txt`.
+
+The image needs `bash` and `timeout`. Without them `test.sh` never starts and the sample is masked.
+
+## Reward files
+
+`test.sh` writes its result to `/logs/verifier/reward.txt` or `/logs/verifier/reward.json`. The exit code of
+`test.sh` does not affect the score.
+
+- `reward.txt` holds one number, which is the reward.
+- `reward.json` holds a JSON object of numbers; booleans count as numbers. A `reward` key is the score, and the
+  other keys are metrics, kept in `verifier_rewards`. Without a `reward` key, every key is a component: the score is
+  their sum, and the result names them in `reward_components`.
+- `reward.json` wins whenever it exists, even when it is malformed.
+
+Two tasks of one dataset may write different keys. Gym pads no missing key and renames none.
+
+| Outcome | Reward | `failure_kind` |
+| --- | --- | --- |
+| No reward file | 0 | `harbor:missing_reward` |
+| An empty file, a value that is not a finite number, or components with no finite sum | 0 | `harbor:invalid_reward` |
+| `test.sh` runs past `timeout_sec` without writing a reward | 0 | `harbor:verifier_timeout` |
+
+These rows count in the score, and a reward written before a timeout still stands. Only infrastructure failures,
+such as a lost sandbox or a reward that could not be copied out, set `mask_sample` and leave the row out.
+
+## Python verifiers
+
+A task may grade with `tests/verifier.py` instead of `tests/test.sh`. When `tests/test.sh` exists it wins, and a
+`verifier.py` beside it is an ordinary helper. A `verifier.py` at the dataset root grades every task that has no
+`tests/` folder; see [Shared verifier code](/main/data/task-folder-patterns#shared-verifier-code).
+
+The module defines `verify`, which declares the arguments it reads and returns the reward:
+
+```python
+from pathlib import Path
+
+from nemo_gym.verifiers.files import read_text
+
+
+def verify(workspace: Path, task_data: dict) -> float:
+    answer = read_text(workspace, "answer.txt")
+    return float(answer is not None and answer.strip() == task_data["answer"])
+```
+
+| Argument | What it is |
+| --- | --- |
+| `workspace` | The task's working directory in the sandbox, as a `Path`. |
+| `task_data` | The task's fields, from `task_data.json` or a parameterized row. |
+| `response` | The agent's final response, as a dict. Gym only: Harbor cannot provide it. |
+| `state` | `{"workspace": Path}`. |
+
+`verify` returns a number, or a dict with a `reward` key and other numeric keys as metrics. An `async def verify`
+is awaited. A `verify` that raises, requires an argument the runner does not supply, or returns anything else writes no reward, which
+scores 0 with `harbor:missing_reward` and the error in `test-stdout.txt`.
+
+The helpers use the standard library only:
+
+- `nemo_gym.verifiers`: `final_text`, `exact_match` and `numeric_match`.
+- `nemo_gym.verifiers.files`: `read_text`, `file_exists` and `text_file_equals`. They read only inside the
+  workspace. `read_text` drops one trailing newline unless you pass `strip_trailing_newline=False`.
+
+No verifier code runs on the host. At verification the server uploads a shim over `/tests`: a `test.sh` that
+finds `python3` or `python` 3.8 or newer in the image, a runner, a copy of `nemo_gym.verifiers`, the task's fields
+and the agent's response. The shim runs like any `test.sh`, under the same timeout, user and mode.
+
+In separate mode, a verifier that reads `workspace` needs the working directory in `artifacts`.
+`gym dataset publish --harbor` refuses a Python verifier that declares `response` or runs in separate mode.
+
+## Reference answers
+
+A task graded by its answer can ship `solution/answer.md` instead of `solution/solve.sh`. The oracle of
+`gym dataset validate` copies the file byte for byte to `answer.md` in the working directory, as the task's user,
+and submits its text as the response. It reads the file with `base64`, so the image needs that tool. A verifier
+that reads `workspace / "answer.md"` grades the same under Gym and under Harbor, where
+`gym dataset publish --harbor` turns the file into a `solve.sh` that writes it.
+
+## Sidecar inputs
+
+A Compose sidecar may write a file into `/logs/verifier` during the rollout for `test.sh` to read. The shared
+verifier empties that folder first, so declare each such file in `dataset.toml`:
+
+```toml
+[gym.tasks."<id>".verifier]
+inputs = ["actions.jsonl"]
+```
+
+Each entry is a plain top-level file name: no path separators, no `*`, `?` or `[`, and no grader output such as
+`reward.json`. A declared file survives only as a regular file. In a multi-step task it survives the reset before
+every turn. Harbor has no such field. See [Multi-Container Tasks](/main/data/compose-tasks).
+
+## Shared and separate verification
+
+In **shared** mode, `test.sh` runs in the agent's sandbox. Processes the agent started keep running beside it.
+
+In **separate** mode, set by `environment_mode = "separate"` or a `[verifier.environment]` table, the server runs
+the collect hooks, copies `/logs/artifacts` and the task's `artifacts` out of the agent's sandbox, stops it, and
+runs `test.sh` in a fresh sandbox. That sandbox receives the artifacts at their own paths, the task's `tests/` (unless its image ships
+`/tests/test.sh`) and the transcript. A verifier that reads the agent's files needs them in `artifacts`, for
+example `artifacts = ["/workspace"]`.
+
+An `artifacts` entry is a path, or a table with `source`, `destination`, `service` (a Compose service, `main` by
+default) and `exclude` patterns. A source under `/tests` or `/logs/verifier` is refused.
+
+The separate verifier's image:
+
+| The task declares | The verifier runs in |
+| --- | --- |
+| `[verifier.environment].docker_image` | That image. |
+| No `[verifier.environment]`, and `[environment].docker_image` | The task's own image. |
+| Neither image, and `tests/Dockerfile` | An image prepare builds from `tests/`, named `hb__<hash>-verifier`. |
+
+A separate-mode task with none of these is refused. When Gym has the verifier image's configuration on record, its
+`ENTRYPOINT` and `HEALTHCHECK` run before `test.sh`. A `tests/docker-compose.yaml` may declare service `main` only, with no runtime keys such as `volumes`.
+
+`[verifier].network_mode` (`no-network`, or `allowlist` with `allowed_hosts`) applies to separate verification on
+OpenSandbox only. The server option `separate_verifier_for_artifacts: true` verifies every task that declares
+`artifacts` separately; see [Configure the server](/main/agent-interactions/harbor#configure-the-server).
+
+## Environment variables and secrets
+
+A whole value `${VAR}` or `${VAR:-default}` in `[environment].env`, `[verifier].env` or
+`[verifier.environment].env` is read from the server's host environment when used. A missing required value
+fails the episode before any sandbox starts.
+
+`test.sh` receives from the server only what `[verifier].env` names. Judge API keys and other secrets go in the
+server's `secrets` block and fill `${NAME}` templates in `[verifier].env` only. Every sandbox also gets CPU-count
+hints such as `OMP_NUM_THREADS`, derived from its CPU limit; a variable the task or image sets wins.
+
+## Users
+
+`test.sh` runs as `[verifier].user`. Unset, it runs as the user the verifier's image starts with, never
+`[agent].user`; when Gym has no record of that user and `[agent].user` is set, it runs as root. A numeric user is resolved to its name in the image. A user with a group (`name:group`) works on
+the Docker provider only and is refused at seed elsewhere.
+
+## Image entrypoint
+
+When Gym has the image's configuration on record (a built image, or a pull-mode or overlay-mode Dockerfile), the
+seed starts the image's `ENTRYPOINT` beside the sandbox's keep-alive process, then waits for its `HEALTHCHECK` and
+`[environment.healthcheck]`. An entrypoint that exits non-zero fails the seed, or masks the sample with
+`harbor:entrypoint_failed` if it dies during the rollout. Its output is kept as `entrypoint-stdout.txt` with the
+verifier logs. `ENTRYPOINT []` turns it off. Outside a Compose task, a prebuilt `docker_image` has no record, so its
+`ENTRYPOINT` and `HEALTHCHECK` do not run, unless a pull-mode `environment/Dockerfile` (`FROM` that image) sits beside
+it. A Compose task's `main` runs both from the record prepare makes of every service image.
+
+## Scoring patterns
+
+What a verifier checks, from file state to a model judge, is the same question for task folders and Resources
+Servers. See [Build Verifiers](/main/build-verifiers) for scoring patterns.

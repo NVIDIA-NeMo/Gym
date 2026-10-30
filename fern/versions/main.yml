@@ -16,10 +16,13 @@ navigation:
         title: "Get Started"
         title-source: frontmatter
       - folder: ./latest/pages/data
-        title: "Prepare Data"
+        title: "Prepare Tasks"
         title-source: frontmatter
       - folder: ./latest/pages/agent-server
         title: "Configure Agents"
+        title-source: frontmatter
+      - folder: ./latest/pages/agent-interactions
+        title: "Design Agent Interactions"
         title-source: frontmatter
       - folder: ./latest/pages/model-server
         title: "Configure Models"

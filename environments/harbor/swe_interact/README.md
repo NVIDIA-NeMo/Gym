@@ -13,7 +13,7 @@ gym eval run SWE-Interact/data/multiturn --agent codex_agent --sandbox opensandb
 ```
 
 Each task is a Harbor multi-step task, and each step runs as one turn on the same sandbox, in a fresh agent
-session (`environment_servers/harbor/README.md`, Multi-step tasks):
+session (`fern/versions/latest/pages/data/multi-step-tasks.mdx`):
 
 | Turn | The agent | Verifier |
 | --- | --- | --- |
@@ -39,6 +39,6 @@ session (`environment_servers/harbor/README.md`, Multi-step tasks):
   server, under the episode's rollout prefix, so provider keys stay on the Gym host.
 - `default_episode_timeout_seconds`: Atlas tasks budget about 26,000 s across their turns and verifiers.
 
-Compose groups need OpenSandbox with `networking.enabled: true` (see the harbor README). Native Codex sessions
+Compose groups need OpenSandbox with `networking.enabled: true` (see `fern/versions/latest/pages/data/compose-tasks.mdx`). Native Codex sessions
 must accept MCP tool grants; without that, `task_mcp_grants: required` fails each seed with Codex's refusal. The
 published runs use GPT-5.5 (high) as the simulated user; scores are comparable only with the same user model.
