@@ -45,7 +45,11 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
     RolloutOutcomeFacts,
     classify_rollout_outcome,
 )
-from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
+from responses_api_agents.osworld_agent.runner_registry import (
+    MODEL_PROTOCOL_RUNNER_KINDS,
+    load_attr,
+    resolve_runner_spec,
+)
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
     OSWorldModelTimeoutError,
@@ -2026,7 +2030,7 @@ def run_osworld_task(
                 native_agent.reset(task_logger, vm_ip=getattr(env, "vm_ip", None))
             except TypeError:
                 native_agent.reset(task_logger)
-        elif runner_spec.kind == "nemotron_v3_nano_omni_agent":
+        elif runner_spec.kind in MODEL_PROTOCOL_RUNNER_KINDS:
             if not runner_spec.agent_class_path:
                 raise ValueError(f"runner {runner_spec.name!r} requires agent_class_path")
             if messages_model_fn is None:
@@ -2048,8 +2052,9 @@ def run_osworld_task(
                 nemotron_kwargs["max_image_history_length"] = max_trajectory_length
             else:
                 nemotron_kwargs["history_policy"] = dict(history_policy)
-            if model_protocol_id is not None:
-                nemotron_kwargs["model_protocol_id"] = model_protocol_id
+            effective_protocol_id = model_protocol_id or runner_spec.model_protocol_id
+            if effective_protocol_id is not None:
+                nemotron_kwargs["model_protocol_id"] = effective_protocol_id
             nemotron_kwargs.update(runner_spec.agent_kwargs)
             nemotron_kwargs["log_context"] = event_context
             native_agent = agent_cls(**nemotron_kwargs)

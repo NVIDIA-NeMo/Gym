@@ -242,6 +242,30 @@ not repeated. This prompt contract is implemented directly by the standard
 `NemotronV3NanoOmniAgent`, so deployments must not stage a Python subclass or
 extend `PYTHONPATH` with a reproduction overlay.
 
+### Nemotron Super 3.5 VL with tool XML
+
+After starting a compatible Super 3.5 VL endpoint that accepts at least four
+images per request:
+
+```bash
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile super35 \
+  --execution-backend gym_sandbox \
+  --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name nemotron-3.5-super-vl
+```
+
+Start control and evaluation with the normal wrappers. The profile selects
+`nemotron_super35_agent` and `nemotron-super35-tool-xml-v1`, initial-plus-recent
+four-image history, 100 steps, 4096 output tokens, temperature 0.6, and top_p
+0.95. It preserves historical thinking and full assistant tool calls. See the
+[protocol and model extension guide](../../responses_api_agents/osworld_agent/README.md#super-35-vl-tool-xml)
+for tool syntax, model-server request forwarding, and profile compatibility.
+This explicit tool-XML profile does not change the existing Nano Omni
+profile or the scaffolds pinned by published Nemotron recipes.
+
 ### OpenSandbox Pool backend
 
 The `gym_opensandbox` backend keeps the same OSWorld agent, task setup, action,

@@ -4,8 +4,9 @@
 
 The adapter owns model-specific prompting, history, parsing, and coordinate
 projection while OSWorld continues to own ``DesktopEnv`` and task evaluation.
-``NemotronV3NanoOmniAgent`` supports both image-history and single-image
-endpoints through configuration.
+``OSWorldProtocolAgent`` shares rollout behavior across registered model
+protocols. The existing ``NemotronV3NanoOmniAgent`` entrypoint keeps the Nano
+Omni defaults; other runners select their own model protocol.
 
 This module is intentionally named ``adapter_agents`` because the model-specific
 scaffold is implemented by the Gym adapter rather than upstream OSWorld's
@@ -21,16 +22,16 @@ import logging
 import os
 import re
 import time
-from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Mapping, Tuple
+from typing import Any, Dict, List, Mapping, Tuple
 
 from responses_api_agents.osworld_agent.history_policy import (
     HistoryPolicySpec,
     HistoryPolicyState,
     plan_history,
 )
+from responses_api_agents.osworld_agent.model_protocol import OSWorldModelProtocol, ProtocolMessageContext
 from responses_api_agents.osworld_agent.runtime_errors import OSWorldModelTimeoutError
-from responses_api_agents.osworld_agent.trajectory import stable_id
+from responses_api_agents.osworld_agent.super35_protocol import SUPER35_PROTOCOL, SUPER35_PROTOCOL_ID
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.adapter_agents")
@@ -546,51 +547,11 @@ def normalize_nemotron_agent_options(options: Mapping[str, Any]) -> Dict[str, An
     }
 
 
-@dataclass(frozen=True)
-class NemotronModelProtocol:
-    """Frozen model-facing wire format, independent of history selection."""
-
-    protocol_id: str
-    parser_id: str
-    instruction_template: str
-    step_template: str
-    text_history_template: str
-    system_prompt_thinking: str
-    system_prompt_non_thinking: str
-    assistant_history_template_thinking: str
-    assistant_history_template_non_thinking: str
-    parser: Callable[..., tuple[str, List[str], Dict[str, Any]]]
-    schema_version: int = 1
-
-    def system_prompt(self, *, thinking: bool, password: str) -> str:
-        template = self.system_prompt_thinking if thinking else self.system_prompt_non_thinking
-        return template.replace("{password}", password)
-
-    def assistant_history_template(self, *, thinking: bool) -> str:
-        return self.assistant_history_template_thinking if thinking else self.assistant_history_template_non_thinking
-
-    def to_contract(self, *, thinking: bool) -> Dict[str, Any]:
-        wire_material = {
-            "schema_version": self.schema_version,
-            "protocol_id": self.protocol_id,
-            "parser_id": self.parser_id,
-            "thinking": thinking,
-            "instruction_template": self.instruction_template,
-            "step_template": self.step_template,
-            "text_history_template": self.text_history_template,
-            "system_prompt_template": (self.system_prompt_thinking if thinking else self.system_prompt_non_thinking),
-            "assistant_history_template": self.assistant_history_template(thinking=thinking),
-        }
-        return {
-            "schema_version": self.schema_version,
-            "protocol_id": self.protocol_id,
-            "parser_id": self.parser_id,
-            "thinking": thinking,
-            "wire_contract_id": stable_id("osworld-model-wire", wire_material),
-        }
+# Preserve the existing public name for callers which define Markdown protocols.
+NemotronModelProtocol = OSWorldModelProtocol
 
 
-NEMOTRON_PROTOCOL_REGISTRY: Dict[str, NemotronModelProtocol] = {
+MODEL_PROTOCOL_REGISTRY: Dict[str, OSWorldModelProtocol] = {
     DEFAULT_NEMOTRON_PROTOCOL_ID: NemotronModelProtocol(
         protocol_id=DEFAULT_NEMOTRON_PROTOCOL_ID,
         parser_id="nemotron-v3-nano-omni-parser-v1",
@@ -602,23 +563,33 @@ NEMOTRON_PROTOCOL_REGISTRY: Dict[str, NemotronModelProtocol] = {
         assistant_history_template_thinking=ASSISTANT_HISTORY_TEMPLATE_THINKING,
         assistant_history_template_non_thinking=ASSISTANT_HISTORY_TEMPLATE_NON_THINKING,
         parser=parse_nemotron_response,
-    )
+    ),
+    SUPER35_PROTOCOL_ID: SUPER35_PROTOCOL,
 }
 
 
-def resolve_nemotron_protocol(protocol_id: str | None = None) -> NemotronModelProtocol:
+NEMOTRON_PROTOCOL_REGISTRY = MODEL_PROTOCOL_REGISTRY
+
+
+def resolve_model_protocol(protocol_id: str | None = None) -> OSWorldModelProtocol:
     """Resolve a named model protocol and fail closed on unknown identities."""
 
     resolved_id = protocol_id or DEFAULT_NEMOTRON_PROTOCOL_ID
     try:
-        return NEMOTRON_PROTOCOL_REGISTRY[resolved_id]
+        return MODEL_PROTOCOL_REGISTRY[resolved_id]
     except KeyError as exc:
-        allowed = ", ".join(sorted(NEMOTRON_PROTOCOL_REGISTRY))
+        allowed = ", ".join(sorted(MODEL_PROTOCOL_REGISTRY))
         raise ValueError(f"Unknown model_protocol_id={resolved_id!r}. Allowed: {allowed}") from exc
 
 
-class NemotronV3NanoOmniAgent:
-    """Nemotron Nano Omni scaffold with a Gym-injected model transport."""
+def resolve_nemotron_protocol(protocol_id: str | None = None) -> OSWorldModelProtocol:
+    """Compatibility name for the model protocol registry."""
+
+    return resolve_model_protocol(protocol_id)
+
+
+class OSWorldProtocolAgent:
+    """Shared screenshot agent loop with a registered model-facing protocol."""
 
     def __init__(
         self,
@@ -660,9 +631,9 @@ class NemotronV3NanoOmniAgent:
             }
         )
         if action_space != "pyautogui":
-            raise ValueError("NemotronV3NanoOmniAgent only supports pyautogui")
+            raise ValueError("OSWorldProtocolAgent only supports pyautogui")
         if observation_type != "screenshot":
-            raise ValueError("NemotronV3NanoOmniAgent only supports screenshot observations")
+            raise ValueError("OSWorldProtocolAgent only supports screenshot observations")
 
         self.model = model
         self.platform = platform
@@ -692,7 +663,7 @@ class NemotronV3NanoOmniAgent:
         # these attributes, but the policy object is now the authority.
         self.max_image_history_length = self.history_policy.low_water
         self.max_live_images = self.history_policy.high_water
-        self.model_protocol = resolve_nemotron_protocol(model_protocol_id)
+        self.model_protocol = resolve_model_protocol(model_protocol_id)
         self.model_protocol_id = self.model_protocol.protocol_id
         self.max_steps = max_steps
         self.client_password = client_password
@@ -758,7 +729,7 @@ class NemotronV3NanoOmniAgent:
     def call_llm(self, payload: Dict[str, Any], _model: str | None = None) -> Any:
         """Injected by ``client.run_osworld_task`` before the first prediction."""
 
-        raise RuntimeError("NemotronV3NanoOmniAgent requires an injected Gym model transport")
+        raise RuntimeError("OSWorldProtocolAgent requires an injected Gym model transport")
 
     def _log_event_context(self, *, step: int, parse_attempt: int) -> Dict[str, Any]:
         context = dict(self.log_context)
@@ -766,10 +737,7 @@ class NemotronV3NanoOmniAgent:
         return context
 
     def _assistant_history(self, cot: Dict[str, Any]) -> str:
-        return self.assistant_history_template.format(
-            thought=cot.get("thought", ""),
-            action=cot.get("action", ""),
-        )
+        return self.assistant_history_template.format_map({"thought": "", "action": "", **cot})
 
     def _parse_retry_messages(
         self,
@@ -784,7 +752,12 @@ class NemotronV3NanoOmniAgent:
         return [
             *messages,
             {"role": "assistant", "content": invalid_response},
-            {"role": "user", "content": PARSE_RETRY_TEMPLATE.format(error=error[-2000:])},
+            {
+                "role": "user",
+                "content": (self.model_protocol.parse_retry_template or PARSE_RETRY_TEMPLATE).format(
+                    error=error[-2000:]
+                ),
+            },
         ]
 
     @staticmethod
@@ -846,6 +819,18 @@ class NemotronV3NanoOmniAgent:
         self.history_policy_state = plan.next_state
         self.compacted_turns = plan.text_turns
         self.snapshot_window = plan.telemetry()
+        if self.model_protocol.message_renderer is not None:
+            return self.model_protocol.message_renderer(
+                ProtocolMessageContext(
+                    instruction=instruction,
+                    system_prompt=self.system_prompt,
+                    observations=self.observations,
+                    assistant_history=[self._assistant_history(cot) for cot in self.cots],
+                    current_observation=obs,
+                    image_turns=frozenset(plan.image_turns),
+                    guidance=self._step_guidance(),
+                )
+            )
 
         # Walk the plan in turn order and flush a text block whenever a run of
         # folded turns ends.  For a single leading text run -- every policy
@@ -969,6 +954,9 @@ class NemotronV3NanoOmniAgent:
             }
             if self.top_p is not None:
                 payload["top_p"] = self.top_p
+            template_kwargs = self.model_protocol.chat_template_kwargs(thinking=self.thinking)
+            if template_kwargs is not None:
+                payload["chat_template_kwargs"] = template_kwargs
             model_call_record: Dict[str, Any] = {
                 "parse_attempt": parse_attempt,
                 "prompt_messages": _jsonable(request_messages),
@@ -988,7 +976,12 @@ class NemotronV3NanoOmniAgent:
                 if finish_reason is not None and finish_reason not in {"stop", "tool_calls"}:
                     raise ValueError(f"Model response did not finish cleanly: finish_reason={finish_reason!r}")
                 content, _reasoning = _response_parts(response)
-                if not content:
+                tool_calls = (
+                    response.get("tool_calls")
+                    if isinstance(response, Mapping)
+                    else getattr(response, "tool_calls", None)
+                )
+                if not content and not tool_calls:
                     raise ValueError("model response has no content")
                 low_level, actions, response_info = self.model_protocol.parser(
                     response,
@@ -1149,3 +1142,7 @@ class NemotronV3NanoOmniAgent:
         self.cots.append({key: value for key, value in parsed_info.items() if key != "model_calls"})
 
         return content, actions, parsed_info
+
+
+class NemotronV3NanoOmniAgent(OSWorldProtocolAgent):
+    """Compatibility entrypoint for the unchanged Nano Omni Markdown protocol."""

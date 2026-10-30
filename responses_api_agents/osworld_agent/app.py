@@ -728,6 +728,8 @@ def _build_messages_model_fn(
         }
         if payload.get("top_p") is not None:
             create_kwargs["top_p"] = payload["top_p"]
+        if payload.get("chat_template_kwargs") is not None:
+            create_kwargs["extra_body"] = {"chat_template_kwargs": dict(payload["chat_template_kwargs"])}
         if rollout_purpose is not None:
             # The Gym vLLM proxy reads metadata.extra_body and forwards the
             # decoded fields to NeMo-RL's internal vLLM endpoint. Standalone

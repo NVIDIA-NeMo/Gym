@@ -113,6 +113,8 @@ service endpoints, status, and cleanup.
 | `rollout_outcome.py` | Termination classification and runtime admission; never changes actions, score, or reward |
 | `runner_registry.py` | Runner names, upstream class paths, and default observation/action contracts |
 | `adapter_agents.py` | Gym-owned model scaffolds, including `NemotronV3NanoOmniAgent` |
+| `model_protocol.py` | Model wire contracts and the selected-history message renderer interface |
+| `super35_protocol.py` | Super 3.5 VL tool-XML parsing, message rendering, and request options |
 | `trajectory.py` | Model-independent semantic trajectory identity, transitions, and evidence capabilities |
 | `exact_trace.py` | Optional exact model-call/token/media evidence for trace-aware trainers |
 | `action_parser.py` | Gym pyautogui/control-action parsing and validation |
@@ -159,6 +161,7 @@ authority and evaluation review.
 | `pointer_agent` | Upstream PointerAgent planner/executor/verifier loop |
 | `m3_agent` | Upstream MiniMax M3 scaffold and protocol |
 | `nemotron_v3_nano_omni_agent` | Gym-owned Nemotron 3 Nano Omni scaffold and parser |
+| `nemotron_super35_agent` | Shared protocol agent with the Super 3.5 VL tool-XML protocol |
 | `qwen3_omni_agent` | Upstream Qwen3VL scaffold through Gym model transport |
 
 The benchmark directory contains the model- and runner-specific YAML overlays.
@@ -188,9 +191,71 @@ Code, literal newline escaping, reasoning/content separation, tool calls, and
 terminal status syntax. Supported formats should remain explicit rather than
 recovering executable code from arbitrary prose.
 
+### Super 3.5 VL tool XML
+
+Select `benchmarks/osworld/configs/osworld_agent_super35.yaml`, or prepare the
+benchmark with `--profile super35`. This uses the Gym-owned
+`nemotron-super35-tool-xml-v1` protocol. It accepts both raw
+`<tool_call><function=...><parameter=...>` responses and native OpenAI
+`tool_calls`. Supported tools are `exec_py(code_block)`, argument-free
+`computer.wait`, and `computer.terminate(status, answer?)`. Mouse positions
+must be literal normalized coordinates in `[0, 1]`; Gym projects them to the
+screen dimensions before execution.
+
+The profile keeps the initial screenshot plus the latest three screenshots,
+up to four images per request, and retains complete assistant tool calls and
+thinking in chronological history. Observations are user turns. It passes
+`enable_thinking` and `truncate_history_thinking: false` through the policy
+transport. The profile enables `forward_request_chat_template_kwargs` on
+Gym's vLLM model adapter so those per-request options reach the backend.
+Tool definitions are in the system message; dotted function names therefore
+do not require a gateway to accept them in the API `tools` field.
+
+Use a compatible Super 3.5 VL model service, for example the public model's
+recommended vLLM version and `qwen3_coder` / `nemotron_v3` parsers. The model
+service must allow at least four images. `computer.wait` uses the runner's
+configured post-action delay. Gym still owns the horizon; malformed replies
+are bounded parser retries, not synthetic model-authored `FAIL` actions.
+
+This is an independently implemented Gym prompt and protocol. It does not
+load an external agent repository, change the Nano Omni defaults, or replace
+the scaffold pinned by a published recipe. Treat a change of protocol or
+history policy as a distinct benchmark configuration; existing scores do
+not qualify a different profile automatically.
+
+### Adding a model protocol
+
+`OSWorldProtocolAgent` owns the model-call/retry loop and uses a registered
+`OSWorldModelProtocol` for its system prompt, assistant-history template,
+parser, optional message renderer, and thinking-dependent template options.
+`NemotronV3NanoOmniAgent` remains a compatibility entrypoint with its existing
+Markdown defaults.
+
+For another screenshot-driven model:
+
+1. Implement a protocol module and register its object in
+   `MODEL_PROTOCOL_REGISTRY` in `adapter_agents.py`.
+2. Add a `RunnerSpec` with `kind: model_protocol_agent`, the shared
+   `OSWorldProtocolAgent` class, and its default `model_protocol_id`.
+3. Add a benchmark profile selecting the runner, history policy, and model
+   endpoint. Add the profile to the preparation maps when exposing a
+   `prepare.py --profile` choice.
+4. Test real response samples, history rendering, errors and terminal actions,
+   and run representative model/environment smoke rollouts.
+
+An optional renderer receives `ProtocolMessageContext`: the instruction,
+system prompt, observations, serialized assistant history, current
+observation, and the history policy's selected image indices. It chooses
+message roles and media order without changing image selection or execution.
+Assistant-history templates may reference fields returned by the parser.
+Provide a versioned renderer ID; renderer identity and request options enter
+the wire contract. Bump parser/protocol IDs when changing their semantics.
+Agents with their own planning or execution loop continue to use the
+existing runner extension points.
+
 ### Model protocol and history policy
 
-The Nemotron adapter keeps two independently selectable identities:
+The protocol agent keeps two independently selectable identities:
 
 - `model_protocol_id` selects prompts, message templates, and response parser;
 - `history_policy` selects which completed turns remain live screenshots and

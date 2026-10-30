@@ -16,10 +16,10 @@ from typing import Any, Literal, Mapping
 from responses_api_agents.osworld_agent.adapter_agents import (
     DEFAULT_NEMOTRON_PROTOCOL_ID,
     normalize_nemotron_agent_options,
-    resolve_nemotron_protocol,
+    resolve_model_protocol,
 )
 from responses_api_agents.osworld_agent.history_policy import HistoryPolicySpec
-from responses_api_agents.osworld_agent.runner_registry import RunnerSpec
+from responses_api_agents.osworld_agent.runner_registry import MODEL_PROTOCOL_RUNNER_KINDS, RunnerSpec
 from responses_api_agents.osworld_agent.trajectory import stable_id
 
 
@@ -74,7 +74,7 @@ def resolve_agent_contract(
     history_policy: HistoryPolicySpec | None = None
     protocol_contract: dict[str, Any] | None = None
 
-    if runner_spec.kind == "nemotron_v3_nano_omni_agent":
+    if runner_spec.kind in MODEL_PROTOCOL_RUNNER_KINDS:
         legacy_history_fields = sorted(_LEGACY_HISTORY_KEYS.intersection(agent_kwargs))
         if explicit_history_policy is not None and legacy_history_fields:
             raise ValueError(
@@ -91,7 +91,9 @@ def resolve_agent_contract(
         else:
             history_policy = HistoryPolicySpec.from_mapping(explicit_history_policy)
 
-        protocol = resolve_nemotron_protocol(model_protocol_id or DEFAULT_NEMOTRON_PROTOCOL_ID)
+        protocol = resolve_model_protocol(
+            model_protocol_id or runner_spec.model_protocol_id or DEFAULT_NEMOTRON_PROTOCOL_ID
+        )
         thinking = bool(_nemotron_options(agent_kwargs)["thinking"])
         protocol_contract = protocol.to_contract(thinking=thinking)
         resolved_protocol_id: str | None = protocol.protocol_id
@@ -146,12 +148,12 @@ def assert_train_eval_parity(
     *,
     parity_mode: ParityMode,
 ) -> None:
-    """Fail closed for the Nemotron adapter without changing other runners."""
+    """Enforce parity for shared protocol agents without changing other runners."""
 
     training_kind = (training.contract.get("runner") or {}).get("kind")
     evaluation_kind = (evaluation.contract.get("runner") or {}).get("kind")
     parity_is_in_scope = (
-        training_kind == "nemotron_v3_nano_omni_agent" and evaluation_kind == "nemotron_v3_nano_omni_agent"
+        training_kind in MODEL_PROTOCOL_RUNNER_KINDS and evaluation_kind in MODEL_PROTOCOL_RUNNER_KINDS
     )
     if parity_is_in_scope and parity_mode == "strict" and training.contract_id != evaluation.contract_id:
         raise ValueError(

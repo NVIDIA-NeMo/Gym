@@ -18,6 +18,7 @@ from benchmarks.osworld.prepare import (
     OPENSANDBOX_CONFIG,
     OPENSANDBOX_VM_SENTINEL,
     POINTER_AGENT_CONFIG,
+    SUPER35_AGENT_CONFIG,
     main,
     prepare,
     select_config_paths,
@@ -189,7 +190,16 @@ def test_opensandbox_backend_adds_pool_provider_config() -> None:
     )
 
 
-def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path, capsys) -> None:
+@pytest.mark.parametrize(
+    ("profile", "profile_config", "agent_name"),
+    [
+        ("nano_omni", NANO_OMNI_AGENT_CONFIG, "osworld_nano_omni_agent"),
+        ("super35", SUPER35_AGENT_CONFIG, "osworld_super35_agent"),
+    ],
+)
+def test_main_writes_complete_model_profile(
+    monkeypatch, tmp_path: Path, capsys, profile: str, profile_config: Path, agent_name: str
+) -> None:
     vm_path = tmp_path / "Ubuntu.qcow2"
     vm_path.write_bytes(b"qcow2-base")
     env_path = tmp_path / "env.yaml"
@@ -204,7 +214,7 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path, cap
             str(tmp_path / "rollouts.jsonl"),
             "--skip-assets",
             "--profile",
-            "nano_omni",
+            profile,
             "--execution-backend",
             "gym_sandbox",
             "--vm-path",
@@ -219,11 +229,11 @@ def test_main_writes_complete_nano_omni_profile(monkeypatch, tmp_path: Path, cap
     main()
 
     config = yaml.safe_load(env_path.read_text(encoding="utf-8"))
-    assert config["config_paths"] == [str(NANO_OMNI_AGENT_CONFIG.resolve())]
-    assert config["agent_name"] == "osworld_nano_omni_agent"
+    assert config["config_paths"] == [str(profile_config.resolve())]
+    assert config["agent_name"] == agent_name
     assert config["skip_venv_if_present"] is True
     assert config["uv_venv_dir"] == str((tmp_path / "server-venvs").resolve())
-    agent = config["osworld_nano_omni_agent"]["responses_api_agents"]["osworld_agent"]
+    agent = config[agent_name]["responses_api_agents"]["osworld_agent"]
     assert agent["sandbox_provider"] == "osworld_sandbox"
     assert agent["vm_path"] == str(vm_path.resolve())
 
