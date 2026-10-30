@@ -2,3 +2,8 @@
 swebench_pro_benchmark.jsonl.tmp
 swebench_pro_image_digests.json
 swebench_pro_upstream/
+swebench_pro_v2_benchmark.jsonl.tmp
+swebench_pro_v2_hard_benchmark.jsonl.tmp
+swebench_pro_v2_image_digests.json
+swebench_pro_v2_upstream/
+ripgrep-*/

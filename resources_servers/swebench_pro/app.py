@@ -19,7 +19,9 @@ import asyncio
 import logging
 import sys
 from contextlib import asynccontextmanager
+from copy import deepcopy
 from dataclasses import asdict
+from ipaddress import ip_address
 from pathlib import Path
 from shlex import quote
 from tempfile import TemporaryDirectory
@@ -48,10 +50,13 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.config_types import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.global_config import HEAD_SERVER_KEY_NAME, get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url
 from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import ConnectableProvider
 from nemo_gym.server_utils import SESSION_ID_KEY
@@ -65,6 +70,11 @@ from resources_servers.swebench_pro.verification import (
     drop_patch_sections,
     inconclusive_reason,
     run_verification,
+)
+from resources_servers.swebench_pro.verification_v2 import (
+    run_v2_verification,
+    v2_inconclusive_reason,
+    verification_files,
 )
 
 
@@ -89,6 +99,15 @@ HARNESS_ENV_TO_SCRUB = (
     "OTEL_METRICS_EXPORTER",
     "OTEL_LOGS_EXPORTER",
 )
+
+
+def _is_loopback(host: str) -> bool:
+    if host.lower().rstrip(".") == "localhost":
+        return True
+    try:
+        return ip_address(host.strip("[]")).is_loopback
+    except ValueError:
+        return False
 
 
 def _verification_deadline(total_timeout: float | None) -> float | None:
@@ -141,6 +160,10 @@ class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     environment_repairs: tuple[str, ...] = DEFAULT_ENVIRONMENT_REPAIRS
     image_repository: str = "docker.io/jefzda/sweap-images"
     image_template: str | None = None  # Local SIF path with a checked provenance manifest.
+    # The agent sandbox may reach only `sandbox_model_server` (an OpenSandbox network_policy); verification
+    # sandboxes keep normal network access. SWE-bench Pro V2's locked protocol needs it.
+    agent_network_lock: bool = False
+    sandbox_model_server: ModelServerRef | None = None
     sandbox_provider: str
     sandbox_config: dict[str, Any]
 
@@ -171,6 +194,8 @@ class SWEBenchProInstanceRequest(BaseModel):
     parser_script: str
     base_dockerfile: str = ""
     instance_dockerfile: str = ""
+    # SWE-bench Pro V2 rows carry the task's Harbor `tests/` files; their presence selects the V2 verifier.
+    verifier_files: dict[str, str] | None = None
     subset: str = "pro"
     split: str = "test"
 
@@ -212,6 +237,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         super().model_post_init(context)
         if self.config.num_workers not in (None, 1):
             raise ValueError("SWE-bench Pro process-local sessions require num_workers=1")
+        if self.config.agent_network_lock and self.config.sandbox_model_server is None:
+            raise ValueError("agent_network_lock requires sandbox_model_server")
         self._session_id_to_sandbox: dict[str, AsyncSandbox] = {}
         # Untracked files the image ships, per session. Leading underscore: pydantic needs it.
         self._session_id_to_pristine_untracked: dict[str, frozenset[str]] = {}
@@ -304,14 +331,35 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             return verify_local_image(Path(image), source)
         return {"image": image, "source_uri": image}
 
+    def _agent_network_policy(self, provider_config: Any, global_config_dict: Any) -> dict[str, object]:
+        """Deny all egress except the model server; fails closed on providers without network policies."""
+        provider_name = (
+            next(iter(provider_config)) if isinstance(provider_config, dict) else getattr(provider_config, "name", "")
+        )
+        model_url = sandbox_server_url(self.config.sandbox_model_server.name, require_reachable=True)
+        # The policy allows the model server's whole host, so the head server and its config endpoint must stay on
+        # loopback; a wildcard or routable bind could listen on that host.
+        head_host = (global_config_dict.get(HEAD_SERVER_KEY_NAME) or {}).get("host") or "127.0.0.1"
+        if not _is_loopback(head_host):
+            raise ValueError(
+                f"agent_network_lock: the head server binds {head_host}, which the locked sandbox may reach; "
+                "keep it on loopback with absolute_ip_server_types: [responses_api_models]"
+            )
+        return restricted_network_policy(provider_name, [model_url])
+
     async def _create_sandbox(
         self,
         body: SWEBenchProInstanceRequest,
         files: dict[str, str] | None = None,
+        *,
+        agent_phase: bool = False,
     ) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()
         provider_config = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
         provider_metadata = resolve_provider_metadata(self.config.sandbox_provider, global_config_dict)
+        provider_options = deepcopy(self.config.sandbox_config.get("provider_options", {}))
+        if agent_phase and self.config.agent_network_lock:
+            provider_options["network_policy"] = self._agent_network_policy(provider_config, global_config_dict)
         image_info = await asyncio.to_thread(self._image_info, body)
         spec = SandboxSpec(
             image=image_info["image"],
@@ -328,7 +376,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             },
             resources=SandboxResources.from_mapping(self.config.sandbox_config.get("resources", {})),
             entrypoint=None,
-            provider_options=self.config.sandbox_config.get("provider_options", {}),
+            provider_options=provider_options,
         )
         sandbox = AsyncSandbox(provider_config)
         await sandbox.start(spec)
@@ -405,7 +453,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
 
     async def _seed_session(self, session_id: str, body: SWEBenchProInstanceRequest) -> SWEBenchProSeedSessionResponse:
         await self._stop_session_sandbox(session_id)
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, agent_phase=True)
         # Keep ownership before initialization, including when cleanup itself fails.
         self._session_id_to_sandbox[session_id] = sandbox
         try:
@@ -539,11 +587,16 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 model_patch = ""
                 extraction_error = f"Failed to extract model patch: {exc}"
 
-        inputs = self._verification_inputs(body, model_patch)
-        workspace_files, _ = assemble_workspace_files(body.instance_id, None, model_patch, asdict(inputs))
-        sandbox_files = {
-            f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
-        }
+        if body.verifier_files is not None:
+            sandbox_files = verification_files(
+                body.verifier_files, model_patch, test_timeout_s=self.config.evaluation_timeout
+            )
+        else:
+            inputs = self._verification_inputs(body, model_patch)
+            workspace_files, _ = assemble_workspace_files(body.instance_id, None, model_patch, asdict(inputs))
+            sandbox_files = {
+                f"/workspace/{relative_path}": contents for relative_path, contents in workspace_files.items()
+            }
 
         run_log_dir = Path(__file__).parent / "logs" / "run_evaluation" / session_id / body.instance_id
         eval_sandbox_start_time_taken = 0.0
@@ -558,12 +611,19 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     eval_sandbox = await self._create_sandbox(body, files=sandbox_files)
                     eval_sandbox_start_time_taken = time() - start_time
                     verification_start = time()
-                    result = await run_verification(
-                        sandbox=eval_sandbox,
-                        inputs=inputs,
-                        log_dir=run_log_dir,
-                        timeout_s=self.config.evaluation_timeout,
-                    )
+                    if body.verifier_files is not None:
+                        result = await run_v2_verification(
+                            sandbox=eval_sandbox,
+                            log_dir=run_log_dir,
+                            timeout_s=self.config.evaluation_timeout,
+                        )
+                    else:
+                        result = await run_verification(
+                            sandbox=eval_sandbox,
+                            inputs=inputs,
+                            log_dir=run_log_dir,
+                            timeout_s=self.config.evaluation_timeout,
+                        )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
                 eval_sandbox_start_time_taken = time() - start_time
@@ -583,7 +643,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
-            reason = inconclusive_reason(result)
+            reason = v2_inconclusive_reason(result) if body.verifier_files is not None else inconclusive_reason(result)
             if reason is not None and _budget_spent(deadline):
                 print(
                     f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
@@ -625,6 +685,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
         }
+        # V2 masks a rollout the environment could not grade, so it is not scored as the model's 0. A patch that
+        # could not be extracted is graded as empty, as upstream does.
+        if body.verifier_files is not None and reason is not None:
+            response_data |= {"mask_sample": True, "failure_kind": VERIFIER_ERROR, "failure_reason": reason}
         return SWEBenchProVerifyResponse.model_validate(response_data)
 
 
