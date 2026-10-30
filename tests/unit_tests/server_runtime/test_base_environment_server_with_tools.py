@@ -2,14 +2,17 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
-from collections.abc import Awaitable, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import asynccontextmanager
 from typing import Any, ClassVar
 from unittest.mock import MagicMock
 
 import httpx
 import pytest
-from fastapi import Body
-from pydantic import BaseModel
+from fastapi import Body, FastAPI
+from mcp import ClientSession
+from mcp.client.streamable_http import streamablehttp_client
+from pydantic import BaseModel, ValidationError
 
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest
@@ -26,7 +29,12 @@ from nemo_gym.server_runtime.base_server import refuse_unsupported_num_workers
 from nemo_gym.server_runtime.episode_tokens import EPISODE_TOKEN_HEADER, EpisodeTokens, episode_token_secret
 from nemo_gym.server_runtime.episode_tools import ToolResult, ToolSpec, TypedToolset, episode_tool
 from nemo_gym.server_runtime.request_handling.request_context import install_request_context_isolation
-from nemo_gym.server_runtime.tool_access import TOOL_CALL_ID_HEADER, TOOL_ERROR_HEADER, DirectHTTPToolAccess
+from nemo_gym.server_runtime.tool_access import (
+    TOOL_CALL_ID_HEADER,
+    TOOL_ERROR_HEADER,
+    DirectHTTPToolAccess,
+    MCPToolAccess,
+)
 
 
 BASE_URL = "http://127.0.0.1:1234"
@@ -139,7 +147,9 @@ class _Server(BaseEnvironmentServerWithTools[_Request, _Response]):
         return AggregateMetrics()
 
 
-def _server(agent: Agent | None = None, **overrides: Any) -> tuple[_Server, httpx.AsyncClient]:
+def _app(
+    agent: Agent | None = None, server_class: type[_Server] | None = None, **overrides: Any
+) -> tuple[_Server, FastAPI]:
     config = BaseEnvironmentServerWithToolsConfig(
         name="counter_environment",
         host="127.0.0.1",
@@ -150,13 +160,17 @@ def _server(agent: Agent | None = None, **overrides: Any) -> tuple[_Server, http
     )
     client = MagicMock(spec=ServerClient)
     client._resolve_base_url.return_value = BASE_URL
-    server_type = type("_Agented", (_Server,), {"agent": staticmethod(agent)} if agent else {})
+    server_type = type("_Agented", (server_class or _Server,), {"agent": staticmethod(agent)} if agent else {})
     server = server_type(config=config, server_client=client)
     app = server.setup_webserver()
     # As in production: a request does not inherit the context of the task that sent it, here the episode's own.
     install_request_context_isolation(app)
-    http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
-    return server, http
+    return server, app
+
+
+def _server(agent: Agent | None = None, **overrides: Any) -> tuple[_Server, httpx.AsyncClient]:
+    server, app = _app(agent, **overrides)
+    return server, httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
 
 
 def _request(rollout_id: str = "3-0") -> _Request:
@@ -574,6 +588,37 @@ def test_several_workers_are_refused_while_calls_reach_any_worker() -> None:
         refuse_unsupported_num_workers(server)
 
 
+def test_with_mcp_mounted_shutdown_still_finishes_the_cleanups_of_a_running_episode() -> None:
+    """The app's lifespan runs both the MCP session manager and the base's shutdown sweep."""
+    released: list[str] = []
+    started = asyncio.Event()
+
+    async def run(self: _Server, request: _Request, cleanup: CleanupContext) -> _Response:
+        async def release() -> None:
+            released.append(request.episode_id.capture_key)
+
+        cleanup.register_cleanup("sandbox", release)
+        started.set()
+        await asyncio.Event().wait()
+
+    server, _ = _server(tool_transports=["mcp"])
+    type(server).run = run
+    app = server.setup_webserver()
+
+    async def scenario() -> None:
+        episode = asyncio.create_task(server.run_request(_request()))
+        await started.wait()
+        async with app.router.lifespan_context(app):
+            pass
+        assert released == ["3-0"]
+        episode.cancel()
+        await asyncio.gather(episode, return_exceptions=True)
+
+    asyncio.run(scenario())
+
+    assert released == ["3-0"]
+
+
 def test_a_handled_failure_in_a_tool_fails_the_episode() -> None:
     """A sandbox that crashes during a tool call is an environment failure, not the agent's."""
     replies: list[httpx.Response] = []
@@ -595,3 +640,181 @@ def test_a_handled_failure_in_a_tool_fails_the_episode() -> None:
     assert [reply.status_code for reply in replies] == [500, 500]
     assert response.failure is not None and response.failure.terminal is False
     assert "sandbox crashed" in response.failure.failure_reason
+
+
+# MCP: the same episode tools for agents that take only MCP grants.
+
+
+@asynccontextmanager
+async def _mcp_session(app: FastAPI, headers: dict[str, str]) -> AsyncIterator[ClientSession]:
+    """An MCP client session against ``app``'s /mcp, in-process."""
+
+    def client_factory(headers=None, timeout=None, auth=None) -> httpx.AsyncClient:
+        transport = httpx.ASGITransport(app=app)
+        return httpx.AsyncClient(transport=transport, base_url=BASE_URL, headers=headers, timeout=timeout, auth=auth)
+
+    async with streamablehttp_client(f"{BASE_URL}/mcp", headers=headers, httpx_client_factory=client_factory) as (
+        read,
+        write,
+        _,
+    ):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            yield session
+
+
+def _mcp_headers(served: ServedTools) -> dict[str, str]:
+    (grant,) = [access for access in served.tool_accesses if isinstance(access, MCPToolAccess)]
+    return dict(grant.connection.headers)
+
+
+def _text(result: Any) -> str:
+    return result.content[0].text
+
+
+async def _run_with_lifespan(app: FastAPI, *runs: Awaitable[_Response]) -> list[_Response]:
+    """Run episodes while the app's lifespan, which runs the MCP endpoint, is up."""
+    async with app.router.lifespan_context(app):
+        return await asyncio.gather(*runs)
+
+
+@pytest.mark.parametrize(
+    "transports, granted",
+    [
+        pytest.param(["direct_http"], [DirectHTTPToolAccess], id="direct-http"),
+        pytest.param(["mcp"], [MCPToolAccess], id="mcp"),
+        pytest.param(["mcp", "direct_http"], [MCPToolAccess, DirectHTTPToolAccess], id="both"),
+    ],
+)
+def test_the_episode_is_granted_over_each_configured_transport(transports: list[str], granted: list[type]) -> None:
+    seen: list[ServedTools] = []
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        seen.append(served)
+
+    server, app = _app(agent, tool_transports=transports)
+    asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
+
+    accesses = seen[0].tool_accesses
+    assert [type(access) for access in accesses] == granted
+    tokens = {
+        (access.connection.headers if isinstance(access, MCPToolAccess) else access.headers)[EPISODE_TOKEN_HEADER]
+        for access in accesses
+    }
+    assert len(tokens) == 1
+    for access in accesses:
+        if isinstance(access, MCPToolAccess):
+            assert access.name == "counter_environment" and str(access.connection.url) == f"{BASE_URL}/mcp"
+
+
+def test_a_server_without_mcp_serves_no_mcp_endpoint() -> None:
+    _, app = _app()
+
+    assert "/mcp" not in {getattr(route, "path", None) for route in app.routes}
+
+
+def test_mcp_lists_the_episodes_tools_and_shares_its_calls_with_direct_http() -> None:
+    seen: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        async with _mcp_session(app, _mcp_headers(served)) as session:
+            seen["tools"] = (await session.list_tools()).tools
+            seen["mcp"] = await session.call_tool("add", {"amount": 2})
+        direct = [access for access in served.tool_accesses if isinstance(access, DirectHTTPToolAccess)][0]
+        http = httpx.AsyncClient(transport=httpx.ASGITransport(app=app), base_url=BASE_URL)
+        seen["http"] = (await http.post("/add", json={"amount": 3}, headers=dict(direct.headers))).json()
+        seen["calls"] = list(served.calls)
+
+    server, app = _app(agent, tool_transports=["mcp", "direct_http"])
+    (response,) = asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
+
+    assert {tool.name: tool.description for tool in seen["tools"]} == {
+        spec.name: spec.description for spec in TypedToolset(_Counter()).specs()
+    }
+    assert seen["mcp"].isError is False and seen["mcp"].structuredContent == {"total": 2}
+    assert seen["http"] == {"total": 5}
+    assert [(call.name, call.arguments) for call in seen["calls"]] == [("add", {"amount": 2}), ("add", {"amount": 3})]
+    assert response.result == "total=5 calls=2"
+
+
+@pytest.mark.parametrize(
+    "headers",
+    [pytest.param({}, id="missing"), pytest.param({EPISODE_TOKEN_HEADER: "garbage"}, id="garbage")],
+)
+def test_mcp_without_the_episodes_token_lists_no_tools_and_refuses_calls(headers: dict[str, str]) -> None:
+    seen: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        async with _mcp_session(app, headers) as session:
+            seen["tools"] = (await session.list_tools()).tools
+            seen["call"] = await session.call_tool("add", {"amount": 2})
+
+    server, app = _app(agent, tool_transports=["mcp"])
+    (response,) = asyncio.run(_run_with_lifespan(app, server.run_request(_request())))
+
+    assert seen["tools"] == []
+    assert seen["call"].isError is True and "needs a valid" in _text(seen["call"])
+    assert response.result == "total=0 calls=0"
+
+
+def test_an_mcp_call_after_the_episode_ends_is_refused() -> None:
+    kept: dict[str, Any] = {}
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        kept["headers"] = _mcp_headers(served)
+
+    server, app = _app(agent, tool_transports=["mcp"])
+
+    async def scenario() -> Any:
+        async with app.router.lifespan_context(app):
+            await server.run_request(_request())
+            async with _mcp_session(app, kept["headers"]) as session:
+                return await session.call_tool("add", {"amount": 1})
+
+    late = asyncio.run(scenario())
+
+    assert late.isError is True and "is not running" in _text(late)
+
+
+class _TwoToolsets(_Server):
+    """Episode 4-0 gets a toolset of its own, as a toolset built from the task does."""
+
+    async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+        counter = _Counter()
+        toolset = _Specs("lookup") if request.episode_id.rollout_id == "4-0" else TypedToolset(counter)
+        served = await self.serve_tools(request, toolset, cleanup)
+        await type(self).agent(self, counter, served)
+        return _Response(episode_id=request.episode_id, task_id=request.task.task_id, result="")
+
+
+def test_each_episode_lists_only_its_own_tools_over_mcp() -> None:
+    granted: list[ServedTools] = []
+    listed: list[list[str]] = []
+    both_open = asyncio.Event()
+
+    async def agent(server: _Server, counter: _Counter, served: ServedTools) -> None:
+        granted.append(served)
+        if len(granted) == 2:
+            both_open.set()
+        await both_open.wait()
+        async with _mcp_session(app, _mcp_headers(served)) as session:
+            listed.append(sorted(tool.name for tool in (await session.list_tools()).tools))
+
+    server, app = _app(agent, server_class=_TwoToolsets, tool_transports=["mcp"])
+    asyncio.run(_run_with_lifespan(app, server.run_request(_request("3-0")), server.run_request(_request("4-0"))))
+
+    assert sorted(listed) == [sorted(spec.name for spec in TypedToolset(_Counter()).specs()), ["lookup"]]
+
+
+def test_an_mcp_grant_refuses_tool_names_mcp_clients_reject() -> None:
+    server, _ = _app(tool_transports=["mcp"])
+    type(server).toolset = staticmethod(lambda counter: _Specs("lookup.v2"))
+
+    response = asyncio.run(server.run_request(_request()))
+
+    assert response.failure is not None and "lookup.v2" in response.failure.failure_reason
+
+
+def test_tool_transports_cannot_repeat() -> None:
+    with pytest.raises(ValidationError, match="must not repeat"):
+        _app(tool_transports=["mcp", "mcp"])
