@@ -90,6 +90,10 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
             assert config["probe_environment"]["environment_servers"][environment_type][
                 "resources_tool_transports"
             ] == ["direct_http"]
+        elif harness == "nooa":
+            assert agent["nooa"]["execution_mode"] == "sandboxed"
+            assert "sandbox_config" not in agent and "sandbox_provider" not in agent
+            assert config["probe_sandbox"] == {"conformance_local": {"concurrency": 1}}
         else:
             assert agent["sandbox_config"]["workdir"] == str(tmp_path / "workspace")
             assert config[agent["sandbox_provider"]] == {"local": {"concurrency": 1}}

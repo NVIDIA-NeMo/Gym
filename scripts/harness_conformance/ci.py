@@ -8,6 +8,7 @@ import importlib
 import json
 import os
 import subprocess
+import sys
 from pathlib import Path
 
 from .feedback import failure_details, reproduction
@@ -100,6 +101,9 @@ def install_runtime(harness: str) -> None:
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
     override_flag = ["--override", "overrides.txt"] if (adapter / "overrides.txt").exists() else []
     subprocess.run(["uv", "pip", "install", *override_flag, "-r", "requirements.txt"], cwd=adapter, check=True)
+    if harness == "nooa":
+        subprocess.run([sys.executable, "-m", "scripts.harness_conformance.nooa"], cwd=ROOT, check=True)
+        return
     if harness in ("hermes", "stirrup", "simple"):
         # Simple Agent is built in; Hermes ships via requirements; Stirrup installs in its task sandbox.
         return

@@ -32,7 +32,7 @@ from nemo_gym.server_utils import ServerClient
 from .scenarios import Scenario
 
 
-SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec")
+SHELL_TOOLS = ("bash", "terminal", "shell", "shell_command", "exec_command", "code_exec", "python_cell")
 # Harnesses that end an episode on a tool call rather than on a text answer.
 FINISH_TOOLS = ("finish", "submit")
 ANSWER = "CONFORMANCE_DONE"
@@ -69,6 +69,13 @@ class Probe:
         }
         (self.directory / "witness.json").write_text(json.dumps(witness, indent=2) + "\n")
 
+    async def seed_sandbox(self) -> dict:
+        """Optional Resources-owned sandbox for harnesses that borrow their task environment."""
+        return {}
+
+    async def close_sandbox(self) -> None:
+        """Release a task sandbox, when the probe owns one."""
+
     def _tool(self, body: dict) -> tuple[str, dict, dict]:
         tools, namespaces = flatten_namespace_tools(body.get("tools"))
         for tool in tools:
@@ -82,7 +89,16 @@ class Probe:
                 marker = self.directory / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
-                if "cmd" in properties:
+                if bare == "python_cell" and "code" in properties:
+                    args = {
+                        "code": (
+                            f"result = await self.shell.run({('sh -c ' + shlex.quote(command))!r})\n"
+                            "print(result.stdout, end='')\n"
+                            "if result.returncode:\n"
+                            "    raise RuntimeError(f'shell exited with code {result.returncode}')"
+                        )
+                    }
+                elif "cmd" in properties:
                     args = {"cmd": command}
                 elif "command" in properties:
                     command_type = properties["command"].get("type")
@@ -112,6 +128,18 @@ class Probe:
         for tool in tools:
             function = tool.get("function", tool)
             name = function.get("name", "")
+            if name.rsplit("__", 1)[-1] == "python_cell":
+                return (
+                    name,
+                    {
+                        "code": (
+                            "from nooa_bench.bench_agent import TaskResult\n"
+                            f"return_result(TaskResult(solution_description={ANSWER!r}, "
+                            f"evidence={ANSWER!r}, how_to_verify={ANSWER!r}))"
+                        )
+                    },
+                    namespaces,
+                )
             if name.rsplit("__", 1)[-1] not in FINISH_TOOLS:
                 continue
             parameters = function.get("parameters") or {}
@@ -235,7 +263,7 @@ class Probe:
                         "id": response_id,
                         "object": "chat.completion",
                         "created": 1,
-                        "model": body["model"],
+                        "model": body.get("model") or "conformance-model",
                         "choices": [
                             {
                                 "index": 0,
@@ -260,11 +288,11 @@ class Probe:
                         "status": "completed",
                         "error": None,
                         "incomplete_details": None,
-                        "model": body["model"],
+                        "model": body.get("model") or "conformance-model",
+                        "output": restore_namespace_tool_calls(output, namespaces),
                         "parallel_tool_calls": body.get("parallel_tool_calls", False),
                         "tool_choice": body.get("tool_choice", "auto"),
                         "tools": body.get("tools", []),
-                        "output": restore_namespace_tool_calls(output, namespaces),
                     }
                     if self.scenario.usage:
                         payload["usage"] = {
@@ -341,9 +369,13 @@ class Probe:
                 request.session["resources_session_id"] = session.resources_session_id
             self.seeded += 1
             self.save()
-            return {"resources_session_id": session.resources_session_id} if "resources_session_id" in body else {}
+            result = {"resources_session_id": session.resources_session_id} if "resources_session_id" in body else {}
+            if "resources_session_id" in body:
+                result.update(await self.seed_sandbox())
+            return result
 
         async def close(body: ResourcesCloseSessionRequest) -> dict:
+            await self.close_sandbox()
             self.closed += 1
             self.save()
             return {"resources_session_id": body.resources_session_id}
