@@ -70,7 +70,9 @@ Per-harness policy stays in the adapter:
   command, whether its supervisor still runs as that identity and holds that pause, with no receipt yet. If so,
   point the harness at the new model server, then `SandboxSession.adopt(pause_seq=...)` continues the pause and waits
   for the receipt, as `execute` would have, under `run_until_parked` like a launch. If not, `abandon_launch` kills the
-  launch without continuing anything, and the next launch relaunches as below.
+  launch without continuing anything, and the next launch relaunches as below. OpenCode reaches the model through
+  `nemo_gym/agents/utils/model_relay.py`, which `harness_runner.sh` starts in the sandbox: re-pointing it (a new
+  `gen` in its endpoint file) makes it re-send the call the checkpoint cut to the new model server.
 - **Resume decision.** On the first launch after a stop or a restore, read the saved conversation. Resume it when it is
   the task's own and the model answered at least once; otherwise start afresh from the original prompt. OpenCode
   re-posts the last user message with empty `parts` through `opencode serve` (`resume_opencode.sh`), so no turn is added.
@@ -85,4 +87,5 @@ Per-harness policy stays in the adapter:
 machine (`LocalExecProvider`) and a test harness in place of the CLI. It checks pause → park → continue, a re-sent
 activation, the stop fallback and relaunch, the close of a restored session that was never re-bound, re-bind and resume
 after a crash, and a close while the harness runs. `responses_api_agents/opencode_agent/tests/test_checkpoint.py` shows
-a fixture with a fake `opencode` executable.
+a fixture with a fake `opencode` executable; `test_resume_in_place.py` runs it on a provider that keeps processes,
+through a crash of the agent server alone.

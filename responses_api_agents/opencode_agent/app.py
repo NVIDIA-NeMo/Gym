@@ -48,9 +48,12 @@ from nemo_gym.agents import (
     BaseResponsesAPIAgentConfig,
     Body,
     Finished,
+    RestoredLaunch,
     SandboxSession,
     SimpleResponsesAPIAgent,
     Stopped,
+    abandon_launch,
+    check_restored,
     exec_idempotent,
     resolve_agent_timeout,
     run_until_parked,
@@ -106,7 +109,12 @@ from responses_api_agents.opencode_agent.runtime import (
     OPENCODE_VERSION,
     apply_observability_patch,
 )
-from responses_api_agents.opencode_agent.sandbox import OpenCodeSandboxSession, format_error_message
+from responses_api_agents.opencode_agent.sandbox import (
+    MODEL_RELAY_SCRIPT,
+    RELAY_STATUS_FILE,
+    OpenCodeSandboxSession,
+    format_error_message,
+)
 from responses_api_agents.opencode_agent.setup_opencode import ensure_opencode
 
 
@@ -285,6 +293,9 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # How long a launch may stay paused for checkpoints in all, beyond `timeout`. Paused time does not count against
     # `timeout`; a launch paused for longer fails, so size it to cover the longest checkpoint commit.
     checkpoint_pause_allowance_seconds: float = Field(default=3600, ge=0, allow_inf_nan=False)
+    # The sandbox port of the model relay OpenCode calls the model through, on a sandbox whose snapshots keep
+    # processes: a restore re-points the relay at the replacement attempt while OpenCode keeps running.
+    sandbox_model_relay_port: int = Field(default=18431, gt=0, lt=65536)
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -835,6 +846,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "completed_activation": state.completed_activation,
                 "completed_reply": state.completed_reply,
             }
+            if state.keeps_processes:
+                exported[key] |= {"keeps_processes": True, "relay_gen": state.relay_gen}
         return exported
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -860,6 +873,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 completed_activation=int(saved.get("completed_activation") or 0),
                 completed_reply=saved.get("completed_reply"),
                 restored=dict(saved),
+                keeps_processes=bool(saved.get("keeps_processes", False)),
+                relay_gen=int(saved.get("relay_gen") or 0),
             )
         for key, state in restored.items():
             self._install_restored_session(key, state)
@@ -871,7 +886,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         The fork holds the session's files as of the checkpoint: the runtime, the supervisor files and the saved
         conversation. Files the snapshot does not hold are put back; a conversation it does not hold makes the next
-        launch start the task afresh.
+        launch start the task afresh. A fork that also kept the session's processes may still run the launch the
+        checkpoint held: it is taken over in place when it can be, and otherwise ended before a relaunch.
         """
         assert isinstance(state, OpenCodeSandboxSession)
         if state.session is not None:
@@ -887,11 +903,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         except BaseException:
             await provider.aclose()
             raise
+        saved_session = state.restored["session"]
         session = SandboxSession.reattach(
-            sandbox, state.restored["session"], workdir=access.workdir, harness="OpenCode", pausable=True
+            sandbox,
+            saved_session,
+            workdir=access.workdir,
+            harness="OpenCode",
+            pausable=True,
+            pause_mode="hold" if state.keeps_processes else "stop",
         )
         root = session.session_root
         files = (f"{state.runtime}/opencode", f"{root}/{HARNESS_RUNNER_FILE}", f"{root}/{RESUME_SCRIPT.name}")
+        if state.keeps_processes:
+            files += (f"{root}/{MODEL_RELAY_SCRIPT.name}",)
         present = await sandbox.exec(
             " && ".join(f"[ -e {quote(path)} ]" for path in files),
             cwd="/",
@@ -907,11 +931,72 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 timeout_s=self.config.sandbox_install_timeout_seconds,
             )
             self._check_sandbox_setup(command, result)
-            await self._install_session_files(sandbox, root, access.workdir, state.runtime, checkpointed=True)
+            await self._install_session_files(
+                sandbox, root, access.workdir, state.runtime, checkpointed=True, model_relay=state.keeps_processes
+            )
         state.session = session
         state.sandbox_id = sandbox.sandbox_id
         state.restored = None
+        if state.keeps_processes:
+            await self._check_restored_launch(state, saved_session)
         return state
+
+    async def _check_restored_launch(self, state: OpenCodeSandboxSession, saved: Mapping[str, Any]) -> None:
+        """Decide what becomes of the launch a process-keeping restore brought back: take it over, or end it.
+
+        Only a launch whose supervisor held a confirmed pause at the checkpoint can still run. It is taken over
+        when its supervisor, its pause and its model relay all survived the restore, and also when it had already
+        ended (its cleanup receipt is there): the take-over then just collects what it left. Otherwise it is
+        ended, without letting it run again, and the next launch resumes the saved conversation as after a
+        files-only restore.
+        """
+        pause_seq, identity = saved.get("pause_seq"), saved.get("supervisor_identity")
+        if pause_seq is None or identity is None:
+            return
+        session = state.require_session()
+        verdict = await check_restored(
+            session.sandbox,
+            session.session_dir,
+            pause_seq=pause_seq,
+            identity=identity,
+            relay_status_path=f"{session.session_dir}/{RELAY_STATUS_FILE}",
+            timeout=self.config.session_close_timeout_seconds,
+        )
+        if isinstance(verdict, RestoredLaunch) or verdict.reason == "launch_finished":
+            state.adoption = RestoredLaunch(pause_seq=pause_seq, identity=identity)
+            return
+        LOG.warning(
+            "OpenCode cannot resume in place: session %s, reason %s, detail %s; relaunching",
+            state.request.agent_session_id,
+            verdict.reason,
+            verdict.detail,
+        )
+        await self._abandon_restored_launch(state, identity, reason=verdict.reason)
+
+    async def _abandon_restored_launch(self, state: OpenCodeSandboxSession, identity: str, *, reason: str) -> None:
+        """End a restored launch that will not be taken over, so nothing of it runs beside its relaunch."""
+        session = state.require_session()
+        try:
+            receipt = await abandon_launch(
+                session.sandbox,
+                session.session_dir,
+                identity=identity,
+                timeout=self.config.session_close_timeout_seconds,
+                harness="OpenCode",
+            )
+        except Exception:
+            LOG.exception(
+                "OpenCode could not abandon the restored launch of session %s (reason %s)",
+                state.request.agent_session_id,
+                reason,
+            )
+            return
+        LOG.warning(
+            "OpenCode abandoned a restored launch: session %s, reason %s, receipt %s",
+            state.request.agent_session_id,
+            reason,
+            json.dumps(dict(receipt), sort_keys=True),
+        )
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> OpenCodeSandboxSession:
         """Prepare only the harness runtime; Resources owns borrowed task setup."""
@@ -992,6 +1077,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         directory = f"{self.config.sandbox_session_root.rstrip('/')}/{uuid4().hex}"
         runtime = f"/tmp/nemo-gym-opencode-runtime-{self.config.opencode_version}"
         checkpointed = self.checkpoint_participant is not None and not self._seed_restarts(body)
+        # A restore of this sandbox brings its processes back: the harness keeps running through checkpoints and
+        # calls the model through a relay a restore can re-point.
+        keeps_processes = checkpointed and bool(getattr(provider, "snapshot_keeps_processes", False))
         state = OpenCodeSandboxSession(
             request=body,
             session=SandboxSession(
@@ -1001,10 +1089,13 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 harness="OpenCode",
                 owns_sandbox=owns_sandbox,
                 pausable=checkpointed,
+                pause_mode="hold" if keeps_processes else "stop",
             ),
             runtime=runtime,
             model_ref=self.config.model_server,
             checkpointed=checkpointed,
+            keeps_processes=keeps_processes,
+            relay_gen=1 if keeps_processes else 0,
         )
         prepared_directory = False
         try:
@@ -1033,7 +1124,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
             self._check_sandbox_setup(command, result)
             prepared_directory = True
-            await self._install_session_files(sandbox, directory, workdir, runtime, checkpointed=checkpointed)
+            await self._install_session_files(
+                sandbox, directory, workdir, runtime, checkpointed=checkpointed, model_relay=keeps_processes
+            )
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -1113,7 +1206,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return None, None
 
     async def _install_session_files(
-        self, sandbox: AsyncSandbox, directory: str, workdir: str, runtime: str, *, checkpointed: bool
+        self,
+        sandbox: AsyncSandbox,
+        directory: str,
+        workdir: str,
+        runtime: str,
+        *,
+        checkpointed: bool,
+        model_relay: bool = False,
     ) -> None:
         """Install the OpenCode runtime if the sandbox lacks it, and upload the session's helper files."""
         installer = "install_opencode_runtime.sh"
@@ -1144,6 +1244,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
         if checkpointed:
             await sandbox.upload(RESUME_SCRIPT, f"{directory}/{RESUME_SCRIPT.name}")
+        if model_relay:
+            await sandbox.upload(MODEL_RELAY_SCRIPT, f"{directory}/{MODEL_RELAY_SCRIPT.name}")
 
     @staticmethod
     def _check_sandbox_setup(command: str, result: SandboxExecResult) -> None:
@@ -1558,39 +1660,58 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
 
         A launch whose pause or continue failed was stopped; the next launch resumes the saved conversation, and so
         does the first launch of a restored session that had started one. Each launch has what is left of the
-        activation's budget, not counting time paused for checkpoints.
+        activation's budget, not counting time paused for checkpoints. A restored session whose launch survived
+        the restore (``adoption``) takes that launch over first, and relaunches only if the take-over fails.
         """
         close_timeout = self.config.session_close_timeout_seconds
         clock = _PauseClock(activation)
         while True:
-            resuming = state.launch_count > 0
-            if resuming:
-                await state.prepare_launch(state.launch_count + 1, timeout=close_timeout)
-            await self._stage_mcp_grants(state, deadline=None if deadline is None else deadline + clock.paused_s)
-            launch_payload = payload()
-            if resuming:
-                launch_payload = await self._relaunch_payload(state, launch_payload, prompt=prompt)
-            state.launch_count += 1
-            launch = state.launch_count
-            launch_deadline = None if deadline is None else deadline + clock.paused_s
-            outcome = await run_until_parked(
-                state.require_session(),
-                clock,
-                launch=lambda: state.execute(
-                    launch_payload,
-                    timeout=timeout,
-                    close_timeout=close_timeout,
-                    deadline=launch_deadline,
-                    pause_allowance_s=self.config.checkpoint_pause_allowance_seconds,
-                ),
-                on_parked=lambda: {"launch": launch, "harness_session_id": state.harness_session_id},
-                stop_timeout=close_timeout,
-            )
+            adoption, state.adoption = state.adoption, None
+            if adoption is not None:
+                launch = state.launch_count
+                try:
+                    outcome = await self._adopt_restored_launch(
+                        state, adoption, clock, timeout=timeout, close_timeout=close_timeout
+                    )
+                except Exception as error:
+                    LOG.warning(
+                        "OpenCode cannot resume in place: session %s, reason adopt_failed, detail %r; relaunching",
+                        state.request.agent_session_id,
+                        error,
+                    )
+                    if not state.require_session().cleanup_confirmed:
+                        await self._abandon_restored_launch(state, adoption.identity, reason="adopt_failed")
+                    continue
+                resumed = "in_place"
+            else:
+                resumed = state.launch_count > 0
+                if resumed:
+                    await state.prepare_launch(state.launch_count + 1, timeout=close_timeout)
+                await self._stage_mcp_grants(state, deadline=None if deadline is None else deadline + clock.paused_s)
+                launch_payload = payload()
+                if resumed:
+                    launch_payload = await self._relaunch_payload(state, launch_payload, prompt=prompt)
+                state.launch_count += 1
+                launch = state.launch_count
+                launch_deadline = None if deadline is None else deadline + clock.paused_s
+                outcome = await run_until_parked(
+                    state.require_session(),
+                    clock,
+                    launch=lambda: state.execute(
+                        launch_payload,
+                        timeout=timeout,
+                        close_timeout=close_timeout,
+                        deadline=launch_deadline,
+                        pause_allowance_s=self.config.checkpoint_pause_allowance_seconds,
+                    ),
+                    on_parked=lambda: {"launch": launch, "harness_session_id": state.harness_session_id},
+                    stop_timeout=close_timeout,
+                )
             receipt = state.session.cleanup or {}
             state.launch_records.append(
                 {
                     "launch": launch,
-                    "resumed": resuming,
+                    "resumed": resumed,
                     "outcome": "finished" if isinstance(outcome, Finished) else "stopped",
                     "return_code": receipt.get("return_code"),
                     "paused_s": round(clock.paused_s, 3),
@@ -1620,6 +1741,43 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             await upload_text(state.session.sandbox, path=f"{directory}/mcp-grants.json", text=json.dumps(mcp_grants))
             # null until the plugin checks the grants before the first model call of this launch.
             await upload_text(state.session.sandbox, path=f"{directory}/mcp-status.json", text=json.dumps(None))
+
+    async def _adopt_restored_launch(
+        self,
+        state: OpenCodeSandboxSession,
+        adoption: RestoredLaunch,
+        clock: _PauseClock,
+        *,
+        timeout: float,
+        close_timeout: float,
+    ) -> Finished[str] | Stopped:
+        """Point the restored launch's relay at this attempt's model URL, then continue the launch and finish it.
+
+        The relay is re-pointed before the continue: it holds the launch's model calls until then, and re-sends the
+        one the checkpoint cut, byte for byte, under the replacement attempt.
+        """
+        launch = state.launch_count
+        upstream = self.resolve_model_base_url(self.config.model_server.name, state.request.episode_id.capture_key)
+        await state.point_relay(upstream)
+        LOG.warning(
+            "OpenCode resumed in place: session %s, launch %d, pause %d, relay generation %d",
+            state.request.agent_session_id,
+            launch,
+            adoption.pause_seq,
+            state.relay_gen,
+        )
+        return await run_until_parked(
+            state.require_session(),
+            clock,
+            launch=lambda: state.adopt(
+                pause_seq=adoption.pause_seq,
+                timeout=timeout,
+                close_timeout=close_timeout,
+                pause_allowance_s=self.config.checkpoint_pause_allowance_seconds,
+            ),
+            on_parked=lambda: {"launch": launch, "harness_session_id": state.harness_session_id},
+            stop_timeout=close_timeout,
+        )
 
     async def _relaunch_payload(
         self, state: OpenCodeSandboxSession, payload: dict[str, JsonValue], *, prompt: str
@@ -1716,12 +1874,34 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             # A relaunch within one activation tags its calls with its launch; they join the activation's invocation.
             launch = f":launch-{state.launch_count + 1}" if state.launch_count else ""
             activation_id = {"NEMO_GYM_OPENCODE_ACTIVATION_ID": f"{state.invocation_prefix}{launch}"}
+
+        def serialize(launch: dict[str, Any]) -> str:
+            replace = system and self.config.system_prompt_mode == "replace"
+            return _serialize_replacement_config(launch) if replace else json.dumps(launch)
+
+        relay: dict[str, JsonValue] | None = None
+        launch_config = config
+        if state.keeps_processes:
+            # OpenCode calls the model through the relay, which a restore re-points; without a relay in the sandbox,
+            # the runner's fallback environment points it at the model server directly.
+            relay_url = f"http://127.0.0.1:{self.config.sandbox_model_relay_port}/v1"
+            provider = config["provider"]["nemo_gym"]
+            launch_config = {
+                **config,
+                "provider": {"nemo_gym": {**provider, "options": {**provider["options"], "baseURL": relay_url}}},
+            }
+            relay = {
+                "port": self.config.sandbox_model_relay_port,
+                "upstream": base_url,
+                "fallback_env": [f"OPENCODE_CONFIG_CONTENT={serialize(config)}"],
+            }
         return {
             "instructions": system if self.config.system_prompt_mode == "append" else "",
             "path_prefix": self.config.sandbox_path_prefix,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
+            **({"relay": relay} if relay is not None else {}),
             "env": {
                 "HOME": f"{state.persistent_directory}/home",
                 "XDG_DATA_HOME": f"{state.persistent_directory}/data",
@@ -1729,11 +1909,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 "XDG_CACHE_HOME": f"{state.persistent_directory}/cache",
                 "XDG_STATE_HOME": f"{state.persistent_directory}/state",
                 **activation_id,
-                "OPENCODE_CONFIG_CONTENT": (
-                    _serialize_replacement_config(config)
-                    if system and self.config.system_prompt_mode == "replace"
-                    else json.dumps(config)
-                ),
+                "OPENCODE_CONFIG_CONTENT": serialize(launch_config),
                 "OPENCODE_DISABLE_PROJECT_CONFIG": "true",
                 "OPENCODE_DISABLE_AUTOUPDATE": "true",
                 "OPENCODE_DISABLE_MODELS_FETCH": "true",
