@@ -75,11 +75,17 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.config import token_id_capture_config
 from nemo_gym.token_id_capture.external_capture import (
+    DYNAMO_GYM_REQUEST_ANNOTATION,
+    DYNAMO_PREFIX_ANNOTATION_PREFIX,
+    DYNAMO_SESSION_ID_HEADER,
     ExternalCaptureHandler,
+    annotate_dynamo_request,
     make_external_capture_handler,
+    request_dynamo_engine_data,
     validate_framework_context_options,
 )
 from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
+from nemo_gym.token_id_capture.records import TOKEN_FIELDS
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -110,6 +116,15 @@ def _set_aside_unlisted_reasoning_effort(request: Request, body: Dict[str, Any])
         setattr(request.state, _UNLISTED_REASONING_EFFORT_STATE, effort)
         return {**body, "reasoning": {key: value for key, value in reasoning.items() if key != "effort"}}
     return body
+
+
+# NeMo RL's Dynamo engine writes these `nvext.engine_data` keys (Dynamo forwards them as-is);
+# mapped to the message fields that carry them to Gym.
+_DYNAMO_ENGINE_DATA_FIELDS = {
+    "prompt_token_ids": "prompt_token_ids",
+    "completion_token_ids": "generation_token_ids",
+    "completion_logprobs": "generation_log_probs",
+}
 
 
 def _log_unhandled_engine_error(request: Request, status: int, body: str, route: str) -> None:
@@ -380,6 +395,13 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     return_token_id_information: bool
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
+    # Speak the Dynamo frontend's dialect (ai-dynamo >= 1.5.1). The frontend rejects unknown request
+    # fields and returns token data only under `nvext.engine_data`, when `nvext.extra_fields` names it.
+    # On, echoed per-message token fields are stripped from requests, and every request carries the
+    # `nemo_gym:rollout` annotation in `nvext.annotations`. With return_token_id_information,
+    # engine data is requested and copied onto the message token fields. Token capture with
+    # external staging requires `token_id_capture.external_staging_backend: dynamo_worker`.
+    dynamo_frontend: bool = False
     propagate_context_overflow_errors: bool = False
 
     uses_reasoning_parser: bool
@@ -458,6 +480,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # logged once. Chat path only: with ``use_completions_api`` the request field
     # is always dropped. Opt in deliberately and re-baseline with a same-config run.
     forward_request_chat_template_kwargs: bool = False
+    # Template kwargs under every other source: ``chat_template_kwargs`` above, the request's own kwargs,
+    # ``metadata.chat_template_kwargs`` and ``extra_body`` each override a key set here. For a caller that
+    # supplies defaults, such as a training framework, without replacing the kwargs an environment configures.
+    default_chat_template_kwargs: Optional[Dict[str, Any]] = None
 
     # When True, if the last input message is an assistant message, forward it to vLLM as a
     # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
@@ -567,6 +593,36 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
                 "native Responses route forwards requests without the Responses-to-Chat conversion that "
                 "implements the bridge, and vLLM's native route renders function tools only, so a custom "
                 "tool would be accepted but never shown to the model."
+            )
+        return self
+
+    @model_validator(mode="after")
+    def _validate_dynamo_frontend(self) -> "VLLMModelConfig":
+        # The dialect covers only the chat completions call; the frontend rejects required_prefix_token_ids,
+        # and return_token_ids (sent for request_prompt_and_generation_token_ids) is not a field it accepts.
+        if self.dynamo_frontend and (
+            self.use_completions_api
+            or self.is_responses_native
+            or self.supply_prefix_token_ids
+            or self.request_prompt_and_generation_token_ids
+        ):
+            raise ValueError(
+                "dynamo_frontend is not supported with use_completions_api, is_responses_native, "
+                "supply_prefix_token_ids, or request_prompt_and_generation_token_ids (the frontend rejects "
+                "the return_token_ids field it sends)"
+            )
+        # The frontend reads `reasoning` as an alias of `reasoning_content` and rejects a message that carries
+        # both (`400 duplicate field 'reasoning'`). Checked after validation, so the NEMO_GYM_REASONING_FIELD
+        # default is covered too.
+        if (
+            self.dynamo_frontend
+            and self.uses_reasoning_parser
+            and not self.preserve_reasoning_in_assistant_content
+            and self.reasoning_field == "both"
+        ):
+            raise ValueError(
+                "dynamo_frontend needs reasoning_field: reasoning_content; with 'both' (from config or "
+                "NEMO_GYM_REASONING_FIELD), every echoed reasoning turn fails with 400 duplicate field 'reasoning'"
             )
         return self
 
@@ -833,9 +889,14 @@ class VLLMModel(SimpleResponsesAPIModel):
                     "token_id_capture.external_staging requires return_token_id_information=false; "
                     "worker custody replaces the token echo"
                 )
-            self._external_capture_handler = make_external_capture_handler(
-                capture_config.token_id_capture.external_staging_backend
-            )
+            backend = capture_config.token_id_capture.external_staging_backend
+            # The capture block is global, so judges see dynamo_worker too; only a dialect server must match it.
+            if self.config.dynamo_frontend and backend != "dynamo_worker":
+                raise ValueError(
+                    f"`{self.config.name}` sets dynamo_frontend=true, which needs "
+                    "token_id_capture.external_staging_backend=dynamo_worker"
+                )
+            self._external_capture_handler = make_external_capture_handler(backend)
 
         self._chat_template_tokenizer = None
         if self.config.use_completions_api and self.config.render_chat_template:
@@ -933,6 +994,17 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict.update(self.config.sampling_overrides)
         return body_dict
 
+    def _apply_default_chat_template_kwargs(self, body_dict: Dict[str, Any]) -> None:
+        """Put ``config.default_chat_template_kwargs`` under the outbound body's own kwargs, in place.
+
+        Called once every other source has set ``chat_template_kwargs``, ``extra_body`` included, so a
+        default fills only the keys none of them set.
+        """
+        if self.config.default_chat_template_kwargs:
+            body_dict["chat_template_kwargs"] = deepcopy(self.config.default_chat_template_kwargs) | (
+                body_dict.get("chat_template_kwargs") or {}
+            )
+
     async def _responses_native(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming
     ) -> NeMoGymResponse:
@@ -956,6 +1028,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
             body_dict = self.config.extra_body | body_dict
+        self._apply_default_chat_template_kwargs(body_dict)
         self._apply_sampling_overrides(body_dict)
 
         note_generation_request(body_dict)
@@ -1187,6 +1260,7 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if extra_body:
             body_dict = extra_body | body_dict
+        self._apply_default_chat_template_kwargs(body_dict)
 
         self._splice_audio_from_metadata(body_dict, metadata)
 
@@ -1196,6 +1270,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             body_dict = self._external_capture_handler.prepare_request(body_dict)
         else:
             body_dict = self._apply_prefix_supply(body_dict)
+        if self.config.dynamo_frontend:
+            self._prepare_dynamo_request(body_dict)
 
         if body_dict.get("ng_capture") and body_dict.get("top_logprobs") and body_dict.get("logprob_token_ids"):
             # vLLM ignores top_logprobs when specific IDs are requested. Equal
@@ -1214,6 +1290,54 @@ class VLLMModel(SimpleResponsesAPIModel):
                 body_dict.pop("top_logprobs", None)
 
         return body_dict
+
+    def _prepare_dynamo_request(self, body_dict: Dict[str, Any]) -> None:
+        """Fit a chat request to the Dynamo frontend.
+
+        Strip the token fields agents echo on messages, which the frontend rejects, mark the request as
+        Gym rollout traffic, and request engine data. Without capture, the last echoed assistant turn's
+        tokens move to an annotation instead, so the engine can splice them as vLLM's
+        ``required_prefix_token_ids`` extension does. Capture calls resolve their prefix from staging.
+        """
+        if self._external_capture_handler is None:
+            for message_dict in reversed(body_dict.get("messages") or []):
+                if "prompt_token_ids" in message_dict:
+                    prefix = message_dict["prompt_token_ids"] + message_dict["generation_token_ids"]
+                    annotate_dynamo_request(
+                        body_dict, DYNAMO_PREFIX_ANNOTATION_PREFIX + json.dumps(prefix, separators=(",", ":"))
+                    )
+                    break
+        for message_dict in body_dict.get("messages") or []:
+            for field_name in TOKEN_FIELDS:
+                message_dict.pop(field_name, None)
+        annotate_dynamo_request(body_dict, DYNAMO_GYM_REQUEST_ANNOTATION)
+        if self.config.return_token_id_information:
+            request_dynamo_engine_data(body_dict)
+
+    def _lift_dynamo_engine_data(self, chat_completion_dict: Dict[str, Any]) -> None:
+        """Copy Dynamo's `nvext.engine_data` token arrays onto the message fields read below.
+
+        The token-information path then validates them, including the log probability count.
+        """
+        nvext = chat_completion_dict.pop("nvext", None)
+        if not self.config.return_token_id_information:
+            return
+        engine_data = nvext.get("engine_data") if isinstance(nvext, dict) else None
+        if not isinstance(engine_data, dict):
+            raise RuntimeError(f"`{self.config.name}` got a Dynamo response without nvext.engine_data.")
+        missing = [field for field in _DYNAMO_ENGINE_DATA_FIELDS if not isinstance(engine_data.get(field), list)]
+        if missing:
+            # NeMo RL's engine omits completion_logprobs when vLLM returned no logprobs for the call.
+            raise RuntimeError(
+                f"`{self.config.name}` got Dynamo nvext.engine_data without a list for: {', '.join(missing)}."
+            )
+        message = chat_completion_dict["choices"][0]["message"]
+        message.update(
+            {message_field: engine_data[field] for field, message_field in _DYNAMO_ENGINE_DATA_FIELDS.items()}
+        )
+        # Present only with router replay on, as the native endpoint attaches it; not a required key.
+        if "routed_experts" in engine_data:
+            message["routed_experts"] = engine_data["routed_experts"]
 
     def _splice_audio_from_metadata(self, body_dict: Dict[str, Any], metadata: Dict[str, Any]) -> None:
         """Move audio metadata into content blocks on the most recent user message."""
@@ -1467,6 +1591,13 @@ class VLLMModel(SimpleResponsesAPIModel):
                 }
             )
 
+        extra_headers = (
+            self._external_capture_handler.request_headers() if self._external_capture_handler is not None else {}
+        )
+        if self.config.dynamo_frontend:
+            # The router picks an engine before that engine splices the echoed prefix, so it can send a later
+            # turn away from the engine caching the earlier ones. Pin each rollout to one engine instead.
+            extra_headers.setdefault(DYNAMO_SESSION_ID_HEADER, self._routing_session_id(request))
         execution["upstream_attempted"] = True
         context = current_capture_context()
         transport_options = (
@@ -1474,6 +1605,8 @@ class VLLMModel(SimpleResponsesAPIModel):
             if context is not None and context.parent_resolution_mode == "source_history"
             else {}
         )
+        if extra_headers:
+            transport_options["extra_headers"] = extra_headers
         try:
             chat_completion_dict = await self._call_endpoint(
                 client, client.create_chat_completion(**transport_options, **body_dict)
@@ -1606,6 +1739,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         if self._external_capture_handler is not None:
             self._external_capture_handler.prepare_response(chat_completion_dict)
+        elif self.config.dynamo_frontend:
+            self._lift_dynamo_engine_data(chat_completion_dict)
 
         if self.config.return_token_id_information:
             message_dict = choice_dict["message"]
@@ -1988,18 +2123,18 @@ class VLLMModel(SimpleResponsesAPIModel):
         Assistant and tool messages, plus any tool definitions, are passed
         through to the template unchanged.
 
-        ``chat_template_kwargs`` is merged from two sources: the
-        server-level value from config, plus an optional per-request
-        override JSON-encoded under ``metadata.chat_template_kwargs``. The
-        per-request override wins on key conflicts.
+        ``chat_template_kwargs`` is merged from three sources:
+        ``default_chat_template_kwargs`` and ``chat_template_kwargs`` from
+        config, plus an optional per-request override JSON-encoded under
+        ``metadata.chat_template_kwargs``. A later source wins on key conflicts.
         """
         messages = body_dict.get("messages") or []
         tools = body_dict.get("tools") or None
         self._validate_text_only_messages(messages)
 
-        # Global config baseline, per-request metadata overrides on top. Unlike the
+        # Defaults, then the global config baseline, then per-request metadata overrides. Unlike the
         # chat path, a request's top-level chat_template_kwargs is never merged here.
-        chat_template_kwargs: Dict[str, Any] = {}
+        chat_template_kwargs: Dict[str, Any] = deepcopy(self.config.default_chat_template_kwargs or {})
         if self.config.chat_template_kwargs:
             chat_template_kwargs.update(deepcopy(self.config.chat_template_kwargs))
         metadata = body_dict.get("metadata") or {}
@@ -2257,12 +2392,16 @@ class VLLMModel(SimpleResponsesAPIModel):
             raise ValueError(f"no generation_cut_control_url is configured for backend {base_url}")
         return control_url.rstrip("/")
 
-    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
-        self._maybe_rebind_endpoint()
+    @staticmethod
+    def _routing_session_id(request: Request) -> str:
         # Route by rollout when the call carries one: agents that drop cookies get a new
         # session per call, which scatters a rollout's turns and lets the slowest endpoint
         # collect them. Keying on the rollout keeps its turns on one endpoint.
-        session_id = current_rollout_id() or request.session[SESSION_ID_KEY]
+        return current_rollout_id() or request.session[SESSION_ID_KEY]
+
+    def _resolve_client(self, request: Request) -> NeMoGymAsyncOpenAI:
+        self._maybe_rebind_endpoint()
+        session_id = self._routing_session_id(request)
         client = self._session_id_to_client.get(session_id)
         if self.config.route_around_failing_endpoints:
             hashed = self._hashed_client(session_id)

@@ -837,6 +837,8 @@ class TestApp:
         endpoint_failure_threshold: int = 3,
         endpoint_retry_after_s: float = 60.0,
         forward_session_id_as_conversation_id: bool = False,
+        return_token_id_information: bool = False,
+        dynamo_frontend: bool = False,
     ):
         config = VLLMModelConfig(
             host="0.0.0.0",
@@ -846,7 +848,8 @@ class TestApp:
             model="dummy_model",
             entrypoint="",
             name="",
-            return_token_id_information=False,
+            return_token_id_information=return_token_id_information,
+            dynamo_frontend=dynamo_frontend,
             uses_reasoning_parser=False,
             propagate_context_overflow_errors=propagate_context_overflow_errors,
             use_completions_api=use_completions_api,
@@ -1609,6 +1612,211 @@ class TestApp:
             "generation_log_probs",
         ):
             assert field_name not in served_message, field_name
+
+    @mark.parametrize(
+        ("capture", "engine_data", "error"),
+        [
+            (False, {"prompt_token_ids": [1, 2], "completion_token_ids": [3], "completion_logprobs": [-0.5]}, None),
+            (False, None, "without nvext.engine_data"),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "completion_token_ids": [3]},
+                "without a list for: completion_logprobs",
+            ),
+            (
+                False,
+                {"prompt_token_ids": [1, 2], "completion_token_ids": [3], "completion_logprobs": [-0.5, -0.1]},
+                "mismatched generation token IDs and log probabilities",
+            ),
+            (True, None, None),
+            (
+                False,
+                {
+                    "prompt_token_ids": [1, 2],
+                    "completion_token_ids": [3],
+                    "completion_logprobs": [-0.5],
+                    # Router replay: the base64 routes envelope, as the native endpoint attaches it.
+                    "routed_experts": "cm91dGVz",
+                },
+                None,
+            ),
+        ],
+        ids=[
+            "token-information",
+            "missing-engine-data",
+            "missing-logprobs",
+            "logprob-count-mismatch",
+            "capture",
+            "routed-experts",
+        ],
+    )
+    async def test_dynamo_frontend_dialect(self, monkeypatch: MonkeyPatch, capture, engine_data, error) -> None:
+        # The Dynamo frontend rejects unknown top-level fields and returns tokens only under
+        # nvext.engine_data; a capture call's admission and acknowledgement ride in nvext too.
+        server = self._setup_server(
+            monkeypatch,
+            dynamo_frontend=True,
+            return_token_id_information=not capture,
+            external_staging_backend="dynamo_worker" if capture else None,
+        )
+        context = None
+        if capture:
+            context = CaptureContext(
+                rollout_id="rollout-1",
+                model_call_id="c1",
+                token_sink=None,
+                lineage_store=InMemoryLineageStore(),
+                external_staging=True,
+                request_items=[{"role": "user", "content": "go"}],
+                capture_admission=CaptureAdmission(capture_key="rollout-1", model_call_id="c1", mode="text"),
+            )
+            engine_data = {
+                "ng_commit_coords": {
+                    "capture_key": "rollout-1",
+                    "model_call_id": "c1",
+                    "prev_len": 0,
+                    "delta_len": 3,
+                    "cum_len": 3,
+                    "weight_version": 7,
+                    "digest": "0" * 64,
+                    "extras_digest": "1" * 64,
+                    "staging_key": "rollout-1/c1",
+                    "chain_hash": "2" * 64,
+                    "cumulative_hash": "3" * 64,
+                }
+            }
+        engine_response = {
+            "id": "dynamo-1",
+            "object": "chat.completion",
+            "created": FIXED_TIME,
+            "model": "dummy_model",
+            "choices": [
+                {"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "done"}},
+            ],
+        }
+        if engine_data is not None:
+            engine_response["nvext"] = {"engine_data": engine_data}
+        sent = []
+
+        async def fake_request(**kwargs):
+            sent.append(kwargs)
+            return SimpleNamespace(status=200, ok=True, read=AsyncMock(return_value=json.dumps(engine_response)))
+
+        monkeypatch.setattr("nemo_gym.openai_utils.request", fake_request)
+        server._clients = [
+            NeMoGymAsyncOpenAI(base_url="http://dynamo/v1", api_key="key", default_headers={"x-default": "kept"})
+        ]
+        request = MagicMock()
+        request.session = {SESSION_ID_KEY: "session-1"}
+        request.headers = {}
+        body = NeMoGymChatCompletionCreateParamsNonStreaming(
+            messages=[
+                {"role": "user", "content": "hi"},
+                # A token-information turn echoed back by the agent.
+                {
+                    "role": "assistant",
+                    "content": "hello",
+                    "prompt_token_ids": [1],
+                    "generation_token_ids": [2],
+                    "generation_log_probs": [-0.1],
+                },
+                {"role": "user", "content": "go"},
+            ],
+        )
+        token = set_token_sink(context) if capture else None
+        try:
+            with raises(RuntimeError, match=error) if error else nullcontext():
+                response = await server.chat_completions(request, body)
+            if capture:
+                await server._finalize_served_response(response)
+        finally:
+            if token is not None:
+                reset_token_sink(token)
+
+        outbound = sent[0]["json"]
+        assert "prompt_token_ids" not in outbound["messages"][1]
+        assert "generation_token_ids" not in outbound["messages"][1]
+        assert "generation_log_probs" not in outbound["messages"][1]
+        assert outbound["nvext"]["extra_fields"] == ["engine_data"]
+        assert not {"ng_capture", "required_prefix_token_ids"} & outbound.keys()
+        # Every Gym request is marked as rollout traffic. A capture call also carries its admission;
+        # otherwise the echoed turn's tokens ride as the prefix the engine splices.
+        (call_annotation, marker) = outbound["nvext"]["annotations"]
+        assert marker == "nemo_gym:rollout"
+        if not capture:
+            assert call_annotation == "ng_prefix:[1,2]"
+        assert sent[0]["headers"]["x-default"] == "kept"
+        # Every call pins its rollout to one engine, keyed like the client choice; capture keeps its admission's id.
+        assert sent[0]["headers"]["x-dynamo-session-id"] == ("rollout-1" if capture else "session-1")
+        if error:
+            return
+        served = response.model_dump()
+        assert "nvext" not in served
+        if capture:
+            # The engine stages log probabilities itself; the admission is the only capture field sent.
+            assert "logprobs" not in outbound
+            assert outbound["stream"] is False
+            assert call_annotation.startswith("ng_capture:")
+            assert CaptureAdmission.model_validate_json(call_annotation.removeprefix("ng_capture:")) == (
+                context.capture_admission
+            )
+            assert context.committed is True
+            manifest = await context.lineage_store.manifest("rollout-1")
+            assert manifest["records"][0]["staging_key"] == "rollout-1/c1"
+            assert "ng_commit_coords" not in served
+        else:
+            message = served["choices"][0]["message"]
+            assert message["prompt_token_ids"] == [1, 2]
+            assert message["generation_token_ids"] == [3]
+            assert message["generation_log_probs"] == [-0.5]
+            assert message.get("routed_experts") == engine_data.get("routed_experts")
+
+    @mark.parametrize(
+        ("settings", "error"),
+        [
+            # The frontend rejects the return_token_ids field this flag sends.
+            ({"request_prompt_and_generation_token_ids": True}, "return_token_ids"),
+            # An echoed reasoning turn would carry both `reasoning` and its alias.
+            ({"uses_reasoning_parser": True, "reasoning_field": "both"}, "duplicate field 'reasoning'"),
+            ({"uses_reasoning_parser": True, "reasoning_field": "reasoning_content"}, None),
+            (
+                {
+                    "uses_reasoning_parser": True,
+                    "reasoning_field": "both",
+                    "preserve_reasoning_in_assistant_content": True,
+                },
+                None,
+            ),
+        ],
+    )
+    def test_dynamo_frontend_rejects_settings_it_cannot_serve(self, settings, error) -> None:
+        fields = {
+            "host": "0.0.0.0",
+            "port": 8081,
+            "base_url": "http://dynamo/v1",
+            "api_key": "dummy_key",  # pragma: allowlist secret
+            "model": "dummy_model",
+            "entrypoint": "",
+            "name": "",
+            "dynamo_frontend": True,
+            "return_token_id_information": True,
+            "uses_reasoning_parser": False,
+            **settings,
+        }
+        with raises(ValueError, match=error) if error else nullcontext():
+            VLLMModelConfig(**fields)
+
+    @mark.parametrize(
+        ("backend", "dynamo_frontend", "error"),
+        [
+            # A judge shares the global dynamo_worker capture block without speaking the dialect.
+            ("dynamo_worker", False, None),
+            ("vllm_worker", True, "needs token_id_capture.external_staging_backend=dynamo_worker"),
+        ],
+    )
+    def test_dynamo_worker_backend_pairing(self, monkeypatch: MonkeyPatch, backend, dynamo_frontend, error) -> None:
+        with raises(ValueError, match=error) if error else nullcontext():
+            self._setup_server(monkeypatch, external_staging_backend=backend, dynamo_frontend=dynamo_frontend)
 
     def test_session_client_routing_is_stable_across_workers(self, monkeypatch: MonkeyPatch) -> None:
         workers = [self._setup_server(monkeypatch) for _ in range(2)]
@@ -4442,6 +4650,25 @@ class TestVLLMConverter:
         )
         assert rejected.status_code == 422
 
+    @mark.parametrize(
+        "config_overrides",
+        [
+            {"chat_template_kwargs": {"enable_thinking": False}},
+            {"extra_body": {"chat_template_kwargs": {"enable_thinking": False}}},
+        ],
+        ids=["chat_template_kwargs", "extra_body"],
+    )
+    def test_default_chat_template_kwargs_have_lowest_precedence(self, config_overrides: dict[str, Any]) -> None:
+        """A default fills only the keys no other source sets, and leaves ``extra_body`` kwargs in place."""
+        client, captured_kwargs = self._chat_client_capturing_upstream(
+            default_chat_template_kwargs={"enable_thinking": True, "default_only": 1}, **config_overrides
+        )
+
+        response = client.post("/v1/chat/completions", json={"messages": [{"role": "user", "content": "hi"}]})
+
+        assert response.status_code == 200, response.text
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": False, "default_only": 1}
+
     def test_request_chat_template_kwargs_dropped_by_default(self, caplog):
         """By default the field is accepted at ingress but not forwarded.
 
@@ -5979,6 +6206,7 @@ def _make_chat_template_model(
     *,
     has_chat_template: bool = True,
     chat_template_kwargs: dict | None = None,
+    default_chat_template_kwargs: dict | None = None,
 ) -> tuple[VLLMModel, _FakeTokenizer]:
     config = VLLMModelConfig(
         host="0.0.0.0",
@@ -5996,6 +6224,7 @@ def _make_chat_template_model(
         # actually load HF AutoTokenizer at construction. We flip it on after
         # injecting a _FakeTokenizer instance.
         chat_template_kwargs=chat_template_kwargs,
+        default_chat_template_kwargs=default_chat_template_kwargs,
     )
     model = VLLMModel(
         config=config,
@@ -6055,6 +6284,7 @@ class TestCompletionsBackendChatTemplateRender:
     def test_chat_template_kwargs_merged_with_metadata_override(self) -> None:
         model, tokenizer = _make_chat_template_model(
             chat_template_kwargs={"enable_thinking": True, "tool_use_mode": "tool_calls"},
+            default_chat_template_kwargs={"tool_use_mode": "default", "default_only": 0},
         )
         body_dict = {
             "messages": [{"role": "user", "content": "x"}],
@@ -6065,8 +6295,8 @@ class TestCompletionsBackendChatTemplateRender:
         }
         model._render_messages_via_chat_template(body_dict)
 
-        # Per-request override beats global config; non-overridden global keys persist;
-        # new metadata-only keys are added.
+        # Per-request override beats global config, which beats the defaults; non-overridden
+        # keys persist; new metadata-only keys are added.
         kwargs_seen = {
             k: v
             for k, v in tokenizer.last_call.items()
@@ -6074,8 +6304,9 @@ class TestCompletionsBackendChatTemplateRender:
         }
         assert kwargs_seen == {
             "enable_thinking": False,  # metadata override
-            "tool_use_mode": "tool_calls",  # global config preserved
+            "tool_use_mode": "tool_calls",  # global config preserved over the default
             "extra_knob": 7,  # metadata-only addition
+            "default_only": 0,  # default nothing else sets
         }
 
     def test_post_init_loads_tokenizer_when_render_chat_template_is_set(self, monkeypatch: MonkeyPatch) -> None:
