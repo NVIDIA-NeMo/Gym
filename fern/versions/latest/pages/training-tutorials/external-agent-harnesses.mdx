@@ -326,7 +326,7 @@ The following function performs these steps for one result. The framework suppli
 ```python
 from collections.abc import Awaitable, Callable
 
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.core import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.delivery import (
     finalize_rollout_token_capture,
     retire_rollout_token_capture,

@@ -9,11 +9,16 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_RUNNER_FILE,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)
@@ -25,7 +30,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -72,28 +76,32 @@ class PiSandboxSession(AgentSessionState):
                     raise
                 # The agent base replays the activation error independently of close.
 
-    async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
+    async def execute(
+        self, *, command: list[str], env: dict[str, str], prompt: str, timeout: float, close_timeout: float
+    ) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
         return await self.session.execute(
-            stage_activation=lambda: self.stage_activation(payload),
+            stage_activation=lambda: self.stage_activation(command=command, env=env, prompt=prompt),
             collect=self.collect_artifacts,
             timeout=timeout,
             close_timeout=close_timeout,
         )
 
-    async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
+    async def stage_activation(self, *, command: list[str], env: dict[str, str], prompt: str) -> SandboxCommand:
         """Stage the invocation and return the Pi worker command."""
-        await self.upload_json("input.json", payload)
-        return SandboxCommand(
-            python="python3",
-            argv=[
-                "python3",
-                "-I",
-                f"{self.session.session_dir}/{RUNNER_FILE}",
-                f"{self.session.session_dir}/input.json",
-            ],
-            stdlib_runner=True,
-        )
+        directory = self.session.session_dir
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=prompt)
+        params = {
+            "cwd": self.session.workdir,
+            "command": command,
+            "env": env,
+            "stdin": f"{directory}/prompt.txt",
+            "stdout": f"{directory}/stdout.log",
+            "stderr": f"{directory}/stderr.log",
+            "events": f"{directory}/events.jsonl",
+        }
+        await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
+        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""

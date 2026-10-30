@@ -10,7 +10,7 @@ from tempfile import NamedTemporaryFile
 
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 def materialize(

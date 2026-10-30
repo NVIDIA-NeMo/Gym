@@ -38,7 +38,7 @@ Use a separate directory for each evaluation job: rollout IDs do not contain a r
 
 Follow [Model-Call Capture](/main/model-server/model-call-capture) for a runnable evaluation example.
 Agent-side evidence depends on the harness and execution path. See the
-[capability matrix](/main/reference/trajectory-capabilities) for measured harness checks.
+[harness conformance results](/main/observability/harness-conformance#results) for measured harness checks.
 
 ## Which Artifact to Read
 
@@ -168,7 +168,7 @@ and return an `AgentObservationBundle` as `ng_agent_observations`:
 - Supply explicit `TrajectoryTurn` records in a producer `ng_trajectory` when semantic turns are
   observable. Collection preserves them; it does not derive them from an invocation's conversation.
 
-See the [observation schemas](/main/nemo-gym/nemo_gym/rollout_observability) for field definitions.
+See the [observation schemas](/main/nemo-gym/nemo_gym/trajectory/trajectory_record) for field definitions.
 
 ## Health and Performance
 

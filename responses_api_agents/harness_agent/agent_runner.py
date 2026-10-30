@@ -32,9 +32,19 @@ assert nemo_gym.__file__.startswith(str(WORK_DIR / "gym_mount")), f"wrong nemo_g
 
 from omegaconf import OmegaConf  # noqa: E402
 
-from nemo_gym.config_types import BaseServerConfig  # noqa: E402
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # noqa: E402
-from nemo_gym.server_utils import ServerClient  # noqa: E402
+
+try:
+    from nemo_gym.client import ServerClient
+    from nemo_gym.config import BaseServerConfig
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+except ModuleNotFoundError as exc:
+    # With a prebuilt gym_source bundle, this runs against the bundle's nemo-gym, which can predate the package
+    # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+    if not (exc.name or "").startswith("nemo_gym."):
+        raise
+    from nemo_gym.config_types import BaseServerConfig  # path before nemo_gym 0.8.0
+    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # path before nemo_gym 0.8.0
+    from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 
 
 def main() -> None:

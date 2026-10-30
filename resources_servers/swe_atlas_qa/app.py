@@ -17,7 +17,17 @@ from fastapi import FastAPI, Request
 from omegaconf import ListConfig
 from pydantic import Field, PrivateAttr, SecretStr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef, get_first_server_config_dict
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxHandle,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseSeedSessionResponse,
@@ -28,12 +38,6 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxHandle, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
-from nemo_gym.server_utils import SESSION_ID_KEY
 from resources_servers.swe_atlas_qa.prepare import TASKS_DIR, load_task, validate_source
 
 
@@ -113,7 +117,12 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     yield state
             finally:
                 try:
-                    await asyncio.gather(*(self._close(handle) for handle in list(self._sandboxes.values())))
+                    results = await asyncio.gather(
+                        *(self._close(handle) for handle in list(self._sandboxes.values())), return_exceptions=True
+                    )
+                    for result in results:
+                        if isinstance(result, BaseException):
+                            raise result
                 finally:
                     self._sessions.clear()
                     await self._provider.aclose()
@@ -268,6 +277,8 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                     or not 0 <= results["agg_score"] <= 1
                 ):
                     raise ValueError("The upstream verifier returned inconsistent rubric counts")
+                if results["num_scored"] == 0:
+                    raise RuntimeError("The upstream verifier did not score any rubrics")
                 scores = {
                     key: results[key]
                     for key in ("reward", "agg_score", "num_rubrics", "num_scored", "num_unscored", "num_passed")
@@ -280,7 +291,7 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
     async def verify(self, request: Request, body: SWEAtlasQAVerifyRequest) -> SWEAtlasQAVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
         async with self._session_locks[session_id]:
-            session = self._sessions.pop(session_id, None)
+            session = None if session_id in self._closed_sessions else self._sessions.pop(session_id, None)
             self._closed_sessions.add(session_id)
         result: dict[str, Any] = {"reward": 0.0, "evaluation_completed": True}
         if session is None:
@@ -308,7 +319,11 @@ class SWEAtlasQAResourcesServer(SimpleResourcesServer):
                             await self._provider.download_file(handle, "/logs/agent/answer.txt", answer_path)
                     finally:
                         # No agent process can run while private rubric files or judge credentials are staged.
-                        await self._close(handle)
+                        try:
+                            await self._close(handle)
+                        finally:
+                            if handle.sandbox_id in self._sandboxes:
+                                self._sessions[session_id] = session
                     if answer_path.exists():
                         if answer_path.stat().st_size > self.config.max_answer_bytes:
                             raise ValueError("Agent answer exceeds the configured size limit")

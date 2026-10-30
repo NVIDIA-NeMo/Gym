@@ -4,6 +4,7 @@ import asyncio
 import hashlib
 import io
 import json
+import os
 import shutil
 import sys
 import tarfile
@@ -91,22 +92,52 @@ def provisioner(tmp_path, monkeypatch):
     return runtime.RuntimeProvisioner(provider_config={}, manifest_path=manifest(tmp_path), helper_image="helper")
 
 
+def max_cache_links(root: Path) -> int:
+    return max(path.lstat().st_nlink for path in (root / runtime.CACHE).rglob("*") if path.is_file())
+
+
 @pytest.mark.asyncio
-async def test_cache_upload_once_and_private_role_mounts(provisioner):
+async def test_cache_upload_once_and_direct_read_only_mounts(provisioner):
     root = Path(runtime.STORAGE_ROOT)
     first = await provisioner.prepare("one")
     second = await provisioner.prepare("two")
     assert first != second and provisioner.helper.uploads == 4
     assert provisioner.helper.spec.provider_options["network_policy"] == {"defaultAction": "deny", "egress": []}
-    for session in ["one", "two"]:
-        candidate = provisioner.mount_options(session, "candidate")["volumes"][0]
-        judge = provisioner.mount_options(session, "judge")["volumes"][0]
-        assert candidate["readOnly"] and judge["readOnly"]
-        assert candidate["mountPath"] == judge["mountPath"] == "/opt/gym-runtime"
-        candidate_root, judge_root = root / candidate["subPath"], root / judge["subPath"]
-        assert set(path.name for path in candidate_root.iterdir()) == {"owner", "python", "opencode", "rg"}
-        assert set(path.name for path in judge_root.iterdir()) == {"owner", "python"}
-        assert (candidate_root / "python/bin/python3").is_file()
+    artifacts = provisioner.manifest["artifacts"]
+    for session, bundle in [("one", first), ("two", second)]:
+        candidate = provisioner.mount_options(session, "candidate")["volumes"]
+        judge = provisioner.mount_options(session, "judge")["volumes"]
+        assert candidate[:3] == [
+            {
+                "subPath": "gym-swet-runtime-cache/" + artifacts["python"]["sha256"] + ".python/python",
+                "mountPath": "/opt/gym-runtime/python",
+                "readOnly": True,
+            },
+            {
+                "subPath": "gym-swet-runtime-cache/" + artifacts["opencode"]["sha256"],
+                "mountPath": "/opt/gym-runtime/opencode",
+                "readOnly": True,
+            },
+            {
+                "subPath": "gym-swet-runtime-cache/" + artifacts["rg"]["sha256"],
+                "mountPath": "/opt/gym-runtime/rg",
+                "readOnly": True,
+            },
+        ]
+        # The judge never sees the candidate's tools or a writable submission.
+        assert judge[:1] == candidate[:1]
+        assert candidate[3] == {
+            "subPath": bundle + "/submission-candidate",
+            "mountPath": "/opt/gym-submission",
+            "readOnly": False,
+        }
+        assert judge[1:] == [
+            {"subPath": bundle + "/submission-judge", "mountPath": "/opt/gym-submission", "readOnly": True}
+        ]
+        assert (root / candidate[0]["subPath"] / "bin/python3").is_file()
+        assert (root / candidate[1]["subPath"]).read_bytes() == b"opencode"
+        assert set(path.name for path in (root / bundle).iterdir()) == {"submission-candidate", "submission-judge"}
+    assert max_cache_links(root) == 1
     await provisioner.release("one")
     assert not (root / first).exists() and (root / second).exists()
     with pytest.raises(RuntimeError, match="remain owned"):
@@ -114,6 +145,68 @@ async def test_cache_upload_once_and_private_role_mounts(provisioner):
     await provisioner.release("two")
     await provisioner.close()
     assert provisioner.helper.stopped and (root / "gym-swet-runtime-cache").is_dir()
+    assert [path.name for path in root.iterdir()] == ["gym-swet-runtime-cache"]
+
+
+@pytest.mark.asyncio
+async def test_repeated_concurrent_prepare_and_release_add_no_cache_links(provisioner):
+    root = Path(runtime.STORAGE_ROOT)
+    for round in range(3):
+        sessions = [f"{round}-{index}" for index in range(12)]
+        await asyncio.gather(*(provisioner.prepare(session) for session in sessions))
+        assert len(list((root / ("gym-swet-runtime-" + provisioner._owner)).iterdir())) == 12
+        assert max_cache_links(root) == 1
+        await asyncio.gather(*(provisioner.release(session) for session in sessions))
+    assert provisioner._bundles == {} and max_cache_links(root) == 1
+    assert [path.name for path in root.iterdir()] == ["gym-swet-runtime-cache"]
+    await provisioner.close()
+
+
+@pytest.mark.asyncio
+async def test_interrupted_driver_leaves_no_cache_links_for_the_next_driver(provisioner, tmp_path):
+    root = Path(runtime.STORAGE_ROOT)
+    abandoned = [await provisioner.prepare(f"interrupted-{index}") for index in range(4)]
+    # Bundles from earlier Gym releases hold hard links to every cached runtime file.
+    cached = next((root / runtime.CACHE).rglob("python3"))
+    earlier = root / ("gym-swet-runtime-" + "e" * 32)
+    (earlier / "bundle/candidate").mkdir(parents=True)
+    os.link(cached, earlier / "bundle/candidate/python3")
+
+    restarted = runtime.RuntimeProvisioner(
+        provider_config={}, manifest_path=tmp_path / "manifest.json", helper_image="helper"
+    )
+    for round in range(3):
+        sessions = [f"{round}-{index}" for index in range(8)]
+        await asyncio.gather(*(restarted.prepare(session) for session in sessions))
+        await asyncio.gather(*(restarted.release(session) for session in sessions))
+    # Nothing deletes another owner's directories; their links neither grow nor block preparation.
+    assert all((root / bundle).is_dir() for bundle in abandoned) and earlier.is_dir()
+    assert cached.stat().st_nlink == 2 and max_cache_links(root) == 2
+    assert not (root / ("gym-swet-runtime-" + restarted._owner)).exists()
+    # Only the worker is uploaded: the restarted driver reuses the verified cache.
+    assert restarted.helper.uploads == 1
+    await restarted.close()
+
+
+@pytest.mark.asyncio
+async def test_failed_worker_keeps_traceback_from_background_output(provisioner, monkeypatch):
+    await provisioner.prepare("one")
+    execute = provisioner.helper.exec
+
+    async def background_exec(command, **kwargs):
+        # OpenSandbox background commands return combined output in stdout.
+        result = await execute(command, **kwargs)
+        return SimpleNamespace(
+            return_code=result.return_code, error_type=None, stdout=result.stderr, stderr="exit status 1"
+        )
+
+    monkeypatch.setattr(provisioner.helper, "exec", background_exec)
+    monkeypatch.setattr(runtime, "uuid4", lambda: SimpleNamespace(hex=provisioner._bundles["one"].split("/")[1]))
+    with pytest.raises(RuntimeError) as failure:
+        await provisioner.prepare("two")
+    message = str(failure.value)
+    assert message.startswith("Trusted runtime preparation failed: prepare exited 1 (process): exit status 1\n")
+    assert "FileExistsError: [Errno 17] File exists" in message
 
 
 @pytest.mark.asyncio

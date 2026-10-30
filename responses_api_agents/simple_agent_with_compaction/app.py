@@ -21,20 +21,14 @@ from typing import Any, List
 from fastapi import Request, Response
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -43,7 +37,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,
@@ -51,7 +46,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, get_response_json, raise_for_status
 from responses_api_agents.simple_agent_with_compaction.compaction import (
     ContextCompactedResponse,
     ContextCompactedTransportResponse,

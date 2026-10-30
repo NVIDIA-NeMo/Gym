@@ -24,6 +24,11 @@ from typing import Any
 import orjson
 from pydantic import BaseModel, ValidationError
 
+from nemo_gym.artifacts.run_files import (
+    QUALITY_SUMMARY_FILENAME,
+    QUALITY_SUMMARY_SOURCES_KEY,
+    ROLLOUT_VERDICTS_FILENAME,
+)
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -51,11 +56,8 @@ from nemo_gym.health.checks import (
 from nemo_gym.health.timeouts import read_rollout_timing, summarize_timeouts
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
-    QUALITY_SUMMARY_FILENAME,
-    QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
-    ROLLOUT_VERDICTS_FILENAME,
     TASK_INDEX_KEY,
     CheckInput,
     CheckScope,
@@ -71,7 +73,7 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -559,10 +561,8 @@ def _rollout_accounting(
     The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
-    from nemo_gym.rollout_collection import (
-        NG_FAILURE_CLASS_KEY,
-        is_terminal_failure,
-    )
+    from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollout_collection import is_terminal_failure
 
     failed, owed, any_sidecar = failures.rows, failures.owed, failures.any_sidecar
     expected = None if owed is None else len(owed)
@@ -713,8 +713,8 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         return
     # Lazy: the capture store pulls in the model-server stack, which health workers do not need.
     from nemo_gym.base_responses_api_model import _PENDING_SUFFIX, CaptureStore
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
     from nemo_gym.observability.model_calls import read_available_model_call_records
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 
     listings = []
     for directory in capture_dirs:

@@ -70,13 +70,9 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
-)
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
-from nemo_gym.global_config import (
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -84,21 +80,24 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import (
-    aggregation_sources_path_for,
-    failures_path_for,
-    materialized_path_for,
-    resubmit_offset_path_for,
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.observability.model_calls import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
 )
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
-    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
@@ -115,7 +114,12 @@ from nemo_gym.rollout_collection import (
     observed_elapsed,
     record_resubmit_offset,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,
@@ -1633,8 +1637,9 @@ def _require_final_stage_rows(
     Only a coverage rejection is terminal here. When the stage loop stopped with
     rows still retryable, a resume picks them up and the run is expected to
     continue in a later process; that path only logs how to continue, and the
-    run exits normally without a ``comparison/eval_elo``. Likewise a final stage
-    with *some* rows is not fatal: aggregation reports its per-stage fit and
+    completion check after aggregation fails a ``require_complete`` run so its
+    chain resumes it. Likewise a final stage with *some* rows is not fatal:
+    aggregation reports its per-stage fit and
     marks it degraded, with no headline ``comparison/eval_elo`` unless every
     expected final-stage row is present.
     """
@@ -1811,7 +1816,7 @@ def _resume_complete_stage(
         summary.update(
             partial=True,
             num_rollouts=expected_stage_row_count,
-            num_successful=len(cached_rows),
+            num_successful=len(included_keys),
             success_fraction=outcome.get("success_fraction"),
             num_omitted=len(_recorded_key_set(outcome, "omitted_keys")),
         )
@@ -2716,9 +2721,12 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
     )
-    rollout_collection_config.check_completion(
-        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
+    # A stage accepted by its partial-completion policy is complete at its accepted size; every other stage
+    # owes all planned rollouts, so a stop with retryable or undispatched rows still fails the run.
+    expected = sum(
+        stage["num_successful"] if stage.get("partial") else stage["num_rollouts"] for stage in stage_summaries
     )
+    rollout_collection_config.check_completion(expected=expected, results=all_results)
     return aggregate_metrics_fpath
 
 

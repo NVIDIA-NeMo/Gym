@@ -7,12 +7,8 @@ from omegaconf import OmegaConf
 
 from environment_servers.swe_together.app import SWETConfig, SWETEnvironmentServer
 from nemo_gym.benchmarks import BenchmarkConfig
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import (
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-    taskset_environment_server_name,
-)
+from nemo_gym.config import AggregateMetricsRequest, GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import taskset_environment_server_name
 from nemo_gym.rollout_collection import NG_ENVIRONMENT_SERVER_KEY, RolloutCollectionHelper
 
 
@@ -55,6 +51,8 @@ async def test_recipe_routes_to_environment_and_aggregates_measurements(monkeypa
     assert renewal == 3600
     assert renewal < env_config.sandbox_config.get("ttl_s", 7200)
     assert renewal < env_config.judge_sandbox_config.get("ttl_s", 7200)
+    assert env_config.sandbox_config["metadata"] == {"nemo.nvidia.com/oom-kill": "process"}
+    assert env_config.judge_sandbox_config["metadata"] == {}
     assert env_config.interaction_timeout_seconds == (600 if smoke else 4800)
     assert env_config.agent_server.name == "swe_together_candidate"
     assert env_config.judge_agent.name == "swe_together_judge"

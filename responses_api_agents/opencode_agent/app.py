@@ -37,9 +37,8 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -49,10 +48,12 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import MODEL_CONTEXT_LIMIT, MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -64,22 +65,25 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxExecResult,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
     ObservationGap,
     SandboxObservation,
+    ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.opencode_agent.artifacts import (
     _parse_opencode_session,
     parse_opencode_export,
@@ -136,11 +140,10 @@ def _extract_instruction(body_input) -> tuple[str, Optional[str]]:
     return user_message, system_message
 
 
-def _sandbox_prepare_command(workdir: str, directory: str, runtime: str, *, python: str = "python3") -> str:
+def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
     # Bootstrap with POSIX sh; the runtime installer itself requires Bash.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "OpenCode sandbox execution requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -155,17 +158,28 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    validate_paths = (
-        "from pathlib import Path; import sys; "
-        "workdir,*roots=[Path(p).resolve() for p in sys.argv[1:]]; "
-        "assert workdir.is_dir(), 'OpenCode task workdir is missing'; "
-        "assert all(workdir != root and workdir not in root.parents and root not in workdir.parents "
-        "for root in roots), 'OpenCode runtime/session storage overlaps the task workdir'"
-    )
+    # Resolve symlinks like realpath -m: storage roots need not exist yet.
+    validate_paths = """resolve() {
+    if [ -e "$1" ]; then (cd -P "$1" && pwd -P); else
+        parent=${1%/*}
+        parent=$(resolve "${parent:-/}") && printf '%s/%s\\n' "${parent%/}" "${1##*/}"
+    fi
+}
+[ -d "$1" ] || { echo 'OpenCode task workdir is missing' >&2; exit 1; }
+workdir=$(resolve "$1")
+shift
+for root in "$@"; do
+    root=$(resolve "$root")
+    case "$root/" in "${workdir%/}"/*) overlap=1 ;; esac
+    case "$workdir/" in "${root%/}"/*) overlap=1 ;; esac
+done
+[ -z "${overlap-}" ] || { echo 'OpenCode runtime/session storage overlaps the task workdir' >&2; exit 1; }
+"""
     return (
-        bootstrap.replace("command -v python3", "command -v " + quote(python))
-        + f"{quote(python)} -I -c {quote(validate_paths)} {quote(workdir)} "
-        f"{quote(str(PurePosixPath(directory).parent))} {quote(runtime)} && mkdir -p {quote(directory)}"
+        bootstrap
+        + f"set -- {quote(workdir)} {quote(str(PurePosixPath(directory).parent))} {quote(runtime)}\n"
+        + validate_paths
+        + f"mkdir -p {quote(directory)}"
     )
 
 
@@ -195,7 +209,6 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     opencode_version: str = OPENCODE_VERSION
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
-    sandbox_python_executable: str = "python3"
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
@@ -730,7 +743,6 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 sandbox=sandbox, session_dir=directory, workdir=workdir, harness="OpenCode", owns_sandbox=owns_sandbox
             ),
             runtime=runtime,
-            python_executable=self.config.sandbox_python_executable,
             model_ref=self.config.model_server,
         )
         prepared_directory = False
@@ -744,9 +756,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         f"Cannot create OpenCode sandbox workdir {workdir}: {workspace.stderr or workspace.stdout}"
                     )
             state.sandbox_id = sandbox.sandbox_id
-            command = _sandbox_prepare_command(
-                workdir, directory, runtime, python=self.config.sandbox_python_executable
-            )
+            command = _sandbox_prepare_command(workdir, directory, runtime)
             result = await sandbox.exec(command, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
             prepared_directory = True
@@ -760,13 +770,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.opencode_version,
                     self.config.sandbox_executable_path or "",
                     self.config.sandbox_executable_sha256 or "",
-                    self.config.sandbox_python_executable,
                     ":".join(self.config.sandbox_path_prefix),
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
             self._check_sandbox_setup(command, result)
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
             await sandbox.upload(Path(__file__).with_name("task_environment.mjs"), f"{directory}/task_environment.mjs")
             if self._model_call_capture_enabled():
                 await sandbox.upload(OBSERVABILITY_PATCH, f"{directory}/{OBSERVABILITY_PATCH.name}")
@@ -1137,13 +1146,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         payload = {
             "instructions": system,
             "path_prefix": self.config.sandbox_path_prefix,
-            "directory": state.session.session_dir,
             "cwd": state.session.workdir,
             "command": command,
             "prompt": prompt,
-            "harness_session_id": state.harness_session_id,
-            "previous_message_ids": state.message_ids,
-            "activation_id": state.activation_id,
             "env": {
                 "HOME": f"{state.persistent_directory}/home",
                 "XDG_DATA_HOME": f"{state.persistent_directory}/data",
@@ -1260,7 +1265,19 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     record.error_type = "provider_error"
                 elif error or failure:
                     record.error_type = "server_error"
+        cancelled = isinstance(failure, asyncio.CancelledError)
+        timed_out = result is not None and result["timed_out"]
+        if cancelled or timed_out:
+            # Gym stopped the process, so a tool OpenCode left running ended with that stop.
+            termination = "timeout" if timed_out else "cancelled"
+            for record in observations.records:
+                if isinstance(record, ToolCallObservation) and record.status == "incomplete":
+                    record.status = termination
+                    record.error_type = f"invocation_{termination}"
         if result is not None:
+            sandbox_outcome = (
+                "timeout" if timed_out else "cancelled" if cancelled else "failed" if error or failure else "completed"
+            )
             observations.records.append(
                 SandboxObservation(
                     role="agent",
@@ -1270,9 +1287,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                         else state.request.sandbox_access.connection.provider_config_ref
                     ),
                     sandbox_id=state.sandbox_id,
-                    outcome="timeout" if result["timed_out"] else "failed" if error or failure else "completed",
+                    outcome=sandbox_outcome,
                     exit_code=result["return_code"],
-                    error_type="process_exit" if reported_error else None,
+                    # The same category the root invocation carries for the stop or failure.
+                    error_type="process_exit"
+                    if reported_error
+                    else {"cancelled": "cancelled", "failed": "server_error"}.get(sandbox_outcome),
                 )
             )
         observations.gaps.append(
