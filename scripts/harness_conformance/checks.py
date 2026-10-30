@@ -5,46 +5,27 @@
 
 import json
 import os
-import subprocess
 from pathlib import Path
-from typing import NotRequired, TypedDict
 
-from .artifacts import download_artifacts
+from scripts.check_suites.github_actions import (
+    CI_RESULT,
+    STATUSES,
+    CheckRun,
+    artifact_download_urls,
+    download_artifacts,
+    job_exit_code,
+    markdown_table,
+    post_check_run,
+    read_ci_result,
+)
+
 from .feedback import failure_details, reproduction
 from .registry import HARNESSES
 
 
 CHECK_NAME = "Harness conformance (non-blocking)"
-
-
-class CheckOutput(TypedDict):
-    title: str
-    summary: str
-
-
-class CheckRun(TypedDict):
-    name: str
-    head_sha: str
-    status: str
-    conclusion: str
-    output: CheckOutput
-    details_url: NotRequired[str]
-    external_id: NotRequired[str]
-
-
-def ci_result(harness: str, *, artifacts: Path, sha: str) -> dict | None:
-    """Read one measurement only when it belongs to this harness and tested commit."""
-    try:
-        result = json.loads((artifacts / harness / "probes" / "ci-result.json").read_text())
-        if (
-            result["harness"] == harness
-            and result["sha"] == sha
-            and result["status"] in ("passed", "failed", "unavailable")
-        ):
-            return result
-    except (OSError, ValueError, KeyError, TypeError):
-        pass
-    return None
+ARTIFACT_PREFIX = "harness-conformance"
+RESULT_FILE = f"probes/{CI_RESULT}"
 
 
 def p0_check(
@@ -52,10 +33,10 @@ def p0_check(
 ) -> CheckRun:
     """Require a complete result for every selected harness; missing evidence fails P0."""
     rows = []
-    counts = dict.fromkeys(("passed", "failed", "unavailable"), 0)
+    counts = dict.fromkeys(STATUSES, 0)
     rerun = []
     for harness in harnesses or []:
-        result = ci_result(harness, artifacts=artifacts, sha=sha)
+        result = read_ci_result(artifacts / harness / RESULT_FILE, subject=harness, sha=sha, subject_key="harness")
         status = result["status"] if result else "unavailable"
         counts[status] += 1
         count, first = (
@@ -65,7 +46,7 @@ def p0_check(
         )
         artifact_url = (artifact_urls or {}).get(harness)
         evidence = f"[Download report and logs]({artifact_url})" if artifact_url else "See workflow artifacts/logs"
-        rows.append(f"| {harness} | {status} | {count} | {first} | {evidence} |")
+        rows.append([harness, status, count, first, evidence])
         if status != "passed":
             rerun.append(harness)
     if harnesses is None:
@@ -76,10 +57,7 @@ def p0_check(
         summary = "No registered harnesses or their dependencies were changed."
     else:
         title = ", ".join(f"{count} {status}" for status, count in counts.items())
-        summary = (
-            "| Harness | P0 result | Failed scenario checks | First failure | Evidence |\n|---|---|---|---|---|\n"
-        )
-        summary += "\n".join(rows)
+        summary = markdown_table(["Harness", "P0 result", "Failed scenario checks", "First failure", "Evidence"], rows)
         summary += (
             "\n\nCounts include execution errors and count each scenario once. "
             "Unavailable means setup, tests, execution, or evidence collection failed.\n\n"
@@ -110,30 +88,24 @@ def main() -> int:
             raise ValueError("Invalid selection")
     except (ValueError, TypeError, KeyError):
         harnesses = None
-    download_artifacts(harnesses or [], repo=repo, run_id=run_id, attempt=attempt, output=artifacts)
+    download_artifacts(
+        harnesses or [],
+        artifact_prefix=ARTIFACT_PREFIX,
+        repo=repo,
+        run_id=run_id,
+        attempt=attempt,
+        output=artifacts,
+        result_file=RESULT_FILE,
+    )
     run_url = f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}/attempts/{attempt}"
-    artifact_urls = {}
-    try:
-        listing = subprocess.check_output(
-            [
-                "gh",
-                "api",
-                "--paginate",
-                f"repos/{repo}/actions/runs/{run_id}/artifacts",
-                "--jq",
-                ".artifacts[] | select(.expired == false) | [.name, .id] | @tsv",
-            ],
-            text=True,
-        )
-        by_name = dict(line.split("\t") for line in listing.splitlines())
-        for harness in harnesses or []:
-            artifact_id = by_name.get(f"harness-conformance-{harness}-{run_id}-{attempt}")
-            if artifact_id:
-                artifact_urls[harness] = (
-                    f"{os.environ['GITHUB_SERVER_URL']}/{repo}/actions/runs/{run_id}/artifacts/{artifact_id}"
-                )
-    except (subprocess.CalledProcessError, ValueError):
-        print("::warning::Could not link individual artifacts; use the workflow artifacts page.")
+    artifact_urls = artifact_download_urls(
+        harnesses or [],
+        artifact_prefix=ARTIFACT_PREFIX,
+        repo=repo,
+        run_id=run_id,
+        attempt=attempt,
+        server_url=os.environ["GITHUB_SERVER_URL"],
+    )
     payload = p0_check(harnesses, artifacts=artifacts, sha=os.environ["GITHUB_SHA"], artifact_urls=artifact_urls)
     payload["details_url"] = run_url
     payload["external_id"] = f"harness-conformance-p0-{run_id}-{attempt}"
@@ -144,21 +116,8 @@ def main() -> int:
     with Path(os.environ["GITHUB_STEP_SUMMARY"]).open("a") as handle:
         handle.write(f"## {CHECK_NAME}\n\n{output['title']}\n\n{output['summary']}\n")
     # Publish the detailed check before making the workflow job reflect its result.
-    subprocess.run(
-        ["gh", "api", "--method", "POST", f"repos/{repo}/check-runs", "--input", "-"],
-        input=json.dumps(payload),
-        text=True,
-        check=True,
-        stdout=subprocess.DEVNULL,
-    )
-    probe_result = os.environ.get("PROBE_JOB_RESULT", "success")
-    if payload["conclusion"] != "success" or probe_result not in ("success", "skipped"):
-        print(
-            f"::error title={CHECK_NAME}::{output['title']}. "
-            f"Probe jobs: {probe_result}. See the job summary for failures, rerun commands, and artifact links."
-        )
-        return 1
-    return 0
+    post_check_run(payload, repo=repo)
+    return job_exit_code(payload, probe_result=os.environ.get("PROBE_JOB_RESULT", "success"))
 
 
 if __name__ == "__main__":

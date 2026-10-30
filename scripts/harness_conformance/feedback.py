@@ -6,6 +6,8 @@
 import json
 from pathlib import Path
 
+from scripts.check_suites.github_actions import table_cell
+
 
 EVIDENCE_LABELS = {
     "TE-1": "model-call status",
@@ -38,7 +40,7 @@ def failure_details(harness: str, output: Path) -> tuple[str, str]:
                 description.rstrip(".") + f"; execution also failed in {execution_error['scenario']}: {detail}"
             )
         # Keep external evidence from breaking the Markdown table or annotation lines.
-        return count, " ".join(description.split()).replace("|", "&#124;")
+        return count, table_cell(description)
     except (OSError, ValueError, KeyError, TypeError, AttributeError):
         return "Unknown", "No usable scenario results. Check the probe job's setup/test logs and downloaded evidence."
 
