@@ -34,7 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     ConnectableProvider,
@@ -196,6 +196,13 @@ class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
 
 
 class SWEBenchProVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(serialize_by_alias=True)
+
+    failure_class: str | None = Field(default=None, alias="_ng_failure_class", exclude_if=lambda value: value is None)
+    failure_judge_error: str | None = Field(
+        default=None, alias="_ng_failure_judge_error", exclude_if=lambda value: value is None
+    )
+    verification_attempts: int | None = Field(default=None, exclude_if=lambda value: value is None)
     image_provenance: dict[str, Any] = Field(default_factory=dict)
     evaluation_completed: bool
     eval_timed_out: bool = False
@@ -556,7 +563,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
+        allocation_error: Exception | None = None
         for attempt in range(1, attempts + 1):
+            allocation_error = None
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
             try:
@@ -572,6 +581,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
+                if eval_sandbox is None and isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
+                    allocation_error = exc
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
                 result = VerificationResult(
@@ -618,6 +629,9 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "mask_sample": False,
             "failure_kind": None,
             "failure_reason": None,
+            "_ng_failure_class": None,
+            "_ng_failure_judge_error": None,
+            "verification_attempts": None,
             "evaluation_completed": result.completed and reason is None,
             "eval_timed_out": result.timed_out,
             "resolved": result.resolved,
@@ -631,6 +645,18 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
         }
+        if allocation_error is not None:
+            # The saved patch was never graded. A collection retry would run the agent again;
+            # this stateful verifier cannot yet reverify that patch through the public CLI.
+            response_data |= {
+                "mask_sample": True,
+                "failure_kind": VERIFIER_ERROR,
+                "failure_reason": result.error,
+                "_ng_failure_class": "judge_failed",
+                "_ng_failure_judge_error": result.error,
+                "model_patch": model_patch,
+                "verification_attempts": attempt,
+            }
         return SWEBenchProVerifyResponse.model_validate(response_data)
 
 

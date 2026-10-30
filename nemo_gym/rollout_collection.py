@@ -3324,6 +3324,7 @@ class RolloutCollectionHelper(BaseModel):
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
         terminal_keys: set = set()
+        saved_verification_keys: set = set()
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
@@ -3343,6 +3344,10 @@ class RolloutCollectionHelper(BaseModel):
                         budget_used[k] += 1
                     if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
                         terminal_keys.add(k)
+                    if fr.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and isinstance(fr.get("model_patch"), str):
+                        # The model already supplied this patch. Collection cannot recover its verification
+                        # by running the agent again, even when rollout attempts remain.
+                        saved_verification_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3352,7 +3357,7 @@ class RolloutCollectionHelper(BaseModel):
 
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        gated = successes_seen | terminal_keys | maxed_out
+        gated = successes_seen | terminal_keys | maxed_out | saved_verification_keys
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
@@ -3393,6 +3398,7 @@ class RolloutCollectionHelper(BaseModel):
 - {len(successes_seen)} rows already done (in main jsonl)
 - {sum(attempts_by_key.values())} prior failure attempts ({len(attempts_by_key)} unique tasks) in sidecar
 - {len(terminal_keys)} sidecar-terminal → not retried
+- {len(saved_verification_keys)} saved patches awaiting verification → agent not retried
 - {len(maxed_out)} hit max_attempts={max_attempts} → not retried
 - {len(input_rows)} rows that still need to be run"""
         )
