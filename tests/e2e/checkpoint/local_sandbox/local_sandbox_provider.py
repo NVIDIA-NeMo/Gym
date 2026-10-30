@@ -23,7 +23,13 @@ from collections.abc import Mapping
 from pathlib import Path
 from typing import Any, Optional
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox.providers.base import (
+    SandboxExecResult,
+    SandboxHandle,
+    SandboxSnapshotNotFoundError,
+    SandboxSpec,
+    SandboxStatus,
+)
 from nemo_gym.sandbox.providers.registry import register_provider
 
 
@@ -164,13 +170,10 @@ class LocalDirPlainProvider:
 class LocalDirProvider(LocalDirPlainProvider):
     name = "local_dir"
 
-    async def create(self, spec: SandboxSpec) -> SandboxHandle:
-        snapshot_id = spec.provider_options.get("snapshot_id")
-        if snapshot_id is None:
-            return await super().create(spec)
+    async def create_from_snapshot(self, snapshot_id: str, spec: SandboxSpec) -> SandboxHandle:
         meta_file = self.base / "snapshots" / snapshot_id / "meta.json"
         if not meta_file.exists():
-            raise RuntimeError(f"snapshot {snapshot_id} does not exist")
+            raise SandboxSnapshotNotFoundError(f"snapshot {snapshot_id} does not exist")
         meta = json.loads(meta_file.read_text())
         path = Path(meta["path"])
         # The sandbox the snapshot was taken from is set aside, with its processes, so the fork keeps its paths.
