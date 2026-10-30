@@ -53,7 +53,7 @@ from uuid import uuid4
 from anthropic.types.message_create_params import MessageCreateParams
 
 from nemo_gym.anthropic_utils import NeMoGymAnthropicMessage
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,

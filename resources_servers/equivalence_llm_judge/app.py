@@ -40,13 +40,13 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.judge import call_judge
 from nemo_gym.verifier_fixture import VerifierFixture
 from resources_servers.equivalence_llm_judge.verifier_fixture import create_hle_verified_server, invoke_hle_verified
 

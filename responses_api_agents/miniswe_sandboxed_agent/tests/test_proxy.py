@@ -6,7 +6,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 

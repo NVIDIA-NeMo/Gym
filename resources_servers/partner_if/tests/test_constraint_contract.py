@@ -27,7 +27,7 @@ def test_all_synthetic_examples_use_explicit_registered_verifiers():
 
 
 def test_example_receipts_match_current_contracts_and_grounded_judge_protocol():
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
     from resources_servers.partner_if.evidence import EvidenceBundle
     from resources_servers.partner_if.grading_service import contract_hash
     from resources_servers.partner_if.llm import PROTOCOL, parse_verdict

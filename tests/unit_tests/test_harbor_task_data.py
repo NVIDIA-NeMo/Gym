@@ -9,7 +9,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ValidationError
 
-from nemo_gym.config_types import EnvironmentServerInstanceConfig, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.config_types import EnvironmentServerInstanceConfig, ResponsesAPIAgentServerInstanceConfig
 from nemo_gym.tasks.harbor import DIGEST_KEY, content_hash, load_task
 from nemo_gym.tasks.harbor.cli import prepare_target
 from nemo_gym.tasks.harbor.digest import DATASET_DIGEST_KEY

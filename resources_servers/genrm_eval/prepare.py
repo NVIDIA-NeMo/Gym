@@ -54,7 +54,7 @@ def download_prepared_dataset(
     validate_metadata: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
     """Fetch preprocessed Gym tasks from the private GitLab registry."""
-    from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig
+    from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
     from nemo_gym.gitlab_utils import download_jsonl_dataset
 
     output = Path(output_fpath)

@@ -50,7 +50,7 @@ def generation(tmp_path, monkeypatch):
                         {
                             "scenario": s.name,
                             "verdict": "not_fulfilled",
-                            "checks": [{"id": "calls.outcome", "kind": "schema", "status": "fail"}],
+                            "checks": [{"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "fail"}],
                         }
                         for s in scenarios
                     ],
@@ -98,7 +98,7 @@ def test_evidence_failures_publish_commit_runtime_and_test_provenance(generation
     assert text.startswith("Introduction\n") and text.endswith("\nDeprecated C-table\n")
     assert COMMIT in text
     assert "### `pi`" in text and "| **Schema** |" in text and "`calls.outcome` | ✗" in text
-    assert "`hermes` | Not measured | —" in text
+    assert "`hermes` | — | — | —" in text
     assert not (root / "fern/assets").exists()
     report = json.loads((kwargs["output"] / "generation_report.json").read_text())
     assert report["gym_commit"] == COMMIT

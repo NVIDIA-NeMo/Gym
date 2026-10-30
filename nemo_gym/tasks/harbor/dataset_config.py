@@ -25,7 +25,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
-from nemo_gym.config_types import DatasetLicense, Domain
+from nemo_gym.config.config_types import DatasetLicense, Domain
 from nemo_gym.tasks.harbor.models import HarborArtifact, HarborEnvironment, HarborTaskConfig, HarborVerifier
 
 

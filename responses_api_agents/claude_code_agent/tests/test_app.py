@@ -25,8 +25,8 @@ import yaml
 from fastapi import Request
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.config import SKILLS_REF_KEY_NAME
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,

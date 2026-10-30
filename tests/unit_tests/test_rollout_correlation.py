@@ -39,12 +39,12 @@ from nemo_gym.base_responses_api_model import (
     _CaptureMiddleware,
     install_model_call_capture,
 )
-from nemo_gym.config_types import BaseServerConfig
-from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.rollout_correlation import (
+from nemo_gym.config.config_types import BaseServerConfig
+from nemo_gym.core.episode import (
     current_rollout_id,
     maybe_rollout_id_from_run_body,
 )
+from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.server_utils import ServerClient, get_response_json
 
 

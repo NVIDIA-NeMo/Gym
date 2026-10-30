@@ -9,7 +9,7 @@ import pytest
 import yaml
 from nooa_bench.bench_agent import TaskResult
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import TrajectoryRecord
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig, NOOAInvocationConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result

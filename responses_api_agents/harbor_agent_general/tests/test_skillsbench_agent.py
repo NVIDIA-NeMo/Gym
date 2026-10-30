@@ -297,7 +297,14 @@ async def test_docker_deadline_discards_detached_processes(tmp_path, completed):
     environment = _make_environment(
         tmp_path,
         sandbox_provider={"docker": {}},
-        task_env_config=EnvironmentConfig(docker_image="mirror.gcr.io/library/ubuntu:24.04", cpus=1, memory_mb=512),
+        # Docker's official ubuntu:24.04 index, pulled from its ECR Public copy: CI runners pull Docker Hub
+        # anonymously and hit its rate limit (HTTP 429). The digest is the one Docker Hub serves for the tag.
+        task_env_config=EnvironmentConfig(
+            docker_image="public.ecr.aws/docker/library/ubuntu:24.04"
+            "@sha256:fe81560990fae86dc4743202b2cb4d3df98d0bcf949173cecef15ce1127ef852",
+            cpus=1,
+            memory_mb=512,
+        ),
     )
     finished = threading.Event()
     waiting = threading.Event()

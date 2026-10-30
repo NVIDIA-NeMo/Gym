@@ -7,7 +7,8 @@ import logging
 
 import pytest
 
-from nemo_gym.global_config import reset_global_config_dict
+import nemo_gym.exporters as exporters_module
+from nemo_gym.config.global_config import reset_global_config_dict
 from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
 
 
@@ -51,6 +52,16 @@ def fresh_global_config():
     reset_global_config_dict()
     yield
     reset_global_config_dict()
+
+
+@pytest.fixture(autouse=True)
+def fresh_run_failure():
+    """``mark_run_failed`` sets a process-wide flag that exporters read when they close their run. A CLI test whose
+    collection fails would otherwise leave it set, and the next test's exporter would close its run FAILED. Every
+    test starts and ends with the flag clear."""
+    exporters_module._RUN_FAILED = False
+    yield
+    exporters_module._RUN_FAILED = False
 
 
 @pytest.fixture(autouse=True)
