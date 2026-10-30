@@ -32,7 +32,7 @@ from metrics import canonical_smiles, canonical_species, compare_step_products, 
 from task_data import TaskData
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.reward_profile import compute_aggregate_metrics
 from nemo_gym.server_utils import ServerClient
 

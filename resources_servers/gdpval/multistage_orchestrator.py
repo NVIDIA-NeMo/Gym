@@ -78,18 +78,18 @@ from nemo_gym.config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.failure_kinds import AGENT_TIMEOUT, SESSION_EXPIRED, SESSION_LOST
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
 from nemo_gym.observability.model_calls import (
     clear_model_call_captures_for_rollouts,
     merge_model_call_capture_into_record,
     model_call_capture_dirs_from_config,
-)
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import (
-    aggregation_sources_path_for,
-    failures_path_for,
-    materialized_path_for,
-    resubmit_offset_path_for,
 )
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
@@ -116,6 +116,12 @@ from nemo_gym.rollout_collection import (
     record_resubmit_offset,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,

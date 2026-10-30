@@ -11,7 +11,6 @@ from multidict import CIMultiDict
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
-import nemo_gym.server_utils
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.config import AgentServerRef
 from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
@@ -113,7 +112,7 @@ def test_setting_a_limit_the_relay_does_not_enforce_warns() -> None:
 
 def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
 
     namespace = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="legacy_agent.worker_test")

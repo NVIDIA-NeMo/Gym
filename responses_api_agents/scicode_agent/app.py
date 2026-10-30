@@ -49,14 +49,14 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
-from nemo_gym.metrics_config import Stat
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.metrics_config import Stat
 from nemo_gym.prompt import PromptConfig, load_prompt_config
 from nemo_gym.rollout_observability import (
     AgentInvocation,

@@ -29,7 +29,7 @@ from nemo_gym.config import (
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_simulation.prompt import (
     agent_system_message,
     responses_api_tools,

@@ -32,12 +32,13 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.config import ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    EpisodeId,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    TaskId,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.session_routing import ResourcesSessionLifetimes
 from nemo_gym.testing.session_conformance import check_resources_session_contract

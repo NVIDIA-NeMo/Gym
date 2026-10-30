@@ -55,7 +55,6 @@ from nemo_gym.config.global_config import (
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.path_utils import aggregate_metrics_path_for, aggregation_sources_path_for, failures_path_for
 from nemo_gym.rollout_collection import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,
@@ -74,6 +73,7 @@ from nemo_gym.server_utils import (
     raise_for_status,
     setup_server_client,
 )
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for, aggregation_sources_path_for, failures_path_for
 
 
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py

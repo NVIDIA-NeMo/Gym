@@ -17,11 +17,11 @@ from pydantic import BaseModel
 from starlette.exceptions import HTTPException
 from starlette.responses import JSONResponse, Response
 
-from nemo_gym.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
-from nemo_gym.rollout_correlation import (
+from nemo_gym.core.episode import (
     current_rollout_id,
     verifier_invocation_context,
 )
+from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.rollout_observability import NG_VERIFIER_INVOCATIONS_KEY, ModelCallRef, VerifierInvocation
 
 

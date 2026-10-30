@@ -55,9 +55,8 @@ from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
-    IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
@@ -82,6 +81,7 @@ from nemo_gym.server_utils import (
 )
 from nemo_gym.telemetry import connection_pool
 from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 
 
 _TCP_KEEPALIVE_TEST_IDLE = 42

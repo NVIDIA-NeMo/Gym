@@ -52,7 +52,7 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
     rollout_agent_label,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymMessage,

@@ -213,7 +213,7 @@ def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
 
 # Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

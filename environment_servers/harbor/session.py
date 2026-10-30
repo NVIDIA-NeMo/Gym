@@ -26,7 +26,7 @@ from fastapi import HTTPException
 
 from environment_servers.harbor.entrypoint import EntrypointLaunch, _cancel_entrypoint
 from environment_servers.harbor.users import _is_root
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import (
     AsyncSandbox,
     AsyncSandboxCompose,

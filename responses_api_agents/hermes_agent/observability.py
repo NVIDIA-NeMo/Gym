@@ -12,7 +12,7 @@ from time import monotonic, time
 from typing import Any
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,

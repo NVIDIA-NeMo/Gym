@@ -35,8 +35,7 @@ from benchmarks.gdp_pdf.prepare import (
     write_example,
 )
 from nemo_gym.config import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -47,6 +46,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.judge import JudgeError
 from nemo_gym.server_utils import ServerClient
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,

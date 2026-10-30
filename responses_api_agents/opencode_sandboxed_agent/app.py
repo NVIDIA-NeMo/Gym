@@ -45,7 +45,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -85,12 +85,8 @@ from nemo_gym.sandbox.agent_tools import (
     seed_mcp_servers,
     verify_agent_response,
 )
-from nemo_gym.server_utils import (
-    SESSION_ID_KEY,
-    is_nemo_gym_fastapi_entrypoint,
-    is_nemo_gym_fastapi_worker,
-    raise_for_status,
-)
+from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,
     opencode_tool_outcome,

@@ -14,9 +14,10 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, ServerClient
+from nemo_gym.server_utils import ServerClient
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.hermes_sandboxed_agent import app
 from responses_api_agents.hermes_sandboxed_agent.app import (
     MAX_OUTPUT_BYTES,

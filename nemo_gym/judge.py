@@ -44,7 +44,7 @@ from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
 
-from nemo_gym.rollout_correlation import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 
 

@@ -215,10 +215,10 @@ _LAZY_EXPORTS: dict[str, str] = {
     "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
     "NeMoGymAsyncOpenAI": "openai_utils",
-    "NeMoGymResponse": "openai_utils",
-    "NeMoGymResponseCreateParamsNonStreaming": "openai_utils",
-    "NeMoGymChatCompletion": "openai_utils",
-    "NeMoGymChatCompletionCreateParamsNonStreaming": "openai_utils",
+    "NeMoGymResponse": "core.responses_api_types",
+    "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
+    "NeMoGymChatCompletion": "core.responses_api_types",
+    "NeMoGymChatCompletionCreateParamsNonStreaming": "core.responses_api_types",
 }
 
 # Eagerly-defined names (path constants + package metadata) that live directly in this module.

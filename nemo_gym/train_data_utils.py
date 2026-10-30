@@ -51,13 +51,14 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
 )
+from nemo_gym.core.episode import TaskId
 from nemo_gym.dataset_metrics import (
     DatasetMetricHook,
     DatasetMetricsHookError,
     DatasetMetricValue,
     load_dataset_metrics_hook,
 )
-from nemo_gym.episode_types import TaskId, is_materialized_task_row
+from nemo_gym.episode_types import is_materialized_task_row
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from nemo_gym.hf_utils import (
     download_hf_dataset_as_jsonl,
@@ -1436,7 +1437,7 @@ def validate_backend_credentials(backend: str) -> tuple[bool, str]:
 
 # Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
 # Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

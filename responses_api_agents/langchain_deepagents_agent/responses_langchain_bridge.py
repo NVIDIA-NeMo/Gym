@@ -51,7 +51,7 @@ from langchain_core.runnables import ensure_config
 from langchain_core.utils.function_calling import convert_to_openai_tool
 from pydantic import Field
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputText, accumulate_response_usage
 from nemo_gym.server_utils import get_response_json, raise_for_status
 
 
