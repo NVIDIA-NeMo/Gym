@@ -38,6 +38,7 @@ from nemo_gym.base_resources_server import BaseVerifyResponse
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.metrics import RewardProfiler
+from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
@@ -230,6 +231,35 @@ async def test_judge_failure_preserves_answer_and_diagnostics_through_run(servic
         assert "judge /v1/responses pair=" in error and "500" in error and "deadline=" in error
     assert len({body["response"]["id"] for _, body in results}) == 4
     assert all(c.phase == "failed" and not c.results for c in services.resource._verify_cohorts.values())
+
+
+@pytest.mark.parametrize("failing_pairs", [{(0, 1)}, {(0, 1), (1, 2)}], ids=["one_failure", "adjacent_failures"])
+async def test_failed_comparisons_through_run(services, monkeypatch, failing_pairs):
+    services.resource.config.num_rollouts_per_prompt = 16
+    judge = services.resource._run_single_comparison
+
+    async def judge_fails_for_pairs(*args, pair_idx, **kwargs):
+        if pair_idx in failing_pairs:
+            raise JudgeError("judge unavailable for this pair")
+        return await judge(*args, pair_idx=pair_idx, **kwargs)
+
+    monkeypatch.setattr(services.resource, "_run_single_comparison", judge_fails_for_pairs)
+    results = await asyncio.gather(*(run(services, i) for i in range(16)))
+
+    masked = {index for pair in failing_pairs for index in pair}
+    for index, (status, body) in enumerate(results):
+        if index in masked:
+            assert_judge_failure(status, body, f"rollout_index={index} lost a comparison")
+            assert "judge unavailable for this pair" in body["failure_reason"]
+            continue
+        # Every scored rollout keeps both comparisons: 4 as response_1 and 2 as response_2.
+        assert status == 200 and "_ng_failure_class" not in body
+        assert body["reward"] == 3.0
+        assert not body["mask_sample"] and not (body.get("instance_config") or {}).get("mask_sample")
+        assert body.get("failure_kind") is None
+        assert body["genrm_failed_comparison_rate_per_group"] == len(failing_pairs) / 16
+        assert body["genrm_masked_rollout_rate_per_group"] == len(masked) / 16
+    assert services.policy_calls == 16 and services.judge_calls == 16 - len(failing_pairs)
 
 
 async def test_empty_http_200_judge_retries_then_fails_through_run(services):

@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock, MagicMock
 import httpx
 import pytest
 from omegaconf import DictConfig
+from pytest import approx
 
 import resources_servers.genrm_compare.app as genrm
 from nemo_gym._checkpoint.control import CheckpointRequest, next_attempt
@@ -166,6 +167,44 @@ async def test_a_member_that_has_not_recorded_its_judge_failure_gets_it_back_aft
     restored, _ = await restore(config, records)
     with pytest.raises(JudgeError, match="judge is down"):
         await asyncio.wait_for(verify_as(restored, SESSIONS[1], member(1)), timeout=0.5)
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
+async def test_members_masked_alone_get_their_judge_failure_back_after_a_restore(config):
+    """A failed comparison masks its two members; a restore keeps them masked and their siblings scored."""
+    config.num_rollouts_per_prompt = 4
+    sessions = [f"session-{index}" for index in range(4)]
+
+    def judge(*_args, pair_idx, **_kwargs):
+        if pair_idx == (0, 1):
+            raise JudgeError("judge is down for one pair")
+        return comparison_result(5.0, 1.0)
+
+    server, participant = participant_server(config, judge=AsyncMock(side_effect=judge))
+    for index, session_id in enumerate(sessions):
+        participant.seeded(session_id, EpisodeId(rollout_id=f"group_g{index}"))
+    outcomes = await asyncio.gather(
+        *(verify_as(server, sessions[index], member(index)) for index in range(4)), return_exceptions=True
+    )
+    assert [isinstance(outcome, JudgeError) for outcome in outcomes] == [True, True, False, False]
+    assert all(outcome.genrm_failed_comparison_rate_per_group == approx(1 / 4) for outcome in outcomes[2:])
+    participant.ended(sessions[0])
+    records = await participant.export(None)
+    states = {record.session_id: record.state for record in records}
+    assert states[sessions[1]]["masked_alone"] is True
+    assert states[sessions[1]]["judge_failure"] == str(outcomes[1])
+    for index in (2, 3):
+        assert "masked_alone" not in states[sessions[index]]
+        assert states[sessions[index]]["result"]["reward"] == outcomes[index].reward
+    await server.aclose()
+
+    restored, _ = await restore(config, records)
+    with pytest.raises(JudgeError, match="rollout_index=1 lost a comparison"):
+        await asyncio.wait_for(verify_as(restored, sessions[1], member(1)), timeout=0.5)
+    for index in (2, 3):
+        replayed = await asyncio.wait_for(verify_as(restored, sessions[index], member(index)), timeout=0.5)
+        assert replayed.reward == outcomes[index].reward
     restored._run_single_comparison.assert_not_awaited()
     await restored.aclose()
 

@@ -207,6 +207,8 @@ All score aggregates include the existing tiebreaker. `/verify` returns:
 | `reward_overall_score_raw`, `reward_overall_score` | Overall aggregates before and after length/style adjustments. |
 | `genrm_parse_failure_rate_per_group` | Fraction of final comparison verdicts that failed overall parsing. |
 | `genrm_rubric_parse_failure_rate_per_group` | Fraction that failed rubric parsing; zero in overall mode. |
+| `genrm_failed_comparison_rate_per_group` | Fraction of the group's comparisons dropped after judge failures; see [Failed comparisons](#failed-comparisons). |
+| `genrm_masked_rollout_rate_per_group` | Fraction of the group's members masked because a comparison of theirs failed; see [Failed comparisons](#failed-comparisons). |
 | `reasoning_text`, `answer_text` | Reasoning and final answer extracted from the rollout. |
 
 ### Token-usage metrics
@@ -298,8 +300,9 @@ genrm_compare/
 
 ### POST `/compare`
 
-Compare multiple candidate responses. Judge transport failures or exhausted retries without a completed
-answer return HTTP 503 instead of ordinary rewards. Empty input returns an empty reward list.
+Compare multiple candidate responses. This endpoint has no per-response mask, so a comparison that fails as a
+judge failure (see [Failed comparisons](#failed-comparisons)) makes the request return HTTP 503 instead of
+ordinary rewards. Empty input returns an empty reward list.
 
 **Request Body** (`GenRMCompareRequest`):
 - `conversation_history`: List of `{"role": str, "content": str}` messages
@@ -392,8 +395,9 @@ HTTP retries, and retry sleeps together; each retry does not receive a fresh eva
 deadline. The supplied YAML uses 16 members, so it requires 16 slots and enough concurrency to admit them together.
 
 If D never arrives, the server fails the group and releases A, B, and C without rewards. Judge HTTP errors,
-connection failures, expired deadlines, or exhausted retries for empty/unsuccessful judge responses also
-fail the group. Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
+connection failures, expired request deadlines, or exhausted retries for empty/unsuccessful judge responses
+fail that comparison, and its two members are masked; the other members are scored
+(see [Failed comparisons](#failed-comparisons)). Each comparison shares one `genrm_parse_retries` budget across malformed/empty/truncated
 answers, HTTP 408, 429, or 5xx responses, and interrupted response bodies, with
 `genrm_parse_retry_sleep_s` between attempts. The default
 budget permits four attempts in total, not four attempts for each failure type. Other HTTP errors fail
@@ -438,10 +442,11 @@ placeholders; `include` is an explicit research ablation. Top-level field ingest
 migration work, so retain the nested field until that migration is complete. Gym HTTP tests do not prove
 zero policy loss or correct advantage statistics in a downstream trainer.
 
-A late request to a retained failed explicit-ID group receives its original failure, even if it contains a
-regenerated answer. To judge again, advance the group attempt for every member. Preserving answers does
-not enable individual judge-only reverification: reconstructing and retrying a full group remains the
-caller's responsibility. The batch `/compare` endpoint returns HTTP 503 for judge failures.
+A late request to a retained failed explicit-ID group, or to a member masked alone in a retained completed
+group, receives its recorded failure, even if it contains a regenerated answer. To judge again, advance the
+group attempt for every member. Preserving answers does not enable individual judge-only reverification:
+reconstructing and retrying a full group remains the caller's responsibility. The batch `/compare` endpoint
+returns HTTP 503 for judge failures.
 
 Failure and server shutdown release waiters and discard stored response bodies. Owned judge tasks are
 cancelled and drained. During HTTP-server shutdown, requests may receive an upstream error or lose their
@@ -451,6 +456,47 @@ transport diagnostics include the model server, path, pair, deadline, and bounde
 Connection retries retain the existing HTTP-client policy. The bounded comparison retry loop described
 above additionally handles transient HTTP statuses and response-body transport errors; it does not
 restart the entire cohort.
+
+### Failed comparisons
+
+A failed comparison no longer fails the group. It masks only its two members, and every other member is scored
+from all of its comparisons. So in a group-relative trainer, every scored member's reward comes from the same
+number of comparisons. With 16 members and a long judge answer, one comparison that exhausts
+`max_output_tokens` on every attempt then masks 2 members instead of all 16. There is no configuration key for
+this.
+
+- **What counts as failed:** a comparison that raises a `JudgeError`:
+  - no completed answer within the retry budget;
+  - an error from the judge HTTP request that is not retried or that uses up its retries, such as an HTTP
+    error, a connection error or a reply that is not JSON;
+  - a `judge_request_timeout_s` expiry, but only if it comes before the `cohort_evaluation_timeout_s`
+    deadline. Both default to 1,800 seconds, so by default the group deadline wins and the group fails.
+
+  A completed but malformed answer keeps the default-score fallback. An error outside the judge request
+  still fails a `/verify` group with HTTP 503, and the comparisons still running are cancelled.
+  `cohort_evaluation_timeout_s` still bounds the whole group.
+- **Masking:** both members of a failed comparison are masked through the failsafe described above (reward
+  0.0, `mask_sample`, `failure_kind: judge_failed`). Under `circular`, one failed comparison (5, 6) masks
+  members 5 and 6. Under `all_pairs`, or with several judge passes, a member with any failed comparison is
+  masked. In `fixed_baseline` mode, a member with a failed judge pass against the baseline is masked. When
+  every member is masked, for example when the judge is down, the whole group fails as a judge failure. The
+  server waits for every comparison to finish or fail, within the group deadline.
+- **Scoring:** every other member is scored from all of its comparisons, including those against a masked
+  member, which still measure it. Bonuses and length and style adjustments apply as usual, over the scored
+  members only.
+- **Consumer requirement:** a masked member's reward is a placeholder. A trainer must keep it out of the
+  group's baseline and normalization. In NeMo RL, set `grpo.masked_reward_policy` to `exclude_infra`
+  (`judge_failed` is not a policy failure kind) or to `exclude`. Under `include`, NeMo RL's default, the
+  placeholder 0.0 still counts in the group mean and std, and it shifts the advantages of the member's
+  siblings. Also keep `env.should_mask_flagged_samples` on, its default. With it off, NeMo RL trains the
+  masked members on their 0.0 rewards.
+- **Reporting:**
+  - `/verify` reports `genrm_failed_comparison_rate_per_group` and `genrm_masked_rollout_rate_per_group` on
+    each scored member.
+  - Token-usage metrics count completed comparisons only.
+  - Each failed comparison is logged when it fails, and each masked member is logged with its reason.
+- **Trade-off:** a failed comparison costs two members' training signal, where scoring them from their remaining
+  comparison would keep it. In exchange, no scored member is scored from fewer comparisons than its siblings.
 
 ### Replacement attempts and retention
 

@@ -39,7 +39,7 @@ from contextvars import Context
 from dataclasses import dataclass, field
 from functools import lru_cache
 from math import isfinite
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple
+from typing import Any, ClassVar, Dict, List, Literal, Optional, Tuple, Union
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseError
 from fastapi import FastAPI, HTTPException, Request
@@ -88,6 +88,8 @@ ComparisonResult = Tuple[
     float,
     float,
 ]
+# A comparison whose judge gave no usable answer keeps its JudgeError in its result's place.
+ComparisonOutcome = Union[ComparisonResult, JudgeError]
 VerifyResult = Dict[str, Any]
 
 
@@ -138,6 +140,8 @@ class _CohortState:
     members: Dict[int, _CohortMember] = field(default_factory=dict)
     phase: Literal["collecting", "evaluating", "completed", "failed"] = "collecting"
     results: Dict[int, VerifyResult] = field(default_factory=dict)
+    # In a completed cohort, the members masked alone because a comparison of theirs failed, with the reason.
+    member_failures: Dict[int, str] = field(default_factory=dict)
     failure: Optional[str] = None
     failure_kind: Literal["cohort", "judge"] = "cohort"
     terminal_at: Optional[float] = None
@@ -170,11 +174,15 @@ class _CompletedMemberState(BaseModel):
     # Exactly one of these: a completed cohort's reward, or a judge failure, which the caller records as a masked row.
     result: Optional[Dict[str, Any]] = None
     judge_failure: Optional[str] = None
+    # One of this member's comparisons failed, so it was masked, but its cohort completed.
+    masked_alone: bool = False
 
     @model_validator(mode="after")
     def _one_outcome(self) -> "_CompletedMemberState":
         if (self.result is None) == (self.judge_failure is None):
             raise ValueError("a saved GenRM member needs exactly one of result and judge_failure")
+        if self.masked_alone and self.judge_failure is None:
+            raise ValueError("a GenRM member masked alone needs its judge_failure")
         return self
 
 
@@ -338,6 +346,8 @@ class GenRMCompareVerifyResponse(BaseVerifyResponse):
     reward_length_adjustment: float
     genrm_parse_failure_rate_per_group: float = 0.0
     genrm_rubric_parse_failure_rate_per_group: float = 0.0
+    genrm_failed_comparison_rate_per_group: float = 0.0
+    genrm_masked_rollout_rate_per_group: float = 0.0
     genrm_input_tokens_per_comparison_mean: Optional[float] = None
     genrm_input_tokens_per_comparison_p50: Optional[float] = None
     genrm_input_tokens_per_comparison_p95: Optional[float] = None
@@ -495,7 +505,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 self._raise_cohort_failure(body, cohort)
             member = cohort.members.get(rollout_index)
             if member is not None:
-                if member.response_digest != response_digest:
+                # Like a failed group, a member masked alone gets its recorded failure even for a regenerated answer.
+                if member.response_digest != response_digest and rollout_index not in cohort.member_failures:
                     raise HTTPException(
                         status_code=409,
                         detail=(
@@ -505,7 +516,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     )
                 self._remember_member(cohort, rollout_index, session_id)
                 if cohort.phase == "completed":
-                    return self._verify_response(body, cohort.results[rollout_index])
+                    return self._completed_member_response(body, cohort, rollout_index)
                 member.waiters.append(future)
             else:
                 if cohort.phase != "collecting":
@@ -571,6 +582,16 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             # The shared failsafe preserves the answer and sets both masking contracts.
             raise JudgeError(message)
         raise HTTPException(status_code=503, detail=message)
+
+    @classmethod
+    def _completed_member_response(
+        cls, body: GenRMCompareVerifyRequest, cohort: _CohortState, rollout_index: int
+    ) -> GenRMCompareVerifyResponse:
+        failure = cohort.member_failures.get(rollout_index)
+        if failure is not None:
+            # Masked alone: the shared failsafe sets both masking contracts, as for a failed cohort.
+            raise JudgeError(failure)
+        return cls._verify_response(body, cohort.results[rollout_index])
 
     @staticmethod
     def _verify_response(body: GenRMCompareVerifyRequest, result: VerifyResult) -> GenRMCompareVerifyResponse:
@@ -789,10 +810,15 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 overall_raw,
                 overall_adjusted,
                 length_adjustments,
+                member_failures,
             ) = compare_result
             if len(rewards) != len(sorted_indices):
                 raise RuntimeError(f"GenRM returned {len(rewards)} rewards for {len(sorted_indices)} cohort members")
-            if not all(isfinite(reward) for reward in rewards):
+            if len(member_failures) == len(sorted_indices):
+                # No member can be scored, so the whole group fails as a judge failure.
+                first = member_failures[min(member_failures)]
+                raise JudgeError(f"GenRM masked all {len(member_failures)} rollouts of the group; first: {first}")
+            if not all(isfinite(reward) for position, reward in enumerate(rewards) if position not in member_failures):
                 raise ValueError("GenRM returned non-finite cohort rewards")
             results_by_index = {
                 index: {
@@ -805,8 +831,12 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     **metrics,
                 }
                 for position, index in enumerate(sorted_indices)
+                if position not in member_failures
             }
-            await self._publish_verify_cohort(prompt_key, cohort, results_by_index)
+            failures_by_index = {sorted_indices[position]: reason for position, reason in member_failures.items()}
+            for reason in failures_by_index.values():
+                logger.warning("GenRM masked one rollout of key=%r: %s", prompt_key[:160], reason[:500])
+            await self._publish_verify_cohort(prompt_key, cohort, results_by_index, failures_by_index)
         except asyncio.CancelledError:
             await asyncio.shield(
                 self._fail_verify_cohort(
@@ -841,6 +871,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         prompt_key: str,
         cohort: _CohortState,
         results_by_index: Dict[int, VerifyResult],
+        member_failures: Optional[Dict[int, str]] = None,
     ) -> None:
         """Publish rewards, retiring legacy cohorts and compacting explicit-ID tombstones."""
         participant = self.checkpoint_participant
@@ -853,7 +884,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 await participant.wait_open()
             async with cohort.lock:
                 if participant is None or participant.accepting:
-                    self._publish_verify_cohort_locked(prompt_key, cohort, results_by_index)
+                    self._publish_verify_cohort_locked(prompt_key, cohort, results_by_index, member_failures or {})
                     return
 
     def _publish_verify_cohort_locked(
@@ -861,20 +892,29 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         prompt_key: str,
         cohort: _CohortState,
         results_by_index: Dict[int, VerifyResult],
+        member_failures: Dict[int, str],
     ) -> None:
-        """Publish under ``cohort.lock``, with no await, so every member gets its reward at once."""
+        """Publish under ``cohort.lock``, with no await, so every member gets its outcome at once.
+
+        A member in ``member_failures`` lost a comparison; it gets that judge failure instead of a reward.
+        """
         if cohort.phase == "failed":
             logger.debug("Discarding late GenRM completion for key=%r", cohort.key[:160])
             return
         if cohort.phase != "evaluating":
             raise RuntimeError(f"cannot publish GenRM rewards while cohort is {cohort.phase}")
         cohort.results = results_by_index
+        cohort.member_failures = member_failures
         cohort.phase = "completed"
         cohort.terminal_at = time.monotonic()
         cohort.evaluation_task = None
         for index, member in cohort.members.items():
             for waiter in member.waiters:
-                if not waiter.done():
+                if waiter.done():
+                    continue
+                if index in member_failures:
+                    waiter.set_exception(JudgeError(member_failures[index]))
+                else:
                     waiter.set_result(results_by_index[index])
             # A tombstone only needs the digest and result. Do not retain
             # full response payloads for every completed training cohort.
@@ -883,10 +923,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if cohort.group_id is None and self._verify_cohorts.get(prompt_key) is cohort:
             self._verify_cohorts.pop(prompt_key, None)
         logger.info(
-            "GenRM cohort disposition=completed key=%r attempt=%s members=%s",
+            "GenRM cohort disposition=completed key=%r attempt=%s members=%s masked=%s",
             cohort.key[:160],
             cohort.group_attempt,
             len(cohort.members),
+            sorted(member_failures),
         )
 
     async def _fail_verify_cohort(
@@ -1041,8 +1082,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         cohort = self._verify_cohorts.get(cohort_key)
         if cohort is None or cohort.group_id is None or rollout_index not in cohort.members:
             return {}
-        if cohort.phase == "completed":
-            outcome: Dict[str, Any] = {"result": cohort.results[rollout_index]}
+        if cohort.phase == "completed" and rollout_index in cohort.member_failures:
+            outcome: Dict[str, Any] = {"judge_failure": cohort.member_failures[rollout_index], "masked_alone": True}
+        elif cohort.phase == "completed":
+            outcome = {"result": cohort.results[rollout_index]}
         elif cohort.phase == "failed" and cohort.failure_kind == "judge":
             outcome = {"judge_failure": cohort.failure or "GenRM cohort evaluation failed"}
         else:
@@ -1057,7 +1100,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             response_digest=cohort.members[rollout_index].response_digest,
             response_digest_scheme=RESPONSE_DIGEST_SCHEME,
             **outcome,
-        ).model_dump(mode="json", exclude_none=True)
+        ).model_dump(mode="json", exclude_defaults=True)
 
     async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
         """Export the outcome of each session's member whose cohort has finished; an empty state otherwise."""
@@ -1072,7 +1115,11 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 continue
             state = _CompletedMemberState.model_validate(raw)
             session_members[session_id] = (state.cohort_key, state.rollout_index)
-            phase: Literal["completed", "failed"] = "completed" if state.result is not None else "failed"
+            # A member masked alone belongs to a completed cohort; only a whole-cohort judge failure fails it.
+            failed = state.result is None and not state.masked_alone
+            phase: Literal["completed", "failed"] = "failed" if failed else "completed"
+            cohort_failure = state.judge_failure if failed else None
+            member_failure = state.judge_failure if state.masked_alone else None
             cohort = cohorts.get(state.cohort_key)
             if cohort is None:
                 cohort = _CohortState(
@@ -1081,7 +1128,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     group_id=state.group_id,
                     group_attempt=state.group_attempt,
                     phase=phase,
-                    failure=state.judge_failure,
+                    failure=cohort_failure,
                     failure_kind="judge",
                 )
                 cohorts[state.cohort_key] = cohort
@@ -1090,13 +1137,14 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 state.group_id,
                 state.group_attempt,
                 phase,
-                state.judge_failure,
+                cohort_failure,
             ):
                 raise ValueError(f"session {session_id!r} names cohort {state.cohort_key!r} inconsistently")
             existing = cohort.members.get(state.rollout_index)
             if existing is not None and (
                 existing.response_digest != state.response_digest
                 or cohort.results.get(state.rollout_index) != state.result
+                or cohort.member_failures.get(state.rollout_index) != member_failure
             ):
                 raise ValueError(
                     f"sessions disagree on rollout_index={state.rollout_index} of cohort {state.cohort_key!r}"
@@ -1104,6 +1152,8 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             cohort.members[state.rollout_index] = _CohortMember(body=None, response_digest=state.response_digest)
             if state.result is not None:
                 cohort.results[state.rollout_index] = state.result
+            if member_failure is not None:
+                cohort.member_failures[state.rollout_index] = member_failure
             cohort.member_sessions.add(session_id)
             cohort.unreplayed_sessions.add(session_id)
         # Validated in full before anything is installed.
@@ -1144,6 +1194,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         if not any(self._session_members.get(other) == member for other in cohort.member_sessions):
             cohort.members.pop(rollout_index, None)
             cohort.results.pop(rollout_index, None)
+            cohort.member_failures.pop(rollout_index, None)
         if cohort.members:
             return
         self._drop_cohort(cohort_key)
@@ -1208,6 +1259,78 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         return f"{logical_key}::group_attempt::{body.group_attempt}"
 
     def _aggregate_results(
+        self,
+        response_objs: List[Dict[str, Any]],
+        raw_results: List[ComparisonOutcome],
+        metadata: List[Tuple[int, int, int]],
+        trainable_count: Optional[int] = None,
+    ) -> tuple:
+        """Score each response whose comparisons all succeeded; mask both responses of a failed comparison.
+
+        A trainable response with a failed comparison gets no score, so every scored response is scored from all of
+        its comparisons. Its entries in the per-response lists are None, and the last element maps its position to
+        the reason it is masked; when every trainable response is in it, the caller fails the group. A masked
+        response's successful comparisons still score its neighbors, but the group adjustments see only the scored
+        responses.
+        """
+        count = trainable_count if trainable_count is not None else len(response_objs)
+        failed = [isinstance(result, JudgeError) for result in raw_results]
+        masked: Dict[int, str] = {}
+        for result, item in zip(raw_results, metadata):
+            if isinstance(result, JudgeError):
+                for index in item[:2]:
+                    if index < count and index not in masked:
+                        masked[index] = (
+                            f"GenRM rollout_index={index} lost a comparison to a judge failure ({sum(failed)} of "
+                            f"{len(raw_results)} comparisons failed): {str(result)[:1500]}"
+                        )
+        drop_metrics = {
+            "genrm_failed_comparison_rate_per_group": sum(failed) / max(1, len(raw_results)),
+            "genrm_masked_rollout_rate_per_group": len(masked) / max(1, count),
+        }
+        if len(masked) == count:
+            nothing: List[Any] = [None] * count
+            return (
+                nothing,
+                list(nothing),
+                list(nothing),
+                drop_metrics,
+                [],
+                list(nothing),
+                list(nothing),
+                list(nothing),
+                masked,
+            )
+        # Scored responses lead, so only they are adjusted; masked responses and any baseline follow.
+        order = [index for index in range(count) if index not in masked] + sorted(masked)
+        order += list(range(count, len(response_objs)))
+        position = {index: new for new, index in enumerate(order)}
+        scored = self._score_results(
+            [response_objs[index] for index in order],
+            [result for result, lost in zip(raw_results, failed) if not lost],
+            [(position[i], position[j], judge) for (i, j, judge), lost in zip(metadata, failed) if not lost],
+            trainable_count=count - len(masked),
+        )
+        rewards, raw_scores, valid_rubric_scores, metrics, comparisons, overall_raw, overall_adjusted, adjustments = (
+            scored
+        )
+
+        def expand(values: List[Any]) -> List[Any]:
+            return [None if index in masked else values[position[index]] for index in range(count)]
+
+        return (
+            expand(rewards),
+            expand(raw_scores),
+            expand(valid_rubric_scores),
+            {**metrics, **drop_metrics},
+            comparisons,
+            expand(overall_raw),
+            expand(overall_adjusted),
+            expand(adjustments),
+            masked,
+        )
+
+    def _score_results(
         self,
         response_objs: List[Dict[str, Any]],
         raw_results: List[ComparisonResult],
@@ -1311,7 +1434,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
         response_objs: List[Dict[str, Any]],
         principle: Optional[str] = None,
         expected_rubric_ids: Optional[Tuple[int, ...]] = None,
-    ) -> Tuple[List[ComparisonResult], List[Tuple[int, int, int]]]:
+    ) -> Tuple[List[ComparisonOutcome], List[Tuple[int, int, int]]]:
         cfg = self.config
         comparison_pairs = generate_comparison_pairs(cfg.comparison_strategy, len(response_objs))
         tasks = []
@@ -1331,13 +1454,39 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                     )
                 )
                 metadata.append((i, j, judge_idx))
+        return await self._gather_comparisons(tasks, metadata), metadata
+
+    async def _gather_comparisons(
+        self, tasks: List[asyncio.Task], metadata: List[Tuple[int, int, int]]
+    ) -> List[ComparisonOutcome]:
+        """Await every comparison. A JudgeError takes its comparison's place; any other error fails the group."""
+        positions = {task: position for position, task in enumerate(tasks)}
         try:
-            return list(await asyncio.gather(*tasks)), metadata
+            pending = set(tasks)
+            while pending:
+                done, pending = await asyncio.wait(pending, return_when=asyncio.FIRST_EXCEPTION)
+                for task in sorted(done, key=positions.__getitem__):
+                    error = task.exception()
+                    if error is None:
+                        continue
+                    if not isinstance(error, JudgeError):
+                        raise error
+                    position = positions[task]
+                    # Log now: a non-judge error or the group deadline can still end the group before all finish.
+                    logger.warning(
+                        "GenRM dropped comparison %s (judge %s) of %s after a judge failure: %s",
+                        metadata[position][:2],
+                        metadata[position][2],
+                        len(tasks),
+                        str(error)[:500],
+                    )
         finally:
             for task in tasks:
                 if not task.done():
                     task.cancel()
             await asyncio.gather(*tasks, return_exceptions=True)
+
+        return [task.exception() or task.result() for task in tasks]
 
     async def _run_compare(
         self,
@@ -1359,7 +1508,10 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             expected_rubric_ids,
         )
         aggregate_result = self._aggregate_results(response_objs, raw_results, comparison_metadata)
-        rewards, _, _, metrics, comparison_results, _, _, _ = aggregate_result
+        rewards, _, _, metrics, comparison_results, _, _, _, masked = aggregate_result
+        if masked:
+            # This API has no per-response mask, so a failed comparison fails the request.
+            raise JudgeError(masked[min(masked)])
         return rewards, metrics, comparison_results, comparison_metadata
 
     async def _run_fixed_baseline_compare(
@@ -1409,13 +1561,7 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
             for judge_index in range(cfg.num_judges_per_comparison):
                 tasks.append(asyncio.create_task(compare_one(response_index, response, judge_index)))
                 metadata.append((response_index, baseline_index, judge_index))
-        try:
-            raw_results = list(await asyncio.gather(*tasks))
-        finally:
-            for task in tasks:
-                if not task.done():
-                    task.cancel()
-            await asyncio.gather(*tasks, return_exceptions=True)
+        raw_results = await self._gather_comparisons(tasks, metadata)
         # The appended baseline is diagnostic only; adjustments apply to the trainable prefix.
         return self._aggregate_results(
             response_objs + [baseline_obj], raw_results, metadata, trainable_count=len(response_objs)

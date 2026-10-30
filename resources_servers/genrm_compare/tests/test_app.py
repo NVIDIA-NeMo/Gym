@@ -1118,6 +1118,7 @@ class TestFixedBaseline:
             overall_raw,
             overall_adjusted,
             adjustments,
+            uncovered,
         ) = await server._run_fixed_baseline_compare([], response_objs, "baseline", None, "prompt")
 
         assert set(seen_pairs) == {("rollout", "baseline"), ("baseline", "rollout")}
@@ -1127,6 +1128,7 @@ class TestFixedBaseline:
         assert overall_raw == approx([3.5])
         assert overall_adjusted == approx([3.5])
         assert adjustments == approx([0.0])
+        assert uncovered == {}
         assert metrics["genrm_parse_failure_rate_per_group"] == 0.0
         assert metrics["genrm_rubric_parse_failure_rate_per_group"] == 0.0
         assert metrics["genrm_input_tokens_per_comparison_mean"] == 150.0
