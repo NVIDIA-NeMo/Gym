@@ -433,7 +433,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
-- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed. A CLI harness runs through the shared bash runner, whose name never mentions python, so a `pkill -f python3` in the task cannot stop it. `stdlib_runner=True` remains temporarily for existing standard-library Python shims and runs them through `bin/gym-runner`. No built-in adapter uses it after the Codex migration; do not use it in a new adapter.
+- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed. A CLI harness runs through the shared bash runner, whose name never mentions python, so a `pkill -f python3` in the task cannot stop it.
 - `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker, for example the last 1 MiB of a runner log.
 
 ```python
@@ -534,7 +534,6 @@ All control files live under `session_dir`, and their names are defined in `supe
 | File | Writer and purpose |
 | --- | --- |
 | `process_supervisor.sh` | `SandboxSession` uploads it after staging input and before launch. |
-| `bin/gym-runner` | The launch shell links it to the binary behind the interpreter of a runner that sets `stdlib_runner`, and runs the runner through it, so the runner's process name doesn't mention python. If the link can't be made, the runner runs unchanged. |
 | `launch.claim` | The launch or stop shell creates it atomically, either to claim execution or to fence a delayed launch. |
 | `supervisor.pid` | The launch shell records the PID that becomes the supervisor when the shell executes it. If the provider did not make that shell a process group leader, this process instead starts the supervisor in a new process group, passes `SIGTERM` on to it and exits with its status. |
 | `stop.request` | The stop shell writes this cancellation marker; the supervisor polls for it. A signal is not used, so the harness keeps the default `SIGTERM` disposition. |
@@ -546,6 +545,7 @@ To migrate an adapter that launches the process supervisor itself, move launch, 
 Out-of-tree adapters written for the Python supervisor also need these changes:
 
 - `SandboxCommand(python=...)` and `supervised_launch_command(python=...)` are removed. The supervisor runs with bash, so the task image needs bash; an adapter that installed `python3` during setup only to run the supervisor or a runner no longer needs to.
+- `SandboxCommand(stdlib_runner=...)`, `supervised_launch_command(stdlib_runner=...)`, the `bin/gym-runner` interpreter link and `RUNNER_FILE` are removed. Run a CLI through `harness_runner.sh`; a Python shim must bring its own interpreter.
 - The receipt's `return_code` is now the shell status of the harness command: 128+N when signal N killed it, where the Python supervisor reported -N. A harness that could not be started now gives a confirmed receipt with 126 or 127 instead of a negative receipt with a launch error.
 - A harness that runs through `harness_runner.sh` reports the runner's own failures as 125, before the CLI starts, so 125, 126 and 127 do not come from the CLI itself.
 
