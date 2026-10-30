@@ -759,8 +759,8 @@ def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, r
         AgentObservationBundle,
         ContextCompactionObservation,
         TrajectoryRecord,
+        join_agent_model_calls,
         join_assistant_message_calls,
-        join_model_call_observations,
     )
     from responses_api_agents.opencode_agent.tests.test_app import _session_db
 
@@ -844,7 +844,7 @@ def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, r
         )
         for index, message_id in enumerate(["m1", "m3", "m4"])
     ]
-    bundle = join_model_call_observations(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
     bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
     [compaction] = [record for record in bundle.records if isinstance(record, ContextCompactionObservation)]
     assert [ref.model_call_id for ref in compaction.model_calls] == ["capture-1"]
