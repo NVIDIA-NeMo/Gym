@@ -161,7 +161,7 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |
 | Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) table lists the harness; so do the [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) table for a sandboxed harness and each paired benchmark's README harness table, where one exists. Each entry matches the adapter: its limits, the request fields it rejects, and whether it captures token IDs. | Docs diff |
 
-The [capability matrix](../../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx) is published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
+The [conformance results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#results) are published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
 
 ## Step 8: Pre-commit and PR
 

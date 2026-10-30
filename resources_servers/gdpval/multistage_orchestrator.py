@@ -1658,8 +1658,9 @@ def _require_final_stage_rows(
     Only a coverage rejection is terminal here. When the stage loop stopped with
     rows still retryable, a resume picks them up and the run is expected to
     continue in a later process; that path only logs how to continue, and the
-    run exits normally without a ``comparison/eval_elo``. Likewise a final stage
-    with *some* rows is not fatal: aggregation reports its per-stage fit and
+    completion check after aggregation fails a ``require_complete`` run so its
+    chain resumes it. Likewise a final stage with *some* rows is not fatal:
+    aggregation reports its per-stage fit and
     marks it degraded, with no headline ``comparison/eval_elo`` unless every
     expected final-stage row is present.
     """
@@ -1837,7 +1838,7 @@ def _resume_complete_stage(
         summary.update(
             partial=True,
             num_rollouts=expected_stage_row_count,
-            num_successful=len(cached_rows),
+            num_successful=len(included_keys),
             success_fraction=outcome.get("success_fraction"),
             num_omitted=len(_recorded_key_set(outcome, "omitted_keys")),
         )
@@ -2756,10 +2757,15 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
     )
+    # A stage accepted by its partial-completion policy is complete at its accepted size; every other stage
+    # owes all planned rollouts, so a stop with retryable or undispatched rows still fails the run.
+    expected = sum(
+        stage["num_successful"] if stage.get("partial") else stage["num_rollouts"] for stage in stage_summaries
+    )
+    # Accepted omissions are already excluded from expected; crediting them again could hide another stage's gaps.
     rollout_collection_config.check_completion(
-        expected=sum(stage["num_rollouts"] for stage in stage_summaries),
+        expected=expected,
         results=all_results,
-        intentionally_omitted=sum(stage.get("num_omitted", 0) for stage in stage_summaries),
         retryable=any(stage["num_retryable"] > 0 for stage in stage_summaries),
         made_progress=outcomes_recorded > 0,
     )
