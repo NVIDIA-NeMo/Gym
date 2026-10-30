@@ -190,9 +190,8 @@ def test_managed_requirements_cover_the_e2b_provider_imports() -> None:
     third_party -= set(sys.stdlib_module_names) | {"nemo_gym"}
 
     requirements = (agent_dir / "requirements.txt").read_text()
-    # httpx arrives with the e2b SDK and aiohttp with nemo-gym itself; the rest
-    # must be pinned here by name.
-    for module in sorted(third_party - {"httpx", "aiohttp"}):
+    # httpx arrives with the e2b SDK; the rest must be pinned here by name.
+    for module in sorted(third_party - {"httpx"}):
         assert module.replace("_", "-") in requirements, (
             f"{module} is imported by the e2b provider but absent from requirements.txt"
         )

@@ -488,15 +488,12 @@ class E2BProvider:
     async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
         """Create through ``POST /sandboxes``, adding ``customExtensionParams``.
 
-        The body carries the API's ``NewSandbox`` fields for ``kwargs``. The
-        POST is sent once, like the SDK create. ``AsyncSandbox.connect`` then
-        attaches; it also returns the envd access token a secure sandbox needs.
+        The POST goes through the SDK's own API client, so it gets the URL, auth
+        headers, proxy, timeout and HTTP transport of ``AsyncSandbox.create``,
+        and like it is never replayed. ``AsyncSandbox.connect`` then attaches;
+        it also returns the envd access token a secure sandbox needs.
         """
-        import aiohttp
-
-        from nemo_gym import server_utils
-
-        config = e2b.ConnectionConfig(**self._api_params())
+        config = e2b.ConnectionConfig(**{**self._api_params(), "request_timeout": kwargs.get("request_timeout")})
         body: dict[str, Any] = {
             "templateID": kwargs["template"],
             "timeout": kwargs["timeout"],
@@ -508,26 +505,24 @@ class E2BProvider:
         }
         if "network" in kwargs:
             body["network"] = {_NETWORK_API_KEYS[key]: rules for key, rules in kwargs["network"].items()}
-        request_timeout = kwargs.get("request_timeout", config.request_timeout)
-        response = await server_utils.request(
-            "POST",
-            f"{config.api_url}/sandboxes",
-            _max_num_tries=1,
-            _resend_after_disconnect=False,
-            headers={**config.headers, "X-API-Key": config.api_key or ""},
-            json=body,
-            proxy=self._connection.proxy,
-            # The SDK treats a zero request timeout as "no timeout".
-            timeout=aiohttp.ClientTimeout(total=request_timeout or None),
-        )
-        if not response.ok:
-            raise E2BCreateError(f"POST /sandboxes returned HTTP {response.status}: {(await response.text())[:500]}")
-        sandbox_id = (await response.json())["sandboxID"]
-        # Pass the create timeout: connect otherwise applies the SDK default.
-        return await self._with_retries(
-            lambda: e2b.AsyncSandbox.connect(sandbox_id, timeout=kwargs["timeout"], **self._api_params()),
-            operation="connect",
-        )
+        client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
+        response = await client.post("/sandboxes", json=body)
+        if response.status_code >= 300:
+            raise E2BCreateError(f"POST /sandboxes returned HTTP {response.status_code}: {response.text[:500]}")
+        sandbox_id = response.json()["sandboxID"]
+        try:
+            # Pass the create timeout: connect otherwise applies the SDK default.
+            return await self._with_retries(
+                lambda: e2b.AsyncSandbox.connect(sandbox_id, timeout=kwargs["timeout"], **self._api_params()),
+                operation="connect",
+            )
+        except BaseException:
+            # The caller gets no handle to close this sandbox, so stop it here.
+            try:
+                await e2b.AsyncSandbox.kill(sandbox_id, **self._api_params())
+            except Exception as kill_exc:  # noqa: BLE001 - best effort; the sandbox TTL is the backstop
+                LOGGER.warning("Could not kill e2b sandbox %s after a failed connect: %s", sandbox_id, kill_exc)
+            raise
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for attaching to this sandbox from another process."""
