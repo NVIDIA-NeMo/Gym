@@ -60,10 +60,14 @@ def _configure_async_http() -> None:
         http2: bool = True,
         *,
         for_streaming: bool = False,
+        http_version: Any = None,
+        retry_connect: bool = True,
     ) -> GymAiohttpTransport:
         # aiohttp speaks HTTP/1.1; the E2B endpoints support it. Streamed and
         # regular requests share Gym's globally configured connection pool.
-        del http2, for_streaming
+        # E2B 2.5x+ also passes http_version and retry_connect; both describe
+        # its own pyqwest pools and do not apply to Gym's.
+        del http2, for_streaming, http_version, retry_connect
         proxy = config.proxy
         if proxy is not None:
             proxy_url = str(proxy.url if isinstance(proxy, httpx.Proxy) else proxy)

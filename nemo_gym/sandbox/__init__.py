@@ -125,6 +125,8 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
+    from nemo_gym.sandbox.providers.e2b._sdk import require_e2b_sdk
+    from nemo_gym.sandbox.providers.e2b.provider import E2BProvider
     from nemo_gym.sandbox.providers.local.provider import LocalProvider
     from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider, SandboxBackendUnreachableError
     from nemo_gym.sandbox.transfer import (
@@ -151,6 +153,7 @@ _PUBLIC_API = {
     "DirectSandboxConnection": "access",
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
+    "E2BProvider": "providers.e2b.provider",
     "LocalProvider": "providers.local.provider",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
     "OpenSandboxProvider": "providers.opensandbox.provider",
@@ -171,6 +174,7 @@ _PUBLIC_API = {
     "opensandbox_shm_labels": "compose_config",
     "read_text": "utils",
     "remote_kind": "transfer",
+    "require_e2b_sdk": "providers.e2b._sdk",
     "resolve_compose": "compose_config",
     "sandbox_platform": "compose_config",
     "service_gpus": "compose_fields",

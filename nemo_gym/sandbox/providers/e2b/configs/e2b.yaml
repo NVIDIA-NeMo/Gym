@@ -67,6 +67,10 @@ sandbox:
       # false deletes at timeout; true pauses and resumes on the next request (AgentENV).
       # null sends no lifecycle, which can leave timed-out sandboxes paused on AgentENV.
       auto_resume: false
+      # Lease in seconds: create with this timeout and renew it every third of a lease, up to the
+      # sandbox's lifetime, so the sandboxes of a process that died end one lease later. null renews
+      # nothing and creates with the full lifetime.
+      lease_s: null
       # Secure the sandbox envd service with an access token.
       secure: true
       # Permit outbound internet access. Set false for offline/untrusted workloads.
@@ -109,6 +113,10 @@ sandbox:
       # command that finishes while disconnected cannot be recovered at all.
       background: true
       reconnect_attempts: 2
+    snapshots:
+      # Send checkpoint snapshot names to the service. E2B files a named snapshot as a template
+      # alias visible to the whole team, so names stay off: the checkpointer releases snapshots by id.
+      send_names: false
     operations:
       # Retries for transient transport/5xx failures. Deterministic errors and
       # rate limits are not retried. Command timeouts are terminal; kill
