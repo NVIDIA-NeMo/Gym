@@ -62,10 +62,14 @@ def _configure_async_http() -> None:
         http2: bool = True,
         *,
         for_streaming: bool = False,
+        http_version: str | None = None,
+        retry_connect: bool = True,
     ) -> GymAiohttpTransport:
         # aiohttp speaks HTTP/1.1; the E2B endpoints support it. Streamed and
         # regular requests share Gym's globally configured connection pool.
-        del http2, for_streaming
+        # Newer SDKs (2.5x) also pass http_version and retry_connect; Gym's
+        # transport is HTTP/1.1-only and does not retry connects, so both are no-ops.
+        del http2, for_streaming, http_version, retry_connect
         proxy = config.proxy
         if proxy is not None:
             proxy_url = str(proxy.url if isinstance(proxy, httpx.Proxy) else proxy)
