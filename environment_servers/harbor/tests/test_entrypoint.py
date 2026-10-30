@@ -1054,25 +1054,29 @@ class TestEntrypoint:
         warnings = [r.getMessage() for r in caplog.records if "USER 1000 names no user" in r.getMessage()]
         assert len(warnings) == 1
 
-    async def test_resolved_dockerfile_workdir_is_created_for_the_entrypoint(self, tmp_path, monkeypatch):
+    @pytest.mark.parametrize("image_user,startup_user", [("agent", "agent"), ("12345", 12345)])
+    async def test_resolved_dockerfile_workdir_is_created_for_the_entrypoint(
+        self, tmp_path, monkeypatch, image_user, startup_user
+    ):
         # A trailing WORKDIR with no RUN after it: `docker build` would have created it in the image, and so does
         # the overlay (after its last RUN line), before the task's workdir, which task.toml points elsewhere.
-        dockerfile = "FROM debian:bookworm-slim\nRUN useradd agent\nUSER agent\nWORKDIR /app\n"
+        dockerfile = f"FROM debian:bookworm-slim\nRUN useradd agent\nUSER {image_user}\nWORKDIR /app\n"
         config = {"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entrypoint.sh"]}
         toml = TASK_TOML.replace("storage_mb = 10240", 'storage_mb = 10240\nworkdir = "/work"')
         sandbox = EntrypointSandbox()
         server, task, _, _ = make_server(
             tmp_path, monkeypatch, sandbox, dockerfile=dockerfile, image_config=config, toml=toml
         )
-        assert (task.workdir, task.entrypoint_workdir, task.entrypoint_user) == ("/work", "/app", "agent")
+        assert (task.workdir, task.entrypoint_workdir, task.entrypoint_user) == ("/work", "/app", image_user)
 
         response = await run_episode(server, task)
 
         assert response.failure is None, response.failure
-        made = sandbox.index_of("test -d /app || (mkdir -p /app && chown agent /app)")
+        made = sandbox.index_of(f"test -d /app || (mkdir -p /app && chown {image_user} /app)")
         assert made < sandbox.index_of("mkdir -p /work") < sandbox.index_of(f"sh {ENTRYPOINT_DIR}/run.sh")
         assert sandbox.execs[made]["user"] == "root"
-        assert sandbox.launch()["cwd"] == "/app" and sandbox.dirs["/app"] == "agent"
+        assert sandbox.launch()["cwd"] == "/app" and sandbox.dirs["/app"] == image_user
+        assert sandbox.launch()["user"] == startup_user and sandbox.default_user == startup_user
 
     # -- the separate verifier's start -------------------------------------------------------
 

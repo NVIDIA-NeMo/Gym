@@ -69,7 +69,7 @@ def overlay_shell_command(step: OverlayRun, sandbox_env: Mapping[str, str] | Non
     return "; ".join(parts)
 
 
-def overlay_workdir_command(workdir: str, user: str | None) -> str:
+def overlay_workdir_command(workdir: str, user: str | int | None) -> str:
     """Create a ``WORKDIR`` as root the way BuildKit does: missing directories are made and owned by the user.
 
     An existing directory (one the image ships) is left as it is. ``root:1234`` is not plain root: the
@@ -78,7 +78,7 @@ def overlay_workdir_command(workdir: str, user: str | None) -> str:
     quoted = shlex.quote(workdir)
     if _is_plain_root(user):
         return f"mkdir -p {quoted}"
-    return f"test -d {quoted} || (mkdir -p {quoted} && chown {shlex.quote(user)} {quoted})"
+    return f"test -d {quoted} || (mkdir -p {quoted} && chown {shlex.quote(str(user))} {quoted})"
 
 
 def _output_tail(result: SandboxExecResult, limit: int = OVERLAY_OUTPUT_TAIL) -> str:

@@ -32,7 +32,7 @@ def _is_root(user: str | int | None) -> bool:
     return user is None or str(user).split(":")[0] in ("root", "0")
 
 
-def _is_plain_root(user: str | None) -> bool:
+def _is_plain_root(user: str | int | None) -> bool:
     """Whether ``user`` is root with no group of its own (``root:1234`` is not: the group must be kept)."""
     return user is None or str(user) in ("root", "0")
 
