@@ -57,6 +57,13 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.config_types import ModelServerRef
+from nemo_gym.failure_kinds import (
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
+    MODEL_CONTEXT_LIMIT,
+    PROVIDER_OOM_KILLED,
+    PROVIDER_UNAVAILABLE,
+)
 from nemo_gym.global_config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
@@ -297,6 +304,8 @@ class SWEBenchWrapperInstanceConfig(SWEBenchWrapperServerConfig, SWEBenchWrapper
 
     # GRPO related fields
     mask_sample: bool = False
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
     @property
     def instance_id(self) -> str:
@@ -338,6 +347,35 @@ class SWEBenchMetrics(BaseModel):
     total_model_call_time: Optional[float] = None
     final_eval_apptainer_spinup_time: Optional[float] = None
     final_eval_time: Optional[float] = None
+
+
+# The evaluation ran past swebench_tests_timeout. The model's patch can make the tests hang, and so can a
+# slow host, so this is not one of the shared policy or infrastructure kinds.
+EVAL_TIMEOUT = "swe_agents:eval_timeout"
+
+
+def _masked_failure(metrics: SWEBenchMetrics) -> Optional[tuple[str, str]]:
+    """Return the failure_kind and failure_reason that mask this sample, or None when its reward counts.
+
+    Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not
+    reported as a measured policy failure. Max-iteration and context-window runs are masked whether or not
+    the patch resolved the tests, because a resolved patch from an agent that never finished is accidental.
+    """
+    if metrics.eval_launch_failed:
+        return PROVIDER_UNAVAILABLE, "The evaluation container failed before its startup marker"
+    if metrics.oom_killed:
+        return PROVIDER_OOM_KILLED, "The memory watchdog killed the agent container"
+    if metrics.eval_oom_killed:
+        return PROVIDER_OOM_KILLED, "The memory watchdog killed the evaluation container"
+    if metrics.eval_timed_out:
+        return EVAL_TIMEOUT, "The evaluation ran past swebench_tests_timeout"
+    if metrics.agent_timed_out:
+        return AGENT_TIMEOUT, "The agent ran past swebench_agent_timeout"
+    if metrics.agent_error_kind == "max_iteration":
+        return AGENT_LIMIT, "The agent reached its maximum number of iterations"
+    if metrics.agent_error_kind == "context_window":
+        return MODEL_CONTEXT_LIMIT, "The conversation exceeded the model's context window"
+    return None
 
 
 class SWEBenchVerifyResponse(SWEBenchMetrics, BaseVerifyResponse):
@@ -3934,29 +3972,12 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
         else:
             metrics_to_update["resolved"] = False
 
-        # Decide whether to mask this sample from the GRPO gradient.
-        # 1) Patch passed eval but agent did not actually submit (hit max-turns
-        #    or blew the context window) — the reward is accidental.
-        # 2) Final eval step timed out — reward is unreliable.
-        # 3) Agent itself timed out (wall-clock) — mask regardless of resolved.
-        # 4) Memory watchdog killed the agent container (OOM).
-        # 5) Memory watchdog killed the eval container.
-        # 6) Evaluator failed before its startup marker; no reward was measured.
+        # Decide whether to mask this sample, and record why.
         persisted_metrics = SWEBenchMetrics.model_validate(update_and_read_metrics(params.metrics_fpath))
-        agent_error_kind = persisted_metrics.agent_error_kind
-        eval_timed_out = bool(persisted_metrics.eval_timed_out)
-        agent_timed_out = bool(persisted_metrics.agent_timed_out)
-        oom_killed = bool(persisted_metrics.oom_killed)
-        eval_oom_killed = bool(persisted_metrics.eval_oom_killed)
-        if (
-            agent_error_kind in ("max_iteration", "context_window")
-            or eval_timed_out
-            or persisted_metrics.eval_launch_failed
-            or agent_timed_out
-            or oom_killed
-            or eval_oom_killed
-        ):
+        masked_failure = _masked_failure(persisted_metrics)
+        if masked_failure:
             params.mask_sample = True
+            params.failure_kind, params.failure_reason = masked_failure
 
         trajectories_dir = params.persistent_dir / "trajectories"
         (
@@ -4100,6 +4121,8 @@ class SWEBenchWrapper(SimpleResponsesAPIAgent):
                 # Report it on the contract as well; `instance_config.mask_sample` stays
                 # for one release so existing consumers keep working.
                 mask_sample=instance_config.mask_sample,
+                failure_kind=instance_config.failure_kind,
+                failure_reason=instance_config.failure_reason,
                 **metrics.model_dump(),
                 instance_config=instance_config.model_dump(),
                 subagent_trajectories=subagent_trajectories,

@@ -667,13 +667,21 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 ## GRPO masking and failure modes
 
-`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when:
+`SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when one of these happens. The verify response carries `mask_sample` too, with a `failure_kind` and `failure_reason` for the first match in this order:
 
-1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental.
-2. The eval container hit `swebench_tests_timeout` — reward is unreliable.
-3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
-4. The memory watchdog killed the **agent** container (OOM).
-5. The memory watchdog killed the **eval** container (OOM).
+| Condition | `failure_kind` |
+|---|---|
+| The evaluator failed before its startup marker, so no reward was measured | `provider_unavailable` |
+| The memory watchdog killed the **agent** container (OOM) | `provider_oom_killed` |
+| The memory watchdog killed the **eval** container (OOM) | `provider_oom_killed` |
+| The eval container hit `swebench_tests_timeout` | `swe_agents:eval_timeout` |
+| The agent hit `swebench_agent_timeout` (wall-clock) | `agent_timeout` |
+| The agent ended in a `max_iteration` error | `agent_limit` |
+| The agent ended in a `context_window` error | `model_context_limit` |
+
+Each condition masks regardless of `resolved`. A patch that resolves the tests after the agent hit its iteration limit or context window is accidental.
+
+Failures that leave the reward unmeasured come first, so a run that also hit an agent limit is not reported as a measured policy failure. An eval timeout gets its own `swe_agents:` name because the model's patch can make the tests hang, and so can a slow host.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
