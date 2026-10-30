@@ -1,0 +1,40 @@
+prime_tau2_synth_agent:
+  responses_api_agents:
+    prime_tau2_synth_agent:
+      entrypoint: app.py
+      domain: agent
+      description: tau2-bench style training with custom synthetic domains via Prime Intellect verifiers.
+      value: Improve multi-domain agentic customer service and tool use capabilities.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model_name: ""
+      vf_env_id: tau2-synth
+      vf_env_args:
+        # Picks the tau2 domain for every row. Prepare data with the same --domain.
+        domain: library
+        # The user simulator calls the policy endpoint directly through litellm.
+        # hosted_vllm needs no key. Export HOSTED_VLLM_API_KEY if the endpoint wants one.
+        user_model: hosted_vllm/${policy_model_name}
+        user_base_url: ${policy_base_url}
+        user_api_key_var: HOSTED_VLLM_API_KEY
+        max_steps: 200
+        max_errors: 10
+      group_size: 1
+      max_concurrent_generation: -1
+      max_concurrent_scoring: -1
+      max_tokens: 16000
+      temperature: 1.0
+      top_p: 1.0
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environments/prime_tau2_synth/data/example.jsonl
+
+prime_tau2_synth_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: prime_tau2_synth_agent
