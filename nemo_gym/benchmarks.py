@@ -33,7 +33,11 @@ from nemo_gym.config.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
+from nemo_gym.discovery import (
+    _parse_no_environment_tolerating_unset_values,
+    _scan_servers_for_metadata,
+    discover_components,
+)
 
 
 BENCHMARKS_SUBDIR = "benchmarks"
@@ -50,6 +54,8 @@ class BenchmarkConfig(BaseModel):
     dataset: BenchmarkDatasetConfig | DatasetConfig
     # The Environment Server a taskset dataset routes to; None for datasets routed by agent.
     environment_server: Optional[str] = None
+    domain: Optional[str] = None
+    description: Optional[str] = None
 
     @classmethod
     def from_config_path(cls, config_path: Path, *, strict: bool = True) -> "Optional[BenchmarkConfig]":
@@ -119,7 +125,14 @@ class BenchmarkConfig(BaseModel):
         except ConfigError as e:
             raise ConfigError(f"Benchmark config {path}: dataset {dataset.name!r}: {e}") from e
 
+        # Keep inline metadata precedence, then fill missing fields from the config already resolved above.
+        raw = OmegaConf.to_container(initial_config_dict, resolve=False, throw_on_missing=False)
+        domain, description = _scan_servers_for_metadata(raw)
+        resolved_domain, resolved_description = _scan_servers_for_metadata(global_config_dict)
+
         return cls(
+            domain=domain if domain is not None else resolved_domain,
+            description=description if description is not None else resolved_description,
             name=dataset.name,
             path=path,
             agent_name=agent_name,
