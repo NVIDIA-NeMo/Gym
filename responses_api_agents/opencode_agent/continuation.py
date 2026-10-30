@@ -9,6 +9,9 @@ from typing import Any, Literal
 from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
 
 
+ERROR_EVENT_CHARS = 4000
+
+
 @dataclass(frozen=True, kw_only=True)
 class OpenCodeRunOutcome:
     """One stopped OpenCode run classified from its saved checkpoint and events."""
@@ -37,8 +40,8 @@ def classify_opencode_run(
     for message in assistants:
         if message["info"].get("error"):
             error = error or json.dumps(message["info"]["error"])
-    if continuation and timed_out and has_opencode_error_event(stdout):
-        error = error or "OpenCode emitted an error event"
+    if continuation and timed_out and (event := opencode_error_event(stdout)) is not None:
+        error = error or f"OpenCode emitted an error event: {event}"
     resumable_checkpoint = bool(
         continuation
         and session_id
@@ -99,13 +102,14 @@ def classify_opencode_run(
     return OpenCodeRunOutcome(status="completed")
 
 
-def has_opencode_error_event(stdout: str) -> bool:
-    """An interrupted checkpoint must not hide an explicit OpenCode error event."""
+def opencode_error_event(stdout: str) -> str | None:
+    """Return the first explicit OpenCode error event, which an interrupted checkpoint must not hide."""
     for line in stdout.splitlines():
         try:
             event = json.loads(line)
         except ValueError:
             continue
         if isinstance(event, dict) and event.get("type") == "error":
-            return True
-    return False
+            # The event names the failing boundary, for example an APIError with the provider's status.
+            return json.dumps(event.get("error") or event)[:ERROR_EVENT_CHARS]
+    return None

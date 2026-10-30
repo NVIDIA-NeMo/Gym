@@ -30,7 +30,8 @@ These metrics make that pressure visible without inspecting private asyncio inte
 * ``gym.server.requests.in_flight``, ``gym.server.requests.unhandled_exceptions_total``, and ``gym.server.responses_total`` by ``http.response.status_code``.
   ``gym.server.requests.cancelled_total`` carries ``http.route`` and ``nemo.gym.request.phase``.
   The outermost server middleware keeps these totals locally, and the exporter thread reads them.
-* ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request`` still waiting for their response headers.
+* ``gym.http.client.requests.in_flight``: outbound calls through ``server_utils.request``
+  that have not returned or raised, including retries and eligible response-body reads.
 * ``gym.driver.rollouts.offered_total``, ``gym.driver.rollouts.resident``, and ``gym.driver.rollouts.active``, plus the ``gym.driver.admission_duration_ms``, ``gym.driver.output_write_duration_ms``, ``gym.driver.output_write_bytes``, and ``gym.driver.materialize_duration_ms`` histograms, from the rollout driver.
 * ``gym.driver.rollout.input_items``, ``gym.driver.rollout.output_items``, ``gym.driver.rollout.turns``, and ``gym.driver.rollout.tool_calls``: the size of each completed rollout, recorded once per rollout by the driver.
 
@@ -313,7 +314,10 @@ class _Instruments:
             OUTBOUND_IN_FLIGHT_INSTRUMENT,
             callbacks=[_observe(lambda state: [_observation(state.requests.outbound_in_flight)])],
             unit="{request}",
-            description="Outbound calls through server_utils.request that are still waiting for their response headers.",
+            description=(
+                "Outbound calls through server_utils.request that have not returned or raised, "
+                "including retries and eligible response-body reads."
+            ),
         )
         meter.create_observable_counter(
             DRIVER_OFFERED_INSTRUMENT,

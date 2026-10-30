@@ -106,6 +106,41 @@ Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
 
+## Environment Server sessions (SandboxAccess)
+
+Harnesses that borrow a task sandbox through `SandboxAccess` (for example
+`codex_agent` behind `single_agent_turn` or `single_agent_turn_legacy`) use the
+shared resources-session protocol instead of the contract above, as
+[Terminal-Bench 2.1](../../benchmarks/terminal_bench_2_1/README.md) does:
+
+- `/seed_session` with a `ResourcesSeedSessionRequest` whose `task_data` is the task
+  row (`task_name`, `task_ref`, `dataset_ref`) provisions the task as above, then
+  returns `sandbox_access`: a direct connection through the top-level sandbox provider
+  block named by `sandbox_provider_ref` (it must describe the same provider as
+  `environment.sandbox_provider`), and the task's working directory as its user sees
+  it. Seeds are idempotent per `resources_session_id`; a changed request is rejected.
+- `/verify` with the task row, `responses_create_params`, and the agent's `response`
+  grades once, as above; the session cookie names the episode. Termination comes from
+  `response.status`: `completed`, `incomplete` (`timeout`, or `nonzero_exit` for
+  `max_output_tokens`), and `nonzero_exit` for any other status, such as the `failed`
+  response of an agent that died while its sandbox still runs (codex_agent's
+  `verify_after_agent_error`). Identical retries replay the verdict. A verify for a
+  closed or unknown session returns a masked sample (`mask_sample: true`, reward 0) with
+  `failure_kind: session_lost`, or `session_expired` past the seeded-session deadline.
+- `/close_session` fences the session first, so a seed still provisioning releases its
+  sandboxes instead of lending them (HTTP 409), even if the close's caller stops waiting.
+  It then waits for in-flight provisioning or grading, stops anything still running
+  without grading it (finishing even if the caller disconnects), and fences late seeds.
+  A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
+  retries the deletion, and the provider TTL bounds it. A completed close is remembered
+  for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
+  late seeds are rejected; set it to cover the caller's retry horizon.
+
+The borrower runs as the sandbox's default user, so tasks that declare
+`agent.user` are rejected with HTTP 422, and the access carries no agent timeout:
+configure the harness timeout from the task's `agent.timeout_sec`. Split sandbox
+endpoints are not supported in this mode.
+
 ## Other pinned Harbor datasets
 
 `manifest_path` selects the pinned dataset. It defaults to Terminal-Bench 4.0; a relative
@@ -159,7 +194,12 @@ the same rows uses the same denominator for both. `evaluation_completed: false` 
 
 ## Non-root Compose services
 
-When loading agent Compose YAML, three task-specific adaptations use the
+`environment.compose_service_overrides` maps a short task name and a Compose service to a
+[JSON merge patch](https://www.rfc-editor.org/rfc/rfc7396) for that service in the agent's
+generated Compose YAML: mappings merge, other values replace, and `null` removes a setting.
+As with `by_task`, a task name that the manifest lacks stops the server at startup, and a
+service that the task's Compose file lacks fails the task at seed. The Terminal-Bench 4
+profile uses it for two services that run as non-root users, with the
 [Compose extensions](../../fern/versions/latest/pages/infrastructure/sandbox/compose.mdx):
 
 - `medical-claims-processing`: `playwright-mcp` keeps `pwuser`, disables host-file
@@ -168,15 +208,20 @@ When loading agent Compose YAML, three task-specific adaptations use the
 - `payments-pipeline-fix`: `kafka` keeps `appuser` and disables host-file injection.
   Its single-broker controller uses localhost; clients retain the `kafka` alias
   needed by the advertised listener.
-- Terminal-Bench-Science `protein-active-learning`: `submission` keeps its `submission`
-  user, disables host-file injection, and receives its only peer URL as
-  `ASSAY_STATUS=http://assay:8080/status`, resolved to the assay sandbox IP. The image's
-  server must read that variable; see the
-  [benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
-These services use their image's default user, omitting the redundant explicit
-`user` value copied from image metadata. This avoids the provider attempting
-`su` from a non-root process to the same user.
+```yaml
+compose_service_overrides:
+  medical-claims-processing:
+    playwright-mcp:
+      x-sandbox: {hosts: [], resolve_environment: [BROWSER_URL]}
+      user: null
+```
+
+`user: null` makes these services use their image's default user, omitting the
+redundant explicit `user` value copied from image metadata. This avoids the provider
+attempting `su` from a non-root process to the same user. Terminal-Bench-Science's
+profile patches its `protein-active-learning` `submission` service the same way; see the
+[benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
 These changes apply only to the generated runtime YAML. Pinned task packages,
 other services, and verifier environments retain their original configuration.

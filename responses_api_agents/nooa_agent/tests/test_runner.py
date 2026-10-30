@@ -23,7 +23,7 @@ import pytest
 from nooa import Agent, strategy
 from nooa.errors import GenerationError
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent import resource_tools
