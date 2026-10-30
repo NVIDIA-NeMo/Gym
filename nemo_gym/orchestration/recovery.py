@@ -403,7 +403,8 @@ try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
     acc = run.get("artifacts") or {}
     quality = {"artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
-               "verdicts": run.get("verdicts")}
+               "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
+               "ignored_checks": run.get("ignored_checks")}
 except (OSError, ValueError, KeyError, TypeError):
     pass
 score = None
@@ -558,12 +559,12 @@ RecoveryOutcome.model_rebuild()
 def quality_inputs(
     decision: RecoveryDecision, collected: CollectedEvidence, *, max_unhealthy_fraction: float | None
 ) -> tuple[bool | None, list[str], bool | None, list[str]]:
-    """FE validity and response/trial health from the run's ``quality_summary.json``, kept separate.
+    """FE validity and per-rollout health from the run's ``quality_summary.json``, kept separate.
 
     Validity is the health check's own accounting verdict (``run.artifacts.healthy``, null for a partial summary),
-    and must count the same expected identities as the inventory. Response/trial health is the rollout verdict count;
-    it passes only against an explicit ``max_unhealthy_fraction`` (an existing acceptance criterion the caller
-    names), and is not evaluated without one. Any missing piece is ``None``, which the gate summary blocks on.
+    and must count the same expected identities as the inventory. Per-rollout health is the rollout verdict count
+    (``run.verdicts``), judged only against an explicit ``max_unhealthy_fraction``; it is not ModelOpt response or
+    trial health, which this adapter has no separate evidence for. Any missing piece is ``None``.
     """
     quality = collected.quality
     if quality is None:
@@ -629,6 +630,51 @@ def mlflow_errors(local: dict[str, bool] | None, observed_status: str | None) ->
     return errors
 
 
+_MAX_FACTS = 20
+
+
+def _bounded(items: list[str]) -> str:
+    shown = ", ".join(items[:_MAX_FACTS])
+    return shown + (f", and {len(items) - _MAX_FACTS} more" if len(items) > _MAX_FACTS else "")
+
+
+def health_check_facts(quality: Mapping[str, Any] | None) -> list[str]:
+    """Named health-check facts from ``quality_summary.json`` for the gate warnings, kept even below any criterion.
+
+    Nonzero ``run.issues`` counts, checks ``run.artifacts.coverage`` did not fully evaluate (any unobserved or
+    ignored), and ``run.ignored_checks``. A field that is absent or malformed is reported as unknown, never as clean.
+    """
+    if quality is None:
+        return []
+    facts: list[str] = []
+    issues = quality.get("issues")
+    if not isinstance(issues, dict) or not all(
+        isinstance(k, str) and type(v) is int and v >= 0 for k, v in issues.items()
+    ):
+        facts.append("health-check issue counts unknown: run.issues absent or not non-negative integers")
+    elif nonzero := sorted(f"{k[:80]} {v}" for k, v in issues.items() if v):
+        facts.append(f"health-check issues (nonzero): {_bounded(nonzero)}")
+    coverage = quality.get("coverage")
+    fields = ("evaluated", "unobserved", "ignored")
+    if not isinstance(coverage, dict) or not all(
+        isinstance(k, str) and isinstance(c, dict) and all(type(c.get(f)) is int and c[f] >= 0 for f in fields)
+        for k, c in coverage.items()
+    ):
+        facts.append("health-check coverage unknown: run.artifacts.coverage absent or malformed")
+    elif partial := sorted(
+        f"{k[:80]} (evaluated {c['evaluated']}, unobserved {c['unobserved']}, ignored {c['ignored']})"
+        for k, c in coverage.items()
+        if c["unobserved"] or c["ignored"]
+    ):
+        facts.append(f"health checks not fully evaluated: {_bounded(partial)}")
+    ignored = quality.get("ignored_checks")
+    if not isinstance(ignored, list) or not all(isinstance(k, str) for k in ignored):
+        facts.append("ignored health checks unknown: run.ignored_checks absent or malformed")
+    elif ignored:
+        facts.append(f"ignored health checks: {_bounded(sorted(k[:80] for k in ignored))}")
+    return facts
+
+
 def gate_summary_from_collected(
     decision: RecoveryDecision,
     collected: CollectedEvidence,
@@ -653,7 +699,11 @@ def gate_summary_from_collected(
         health_reasons=health_reasons,
     )
     judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
-    task["warnings"] = task["warnings"] + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
+    task["warnings"] = (
+        task["warnings"]
+        + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
+        + health_check_facts(collected.quality)
+    )
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
         extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")

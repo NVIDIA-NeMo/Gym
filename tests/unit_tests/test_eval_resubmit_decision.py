@@ -954,3 +954,57 @@ def test_an_interrupted_row_with_failure_events_restarts_like_rollout_collection
     out = submit.recover("gym-job-z", "bench")
     assert out.decision.identities["missing"] == [(1, 0)] and "unknown" not in out.decision.identities
     assert fake_executor.calls == ["decide", "resubmit"]
+
+
+def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path) -> None:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    # Shape of a real run (chartqapro, inc52): nonzero issues below the limit and an unobserved run-level check.
+    job = complete_job(tmp_path)
+    write_quality(job, expected=4, healthy=True, verdicts={"healthy": 3, "unhealthy": 1, "unobserved": 0})
+    summary_path = job / "artifacts" / "quality_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["run"]["issues"] = {
+        "model_call_runaway_generation": 1,
+        "task_consistently_unhealthy": 1,
+        "agent_turn_hollow": 0,
+    }
+    summary["run"]["ignored_checks"] = []
+    summary["run"]["artifacts"]["coverage"] = {
+        "model_call_runaway_generation": {"evaluated": 4, "unobserved": 0, "ignored": 0},
+        "run_excessive_failures": {"evaluated": 0, "unobserved": 1, "ignored": 0},
+    }
+    summary_path.write_text(json.dumps(summary))
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED")
+    assert task["status"] == "FAILED"
+    assert task["warnings"][-3].startswith("per-rollout health within the configured criterion")
+    assert task["warnings"][-2:] == [
+        "health-check issues (nonzero): model_call_runaway_generation 1, task_consistently_unhealthy 1",
+        "health checks not fully evaluated: run_excessive_failures (evaluated 0, unobserved 1, ignored 0)",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("issues", None),
+        ("issues", {"model_call_runaway_generation": -1}),
+        ("issues", {"model_call_runaway_generation": True}),
+        ("coverage", None),
+        ("coverage", {"run_excessive_failures": {"evaluated": 1}}),
+        ("ignored_checks", "run_excessive_failures"),
+    ],
+)
+def test_malformed_health_facts_are_unknown_never_clean(field, value) -> None:
+    from nemo_gym.orchestration.recovery import health_check_facts
+
+    good = {
+        "issues": {"a": 0},
+        "coverage": {"a": {"evaluated": 1, "unobserved": 0, "ignored": 0}},
+        "ignored_checks": [],
+    }
+    assert health_check_facts(good) == []
+    facts = health_check_facts(good | {field: value})
+    assert len(facts) == 1 and "unknown" in facts[0]
