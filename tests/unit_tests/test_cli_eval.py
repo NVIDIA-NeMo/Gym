@@ -26,13 +26,14 @@ from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
-import nemo_gym.global_config
+import nemo_gym.client.server_client
+import nemo_gym.config.global_config
 import nemo_gym.server_utils
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
 from nemo_gym.cli.main import main
-from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIAgentServerInstanceConfig:
@@ -186,7 +187,7 @@ class TestPrepareDependencies:
 
     @staticmethod
     def _benchmark(dependencies):
-        from nemo_gym.config_types import BenchmarkDatasetConfig
+        from nemo_gym.config.config_types import BenchmarkDatasetConfig
 
         dataset = BenchmarkDatasetConfig(
             name="b",
@@ -270,7 +271,7 @@ class TestEvalRunNoServeWithoutHeadServer:
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         (tmp_path / "env.yaml").write_text("")
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         # Rich soft-wraps at 80 columns when stdout is not a TTY, which would split the message mid-sentence.
         monkeypatch.setenv("COLUMNS", "1000")
 
@@ -279,7 +280,7 @@ class TestEvalRunNoServeWithoutHeadServer:
         def refuse(*args, **kwargs):
             raise requests.exceptions.ConnectionError("[Errno 61] Connection refused")
 
-        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", refuse)
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", refuse)
 
     def test_exits_one_with_a_single_error_line_and_no_traceback(
         self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys

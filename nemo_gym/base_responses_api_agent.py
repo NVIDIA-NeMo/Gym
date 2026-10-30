@@ -39,55 +39,50 @@ from pydantic import (
     model_serializer,
 )
 
-from nemo_gym._checkpoint.agent import (
-    ActivationOutOfOrderError,
-    AgentSessionParticipant,
-    RestartOnlyAgentParticipant,
-    RestartOnlyTrackingMiddleware,
-    RestoredAgentSession,
-)
-from nemo_gym._checkpoint.control import install_participant
-from nemo_gym._checkpoint.errors import StaleAttemptError
-from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
 )
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
-from nemo_gym.base_resources_server import (
+from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
+from nemo_gym.config.global_config import (
+    OBSERVABILITY_ENABLED_KEY_NAME,
+    TOKEN_ID_CAPTURE_BLOCK,
+    get_first_server_config_dict,
+)
+from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body, rollout_context
+from nemo_gym.core.responses_api_types import (
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.metrics.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
+from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.server_runtime._checkpoint.agent import (
+    ActivationOutOfOrderError,
+    AgentSessionParticipant,
+    RestartOnlyAgentParticipant,
+    RestartOnlyTrackingMiddleware,
+    RestoredAgentSession,
+)
+from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
+from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
+from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym.server_runtime.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
     BaseRunRequest,
     BaseVerifyResponse,
 )
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import (
-    OBSERVABILITY_ENABLED_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
-    get_first_server_config_dict,
-)
-from nemo_gym.openai_utils import (
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
-from nemo_gym.reward_profile import AggregateMetricsMixin, compute_aggregate_metrics
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.sandbox.access import SandboxAccess
-from nemo_gym.server_utils import (
-    BaseRunServerInstanceConfig,
-    BaseServer,
-    SimpleServer,
-    apply_rollout_prefix,
-    rollout_path_prefix,
-)
-from nemo_gym.session_routing import SessionClaims, SessionKind
+from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims, SessionKind
+from nemo_gym.server_runtime.tool_access import ToolAccess
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
-from nemo_gym.tool_access import ToolAccess
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
 
 
 LOG = logging.getLogger(__name__)
@@ -96,7 +91,7 @@ LOG = logging.getLogger(__name__)
 # Session cookie key that binds later activation and close requests to their agent session.
 AGENT_SESSION_COOKIE_KEY = "agent_session_id"
 # An agent session is named by agent_session_id, in its seed and close bodies and in the cookie after its seed
-# (see nemo_gym.session_routing).
+# (see nemo_gym.server_runtime.request_handling.session_routing).
 AGENT_SESSIONS = SessionKind(
     cookie_key=AGENT_SESSION_COOKIE_KEY,
     id_field="agent_session_id",
@@ -186,6 +181,20 @@ class AgentSeedSessionResponse(BaseModel):
         if self.capabilities is None:
             result.pop("capabilities", None)
         return result
+
+
+class AgentSessionCapabilitiesResponse(BaseModel):
+    """What this adapter's sessions can do, asked before any session is seeded.
+
+    An environment server reads it to refuse a run before provisioning anything: a multi-step task whose turns
+    must continue one harness session needs ``continuation``, as Harbor's multi-step trial refuses
+    ``resume_trajectory`` for an agent without ``SUPPORTS_RESUME`` before any environment spend.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    supports_task_tool_context: bool = False
+    continuation: AgentContinuationCapabilities | None = None
 
 
 class AgentCloseSessionRequest(BaseModel):
@@ -342,6 +351,8 @@ class _AgentSessionRecord:
 # to the host. Docker only does so when the daemon runs on the host and the container uses host networking.
 _HOST_NETWORK_SANDBOX_PROVIDERS = frozenset({"local"})
 _LOCAL_DOCKER_SANDBOX_PROVIDERS = frozenset({"docker"})
+# An agent either exports its sessions or restarts its rollouts; it has no stateless mode.
+_AGENT_CHECKPOINT_MODES = ("restart_only", "exported")
 
 
 def is_loopback_host(url: str) -> bool:
@@ -399,7 +410,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # Seeds whose setup failed, kept for the caller's close until session_close_retry_window_seconds passes.
     _failed_seed_records: OrderedDict[str, _AgentSessionRecord] = PrivateAttr(default_factory=OrderedDict)
     _failed_seed_releases: set[asyncio.Task] = PrivateAttr(default_factory=set)
-    # With several workers, which worker claimed each agent_session_id (see nemo_gym.session_routing).
+    # With several workers, which worker claimed each agent_session_id (see nemo_gym.server_runtime.request_handling.session_routing).
     _agent_session_claims: Optional[SessionClaims] = PrivateAttr(default=None)
 
     def claimed_session_routing(self) -> dict[str, Any]:
@@ -410,7 +421,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return agent_session_id in self._session_records
 
     def use_agent_session_claims(self, claims: SessionClaims) -> None:
-        """Release a session's claim when this worker drops its last record (see nemo_gym.session_routing)."""
+        """Release a session's claim when this worker drops its last record (see nemo_gym.server_runtime.request_handling.session_routing)."""
         self._agent_session_claims = claims
 
     def _release_agent_session_claim(self, agent_session_id: str) -> None:
@@ -526,9 +537,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             raise HTTPException(409, "Unknown or closing agent_session_id")
         return record.state
 
-    # Agents that implement the AgentSessionHooks methods set this to take part in partial-rollout checkpoints.
-    # Other agents restart unfinished rollouts from their input.
-    checkpoint_sessions_supported: ClassVar[bool] = False
+    # How this agent takes part in partial-rollout checkpoints.
+    # Agents that implement the AgentSessionHooks methods declare "exported".
+    # The default fails closed: unfinished rollouts are restarts, which start over from their input after a crash.
+    checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
     _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
     _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
 
@@ -546,13 +558,16 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if getattr(app.state, "nemo_gym_agent_checkpoint_installed", False):
             return
         app.state.nemo_gym_agent_checkpoint_installed = True
+        # The declaration is a class attribute nothing else checks: a typo would act as a mode of its own.
+        if self.checkpoint_mode not in _AGENT_CHECKPOINT_MODES:
+            raise ValueError(
+                f"{type(self).__name__} declares checkpoint_mode={self.checkpoint_mode!r}; "
+                f"expected one of {_AGENT_CHECKPOINT_MODES}"
+            )
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if (self.config.num_workers or 1) != 1:
-            # Each worker would track only its own calls, so a checkpoint could miss work in the others.
-            raise ValueError("agent checkpointing requires num_workers=1: sessions live in one process")
-        if not self.checkpoint_sessions_supported:
+        if self.checkpoint_mode == "restart_only":
             # Fail closed: in-flight work is reported as restarts,
             # which never hold up a checkpoint and start over after a crash.
             self._restart_only = RestartOnlyAgentParticipant(self.retire_agent_session)
@@ -561,9 +576,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         else:
             self._checkpoint_participant = AgentSessionParticipant(self)
             participant = self._checkpoint_participant
-        install_participant(
+        install_server_participant(
             app,
             participant,
+            num_workers=self.config.num_workers or 1,
             auth_token=settings.control_auth_token,
             lease_grace_seconds=settings.lease_grace_seconds,
             instance_name=self.config.name,
@@ -634,8 +650,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.post("/v1/agent_sessions")(self.seed_agent_session)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
+        app.get("/v1/agent_sessions/capabilities")(self.agent_session_capabilities)
 
         return app
+
+    async def agent_session_capabilities(self) -> AgentSessionCapabilitiesResponse:
+        """Declare the session capabilities a seed would confirm, without seeding: the task-tool context and the
+        multi-turn continuation this adapter supports (``None`` for one-activation adapters and for agents that
+        implement no sessions at all)."""
+        return AgentSessionCapabilitiesResponse(
+            supports_task_tool_context=self.supports_task_tool_context(),
+            continuation=self._agent_continuation_capabilities(),
+        )
 
     async def seed_agent_session(
         self,

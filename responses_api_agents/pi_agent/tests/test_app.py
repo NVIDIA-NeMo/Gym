@@ -25,16 +25,16 @@ import pytest
 import yaml
 from fastapi import Request
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, ToolCallObservation
 from responses_api_agents.pi_agent.app import (
     PiAgent,
     PiAgentConfig,
@@ -404,7 +404,10 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
             returncode=0,
         )
 
-    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch):
+    with (
+        patch("responses_api_agents.pi_agent.app.ensure_pi"),
+        patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch),
+    ):
         items, _, _, _ = await agent._run_pi("task", None)
     assert items[0].content[0].text == "done"
     assert homes and all(not home.exists() for home in homes)

@@ -541,7 +541,7 @@ def validate_output(path: Path, gym_repo: Path, agent_ref: str) -> Counter:
 
     from pydantic import TypeAdapter
 
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
         ExpectedAction,
     )

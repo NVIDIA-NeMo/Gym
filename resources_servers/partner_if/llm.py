@@ -7,14 +7,14 @@ import re
 
 from pydantic import ConfigDict, Field, JsonValue, StrictInt, model_validator
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.evidence_sources import evidence_sources
 from resources_servers.partner_if.grading_contract import EvidenceQuote, GradingItem, RawJudgment, StrictModel
 from resources_servers.partner_if.schema import JudgeItem
 
 
-PROTOCOL = "partner-if-evidence-v5.2"
+PROTOCOL = "partner-if-evidence-v5.3"
 # The default limit on the judge's input: characters of its user message, the serialized rubrics and evidence.
 MAX_JUDGE_INPUT_CHARS = 1_000_000
 PROMPT = """You are an independent instruction-following and task-completion evaluator.
@@ -106,13 +106,17 @@ class Verdict(StrictModel):
 
 
 def payload(items: list[GradingItem], evidence: EvidenceBundle) -> dict:
-    """Send only rubric fields and evidence sources; analogues, taxonomy and actor identity stay out."""
+    """Send only rubric fields and evidence sources, plus an output-format cue; analogues, taxonomy and actor
+    identity stay out."""
     return {
         "evidence_sources": {key: value.payload() for key, value in evidence_sources(evidence).items()},
         "rubrics": [
             r.model_dump(include={"id", "constraint", "dimension", "category", "guidance", "provenance"})
             for r in items
         ],
+        # The system prompt asks for JSON, but some hosted OpenAI-compatible routes accept JSON-object output only
+        # when the user message says JSON.
+        "_judge_output_format": "JSON object with an items array",
     }
 
 

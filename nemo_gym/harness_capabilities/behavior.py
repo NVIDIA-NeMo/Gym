@@ -7,6 +7,10 @@ import json
 from collections import Counter
 from collections.abc import Callable
 
+from pydantic import ValidationError
+
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.responses_converter import message_content_to_text
 
 from .checks import BehavioralCheck
@@ -26,6 +30,13 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
     if not attempts or any(attempt["status_code"] != expected_status for attempt in attempts):
         return False
     if len(responses) != 1 or responses[0].get("status") != "failed":
+        return False
+    raw = _mapping(responses[0].get("metadata")).get(AGENT_OUTCOME_METADATA_KEY)
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        return False
+    if outcome.failure_kind != MODEL_REQUEST_ERROR or outcome.status_code != expected_status:
         return False
     message = _mapping(_mapping(attempts[-1].get("response")).get("error")).get("message")
     reported = _mapping(responses[0].get("error")).get("message")
@@ -164,6 +175,7 @@ def inspect_behavior(
     tool_steps: int,
     expected_reward: float,
     fingerprint: Callable,
+    judge_verifier: bool = False,
 ) -> list[dict]:
     """Check saved evidence and observations against explicit test expectations."""
     results = Results()
@@ -237,7 +249,8 @@ def inspect_behavior(
             tier="P0",
             evidence=("TE-1",),
             location="witness.json",
-            reason="the EnvironmentServer did not receive a failed response retaining the terminal model error",
+            reason="the EnvironmentServer must receive a failed response retaining the model error and "
+            "ng_agent_outcome with model_request_error and the witnessed HTTP status",
             predicate=lambda: _terminal_error_reported(attempts, agent_responses, http_errors[-1])
             if terminal_error
             else True,
@@ -319,9 +332,38 @@ def inspect_behavior(
             applies=not terminal_error,
         )
     )
+    judges = (witness or {}).get("judge_calls", [])
+    judge_id = (judges[0].get("response") or {}).get("id") if len(judges) == 1 else None
+    trajectory = _mapping((record or {}).get("ng_trajectory"))
+    judge_calls = [
+        call
+        for call in _objects(trajectory.get("model_calls"))
+        if judge_id is not None and _mapping(call.get("response_metadata")).get("response_id") == judge_id
+    ]
+    verifier_refs = {
+        ref.get("model_call_id")
+        for inv in _objects(trajectory.get("verifier_invocations"))
+        for ref in _objects(inv.get("model_calls"))
+    }
+    results.run(
+        BehavioralCheck(
+            id="verifier.judge_reference",
+            tier="P1",
+            evidence=("TE-6", "TE-8"),
+            location="$.judgement_id",
+            reason="the grade must reference the witnessed judge response with explicit verifier ownership",
+            predicate=lambda: judge_id is not None
+            and len(judge_calls) == 1
+            and (record or {}).get("judgement_id") == judge_id
+            and judge_calls[0].get("model_call_id") in verifier_refs
+            and "CONFORMANCE_DONE" in json.dumps(judges[0].get("request")),
+            available=available and record is not None,
+            applies=judge_verifier,
+        )
+    )
     return (
         results.dump()
-        + model_checks(record, attempts, fingerprint=fingerprint, available=available)
+        + model_checks(record, attempts + judges, fingerprint=fingerprint, available=available)
         + tool_checks(
             record,
             tools,

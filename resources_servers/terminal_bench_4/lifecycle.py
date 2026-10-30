@@ -55,12 +55,26 @@ class Session:
     slots: Any = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
+    # Environment Server sessions: the seed request, the SandboxAccess response or the HTTP
+    # error the seed replays, and the first verify body (retries must repeat it exactly).
+    resources_request: Any = None
+    resources_response: Any = None
+    resources_error: tuple[int, str] | None = None
+    resources_verify_body: Any = None
 
 
 def exception(session, error, error_type=None):
     record = {"exception_type": error_type or type(error).__name__, "exception_message": str(error)}
     session.result.setdefault("exception_info", record)
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
+
+
+def released(session):
+    """Whether every sandbox this session allocated (task, verifier, EFS helper) has stopped."""
+    return all(
+        resource is None or resource.closed
+        for resource in (session.environment, session.verifier_environment, session.shared_logs)
+    )
 
 
 async def cleanup(session):
@@ -108,6 +122,10 @@ async def prepare_session(session, loader):
     await session.slots.acquire()
     session.owns_slot = True
     session.task = await loader.load(session.request.task_name, session.request.task_ref)
+    # Before any sandbox starts or the agent runs: this task's settings could not produce a valid verification.
+    session.config.environment.require_exec_limit_covers(
+        session.task.name, session.config.environment.verifier_timeout_sec(session.task)
+    )
     session.environment = Environment(session.task, session.config.environment, session.session_id, session.directory)
     # Construct and validate the verifier configuration before allocating
     # either environment, but allocate its resources only after collection.

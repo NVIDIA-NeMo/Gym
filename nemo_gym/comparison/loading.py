@@ -28,16 +28,16 @@ from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
 import orjson
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.cli.utils import did_you_mean
 from nemo_gym.comparison.schema import RunFile
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     EXPECTED_NUM_ROLLOUTS_KEY_NAME,
     ROLLOUT_INFOS_KEY_NAME,
 )
-from nemo_gym.metrics_config import Stat
-from nemo_gym.path_utils import aggregate_metrics_path_for
+from nemo_gym.metrics.metrics_config import Stat
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for
+from nemo_gym.utils.text import did_you_mean
 
 
 RunRole = Literal["baseline", "candidate"]
@@ -107,7 +107,7 @@ def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:
 
 def _compute_repeat_metrics(entry: Dict[str, Any]) -> Dict[str, Any]:
     """Add repeat metrics to one legacy aggregate entry."""
-    from nemo_gym.reward_profile import compute_aggregate_metrics
+    from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 
     computed = compute_aggregate_metrics(
         [info for group in entry.get("group_level_metrics", []) for info in group.get(ROLLOUT_INFOS_KEY_NAME, [])]

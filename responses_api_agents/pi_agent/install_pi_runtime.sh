@@ -27,10 +27,6 @@ install_packages() {
 }
 
 test "$(uname -s)" = Linux
-if ! command -v python3 >/dev/null 2>&1; then
-  install_packages python3
-fi
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Pi requires Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
@@ -58,10 +54,13 @@ if [ ! -f "$runtime/ready" ]; then
   if ! command -v curl >/dev/null 2>&1; then
     packages+=(curl ca-certificates)
   fi
-  if [ "$platform" = linux-x64-musl ] && ! python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")' 2>/dev/null; then
+  # musl searches /lib, /usr/local/lib and /usr/lib by default.
+  if [ "$platform" = linux-x64-musl ] && [ ! -e /lib/libstdc++.so.6 ] && [ ! -e /usr/local/lib/libstdc++.so.6 ] \
+    && [ ! -e /usr/lib/libstdc++.so.6 ]; then
     packages+=(libstdc++)
   fi
-  install_packages "${packages[@]}"
+  # Bash < 4.4 treats an empty array as unbound under set -u.
+  install_packages ${packages[@]+"${packages[@]}"}
   mkdir -p "$runtime"
   cd "$runtime"
   # gzip and sha256sum -c work with Alpine's BusyBox; xz and --strict may not.

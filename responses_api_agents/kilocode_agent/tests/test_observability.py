@@ -3,17 +3,16 @@
 """Family coverage, output separation, accounting, and consistent artifact capture."""
 
 import json
+import shutil
 import sqlite3
-import subprocess
-import sys
 from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
-from responses_api_agents.kilocode_agent.observability import read_kilo_observations
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
+from responses_api_agents.kilocode_agent.observability import read_kilo_observations, read_kilo_snapshot
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
 from responses_api_agents.kilocode_agent.tests.test_sandbox import state
@@ -173,11 +172,12 @@ def test_snapshot_keeps_committed_wal_data(tmp_path: Path) -> None:
         connection.execute("pragma wal_checkpoint(truncate)")
         connection.execute("insert into session values ('new-child', 'root', 2)")
         connection.commit()
-        runner = Path(__file__).parents[1] / "sandbox_runner.py"
-        subprocess.run(
-            [sys.executable, "-I", str(runner), "--snapshot", str(tmp_path)], check=True, capture_output=True
-        )
-    observations, _ = read_kilo_observations(tmp_path / "observations.db", fallback_invocation_id="gym")
+        # The agent server downloads the database and its WAL, without the shared-memory index.
+        downloaded = tmp_path / "downloaded"
+        downloaded.mkdir()
+        for name in ("kilo.db", "kilo.db-wal"):
+            shutil.copyfile(tmp_path / name, downloaded / name)
+    observations, _ = read_kilo_snapshot(downloaded, fallback_invocation_id="gym")
     assert "new-child" in {
         record.invocation_id for record in observations.records if isinstance(record, AgentInvocation)
     }

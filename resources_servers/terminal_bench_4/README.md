@@ -38,8 +38,33 @@ in the rollout and trial result; `verifier_result.source` is
 `sandbox_resource_limit`, and test counts remain null. The original agent
 termination and diagnostics are preserved, but the result carries no
 infrastructure-failure marker. Recognition requires an explicit provider death
-report. Setup failures, node-pressure evictions, unrelated sandbox losses, and
-verifier failures retain their existing infrastructure-error handling.
+report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
+verifier that fails to start retain their existing infrastructure-error handling.
+
+A verifier that runs but times out, or that leaves no reward file, an empty one
+or one that cannot be parsed, scores `reward: 0.0` and counts in the pass-rate
+denominator. This is how Terminal-Bench scores it: Harbor never retries these
+outcomes and counts a trial without a reward as 0. The response keeps
+`evaluation_completed: false`, names the exception in `failure_reason`, and sets
+`failure_kind: verifier_error`. Only the verifier's own budget makes a timeout: a
+provider call that times out within it, or a sandbox that reports no command
+outcome, keeps the infrastructure-error handling. So does a trial whose agent
+ended on an infrastructure failure, whatever its verifier did next, because
+Harbor decides a retry from the trial's first exception.
+
+The verifier command runs under the per-command limit
+`environment.default_exec_timeout_s`, and that limit must be at least the task's
+verifier budget (`[verifier].timeout_sec`, or its entry in
+`environment.verifier_timeout_overrides`). A shorter limit could end the
+verifier inside its budget, and the sandbox reports no evidence of that, so the
+missing reward would read as the task's own zero. The server therefore refuses
+to start when an override is longer than the limit, and refuses a task whose
+package budget is longer, when it loads and before any sandbox starts or the
+agent runs. The failure is `ExecLimitConfigurationError`, an infrastructure
+failure marked terminal so that a resume does not retry it, and its message
+names both values. Neither value is changed: raise the limit to fix it. An
+equal limit is supported, because the verifier's budget starts before the
+command is submitted and so expires first.
 
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
@@ -74,6 +99,41 @@ pending or other outcomes in addition to passed, failed, and skipped tests.
 Missing, malformed, or unsupported reports yield null counts. Verifier timeouts
 also yield null counts. Report parsing diagnostics identify the source file.
 The official reward and evaluation-completion rules remain unchanged.
+
+## Environment Server sessions (SandboxAccess)
+
+Harnesses that borrow a task sandbox through `SandboxAccess` (for example
+`codex_agent` behind `single_agent_turn` or `single_agent_turn_legacy`) use the
+shared resources-session protocol instead of the contract above, as
+[Terminal-Bench 2.1](../../benchmarks/terminal_bench_2_1/README.md) does:
+
+- `/seed_session` with a `ResourcesSeedSessionRequest` whose `task_data` is the task
+  row (`task_name`, `task_ref`, `dataset_ref`) provisions the task as above, then
+  returns `sandbox_access`: a direct connection through the top-level sandbox provider
+  block named by `sandbox_provider_ref` (it must describe the same provider as
+  `environment.sandbox_provider`), and the task's working directory as its user sees
+  it. Seeds are idempotent per `resources_session_id`; a changed request is rejected.
+- `/verify` with the task row, `responses_create_params`, and the agent's `response`
+  grades once, as above; the session cookie names the episode. Termination comes from
+  `response.status`: `completed`, `incomplete` (`timeout`, or `nonzero_exit` for
+  `max_output_tokens`), and `nonzero_exit` for any other status, such as the `failed`
+  response of an agent that died while its sandbox still runs (codex_agent's
+  `verify_after_agent_error`). Identical retries replay the verdict. A verify for a
+  closed or unknown session returns a masked sample (`mask_sample: true`, reward 0) with
+  `failure_kind: session_lost`, or `session_expired` past the seeded-session deadline.
+- `/close_session` fences the session first, so a seed still provisioning releases its
+  sandboxes instead of lending them (HTTP 409), even if the close's caller stops waiting.
+  It then waits for in-flight provisioning or grading, stops anything still running
+  without grading it (finishing even if the caller disconnects), and fences late seeds.
+  A sandbox that cannot be stopped fails the close and keeps the fence; a repeated close
+  retries the deletion, and the provider TTL bounds it. A completed close is remembered
+  for `session_close_retry_window_seconds` (default 300), so retried closes succeed and
+  late seeds are rejected; set it to cover the caller's retry horizon.
+
+The borrower runs as the sandbox's default user, so tasks that declare
+`agent.user` are rejected with HTTP 422, and the access carries no agent timeout:
+configure the harness timeout from the task's `agent.timeout_sec`. Split sandbox
+endpoints are not supported in this mode.
 
 ## Other pinned Harbor datasets
 
@@ -128,7 +188,12 @@ the same rows uses the same denominator for both. `evaluation_completed: false` 
 
 ## Non-root Compose services
 
-When loading agent Compose YAML, three task-specific adaptations use the
+`environment.compose_service_overrides` maps a short task name and a Compose service to a
+[JSON merge patch](https://www.rfc-editor.org/rfc/rfc7396) for that service in the agent's
+generated Compose YAML: mappings merge, other values replace, and `null` removes a setting.
+As with `by_task`, a task name that the manifest lacks stops the server at startup, and a
+service that the task's Compose file lacks fails the task at seed. The Terminal-Bench 4
+profile uses it for two services that run as non-root users, with the
 [Compose extensions](../../fern/versions/latest/pages/infrastructure/sandbox/compose.mdx):
 
 - `medical-claims-processing`: `playwright-mcp` keeps `pwuser`, disables host-file
@@ -137,15 +202,20 @@ When loading agent Compose YAML, three task-specific adaptations use the
 - `payments-pipeline-fix`: `kafka` keeps `appuser` and disables host-file injection.
   Its single-broker controller uses localhost; clients retain the `kafka` alias
   needed by the advertised listener.
-- Terminal-Bench-Science `protein-active-learning`: `submission` keeps its `submission`
-  user, disables host-file injection, and receives its only peer URL as
-  `ASSAY_STATUS=http://assay:8080/status`, resolved to the assay sandbox IP. The image's
-  server must read that variable; see the
-  [benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
-These services use their image's default user, omitting the redundant explicit
-`user` value copied from image metadata. This avoids the provider attempting
-`su` from a non-root process to the same user.
+```yaml
+compose_service_overrides:
+  medical-claims-processing:
+    playwright-mcp:
+      x-sandbox: {hosts: [], resolve_environment: [BROWSER_URL]}
+      user: null
+```
+
+`user: null` makes these services use their image's default user, omitting the
+redundant explicit `user` value copied from image metadata. This avoids the provider
+attempting `su` from a non-root process to the same user. Terminal-Bench-Science's
+profile patches its `protein-active-learning` `submission` service the same way; see the
+[benchmark README](../../benchmarks/terminal_bench_science/README.md#protein-active-learning-submission).
 
 These changes apply only to the generated runtime YAML. Pinned task packages,
 other services, and verifier environments retain their original configuration.

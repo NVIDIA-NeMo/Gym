@@ -8,7 +8,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.in22 import prepare as prepare_module
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.prompt import fill_prompt, load_prompt_config
 
 
@@ -251,7 +251,7 @@ def test_gen_and_conv_compose_with_separate_preparation(config_names, monkeypatc
         assert {json.loads(line)["uuid"].split("/")[2] for line in output.read_text().splitlines()} == {subset}
         agent = config[dataset.agent_name]["responses_api_agents"]["simple_agent"]
         assert agent["resources_server"]["name"] == "in22_wmt_translation_resources_server"
-        env = config[f"in22_{subset}_environment_server"]["environment_servers"]["legacy_agent"]
+        env = config[f"in22_{subset}_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
         assert env["agent_server"]["name"] == dataset.agent_name
 
 

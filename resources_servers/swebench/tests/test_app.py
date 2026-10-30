@@ -21,14 +21,16 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,
     SwebenchResourcesServerConfig,
     SWEBenchVerifyResponse,
+    patch_extraction_command,
+    strip_binary_diffs,
 )
 from resources_servers.swebench.swebench_patches import patch_swebench_multilingual_sandbox
 
@@ -288,3 +290,24 @@ class TestMultilingualMavenSettings:
         destinations = [call.args[1] for call in sandbox.upload.await_args_list]
         assert ("/root/.m2/settings.xml" in destinations) is overwrite
         assert "/root/.gradle/init.d/maven_central_mirror.gradle" in destinations
+
+
+class TestPatchExtraction:
+    def test_command_stages_tracked_changes_and_diffs_the_index_against_the_seed_commit(self) -> None:
+        cmd = patch_extraction_command("/testbed", "abc123")
+        assert cmd.startswith("cd /testbed && git add -u ")
+        assert "add -A" not in cmd  # untracked build output must not ride along
+        assert cmd.endswith("cd /testbed && git --no-pager diff --cached abc123")
+
+    def test_command_quotes_odd_paths(self) -> None:
+        assert "'/work dir'" in patch_extraction_command("/work dir", "deadbeef")
+
+    def test_strip_binary_diffs_drops_only_binary_sections(self) -> None:
+        text = (
+            "diff --git a/a.py b/a.py\nindex 1..2 100644\n--- a/a.py\n+++ b/a.py\n@@ -1 +1 @@\n-x\n+y\n"
+            "diff --git a/img.png b/img.png\nindex 3..4 100644\nBinary files a/img.png and b/img.png differ\n"
+            "diff --git a/b.py b/b.py\nnew file mode 100644\n--- /dev/null\n+++ b/b.py\n@@ -0,0 +1 @@\n+z\n"
+        )
+        out = strip_binary_diffs(text)
+        assert "img.png" not in out and "a/a.py" in out and "b/b.py" in out
+        assert strip_binary_diffs("") == ""

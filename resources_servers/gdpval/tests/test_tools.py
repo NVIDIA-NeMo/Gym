@@ -10,9 +10,9 @@ import httpx
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.mcp_auto_exposure import harvest_tools
+from nemo_gym.client import ServerClient
 from nemo_gym.prompt import load_prompt_config
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
 from resources_servers.gdpval import app
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
 
@@ -63,7 +63,7 @@ def test_benchmark_tools_are_the_tools_the_server_serves(server):
             "type": "function",
             "name": t.name,
             "description": t.tool.description,
-            "parameters": t.tool.inputSchema,
+            "parameters": t.tool.model_dump(by_alias=True)["inputSchema"],
             "strict": None,
         }
         for t in tools.values()

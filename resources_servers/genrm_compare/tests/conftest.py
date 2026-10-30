@@ -18,8 +18,8 @@ from unittest.mock import MagicMock
 import pytest
 
 import resources_servers.genrm_compare.app as genrm
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 @pytest.fixture

@@ -1,0 +1,71 @@
+# A synthetic task.toml written for NeMo Gym's tests in the shape of the Harbor hub's `gabeorlanski/slopcodebench`
+# tasks: five steps, each collecting /app under `app` with excludes and gating two reward keys with min_reward. The
+# step names, verifier budgets, resources, reward gates and exclude list are the tests' own; no text of the dataset's
+# files is copied (the two share only TOML table headers, schema keys and generic values such as the two-hour agent
+# budget). See README.md.
+schema_version = "1.1"
+
+artifacts = []
+
+[task]
+name = "example/code_search_shape"
+description = "Synthetic five-step task in the shape of a slopcodebench problem, for loader and server tests."
+authors = [{ name = "NeMo Gym tests" }]
+keywords = ["multi-step", "pytest", "test-fixture"]
+
+[metadata]
+difficulty = "easy"
+category = "developer-tools"
+source = "synthetic"
+
+[environment]
+cpus = 2
+memory_mb = 4096
+storage_mb = 8192
+workdir = "/app"
+
+[agent]
+timeout_sec = 7200.0
+
+[verifier]
+timeout_sec = 300.0
+
+[[steps]]
+name = "scaffold"
+artifacts = [{ source = "/app", destination = "app", exclude = [".venv", "node_modules", "target", ".git"] }]
+min_reward = { core_pass_rate = 0.5, strict_pass_rate = 0.25 }
+
+[steps.verifier]
+timeout_sec = 300.0
+
+[[steps]]
+name = "lexer"
+artifacts = [{ source = "/app", destination = "app", exclude = [".venv", "node_modules", "target", ".git"] }]
+min_reward = { core_pass_rate = 0.5, strict_pass_rate = 0.25 }
+
+[steps.verifier]
+timeout_sec = 300.0
+
+[[steps]]
+name = "index"
+artifacts = [{ source = "/app", destination = "app", exclude = [".venv", "node_modules", "target", ".git"] }]
+min_reward = { core_pass_rate = 0.5, strict_pass_rate = 0.25 }
+
+[steps.verifier]
+timeout_sec = 300.0
+
+[[steps]]
+name = "query"
+artifacts = [{ source = "/app", destination = "app", exclude = [".venv", "node_modules", "target", ".git"] }]
+min_reward = { core_pass_rate = 0.5, strict_pass_rate = 0.25 }
+
+[steps.verifier]
+timeout_sec = 300.0
+
+[[steps]]
+name = "report"
+artifacts = [{ source = "/app", destination = "app", exclude = [".venv", "node_modules", "target", ".git"] }]
+min_reward = { core_pass_rate = 0.5, strict_pass_rate = 0.25 }
+
+[steps.verifier]
+timeout_sec = 300.0

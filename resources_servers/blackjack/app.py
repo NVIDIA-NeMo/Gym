@@ -27,8 +27,8 @@ from typing import ClassVar, Optional
 from fastapi import HTTPException
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint.resources import ResourcesCheckpointMode
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import CheckpointMode
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
@@ -54,7 +54,7 @@ def _fmt(hand: list[str]) -> str:
 
 class BlackjackEnv(GymnasiumServer):
     # The rest of a game depends only on the two hands and the session's generator, which are all exported.
-    checkpoint_mode: ClassVar[ResourcesCheckpointMode] = "exported"
+    checkpoint_mode: ClassVar[CheckpointMode] = "exported"
 
     def export_env_state(self, state: dict) -> JsonValue:
         version, internal_state, gauss_next = state["rng"].getstate()
