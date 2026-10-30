@@ -1258,6 +1258,36 @@ class TestReadFileLineRanges:
         assert out["result"] is None
         assert "read_file failed" in out["error"]
 
+    @pytest.mark.skipif(shutil.which("dash") is None, reason="needs dash, the /bin/sh of Debian sandbox images")
+    async def test_range_runs_under_posix_sh(self, tmp_path: Path) -> None:
+        # Provider sandboxes run a non-root user's command through `su -s /bin/sh`, which is dash on Debian images.
+        (tmp_path / "f.txt").write_text("".join(f"line{i}\n" for i in range(1, 6)))
+        sandbox = _DashSandbox(tmp_path)
+        out = await tools_mod.dispatch_tool("read_file", {"path": "f.txt", "start_line": 2, "end_line": 3}, sandbox)
+        assert out["error"] is None
+        assert out["result"]["text"].splitlines() == ["     2\tline2", "     3\tline3"]
+        missing = await tools_mod.dispatch_tool("read_file", {"path": "nope.txt", "start_line": 1}, sandbox)
+        assert missing["result"] is None and "no such readable file" in missing["error"]
+
+
+class _DashSandbox:
+    """Runs tool commands with dash in a directory, as a provider sandbox runs them for its non-root user."""
+
+    def __init__(self, root: Path) -> None:
+        self.codebase_path = str(root)
+
+    async def exec(self, command: str, timeout_s: int | None = None) -> ExecResult:
+        proc = await asyncio.create_subprocess_exec(
+            "dash",
+            "-c",
+            command,
+            cwd=self.codebase_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        stdout, stderr = await proc.communicate()
+        return ExecResult(exit_code=proc.returncode or 0, stdout=stdout.decode(), stderr=stderr.decode())
+
 
 async def test_grep_include_becomes_a_ripgrep_glob() -> None:
     sandbox = FakeSandbox()

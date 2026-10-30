@@ -259,10 +259,14 @@ async def _read_file(args: ReadFileArgs, sandbox: Sandbox) -> Dict[str, Any]:
         if args.end_line is not None and args.end_line < start:
             return _make_error(f"end_line ({args.end_line}) is before start_line ({start})")
         line_range = f"{start},{args.end_line}p" if args.end_line is not None else f"{start},$p"
-        # `cat -n`-style numbering that starts at `start`, so cited line numbers are the file's own.
+        path = shlex.quote(abs_path)
+        # `cat -n`-style numbering that starts at `start`, so cited line numbers are the file's own. POSIX sh only:
+        # provider sandboxes run a non-root user's command through `su -s /bin/sh` (dash on Debian images), which
+        # rejects `set -o pipefail`, so a missing or unreadable file is checked before the pipeline.
         cmd = (
-            f"set -o pipefail; sed -n {shlex.quote(line_range)} -- {shlex.quote(abs_path)} "
-            f"| nl -ba -w6 -s {shlex.quote(chr(9))} -v {int(start)} | head -c {int(cap)}"
+            f"if ! [ -f {path} ] || ! [ -r {path} ]; then echo 'no such readable file' >&2; exit 1; fi; "
+            f"sed -n {shlex.quote(line_range)} -- {path} | nl -ba -w6 -s {shlex.quote(chr(9))} -v {int(start)} "
+            f"| head -c {int(cap)}"
         )
     res = await sandbox.exec(cmd)
     if res.timed_out:
