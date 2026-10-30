@@ -44,6 +44,7 @@ from nemo_gym.config_types import (
 )
 from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.global_config import (
     AGENT_REF_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
@@ -730,7 +731,13 @@ def _run_verification_payloads(
                         flush=True,
                     )
                 raise
-            return row, await get_response_json(res)
+            result = await get_response_json(res)
+            # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
+            # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
+            report = FailureHeader.decode(getattr(res, "headers", None))
+            if report is not None:
+                result = FailureReportRow.merged_into(result, report)
+            return row, result
 
     return tqdm.as_completed(
         map(_post_subroutine, payloads),
