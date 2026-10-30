@@ -43,7 +43,7 @@ FAKE_BINARY = "/usr/bin/apptainer"
 async def test_reconnect_preserves_workdir_environment_and_transfers(fake_binary, tmp_path, monkeypatch):
     import tempfile
 
-    from nemo_gym.sandbox import AsyncSandbox
+    from nemo_gym.sandbox.api import AsyncSandbox
 
     staging = Path(tempfile.mkdtemp(prefix="nemo-gym-apptainer-", dir=tmp_path))
     creator = apptainer_provider.ApptainerProvider()

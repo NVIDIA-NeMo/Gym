@@ -24,10 +24,10 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
-import nemo_gym.global_config as gc
+import nemo_gym.config.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -618,7 +618,7 @@ class TestFriendlyValidationError:
         from pydantic import ValidationError
 
         from nemo_gym.cli.main import _handle_pydantic_validation_error
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (so it passes the scoping check) with one missing and one invalid field.
         class _Model(BaseNeMoGymCLIConfig):
@@ -642,7 +642,7 @@ class TestFriendlyValidationError:
         assert "invalid configuration: count" in recorder.message
 
     def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
         class _Config(BaseNeMoGymCLIConfig):
@@ -1677,22 +1677,22 @@ class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
     def test_helper_does_not_suggest_exact_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["list", "eval", "env"]) == ""
 
     def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
 

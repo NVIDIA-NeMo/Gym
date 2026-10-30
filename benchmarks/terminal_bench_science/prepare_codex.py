@@ -24,7 +24,8 @@ from pathlib import Path
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science.prepare import BENCHMARK_DIR, load_manifest, select_tasks, task_row
-from nemo_gym import PARENT_DIR, global_config
+from nemo_gym import PARENT_DIR
+from nemo_gym.config import global_config
 
 
 OUTPUT_PATH = BENCHMARK_DIR / "data" / "benchmark_codex.jsonl"
@@ -43,7 +44,7 @@ def _needs_server_environment() -> bool:
 def _prepare_in_server_environment(arguments: list[str]) -> Path:
     """Run this module with the terminal_bench_4 server's Python, setting up its environment first."""
     from nemo_gym.cli.setup_command import get_venv_path, run_command, setup_env_command
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     setup_config = GlobalConfigDictParser().parse(
         GlobalConfigDictParserConfig(

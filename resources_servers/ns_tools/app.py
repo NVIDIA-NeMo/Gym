@@ -46,7 +46,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ResourcesServerRef
+from nemo_gym.config import ResourcesServerRef
 from nemo_gym.server_utils import SESSION_ID_KEY
 
 

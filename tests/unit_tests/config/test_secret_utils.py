@@ -15,7 +15,12 @@
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.secret_utils import MASKED_VALUE, hide_secrets_in_container, mask_url_passwords, recursively_hide_secrets
+from nemo_gym.config.secret_utils import (
+    MASKED_VALUE,
+    hide_secrets_in_container,
+    mask_url_passwords,
+    recursively_hide_secrets,
+)
 
 
 @pytest.mark.parametrize(

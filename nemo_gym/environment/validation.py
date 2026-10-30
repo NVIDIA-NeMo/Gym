@@ -22,7 +22,15 @@ from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import (
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    dataset_agent_pins,
+    get_first_server_config_dict,
+    resolve_dataset_agent,
+    translate_interpolation_error,
+)
 from nemo_gym.environment.manifest import (
     DatasetKind,
     EnvironmentKind,
@@ -31,14 +39,6 @@ from nemo_gym.environment.manifest import (
     dump_manifest,
     load_manifest,
     resolve_manifest_config_path,
-)
-from nemo_gym.global_config import (
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-    dataset_agent_pins,
-    get_first_server_config_dict,
-    resolve_dataset_agent,
-    translate_interpolation_error,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 

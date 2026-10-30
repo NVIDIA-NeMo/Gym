@@ -14,12 +14,9 @@ from fastapi import HTTPException
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_science import prepare as preparation
-from nemo_gym import global_config
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox import SandboxExecResult, create_provider, resolve_provider_config
-from nemo_gym.sandbox.adapters.docker_compose import AsyncSandboxCompose
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, AggregateMetricsRequest, global_config
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.sandbox import AsyncSandboxCompose, SandboxExecResult, create_provider, resolve_provider_config
 from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
@@ -481,6 +478,7 @@ async def test_every_trial_sandbox_asks_for_single_process_oom_kills(tmp_path, m
         await provider.create(spec)
         assert sent[-1]["nemo.nvidia.com/oom-kill"] == "process", role
         assert sent[-1]["nemo.nvidia.com/resources"] == "custom", role
+        assert sent[-1]["nemo.nvidia.com/s3-hostpath"] == "false", role
     await provider.aclose()
 
 
