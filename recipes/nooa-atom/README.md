@@ -58,12 +58,28 @@ checkouts at the same pins must produce the same `resolved.sha256`.
 ```bash
 recipes/nooa-atom/run.sh terminal-bench-2.1                 # full benchmark
 LIMIT=5 PARALLEL=2 recipes/nooa-atom/run.sh terminal-bench-2.1
+ONLY_TASKS='code-from-image,fp8-*' recipes/nooa-atom/run.sh terminal-bench-2.1   # named tasks only
 RESUME=1 recipes/nooa-atom/run.sh terminal-bench-2.1        # continue an interrupted run
 ```
+
+`ONLY_TASKS` takes comma-separated globs on task ids (`task_id`, `task_name` or `instance_id` of the dataset rows).
+The run filters the prepared dataset file to the matching rows (`only_tasks.py`) and points Gym at the copy.
 
 Output: `results/<recipe>/evaluator_rollouts.jsonl` with the resolved config saved beside it by Gym, and
 the failures sidecar. `gym eval export atif --rollouts results/<recipe>/evaluator_rollouts.jsonl` writes
 ATIF trajectories.
+
+### What an Atom shell sees in the sandbox
+
+```bash
+python recipes/nooa-atom/probe_runtime.py --image alexgshaw/code-from-image:20251031 \
+  --wheelhouse "$NOOA_RUNTIME_WHEELHOUSE" --wheelhouse-musl "$NOOA_RUNTIME_WHEELHOUSE_MUSL"
+```
+
+Starts one sandbox from the task image, stages the runtime as the agent server does, and reports what `command -v`
+resolves under the entrypoint's PATH policy. `ACCEPTED` means `python3` and `pip` are the image's own (or absent),
+`rg` is `<runtime>/shell-tools/rg`, and nothing else of the runtime is on PATH. Use it after changing the runtime
+or the entrypoint, before a benchmark run.
 
 ### Arms
 

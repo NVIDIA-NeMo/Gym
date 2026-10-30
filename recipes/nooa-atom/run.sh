@@ -22,7 +22,7 @@
 #
 #   recipes/nooa-atom/run.sh terminal-bench-2.1                   # full benchmark
 #   LIMIT=1 recipes/nooa-atom/run.sh terminal-bench-2.1           # one row
-#   ONLY_TASKS=code-from-image recipes/nooa-atom/run.sh terminal-bench-2.1   # named tasks (gym eval run --only-tasks)
+#   ONLY_TASKS='code-from-image,fp8-*' recipes/nooa-atom/run.sh terminal-bench-2.1   # named tasks (globs on task ids)
 #   OUT=<dir> PARALLEL=<n> recipes/nooa-atom/run.sh terminal-bench-2.1
 #   RESUME=1 recipes/nooa-atom/run.sh terminal-bench-2.1          # continue an interrupted run
 #
@@ -75,11 +75,17 @@ gym eval prepare "${CONFIGS[@]}" "${HYDRA[@]}"
 # The recipe's setup runs after preparation: it may pin a task repo, or write the rows the dataset entry names.
 SETUP="$RECIPES/$BENCH.setup.sh"
 [ -f "$SETUP" ] && source "$SETUP"
+# ONLY_TASKS: `gym eval run --only-tasks` applies to Harbor task targets, not to a prepared dataset file. The recipe
+# filters the prepared file to the matching rows instead and points the run at the copy (only_tasks.py).
+if [ -n "${ONLY_TASKS:-}" ]; then
+  gym env resolve "${CONFIGS[@]}" "${HYDRA[@]}" > "$OUT/only-tasks-resolved.yaml"
+  mapfile -t ONLY_OVERRIDES < <(python "$RECIPES/only_tasks.py" "$OUT/only-tasks-resolved.yaml" "$OUT/only-tasks" "$ONLY_TASKS")
+  HYDRA+=("${ONLY_OVERRIDES[@]}" ++use_cached_prepared_benchmarks=true)
+fi
 gym eval run \
   "${CONFIGS[@]}" \
   --output "$OUT/evaluator_rollouts.jsonl" \
   ${RESUME:+--resume} \
   ${LIMIT:+--limit "$LIMIT"} \
-  ${ONLY_TASKS:+--only-tasks "$ONLY_TASKS"} \
   ${PARALLEL:+--concurrency "$PARALLEL"} \
   "${HYDRA[@]}"
