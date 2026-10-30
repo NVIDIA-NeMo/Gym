@@ -43,8 +43,10 @@ benchmark supplies 30 seconds. Task-specific overall deadlines remain separate.
 
 ## Dataset and deployment
 
-The dataset is `terminal-bench/terminal-bench@4.0.0`, pinned to
-`sha256:39d9f44b40420cde8fdcc087579c0d72a7e14fa3656d603c3f0d22fb35e27732`.
+On this branch the dataset is TB4's GitHub main at `06a92e79` (a pre-release of 4.1), built as TB4's
+release build does, with images in ECR; its packages are not on Harbor Hub, so set `task_download_dir` to a
+folder that holds them. It is pinned to
+`sha256:17f8d25131ad47c286f682e0159ae78fd1698b2437eb0e5baa996753a412ae18`.
 `manifest.json` retains all 52 CPU, 11 CPU Compose, and 3 H100 tasks and their
 individual package digests. Preparation writes identities only; the resources
 server validates the dataset and task digests before allocation.
