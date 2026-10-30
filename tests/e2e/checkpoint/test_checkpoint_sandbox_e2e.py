@@ -35,7 +35,9 @@ TOPOLOGIES = pytest.mark.parametrize("topology", ["sandbox_sessions", "sandbox_s
 
 
 def request_for(topology: str, rollout_id: str, attempt: int = 0) -> dict:
-    return notes_row(rollout_id, attempt) if topology == "sandbox_sessions_legacy" else notes_episode(rollout_id, attempt)
+    return (
+        notes_row(rollout_id, attempt) if topology == "sandbox_sessions_legacy" else notes_episode(rollout_id, attempt)
+    )
 
 
 def running(state: dict) -> list[dict]:
