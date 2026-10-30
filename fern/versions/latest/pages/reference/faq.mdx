@@ -343,8 +343,8 @@ gym env start --config $config_paths
 ```
 
 Ray is involved in two places:
-1. **Main process** (`RunHelper.start()` in `nemo_gym/cli/env.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`. Otherwise no Ray cluster is created.
-2. **Server process** (`server_utils.py`): each server process, including Uvicorn managers and workers, connects only when its implementation declares `ray_enabled = True`.
+1. **Main process** (`RunHelper.start()` in `nemo_gym/orchestration/server_supervisor.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`. Otherwise no Ray cluster is created.
+2. **Server process** (`nemo_gym/server_runtime/ray_support.py`): each server process, including Uvicorn managers and workers, connects only when its implementation declares `ray_enabled = True`.
 
 `ray_enabled` defaults to `False`. Server implementations that use Ray declare it as a class attribute:
 ```python
