@@ -78,7 +78,7 @@ their rollouts, and apply the existing P0 evidence checks:
 
 ```bash
 python scripts/run_harness_conformance.py \
-    --harness codex --harness pi --harness opencode --harness hermes \
+    --harness codex --harness pi --harness opencode --harness openclaw --harness hermes \
     --output results/conformance
 ```
 

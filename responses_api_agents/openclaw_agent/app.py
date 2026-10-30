@@ -35,6 +35,7 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
@@ -467,6 +468,18 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read the terminal assistant error emitted by OpenClaw 2026.6.11."""
+        if native_result.get("stopReason") != "error":
+            return AgentOutcome(failure_kind="unknown")
+        message = str(native_result.get("errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if match:
+            return AgentOutcome(failure_kind="model_request_error", status_code=int(match[1]))
+        if message in {"Connection error.", "Connection error", "fetch failed", "Request timed out."}:
+            return AgentOutcome(failure_kind="model_transport_error")
+        return AgentOutcome(failure_kind="unknown")
+
     config: OpenClawAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -580,6 +593,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     f"bash {directory}/{installer} {runtime} {self.config.openclaw_version}\n"
                     f"stderr={(installed.stderr or '')[-16000:]}; stdout={(installed.stdout or '')[-16000:]}"
                 )
+            for name in ("index.mjs", "openclaw.plugin.json"):
+                await sandbox.upload(
+                    Path(__file__).with_name("provider_plugin") / name, f"{directory}/provider_plugin/{name}"
+                )
             await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
@@ -666,6 +683,10 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
         session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        # Rejected HTTP attempts have no response ID. Correlate them with the
+        # single invocation returned at close, including retries and cancellation.
+        session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -687,7 +708,12 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                     "allow": ["read", "write", "edit", "exec", "process"],
                     "exec": {"host": "gateway", "security": "full", "ask": "off"},
                 },
-                "plugins": {"enabled": False},
+                "plugins": {
+                    "enabled": True,
+                    "allow": ["nemo-gym"],
+                    "load": {"paths": [f"{state.session.session_dir}/provider_plugin"]},
+                    "entries": {"nemo-gym": {"enabled": True}},
+                },
             }
         )
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
@@ -737,11 +763,18 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
+        # Keep transcript evidence even if the runtime ignored a plugin load failure.
         response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
-        if response.error is not None:
-            # Preserve the transcript in session observations, but let the environment
-            # classify runtime/provider failures before it invokes the verifier.
-            raise HTTPException(502, response.error.message)
+        if (state.session.artifacts or {}).get("provider_plugin/policy.ready") != "nemo-gym-replay-v1\n":
+            state.observations.gaps.append(ObservationGap(code="provider_replay_policy_unconfirmed"))
+            for record in state.observations.records:
+                if record.kind == "agent_invocation":
+                    record.status = "failed"
+            raise RuntimeError(
+                "OpenClaw did not activate the Gym provider replay policy; tool-call identity is unconfirmed"
+            )
+        # Return modeled failures with their output and error. The Environment Server
+        # owns verification and masking; an HTTP error would discard that response.
         response.metadata = {**(response.metadata or {}), AGENT_TIMEOUT_METADATA_KEY: str(timeout)}
         return response
 
@@ -899,6 +932,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 "openclaw_version": self.config.openclaw_version,
             },
         )
+        response = self.report_outcome(response, last if error == last.get("errorMessage") else {})
         input_items = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
         input_items.append(NeMoGymEasyInputMessage(role="user", content=prompt))
         try:
@@ -907,12 +941,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 openclaw_session_conversation(events, input_items=input_items, fallback_output=output),
                 events,
                 transcript_available=bool(events),
+                prefer_openclaw_session_id=False,
                 model_ref=self.config.model_server,
             )
             # Sandbox sessions enable only local file/process tools, so there is
-            # exactly one invocation; child sessions cannot be spawned.
+            # exactly one invocation; child sessions cannot be spawned. The provider
+            # header correlates even rejected attempts with this invocation.
             state.observations.gaps = [
-                gap for gap in state.observations.gaps if gap.code != "subagent_hierarchy_unavailable"
+                gap
+                for gap in state.observations.gaps
+                if gap.code not in {"subagent_hierarchy_unavailable", "model_call_ownership_unavailable"}
             ]
             state.observations.records[0].status = status
             state.observations.gaps.extend(gaps)

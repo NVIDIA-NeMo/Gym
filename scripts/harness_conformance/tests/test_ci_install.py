@@ -24,3 +24,13 @@ def test_install_uses_adapter_dir_and_overrides(monkeypatch, harness):
     ships_overrides = (adapter / "overrides.txt").is_file()
     assert ("--override" in command) is ships_overrides
     assert not ships_overrides or command[command.index("--override") + 1] == "overrides.txt"
+
+
+def test_openclaw_runtime_is_installed_only_in_the_task_sandbox(monkeypatch):
+    calls = []
+    monkeypatch.setattr(subprocess, "run", lambda command, **kwargs: calls.append(command))
+
+    install_runtime("openclaw")
+
+    assert len(calls) == 1
+    assert calls[0][:3] == ["uv", "pip", "install"]

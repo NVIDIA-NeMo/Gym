@@ -72,6 +72,7 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
         (directory / "home/.openclaw/openclaw.json").write_text(
             sandbox.files[f"{directory}/home/.openclaw/openclaw.json"]
         )
+        shutil.copytree(Path(__file__).parents[1] / "provider_plugin", directory / "provider_plugin")
         (directory / "prompt.txt").write_text(payload.pop("prompt"))
         (directory / "params.sh").write_text(shell_assignments(payload))
         process = await asyncio.create_subprocess_exec(

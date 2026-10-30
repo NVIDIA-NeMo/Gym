@@ -1,0 +1,9 @@
+{
+  "id": "nemo-gym",
+  "providers": ["nemo"],
+  "configSchema": {
+    "type": "object",
+    "additionalProperties": false,
+    "properties": {}
+  }
+}

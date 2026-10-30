@@ -128,7 +128,12 @@ class OpenClawSandboxSession(AgentSessionState):
         """Retain transcript and diagnostics before releasing the task sandbox."""
         artifacts = {}
         session_id = self.session.session_dir.rsplit("/", 1)[-1]
-        for name in ("stdout.log", "stderr.log", f"home/.openclaw/agents/main/sessions/{session_id}.jsonl"):
+        for name in (
+            "stdout.log",
+            "stderr.log",
+            "provider_plugin/policy.ready",
+            f"home/.openclaw/agents/main/sessions/{session_id}.jsonl",
+        ):
             try:
                 artifacts[name] = await self.read_text(name)
             except Exception:
