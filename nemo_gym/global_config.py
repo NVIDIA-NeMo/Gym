@@ -204,6 +204,32 @@ AGENT_SERVER_TYPE_KEY_NAME = "responses_api_agents"
 # The field an environment server names its agent in.
 AGENT_SERVER_REF_KEY_NAME = "agent_server"
 ENVIRONMENT_SERVER_TYPE_KEY_NAME = "environment_servers"
+# Agent types whose servers implement agent sessions (`_seed_agent_session_state`), so an environment server
+# such as `single_agent_turn_legacy` can drive them. Config composition cannot import agent apps to ask,
+# so this list is the source of truth; a unit test keeps it in step with the agent apps.
+AGENT_SESSION_AGENT_TYPES = frozenset(
+    {
+        "claude_code_agent",
+        "codex_agent",
+        "harbor_oracle_agent",
+        "hermes_agent",
+        "kilocode_agent",
+        "miniswe_sandboxed_agent",
+        "nooa_agent",
+        "openclaw_agent",
+        "opencode_agent",
+        "pi_agent",
+        "simple_agent",
+        "stirrup_agent",
+        "terminus_2_sandboxed_agent",
+    }
+)
+# An environment server type that drives its agent through agent sessions, and keeps the agent's /run as a
+# fallback through a legacy_agent relay.
+SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE = "single_agent_turn_legacy"
+LEGACY_AGENT_SERVER_TYPE = "legacy_agent"
+# Kept when a single_agent_turn_legacy server falls back to a legacy_agent relay; the rest only applies to sessions.
+_LEGACY_RELAY_KEPT_KEYS = ("entrypoint", AGENT_SERVER_REF_KEY_NAME, "host", "port", "num_workers")
 # Carried over from the environment's agent instance onto the composed agent; every other key is dropped.
 _COMPOSED_AGENT_CARRY_OVER_KEYS = ("resources_server", "model_server", "datasets")
 # Declared on a resources server: the agent types it is known to score correctly. Absent means any harness.
@@ -918,6 +944,8 @@ Duplicate config paths:
                 global_config_dict[renames[target.name]] = instance
 
             self._retarget_environment_servers(global_config_dict, renames)
+            if source.agent_type not in AGENT_SESSION_AGENT_TYPES:
+                self._relay_agents_without_sessions(global_config_dict, set(renames.values()))
             self._raise_on_outdated_routing(global_config_dict, renames)
             self._route_rows_stamped_before_the_swap(global_config_dict, renames)
 
@@ -942,6 +970,32 @@ Duplicate config paths:
                 for reference in environment_server_agent_refs(server):
                     if reference.get("name") in renames:
                         reference["name"] = renames[reference["name"]]
+
+    @staticmethod
+    def _relay_agents_without_sessions(global_config_dict: DictConfig, agent_names: set[str]) -> None:
+        """Replace each single_agent_turn_legacy server fronting one of `agent_names` with a legacy_agent relay.
+
+        Those agents do not implement agent sessions, so single_agent_turn_legacy would fail every episode.
+        The relay calls the agent's own /run, as the environment did before it moved to agent sessions.
+        """
+        for instance_name, instance in global_config_dict.items():
+            if not isinstance(instance, DictConfig):
+                continue
+            servers = instance.get(ENVIRONMENT_SERVER_TYPE_KEY_NAME)
+            if not isinstance(servers, DictConfig):
+                continue
+            server = servers.get(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
+            if not isinstance(server, DictConfig):
+                continue
+            agent_name = (server.get(AGENT_SERVER_REF_KEY_NAME) or {}).get("name")
+            if agent_name not in agent_names:
+                continue
+            logger.info(
+                f"Environment server '{instance_name}' runs '{agent_name}' through a legacy_agent relay: "
+                f"that agent type does not implement the agent sessions single_agent_turn_legacy needs."
+            )
+            servers[LEGACY_AGENT_SERVER_TYPE] = {key: server[key] for key in _LEGACY_RELAY_KEPT_KEYS if key in server}
+            servers.pop(SINGLE_AGENT_TURN_LEGACY_SERVER_TYPE)
 
     @staticmethod
     def _composed_instance_name(target: _AgentInstance, agent_type: str) -> str:
