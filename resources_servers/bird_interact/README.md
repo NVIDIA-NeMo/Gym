@@ -105,8 +105,9 @@ server. `bookshop_3` and `bookshop_4` have a follow-up question. `bookshop_4` an
 ambiguities each, as most published tasks do, and `bookshop_5` hides no knowledge.
 
 The config declares the file once for each mode's taskset, under one dataset name, so both share
-`data/example_metrics.json`. `data/example_rollouts.jsonl` has one c-Interact rollout for each task, with
-`simple_agent`; the data check expects one rollout for each row, so the a-Interact rollouts are not included.
+`data/example_metrics.json`. `data/example_rollouts.jsonl` has one rollout for each task in each mode, with
+`simple_agent`: the five c-Interact rollouts, then the five a-Interact ones. The data check wants five for each
+taskset.
 
 The public BIRD-Interact releases (Mini-Interact, Lite, Full) withhold `sol_sql` and `test_cases`. The authors
 send them on request. A seed for a row without `sol_sql` is refused with HTTP 422. Mini-Interact uses SQLite, so its
