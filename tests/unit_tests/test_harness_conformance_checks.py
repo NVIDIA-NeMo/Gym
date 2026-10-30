@@ -5,9 +5,11 @@
 
 import json
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
+from scripts.check_suites.github_actions import download_artifacts
 from scripts.harness_conformance import checks
 from scripts.harness_conformance.ci import report
 from scripts.harness_conformance.feedback import failure_details
@@ -119,14 +121,14 @@ def test_publisher_downloads_current_attempt_and_posts_check(
             assert args == ["gh", "api", "--method", "POST", "repos/example/Gym/check-runs", "--input", "-"]
             posted.append(json.loads(kwargs["input"]))
 
-    monkeypatch.setattr(checks.subprocess, "run", run)
+    monkeypatch.setattr(subprocess, "run", run)
 
     def artifact_listing(*args, **kwargs):
         if listing_failure:
             raise subprocess.CalledProcessError(1, args[0])
         return "harness-conformance-pi-123-2\t456\n"
 
-    monkeypatch.setattr(checks.subprocess, "check_output", artifact_listing)
+    monkeypatch.setattr(subprocess, "check_output", artifact_listing)
     failed_conformance = download_failure or probe_exit_code != 0
     assert checks.main() == int(failed_conformance or probe_job_result not in ("success", "skipped"))
     assert len(posted) == 1
@@ -215,3 +217,41 @@ def test_first_failure_includes_checker_assertion_and_reason(tmp_path):
     count, first = failure_details("opencode", tmp_path)
     assert count == "1 / 1"
     assert first == "tool_success: TE-3 / turn.question: non-null model-visible prompt is required"
+
+
+def test_failed_download_invalidates_partial_result_and_continues(tmp_path, monkeypatch):
+    calls = []
+
+    def download(command, **kwargs):
+        calls.append(command)
+        if "harness-conformance-pi-12-2" in command:
+            partial = tmp_path / "pi" / "probes" / "ci-result.json"
+            partial.parent.mkdir(parents=True)
+            partial.write_text('"partial result"')
+            raise subprocess.CalledProcessError(1, command)
+
+    monkeypatch.setattr(subprocess, "run", download)
+    download_artifacts(
+        ["pi", "hermes"],
+        artifact_prefix="harness-conformance",
+        repo="NVIDIA-NeMo/Gym",
+        run_id="12",
+        attempt="2",
+        output=tmp_path,
+        result_file="probes/ci-result.json",
+    )
+    assert len(calls) == 2 and "harness-conformance-hermes-12-2" in calls[1]
+    assert not (tmp_path / "pi" / "probes" / "ci-result.json").exists()
+
+
+def test_p0_reporter_imports_without_gym_or_site_packages():
+    subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import sys; from scripts.harness_conformance import checks; "
+            "assert not any(name.startswith('nemo_gym') for name in sys.modules)",
+        ],
+        check=True,
+    )
