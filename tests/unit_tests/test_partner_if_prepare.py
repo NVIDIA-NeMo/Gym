@@ -69,7 +69,7 @@ def test_prepare_refuses_content_other_than_the_pinned_release(prepared, content
 
 
 # The release's task IDs; there is no pif_023.
-RELEASE_TASK_IDS = [f"pif_{index:03d}" for index in (*range(1, 23), *range(24, 27))]
+RELEASE_TASK_IDS = [f"pif_{index:03d}" for index in (*range(1, 23), *range(24, 29))]
 
 
 def test_routes_cover_the_release_and_name_its_environments():
@@ -91,7 +91,7 @@ def test_routes_cover_the_release_and_name_its_environments():
     assert config[swe["agent_server"]["name"]]["_inherit_from"] == "opencode_agent"
 
 
-def test_every_agent_calls_the_policy_copy_that_only_removes_the_output_cap():
+def test_every_agent_uses_the_declared_policy_configuration():
     config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
     policy = config["partner_if_policy_model"]
     assert policy["_copy"] == "policy_model"
@@ -107,8 +107,9 @@ def test_every_agent_calls_the_policy_copy_that_only_removes_the_output_cap():
         for agent in (server.get("responses_api_agents") or {}).values()
         if "model_server" in agent
     ]
-    assert len(agents) == 4
-    assert {agent["model_server"]["name"] for agent in agents} == {"partner_if_policy_model"}
+    assert len(agents) == 5
+    assert {agent["model_server"]["name"] for agent in agents} == {"partner_if_policy_model", "partner_if_prime_model"}
+    assert config["partner_if_prime_model"]["responses_api_models"]["vllm_model"]["sampling_overrides"] is None
 
 
 def test_rows_split_on_newlines_only():
@@ -124,3 +125,31 @@ def test_prepare_checks_the_row_count(prepared):
     ):
         with pytest.raises(ValueError, match="rows"):
             prepare_module.prepare()
+
+
+def test_prime_pairing_validates_its_runtime_and_episode_budgets():
+    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from resources_servers.partner_if.prime_app import PrimeIFConfig
+    from responses_api_agents.prime_agent.child_app import PrimeChildConfig
+
+    config = yaml.safe_load((prepare_module.BENCHMARK_DIR / "config.yaml").read_text())
+    for name, kind, component, schema in [
+        ("partner_if_prime", "resources_servers", "partner_if", PrimeIFConfig),
+        ("partner_if_prime_agent", "responses_api_agents", "prime_agent", PrimeChildConfig),
+        (
+            "partner_if_prime_environment_server",
+            "environment_servers",
+            "single_agent_turn_legacy",
+            SingleAgentTurnEnvironmentServerConfig,
+        ),
+    ]:
+        schema.model_validate(config[name][kind][component] | {"name": name, "host": "127.0.0.1", "port": 8123})
+    agent = config["partner_if_prime_agent"]["responses_api_agents"]["prime_agent"]
+    resources = config["partner_if_prime"]["resources_servers"]["partner_if"]
+    assert agent["capture_directory"] == resources["capture_directory"]
+    assert (agent["max_turns"], agent["max_output_tokens"], agent["context_window"], agent["temperature"]) == (
+        48,
+        65536,
+        131072,
+        0,
+    )

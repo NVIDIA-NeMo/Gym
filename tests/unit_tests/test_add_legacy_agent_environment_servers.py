@@ -77,6 +77,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
     [
         "hermes_agent",
         "pi_agent",
+        "prime_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
@@ -114,6 +115,7 @@ def test_migration_respects_agent_session_templates(
     [
         "hermes_agent",
         "pi_agent",
+        "prime_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
