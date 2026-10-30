@@ -41,6 +41,7 @@ from resources_servers.beam.app import (
     BEAMResourcesServer,
     BEAMResourcesServerConfig,
     BEAMVerifyRequest,
+    _gather_or_cancel,
     build_rubric_prompt,
     event_ordering_score,
     parse_judge_score,
@@ -582,3 +583,20 @@ def test_compute_metrics_runs_keyed_by_rollout_index() -> None:
     assert m["pass@1[avg-of-2]/overall"] == approx((0.5 + 1.0) / 2)
     assert m["pass@2/overall"] == approx(1.0)
     assert m["pass@1[avg-of-2]/overall/std_dev_across_runs"] == approx(0.35355339, abs=1e-6)
+
+
+async def test_task_group_keeps_unrelated_canonical_failures():
+    """A failure that is not a judge failure leaves the task group as itself, not as a judge failure."""
+    from nemo_gym.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    unrelated = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
+    )
+
+    async def fail(error):
+        raise error
+
+    with pytest.raises(ExceptionGroup) as caught:
+        await _gather_or_cancel([fail(unrelated)])
+    assert caught.value.exceptions == (unrelated,)

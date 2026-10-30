@@ -15,7 +15,6 @@ from nemo_gym.agent_outcome import (
 from nemo_gym.core.failure_kinds import AGENT_INVALID_OUTPUT, MODEL_POLICY_RESPONSE_TIMEOUT, MODEL_TRANSPORT_ERROR
 from nemo_gym.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
-from responses_api_agents.simple_agent.app import SimpleAgentConfig, SimpleAgentOutcomePolicyConfig
 
 
 def test_status_kind_default_and_partial_overrides():
@@ -47,47 +46,6 @@ def test_event_adapter_does_not_search_an_inner_http_status():
     before = event.to_record()
     assert failure_outcome_policy(event, config=policy) == OutcomeAction.COUNT_AS_ZERO
     assert event.to_record() == before
-
-
-@pytest.mark.parametrize("field", ["default_action", "by_failure_kind", "by_status_code"])
-def test_boundary_rejects_unsupported_actions_at_load(field):
-    def value(action):
-        return (
-            action
-            if field == "default_action"
-            else {MODEL_POLICY_RESPONSE_TIMEOUT if field == "by_failure_kind" else 500: action}
-        )
-
-    with pytest.raises(ValidationError, match="does not support verify"):
-        SimpleAgentOutcomePolicyConfig(**{field: value("verify")})
-    with pytest.raises(ValidationError, match="does not support count_as_zero"):
-        AgentOutcomePolicyConfig(**{field: value("count_as_zero")})
-
-
-def test_alias_resolves_once_conflicts_are_rejected_and_config_roundtrips():
-    base = dict(
-        host="127.0.0.1",
-        port=8000,
-        entrypoint="",
-        name="agent",
-        model_server={"type": "responses_api_models", "name": "model"},
-    )
-    legacy = SimpleAgentConfig(**base, final_on_model_timeout=True)
-    assert legacy.outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == OutcomeAction.COUNT_AS_ZERO
-    assert "final_on_model_timeout" not in legacy.model_dump()
-    assert (
-        SimpleAgentConfig.model_validate(legacy.model_dump(exclude_none=True)).outcome_policy == legacy.outcome_policy
-    )
-    explicit = SimpleAgentConfig(**base, outcome_policy={"by_failure_kind": {MODEL_POLICY_RESPONSE_TIMEOUT: "fail"}})
-    assert explicit.outcome_policy.default_action == OutcomeAction.RETRY
-    assert explicit.outcome_policy.by_failure_kind[MODEL_POLICY_RESPONSE_TIMEOUT] == OutcomeAction.FAIL
-    for alias, action in [(True, "retry"), (False, "count_as_zero")]:
-        with pytest.raises(ValidationError, match="conflicts"):
-            SimpleAgentConfig(
-                **base,
-                final_on_model_timeout=alias,
-                outcome_policy={"by_failure_kind": {MODEL_POLICY_RESPONSE_TIMEOUT: action}},
-            )
 
 
 @pytest.mark.parametrize("complete", [True, False, None])

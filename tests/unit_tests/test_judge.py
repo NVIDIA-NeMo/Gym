@@ -230,41 +230,6 @@ def test_judge_selector_does_not_swallow_other_canonical_failures():
         assert not is_judge_failure(event)
 
 
-async def test_beam_task_group_keeps_unrelated_canonical_failures():
-    import ast
-    import asyncio
-    from pathlib import Path
-    from typing import Any, Awaitable, List
-
-    from nemo_gym.episode_types import FailureBoundary
-    from nemo_gym.judge import JUDGE_FAILURES, is_judge_failure
-
-    # Load the actual helper without importing BEAM's optional benchmark dependencies.
-    source = Path("resources_servers/beam/app.py").read_text()
-    node = next(
-        n for n in ast.parse(source).body if isinstance(n, ast.AsyncFunctionDef) and n.name == "_gather_or_cancel"
-    )
-    namespace = dict(
-        asyncio=asyncio,
-        Any=Any,
-        Awaitable=Awaitable,
-        List=List,
-        JUDGE_FAILURES=JUDGE_FAILURES,
-        is_judge_failure=is_judge_failure,
-    )
-    exec(compile(ast.Module(body=[node], type_ignores=[]), "resources_servers/beam/app.py", "exec"), namespace)
-    unrelated = NgFailureEvent(
-        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
-    )
-
-    async def fail(error):
-        raise error
-
-    with pytest.raises(ExceptionGroup) as caught:
-        await namespace["_gather_or_cancel"]([fail(unrelated)])
-    assert caught.value.exceptions == (unrelated,)
-
-
 @pytest.mark.asyncio
 async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
     from nemo_gym.core.episode import verifier_invocation_context
