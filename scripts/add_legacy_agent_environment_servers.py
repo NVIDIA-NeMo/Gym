@@ -160,6 +160,7 @@ def needs_environment_server(instance: dict) -> bool:
         in {
             "hermes_agent",
             "pi_agent",
+            "pool_agent",
             "codex_agent",
             "openclaw_agent",
             "opencode_agent",
