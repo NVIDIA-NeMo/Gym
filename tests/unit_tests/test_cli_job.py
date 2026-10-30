@@ -15,6 +15,7 @@
 
 import json
 import os
+import subprocess
 import sys
 from pathlib import Path
 from textwrap import dedent
@@ -22,7 +23,7 @@ from textwrap import dedent
 import pytest
 import yaml
 
-from nemo_gym.cli.job import render_info, render_list, render_status
+from nemo_gym.cli.job_render import render_info, render_list, render_status
 from nemo_gym.cli.main import _reject_overrides, main
 from nemo_gym.orchestration.executors.resume_script import JOB_CHAIN_NAME
 from nemo_gym.orchestration.jobs import (
@@ -387,3 +388,19 @@ def test_info_of_an_executor_without_the_capability_says_so(tmp_path, cluster, m
     _, err = _gym(monkeypatch, capsys, "info", "gym-job-k8s", ok=False)
 
     assert "kubernetes executor does not support info" in err
+
+
+def test_the_renderers_import_nothing_that_talks_to_a_scheduler():
+    """Importing `job_render` must not load the dispatch layer or any executor, so what it prints can be
+    checked without a cluster. Checked in a SUBPROCESS: this module imports the commands itself."""
+    probe = (
+        "import sys;"
+        "import nemo_gym.cli.job_render;"
+        "bad = sorted(m for m in sys.modules if m == 'nemo_gym.orchestration.submit'"
+        " or m.startswith('nemo_gym.orchestration.executors.slurm')"
+        " or m.startswith('nemo_gym.orchestration.executors.kubernetes'));"
+        "print(','.join(bad))"
+    )
+    result = subprocess.run([sys.executable, "-c", probe], capture_output=True, text=True, check=True)
+
+    assert result.stdout.strip() == "", f"job_render pulled in: {result.stdout.strip()}"
