@@ -265,7 +265,7 @@ the body only as raw text, and what collection does with it depends on how far t
 
 | Cancelled | Capture holds | Collection | Health |
 | --- | --- | --- | --- |
-| After a complete answer (2xx status; one JSON object, or a streamed body that ended with its terminal event) | Raw text | Parses it, so the call carries its `response_id`, token counts, finish reason, and parsed response, and the raw text is dropped. `error_category` stays `cancelled`. | A successful call |
+| After a complete answer (2xx status; one JSON object, or a streamed body that ended with its terminal event) | Raw text | Parses it, so the call carries its `response_id`, token counts, completion status or finish reason, and parsed response, and the raw text is dropped. `error_category` stays `cancelled`. | A successful call |
 | Before a complete answer | Raw text, if any | Keeps it as is, with null token counts and no `response_id`. | A failed call that [reported no usage](/main/evaluation/rollout-health) |
 
 A retry after a dropped connection can leave both kinds in one rollout. Only the second kind needs a

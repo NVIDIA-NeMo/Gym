@@ -306,15 +306,16 @@ def _is_delivered_cancelled(call: dict[str, Any]) -> bool:
     """A call the server marked cancelled after it had answered in full.
 
     The client disconnecting after the last byte is not a failure: the answer was complete and
-    its finish reason and usage were recovered from the captured body. A cancelled call without
-    a finish reason was cut before a complete answer and stays failed.
+    its usage and completion were recovered from the captured body. A completed Responses body
+    carries a `completed` status and often no finish reason; Chat and Messages bodies carry a
+    finish reason. A cancelled call with neither was cut before a complete answer and stays failed.
     """
     status = call.get("status_code")
     return (
         call.get("error_category") == "cancelled"
         and type(status) is int
         and 200 <= status < 300
-        and call.get("finish_reason") is not None
+        and (call.get("response_status") == "completed" or call.get("finish_reason") is not None)
         and call.get("response_status") not in {"failed", "error", "cancelled"}
     )
 
