@@ -1,0 +1,13 @@
+config_paths:
+  - resources_servers/capx/configs/capx.yaml
+
+capx_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      datasets:
+      - name: capx
+        type: benchmark
+        jsonl_fpath: benchmarks/capx/data/capbench_benchmark.jsonl
+        prepare_script: benchmarks/capx/prepare.py
+        num_repeats: 1
+        license: MIT

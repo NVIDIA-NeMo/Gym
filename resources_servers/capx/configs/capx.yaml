@@ -1,0 +1,41 @@
+# First start installs CaP-X and downloads the API servers' weights, which exceeds Gym's default 600 s spin-up wait.
+server_spinup_timeout_seconds: 3600
+
+capx:
+  resources_servers:
+    capx:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+      description: CaP-X / CaP-Bench code-as-policy robot manipulation. The model writes Python against robot perception and control APIs; reward is simulator task completion.
+      value: Measure and improve robotic coding agents
+      # A set-up CaP-X checkout; the pinned commit is installed on first start when unset.
+      capx_root: ${oc.env:CAPX_ROOT,null}
+      max_workers: 4
+
+capx_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: capx
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Initial program + up to 10 regenerations + the final FINISH decision, as in CaP-X's multi-turn loop.
+      max_steps: 12
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: benchmarks/capx/data/example.jsonl
+        license: MIT
+
+capx_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: capx_gymnasium_agent

@@ -18,6 +18,7 @@
 import asyncio
 import logging
 import uuid
+from time import time
 from typing import Any
 
 import anyio
@@ -36,6 +37,13 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
+)
+from nemo_gym.rollout_observability import (
+    AgentInvocation,
+    ModelCallRef,
+    ObservationGap,
+    TrajectoryRecord,
+    TrajectoryTurn,
 )
 from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
@@ -79,6 +87,8 @@ class GymnasiumRunResponse(BaseVerifyResponse):
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
+    # Whether the environment produced a valid verdict; harness conformance (TE-6) requires it on every rollout.
+    evaluation_completed: bool = True
 
 
 class GymnasiumAgent(SimpleResponsesAPIAgent):
@@ -229,8 +239,19 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         last_model_response = None
         finished = False
 
-        for _ in range(self.config.max_steps):
+        # Per-turn evidence for rollout health and harness conformance, as simple_agent records it.
+        rollout_id = self.rollout_id_from_run(body) if self._model_call_capture_enabled() else None
+        extra = body.model_extra or {}
+        task_id = next(
+            (str(extra[key]) for key in ("task_id", "_ng_task_index") if extra.get(key) is not None), "unknown"
+        )
+        model_calls: list[ModelCallRef] = []
+        turns: list[TrajectoryTurn] = []
+        gaps: list[ObservationGap] = []
+
+        for turn_no in range(1, self.config.max_steps + 1):
             new_body = base_body.model_copy(update={"input": base_body.input + new_outputs})
+            turn_timestamp = time()
 
             model_response, model_server_cookies = await self._request_model_response(
                 new_body,
@@ -238,6 +259,35 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
                 url_path=model_url_path,
             )
             last_model_response = model_response
+            if rollout_id is not None:
+                turn_model_calls = []
+                if model_response.id:
+                    model_call_ref = ModelCallRef(model_ref=self.config.model_server, response_id=model_response.id)
+                    model_calls.append(model_call_ref)
+                    turn_model_calls.append(model_call_ref)
+                else:
+                    gaps.append(
+                        ObservationGap(
+                            code="model_call_reference_unavailable", invocation_id="root", detail=f"turn:{turn_no}"
+                        )
+                    )
+                turns.append(
+                    TrajectoryTurn(
+                        invocation_id="root",
+                        task_id=task_id,
+                        rollout_id=rollout_id,
+                        turn_no=turn_no,
+                        timestamp=turn_timestamp,
+                        question=new_body.input,
+                        answer=[item for item in model_response.output if item.type != "reasoning"],
+                        reasoning_content=[
+                            item.model_dump(mode="json") for item in model_response.output if item.type == "reasoning"
+                        ]
+                        or None,
+                        step_count=0,
+                        model_calls=turn_model_calls,
+                    )
+                )
 
             returned_outputs.extend(model_response.output)
             if self.config.text_only_history:
@@ -307,6 +357,26 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
         last_model_response.output = returned_outputs if self.config.text_only_history else new_outputs
         last_model_response.usage = usage
 
+        # An environment reports that its own infrastructure, not the policy, decided the episode through the
+        # final step's info, using the same fields a verifier response carries.
+        info = step_data.info or {}
+        mask_sample = info.get("mask_sample") is True
+        trajectory = None
+        if rollout_id is not None:
+            trajectory = TrajectoryRecord(
+                task_id=task_id,
+                rollout_id=rollout_id,
+                invocations=[
+                    AgentInvocation(
+                        invocation_id="root",
+                        status="completed" if finished else "incomplete",
+                        model_calls=model_calls,
+                        conversation=[*base_body.input, *new_outputs],
+                    )
+                ],
+                turns=turns,
+                gaps=gaps,
+            ).model_dump(mode="json")
         return GymnasiumRunResponse(
             responses_create_params=base_body,
             response=last_model_response,
@@ -314,6 +384,11 @@ class GymnasiumAgent(SimpleResponsesAPIAgent):
             terminated=step_data.terminated,
             truncated=step_data.truncated,
             info=step_data.info,
+            mask_sample=mask_sample,
+            failure_kind=info.get("failure_kind"),
+            failure_reason=info.get("failure_reason"),
+            evaluation_completed=info.get("evaluation_completed", not mask_sample) is True,
+            **({"ng_trajectory": trajectory} if trajectory is not None else {}),
         )
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
