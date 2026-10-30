@@ -11,7 +11,9 @@ An exporter takes a finished run, the rollouts file and the files `gym eval run`
 1. `gym eval export <name> +key=value ...` resolves its configuration like every Gym command (command line, `env.yaml`) and loads the exporter class registered under `<name>`.
 2. The exporter's settings model validates that configuration before anything else happens.
 3. The exporter's `export(artifacts)` runs and returns an `ExportResult`.
-4. The command prints the state and the result's `detail`, and exits with the result's exit code when it failed. With `result_json_fpath`, the result is also kept as a JSON file.
+4. The command prints the state and the result's `detail`, and exits with the result's exit code when it failed.
+
+A submitted job runs the same exporter through a small step of its own, `python3 -m nemo_gym.orchestration.export_step <name> +key=value ...`. It does steps 1 to 4 and also keeps the result as a JSON file, which is how the job tells its exports apart afterwards and avoids repeating one that already finished. Your exporter does not need to know about the step.
 
 ## The Contract
 
@@ -20,7 +22,7 @@ An exporter takes a finished run, the rollouts file and the files `gym eval run`
 | | |
 | --- | --- |
 | `name` | The name users type: `gym eval export <name>`. Lowercase, one word. |
-| `config_model` | A pydantic model of the exporter's settings. It extends `RunExportConfig`, which already holds `rollouts_jsonl_fpath` and `result_json_fpath`. |
+| `config_model` | A pydantic model of the exporter's settings. It extends `RunExportConfig`, which already holds `rollouts_jsonl_fpath`. |
 | `export(artifacts) -> ExportResult` | Does the export. |
 
 **The run.** `RunArtifacts` derives the files of a run from the rollouts path, without checking that they exist: `rollouts_jsonl_fpath`, `failures_jsonl_fpath`, `materialized_inputs_jsonl_fpath`, `aggregate_metrics_json_fpath` and `resolved_config_yaml_fpath` (the run's saved configuration, with secrets masked). Each exporter decides which it needs. `unexportable_reason(artifacts)` returns what is missing for a faithful export of the whole run (rollouts, fresh aggregate metrics, saved config), or `None`. If your exporter doesn't read the rollouts file, as the Acme example below doesn't, pass `rollouts_required=False`.
@@ -33,7 +35,7 @@ An exporter takes a finished run, the rollouts file and the files `gym eval run`
 | `ExportResult.skipped(**detail)` | Nothing was done because the run was already exported. |
 | `ExportResult.failed(error, *, exit_code=1, **detail)` | The export failed. Use a distinct `exit_code` (a keyword argument) for failures callers may want to tell apart. |
 
-`detail` is printed by the command and stored in the result file, so it should be small and hold nothing secret. Make a second export of the same run harmless: report `skipped` when the destination already has it, as `gym eval submit` may run an export again.
+`detail` is printed by the command and, in a submitted job, stored in the result file, so it should be small and hold nothing secret. Make a second export of the same run harmless: report `skipped` when the destination already has it, as `gym eval submit` may run an export again.
 
 **The settings.** The settings model must be importable without the exporter's SDK, because `gym eval submit` validates it on a machine that may not have the SDK. Keep SDK imports inside `export()` (or inside the worker, below). Hydra types command-line values, so on the command line `1` arrives as an integer and a `str` field rejects it. Say so in the field's `description` when a setting is likely to look numeric, such as a version. A submit config does not have this problem: submit writes each value so that Hydra reads it back as the same string, number or boolean, so a string setting written as `"1"` stays a string.
 
@@ -127,7 +129,7 @@ gym eval export --help        # lists summary
 gym eval export summary +rollouts_jsonl_fpath=results/rollouts.jsonl +destination_dirpath=results/summaries
 ```
 
-**With `gym eval submit`.** An entry for the exporter under `export` in a submit config is validated against the settings model before anything is sent: unknown settings and invalid values are rejected, and so are incomplete ones (see `is_available` above). Submit fills in `rollouts_jsonl_fpath` and `result_json_fpath` per benchmark. If your exporter needs names derived from the benchmark or submission, such as a run name, add a branch for it in `export_run_settings` in `nemo_gym/orchestration/exports.py`.
+**With `gym eval submit`.** An entry for the exporter under `export` in a submit config is validated against the settings model before anything is sent: unknown settings and invalid values are rejected, and so are incomplete ones (see `is_available` above). Submit fills in `rollouts_jsonl_fpath` per benchmark, and the export step's `result_json_fpath` (which is not one of your settings). If your exporter needs names derived from the benchmark or submission, such as a run name, add a branch for it in `export_run_settings` in `nemo_gym/orchestration/exports.py`.
 
 ## In-Process or Isolated
 
