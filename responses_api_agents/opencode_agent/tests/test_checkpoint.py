@@ -335,6 +335,19 @@ def test_the_resume_payload_re_enters_the_latest_user_turn() -> None:
         resume_payload([ANSWER])
 
 
+def test_a_conversation_exported_from_opencode_s_database_is_resumed() -> None:
+    """snapshot.py keeps each message's id beside its info: OpenCode stores the id on the row, not in the data."""
+
+    def as_exported(message: dict) -> dict:
+        info = {key: value for key, value in message["info"].items() if key != "id"}
+        return {"id": message["info"]["id"], "info": info, "parts": message["parts"]}
+
+    decision = resume_decision(_export(*map(as_exported, (USER, ANSWER, PENDING))), "fix the bug")
+
+    assert decision.resume, decision.reason
+    assert decision.payload["messageID"] == "msg_1"
+
+
 # -- resume_opencode.sh --------------------------------------------------------------------------------------------
 
 
