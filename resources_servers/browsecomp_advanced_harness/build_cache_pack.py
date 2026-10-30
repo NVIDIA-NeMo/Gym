@@ -39,8 +39,8 @@ Shard selection (build, verify, status, unpack, candidates):
 build, per shard: list <kind>/<ab>/*/; every ^[0-9a-f]{64}\\.json$ file whose
 name matches its directory is read and must decode as UTF-8 and json.loads
 (how SearchCache serves it). Files that do not are skipped and recorded: they
-stay flat-only, a miss exactly as today. *.tmp files and other names (e.g. the
-0-byte rsync partials .<name>.json.XXXXXX) are counted and listed. The shard is
+stay flat-only, a miss exactly as today. *.tmp files and other names (e.g.
+rsync partials .<name>.json.XXXXXX) are counted and listed, never packed. The shard is
 written to node-local tmp, copied to pack/<kind>/<ab>.{dat,idx}.tmp, fsynced
 and renamed into place; its manifest (manifests/<kind>_<ab>.json) goes last and
 records, per packed entry, relpath, size, mtime_ns and sha256 of the raw bytes,
