@@ -9,7 +9,12 @@ from typing import Any
 
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxHandle, SupportsSandboxSnapshot
+from nemo_gym.sandbox.providers.base import (
+    SandboxHandle,
+    SandboxSnapshotNotFoundError,
+    SandboxSpec,
+    SupportsSandboxSnapshot,
+)
 
 
 pytestmark = pytest.mark.sandbox
@@ -316,3 +321,48 @@ def test_snapshot_budgets_are_validated(operations: dict[str, float], match: str
         opensandbox_provider.OpenSandboxOperationConfig(**operations)
     defaults = opensandbox_provider.OpenSandboxOperationConfig()
     assert (defaults.snapshot_timeout_s, defaults.snapshot_lookup_grace_s) == (240.0, 60.0)
+
+
+def _recording_create(monkeypatch: pytest.MonkeyPatch, provider: Any, outcome: Any) -> list[SandboxSpec]:
+    """Replace ``provider.create``: record each spec, then return ``outcome``'s handle or raise it."""
+    created: list[SandboxSpec] = []
+
+    async def create(spec: SandboxSpec) -> SandboxHandle:
+        created.append(spec)
+        if isinstance(outcome, BaseException):
+            raise outcome
+        return outcome
+
+    monkeypatch.setattr(provider, "create", create)
+    return created
+
+
+async def test_create_from_snapshot_creates_with_the_snapshot_in_place_of_the_image(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    provider = _provider()
+    created = _recording_create(monkeypatch, provider, SandboxHandle("sb-2", "opensandbox", None))
+    spec = SandboxSpec(image="python:3.12", provider_options={"network_policy": {"egress": "none"}})
+
+    handle = await provider.create_from_snapshot("snap-1", spec)
+
+    assert handle.sandbox_id == "sb-2"
+    assert created[0].image is None
+    assert created[0].provider_options == {"network_policy": {"egress": "none"}, "snapshot_id": "snap-1"}
+
+
+async def test_create_from_a_missing_snapshot_raises_snapshot_not_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider()
+    _recording_create(monkeypatch, provider, RuntimeError("Create sandbox failed: HTTP 404: SNAPSHOT::NOT_FOUND"))
+
+    with pytest.raises(SandboxSnapshotNotFoundError, match="'snap-1'"):
+        await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
+
+
+async def test_other_failures_to_create_from_a_snapshot_keep_their_type(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = _provider()
+    _recording_create(monkeypatch, provider, RuntimeError("quota exceeded"))
+
+    with pytest.raises(RuntimeError, match="quota exceeded") as raised:
+        await provider.create_from_snapshot("snap-1", SandboxSpec(image="python:3.12"))
+    assert not isinstance(raised.value, SandboxSnapshotNotFoundError)
