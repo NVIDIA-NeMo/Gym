@@ -18,6 +18,7 @@ import os
 import re
 import shlex
 import tempfile
+from collections.abc import Iterator
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -26,8 +27,8 @@ import yaml
 
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
-from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.capabilities import Inspectable, Resubmittable
+from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
+from nemo_gym.orchestration.executors.capabilities import LogReadable, Resubmittable, Terminable
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
@@ -41,6 +42,12 @@ from nemo_gym.orchestration.executors.otel import (
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
+from nemo_gym.orchestration.executors.slurm_control import (
+    parse_log_output,
+    parse_terminate_output,
+    render_read_log_script,
+    render_terminate_script,
+)
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script, planned_log_sources
 from nemo_gym.orchestration.executors.slurm_status import (
     parse_read_files_output,
@@ -186,7 +193,7 @@ def _submission_exports(config: SubmitConfig) -> list[str]:
     return exports
 
 
-class SlurmExecutor(BaseExecutor, Resubmittable, Inspectable):
+class SlurmExecutor(BaseExecutor, Resubmittable, Terminable, LogReadable):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
     Every service and the driver are launched via `srun --container-image` so they
@@ -330,6 +337,27 @@ class SlurmExecutor(BaseExecutor, Resubmittable, Inspectable):
         with get_connection(record.hostname) as conn:
             output = conn.run(render_read_files_script(paths))
         return parse_read_files_output(output, paths)
+
+    def terminate(self, record: SubmissionRecord, job: BenchmarkJob) -> None:
+        """Cancel everything of `job` that is queued or running, the pending jobs first, in one script."""
+        with get_connection(record.hostname) as conn:
+            output = conn.run(render_terminate_script(job))
+        _, errors = parse_terminate_output(output)
+        if errors:
+            raise RuntimeError(f"Could not stop {job.benchmark}: {'; '.join(errors)}")
+
+    def stream_logs(
+        self, record: SubmissionRecord, job: BenchmarkJob, *, source: LogSource, tail: int | None, follow: bool
+    ) -> Iterator[str]:
+        """The lines of `source`, read in one call; the location is relative to the job directory."""
+        if follow:
+            raise UnsupportedOperationError("slurm executor cannot follow a log yet; use --tail N")
+        if tail is not None and tail < 0:
+            raise ValueError(f"--tail must be 0 or more, got {tail}.")
+        path = Path(job.job_dir) / source.location
+        with get_connection(record.hostname) as conn:
+            output = conn.run(render_read_log_script(path, tail))
+        return iter(parse_log_output(output, path))
 
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
