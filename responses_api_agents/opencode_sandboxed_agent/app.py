@@ -484,6 +484,13 @@ class OpenCodeSandboxedAgentRunRequest(BaseRunRequest):
     # Allow for benchmark params to propagate properly
     model_config = ConfigDict(extra="allow")
 
+    followup_user_messages: List[str] = Field(default_factory=list)
+
+
+def _opencode_run_finished(stdout: str) -> bool:
+    std_out_split = stdout.rsplit("Shell: ", maxsplit=1)
+    return len(std_out_split) > 1 and "OpenCode run finished" in std_out_split[1]
+
 
 def _build_remote_opencode_install_command(
     install_script_path: str,
@@ -808,6 +815,49 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         return messages
 
+    async def _run_followup_turns(
+        self,
+        *,
+        sandbox: AsyncSandbox,
+        messages: List[str],
+        opencode_run_env_str: str,
+        opencode_run_flags_str: str,
+        session_env: Optional[Dict[str, str]],
+        deadline: float,
+    ) -> tuple[List[Any], Optional[str]]:
+        results: List[Any] = []
+        try:
+            session_list_result = await sandbox.exec(
+                command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
+                env=session_env,
+                timeout_s=self.config.sandbox_timeout,
+            )
+            session_id = _extract_opencode_session_id(session_list_result.stdout or "")
+            for index, message in enumerate(messages, 2):
+                remaining = deadline - time()
+                if remaining <= 0:
+                    break
+                command = f"""
+                echo "Shell: $SHELL" \
+                && export PATH="$HOME/.opencode/bin:$PATH" \
+                && {opencode_run_env_str} \
+                    opencode run --session {quote(session_id)} {opencode_run_flags_str} -- {quote(message)} \
+                && echo "OpenCode run finished"
+                """
+                if self.config.debug:
+                    print(f"Sending OpenCode user turn {index}", file=sys.stderr)
+                result = await sandbox.exec(command=command, timeout_s=remaining)
+                results.append(result)
+                if self.config.debug:
+                    print("OpenCode follow-up stdout:\n", result.stdout, file=sys.stderr)
+                    print("OpenCode follow-up stderr:\n", result.stderr, file=sys.stderr)
+                if not _opencode_run_finished(result.stdout or ""):
+                    break
+        except Exception as exc:
+            print("OpenCode follow-up turn hit error.", format_exc(), file=sys.stderr)
+            return results, type(exc).__name__
+        return results, None
+
     async def responses(
         self,
         request: Request,
@@ -899,6 +949,12 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # and there is no way to set it to null.
         # Here, we set an exorbitantly high number that cannot ever be reached.
         # In future versions of OpenCode, this can be directly passed via maxOutputTokens in the limit config above https://github.com/anomalyco/opencode/blob/1b18a50418f730aca32630ccfcde850f2b5fc360/packages/opencode/src/provider/transform.ts#L1418
+        opencode_run_env_str = (
+            f"NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} "
+            f"OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} "
+            f"OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str}"
+        )
+        opencode_run_flags_str = f"{opencode_debug_str} {opencode_thinking_str}"
         command = f"""
         echo "Shell: $SHELL" \
         && {install_str} \
@@ -907,8 +963,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
         && rm -f /tmp/nemo-gym-mcp-setup-error \
-        && NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} \
-            opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str} -- {quote(query)} \
+        && {opencode_run_env_str} \
+            opencode run --title "NG dummy title" {opencode_run_flags_str} -- {quote(query)} \
         && echo "OpenCode run finished"
         """
 
@@ -918,6 +974,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if ripgrep_remote_path is not None:
             await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
+        followup_user_messages = getattr(request.state, "_ng_followup_user_messages", None)
+        followup_user_messages = followup_user_messages if isinstance(followup_user_messages, list) else []
+        session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
+        run_deadline = time() + self.config.sandbox_timeout
         run_error_type = None
         try:
             result = await sandbox.exec(
@@ -933,6 +993,21 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("OpenCode install and run stdout:\n", result.stdout, file=sys.stderr)
             print("OpenCode install and run stderr:\n", result.stderr, file=sys.stderr)
 
+        turn_results = [result] if result is not None else []
+        followup_results: List[Any] = []
+        if followup_user_messages and result is not None and _opencode_run_finished(result.stdout or ""):
+            followup_results, followup_error_type = await self._run_followup_turns(
+                sandbox=sandbox,
+                messages=followup_user_messages,
+                opencode_run_env_str=opencode_run_env_str,
+                opencode_run_flags_str=opencode_run_flags_str,
+                session_env=session_env,
+                deadline=run_deadline,
+            )
+            run_error_type = run_error_type or followup_error_type
+            turn_results.extend(followup_results)
+            result = turn_results[-1]
+
         if self.config.tool_servers:
             mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
             if mcp_check.return_code != 0 or mcp_check.error_type:
@@ -944,7 +1019,6 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         # diff`, which would sweep this transcript into the patch.
         export_remote_fpath = f"/tmp/opencode_{export_fname}"
         session_id = None
-        session_env = {"XDG_DATA_HOME": remote_data_home} if remote_data_home is not None else None
         try:
             session_list_result = await sandbox.exec(
                 command='export PATH="$HOME/.opencode/bin:$PATH" && opencode session list --format json',
@@ -1072,12 +1146,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     else "OpenCodeError"
                 )
 
-        result_stdout = (result.stdout if result else "") or ""
-        result_stderr = (result.stderr if result else "") or ""
-        opencode_finished = False
-        std_out_split = result_stdout.rsplit("Shell: ", maxsplit=1)
-        if len(std_out_split) > 1:
-            opencode_finished = "OpenCode run finished" in std_out_split[1]
+        result_stdout = "".join(turn_result.stdout or "" for turn_result in turn_results)
+        result_stderr = "".join(turn_result.stderr or "" for turn_result in turn_results)
+        opencode_finished = len(followup_results) == len(followup_user_messages) and _opencode_run_finished(
+            result_stdout
+        )
 
         if collect_observations and observations is not None:
             agent_sandbox_observation = self._agent_sandbox_observation(
@@ -1174,6 +1247,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         request._cookies = cookies
         request.state._ng_observation_invocation_id = rollout_id
+        request.state._ng_followup_user_messages = body.followup_user_messages
         observations = None
         try:
             response = await self.responses(request, body.responses_create_params)
@@ -1191,6 +1265,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
         finally:
             del request.state._ng_observation_invocation_id
+            del request.state._ng_followup_user_messages
             del request.state._ng_opencode_mcp
             # A server cancels its handler when the caller disconnects, and OpenCode keeps running
             # in its pod regardless: only stopping the sandbox ends it. Shielded because the

@@ -61,6 +61,14 @@ checksum before use. Gym uploads it through the sandbox file API and installs it
 alongside OpenCode before execution; no sandbox internet access or root package
 installation is needed. The default is `null`, preserving existing behavior.
 
+## Multi-turn requests
+
+A row may set `followup_user_messages` to a list of strings. After the first `opencode run` finishes, each message is
+sent in order to the same OpenCode session (`opencode run --session <id>`), and the next message waits for the
+previous turn to finish. All turns share the `sandbox_timeout` budget; when a turn does not finish or the budget runs
+out, the remaining messages are not sent and `opencode_finished` is `false`. The injected user messages appear in the
+response output between the assistant turns. See `benchmarks/swebench/pro_multiturn` for an example benchmark.
+
 ## Offline scientific evaluation with OpenCode or Pi
 
 The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
