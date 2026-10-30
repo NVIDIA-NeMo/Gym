@@ -17,12 +17,12 @@
 A failed judge call is a distinct outcome, not a wrong answer. Resources servers
 issue judge calls through ``call_judge``, or wrap a bespoke call in
 ``reraise_judge_errors``; ``judge_failsafe`` wraps every verify endpoint so a
-JudgeError becomes a row tagged ``_ng_failure_class="judge_failed"``, which
+judge failure becomes a row tagged ``_ng_failure_class="judge_failed"``, which
 rollout_collection routes to ``<output>_failures.jsonl`` — excluded from the
 aggregate metrics and from the file-based re-aggregation (``gym eval
 aggregate``), and retryable on resume.
 
-Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
+Boundary: a failed *call* (transport/timeout/auth/HTTP) → ``judge_failed`` event → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser
 score it, don't raise), unless the benchmark explicitly treats an invalid judge
 verdict as an unusable grade. FrontierScience Research uses that exception for
