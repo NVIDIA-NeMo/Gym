@@ -1167,3 +1167,54 @@ def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
     assert d.action == RecoveryAction.RESUBMIT and not d.complete
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert "trial: not evaluated, the run is not complete" in health
+
+
+def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_question(tmp_path) -> None:
+    job = gate_job(tmp_path, expected=100, final_zeros=1)
+    path = job / "artifacts" / "quality_summary.json"
+    summary = json.loads(path.read_text())
+    summary["run"]["provenance"] = {
+        "resolved_config": "read",
+        "route_failures_to_sidecar": None,
+        "servers": {
+            "a": {
+                "kind": "responses_api_agents",
+                "implementation": "scicode_agent",
+                "resources_server": "r",
+                "skip_verification": None,
+            }
+        },
+    }
+    summary["run"]["stats"] = {
+        "model_call_errors": {"ended_on_error": 0, "verification_skipped": {"true": 0, "false": 0, "absent": 100}}
+    }
+    path.write_text(json.dumps(summary))
+    write_postrun_receipt(job)
+    d, task = gate_of(job)
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
+    assert "known failures are a lower bound" in health and "route_failures_to_sidecar None" in health
+    assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
+    assert "open for the benchmark PIC" in health
+    assert "verification_skipped {'true': 0, 'false': 0, 'absent': 100}" in health
+    assert "in_session) is runtime state that no report records, so it is unknown" in health
+
+
+@pytest.mark.parametrize(
+    "quality",
+    [
+        {"provenance": {"resolved_config": "read", "servers": [{"bad": True}]}},
+        {"provenance": {"resolved_config": "read", "servers": "bad"}},
+        {"provenance": {"resolved_config": "read", "servers": {"a": "bad"}}},
+        {"provenance": {"resolved_config": True}},
+        {"provenance": "bad", "ended_on_failed_model_call": True, "verification_skipped": {"true": -1}},
+        {"ended_on_failed_model_call": -1, "verification_skipped": "bad"},
+        "bad",
+    ],
+)
+def test_a_malformed_persisted_trial_fact_is_named_never_read_or_raised(quality) -> None:
+    from nemo_gym.orchestration.recovery import trial_boundary
+
+    text = trial_boundary(quality)
+    assert "malformed" in text or "not reported" in text
+    assert "failed model call unknown" in text or "at least" not in text

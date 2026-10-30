@@ -72,7 +72,12 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.path_utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resolved_config_path_for,
+)
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -274,6 +279,9 @@ def evaluate_record(
         ),
         errors_by_status=dict(errors_by_status),
         ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
+        verification_skipped=(
+            record.get("verification_skipped") if isinstance(record.get("verification_skipped"), bool) else None
+        ),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
@@ -489,6 +497,12 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    # Rows by their own verification_skipped: written True, written False, or not written.
+                    "verification_skipped": {
+                        "true": sum(digest.verification_skipped is True for digest in digests),
+                        "false": sum(digest.verification_skipped is False for digest in digests),
+                        "absent": sum(digest.verification_skipped is None for digest in digests),
+                    },
                     # Failed calls with no finished response and no usage: the token checks skip them,
                     # and any tokens the server spent on them are counted nowhere else.
                     "usage_unknown": sum(digest.model_call_errors_usage_unknown for digest in digests),
@@ -889,6 +903,7 @@ def run_health_checks(
     _judge_run(artifacts, run_findings, run_coverage)
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
     summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
+    summary["run"]["provenance"] = run_provenance(paths[0])
     report_dir = output_dir or paths[0].parent
     summary["run"][QUALITY_SUMMARY_SOURCES_KEY] = _report_sources(paths, report_dir)
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
@@ -941,6 +956,53 @@ def write_provisional_summary(
     summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     return summary_path
+
+
+def _flag(value: Any) -> bool | None:
+    """A config flag as written: a bool is known, anything else (absent, interpolated, malformed) is unknown."""
+    return value if isinstance(value, bool) else None
+
+
+def run_provenance(rollout_path: Path) -> dict[str, Any]:
+    """Facts about how the run was configured, read from the resolved config saved beside the rollouts.
+
+    Only values the config states are reported: ``route_failures_to_sidecar`` and each agent's ``skip_verification``
+    are booleans when written as booleans and ``None`` otherwise, never a default. Each top-level server entry
+    reports its kind (``responses_api_agents``, ``resources_servers`` or ``environment_servers``), its implementation
+    key and, for an agent, the resources server it names. No values beyond these names and flags are copied.
+    """
+    import yaml
+
+    config_path = resolved_config_path_for(rollout_path)
+    try:
+        config = yaml.safe_load(config_path.read_text())
+    except FileNotFoundError:
+        return {"resolved_config": "absent"}
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return {"resolved_config": "unreadable"}
+    if not isinstance(config, dict):
+        return {"resolved_config": "unreadable"}
+    servers: dict[str, Any] = {}
+    for name, entry in config.items():
+        if not isinstance(entry, dict):
+            continue
+        for kind in ("responses_api_agents", "resources_servers", "environment_servers"):
+            block = entry.get(kind)
+            if not isinstance(block, dict) or len(block) != 1:
+                continue
+            [(implementation, settings)] = block.items()
+            settings = settings if isinstance(settings, dict) else {}
+            fact: dict[str, Any] = {"kind": kind, "implementation": str(implementation)}
+            if kind == "responses_api_agents":
+                resources = settings.get("resources_server")
+                fact["resources_server"] = resources.get("name") if isinstance(resources, dict) else None
+                fact["skip_verification"] = _flag(settings.get("skip_verification"))
+            servers[str(name)] = fact
+    return {
+        "resolved_config": "read",
+        "route_failures_to_sidecar": _flag(config.get("route_failures_to_sidecar")),
+        "servers": servers,
+    }
 
 
 def _persisted_limits(run_dir: Path) -> RunHealthLimits:

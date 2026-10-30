@@ -446,7 +446,10 @@ try:
     acc = run.get("artifacts") or {}
     quality = {"artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
                "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
-               "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses")}
+               "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses"),
+               "provenance": run.get("provenance"),
+               "ended_on_failed_model_call": ((run.get("stats") or {}).get("model_call_errors") or {}).get("ended_on_error"),
+               "verification_skipped": ((run.get("stats") or {}).get("model_call_errors") or {}).get("verification_skipped")}
 except (OSError, ValueError, KeyError, TypeError):
     pass
 score = None
@@ -736,6 +739,52 @@ def response_health(decision: RecoveryDecision, quality: Mapping[str, Any] | Non
     return True, f"response: {counts} is below {GATE_FAILURE_LIMIT:.0%}"
 
 
+def _count(value: Any) -> int | None:
+    return value if type(value) is int and value >= 0 else None
+
+
+def trial_boundary(quality: Mapping[str, Any] | None) -> str:
+    """Why trial failures outside the sidecar cannot be ruled out, from the run's own persisted facts.
+
+    Every persisted value is type-checked: a malformed report is named as malformed, never read as a fact.
+    """
+    quality = quality if isinstance(quality, Mapping) else {}
+    provenance = quality.get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
+    if not isinstance(provenance, dict) or provenance.get("resolved_config") != "read":
+        state = provenance.get("resolved_config") if isinstance(provenance, dict) else "not reported"
+        facts = f"run provenance {state if state in ('absent', 'unreadable', 'not reported') else 'malformed'}"
+    elif not isinstance(servers, dict) or not all(isinstance(f, dict) for f in servers.values()):
+        facts = "run provenance malformed"
+    else:
+        agents = {
+            str(name): (fact.get("implementation"), fact.get("resources_server"), fact.get("skip_verification"))
+            for name, fact in servers.items()
+            if fact.get("kind") == "responses_api_agents"
+        }
+        environments = sorted(str(n) for n, f in servers.items() if f.get("kind") == "environment_servers")
+        route = provenance.get("route_failures_to_sidecar")
+        facts = (
+            f"agents (implementation, resources server, skip_verification) {agents}, environment servers "
+            f"{environments}, route_failures_to_sidecar {route if isinstance(route, bool) else None}"
+        )
+    ended = _count(quality.get("ended_on_failed_model_call"))
+    skipped = quality.get("verification_skipped")
+    fields = ("true", "false", "absent")
+    if isinstance(skipped, dict) and all(_count(skipped.get(k)) is not None for k in fields):
+        skipped_text = str({k: skipped[k] for k in fields})
+    else:
+        skipped_text = "not reported or malformed"
+    # The producer sets ended_on_error only where the rollout's model calls were captured, so the count is a floor.
+    ended_text = f"at least {ended} (counted where calls were captured)" if ended is not None else "unknown"
+    return (
+        f"{facts}, rollouts ended on a failed model call {ended_text}, rows by verification_skipped {skipped_text}; "
+        "an agent session (in_session) is runtime state that no report records, so it is unknown; model-generated "
+        "code that fails, raises or times out is scored by the benchmark protocol, and whether it counts as a trial "
+        "failure is open for the benchmark PIC"
+    )
+
+
 def trial_health(decision: RecoveryDecision) -> tuple[bool | None, str]:
     """The trial gate's known failures: settled zero-scored failures over the expected trials, including repeats.
 
@@ -821,6 +870,8 @@ def gate_summary_from_collected(
     # verdicts are per rollout, so they are reported in warnings, never used as either. The trial gate is measured;
     # the trial gate is a lower bound below the limit, so health passes never: it is unknown, or failed when a gate fails.
     trial_passed, trial_reason = trial_health(decision)
+    if trial_passed is None and decision.complete:
+        trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
     response_passed, response_reason = response_health(decision, collected.quality)
     gates = [(response_passed, response_reason), (trial_passed, trial_reason)]
     if any(passed is False for passed, _ in gates):

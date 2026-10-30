@@ -3241,3 +3241,65 @@ def test_an_unverified_selected_call_leaves_the_response_population_unknown(tmp_
     result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
     assert [d.responses for d in result.rollouts] == [None]
     assert json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]["unknown"] == 1
+
+
+def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(
+        "bench_agent:\n"
+        "  responses_api_agents:\n"
+        "    simple_agent:\n"
+        "      resources_server: {type: resources_servers, name: bench_resources}\n"
+        "      skip_verification: true\n"
+        "other_agent:\n"
+        "  responses_api_agents:\n"
+        "    simple_agent:\n"
+        "      skip_verification: ${oc.env:SKIP}\n"
+        "bench_resources:\n"
+        "  resources_servers:\n"
+        "    scicode: {timeout_secs: 30}\n"
+        "bench_environment:\n"
+        "  environment_servers:\n"
+        "    bench_env: {}\n"
+        "output_jsonl_fpath: rollouts.jsonl\n"
+    )
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    assert summary["run"]["provenance"] == {
+        "resolved_config": "read",
+        # Not written, so unknown: never defaulted to the collector's False.
+        "route_failures_to_sidecar": None,
+        "servers": {
+            "bench_agent": {
+                "kind": "responses_api_agents",
+                "implementation": "simple_agent",
+                "resources_server": "bench_resources",
+                "skip_verification": True,
+            },
+            "other_agent": {
+                "kind": "responses_api_agents",
+                "implementation": "simple_agent",
+                "resources_server": None,
+                "skip_verification": None,
+            },
+            "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
+            "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
+        },
+    }
+
+
+@pytest.mark.parametrize(("content", "state"), [(None, "absent"), ("- a list", "unreadable"), ("a: [", "unreadable")])
+def test_run_provenance_without_a_readable_resolved_config_is_not_guessed(tmp_path: Path, content, state) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    if content is not None:
+        (tmp_path / "rollouts_resolved_config.yaml").write_text(content)
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    assert summary["run"]["provenance"] == {"resolved_config": state}
+
+
+def test_rows_are_counted_by_their_own_verification_skipped_value(tmp_path: Path) -> None:
+    rows = [(_record(t, 0, refs=[{"model_call_id": f"c{t}"}]), [_call(model_call_id=f"c{t}")]) for t in range(3)]
+    rows[0][0]["verification_skipped"] = True
+    rows[1][0]["verification_skipped"] = False
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["model_call_errors"]
+    assert stats["verification_skipped"] == {"true": 1, "false": 1, "absent": 1}

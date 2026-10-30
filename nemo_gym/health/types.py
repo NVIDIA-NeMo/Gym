@@ -175,6 +175,8 @@ class RolloutDigest(BaseModel):
     model_call_errors_usage_unknown: int = 0
     errors_by_status: dict[str, int] = Field(default_factory=dict)
     ended_on_error: bool = False
+    # The row's own `verification_skipped` when written as a boolean, else None (absent is not False).
+    verification_skipped: bool | None = None
     duplicated_calls: int = 0
     transcript_prompt_tokens: int = 0
     transcript_completion_tokens: int = 0
