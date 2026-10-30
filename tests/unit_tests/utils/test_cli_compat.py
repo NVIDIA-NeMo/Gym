@@ -73,8 +73,6 @@ MOVED_SYMBOLS = [
     ("nemo_gym.cli", "VersionConfig", "nemo_gym.cli.general", "VersionConfig"),
     ("nemo_gym.cli", "version", "nemo_gym.cli.general", "version"),
     ("nemo_gym.cli", "GlobalConfigDictParserConfig", "nemo_gym.config.global_config", "GlobalConfigDictParserConfig"),
-    ("nemo_gym.cli_setup_command", "run_command", "nemo_gym.orchestration.server_venv", "run_command"),
-    ("nemo_gym.cli_setup_command", "setup_env_command", "nemo_gym.orchestration.server_venv", "setup_env_command"),
 ]
 
 
