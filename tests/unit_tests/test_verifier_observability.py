@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import BaseModel
 
@@ -19,6 +20,8 @@ from nemo_gym.base_resources_server import (
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id, rollout_context
 from nemo_gym.core.failure_kinds import JUDGE_FAILED, SESSION_LOST, TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.episode_types import FailureBoundary
+from nemo_gym.failure_transport import RequestFailureLog
 from nemo_gym.judge import JudgeError, call_judge, judge_failsafe
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.observability.verifiers import observe_verifier
@@ -136,6 +139,42 @@ async def test_verify_errors_return_evidence_in_http_failure(tmp_path, error, st
     assert invocation["status"] == status
     assert invocation["failure_kind"] == kind
     assert current_verifier_invocation_id() is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "error,kind,http_status",
+    [
+        (RuntimeError("scoring broke"), VERIFIER_ERROR, 500),
+        (TimeoutError("grading deadline"), TRANSPORT_TIMEOUT, 500),
+        (HTTPException(503, detail="verifier unavailable"), VERIFIER_ERROR, 503),
+    ],
+)
+async def test_verify_error_is_recorded_in_the_request_failure_report(error, kind, http_status):
+    async def verify():
+        raise error
+
+    with RequestFailureLog.capture() as log, rollout_context("error"):
+        response = await observe_verifier(verify, enabled=True)()
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    (event,) = log.report.events.values()
+    assert event.boundary == FailureBoundary.RESOURCES_SERVER
+    assert event.failure_kind == kind
+    assert event.operation == "verify"
+    assert event.operation_id == invocation["invocation_id"]
+    assert event.http_status == http_status == response.status_code
+    assert "scoring broke" not in event.failure_reason
+    assert log.report.failure_id is None
+
+
+@pytest.mark.asyncio
+async def test_successful_verify_records_no_failure():
+    async def verify():
+        return {"reward": 0.0}
+
+    with RequestFailureLog.capture() as log, rollout_context("ok"):
+        await observe_verifier(verify, enabled=True)()
+    assert log.report.events == {}
 
 
 @pytest.mark.asyncio

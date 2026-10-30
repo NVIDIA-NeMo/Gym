@@ -31,11 +31,14 @@ from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
+    GateCriteria,
     RecoveryAction,
     RecoveryOutcome,
+    RecoveryOutcomePolicyConfig,
     decide_from_collected,
     gate_task_summary,
 )
+from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 
 
 class _StartsWith:
@@ -51,6 +54,10 @@ class _StartsWith:
 
 # A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
 HEALTH_UNKNOWN = _StartsWith("response/trial health unknown: ['response: the health report has no verified response")
+
+
+# The saved answer a judge failure keeps beside its row; re-verification re-judges it.
+SAVED_ANSWER = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "B"}]}]}
 
 
 def ident(task: int, **extra) -> dict:
@@ -167,7 +174,9 @@ class FakeExecutor:
     live = False
     supports_reverify = True
 
-    def recovery_evidence(self, record, benchmark, *, score_key=None, score_agent=None, score_environment=None):
+    def recovery_evidence(
+        self, record, benchmark, *, score_key=None, score_agent=None, score_environment=None, outcome_policy=None
+    ):
         FakeExecutor.calls.append("decide")
         out = subprocess.run(
             [
@@ -196,7 +205,11 @@ class FakeExecutor:
         )
         collected = CollectedEvidence.model_validate_json(out.stdout)
         decision = decide_from_collected(
-            collected, max_infra_retries=3, max_walltime_s=None, live_job=FakeExecutor.live
+            collected,
+            max_infra_retries=3,
+            max_walltime_s=None,
+            live_job=FakeExecutor.live,
+            outcome_policy=outcome_policy,
         )
         return decision, collected
 
@@ -234,7 +247,7 @@ def test_recover_judge_only_rejudges_saved_answers_and_never_queues_the_policy(t
     fake_executor.job_dir = write_job_dir(
         tmp_path / "job",
         n=2,
-        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed", reward=0.0)],
+        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed", response=SAVED_ANSWER, reward=0.0)],
         failures=[],
     )
     out = submit.recover("gym-job-b", "bench")
@@ -245,7 +258,10 @@ def test_recover_judge_only_rejudges_saved_answers_and_never_queues_the_policy(t
 def test_recover_reports_an_executor_without_saved_answer_rejudgment_as_unsupported(tmp_path, fake_executor) -> None:
     fake_executor.supports_reverify = False
     fake_executor.job_dir = write_job_dir(
-        tmp_path / "job", n=1, results=[ident(0, _ng_failure_class="judge_failed", reward=0.0)], failures=[]
+        tmp_path / "job",
+        n=1,
+        results=[ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER, reward=0.0)],
+        failures=[],
     )
     out = submit.recover("gym-job-b2", "bench")
     assert not out.ok and out.dispatched is None and "gym eval reverify --judge-failed-only" in out.unsupported
@@ -314,7 +330,7 @@ def test_recover_with_judge_failures_and_missing_work_stops_until_saved_answer_r
     fake_executor.job_dir = write_job_dir(
         tmp_path / "job",
         n=3,
-        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed")],
+        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed", response=SAVED_ANSWER)],
         failures=[],
         retries=0,
     )
@@ -351,7 +367,7 @@ def test_gate_summary_never_equates_scored_with_expected_by_dropping_failures(tm
     job = write_job_dir(
         tmp_path / "job",
         n=4,
-        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed")],
+        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed", response=SAVED_ANSWER)],
         failures=[ident(2, **INFRA)],
         retries=0,
     )
@@ -526,7 +542,7 @@ def test_final_model_zeros_stay_done_and_are_not_dispatched_again(tmp_path, fake
 @pytest.mark.parametrize(
     "row",
     [
-        dict(_ng_failure_class="judge_failed"),
+        dict(_ng_failure_class="judge_failed", response=SAVED_ANSWER),
         dict(failure_kind="model_transport_error", _ng_failure_terminal=False, _ng_failure_counts_as_zero=False),
     ],
 )
@@ -890,6 +906,7 @@ def judge_failed_sidecar(task: int) -> dict:
         "_ng_rollout_index": 0,
         "_ng_failure_class": "judge_failed",
         "failure_kind": "judge_failed",
+        "response": SAVED_ANSWER,
         "_ng_failure_terminal": False,
         "_ng_failure_max_attempts": 3,
     }
@@ -1232,7 +1249,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
     assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
     assert "open for the benchmark PIC" in health
     assert "verification_skipped {'true': 0, 'false': 0, 'absent': 100}" in health
-    assert "in_session) is runtime state that no report records, so it is unknown" in health
+    assert "in_session) runtime observations are absent or malformed, so it is unknown" in health
 
 
 @pytest.mark.parametrize(
@@ -1438,7 +1455,7 @@ def test_review_mixed_judge_sidecar_never_replays_the_answer(tmp_path, fake_exec
         tmp_path / "job",
         n=2,
         results=[],
-        failures=[ident(0, _ng_failure_class="judge_failed", failure_kind="judge_failed")],
+        failures=[ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER, failure_kind="judge_failed")],
     )
     out = submit.recover("review", "bench")
     assert out.decision.action == RecoveryAction.STOP
@@ -1532,7 +1549,7 @@ def test_review_boolean_expected_count_is_not_one(tmp_path):
 
 def test_review_unsupported_reverify_reports_failed_not_resuming(tmp_path, fake_executor):
     fake_executor.job_dir = write_job_dir(
-        tmp_path / "job", n=1, results=[ident(0, _ng_failure_class="judge_failed")], failures=[]
+        tmp_path / "job", n=1, results=[ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER)], failures=[]
     )
     fake_executor.supports_reverify = False
     out = submit.recover("review", "bench")
@@ -1692,3 +1709,299 @@ def test_review_an_ambiguous_manual_reset_epoch_stays_unknown():
     accounting = "101|COMPLETED|10\n102|FAILED|20\n"
     assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=0) is None
     assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=30) == 30
+
+
+KILLED = dict(_ng_omitted_rollout=True, _ng_failure_class="kill_shaped")
+
+
+def test_review_interrupted_observations_do_not_consume_retry_allowance(tmp_path):
+    job = write_job_dir(
+        tmp_path / "job", n=1, results=[], failures=[ident(0, **KILLED), ident(0, **KILLED), ident(0, **INFRA)]
+    )
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    art = job / "artifacts"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(art / "rollouts_materialized_inputs.jsonl"),
+        output_jsonl_fpath=str(art / "rollouts.jsonl"),
+    )
+    (retried,), *_ = RolloutCollectionHelper()._load_from_cache(config)
+    # Collection retries the task as its second attempt; recovery agrees that one attempt of three is spent.
+    assert retried["_ng_attempt_index"] == 1
+    assert out.identities.get("exhausted") is None
+    assert out.identities["retryable"] == [(0, 0)]
+
+
+FINAL_TIMEOUT_ZERO = dict(
+    failure_kind="model_policy_response_timeout",
+    _ng_failure_terminal=True,
+    _ng_failure_counts_as_zero=True,
+    _ng_failure_id="final",
+)
+POLICY_REQUEST = {"boundary": "agent", "operation": "agent.policy_request", "operation_id": None, "attempt_id": None}
+RECOVERED_VERIFY = {"boundary": "resources_server", "operation": "verify", "operation_id": "v", "attempt_id": None}
+
+
+def _final_zero(events: dict) -> dict:
+    return ident(0, **FINAL_TIMEOUT_ZERO, _ng_failure_events=events)
+
+
+@pytest.mark.parametrize(
+    "events",
+    [
+        {"final": {**POLICY_REQUEST, "cause_id": None}},
+        {"final": {**POLICY_REQUEST, "cause_id": None}, "other": {**RECOVERED_VERIFY, "cause_id": None}},
+    ],
+    ids=["final-only", "with-unrelated-recovered-event"],
+)
+def test_review_unrelated_recovered_event_keeps_a_settled_final_zero(tmp_path, events):
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[_final_zero(events)])
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert out.action == RecoveryAction.NOOP
+    assert out.identities["model_final"] == [(0, 0)]
+
+
+@pytest.mark.parametrize(
+    "events,failure_id",
+    [
+        # The final failure's own cause chain reaches a resources server event.
+        ({"final": {**POLICY_REQUEST, "cause_id": "other"}, "other": {**RECOVERED_VERIFY, "cause_id": None}}, "final"),
+        # The failure_id names no saved event, so every saved event is checked, as before.
+        ({"x": {**POLICY_REQUEST, "cause_id": None}, "other": {**RECOVERED_VERIFY, "cause_id": None}}, "final"),
+        # A cause_id names no saved event: the chain cannot be checked.
+        ({"final": {**POLICY_REQUEST, "cause_id": "gone"}}, "final"),
+    ],
+    ids=["cause-chain-contradicts", "unresolved-failure-id", "broken-cause-chain"],
+)
+def test_review_final_zero_whose_cause_chain_contradicts_or_is_unresolved_stops(tmp_path, events, failure_id):
+    row = {**_final_zero(events), "_ng_failure_id": failure_id}
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
+    out = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert out.action == RecoveryAction.STOP
+    assert out.identities.get("model_final") is None
+
+
+STRICT_DEFAULT = {
+    "response": {"max_failure_fraction": 0.02, "passes": "strictly below, before rounding"},
+    "trial": {"max_failure_fraction": 0.02, "passes": "strictly below, before rounding"},
+}
+
+
+def test_review_gate_reports_its_effective_named_criteria(tmp_path):
+    _, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0))
+    assert task["criteria"] == STRICT_DEFAULT
+
+
+def test_review_trial_criterion_is_configurable_without_changing_decision_or_rows(tmp_path):
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    job = gate_job(tmp_path, expected=100, final_zeros=1)
+    rollouts = (job / "artifacts" / "rollouts.jsonl").read_bytes()
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    tasks = {
+        limit: gate_summary_from_collected(
+            d,
+            collected,
+            max_unhealthy_fraction=0.02,
+            mlflow_status="FINISHED",
+            mlflow_run_id="postrun-run",
+            criteria=GateCriteria(max_trial_failure_fraction=limit),
+        )
+        for limit in (0.02, 0.01)
+    }
+    health = {
+        limit: [e for e in t["errors"] if e.startswith("response/trial health")][0] for limit, t in tasks.items()
+    }
+    # 1 of 100 is a lower bound under the strict default, and fails a stricter configured limit.
+    assert health[0.02].startswith("response/trial health unknown")
+    assert health[0.01].startswith("response/trial health failed") and "is not below 1%" in health[0.01]
+    assert tasks[0.01]["criteria"]["trial"]["max_failure_fraction"] == 0.01
+    assert d.action == RecoveryAction.NOOP and (job / "artifacts" / "rollouts.jsonl").read_bytes() == rollouts
+    assert tasks[0.02]["score"] == tasks[0.01]["score"] == 0.5
+
+
+@pytest.mark.parametrize("value", [True, 0, -0.01, 1.5, float("nan"), float("inf"), "0.02"])
+@pytest.mark.parametrize("name", ["max_response_failure_fraction", "max_trial_failure_fraction"])
+def test_review_invalid_gate_criteria_fail_closed(tmp_path, fake_executor, name, value):
+    with pytest.raises(ValueError):
+        GateCriteria(**{name: value})
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
+    with pytest.raises(ValueError, match="invalid gate criteria"):
+        submit.recover("gym-job-criteria", "bench", **{name: value})
+    assert fake_executor.calls == []
+
+
+def test_review_retryable_failures_are_not_labelled_infrastructure(tmp_path):
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[ident(1, **INFRA)])
+    d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    task = gate_task_summary(d, score=None, fe_valid=None, fe_reasons=[], health_passed=None, health_reasons=[])
+    assert any("retryable failures awaiting another attempt" in e for e in task["errors"])
+    assert not any("infra" in e for e in task["errors"])
+
+
+STOP_PROVIDER = RecoveryOutcomePolicyConfig(by_failure_kind={"provider_unavailable": "fail"})
+
+
+def _decide(job, policy=None):
+    return decide_from_collected(
+        collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False, outcome_policy=policy
+    )
+
+
+def test_review_same_eligible_failure_retries_or_stops_ungraded_by_configuration(tmp_path):
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[ident(1, **INFRA)])
+    before = {p.name: p.read_bytes() for p in (job / "artifacts").iterdir()}
+    default, configured = _decide(job), _decide(job, STOP_PROVIDER)
+    assert default.identities["retryable"] == [(1, 0)] and default.action == RecoveryAction.RESUBMIT
+    assert configured.identities["terminal"] == [(1, 0)] and configured.action == RecoveryAction.STOP
+    assert configured.identities["scored"] == default.identities["scored"] == [(0, 0)]
+    assert {p.name: p.read_bytes() for p in (job / "artifacts").iterdir()} == before
+
+
+def test_review_status_code_rule_precedes_the_kind_rule(tmp_path):
+    row = ident(0, **INFRA, _ng_failure_http_status=503)
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
+    policy = RecoveryOutcomePolicyConfig(
+        by_failure_kind={"provider_unavailable": "retry"}, by_status_code={503: "fail"}
+    )
+    assert _decide(job, policy).identities["terminal"] == [(0, 0)]
+
+
+@pytest.mark.parametrize(
+    "fields",
+    [
+        {"default_action": "count_as_zero"},
+        {"by_failure_kind": {"judge_failed": "count_as_zero"}},
+        {"by_status_code": {503: "count_as_zero"}},
+        {"by_failure_kind": {"not_a_registered_kind": "fail"}},
+        {"by_status_code": {200: "fail"}},
+    ],
+)
+def test_review_unsupported_recovery_policy_is_refused(fields):
+    with pytest.raises(ValueError):
+        RecoveryOutcomePolicyConfig(**fields)
+
+
+def test_review_policy_never_reopens_settled_or_missing_outcomes(tmp_path):
+    job = write_job_dir(tmp_path / "job", n=3, results=[ident(0, reward=0.0)], failures=[final_model_zero(1, 0)])
+    fail_everything = RecoveryOutcomePolicyConfig(
+        by_failure_kind={"model_transport_error": "fail"}, default_action="fail"
+    )
+    for policy in (None, fail_everything, RecoveryOutcomePolicyConfig(default_action="verify")):
+        d = _decide(job, policy)
+        assert d.identities["scored"] == [(0, 0)] and d.identities["model_final"] == [(1, 0)]
+        assert d.identities["missing"] == [(2, 0)]
+        [missing] = [e for e in d.evidence if e.identity == (2, 0)]
+        assert missing.events == [] and missing.failure_kind is None and missing.failure_id is None
+
+
+def _judge_failure(task: int, **extra) -> dict:
+    return ident(task, _ng_failure_class="judge_failed", failure_kind="judge_failed", **extra)
+
+
+@pytest.mark.parametrize("where", ["results", "failures"])
+def test_review_same_saved_answer_judge_failure_verifies_or_fails_by_configuration(tmp_path, where):
+    row = _judge_failure(1, response=SAVED_ANSWER, **({"reward": 0.0} if where == "results" else {}))
+    results = [ident(0, reward=1.0)] + ([row] if where == "results" else [])
+    job = write_job_dir(tmp_path / "job", n=2, results=results, failures=[row] if where == "failures" else [])
+    before = {p.name: p.read_bytes() for p in (job / "artifacts").iterdir()}
+    verify = _decide(job)
+    fail = _decide(job, RecoveryOutcomePolicyConfig(by_failure_kind={"judge_failed": "fail"}))
+    assert verify.identities["judge_recoverable"] == [(1, 0)] and verify.action == RecoveryAction.REVERIFY
+    assert fail.identities["terminal"] == [(1, 0)] and fail.action == RecoveryAction.STOP
+    assert fail.identities.get("judge_recoverable") is None
+    assert {p.name: p.read_bytes() for p in (job / "artifacts").iterdir()} == before
+
+
+def test_review_verify_without_a_saved_answer_stops(tmp_path):
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[_judge_failure(0)])
+    d = _decide(job)
+    assert d.action == RecoveryAction.STOP and d.identities["unknown"] == [(0, 0)]
+    # A failure with no re-verification path cannot be verified either.
+    job = write_job_dir(tmp_path / "job2", n=1, results=[], failures=[ident(0, **INFRA)])
+    d = _decide(job, RecoveryOutcomePolicyConfig(by_failure_kind={"provider_unavailable": "verify"}))
+    assert d.action == RecoveryAction.STOP and d.identities["unknown"] == [(0, 0)]
+
+
+def test_review_policy_selects_on_the_failure_id_event_then_the_row_fields(tmp_path):
+    selected = {
+        "boundary": "model",
+        "operation": "model_request",
+        "failure_kind": "model_request_error",
+        "http_status": 429,
+        "operation_id": "op",
+        "attempt_id": "op-1",
+        "cause_id": None,
+    }
+    other = {**selected, "failure_kind": "provider_unavailable", "http_status": 503}
+    row = ident(
+        0,
+        **{
+            **INFRA,
+            "_ng_failure_id": "sel",
+            "_ng_failure_events": {"sel": selected, "x": other},
+            "_ng_failure_http_status": 500,
+        },
+    )
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
+    # The selected event's 429 wins over the row's 500; the unrelated event's 503 is never searched.
+    assert _decide(job, RecoveryOutcomePolicyConfig(by_status_code={429: "fail"})).identities["terminal"] == [(0, 0)]
+    assert _decide(job, RecoveryOutcomePolicyConfig(by_status_code={503: "fail"})).identities["retryable"] == [(0, 0)]
+    assert _decide(job, RecoveryOutcomePolicyConfig(by_status_code={500: "fail"})).identities["retryable"] == [(0, 0)]
+    # Without a selected event, the producer's own row status applies.
+    plain = write_job_dir(
+        tmp_path / "plain", n=1, results=[], failures=[ident(0, **INFRA, _ng_failure_http_status=500)]
+    )
+    assert _decide(plain, RecoveryOutcomePolicyConfig(by_status_code={500: "fail"})).identities["terminal"] == [(0, 0)]
+
+
+def test_review_collector_keeps_saved_answer_presence_not_bytes(tmp_path):
+    job = write_job_dir(
+        tmp_path / "job", n=2, results=[], failures=[_judge_failure(0, response=SAVED_ANSWER), _judge_failure(1)]
+    )
+    got = collect(job)
+    assert [r["_ng_collected_saved_answer"] for r in got.failures] == [True, False]
+    assert all("response" not in r for r in got.failures)
+
+
+def test_review_retry_policy_cannot_exceed_spent_attempts(tmp_path):
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[ident(0, **INFRA)] * 3)
+    d = _decide(job, RecoveryOutcomePolicyConfig(default_action="retry"))
+    assert d.identities["exhausted"] == [(0, 0)] and d.identities.get("retryable") is None
+
+
+def test_review_recover_passes_the_outcome_policy_to_the_decision(tmp_path, fake_executor):
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[ident(1, **INFRA)]
+    )
+    out = submit.recover("gym-job-policy", "bench", outcome_policy=STOP_PROVIDER)
+    assert out.decision.identities["terminal"] == [(1, 0)] and out.decision.action == RecoveryAction.STOP
+    assert out.dispatched is None
+
+
+@pytest.mark.parametrize("other", ["missing", "retryable", "judge"])
+def test_policy_fail_is_not_replayed_by_mixed_dispatch(tmp_path, other):
+    rows = [ident(0, **INFRA)]
+    if other == "retryable":
+        rows.append(ident(1, **INFRA, _ng_failure_http_status=429))
+    elif other == "judge":
+        rows.append(_judge_failure(1, response=SAVED_ANSWER))
+    job = write_job_dir(tmp_path / "job", n=2, results=[], failures=rows)
+    policy = RecoveryOutcomePolicyConfig(
+        by_failure_kind={"provider_unavailable": "fail"}, by_status_code={429: "retry"}
+    )
+    d = _decide(job, policy)
+    assert d.action == RecoveryAction.STOP
+
+
+@pytest.mark.parametrize("where", ["results", "failures"])
+def test_terminal_judge_failure_never_reopens_by_policy(tmp_path, where):
+    row = _judge_failure(0, response=SAVED_ANSWER, _ng_failure_terminal=True)
+    job = write_job_dir(
+        tmp_path / "job",
+        n=1,
+        results=[row] if where == "results" else [],
+        failures=[row] if where == "failures" else [],
+    )
+    d = _decide(job)
+    assert d.action == RecoveryAction.STOP and d.identities["terminal"] == [(0, 0)]

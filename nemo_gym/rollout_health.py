@@ -11,6 +11,7 @@ and writes reports.
 from __future__ import annotations
 
 import hashlib
+import math
 import os
 import warnings
 from collections import Counter, defaultdict
@@ -273,6 +274,7 @@ def evaluate_record(
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
         responses=_response_population(turn_call_scope_complete, turn_bindings),
         model_call_errors=len(failed),
+        upstream_recovery_observations=_observed_upstream_recovery(calls),
         model_call_errors_usage_unknown=sum(
             _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
             for call in failed
@@ -290,6 +292,50 @@ def evaluate_record(
         capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
         timing=read_rollout_timing(record),
     )
+
+
+def _observed_upstream_recovery(calls: list[dict[str, Any]]) -> dict[str, int] | None:
+    """Count only observed failed attempts and explicitly completed operations; never certify completeness."""
+    attempts = {}
+    outcomes = {}
+    for call in calls:
+        report = call.get("failure_report")
+        operations = call.get("model_operations")
+        if isinstance(report, dict):
+            for event_id, event in (report.get("events") or {}).items():
+                if (
+                    isinstance(event, dict)
+                    and event.get("boundary") == "model"
+                    and event.get("operation") == "model_request"
+                    and event.get("operation_id")
+                    and event.get("attempt_id")
+                ):
+                    attempts[event_id] = event["operation_id"]
+        for observation in operations if isinstance(operations, list) else []:
+            if not isinstance(observation, dict) or not observation.get("operation_id"):
+                continue
+            if observation.get("outcome") in {"completed", "failed"}:
+                outcome = observation["outcome"]
+                # A 2xx header alone cannot recover a call whose body subsequently failed.
+                if outcome == "completed" and (
+                    type(call.get("status_code")) is not int
+                    or not 200 <= call["status_code"] < 400
+                    or _is_failed(call)
+                ):
+                    continue
+                outcomes.setdefault(observation["operation_id"], set()).add(outcome)
+    if not attempts:
+        return None  # No failed-attempt observation is not proof that no earlier failure occurred.
+    failed_operations = set(attempts.values())
+    completed = {operation for operation, values in outcomes.items() if values == {"completed"}}
+    ended = {operation for operation, values in outcomes.items() if len(values) == 1}
+    return {
+        "observed_attempt_errors": len(attempts),
+        "observed_failed_operations": len(failed_operations),
+        "recovered_attempt_errors": sum(operation in completed for operation in attempts.values()),
+        "recovered_operations": len(failed_operations & completed),
+        "operations_without_terminal_observation": len(failed_operations - ended),
+    }
 
 
 def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
@@ -493,6 +539,20 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
             },
             "issues": {spec.id: issues[spec.id] for spec in CHECK_REGISTRY},
             "stats": {
+                "observed_upstream_recovery": (
+                    {
+                        key: sum((d.upstream_recovery_observations or {}).get(key, 0) for d in digests)
+                        for key in (
+                            "observed_attempt_errors",
+                            "observed_failed_operations",
+                            "recovered_attempt_errors",
+                            "recovered_operations",
+                            "operations_without_terminal_observation",
+                        )
+                    }
+                    if any(d.upstream_recovery_observations is not None for d in digests)
+                    else None
+                ),
                 "model_call_errors": {
                     "total": sum(digest.model_call_errors for digest in digests),
                     "by_status": dict(sorted(error_statuses.items())),
@@ -906,6 +966,73 @@ def run_health_checks(
         for row in _jsonl_rows(failures_path_for(path))
     )
     summary["run"]["stats"]["timeouts"] = summarize_timeouts(timings, attempts).model_dump(mode="json")
+    # Preserve observations from unsuccessful writer rows as well as scored rows.
+    # These are known attempt/runtime facts; they do not establish a complete trial population.
+    observed_records = (
+        row
+        for path in paths
+        for source in (path, failures_path_for(path))
+        if source.is_file()
+        for row in _jsonl_rows(source)
+    )
+    observed_calls = []
+    runtime = {
+        "invocation_observations": 0,
+        "in_session": {"true": 0, "false": 0, "absent": 0},
+        "verification_skipped": {"true": 0, "false": 0, "absent": 0},
+        "row_elapsed_s": {"sum_observed": 0.0, "absent": 0},
+    }
+    for record in observed_records:
+        trajectory, _ = _canonical_trajectory(record)
+        if trajectory is not None:
+            # Keep only the bounded metadata needed below, rather than retaining all request/response payloads.
+            observed_calls.extend(
+                {
+                    key: call.get(key)
+                    for key in (
+                        "status_code",
+                        "response_status",
+                        "error_category",
+                        "failure_report",
+                        "model_operations",
+                    )
+                }
+                for call in _normalized_trajectory_calls(trajectory)
+            )
+            for invocation in trajectory.get("invocations") or []:
+                runtime["invocation_observations"] += 1
+                for key in ("in_session", "verification_skipped"):
+                    value = invocation.get(key)
+                    runtime[key][str(value).lower() if isinstance(value, bool) else "absent"] += 1
+        elapsed = record.get("_ng_elapsed_s")
+        if type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0:
+            runtime["row_elapsed_s"]["sum_observed"] += elapsed
+        else:
+            runtime["row_elapsed_s"]["absent"] += 1
+    summary["run"]["stats"]["observed_upstream_recovery"] = _observed_upstream_recovery(observed_calls)
+    summary["run"]["stats"]["observed_runtime"] = runtime
+    operations = {}
+    for call in observed_calls:
+        for operation in call.get("model_operations") or []:
+            # The producer's opaque ID is the join key, not capture position or retry-label parsing.
+            operations.setdefault(operation["operation_id"], []).append(operation)
+    effort = {}
+    for key in ("http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms"):
+        values = []
+        for observations in operations.values():
+            known = {
+                o[key]
+                for o in observations
+                if type(o.get(key)) in (int, float) and math.isfinite(o[key]) and o[key] >= 0
+            }
+            if len(known) == 1:
+                values.append(known.pop())
+        effort[key] = {
+            "sum_observed": sum(values) if values else None,
+            "operations_observed": len(values),
+            "operations_unknown": len(operations) - len(values),
+        }
+    summary["run"]["stats"]["observed_request_effort"] = effort
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
     _judge_run(artifacts, run_findings, run_coverage)
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)

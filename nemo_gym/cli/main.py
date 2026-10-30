@@ -716,6 +716,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             or getattr(args, "score_agent", None) is not None
             or getattr(args, "score_environment", None) is not None
             or getattr(args, "max_unhealthy_fraction", None) is not None
+            or getattr(args, "max_response_failure_fraction", None) is not None
+            or getattr(args, "max_trial_failure_fraction", None) is not None
             or getattr(args, "mlflow_status", None) is not None
             or getattr(args, "mlflow_run_id", None) is not None
         ) and not getattr(args, "recover", False):
@@ -728,6 +730,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 score_agent=getattr(args, "score_agent", None),
                 score_environment=getattr(args, "score_environment", None),
                 max_unhealthy_fraction=getattr(args, "max_unhealthy_fraction", None),
+                max_response_failure_fraction=getattr(args, "max_response_failure_fraction", None),
+                max_trial_failure_fraction=getattr(args, "max_trial_failure_fraction", None),
                 mlflow_status=getattr(args, "mlflow_status", None),
                 mlflow_run_id=getattr(args, "mlflow_run_id", None),
             )
@@ -1718,6 +1722,22 @@ COMMANDS = {
                     type=float,
                     metavar="FRACTION",
                     help="With --recover: the per-rollout health criterion; independent response/trial gates still apply.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-response-failure-fraction",
+                    type=float,
+                    metavar="FRACTION",
+                    help="With --recover: the response gate passes only strictly below this fraction (default 0.02).",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-trial-failure-fraction",
+                    type=float,
+                    metavar="FRACTION",
+                    help="With --recover: the trial gate fails at or above this fraction (default 0.02).",
                 ),
             ),
             Flag(

@@ -102,3 +102,18 @@ Without `--recover`, ordinary `gym eval resubmit` keeps its existing explicit-re
 - A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue --me --all` and cancel any job still pending, using `.gym_job_chain` for the IDs of the jobs that have run.
 - `resumable` does not work with a benchmark `command`, because resuming relies on `gym eval run`'s cache.
 - The `gym-job.json` record contains the first job's ID only.
+
+
+Recovery uses the shared outcome policy for eligible failures. The Python `recover(...,
+outcome_policy=RecoveryOutcomePolicyConfig(...))` API accepts partial failure-kind and HTTP-status overrides.
+`retry` permits another episode only within the saved attempt and chain budgets; `verify` re-verifies a saved
+judge answer, and `fail` leaves it ungraded. Settled results and terminal failures are never reopened.
+Mixed decisions stop when the executor cannot honor them separately. Saved-answer re-verification still
+requires an executor that supports it.
+
+The independent response and trial criteria are configurable with `--max-response-failure-fraction` and
+`--max-trial-failure-fraction`. Both default to a strict fraction below `0.02`, before rounding; reports include
+the effective values under `criteria`. These criteria do not change rewards or retry policy. A positive trial
+result requires observed coverage of every expected identity. The supported one-turn SimpleAgent/MCQA path
+joins invocation, selected response, model operation and verifier observations; unsupported paths and recovered
+failures remain unknown. Recovery NOOP is separate from acceptance and tracking delivery.

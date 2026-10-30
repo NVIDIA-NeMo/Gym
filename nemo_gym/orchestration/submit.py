@@ -15,13 +15,17 @@
 
 import math
 
+from pydantic import ValidationError
+
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.orchestration.recovery import (
+    GateCriteria,
     RecoveryAction,
     RecoveryOutcome,
+    RecoveryOutcomePolicyConfig,
     gate_summary_from_collected,
     gate_task_summary,
 )
@@ -71,6 +75,9 @@ def recover(
     score_agent: str | None = None,
     score_environment: str | None = None,
     max_unhealthy_fraction: float | None = None,
+    max_response_failure_fraction: float | None = None,
+    max_trial_failure_fraction: float | None = None,
+    outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
 ) -> RecoveryOutcome:
@@ -91,6 +98,12 @@ def recover(
         or not 0 < max_unhealthy_fraction <= 1
     ):
         raise ValueError("invalid response-health criterion: expected a finite number in (0, 1]")
+    limits = {"max_response_failure_fraction": max_response_failure_fraction}
+    limits["max_trial_failure_fraction"] = max_trial_failure_fraction
+    try:
+        criteria = GateCriteria(**{name: value for name, value in limits.items() if value is not None})
+    except ValidationError as error:
+        raise ValueError(f"invalid gate criteria: {error.errors()[0]['loc'][0]} expected a finite number in (0, 1]")
     for selector in (score_agent, score_environment):
         if selector is not None and (not isinstance(selector, str) or not selector):
             raise ValueError("score identity selectors must be nonempty strings")
@@ -107,6 +120,7 @@ def recover(
         score_key=score_key,
         score_agent=score_agent,
         score_environment=score_environment,
+        outcome_policy=outcome_policy,
     )
     gate_task = (
         gate_summary_from_collected(
@@ -115,6 +129,7 @@ def recover(
             max_unhealthy_fraction=max_unhealthy_fraction,
             mlflow_status=mlflow_status,
             mlflow_run_id=mlflow_run_id,
+            criteria=criteria,
         )
         if collected is not None
         else gate_task_summary(

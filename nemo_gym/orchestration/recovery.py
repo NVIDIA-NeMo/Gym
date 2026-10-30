@@ -38,8 +38,9 @@ from collections.abc import Iterable, Mapping
 from enum import StrEnum
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
+from nemo_gym.agent_outcome import OutcomeAction, OutcomePolicyConfig, choose_action
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     MODEL_CONTEXT_LIMIT,
@@ -163,6 +164,90 @@ def _events(row: Mapping[str, Any]) -> list[tuple[str | None, str | None, str | 
     ]
 
 
+class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
+    """Shared policy for eligible recovery failures. Retry permits another episode within the existing guards;
+    verify re-judges a saved judge answer; fail leaves the failure ungraded. Settled outcomes are immutable.
+    Unsupported context/action combinations stop, and explicit-zero scoring is not supported here.
+    """
+
+    by_failure_kind: dict[str, OutcomeAction] = Field(default_factory=lambda: {JUDGE_FAILED: OutcomeAction.VERIFY})
+    default_action: OutcomeAction = OutcomeAction.RETRY
+
+    @model_validator(mode="after")
+    def require_recovery_actions(self) -> "RecoveryOutcomePolicyConfig":
+        """Recovery cannot score an explicit zero, so ``count_as_zero`` is refused at configuration load."""
+        if OutcomeAction.COUNT_AS_ZERO in {
+            self.default_action,
+            *self.by_failure_kind.values(),
+            *self.by_status_code.values(),
+        }:
+            raise ValueError("recovery outcome policy does not support count_as_zero")
+        return self
+
+
+def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
+    """The failure kind and HTTP status the policy selects on: the event ``failure_id`` selects first, then the
+    row's own producer fields ``failure_kind`` and ``_ng_failure_http_status``. No other saved event is searched."""
+    events = row.get(FAILURE_EVENTS)
+    selected = events.get(row.get(FAILURE_ID)) if isinstance(events, Mapping) else None
+    selected = selected if isinstance(selected, Mapping) else {}
+    kind = selected.get("failure_kind") if isinstance(selected.get("failure_kind"), str) else row.get("failure_kind")
+    status = next(
+        (v for v in (selected.get("http_status"), row.get("_ng_failure_http_status")) if type(v) is int), None
+    )
+    return (kind if isinstance(kind, str) else None), status
+
+
+def _sidecar_action(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> OutcomeAction:
+    kind, status = _policy_evidence(row)
+    return choose_action(failure_kind=kind or "unknown", http_status=status, config=policy)
+
+
+# COLLECT_SCRIPT's presence flag for a judge failure's saved answer (the same name as its SAVED).
+SAVED_ANSWER_KEY = "_ng_collected_saved_answer"
+
+
+def _saved_answer(row: Mapping[str, Any]) -> bool:
+    if SAVED_ANSWER_KEY in row:
+        return row[SAVED_ANSWER_KEY] is True
+    return isinstance(row.get("response"), dict) and bool(row["response"])
+
+
+def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
+    """A judge failure's treatment: verify re-judges the saved answer only (none saved: stop), fail leaves it
+    ungraded; any other action would run the policy again, so it stops."""
+    if row.get(TERMINAL) is True:
+        return IdentityState.TERMINAL
+    kind, status = _policy_evidence(row)
+    action = choose_action(failure_kind=kind or JUDGE_FAILED, http_status=status, config=policy)
+    if action == OutcomeAction.VERIFY:
+        return IdentityState.JUDGE_RECOVERABLE if _saved_answer(row) else IdentityState.UNKNOWN
+    return IdentityState.TERMINAL if action == OutcomeAction.FAIL else IdentityState.UNKNOWN
+
+
+def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
+    """The event ``failure_id`` selects and its explicit ``cause_id`` chain; other saved events are observations only.
+
+    A row whose ``failure_id`` names no saved event selects no final event, so every saved event is checked, as
+    before. ``None`` when a ``cause_id`` in the chain names no saved event or the chain loops: the final failure's
+    causes cannot be checked.
+    """
+    events = row.get(FAILURE_EVENTS)
+    if not isinstance(events, Mapping) or not isinstance(events.get(row.get(FAILURE_ID)), Mapping):
+        return _events(row)
+    chain: list[tuple[str | None, ...]] = []
+    seen: set[str] = set()
+    event_id = row.get(FAILURE_ID)
+    while event_id is not None:
+        event = events.get(event_id) if isinstance(event_id, str) else None
+        if not isinstance(event, Mapping) or event_id in seen:
+            return None
+        seen.add(event_id)
+        chain.append(tuple(event.get(k) for k in ("boundary", "operation", "operation_id", "attempt_id", "cause_id")))
+        event_id = event.get("cause_id")
+    return chain or None
+
+
 def decide_recovery(
     *,
     materialized: Iterable[Mapping[str, Any]],
@@ -171,6 +256,7 @@ def decide_recovery(
     budget: RecoveryBudget,
     default_max_attempts: int = 3,
     resubmit_offset: int = 0,
+    outcome_policy: RecoveryOutcomePolicyConfig | None = None,
 ) -> RecoveryDecision:
     """Classify every materialized identity and choose the run-level action.
 
@@ -180,6 +266,8 @@ def decide_recovery(
     Only rows at or after ``resubmit_offset`` count towards the attempt cap. The rows are only read.
     """
     from nemo_gym.rollout_collection import is_non_superseding_rollout_row, is_omitted_rollout_row, is_terminal_failure
+
+    policy = outcome_policy or RecoveryOutcomePolicyConfig()
 
     expected: list[Identity] = []
     invalid_inventory = 0
@@ -210,6 +298,7 @@ def decide_recovery(
         sidecar.setdefault(identity, []).append(row)
 
     evidence: list[IdentityEvidence] = []
+    policy_stopped = False
     for identity in sorted(expected_set):
         if identity in result_rows:
             row = result_rows[identity]
@@ -236,7 +325,8 @@ def decide_recovery(
                     )
                 )
                 continue
-            state = IdentityState.JUDGE_RECOVERABLE if judge else IdentityState.SCORED
+            state = _judge_state(row, policy) if judge else IdentityState.SCORED
+            policy_stopped |= judge and state == IdentityState.TERMINAL
             evidence.append(
                 IdentityEvidence(
                     identity=identity,
@@ -253,10 +343,12 @@ def decide_recovery(
             evidence.append(IdentityEvidence(identity=identity, state=IdentityState.MISSING))
             continue
         last = standing[-1]
+        # Spent attempts are counted as Collection counts them: an interrupted or omitted row ran no attempt.
         rows = [
             row
             for index, row in enumerate(standing)
             if (row.get("_line") if isinstance(row.get("_line"), int) else index) >= resubmit_offset
+            and not is_omitted_rollout_row(row)
         ]
         kind = last.get("failure_kind")
         if is_omitted_rollout_row(last):
@@ -276,7 +368,8 @@ def decide_recovery(
         cap = last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
-            state = IdentityState.JUDGE_RECOVERABLE
+            state = _judge_state(last, policy)
+            policy_stopped |= state == IdentityState.TERMINAL
         elif last.get(COUNTS_AS_ZERO) is True:
             # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
             model_kind = kind in {
@@ -285,9 +378,10 @@ def decide_recovery(
                 MODEL_TRANSPORT_ERROR,
                 MODEL_POLICY_RESPONSE_TIMEOUT,
             }
-            contradictory = any(
+            chain = _cause_chain(last)
+            contradictory = chain is None or any(
                 boundary not in (None, "model", "agent") or boundary == "agent" and operation != "agent.policy_request"
-                for boundary, operation, *_ in _events(last)
+                for boundary, operation, *_ in chain
             )
             state = (
                 IdentityState.MODEL_FINAL
@@ -298,6 +392,13 @@ def decide_recovery(
             state = IdentityState.UNKNOWN
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
+        elif (action := _sidecar_action(last, policy)) == OutcomeAction.FAIL:
+            # Unrestricted resume would still retry this nonterminal saved row.
+            policy_stopped = True
+            state = IdentityState.TERMINAL
+        elif action == OutcomeAction.VERIFY:
+            # Only a judge failure has a re-verification path; this failure has none, so nobody can act on it.
+            state = IdentityState.UNKNOWN
         elif len(rows) < cap:
             state = IdentityState.RETRYABLE
         else:
@@ -344,12 +445,17 @@ def decide_recovery(
     if counts.get(IdentityState.UNKNOWN):
         return decision(
             RecoveryAction.STOP,
-            f"{counts[IdentityState.UNKNOWN]} failure(s) have no registered kind, so nobody owns them",
+            f"{counts[IdentityState.UNKNOWN]} failure(s) have no registered kind or no supported action, so nobody owns them",
         )
     # A live job is still writing the files read above, whatever they show now.
     if budget.live_job:
         live = decision(RecoveryAction.STOP, "a job of this run is still pending or running; it is not queued twice")
         return live.model_copy(update={"scheduler_live": True})
+    if policy_stopped:
+        return decision(
+            RecoveryAction.STOP,
+            "the policy stops an ungraded failure; mixed dispatch cannot enforce separate task decisions",
+        )
     # Only what rollout collection would run again: a resume keeps the per-rollout attempts, so it gates an
     # exhausted identity (`_load_from_cache` maxed_out) and queueing for it alone runs nothing.
     needs_policy = sum(counts.get(s, 0) for s in (IdentityState.MISSING, IdentityState.RETRYABLE))
@@ -409,8 +515,31 @@ d = sys.argv[1]
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
-        "_ng_failure_events", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
-        "mask_sample", "evaluation_completed")
+        "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
+        "mask_sample", "evaluation_completed", "_ng_failure_http_status")
+# Only saved-answer presence leaves the run host.
+SAVED = "_ng_collected_saved_answer"
+def trial_refs(items):
+    if not isinstance(items, list):
+        return None
+    return [{"model_call_id": item.get("model_call_id"), "response_id": item.get("response_id"),
+             "model_ref": {k: item["model_ref"].get(k) for k in ("type", "name")} if isinstance(item.get("model_ref"), dict) else None}
+            if isinstance(item, dict) else None for item in items]
+def trial_metadata(value):
+    if not isinstance(value, dict):
+        return None
+    result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category")}
+    result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
+    operations = value.get("model_operations")
+    result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures")}
+                                  if isinstance(operation, dict) else None for operation in operations] if isinstance(operations, list) else None
+    report = value.get("failure_report")
+    result["failure_report"] = None
+    if isinstance(report, dict) and isinstance(report.get("events"), dict):
+        result["failure_report"] = {"failure_id": report.get("failure_id"), "omitted": report.get("omitted"),
+            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id")}
+                       if isinstance(event, dict) else None for event_id, event in report["events"].items()}}
+    return result
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -429,7 +558,28 @@ def rows(name, skip=0):
                 raise
             if name == "rollouts_failures.jsonl":
                 r["_line"] = i
-            out.append({k: r[k] for k in KEEP if k in r})
+            selected = {k: r[k] for k in KEEP if k in r}
+            if r.get("_ng_failure_class") == "judge_failed":
+                selected[SAVED] = isinstance(r.get("response"), dict) and bool(r["response"])
+            # Operation evidence only: prompts, answers, conversations and model payloads stay on the run host.
+            trajectory = r.get("ng_trajectory")
+            if name == "rollouts.jsonl" and isinstance(trajectory, dict):
+                selected["ng_trial_observations"] = {
+                    "task_id": trajectory.get("task_id"), "rollout_id": trajectory.get("rollout_id"),
+                    "invocations": [({k: item.get(k) for k in ("invocation_id", "status", "in_session", "verification_skipped")} | {"model_calls": trial_refs(item.get("model_calls"))})
+                                    if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
+                    "verifier_invocations": [{k: item.get(k) for k in ("invocation_id", "status", "failure_kind")}
+                                            if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
+                    "model_calls": [{"model_call_id": item.get("model_call_id"), "response_metadata": trial_metadata(item.get("response_metadata"))}
+                                    if isinstance(item, dict) else None for item in trajectory.get("model_calls")] if isinstance(trajectory.get("model_calls"), list) else None,
+                    "turns": [({k: item.get(k) for k in ("invocation_id", "task_id", "rollout_id")} | {"model_calls": trial_refs(item.get("model_calls"))}) if isinstance(item, dict) else None for item in trajectory.get("turns")] if isinstance(trajectory.get("turns"), list) else None,
+                    "tool_call_count": len(trajectory["tool_calls"]) if isinstance(trajectory.get("tool_calls"), list) else None,
+                    "gaps": [{"code": gap.get("code")} if isinstance(gap, dict) else None for gap in trajectory.get("gaps")] if isinstance(trajectory.get("gaps"), list) else None,
+                }
+                for key in ("agent_ref", "_ng_environment_server", "_ng_result_type"):
+                    if key in r:
+                        selected[key] = r[key]
+            out.append(selected)
     return out
 def num(name):
     # (value, state): "absent" when the chain never wrote the file, "malformed" when it cannot be read as a number.
@@ -498,6 +648,9 @@ try:
                "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
                "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses"),
                "provenance": run.get("provenance"),
+               "observed_upstream_recovery": (run.get("stats") or {}).get("observed_upstream_recovery"),
+               "observed_runtime": (run.get("stats") or {}).get("observed_runtime"),
+               "observed_request_effort": (run.get("stats") or {}).get("observed_request_effort"),
                "ended_on_failed_model_call": ((run.get("stats") or {}).get("model_call_errors") or {}).get("ended_on_error"),
                "verification_skipped": ((run.get("stats") or {}).get("model_call_errors") or {}).get("verification_skipped"),
                "context_window_exceeded": ((run.get("stats") or {}).get("model_call_errors") or {}).get("context_window_exceeded")}
@@ -565,6 +718,7 @@ def decide_from_collected(
     max_infra_retries: int | None,
     max_walltime_s: float | None,
     live_job: bool | None,
+    outcome_policy: RecoveryOutcomePolicyConfig | None = None,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision."""
     # resume_script creates .gym_infra_retries on the first infra retry, so its absence means none ran; it adds every
@@ -612,6 +766,7 @@ def decide_from_collected(
         failures=collected.failures,
         budget=budget,
         resubmit_offset=collected.resubmit_offset,
+        outcome_policy=outcome_policy,
     )
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(
@@ -688,8 +843,8 @@ def gate_task_summary(
     states = decision.counts
     for state, label in (
         (IdentityState.JUDGE_RECOVERABLE, "judge failures awaiting re-judgment"),
-        (IdentityState.RETRYABLE, "infra failures awaiting retry"),
-        (IdentityState.EXHAUSTED, "infra failures with spent attempts"),
+        (IdentityState.RETRYABLE, "retryable failures awaiting another attempt"),
+        (IdentityState.EXHAUSTED, "failures with spent attempts"),
         (IdentityState.TERMINAL, "terminal unscored failures"),
         (IdentityState.MISSING, "identities with no row"),
         (IdentityState.UNKNOWN, "failures nobody owns"),
@@ -907,7 +1062,44 @@ def mlflow_errors(
 GATE_FAILURE_LIMIT = 0.02
 
 
-def response_health(decision: RecoveryDecision, quality: Mapping[str, Any] | None) -> tuple[bool | None, str]:
+class GateCriteria(BaseModel):
+    """The named response and trial acceptance criteria. Each gate passes only strictly below its limit, measured
+    before rounding. They are separate from retry policy, budgets and benchmark rewards, and default to the bounded
+    failure policy's limit; an invalid value is refused, never clamped."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    max_response_failure_fraction: float = GATE_FAILURE_LIMIT
+    max_trial_failure_fraction: float = GATE_FAILURE_LIMIT
+
+    @field_validator("max_response_failure_fraction", "max_trial_failure_fraction", mode="before")
+    @classmethod
+    def _fraction(cls, value: Any) -> float:
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(value)
+            or not 0 < value <= 1
+        ):
+            raise ValueError("expected a finite number in (0, 1]")
+        return float(value)
+
+    def report(self) -> dict[str, Any]:
+        """The effective criteria as reported beside the gate results."""
+        rule = "strictly below, before rounding"
+        return {
+            "response": {"max_failure_fraction": self.max_response_failure_fraction, "passes": rule},
+            "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "passes": rule},
+        }
+
+
+def _percent(limit: float) -> str:
+    return f"{limit * 100:g}%"
+
+
+def response_health(
+    decision: RecoveryDecision, quality: Mapping[str, Any] | None, *, limit: float = GATE_FAILURE_LIMIT
+) -> tuple[bool | None, str]:
     """The response gate from ``run.stats.responses`` of the health report: faulted over selected responses.
 
     Evaluated only when every scored rollout has a verified response population and every selected call id is
@@ -929,9 +1121,9 @@ def response_health(decision: RecoveryDecision, quality: Mapping[str, Any] | Non
         return None, f"response: {r['faulted']} faulted exceeds {r['selected']} selected responses"
     rate = r["faulted"] / r["selected"]
     counts = f"{r['faulted']} faulted of {r['selected']} selected raw responses ({rate:.2%})"
-    if rate >= GATE_FAILURE_LIMIT:
-        return False, f"response: {counts} is not below {GATE_FAILURE_LIMIT:.0%}"
-    return True, f"response: {counts} is below {GATE_FAILURE_LIMIT:.0%}"
+    if rate >= limit:
+        return False, f"response: {counts} is not below {_percent(limit)}"
+    return True, f"response: {counts} is below {_percent(limit)}"
 
 
 def _count(value: Any) -> int | None:
@@ -971,6 +1163,18 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
             f"agents (implementation, resources server, skip_verification) {agents}, environment servers "
             f"{environments}, route_failures_to_sidecar {route if isinstance(route, bool) else None}"
         )
+    runtime = quality.get("observed_runtime")
+    runtime_count = _count(runtime.get("invocation_observations")) if isinstance(runtime, dict) else None
+    runtime_valid = runtime_count is not None and all(
+        isinstance(runtime.get(key), dict)
+        and all(_count(runtime[key].get(k)) is not None for k in ("true", "false", "absent"))
+        and sum(runtime[key][k] for k in ("true", "false", "absent")) == runtime_count
+        for key in ("in_session", "verification_skipped")
+    )
+    if runtime_valid:
+        session_text = f"observed invocation in_session {runtime['in_session']}; runtime verification_skipped {runtime['verification_skipped']}; these observations do not certify the full trial population"
+    else:
+        session_text = "agent session (in_session) runtime observations are absent or malformed, so it is unknown"
     ended = _count(quality.get("ended_on_failed_model_call"))
     skipped = quality.get("verification_skipped")
     fields = ("true", "false", "absent")
@@ -984,21 +1188,186 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
         f"{facts}, rollouts ended on a failed model call {ended_text}, rows by verification_skipped {skipped_text}, "
         f"rows whose step_usage records context_window_exceeded {_clip_text(quality)} (a signal from a best-effort "
         "error-text match or model metadata, not proof that the input was clipped); "
-        "an agent session (in_session) is runtime state that no report records, so it is unknown; model-generated "
+        f"{session_text}; model-generated "
         "code that fails, raises or times out is scored by the benchmark protocol, and whether it counts as a trial "
         "failure is open for the benchmark PIC"
     )
 
 
-def trial_health(decision: RecoveryDecision) -> tuple[bool | None, str]:
+def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> bool:
+    """Derive coverage for the observed one-turn SimpleAgent/MCQA path; no producer completeness assertion.
+
+    Every expected trial must have the actual invocation, selected raw response and verifier outcome. Other
+    adapters, tool execution, session mode, omitted events and incomplete references remain unsupported/unknown.
+    """
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+
+    if (
+        collected is None
+        or not collected.quality
+        or collected.quality.get("source_matches") is not True
+        or decision.counts.get(IdentityState.SCORED, 0) != decision.expected
+    ):
+        return False
+    rows = collected.results
+    expected = set(decision.identities.get(IdentityState.SCORED.value, []))
+    if rows is None or len(rows) != decision.expected or {_identity(row) for row in rows} != expected:
+        return False
+    provenance = (collected.quality or {}).get("provenance") or {}
+    servers = provenance.get("servers") or {}
+    if provenance.get("resolved_config") != "read" or not isinstance(servers, dict):
+        return False
+    call_ids, response_ids, operation_ids, verifier_ids = set(), set(), set(), set()
+    for row in rows:
+        try:
+            agent = servers[row["agent_ref"]["name"]]
+            resource = servers[agent["resources_server"]]
+            environment = servers[row["_ng_environment_server"]]
+            if (
+                agent.get("kind") != "responses_api_agents"
+                or resource.get("kind") != "resources_servers"
+                or environment.get("kind") != "environment_servers"
+                or agent.get("implementation") != "simple_agent"
+                or resource.get("implementation") != "mcqa"
+                or environment.get("implementation") != "legacy_agent"
+                or row.get("_ng_result_type") != "legacy_agent"
+                or row.get(FAILURE_CLASS) is not None
+                or row.get("failure_kind") is not None
+                or row.get(FAILURE_ID) is not None
+                or row.get("_ng_failure_events_omitted", False) is not False
+            ):
+                return False
+            row_events = row.get(FAILURE_EVENTS, {})
+            if not isinstance(row_events, dict):
+                return False
+            t = row["ng_trial_observations"]
+            if (
+                t["task_id"] != str(row["_ng_task_index"])
+                or t["rollout_id"] != maybe_rollout_id_from_run_body(row)
+                or type(t["tool_call_count"]) is not int
+                or t["tool_call_count"] != 0
+                or not isinstance(t["gaps"], list)
+                or any(g.get("code") != "resolution_unavailable" for g in t["gaps"])
+                or len(t["invocations"]) != 1
+                or len(t["verifier_invocations"]) != 1
+                or len(t["model_calls"]) != 1
+                or len(t["turns"]) != 1
+            ):
+                return False
+            invocation, verifier, call = t["invocations"][0], t["verifier_invocations"][0], t["model_calls"][0]
+            if (
+                invocation["status"] != "completed"
+                or invocation["in_session"] is not False
+                or invocation["verification_skipped"] is not False
+                or verifier["status"] != "completed"
+                or verifier["failure_kind"] is not None
+            ):
+                return False
+            turn = t["turns"][0]
+            if (
+                not isinstance(invocation.get("invocation_id"), str)
+                or not invocation["invocation_id"].strip()
+                or turn.get("invocation_id") != invocation["invocation_id"]
+                or turn.get("task_id") != t["task_id"]
+                or turn.get("rollout_id") != t["rollout_id"]
+            ):
+                return False
+            meta = call["response_metadata"]
+            if (
+                type(meta["status_code"]) is not int
+                or not 200 <= meta["status_code"] < 300
+                or meta.get("error_category") is not None
+                or meta.get("response_status") != "completed"
+            ):
+                return False
+            for references in (invocation["model_calls"], t["turns"][0]["model_calls"]):
+                if not isinstance(references, list) or len(references) != 1:
+                    return False
+                ref = references[0]
+                if ref.get("model_call_id"):
+                    if (
+                        ref["model_call_id"] != call["model_call_id"]
+                        or (ref.get("model_ref") is not None and ref["model_ref"] != meta["model_ref"])
+                        or (ref.get("response_id") is not None and ref["response_id"] != meta["response_id"])
+                    ):
+                        return False
+                elif ref.get("model_ref") != meta["model_ref"] or ref.get("response_id") != meta["response_id"]:
+                    return False
+            operations = meta["model_operations"]
+            if len(operations) != 1:
+                return False
+            operation = operations[0]
+            report = meta["failure_report"]
+            events = report["events"]
+            if (
+                operation["outcome"] != "completed"
+                or operation["failure_id"] is not None
+                or not operation["final_attempt_id"]
+                or type(operation["http_attempts"]) is not int
+                or operation["http_attempts"] != len(events) + 1
+                or type(operation["transport_failures"]) is not int
+                or operation["transport_failures"] != 0
+                or report["omitted"] is not False
+                or report["failure_id"] is not None
+            ):
+                return False
+            attempt_ids = {e["attempt_id"] for e in events.values()}
+            if (
+                len(attempt_ids) != len(events)
+                or operation["final_attempt_id"] in attempt_ids
+                or any(
+                    not isinstance(event_id, str)
+                    or not event_id.strip()
+                    or not isinstance(e.get("attempt_id"), str)
+                    or not e["attempt_id"].strip()
+                    or e.get("boundary") != "model"
+                    or e.get("operation") != "model_request"
+                    or e.get("operation_id") != operation["operation_id"]
+                    or e.get("event_id") != event_id
+                    for event_id, e in events.items()
+                )
+            ):
+                return False
+            if not all(
+                isinstance(value, str) and value.strip()
+                for value in (
+                    call["model_call_id"],
+                    meta["model_ref"]["type"],
+                    meta["model_ref"]["name"],
+                    meta["response_id"],
+                    operation["operation_id"],
+                    operation["final_attempt_id"],
+                    verifier["invocation_id"],
+                )
+            ):
+                return False
+            # Observed recovered failures do not define an agreed trial-health denominator.
+            # Whole-row events also cover resources/agent/relay failures outside the raw model report.
+            if events or row_events:
+                return False
+            response_key = (meta["model_ref"]["type"], meta["model_ref"]["name"], meta["response_id"])
+            values = (call["model_call_id"], response_key, operation["operation_id"], verifier["invocation_id"])
+            populations = (call_ids, response_ids, operation_ids, verifier_ids)
+            if any(not value or value in seen for value, seen in zip(values, populations)):
+                return False
+            for value, seen in zip(values, populations):
+                seen.add(value)
+        except (KeyError, TypeError, ValueError, AttributeError):
+            return False
+    return True
+
+
+def trial_health(
+    decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
+) -> tuple[bool | None, str]:
     """The trial gate's known failures: settled zero-scored failures over the expected trials, including repeats.
 
     A failure counts when rollout collection settled it as a scored zero (MODEL_FINAL: marked counts-as-zero by its
     producer and terminal), so it is recorded as incorrect under the benchmark protocol. The denominator is the full
     materialized inventory. A run that is not complete has unaccounted trials, so the gate is not evaluated. Other
     terminal trial failures (a judge, verifier or harness error scored as a zero in the main output) carry no failure
-    record and cannot be ruled out, so the count is a lower bound: at or above the limit it fails, below it the gate
-    is unknown, never passed.
+    record and cannot be ruled out, so their count is a lower bound. At or above the limit it fails; below it the
+    gate remains unknown unless actual per-identity operation outcomes cover the supported one-turn MCQA path.
     """
     if not decision.complete or decision.expected <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})"
@@ -1007,8 +1376,21 @@ def trial_health(decision: RecoveryDecision) -> tuple[bool | None, str]:
     rate = failed / decision.expected
     counts = f"{failed} settled zero-scored failure(s) of {decision.expected} expected trials ({rate:.2%})"
     detail = f", kinds {dict(sorted(kinds.items(), key=lambda kv: str(kv[0])))}" if kinds else ""
-    if rate >= GATE_FAILURE_LIMIT:
-        return False, f"trial: {counts} is not below {GATE_FAILURE_LIMIT:.0%}{detail}"
+    if rate >= limit:
+        return False, f"trial: {counts} is not below {_percent(limit)}{detail}"
+    recovery = (collected.quality or {}).get("observed_upstream_recovery") if collected else None
+    if isinstance(recovery, dict) and any(
+        (_count(recovery.get(key)) or 0) > 0 for key in ("recovered_attempt_errors", "recovered_operations")
+    ):
+        return (
+            None,
+            "trial: recovered attempt/operation failures are observed; their trial-health treatment is not defined",
+        )
+    if _bounded_mcqa_trial_operations(decision, collected):
+        return (
+            True,
+            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); actual one-turn SimpleAgent/MCQA operation outcomes cover every identity and repeat",
+        )
     return None, (
         f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "
         "cannot be ruled out"
@@ -1067,24 +1449,30 @@ def gate_summary_from_collected(
     max_unhealthy_fraction: float | None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
+    criteria: GateCriteria | None = None,
 ) -> dict[str, Any]:
     """The Day-0 gate task entry from the collected run: decision counts, the named score and the quality summary.
 
     ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
+    ``criteria`` are the response and trial limits (default: the bounded failure policy's); the entry reports the
+    effective values under ``criteria``.
     """
+    criteria = criteria or GateCriteria()
     fe_valid, fe_reasons, rollout_health, rollout_reasons = quality_inputs(
         decision, collected, max_unhealthy_fraction=max_unhealthy_fraction
     )
     # The Day-0 gate's response and trial health need their own counters and denominators; quality_summary's
-    # verdicts are per rollout, so they are reported in warnings, never used as either. The trial gate is measured;
-    # the trial gate is a lower bound below the limit, so health passes never: it is unknown, or failed when a gate fails.
-    trial_passed, trial_reason = trial_health(decision)
+    # verdicts are per rollout, so they are reported in warnings, never used as either. A positive trial gate
+    # requires source-bound operation evidence for the supported path; recovered failures remain unknown.
+    trial_passed, trial_reason = trial_health(decision, collected, limit=criteria.max_trial_failure_fraction)
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
     bound_quality = (
         collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
     )
-    response_passed, response_reason = response_health(decision, bound_quality)
+    response_passed, response_reason = response_health(
+        decision, bound_quality, limit=criteria.max_response_failure_fraction
+    )
     gates = [(response_passed, response_reason), (trial_passed, trial_reason)]
     if any(passed is False for passed, _ in gates):
         health = False
@@ -1101,6 +1489,7 @@ def gate_summary_from_collected(
         health_passed=health,
         health_reasons=health_reasons,
     )
+    task["criteria"] = criteria.report()
     judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
     task["warnings"] = (
         task["warnings"]

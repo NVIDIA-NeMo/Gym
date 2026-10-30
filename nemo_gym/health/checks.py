@@ -290,6 +290,8 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "finish_reason": metadata.get("finish_reason"),
                 "error_category": metadata.get("error_category"),
                 "upstream_attempted": metadata.get("upstream_attempted"),
+                "failure_report": metadata.get("failure_report"),
+                "model_operations": metadata.get("model_operations"),
                 "upstream_status_code": metadata.get("upstream_status_code"),
                 "local_response_reason": metadata.get("local_response_reason"),
                 "tokens_in": tokens.get("prompt_tokens"),

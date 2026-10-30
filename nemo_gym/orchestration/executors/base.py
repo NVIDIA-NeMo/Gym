@@ -22,7 +22,13 @@ import yaml
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
 from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
-from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, RecoveryDecision, RecoveryOutcome
+from nemo_gym.orchestration.recovery import (
+    CollectedEvidence,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+    RecoveryOutcomePolicyConfig,
+)
 
 
 class UnsupportedOperationError(RuntimeError):
@@ -54,6 +60,7 @@ class BaseExecutor(ABC):
         score_key: list[str | int] | None = None,
         score_agent: str | None = None,
         score_environment: str | None = None,
+        outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
         return self.recovery_decision(record, benchmark), None

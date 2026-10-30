@@ -63,6 +63,7 @@ from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
     RecoveryAction,
     RecoveryDecision,
+    RecoveryOutcomePolicyConfig,
     accounted_chain_walltime,
     decide_from_collected,
 )
@@ -255,6 +256,7 @@ class SlurmExecutor(BaseExecutor):
         score_key: list[str | int] | None = None,
         score_agent: str | None = None,
         score_environment: str | None = None,
+        outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH."""
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
@@ -298,6 +300,7 @@ class SlurmExecutor(BaseExecutor):
             max_infra_retries=resume.max_retries,
             max_walltime_s=_walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None,
             live_job=str(job_dir) in workdirs,
+            outcome_policy=outcome_policy,
         )
         return decision, collected
 
