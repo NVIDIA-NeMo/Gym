@@ -13,9 +13,13 @@ It preserves the existing command restrictions; run configs can override individ
 permissions under `opencode_agent.responses_api_agents.opencode_agent.opencode_config.permission`.
 These command filters are not network or filesystem isolation.
 They are adapted from Gym's benchmark runner restrictions, not OpenCode defaults,
-and apply to local calls too. Subagents (`task`) are intentionally enabled for this
+and apply to local calls too. The profile also denies the `webfetch`, `websearch` and
+`skill` tools. Subagents (`task`) are intentionally enabled for this
 general-purpose integration; the separate `opencode_sandboxed_agent` benchmark
-profile still disables them. Use explicit tool overrides when comparing scores.
+profile still disables them. Use explicit `permission` overrides when comparing scores.
+Restrict tools with `permission` rules, not a `tools` map: OpenCode places a `tools`
+map's entries before the permission map's `"*"` rule and applies the last matching
+rule, so with a `tools` map none of these restrictions, the command filters included, apply.
 
 Existing flat-row benchmarks keep the `opencode_sandboxed_agent` entrypoint
 and configuration for their Resources-owned lifecycle.

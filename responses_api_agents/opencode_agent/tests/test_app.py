@@ -808,7 +808,10 @@ class TestConfigYaml:
         assert config.model_server.name == "policy_model"
         assert config.opencode_config["permission"]["bash"]["*"] == "allow"
         assert config.opencode_config["permission"]["bash"]["*git submodule update*"] == "deny"
-        assert config.opencode_config["tools"]["webfetch"] is False
+        permission = config.opencode_config["permission"]
+        assert [permission[tool] for tool in ("webfetch", "websearch", "skill")] == ["deny"] * 3
+        assert list(permission).index("*") < list(permission).index("webfetch")
+        assert "tools" not in config.opencode_config
 
         assert config.token_id_capture is (training_capture is True)
         client = MagicMock(spec=ServerClient)

@@ -4,13 +4,18 @@
 # Default command restrictions for both local calls and sandbox sessions; not isolation.
 # Adapted from NVIDIA's OpenCode benchmark runner: deny destructive shell commands,
 # Git network/history mining and online solution lookups. These are Gym policy,
-# not upstream OpenCode defaults. Tool availability (including subagents) is separate.
+# not upstream OpenCode defaults. The web and skill tools are denied here too; subagents (`task`) stay enabled.
 opencode_agent:
   responses_api_agents:
     opencode_agent:
       opencode_config:
         permission:
           "*": allow
+          # Tools this profile withholds. OpenCode applies the last matching rule, so these follow "*". A
+          # `tools` map would undo them: OpenCode places its keys before this map's "*".
+          webfetch: deny
+          websearch: deny
+          skill: deny
 
           edit:
             "**": allow
