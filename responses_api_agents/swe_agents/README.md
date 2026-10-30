@@ -414,6 +414,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |
 | `skip_eval`                        | `false`                                           | Run the agent normally but skip the eval container entirely; reward is forced to `0.0` since the patch is never graded. Useful for collecting agent trajectories without paying the eval cost. |
+| `unfinished_episodes`              | `mask`                                            | `mask`: turn-cap / context-window episodes are masked. `fail`: they and loop-detector exits stay in the loss with reward `0.0`. See [GRPO masking](#grpo-masking-and-failure-modes). |
 | `agent_prompt_overrides`           | `null`                                            | List of `AgentPromptOverride` entries. See above.                       |
 | `agent_prompt_override_random`     | `false`                                           | `false` = deterministic per `instance_id`; `true` = random per run.     |
 | `opencode_subagents_enabled`       | `false`                                           | (opencode only) Enable opencode's `task` tool so the main agent can spawn subagent sessions. See [Subagents](#opencode-integration). |
@@ -604,11 +605,12 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 {
   "responses_create_params": { /* full input incl. system+user prompts the agent saw */ },
   "response":               { /* output messages + tool calls */ },
-  "reward": 1.0,            // 1.0 iff resolved, else 0.0
+  "reward": 1.0,            // 1.0 iff resolved (and, with unfinished_episodes=fail, not unfinished), else 0.0
   "resolved": true,
   "patch_exists": true,
   "model_patch": "diff --git ...",
   "agent_error_kind": null, // "max_iteration" | "context_window" | "stuck_in_loop" | "oom" | "other" | null
+  "unfinished": false,      // agent_error_kind is max_iteration, context_window or stuck_in_loop
   "agent_timed_out": false,
   "eval_timed_out": false,
   "oom_killed": false,       // memory watchdog killed the agent container — see Memory watchdog
@@ -669,11 +671,20 @@ Each `responses` call returns a `NeMoGymResponse` whose `output` is a Responses-
 
 `SWEBenchWrapperInstanceConfig.mask_sample` is set to `True` (so downstream RL drops the gradient for this rollout) when:
 
-1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental.
+1. The patch resolved the tests **but** the agent terminated in a `max_iteration` or `context_window` error — the reward is accidental. Only with `unfinished_episodes: mask` (the default); see below.
 2. The eval container hit `swebench_tests_timeout` — reward is unreliable.
 3. The agent hit `swebench_agent_timeout` (wall-clock) regardless of `resolved`.
 4. The memory watchdog killed the **agent** container (OOM).
 5. The memory watchdog killed the **eval** container (OOM).
+
+`unfinished_episodes` decides what happens to episodes the agent did not end itself (`max_iteration`, `context_window`, `stuck_in_loop`; reported as `unfinished: true`):
+
+| `unfinished_episodes` | `max_iteration` / `context_window` | `stuck_in_loop`                   |
+|-----------------------|------------------------------------|-----------------------------------|
+| `mask` (default)      | masked                             | graded on the patch left on disk  |
+| `fail`                | kept in the loss, reward `0.0`     | kept in the loss, reward `0.0`    |
+
+With `fail`, a policy that runs out its turn or context budget gets a failure signal instead of disappearing from the batch. `resolved` still reports the measured test verdict, so you can see how many cut-off episodes had a working patch.
 
 Agent error strings are bucketed by `_classify_agent_error`:
 
