@@ -54,12 +54,12 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         return self._legacy_result(response)
 
     def _episode_request_from_row(self, row: dict[str, Any]) -> SingleAgentTurnRequest:
-        task_source = row.get(TASK_SOURCE_KEY_NAME, self.config.resources_server.name)
+        task_source = row.get(TASK_SOURCE_KEY_NAME, self.resources_server_name)
         if not isinstance(task_source, str) or not task_source:
             raise ValueError("task_source must be a non-empty string when provided")
         # Collation sets task_source to the instance that declares the dataset: usually the agent,
         # sometimes the Resources Server, and possibly this Environment Server.
-        bound = (self.config.resources_server.name, self.config.agent_server.name, self.config.name)
+        bound = (self.resources_server_name, self.config.agent_server.name, self.config.name)
         if task_source not in bound:
             raise ValueError(
                 f"Row task_source {task_source!r} names none of this Environment Server's instances: {list(bound)}"

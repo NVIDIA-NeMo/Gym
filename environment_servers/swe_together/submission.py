@@ -5,23 +5,74 @@
 import json
 from pathlib import Path
 from shlex import quote
+from time import monotonic
 from uuid import uuid4
 
+from environment_servers.swe_together.evaluation import JudgeMeasurementError
 from environment_servers.swe_together.runtime import PYTHON, SUBMISSION_ROOT, RuntimeProvisioner
 from environment_servers.swe_together.submission_worker import task_roots
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
 from nemo_gym.sandbox.utils import read_text
 
 
-def record_command(result: SandboxExecResult, *, action: str, artifact_dir: Path) -> None:
+TRANSFER_TIMEOUT_S = 600
+RESOURCE_PROBE = "cat /sys/fs/cgroup/memory.events /sys/fs/cgroup/memory.peak 2>&1; df -k -- " + quote(SUBMISSION_ROOT)
+
+
+def record_command(
+    result: SandboxExecResult,
+    *,
+    action: str,
+    artifact_dir: Path,
+    timeout_s: float | None = None,
+    elapsed_s: float | None = None,
+) -> None:
     """Keep both streams: some providers put worker stderr in merged stdout."""
     details = {key: getattr(result, key) for key in ("return_code", "error_type", "stdout", "stderr")}
+    timing = ""
+    if timeout_s is not None and elapsed_s is not None:
+        # Evidence only: OpenSandbox execd records a kill at its command timeout and an OOM kill alike
+        # (exit -1, "signal: killed"), so reaching the timeout does not prove that the timeout killed it.
+        details |= {
+            "timeout_seconds": timeout_s,
+            "elapsed_seconds": round(elapsed_s, 3),
+            "reached_timeout": elapsed_s >= timeout_s,
+        }
+        timing = f", elapsed_seconds={elapsed_s:.1f}, timeout_seconds={timeout_s:g}"
     (artifact_dir / f"{action}-command.json").write_text(json.dumps(details, indent=2))
     if result.return_code != 0 or result.error_type:
-        raise RuntimeError(
-            f"Submission {action} failed: return_code={result.return_code}, error_type={result.error_type}\n"
-            f"stderr: {(result.stderr or '')[-4000:]}\nstdout: {(result.stdout or '')[-8000:]}"
+        if result.error_type == "timeout":
+            cause = "submission_timeout"
+        elif result.return_code == -1 or "signal: killed" in (result.stderr or ""):
+            cause = "submission_killed"
+        else:
+            cause = "submission_failed"
+        raise JudgeMeasurementError(
+            cause,
+            f"Submission {action} failed ({cause}): return_code={result.return_code}, "
+            f"error_type={result.error_type}{timing}\n"
+            f"stderr: {(result.stderr or '')[-4000:]}\nstdout: {(result.stdout or '')[-8000:]}",
         )
+
+
+async def run_transfer(sandbox: AsyncSandbox, command: str, *, action: str, artifact_dir: Path) -> SandboxExecResult:
+    """Run a freeze or restore step; after a failure, keep timing, memory and disk state as kill evidence."""
+    started = monotonic()
+    result = await sandbox.exec(command, timeout_s=TRANSFER_TIMEOUT_S)
+    elapsed = monotonic() - started
+    try:
+        record_command(
+            result, action=action, artifact_dir=artifact_dir, timeout_s=TRANSFER_TIMEOUT_S, elapsed_s=elapsed
+        )
+    except JudgeMeasurementError:
+        try:
+            probe = await sandbox.exec(RESOURCE_PROBE, timeout_s=15)
+            resources = {key: getattr(probe, key) for key in ("return_code", "error_type", "stdout", "stderr")}
+        except Exception as error:
+            resources = {"probe_error": f"{type(error).__name__}: {error}"}
+        (artifact_dir / f"{action}-resources.json").write_text(json.dumps(resources, indent=2))
+        raise
+    return result
 
 
 async def replicate_submission(
@@ -43,8 +94,7 @@ async def replicate_submission(
         command = " ".join(
             quote(value) for value in [PYTHON, "-I", remote, "freeze", SUBMISSION_ROOT, json.dumps(roots)]
         )
-        result = await candidate.exec(command, timeout_s=600)
-        record_command(result, action="freeze", artifact_dir=artifact_dir)
+        await run_transfer(candidate, command, action="freeze", artifact_dir=artifact_dir)
         raw = await read_text(candidate, path=SUBMISSION_ROOT + "/manifest.json")
         manifest = json.loads(raw)
         if manifest["roots"] != roots:
@@ -52,10 +102,12 @@ async def replicate_submission(
         (artifact_dir / "manifest.json").write_text(raw)
         await storage.seal_submission(session_id, manifest)
         await judge.upload(worker, remote)
-        result = await judge.exec(
-            " ".join(quote(value) for value in [PYTHON, "-I", remote, "restore", SUBMISSION_ROOT]), timeout_s=600
+        result = await run_transfer(
+            judge,
+            " ".join(quote(value) for value in [PYTHON, "-I", remote, "restore", SUBMISSION_ROOT]),
+            action="restore",
+            artifact_dir=artifact_dir,
         )
-        record_command(result, action="restore", artifact_dir=artifact_dir)
         receipt = json.loads(result.stdout.strip().splitlines()[-1])
         if receipt["archive_sha256"] != manifest["archive_sha256"]:
             raise ValueError("Restored submission checksum differs")

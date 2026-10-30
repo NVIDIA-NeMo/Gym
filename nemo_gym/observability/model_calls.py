@@ -140,6 +140,15 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
                         "arguments": _as_arguments(item.get("arguments")),
                     }
                 )
+            elif item.get("type") == "custom_tool_call":
+                # A free-form tool takes one raw string; record it the way a function stand-in takes it.
+                tool_calls.append(
+                    {
+                        "call_id": item.get("call_id") or item.get("id"),
+                        "name": item.get("name"),
+                        "arguments": {"input": item.get("input")},
+                    }
+                )
             elif item.get("type") == "reasoning":
                 for summary in item.get("summary") or []:
                     text = summary.get("text") if isinstance(summary, dict) else None

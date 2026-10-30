@@ -114,11 +114,17 @@ def test_image_tool_markup_validation_rejects_nested_or_extra_tags() -> None:
         ("training", "/ng-rollout/test-rollout/training-token-capture/v1/responses"),
     ],
 )
+@pytest.mark.parametrize(
+    "base_reward,expected_reward",
+    [(0.0, 0.02), (0.5, 0.52), (0.99, 1.0), (1.0, 1.0)],
+)
 async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
     tmp_path: Path,
     entrypoint: str,
     capture_mode: str,
     model_url_path: str,
+    base_reward: float,
+    expected_reward: float,
 ) -> None:
     image_path = tmp_path / "source.png"
     Image.new("RGB", (256, 192), color=(120, 80, 40)).save(image_path)
@@ -191,7 +197,7 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
             verify_payload = kwargs["json"]
             assert len(verify_payload["response"]["output"]) == 1
             assert verify_payload["response"]["output"][0]["content"][0]["text"] == final_text
-            return _FakeClientResponse(_base_verify_response(kwargs["json"], reward=1.0))
+            return _FakeClientResponse(_base_verify_response(kwargs["json"], reward=base_reward))
         raise AssertionError(f"Unexpected call: {server_name} {url_path}")
 
     server_client_post.side_effect = _post_side_effect
@@ -244,9 +250,9 @@ async def test_image_tools_agent_runs_tool_loop_and_delegates_reward(
 
     result = await agent.run(SimpleNamespace(cookies={}), body)
     payload = result.model_dump(mode="json")
-    assert payload["base_reward"] == 1.0
+    assert payload["base_reward"] == base_reward
     assert payload["image_tools_aux_reward"] == 0.02
-    assert payload["reward"] == 1.02
+    assert payload["reward"] == pytest.approx(expected_reward)
     assert payload["image_tools_call_count"] == 1
     assert payload["image_tools_error_count"] == 0
     assert len(payload["image_tools_output_paths"]) == 1

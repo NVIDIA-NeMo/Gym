@@ -1688,6 +1688,33 @@ def _declared_ray_enabled(class_node: ast.ClassDef) -> bool | None:
     return _declared_class_flag(class_node, "ray_enabled")
 
 
+def _parse_entrypoint(entrypoint_fpath: Path) -> ast.Module | None:
+    try:
+        source = entrypoint_fpath.read_text()
+        with warnings.catch_warnings():
+            warnings.simplefilter("ignore", SyntaxWarning)
+            return ast.parse(source)
+    except (OSError, SyntaxError, UnicodeDecodeError):
+        return None
+
+
+def _run_webserver_class_names(tree: ast.Module) -> set[str]:
+    return {
+        node.func.value.id
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Call)
+        and isinstance(node.func, ast.Attribute)
+        and node.func.attr == "run_webserver"
+        and isinstance(node.func.value, ast.Name)
+    }
+
+
+def entrypoint_server_class_names(entrypoint_fpath: Path) -> set[str]:
+    """The names of the classes an entrypoint calls `run_webserver()` on, read from source; empty if unreadable."""
+    tree = _parse_entrypoint(entrypoint_fpath)
+    return _run_webserver_class_names(tree) if tree is not None else set()
+
+
 def entrypoint_class_flag(entrypoint_fpath: Path, name: str) -> bool | None:
     """The boolean class attribute `name` declared by the server an entrypoint starts, read from source.
 
@@ -1699,23 +1726,12 @@ def entrypoint_class_flag(entrypoint_fpath: Path, name: str) -> bool | None:
     be settled from the source alone, such as an inherited declaration, a class imported from another module, or
     an unreadable entrypoint.
     """
-    try:
-        source = entrypoint_fpath.read_text()
-        with warnings.catch_warnings():
-            warnings.simplefilter("ignore", SyntaxWarning)
-            tree = ast.parse(source)
-    except (OSError, SyntaxError, UnicodeDecodeError):
+    tree = _parse_entrypoint(entrypoint_fpath)
+    if tree is None:
         return None
 
     classes = {node.name: node for node in tree.body if isinstance(node, ast.ClassDef)}
-    invoked_class_names = {
-        node.func.value.id
-        for node in ast.walk(tree)
-        if isinstance(node, ast.Call)
-        and isinstance(node.func, ast.Attribute)
-        and node.func.attr == "run_webserver"
-        and isinstance(node.func.value, ast.Name)
-    }
+    invoked_class_names = _run_webserver_class_names(tree)
     if not invoked_class_names:
         return None
     declarations = [
