@@ -112,7 +112,9 @@ class GymnasiumServer(SimpleResourcesServer):
         session_id = request.session.get(SESSION_ID_KEY)
         obs, reward, terminated, truncated, info = await self.step(body.response, body.model_extra or {}, session_id)
         info = dict(info or {})
-        failure = {key: info.pop(key) for key in FAILURE_INFO_KEYS if key in info}
+        # A reserved key set to None (an env that computes the flag) counts as absent; the session is already
+        # closed below, so a value that fails EnvStepResponse validation would turn the step into a 500.
+        failure = {key: value for key in FAILURE_INFO_KEYS if (value := info.pop(key, None)) is not None}
         if terminated or truncated:
             await self.close_session(session_id)
             self.checkpoint_session_ended(request)

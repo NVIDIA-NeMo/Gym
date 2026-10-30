@@ -325,6 +325,8 @@ class TestRun:
         assert result.mask_sample is False
         assert result.failure_kind is None and result.failure_reason is None
 
+    @pytest.mark.asyncio
+    async def test_successful_rollout_survives_close_http_failure(self):
         agent = _make_agent()
         payloads = {
             "/reset": [{"observation": "go", "info": {"supports_explicit_close": True}}],

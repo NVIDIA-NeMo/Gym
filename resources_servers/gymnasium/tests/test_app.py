@@ -80,6 +80,13 @@ class _MaskingEnv(GymnasiumServer):
         return None, 0.2, False, True, info
 
 
+class _NoneFailureFieldsEnv(GymnasiumServer):
+    async def step(self, action, metadata, session_id=None):
+        # An env that computes the flags and leaves them unset: None must read as absent, not as a bad value.
+        info = {"score": 0.2, "mask_sample": None, "failure_kind": None, "failure_reason": None}
+        return None, 0.2, True, False, info
+
+
 _close_log: list = []
 
 
@@ -188,6 +195,15 @@ class TestGymnasiumServer:
         assert resp.mask_sample is False
         assert resp.failure_kind is None and resp.failure_reason is None
         assert resp.info == {}
+
+    @pytest.mark.asyncio
+    async def test_step_treats_none_failure_fields_as_absent(self):
+        env = _make_env(_NoneFailureFieldsEnv)
+        body = EnvStepRequest(responses_create_params={"input": []}, response=_make_response("x"))
+        resp = await env._step_endpoint(body, _FakeRequest("sid-1"))
+        assert resp.mask_sample is False
+        assert resp.failure_kind is None and resp.failure_reason is None
+        assert resp.info == {"score": 0.2}
 
     @pytest.mark.asyncio
     async def test_close_session_override_invoked(self):

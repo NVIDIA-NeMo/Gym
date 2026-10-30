@@ -51,6 +51,8 @@ _FORCED_TOOL_ARGS: dict[str, dict[str, Any]] = {
 # Reported when the user simulator could not continue the dialog: the episode is masked
 # (its reward is not a measurement of the policy) and the kind is recorded on the rollout row.
 USER_SIM_FAILED = "indian_banking:user_sim_failed"
+# vllm_model sets this response metadata key when the request outgrew the model's context window.
+CONTEXT_WINDOW_EXCEEDED_MARKER = "nemo_gym_context_window_exceeded"
 
 # Never add or drop a key here, or downstream aggregation ends up with a ragged column.
 # The failure fields a masked episode adds next to these (``mask_sample``, ``failure_kind``,
@@ -94,6 +96,10 @@ def _coerce_args(args: dict) -> dict:
                     value = parsed
         out[key] = value
     return out
+
+
+def _context_window_exceeded(response: NeMoGymResponse) -> bool:
+    return str((response.metadata or {}).get(CONTEXT_WINDOW_EXCEEDED_MARKER, "")).lower() == "true"
 
 
 def _reward_info(scores: dict[str, Any]) -> dict[str, float]:
@@ -285,6 +291,7 @@ class IndianBankingResourcesServer(GymnasiumServer):
         attempts = self.config.user_sim_retries
         last_failure = "no attempt was made"
         for attempt in range(1, attempts + 1):
+            overflow = False
             try:
                 resp = await self.server_client.post(
                     server_name=self.config.user_sim_model_server.name,
@@ -300,11 +307,15 @@ class IndianBankingResourcesServer(GymnasiumServer):
                 # HTTP 200 but nothing usable: an incomplete reply (e.g. a reasoning model that spent
                 # max_output_tokens on reasoning) or an empty message. Retry like a transport error.
                 last_failure = self._describe_unusable_reply(response)
+                overflow = _context_window_exceeded(response)
             except Exception as exc:  # noqa: BLE001 - transient server hiccup, retry
                 last_failure = f"{type(exc).__name__}: {exc}"
             logger.warning("user-sim call failed (attempt %d/%d): %s", attempt, attempts, last_failure)
+            if overflow:
+                # Another attempt would send the same dialog and overflow the same way.
+                break
         state["user_sim_failure"] = (
-            f"user simulator returned no usable reply in {attempts} attempts; last: {last_failure}"
+            f"user simulator returned no usable reply in {attempt} attempts; last: {last_failure}"
         )
         return None
 
@@ -314,7 +325,14 @@ class IndianBankingResourcesServer(GymnasiumServer):
         reason = getattr(details, "reason", None) if details is not None else None
         text = extract_text(response)
         shape = "empty text" if not text.strip() else f"{len(text)} chars of text"
-        return f"HTTP 200 reply with {shape} (status={response.status!r}, incomplete reason={reason!r})"
+        description = f"HTTP 200 reply with {shape} (status={response.status!r}, incomplete reason={reason!r})"
+        if _context_window_exceeded(response):
+            # Reads like the reasoning-budget case otherwise, but raising max_output_tokens would not help.
+            description += (
+                f"; the dialog no longer fits the simulator's context window ({CONTEXT_WINDOW_EXCEEDED_MARKER} "
+                "set by the model server), so the remedy is a larger context length, not max_output_tokens"
+            )
+        return description
 
     async def _maybe_judge(self, state: dict) -> Optional[float]:
         if not self.config.should_use_judge:

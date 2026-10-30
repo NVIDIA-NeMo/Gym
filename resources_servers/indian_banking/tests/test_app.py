@@ -837,6 +837,24 @@ class TestUserSimFailure:
         assert truncated and info["mask_sample"] is True and info["failure_kind"] == USER_SIM_FAILED
         assert "18 chars of text" in info["failure_reason"] and "status='incomplete'" in info["failure_reason"]
 
+    async def test_context_window_overflow_is_named_and_not_retried(self, configured_engine, caplog) -> None:
+        # vllm_model marks a reply whose request outgrew the context window. The same dialog would overflow
+        # again, so the simulator is not retried, and the reason says what to change (not max_output_tokens).
+        overflow = {**self._incomplete_reply(), "metadata": {"nemo_gym_context_window_exceeded": "true"}}
+        server, posts = self._server_with_simulator(configured_engine, [overflow])
+        await server.reset(self._META, session_id="s-sim-overflow")
+        with caplog.at_level(logging.WARNING, logger="resources_servers.indian_banking.app"):
+            _, _, _, truncated, info = await server.step(
+                self._text_turn("Sure. Which card should I block?"), self._META, session_id="s-sim-overflow"
+            )
+        engine.configure()
+
+        assert posts == ["/v1/responses"]
+        assert truncated and info["mask_sample"] is True and info["failure_kind"] == USER_SIM_FAILED
+        assert "in 1 attempts" in info["failure_reason"]
+        assert "nemo_gym_context_window_exceeded" in info["failure_reason"]
+        assert "not max_output_tokens" in info["failure_reason"]
+
     async def test_recovered_simulator_reply_is_not_flagged(self, configured_engine, caplog) -> None:
         good = {**self._incomplete_reply(), "status": "completed", "incomplete_details": None}
         good["output"] = [
