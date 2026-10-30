@@ -18,7 +18,7 @@ from collections.abc import AsyncIterator, Callable, Mapping
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
-from typing import Any, Protocol, runtime_checkable
+from typing import Any, Literal, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
 
@@ -147,6 +147,43 @@ class SandboxSidecarSpec:
 
 
 @dataclass(frozen=True)
+class SandboxEgressRules:
+    """A complete outbound network policy for a sandbox, set at creation or replaced while it runs.
+
+    ``mode="allow"`` allows only the ``allowed_*`` destinations, so it blocks all egress when they are empty.
+    ``mode="block"`` blocks the ``blocked_*`` destinations and allows everything else. ``mode="allow_all"``
+    removes caller restrictions; network limits the deployment enforces still apply. ``name`` labels the
+    policy in provider logs.
+    """
+
+    mode: Literal["allow", "block", "allow_all"]
+    allowed_cidrs: tuple[str, ...] = ()
+    allowed_domains: tuple[str, ...] = ()
+    blocked_cidrs: tuple[str, ...] = ()
+    blocked_domains: tuple[str, ...] = ()
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if self.mode not in ("allow", "block", "allow_all"):
+            raise ValueError(f"Egress mode must be allow, block, or allow_all, got {self.mode!r}")
+        for key in ("allowed_cidrs", "allowed_domains", "blocked_cidrs", "blocked_domains"):
+            value = getattr(self, key)
+            if isinstance(value, str):
+                raise TypeError(f"SandboxEgressRules.{key} must be a sequence of strings, not a string")
+            object.__setattr__(self, key, tuple(str(item) for item in value))
+        allowed = self.allowed_cidrs + self.allowed_domains
+        blocked = self.blocked_cidrs + self.blocked_domains
+        if self.mode == "allow_all" and (allowed or blocked):
+            raise ValueError("Egress mode allow_all cannot be combined with rules")
+        if self.mode == "allow" and blocked:
+            raise ValueError("Blocked egress rules require mode=block")
+        if self.mode == "block" and allowed:
+            raise ValueError("Allowed egress rules cannot be used with mode=block")
+        if self.mode == "block" and not blocked:
+            raise ValueError("Egress mode block requires at least one blocked rule")
+
+
+@dataclass(frozen=True)
 class SandboxSpec:
     """Sandbox creation request."""
 
@@ -169,10 +206,17 @@ class SandboxSpec:
     # The user commands run as when an exec names none (a Dockerfile's final ``USER``). Providers that
     # cannot set a container default apply it per exec through the sandbox facade.
     user: str | int | None = None
+    # Outbound network policy applied at creation (a mapping is accepted); needs a provider that implements
+    # `SupportsSandboxEgressRules`. None leaves the provider's default policy.
+    egress_rules: SandboxEgressRules | Mapping[str, Any] | None = None
 
     def __post_init__(self) -> None:
         if not isinstance(self.resources, SandboxResources):
             object.__setattr__(self, "resources", SandboxResources.from_mapping(self.resources))
+        if self.egress_rules is not None and not isinstance(self.egress_rules, SandboxEgressRules):
+            if not isinstance(self.egress_rules, Mapping):
+                raise TypeError("SandboxSpec.egress_rules must be SandboxEgressRules, a mapping, or None")
+            object.__setattr__(self, "egress_rules", SandboxEgressRules(**self.egress_rules))
         if not isinstance(self.sidecars, (list, tuple)):
             raise TypeError("Sandbox sidecars must be a list or tuple of sidecar specs or mappings")
         sidecars = tuple(
@@ -458,6 +502,26 @@ class SupportsSandboxSidecars(Protocol):
         self, handle: SandboxHandle, sidecar: str, source_path: str, target_path: Path
     ) -> None:
         """Download one file from ``sidecar`` to the local filesystem."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxEgressRules(Protocol):
+    """Optional provider capability to apply ``SandboxSpec.egress_rules`` when it creates a sandbox."""
+
+    def validate_egress_rules(self, rules: SandboxEgressRules, spec: SandboxSpec) -> None:
+        """Raise ``ValueError`` when ``rules`` cannot be applied to a sandbox created from ``spec``."""
+        ...
+
+
+@runtime_checkable
+class SupportsSandboxEgressRuleUpdates(Protocol):
+    """Optional provider capability to replace a running sandbox's egress policy without a restart."""
+
+    async def update_egress_rules(
+        self, handle: SandboxHandle, rules: SandboxEgressRules, *, timeout_s: int | float | None = None
+    ) -> None:
+        """Replace the whole egress policy; ``timeout_s`` bounds each attempt (``None`` uses the provider default)."""
         ...
 
 

@@ -136,6 +136,7 @@ builds to finish; pass `--continue-on-error` to keep building the remaining imag
 | `resources` | Fixed by the template rather than applied per sandbox. Requests warn, or raise when `create.strict_resources` is true. |
 | `entrypoint` | Unsupported and rejected before allocation; define it in the E2B template. |
 | `provider_options` | Supports only `template`; unknown or invalid values are rejected before allocation. |
+| `egress_rules` | Mapped to the E2B `network` option: `allow` becomes `allow_out` plus `deny_out: ["0.0.0.0/0"]`, `block` becomes `deny_out`, and `allow_all` sends none. `blocked_domains` is rejected (E2B denies by IP address or CIDR only), and so is any rule set when `create.allow_internet_access` is `false`. `AsyncSandbox.update_egress_rules` replaces the policy of a running sandbox through `update_network`. |
 
 The bundled builder controls template CPU count and memory. Disk and GPU requirements need a
 suitable template prepared through E2B tooling.

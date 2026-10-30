@@ -238,6 +238,23 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 
 `AsyncSandbox.pty` opens interactive terminal sessions on providers that implement `SupportsSandboxPty`: OpenSandbox (execd PTY sessions, which also re-attach by id from another process) and Docker (`docker exec -i -t` under a host pseudo-terminal; sessions live in the calling process). `await sandbox.pty.create(rows=..., cols=...)` returns a session with `read`, `write`, `resize`, `send_signal`, `wait_exit` and `close`; `await sandbox.pty.exec(command)` runs one command in a terminal and collects its output; `pty=False` gives a pipe session with stdout and stderr split. Providers without the capability raise `NotImplementedError`, so use `exec()` there. The sync `Sandbox` facade does not mirror the PTY namespace.
 
+## Egress Rules
+
+`SandboxEgressRules` is a complete outbound network policy. `mode="allow"` allows only the `allowed_cidrs` and `allowed_domains` (no rules blocks all egress), `mode="block"` blocks only the `blocked_cidrs` and `blocked_domains`, and `mode="allow_all"` removes caller restrictions. Set it at creation with `SandboxSpec.egress_rules` on providers that implement `SupportsSandboxEgressRules`. Replace it on a running sandbox with `await sandbox.update_egress_rules(rules)` on providers that implement `SupportsSandboxEgressRuleUpdates`, for example to allow egress during setup and block it for the agent run. Other providers raise `NotImplementedError`, and a provider raises `ValueError` for rules it cannot express or when the spec also sets the provider's own network option.
+
+| Provider | At creation | Live update | Limits |
+| --- | --- | --- | --- |
+| E2B (and compatible gateways) | Yes | Yes | `blocked_domains` is not supported: E2B blocks by IP address or CIDR only. Rejected with `create.allow_internet_access: false`. |
+| OpenSandbox | Yes | No | Domains only; CIDR rules are rejected. |
+
+```python
+from nemo_gym.sandbox import SandboxEgressRules, SandboxSpec
+
+spec = SandboxSpec(image="...", egress_rules=SandboxEgressRules(mode="allow", allowed_domains=("pypi.org",)))
+await sandbox.start(spec)
+await sandbox.update_egress_rules(SandboxEgressRules(mode="allow"))  # block all egress
+```
+
 ## SandboxSpec Fields
 
 `SandboxSpec` is intentionally provider-neutral. Providers map these fields onto their own runtime primitives.
@@ -254,6 +271,7 @@ Do not call `Sandbox` from FastAPI handlers, async resources servers, or async a
 | `resources` | `SandboxResources` or a mapping with `cpu`, `memory_mib`, `disk_gib`, `gpu`, and `gpu_type`. |
 | `entrypoint` | Optional container entrypoint override. |
 | `provider_options` | Provider-specific options that do not fit the common schema. |
+| `egress_rules` | Optional `SandboxEgressRules` (or a mapping) applied at creation; see Egress Rules. |
 
 You can pass resources as either a `SandboxResources` instance or a mapping:
 

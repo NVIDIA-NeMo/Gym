@@ -48,6 +48,7 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
+    SandboxEgressRules,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -85,6 +86,18 @@ _API_PARAM_KEYS = (
 
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
+
+
+def _network(rules: SandboxEgressRules) -> dict[str, list[str]]:
+    """Map egress rules onto E2B's ``allow_out``/``deny_out``; ``allow_out`` takes precedence over ``deny_out``."""
+    if rules.blocked_domains:
+        raise ValueError("E2B blocks egress by IP address or CIDR only; use blocked_cidrs instead of blocked_domains")
+    if rules.mode == "allow":
+        allowed = [*rules.allowed_cidrs, *rules.allowed_domains]
+        return {"allow_out": allowed, "deny_out": ["0.0.0.0/0"]} if allowed else {"deny_out": ["0.0.0.0/0"]}
+    if rules.mode == "block":
+        return {"deny_out": [*rules.blocked_cidrs, *rules.blocked_domains]}
+    return {}
 
 
 def _require_e2b_sdk() -> Any:
@@ -413,6 +426,12 @@ class E2BProvider:
 
     # ------------------------------------------------------------- lifecycle
 
+    def validate_egress_rules(self, rules: SandboxEgressRules, spec: SandboxSpec) -> None:
+        del spec
+        _network(rules)
+        if not self._create.allow_internet_access:
+            raise ValueError("SandboxSpec.egress_rules cannot be combined with create.allow_internet_access=false")
+
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         if spec.entrypoint:
             raise E2BCreateError(
@@ -441,6 +460,10 @@ class E2BProvider:
             # provider calls explicitly reapply connection.request_timeout_s
             # when configured; otherwise the SDK-retained value remains.
             kwargs["request_timeout"] = float(spec.ready_timeout_s)
+        if spec.egress_rules is not None:
+            self.validate_egress_rules(spec.egress_rules, spec)
+            if spec.egress_rules.mode != "allow_all":
+                kwargs["network"] = _network(spec.egress_rules)
         if spec.env:
             kwargs["envs"] = {str(k): str(v) for k, v in spec.env.items()}
         if spec.metadata:
@@ -530,6 +553,22 @@ class E2BProvider:
             ) from exc
         headers["E2b-Sandbox-Port"] = str(port)
         return SandboxEndpoint(endpoint=base_url, headers=headers)
+
+    async def update_egress_rules(
+        self, handle: SandboxHandle, rules: SandboxEgressRules, *, timeout_s: int | float | None = None
+    ) -> None:
+        """Replace the running sandbox's egress policy (E2B ``update_network``); transient failures are retried."""
+        sandbox = self._sandbox(handle)
+        network = _network(rules)
+        params = self._api_params()
+        if timeout_s is not None:
+            params["request_timeout"] = float(timeout_s)
+        # The update replaces the whole policy, so a repeated attempt is safe.
+        await self._with_retries(
+            lambda: sandbox.update_network(network, **params),
+            operation="update_network",
+            retry_timeouts=True,
+        )
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()

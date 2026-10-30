@@ -136,6 +136,10 @@ sandbox envd service with an access token.
 
 Outbound internet access is enabled by default for compatibility with workloads that install
 dependencies. Set `create.allow_internet_access: false` for offline or untrusted workloads.
+For a per-sandbox policy, set `SandboxSpec.egress_rules` (mapped to E2B's `network` `allow_out` and
+`deny_out`) and change it on a running sandbox with `AsyncSandbox.update_egress_rules` (E2B's
+`update_network`). E2B denies by IP address or CIDR only, so `blocked_domains` is rejected, and egress
+rules are rejected when `create.allow_internet_access` is `false`.
 Values in `SandboxSpec.env` are injected into the remote sandbox, so pass only secrets that the
 workload needs. Keep E2B API credentials in the provider connection config or host environment,
 not in `SandboxSpec.env`.

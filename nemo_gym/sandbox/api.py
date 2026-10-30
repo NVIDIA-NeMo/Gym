@@ -30,6 +30,7 @@ from typing import Any, TypeVar
 from nemo_gym.sandbox.observability import span_attributes as default_span_attributes
 from nemo_gym.sandbox.providers import (
     ConnectableProvider,
+    SandboxEgressRules,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -40,6 +41,8 @@ from nemo_gym.sandbox.providers import (
     SandboxSpec,
     SandboxStatus,
     SupportsSandboxBackgroundServices,
+    SupportsSandboxEgressRules,
+    SupportsSandboxEgressRuleUpdates,
     SupportsSandboxEndpoint,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
@@ -457,6 +460,11 @@ class AsyncSandbox:
         if requested_spec.sidecars and not isinstance(self._provider, SupportsSandboxSidecars):
             provider_name = getattr(self._provider, "name", type(self._provider).__name__)
             raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support sidecars")
+        if requested_spec.egress_rules is not None:
+            if not isinstance(self._provider, SupportsSandboxEgressRules):
+                provider_name = getattr(self._provider, "name", type(self._provider).__name__)
+                raise NotImplementedError(f"Sandbox provider {provider_name!r} does not support egress rules")
+            self._provider.validate_egress_rules(requested_spec.egress_rules, requested_spec)
 
         if is_span_group_enabled(GymSpanGroup.SANDBOX):
             provider_name = self._telemetry_provider_name()
@@ -661,6 +669,15 @@ class AsyncSandbox:
         if not isinstance(resolved, SandboxEndpoint):
             raise TypeError(f"Sandbox provider endpoint() must return SandboxEndpoint, got {type(resolved).__name__}")
         return resolved
+
+    async def update_egress_rules(self, rules: SandboxEgressRules, *, timeout_s: int | float | None = None) -> None:
+        """Replace this sandbox's whole egress policy while it runs, for example to block egress after setup."""
+        handle = self._require_handle()
+        provider = self._provider
+        if not isinstance(provider, SupportsSandboxEgressRuleUpdates):
+            name = getattr(provider, "name", type(provider).__name__)
+            raise NotImplementedError(f"Sandbox provider {name!r} does not support runtime egress rule updates")
+        await provider.update_egress_rules(handle, rules, timeout_s=timeout_s)
 
     async def pause(self) -> None:
         """Pause this sandbox while preserving its state.

@@ -242,6 +242,7 @@ A public sandbox therefore cannot be switched to a restricted policy once it run
 | `resources` | Mapped to OpenSandbox resource quantities. |
 | `entrypoint` | Passed to OpenSandbox create when set. |
 | `provider_options` | Per-sandbox OpenSandbox options such as `image_auth`, `network_policy`, `platform`, `snapshot_id`, `volumes`, `skip_health_check`, and `extensions`. |
+| `egress_rules` | Mapped to a `network_policy` at create: `allow` becomes `defaultAction: deny` with `allow` rules, `block` becomes `defaultAction: allow` with `deny` rules, and `allow_all` sends no policy. Domain rules only; CIDR rules and a spec that also sets `provider_options.network_policy` are rejected. `AsyncSandbox.update_egress_rules` raises `NotImplementedError`, because a running sandbox cannot change its `defaultAction` (see Network Policy). |
 
 ## Resource Mapping
 

@@ -27,7 +27,8 @@ from unittest.mock import AsyncMock
 import httpx
 import pytest
 
-from nemo_gym.sandbox.providers.base import SandboxResources, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import AsyncSandbox, SupportsSandboxEgressRules, SupportsSandboxEgressRuleUpdates
+from nemo_gym.sandbox.providers.base import SandboxEgressRules, SandboxResources, SandboxSpec, SandboxStatus
 
 
 pytestmark = pytest.mark.sandbox
@@ -542,6 +543,85 @@ async def test_direct_create_passes_network_policy_to_sdk_create(fake_opensandbo
     await provider.create(SandboxSpec(image="image:tag", provider_options={"network_policy": policy}))
 
     assert FakeSandbox.created_kwargs["network_policy"].model_dump(by_alias=True, exclude_none=True) == policy
+
+
+@pytest.mark.parametrize(
+    ("rules", "policy"),
+    [
+        (SandboxEgressRules(mode="allow"), {"defaultAction": "deny", "egress": []}),
+        (
+            SandboxEgressRules(mode="allow", allowed_domains=("pypi.org", "*.pythonhosted.org")),
+            {
+                "defaultAction": "deny",
+                "egress": [
+                    {"action": "allow", "target": "pypi.org"},
+                    {"action": "allow", "target": "*.pythonhosted.org"},
+                ],
+            },
+        ),
+        (
+            SandboxEgressRules(mode="block", blocked_domains=("github.com",)),
+            {"defaultAction": "allow", "egress": [{"action": "deny", "target": "github.com"}]},
+        ),
+    ],
+)
+async def test_direct_create_maps_egress_rules_to_network_policy(
+    fake_opensandbox_sdk: None, rules: SandboxEgressRules, policy: dict[str, Any]
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(SandboxSpec(image="image:tag", egress_rules=rules))
+
+    assert FakeSandbox.created_kwargs["network_policy"].model_dump(by_alias=True, exclude_none=True) == policy
+
+
+async def test_direct_create_allow_all_egress_rules_send_no_network_policy(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+
+    await provider.create(SandboxSpec(image="image:tag", egress_rules=SandboxEgressRules(mode="allow_all")))
+
+    assert "network_policy" not in FakeSandbox.created_kwargs
+
+
+@pytest.mark.parametrize(
+    ("spec", "message"),
+    [
+        (
+            SandboxSpec(
+                image="image:tag",
+                egress_rules=SandboxEgressRules(mode="allow"),
+                provider_options={"network_policy": {"defaultAction": "deny"}},
+            ),
+            "not both",
+        ),
+        (
+            SandboxSpec(
+                image="image:tag", egress_rules=SandboxEgressRules(mode="allow", allowed_cidrs=("10.0.0.0/8",))
+            ),
+            "domains only",
+        ),
+    ],
+)
+async def test_egress_rules_opensandbox_cannot_apply_are_rejected(
+    fake_opensandbox_sdk: None, spec: SandboxSpec, message: str
+) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    FakeSandbox.created_kwargs = {}
+
+    with pytest.raises(ValueError, match=message):
+        await provider.create(spec)
+    assert FakeSandbox.created_kwargs == {}
+
+
+async def test_opensandbox_rejects_live_egress_rule_updates(fake_opensandbox_sdk: None) -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(probe={"command": None})
+    assert isinstance(provider, SupportsSandboxEgressRules)
+    assert not isinstance(provider, SupportsSandboxEgressRuleUpdates)
+    sandbox = AsyncSandbox(provider)
+    await sandbox.start(SandboxSpec(image="image:tag", egress_rules=SandboxEgressRules(mode="allow")))
+
+    with pytest.raises(NotImplementedError, match="'opensandbox' does not support runtime egress rule updates"):
+        await sandbox.update_egress_rules(SandboxEgressRules(mode="allow_all"))
 
 
 async def test_direct_create_passes_resource_requests_to_sdk_create(
