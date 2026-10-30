@@ -754,6 +754,34 @@ def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
         job.exit_with_error(error)
 
 
+def _job_cancel(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "cancel")
+    from nemo_gym.cli import job
+
+    try:
+        code = job.cancel_command(
+            args.gym_job_id,
+            args.benchmark,
+            everything=args.all,
+            confirm=args.confirm,
+            as_json=getattr(args, "json", False),
+        )
+    except (ValueError, RuntimeError) as error:
+        job.exit_with_error(error)
+    if code:
+        sys.exit(code)
+
+
+def _job_logs(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "logs")
+    from nemo_gym.cli import job
+
+    try:
+        job.logs_command(args.gym_job_id, args.benchmark, source=args.source, instance=args.instance, tail=args.tail)
+    except (ValueError, RuntimeError, FileNotFoundError) as error:
+        job.exit_with_error(error)
+
+
 def _job_info(args: argparse.Namespace, overrides: list[str]) -> None:
     _reject_overrides(args, overrides, "info")
     from nemo_gym.cli import job
@@ -1020,7 +1048,7 @@ GROUPS = {
     "dataset": "Manage datasets.",
     "env": "Develop and run environments.",
     "eval": "Run evaluations.",
-    "job": "Look at the runs `gym eval submit` queued.",
+    "job": "Look at, stop and read the logs of the runs `gym eval submit` queued.",
     "dev": "Contributor helpers.",
 }
 
@@ -1818,6 +1846,67 @@ COMMANDS = {
                 ),
             ),
             JOB_JSON,
+        ),
+    ),
+    "job cancel": Command(
+        target=_job_cancel,
+        summary="Stop a benchmark of a submitted run, or every benchmark of it with --all.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "benchmark", nargs="?", metavar="BENCHMARK", help="The benchmark to stop."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--all",
+                    action="store_true",
+                    help="Stop every live benchmark of the submission. Its id has to be typed to confirm.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--confirm",
+                    metavar="ID",
+                    help="With --all, the submission's id, so there is no prompt. There is no --yes.",
+                ),
+            ),
+            JOB_JSON,
+        ),
+    ),
+    "job logs": Command(
+        target=_job_logs,
+        summary="Print one of a benchmark's logs.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to read.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--source",
+                    default="driver",
+                    metavar="NAME",
+                    help="Which log: the driver (default) or a service. `gym job info` lists them.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--instance", metavar="ID", help="Which instance, for a service that runs several."
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--tail", type=int, metavar="N", help="Print only the last N lines (a log can be large)."
+                ),
+            ),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),

@@ -168,7 +168,8 @@ class SSHConnection(Connection):
 
 
 def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> str:
-    result = subprocess.run(cmd, input=input, text=True, capture_output=True)
+    # errors="replace": a log can hold bytes that are not UTF-8, and one of them must not fail the whole read.
+    result = subprocess.run(cmd, input=input, text=True, capture_output=True, errors="replace")
     if result.returncode != 0:
         label = f" ({context})" if context else ""
         raise RuntimeError(

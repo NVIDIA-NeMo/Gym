@@ -216,19 +216,35 @@ def cluster(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         script = bin_dir / tool
         script.write_text(f'#!/bin/bash\ncat "$(dirname "$0")/{tool}_rows" 2>/dev/null\nexit 0\n')
         script.chmod(0o755)
+    scancel = bin_dir / "scancel"
+    scancel.write_text(
+        '#!/bin/bash\nd="$(dirname "$0")"\necho "$*" >> "$d/scancel_calls"\n'
+        'if [ -f "$d/scancel_rc" ]; then echo "scancel: error: Access/permission denied" >&2; exit 1; fi\nexit 0\n'
+    )
+    scancel.chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
 
 
 def _submitted(
-    tmp_path: Path, gym_job_id: str, benchmarks: dict[str, str], *, submitted_at: str, executor: str = "slurm"
+    tmp_path: Path,
+    gym_job_id: str,
+    benchmarks: dict[str, str],
+    *,
+    submitted_at: str,
+    executor: str = "slurm",
+    log_sources: bool = True,
 ) -> SubmissionRecord:
     """A run as `gym eval submit` leaves it: the job dirs, the resolved config, and the record in the index."""
     run_dir = tmp_path / "runs" / gym_job_id
     for name in benchmarks:
-        (run_dir / name).mkdir(parents=True)
+        (run_dir / name / "logs").mkdir(parents=True)
     (run_dir / "resolved-config.yaml").write_text(yaml.safe_dump({"driver": {"container": "gym:latest"}}))
     record = _record(gym_job_id, benchmarks, submitted_at=submitted_at, executor=executor, run_dir=str(run_dir))
+    if not log_sources:
+        record = record.model_copy(
+            update={"benchmarks": [job.model_copy(update={"log_sources": []}) for job in record.benchmarks]}
+        )
     record.write_local_index()
     return record
 
@@ -243,6 +259,10 @@ def _gym(monkeypatch: pytest.MonkeyPatch, capsys, *args: str, ok: bool = True) -
         assert exit_info.value.code != 0
     captured = capsys.readouterr()
     return captured.out, captured.err
+
+
+def _calls(path: Path) -> list[str]:
+    return path.read_text().splitlines() if path.exists() else []
 
 
 def test_list_shows_the_newest_first_and_json_is_the_records(tmp_path, cluster, monkeypatch, capsys):
@@ -388,6 +408,230 @@ def test_info_of_an_executor_without_the_capability_says_so(tmp_path, cluster, m
     _, err = _gym(monkeypatch, capsys, "info", "gym-job-k8s", ok=False)
 
     assert "kubernetes executor does not support info" in err
+
+
+# --- gym job logs --------------------------------------------------------------------------------------------
+
+
+def _log(record: SubmissionRecord, benchmark: str, job_id: str, text: str, source: str = "driver") -> None:
+    (Path(record.run_dir) / benchmark / "logs" / f"{source}-{job_id}.log").write_text(text)
+
+
+def test_logs_print_the_log_of_the_job_that_is_running_now_and_not_the_recorded_one(
+    tmp_path, cluster, monkeypatch, capsys
+):
+    record = _submitted(tmp_path, "gym-job-a", {"ruler": "200"}, submitted_at="2026-10-29T00:00:00Z")
+    job_dir = Path(record.run_dir) / "ruler"
+    (job_dir / JOB_CHAIN_NAME).write_text("200\n201\n")
+    (cluster / "squeue_rows").write_text(f"201|RUNNING|{job_dir}\n")
+    _log(record, "ruler", "200", "the first job\n")
+    _log(record, "ruler", "201", "the resumed job\nsecond line\n")
+
+    out, _ = _gym(monkeypatch, capsys, "logs", "gym-job-a", "ruler")
+
+    assert out == "the resumed job\nsecond line\n"
+
+
+def test_logs_can_be_cut_to_the_last_lines_and_can_name_a_service(tmp_path, cluster, monkeypatch, capsys):
+    record = _submitted(tmp_path, "gym-job-a", {"ruler": "200"}, submitted_at="2026-10-29T00:00:00Z")
+    _log(record, "ruler", "200", "a\nb\nc\nd\n")
+    _log(record, "ruler", "200", "engine up\n", source="vllm")
+
+    out, _ = _gym(monkeypatch, capsys, "logs", "gym-job-a", "ruler", "--tail", "2")
+    assert out == "c\nd\n"
+
+    out, _ = _gym(monkeypatch, capsys, "logs", "gym-job-a", "ruler", "--source", "vllm")
+    assert out == "engine up\n"
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["--source", "nope"], "No log source 'nope' for ruler; known: driver, vllm."),
+        (
+            ["--instance", "0"],
+            "No instance '0' of driver for ruler; instances: none, this source is not split by instance.",
+        ),
+        ([], "does not exist: the job may not have reached the step that writes it."),
+    ],
+)
+def test_a_log_that_cannot_be_read_says_why_and_prints_nothing(tmp_path, cluster, monkeypatch, capsys, args, message):
+    _submitted(tmp_path, "gym-job-a", {"ruler": "200"}, submitted_at="2026-10-29T00:00:00Z")
+
+    out, err = _gym(monkeypatch, capsys, "logs", "gym-job-a", "ruler", *args, ok=False)
+
+    assert out == ""
+    assert message in err
+
+
+def test_logs_of_a_submission_that_recorded_no_sources_point_at_the_logs_directory(
+    tmp_path, cluster, monkeypatch, capsys
+):
+    _submitted(tmp_path, "gym-job-a", {"ruler": "200"}, submitted_at="2026-10-29T00:00:00Z", log_sources=False)
+
+    _, err = _gym(monkeypatch, capsys, "logs", "gym-job-a", "ruler", ok=False)
+
+    assert "submitted before they were tracked" in err and "ruler/logs on the cluster" in err
+
+
+# --- gym job cancel ------------------------------------------------------------------------------------------
+
+
+def _run_two(tmp_path: Path, cluster: Path) -> SubmissionRecord:
+    """gpqa has finished and ruler is running."""
+    record = _submitted(tmp_path, "gym-job-a", {"gpqa": "100", "ruler": "200"}, submitted_at="2026-10-29T00:00:00Z")
+    (cluster / "squeue_rows").write_text(f"200|RUNNING|{Path(record.run_dir) / 'ruler'}\n")
+    (cluster / "sacct_rows").write_text("100|COMPLETED|0:0\n200|RUNNING|0:0\n")
+    return record
+
+
+def test_cancel_stops_the_benchmark_it_is_given_and_says_what_it_sees_afterwards(
+    tmp_path, cluster, monkeypatch, capsys
+):
+    _run_two(tmp_path, cluster)
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "ruler")
+
+    assert _calls(cluster / "scancel_calls") == ["200"]
+    assert out.strip() == (
+        "ruler: cancel requested; still RUNNING (the scheduler can take a moment to report CANCELLED)"
+    )
+
+
+def test_cancel_leaves_a_benchmark_that_has_finished_alone(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "gpqa")
+
+    assert not (cluster / "scancel_calls").exists()
+    assert out.strip() == "gpqa: already finished (SUCCEEDED); nothing was cancelled"
+
+
+def test_cancelling_everything_needs_the_id_and_a_prompt_is_not_possible_without_a_terminal(
+    tmp_path, cluster, monkeypatch, capsys
+):
+    _run_two(tmp_path, cluster)
+
+    out, err = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", ok=False)
+
+    assert out == ""
+    assert "pass --confirm gym-job-a" in err
+    assert not (cluster / "scancel_calls").exists()
+
+
+def test_cancelling_everything_with_the_wrong_id_cancels_nothing(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+
+    _, err = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", "--confirm", "gym-job-b", ok=False)
+
+    assert "needs its id as confirmation; got 'gym-job-b'" in err
+    assert not (cluster / "scancel_calls").exists()
+
+
+def test_cancelling_everything_with_the_id_stops_only_the_live_benchmarks(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", "--confirm", "gym-job-a")
+
+    assert _calls(cluster / "scancel_calls") == ["200"]
+    assert out.splitlines() == [
+        "gpqa: already finished (SUCCEEDED); nothing was cancelled",
+        "ruler: cancel requested; still RUNNING (the scheduler can take a moment to report CANCELLED)",
+    ]
+
+
+def test_a_terminal_prompt_lists_what_will_be_cancelled_and_takes_the_id_typed(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+    monkeypatch.setattr(sys, "stdin", type("Terminal", (), {"isatty": lambda self: True})())
+    asked = []
+    monkeypatch.setattr("builtins.input", lambda prompt: asked.append(prompt) or "gym-job-a")
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all")
+
+    assert "These 1 benchmark(s) will be cancelled:" in out
+    listing = out.split("\n\n")[0]
+    assert "gym-job-a  cluster-a  RUNNING (1 RUNNING)" in listing
+    assert "ruler      RUNNING" in listing and "gpqa" not in listing
+    assert asked == ["Type the submission id (gym-job-a) to cancel them: "]
+    assert _calls(cluster / "scancel_calls") == ["200"]
+
+
+def test_a_wrong_id_typed_at_the_prompt_cancels_nothing(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+    monkeypatch.setattr(sys, "stdin", type("Terminal", (), {"isatty": lambda self: True})())
+    monkeypatch.setattr("builtins.input", lambda prompt: "yes")
+
+    _, err = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", ok=False)
+
+    assert "needs its id as confirmation; got 'yes'" in err
+    assert not (cluster / "scancel_calls").exists()
+
+
+def test_a_benchmark_slurm_refuses_to_cancel_is_reported_and_the_exit_code_says_so(
+    tmp_path, cluster, monkeypatch, capsys
+):
+    _run_two(tmp_path, cluster)
+    (cluster / "scancel_rc").write_text("1")
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", "--confirm", "gym-job-a", ok=False)
+
+    assert "ruler: could not be stopped: Could not stop the job: Could not stop ruler: scancel 200:" in out
+    assert "permission denied" in out
+
+
+def test_a_single_cancel_that_slurm_refuses_exits_with_the_reason(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+    (cluster / "scancel_rc").write_text("1")
+
+    out, err = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "ruler", ok=False)
+
+    assert out == ""
+    assert "Could not stop ruler" in err and "permission denied" in err
+
+
+def test_there_is_nothing_to_cancel_when_everything_has_finished(tmp_path, cluster, monkeypatch, capsys):
+    _submitted(tmp_path, "gym-job-a", {"gpqa": "100"}, submitted_at="2026-10-29T00:00:00Z")
+    (cluster / "sacct_rows").write_text("100|COMPLETED|0:0\n")
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "--all", "--confirm", "gym-job-a")
+
+    assert out.strip() == "Nothing to cancel: every benchmark of gym-job-a has finished."
+    assert not (cluster / "scancel_calls").exists()
+
+
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (["gym-job-a"], "Give a benchmark, or --all"),
+        (["gym-job-a", "ruler", "--all"], "Give a benchmark or --all, not both."),
+        (["gym-job-a", "ruler", "--confirm", "gym-job-a"], "--confirm only applies to --all."),
+    ],
+)
+def test_cancel_wants_either_a_benchmark_or_all(tmp_path, cluster, monkeypatch, capsys, args, message):
+    _run_two(tmp_path, cluster)
+
+    _, err = _gym(monkeypatch, capsys, "cancel", *args, ok=False)
+
+    assert message in err
+    assert not (cluster / "scancel_calls").exists()
+
+
+def test_cancel_prints_json_when_asked(tmp_path, cluster, monkeypatch, capsys):
+    _run_two(tmp_path, cluster)
+
+    out, _ = _gym(monkeypatch, capsys, "cancel", "gym-job-a", "ruler", "--json")
+
+    (result,) = json.loads(out)
+    assert (result["benchmark"], result["state"]) == ("ruler", "RUNNING")
+
+
+@pytest.mark.parametrize("command", [["cancel", "gym-job-k8s", "gpqa"], ["logs", "gym-job-k8s", "gpqa"]])
+def test_an_executor_without_the_capability_says_so(tmp_path, cluster, monkeypatch, capsys, command):
+    _submitted(tmp_path, "gym-job-k8s", {"gpqa": "name"}, submitted_at="2026-10-29T00:00:00Z", executor="kubernetes")
+
+    _, err = _gym(monkeypatch, capsys, *command, ok=False)
+
+    assert f"kubernetes executor does not support {command[0]}" in err
 
 
 def test_the_renderers_import_nothing_that_talks_to_a_scheduler():

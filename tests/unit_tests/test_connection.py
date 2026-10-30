@@ -133,3 +133,7 @@ def test_ssh_connection_writes_a_private_file_owner_only(monkeypatch: MonkeyPatc
 
     assert oct(target.stat().st_mode & 0o777) == oct(0o600)
     assert target.read_text() == "secret: x\n"
+
+
+def test_output_with_bytes_that_are_not_utf8_is_decoded_with_replacements_and_not_an_error():
+    assert LocalConnection().run([r"printf 'a\xffb'"]) == "a\ufffdb"

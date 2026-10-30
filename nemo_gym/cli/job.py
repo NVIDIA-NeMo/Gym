@@ -14,18 +14,25 @@
 # limitations under the License.
 
 
-"""`gym job`: look at the runs `gym eval submit` queued.
+"""`gym job`: look at, stop and read the logs of the runs `gym eval submit` queued.
 
-`list` reads this machine's job index and nothing else. `status` is the only command that asks the
-scheduler, and `info` describes one submission and where its parts are. What they print is rendered by
-`job_render.py`.
+`list` reads this machine's job index and nothing else. `status` asks the scheduler for what is happening,
+`info` describes one submission and where its parts are, `cancel` stops a benchmark or a whole submission,
+and `logs` prints one of a benchmark's logs. What they print is rendered by `job_render.py`.
 """
 
 import json
 import sys
 
-from nemo_gym.cli.job_render import render_info, render_list, render_status
-from nemo_gym.orchestration.jobs import list_submissions
+from nemo_gym.cli.job_render import (
+    could_not_stop,
+    render_cancel,
+    render_info,
+    render_list,
+    render_status,
+    render_status_block,
+)
+from nemo_gym.orchestration.jobs import JobState, JobStatus, SubmissionStatus, list_submissions
 
 
 def list_command(*, limit: int | None, as_json: bool) -> None:
@@ -63,6 +70,65 @@ def info_command(gym_job_id: str, *, benchmark: str | None, show_config: bool, a
     print(render_info(described, show_config=show_config))
 
 
+def cancel_command(
+    gym_job_id: str, benchmark: str | None, *, everything: bool, confirm: str | None, as_json: bool
+) -> int:
+    """Stop one benchmark, or with `everything` every live benchmark after the id is typed; the exit code."""
+    from nemo_gym.orchestration.submit import cancel, cancel_submission, status
+
+    if everything and benchmark:
+        raise ValueError("Give a benchmark or --all, not both.")
+    if not everything and not benchmark:
+        raise ValueError("Give a benchmark, or --all to cancel every benchmark of the submission.")
+    if confirm is not None and not everything:
+        raise ValueError("--confirm only applies to --all.")
+
+    if not everything:
+        results = [cancel(gym_job_id, benchmark)]
+    else:
+        (current,) = status([gym_job_id])
+        live = [job for job in current.jobs if job.state not in _FINISHED]
+        if not live:
+            print(f"Nothing to cancel: every benchmark of {gym_job_id} has finished.")
+            return 0
+        if confirm is None:
+            if as_json or not sys.stdin.isatty():
+                raise ValueError(f"Cancelling a whole submission needs confirmation: pass --confirm {gym_job_id}.")
+            print(f"These {len(live)} benchmark(s) will be cancelled:\n{render_status_block(_only(current, live))}\n")
+            confirm = input(f"Type the submission id ({gym_job_id}) to cancel them: ").strip()
+        results = cancel_submission(gym_job_id, confirm=confirm)
+
+    if as_json:
+        print(json.dumps([result.model_dump(mode="json") for result in results], indent=2))
+    else:
+        print(render_cancel(results))
+    return 1 if any(could_not_stop(result) for result in results) else 0
+
+
+def logs_command(gym_job_id: str, benchmark: str, *, source: str, instance: str | None, tail: int | None) -> None:
+    from nemo_gym.orchestration.submit import logs
+
+    for line in logs(gym_job_id, benchmark, source=source, instance=instance, tail=tail):
+        print(line)
+
+
 def exit_with_error(error: Exception) -> None:
     print(f"Error: {error}", file=sys.stderr)
     sys.exit(1)
+
+
+_FINISHED = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}
+
+
+def _only(submission: SubmissionStatus, live: list[JobStatus]) -> SubmissionStatus:
+    """`submission` narrowed to its live jobs, with a state and counts that describe only those."""
+    states = [job.state for job in live]
+    state = (
+        JobState.RUNNING
+        if JobState.RUNNING in states
+        else JobState.QUEUED
+        if JobState.QUEUED in states
+        else JobState.UNKNOWN
+    )
+    counts = {candidate: states.count(candidate) for candidate in JobState if candidate in states}
+    return submission.model_copy(update={"jobs": live, "state": state, "counts": counts})

@@ -22,7 +22,14 @@ command prints can be checked without a cluster. The commands that call them are
 
 import yaml
 
-from nemo_gym.orchestration.jobs import JobInfo, SubmissionRecord, SubmissionStatus
+from nemo_gym.orchestration.jobs import (
+    FailureCategory,
+    JobInfo,
+    JobState,
+    JobStatus,
+    SubmissionRecord,
+    SubmissionStatus,
+)
 
 
 def render_list(records: list[SubmissionRecord]) -> str:
@@ -44,10 +51,14 @@ def render_list(records: list[SubmissionRecord]) -> str:
 def render_status(results: list[SubmissionStatus], *, note: str | None = None) -> str:
     if not results:
         return "No submissions to show."
-    blocks = [_status_block(result) for result in results]
+    blocks = [render_status_block(result) for result in results]
     if note:
         blocks.append(note)
     return "\n\n".join(blocks)
+
+
+def render_cancel(results: list[JobStatus]) -> str:
+    return "\n".join(f"{result.benchmark}: {_cancel_outcome(result)}" for result in results)
 
 
 def render_info(described: JobInfo, *, show_config: bool) -> str:
@@ -83,7 +94,7 @@ def render_info(described: JobInfo, *, show_config: bool) -> str:
     return "\n".join(lines)
 
 
-def _status_block(result: SubmissionStatus) -> str:
+def render_status_block(result: SubmissionStatus) -> str:
     record = result.record
     counts = ", ".join(f"{count} {state.value}" for state, count in result.counts.items())
     lines = [f"{record.gym_job_id}  {record.cluster}  {result.state.value}" + (f" ({counts})" if counts else "")]
@@ -119,3 +130,19 @@ def _table(header: tuple[str, ...], rows: list[tuple[str, ...]]) -> str:
 
 def _time(submitted_at: str) -> str:
     return submitted_at.replace("T", " ")
+
+
+def could_not_stop(result: JobStatus) -> bool:
+    return result.failure is not None and result.failure.category is FailureCategory.CANCELLED
+
+
+def _cancel_outcome(result: JobStatus) -> str:
+    if could_not_stop(result):
+        return f"could not be stopped: {result.failure.message}"
+    if result.state is JobState.CANCELLED:
+        return "cancelled"
+    if result.state in (JobState.QUEUED, JobState.RUNNING):
+        return f"cancel requested; still {result.state.value} (the scheduler can take a moment to report CANCELLED)"
+    if result.state is JobState.UNKNOWN:
+        return "cancel requested, but its state could not be read afterwards"
+    return f"already finished ({result.state.value}); nothing was cancelled"

@@ -56,6 +56,9 @@ logger = logging.getLogger(__name__)
 # At most this many connections are asked at once; a status over many hosts would otherwise open them all.
 _MAX_CONCURRENT_CONNECTIONS = 8
 
+# Nothing is left to stop for a job in one of these states.
+_FINISHED = {JobState.SUCCEEDED, JobState.FAILED, JobState.CANCELLED}
+
 # A job in one of these states has finished, or the executor could not tell, so what the job wrote decides.
 _DECIDED_BY_FILES = {JobState.FAILED, JobState.SUCCEEDED, JobState.UNKNOWN}
 
@@ -145,19 +148,48 @@ def cancel(executor: Terminable, record: SubmissionRecord, benchmark: str) -> Jo
     Re-queries the scheduler first, so it acts on the jobs that exist now and not on a stale record, and
     leaves a job that is already terminal alone. Calls `terminate` and writes nothing to the record. A
     refusal from the scheduler (permission denied, say) is raised for the caller to report against this
-    benchmark.
+    benchmark. The scheduler can take a moment to report a stopped job, so the status returned may still
+    read `RUNNING`.
     """
-    raise NotImplementedError
+    job = record.benchmark_job(benchmark)  # an unknown benchmark names the known ones before anything is asked
+    (before,) = status(executor, [record], [benchmark])
+    current = before.jobs[0]
+    if current.state in _FINISHED:
+        return current
+    executor.terminate(record, job)
+    (after,) = status(executor, [record], [benchmark])
+    return after.jobs[0]
 
 
 def cancel_submission(executor: Terminable, record: SubmissionRecord, *, confirm: str) -> list[JobStatus]:
     """Stop every live benchmark of `record`, and return each one's status as observed afterwards.
 
-    `confirm` has no default and must equal `record.gym_job_id`, or `ValueError` is raised: cancelling a
-    whole submission by accident costs more than typing its id. A benchmark that cannot be stopped is
-    reported on its own and the others proceed.
+    `confirm` has no default and must equal `record.gym_job_id`, or `ValueError` is raised before anything is
+    asked: cancelling a whole submission by accident costs more than typing its id. A benchmark that cannot
+    be stopped is reported on its own, with a `CANCELLED` failure saying why, and the others proceed.
     """
-    raise NotImplementedError
+    if confirm != record.gym_job_id:
+        raise ValueError(
+            f"Cancelling every benchmark of {record.gym_job_id} needs its id as confirmation; got {confirm!r}."
+        )
+    (before,) = status(executor, [record])
+    refused: dict[str, Failure] = {}
+    for current in before.jobs:
+        if current.state in _FINISHED:
+            continue
+        try:
+            executor.terminate(record, record.benchmark_job(current.benchmark))
+        except Exception as error:  # deliberate: one refusal must not stop the other benchmarks
+            refused[current.benchmark] = Failure(
+                category=FailureCategory.CANCELLED,
+                message=f"Could not stop the job: {error}",
+                source="scheduler",
+            )
+    (after,) = status(executor, [record])
+    return [
+        job.model_copy(update={"failure": refused[job.benchmark]}) if job.benchmark in refused else job
+        for job in after.jobs
+    ]
 
 
 def logs(
@@ -174,10 +206,19 @@ def logs(
 
     `source` and `instance` are resolved against `log_sources`, so `stream_logs` receives one `LogSource`
     and executors never validate names. A name that matches nothing, or a source with several instances
-    and none chosen, raises `ValueError` listing what exists. The current job is found with
-    `query_states`, and its id fills the location's `{job_id}`.
+    and none chosen, raises `ValueError` listing what exists; so does a submission that recorded no log
+    sources. The current job is found with `query_states`, and its id fills the location's `{job_id}`.
+    Resolution happens when this is called, not when the lines are first read, so a wrong name fails before
+    any output.
     """
-    raise NotImplementedError
+    job = record.benchmark_job(benchmark)
+    chosen = _resolve_log_source(job, source, instance)
+    observed = executor.query_states([JobRef(record, job)]).get((record.gym_job_id, benchmark))
+    job_id = (observed.job_id if observed else None) or job.job_id
+    if job_id is None:
+        raise ValueError(f"No job was queued for {benchmark} of {record.gym_job_id}, so it has no logs.")
+    resolved = chosen.model_copy(update={"location": chosen.location.replace("{job_id}", job_id)})
+    return executor.stream_logs(record, job, source=resolved, tail=tail, follow=follow)
 
 
 def log_sources(record: SubmissionRecord, benchmark: str) -> list[LogSource]:
@@ -298,3 +339,26 @@ def _read_config(executor: Inspectable, record: SubmissionRecord) -> tuple[dict[
     if not isinstance(config, dict):
         return None, f"{RESOLVED_CONFIG_NAME} does not hold a mapping"
     return config, None
+
+
+def _resolve_log_source(job: BenchmarkJob, source: str, instance: str | None) -> LogSource:
+    """The one planned log that `source` and `instance` name, or `ValueError` listing what exists."""
+    if not job.log_sources:
+        raise ValueError(
+            f"No log sources are recorded for {job.benchmark}: it was submitted before they were tracked. "
+            f"Look in {job.job_dir}/logs on the cluster."
+        )
+    named = [candidate for candidate in job.log_sources if candidate.name == source]
+    if not named:
+        known = ", ".join(dict.fromkeys(candidate.name for candidate in job.log_sources))
+        raise ValueError(f"No log source {source!r} for {job.benchmark}; known: {known}.")
+    instances = [candidate.instance for candidate in named if candidate.instance is not None]
+    if instance is None:
+        if instances:
+            raise ValueError(f"{source} has instances: {', '.join(instances)}; pick one with --instance.")
+        return named[0]
+    for candidate in named:
+        if candidate.instance == instance:
+            return candidate
+    available = ", ".join(instances) if instances else "none, this source is not split by instance"
+    raise ValueError(f"No instance {instance!r} of {source} for {job.benchmark}; instances: {available}.")
