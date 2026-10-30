@@ -85,7 +85,7 @@ def test_runnable_modes_are_discoverable(monkeypatch):
     from itertools import count
     from pathlib import Path
 
-    from nemo_gym.benchmarks import BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
+    from nemo_gym.environment.benchmarks import BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
 
     ports = count(12000)
     monkeypatch.setattr("nemo_gym.config.global_config._find_open_port_using_range", lambda **kwargs: next(ports))

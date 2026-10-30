@@ -220,7 +220,7 @@ def test_generated_python_passes_repo_lint_and_format(tmp_path: Path) -> None:
         scaffold_environment(root=tmp_path, kind="benchmark", name=f"lint_{index}", profile=profile)
     scaffold_resources_server(directory=tmp_path / "resources_servers/standalone_lint")
     python_files = [str(path) for path in tmp_path.rglob("*.py")]
-    config = Path(__file__).parents[2] / "pyproject.toml"
+    config = Path(__file__).parents[3] / "pyproject.toml"
 
     for command in ("check", "format"):
         arguments = [sys.executable, "-m", "ruff", command, "--no-cache", "--config", str(config)]

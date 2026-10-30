@@ -14,7 +14,7 @@
 # limitations under the License.
 from pathlib import Path
 
-from nemo_gym.agent_registry import (
+from nemo_gym.environment.agent_registry import (
     AgentEntry,
     _discover_agents_in_dir,
     discover_agents,

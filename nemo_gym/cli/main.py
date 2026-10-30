@@ -380,7 +380,7 @@ _ASSETS = {
 def _asset_config_path(flag: str, value: str) -> str:
     """Map a named asset (`name` or `name/flavor`) to its config path.
 
-    Searches the roots from :func:`~nemo_gym.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
+    Searches the roots from :func:`~nemo_gym.environment.discovery.component_search_roots` (``NEMO_GYM_EXTRA_ROOTS`` +
     cwd + install root), the same helper that backs `gym list`/`gym search`, so config resolution and
     discovery agree on where components live. On a name collision across roots the highest-priority root wins
     (as in `gym list`), with a warning. ``--search-dir`` reaches here via ``NEMO_GYM_EXTRA_ROOTS`` (set
@@ -433,7 +433,7 @@ def _asset_config_path(flag: str, value: str) -> str:
         # Benchmarks need special handling because some use non-standard config paths (arbitrary nesting), so
         # the generic one-level flavor/sibling search below can't see them.
         # Enumerate their real config names (the same values `gym list benchmarks` prints) instead.
-        from nemo_gym.benchmarks import _benchmark_config_name, _benchmark_config_paths
+        from nemo_gym.environment.benchmarks import _benchmark_config_name, _benchmark_config_paths
 
         config_names = {
             _benchmark_config_name(p.relative_to(root / parent))
