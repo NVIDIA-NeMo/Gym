@@ -1115,6 +1115,60 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_a_multi_choice_chat_stream_keeps_both_choices_in_the_persisted_payload_that_retirement_relies_on(
+        self, tmp_path: Path
+    ) -> None:
+        import json
+
+        from nemo_gym.base_responses_api_model import CaptureStore, _reconstruct_streamed_response
+        from nemo_gym.observability.model_calls import (
+            merge_model_call_capture_into_record,
+            model_call_capture_uncovered_reasons,
+        )
+
+        chunks = [
+            {
+                "id": "chatcmpl-n2",
+                "model": "m",
+                "choices": [
+                    {"index": 0, "delta": {"role": "assistant", "content": "a"}},
+                    {"index": 1, "delta": {"role": "assistant", "content": "b"}},
+                ],
+            },
+            {
+                "choices": [
+                    {"index": 0, "delta": {}, "finish_reason": "stop"},
+                    {"index": 1, "delta": {}, "finish_reason": "stop"},
+                ]
+            },
+            {"choices": [], "usage": {"prompt_tokens": 5, "completion_tokens": 2, "total_tokens": 7}},
+        ]
+        raw = "".join(f"data: {json.dumps(chunk)}\n\n" for chunk in chunks) + "data: [DONE]\n\n"
+        CaptureStore(tmp_path).record(
+            "2-3",
+            {
+                "model_call_id": "call-1",
+                "dialect": "chat",
+                "status_code": 200,
+                "request": {"messages": [{"role": "user", "content": "hi"}], "n": 2},
+                "response": _reconstruct_streamed_response(raw.encode(), "chat"),
+                "response_raw": raw,
+            },
+        )
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = dict(row)
+
+        merge_model_call_capture_into_record(result, [tmp_path], include_payloads=True)
+        _attach_trajectory_record(row, result)
+
+        # Retirement deletes the capture file once the rollout covers it, so the rollout must hold both answers.
+        [call] = result["ng_trajectory"]["model_calls"]
+        assert [(choice["index"], choice["message"]["content"]) for choice in call["response"]["choices"]] == [
+            (0, "a"),
+            (1, "b"),
+        ]
+        assert model_call_capture_uncovered_reasons(result) == []
+
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {

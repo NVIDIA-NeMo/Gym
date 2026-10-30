@@ -332,7 +332,7 @@ and cache usage, status, finish reason, latency, error details, tool calls, reas
 payloads. `call_index` and timestamps do not establish causal ordering between concurrent calls.
 
 Streaming Responses, Chat Completions, and Anthropic Messages are reassembled for capture on a
-best-effort basis. If reassembly fails, request, status, correlation, and latency data remain
+best-effort basis. A Chat stream with several choices keeps each choice apart by its index. If reassembly fails, request, status, correlation, and latency data remain
 available. A successful-status stream that closes without its dialect's terminal event retains any
 partial reconstruction and is marked `stream_truncated`.
 

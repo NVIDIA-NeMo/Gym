@@ -1429,17 +1429,11 @@ def _reconstruct_anthropic_sse(events: list[dict[str, Any]]) -> Optional[dict[st
 
 
 def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
-    """Rebuild a Chat Completions response from streamed chunks."""
-    content_parts: list[str] = []
-    reasoning_parts: list[str] = []
-    refusal_parts: list[str] = []
-    tool_calls: dict[int, dict[str, Any]] = {}
+    """Rebuild a Chat Completions response from streamed chunks, keeping every choice apart by its index."""
+    choices: dict[int, dict[str, Any]] = {}
     usage: Optional[dict[str, Any]] = None
     model: Optional[str] = None
     response_id: Optional[str] = None
-    role = "assistant"
-    finish_reason: Optional[str] = None
-    saw_choice = False
     for chunk in events:
         model = chunk.get("model") or model
         if isinstance(chunk.get("id"), str):
@@ -1449,18 +1443,29 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
         for choice in chunk.get("choices") or []:
             if not isinstance(choice, dict):
                 continue
-            saw_choice = True
+            index = choice.get("index")
+            state = choices.setdefault(
+                index if type(index) is int else 0,
+                {
+                    "content": [],
+                    "reasoning": [],
+                    "refusal": [],
+                    "tool_calls": {},
+                    "role": "assistant",
+                    "finish_reason": None,
+                },
+            )
             delta = choice.get("delta") or {}
-            role = delta.get("role") or role
+            state["role"] = delta.get("role") or state["role"]
             if delta.get("content"):
-                content_parts.append(delta["content"])
+                state["content"].append(delta["content"])
             if delta.get("refusal"):
-                refusal_parts.append(delta["refusal"])
+                state["refusal"].append(delta["refusal"])
             reasoning = delta.get("reasoning_content") or delta.get("reasoning")
             if reasoning:
-                reasoning_parts.append(reasoning)
+                state["reasoning"].append(reasoning)
             for tc in delta.get("tool_calls") or []:
-                slot = tool_calls.setdefault(
+                slot = state["tool_calls"].setdefault(
                     tc.get("index", 0), {"id": None, "type": "function", "function": {"name": "", "arguments": ""}}
                 )
                 if tc.get("id"):
@@ -1471,21 +1476,21 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
                 if fn.get("arguments"):
                     slot["function"]["arguments"] += fn["arguments"]
             if choice.get("finish_reason"):
-                finish_reason = choice["finish_reason"]
-    if not saw_choice:
+                state["finish_reason"] = choice["finish_reason"]
+    if not choices:
         return None
-    message: dict[str, Any] = {"role": role, "content": "".join(content_parts) or None}
-    if reasoning_parts:
-        message["reasoning_content"] = "".join(reasoning_parts)
-    if refusal_parts:
-        message["refusal"] = "".join(refusal_parts)
-    if tool_calls:
-        message["tool_calls"] = [tool_calls[i] for i in sorted(tool_calls)]
-    result: dict[str, Any] = {
-        "object": "chat.completion",
-        "model": model,
-        "choices": [{"index": 0, "message": message, "finish_reason": finish_reason}],
-    }
+    rebuilt_choices = []
+    for index in sorted(choices):
+        state = choices[index]
+        message: dict[str, Any] = {"role": state["role"], "content": "".join(state["content"]) or None}
+        if state["reasoning"]:
+            message["reasoning_content"] = "".join(state["reasoning"])
+        if state["refusal"]:
+            message["refusal"] = "".join(state["refusal"])
+        if state["tool_calls"]:
+            message["tool_calls"] = [state["tool_calls"][i] for i in sorted(state["tool_calls"])]
+        rebuilt_choices.append({"index": index, "message": message, "finish_reason": state["finish_reason"]})
+    result: dict[str, Any] = {"object": "chat.completion", "model": model, "choices": rebuilt_choices}
     if response_id is not None:
         result["id"] = response_id
     if usage:
