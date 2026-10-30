@@ -27,7 +27,6 @@ from omegaconf import OmegaConf
 import nemo_gym.rollout_collection as collection
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.episode import EpisodeId
-from nemo_gym.episode_types import EpisodeFailure
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper, _CompletedRollout
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_records import (
@@ -39,6 +38,7 @@ from nemo_gym.rollout_records import (
 )
 from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
 from nemo_gym.rollout_store import RolloutStore
+from nemo_gym.server_runtime.episode_types import EpisodeFailure
 from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, http_error, install_fake_server_client
 
 

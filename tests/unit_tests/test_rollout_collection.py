@@ -314,7 +314,7 @@ _JUDGE_429_REPORT = {
         _JUDGE_EVENT_ID: {
             "event_id": _JUDGE_EVENT_ID,
             "boundary": "resources_server",
-            "exception_type": "nemo_gym.judge.JudgeCallFailed",
+            "exception_type": "nemo_gym.verification.judge.JudgeCallFailed",
             "failure_reason": _JUDGE_429_ERROR,
             "failure_kind": "judge_failed",
             "operation": "judge.request",

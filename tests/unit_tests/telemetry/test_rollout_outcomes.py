@@ -374,10 +374,10 @@ async def test_custom_typed_dispatcher_keeps_labels_without_routing_diagnostics(
     import asyncio
 
     from nemo_gym.core.episode import EpisodeId
-    from nemo_gym.episode_types import EpisodeFailure
     from nemo_gym.rollout_outcomes import RolloutFailureRecord
     from nemo_gym.rollout_records import logical_rollout_id
     from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
     _rollout_group_only(monkeypatch)
     install_fake_server_client(monkeypatch, AsyncMock())
