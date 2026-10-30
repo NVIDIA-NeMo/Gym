@@ -34,9 +34,9 @@ from nemo_gym.core import (
     current_rollout_id,
     rollout_context,
 )
-from nemo_gym.judge import judge_failsafe
 from nemo_gym.reward_profile import RewardProfiler
 from nemo_gym.task_data import TaskDataValidator, load_task_data_schema
+from nemo_gym.verification import judge_failsafe
 from resources_servers.genrm_compare.tests.support import request_with_session
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import collected_comparisons, member
 

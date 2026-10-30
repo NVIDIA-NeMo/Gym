@@ -24,6 +24,7 @@ from pytest import approx, fixture, mark, raises, skip
 from sympy import sympify
 
 from nemo_gym.base_resources_server import ReverifyMode
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponse,
@@ -34,9 +35,8 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
-from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.telemetry.resources_operations import ResourcesOperation
+from nemo_gym.verification import JudgeError
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,

@@ -44,6 +44,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import SESSION_ID_KEY, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -61,15 +62,6 @@ from nemo_gym.core import (
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ContextCompactionObservation,
-    ObservationGap,
-    SandboxObservation,
-    ToolCallObservation,
-    TrajectoryRecord,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -85,7 +77,15 @@ from nemo_gym.sandbox.agent_tools import (
     seed_mcp_servers,
     verify_agent_response,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, raise_for_status
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+    TrajectoryRecord,
+)
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.opencode_agent.observability import (
     append_opencode_turns,

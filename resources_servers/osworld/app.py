@@ -12,7 +12,7 @@ from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
 from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
     OSWorldCloseResponse,

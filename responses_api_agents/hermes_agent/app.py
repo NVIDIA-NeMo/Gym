@@ -46,6 +46,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import (
     AGENT_INVALID_OUTPUT,
@@ -67,7 +68,15 @@ from nemo_gym.core import (
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -76,15 +85,6 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import (
-    AsyncSandbox,
-    DirectSandboxConnection,
-    SandboxSpec,
-    create_provider,
-    resolve_provider_config,
-)
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.hermes_agent.model_kwargs import _model_api_kwargs, install_summary_compat
 from responses_api_agents.hermes_agent.observability import HermesAgentObserver, normalize_hermes_messages
 from responses_api_agents.hermes_agent.sandbox import DEFAULT_UV_CACHE_DIR, HarnessProcessInfo, HermesSandboxSession

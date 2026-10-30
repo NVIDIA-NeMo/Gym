@@ -12,8 +12,8 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest, ReverifyMode
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.partner_if.swe_app import SWEIFResourcesServer
 
@@ -264,7 +264,7 @@ async def test_reverify_cannot_run_the_swe_verification_again():
 
 
 async def test_the_verifier_fixture_grades_its_cases_without_a_judge_or_a_sandbox():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification import exercise_verifier_fixture
     from resources_servers.partner_if.swe_app import VERIFIER_FIXTURE
 
     with patch(JUDGE, new_callable=AsyncMock) as judge, patch(SCALE_SWE_VERIFY, AsyncMock()) as verify:

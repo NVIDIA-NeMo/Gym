@@ -8,7 +8,7 @@ from pathlib import Path
 import pytest
 from pydantic import BaseModel
 
-from nemo_gym.verifier_fixture import (
+from nemo_gym.verification.verifier_fixture import (
     VerifierFixture,
     VerifierFixtureError,
     exercise_verifier_fixture,

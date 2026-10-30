@@ -32,9 +32,10 @@ from fastapi import FastAPI, Request
 from fastapi.responses import JSONResponse, Response
 from omegaconf import OmegaConf
 
-import nemo_gym.server_utils as http
+import nemo_gym.client.http_client as http
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.base_resources_server import BaseVerifyResponse
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.reward_profile import RewardProfiler
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
@@ -77,7 +78,7 @@ async def services(config, monkeypatch):
     # Each test owns the loop and the global client; restore any enclosing fixture.
     monkeypatch.setattr(http, "_GLOBAL_AIOHTTP_CLIENT", None)
     session = http.set_global_aiohttp_client(http.GlobalAIOHTTPAsyncClientConfig())
-    client = http.ServerClient.model_construct(
+    client = ServerClient.model_construct(
         global_config_dict=OmegaConf.create(
             {
                 "agent": {"responses_api_agents": {"simple_agent": {}}},

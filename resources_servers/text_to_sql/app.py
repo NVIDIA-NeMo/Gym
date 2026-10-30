@@ -41,7 +41,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.text_to_sql.prompts import SQL_JUDGE_PROMPT_TEMPLATE, SQL_JUDGE_SYSTEM_MESSAGE
 
 

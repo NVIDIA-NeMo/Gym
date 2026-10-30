@@ -28,6 +28,7 @@ from app import (
 )
 from util import EmptyPolicyResponseError, JudgeCallError, JudgeOutputError
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -35,7 +36,6 @@ from nemo_gym.core import (
     NeMoGymChoice,
     NeMoGymResponse,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 ROOT = Path(__file__).resolve().parents[1]

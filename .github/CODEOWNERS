@@ -59,7 +59,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/hf_utils.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/prompt.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/reward_profile.py @nvidia-nemo/gym_env_benchmarks
-# suggest: /nemo_gym/judge.py @nvidia-nemo/gym_env_benchmarks
+# suggest: /nemo_gym/verification/judge.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/skills.py @nvidia-nemo/gym_env_benchmarks
 # suggest: /nemo_gym/rollout_reverification.py @nvidia-nemo/gym_env_benchmarks
 
@@ -76,7 +76,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/agent_registry.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollout_collection.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/profiling.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/telemetry/profiling.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/config/server_metadata.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/server_status.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/train_data_utils.py @nvidia-nemo/gym_core
@@ -89,7 +89,7 @@ uv.lock @nvidia-nemo/automation
 # suggest: /nemo_gym/mcp_auto_exposure.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/orchestration/ @nvidia-nemo/gym_core
 # suggest: /nemo_gym/rollout_correlation.py @nvidia-nemo/gym_core
-# suggest: /nemo_gym/rollout_observability.py @nvidia-nemo/gym_core
+# suggest: /nemo_gym/trajectory/trajectory_record.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/utils/decorators.py @nvidia-nemo/gym_core
 # suggest: /nemo_gym/utils/path_utils.py @nvidia-nemo/gym_core
 # suggest: /tests/ @nvidia-nemo/gym_core

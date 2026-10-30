@@ -12,8 +12,3 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Helpers that resources servers share for verifying submissions.
-
-sandbox_verification grades a submission in a fresh, single-use sandbox. It uses only the
-provider-neutral API; core sandbox APIs and providers live in :mod:`nemo_gym.sandbox`.
-"""

@@ -646,7 +646,7 @@ def _resources_server_app(module_name: str) -> str:
             SimpleResourcesServer,
         )
         from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-        from nemo_gym.verifier_fixture import VerifierFixture
+        from nemo_gym.verification import VerifierFixture
 
 
         class {class_name}ResourcesServerConfig(BaseResourcesServerConfig):
@@ -689,7 +689,7 @@ def _resources_server_test() -> str:
         """\
         import asyncio
 
-        from nemo_gym.verifier_fixture import exercise_verifier_fixture
+        from nemo_gym.verification import exercise_verifier_fixture
 
         from ..app import VERIFIER_FIXTURE
 

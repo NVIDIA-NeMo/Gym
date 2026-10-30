@@ -26,7 +26,7 @@ shared by two opposite-direction consumers:
   and ``anthropic_response_to_sse`` (synthesize Anthropic SSE from a complete response).
 
 The converter is **transport-free and SDK-free**: pure dict/Pydantic in, pure dict/Pydantic
-out. All HTTP stays in the servers via ``nemo_gym.server_utils.request()`` (the ``anthropic``
+out. All HTTP stays in the servers via ``nemo_gym.client.http_client.request()`` (the ``anthropic``
 SDK is avoided because it uses httpx, whose O(n^2) connection pooling hangs at high
 concurrency).
 

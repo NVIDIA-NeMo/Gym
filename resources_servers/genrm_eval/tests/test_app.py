@@ -10,7 +10,7 @@ import pytest
 import tiktoken
 
 from nemo_gym.base_resources_server import AggregateMetricsRequest
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.genrm_eval.app import GenRMEvalConfig, GenRMEvalResourcesServer, GenRMEvalVerifyRequest
 
 

@@ -31,12 +31,13 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.core import MODEL_TRANSPORT_ERROR, EpisodeId, NeMoGymResponse, TaskId, current_rollout_id
 from nemo_gym.episode_types import MaterializedTask
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
+from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
 
 class _Cookie:
@@ -1598,8 +1599,8 @@ async def test_verifier_evidence_reaches_collector_through_result_or_failure(out
     from fastapi.testclient import TestClient
 
     from nemo_gym.base_resources_server import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
-    from nemo_gym.judge import JudgeError
     from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+    from nemo_gym.verification import JudgeError
 
     class Resources(SimpleResourcesServer):
         async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:

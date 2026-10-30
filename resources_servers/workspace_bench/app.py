@@ -25,8 +25,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.judge import JudgeError
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -35,8 +35,8 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import JudgeError
 from resources_servers.workspace_bench.dataset import resolve_task_path
 
 

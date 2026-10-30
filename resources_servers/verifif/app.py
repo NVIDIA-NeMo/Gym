@@ -41,8 +41,8 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.verification import JudgeError
 
 
 # Per-request collector for judge failures. A ContextVar is shared by reference
@@ -334,7 +334,7 @@ class TuringVIFResourcesServer(SimpleResourcesServer):
             api_key = self.config.judge_api_key or getattr(self.config, "policy_api_key", "")
 
             if self.config.judge_server_name:
-                from nemo_gym.server_utils import get_server_url
+                from nemo_gym.client import get_server_url
 
                 base_url = get_server_url(self.config.judge_server_name) + "/v1"
             else:

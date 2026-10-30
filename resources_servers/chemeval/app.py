@@ -21,8 +21,7 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.chemeval.english_judge import build_judge_messages, parse_judge_verdict
 from resources_servers.chemeval.loader import load_grader
 from resources_servers.chemeval.task_data import TaskData
