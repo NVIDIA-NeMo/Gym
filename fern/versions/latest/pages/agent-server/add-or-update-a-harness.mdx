@@ -50,7 +50,7 @@ An adapter that stops at Evaluation returns no invocation or turn records, so it
 An adapter supplies the knowledge that is specific to the harness or framework:
 
 1. **Install or load the agent.** For example, a framework adapter lists the framework in its `requirements.txt`, while Pi and Codex install a pinned runtime into the task sandbox at seed.
-2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, Pi starts its CLI through the shared `harness_runner.sh`, and Codex starts its CLI from its own `sandbox_runner.py`, which also runs a sandbox-local retry proxy for model requests.
+2. **Configure and invoke it.** Build the harness configuration from the adapter configuration and the request, then call the SDK or start the CLI. For example, Hermes writes a `config.yaml`, Pi starts its CLI through the shared `harness_runner.sh`, and Codex starts its CLI through the same runner with a small Node launcher, `sandbox_launcher.mjs`, that also runs a sandbox-local retry proxy for model requests.
 3. **Map the harness's inputs, results, and traces to Gym.** Convert the request into the harness's input, the harness's output into a `NeMoGymResponse`, and its model and tool activity into an `AgentObservationBundle`.
 4. **Map Gym connections into the harness's own configuration.** Set the rollout-prefixed Model Server URL as the harness's model base URL, add tool grants to its tool configuration, and run it in `SandboxAccess.workdir`. For example, Hermes adds each MCP grant to the `mcp_servers` section of its configuration.
 
@@ -345,7 +345,7 @@ The [`nemo_gym/agent_utils`](https://github.com/NVIDIA-NeMo/Gym/tree/main/nemo_g
 
 ### Code layout
 
-Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI. A harness that is itself a Python program runs an adapter-specific `sandbox_runner.py` shim with a Python runtime that the Agent Server builds and uploads with `SandboxPythonRuntime`, as Hermes and Stirrup do. `hermes_sandboxed_agent` is being deprecated; use `hermes_agent` for new development and as the integration reference. One adapter still depends on Python inside the sandbox, and that path is being removed rather than copied: Codex runs its shim on the task image's Python 3.8 or newer.
+Organize a new adapter under `responses_api_agents/<harness>/`. The adapter's `sandbox.py` runs on the Agent Server. Inside the sandbox, the shared `harness_runner.sh` starts the harness CLI. A harness that is itself a Python program runs an adapter-specific `sandbox_runner.py` shim with a Python runtime that the Agent Server builds and uploads with `SandboxPythonRuntime`, as Hermes and Stirrup do. `hermes_sandboxed_agent` is being deprecated; use `hermes_agent` for new development and as the integration reference.
 
 | Adapter file | Responsibility |
 | --- | --- |
@@ -433,7 +433,7 @@ Keep harness-specific response parsing and model and tool behavior in the adapte
 
 **1. Define the session state.** Subclass `AgentSessionState` and compose a `SandboxSession`. Implement two hooks:
 
-- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed. A CLI harness runs through the shared bash runner, whose name never mentions python. `stdlib_runner=True` exists only for Codex, whose standard-library runner still runs on the task image's Python: the runner then runs as `bin/gym-runner`, so a `pkill -f python3` in the task cannot stop it. Do not use it in a new adapter; it goes away once Codex no longer needs the task image's Python.
+- `stage_activation` uploads the activation input and returns `SandboxCommand(argv=...)`. Install the runtime earlier, during seed. A CLI harness runs through the shared bash runner, whose name never mentions python, so a `pkill -f python3` in the task cannot stop it. `stdlib_runner=True` remains temporarily for existing standard-library Python shims and runs them through `bin/gym-runner`. No built-in adapter uses it after the Codex migration; do not use it in a new adapter.
 - `collect` copies artifacts to the Agent Server after harness termination is confirmed, including partial output from interrupted runs. It may run a bounded snapshot command, but it must not restart the harness. Bound the size of what it downloads: trim large logs inside the sandbox first and keep the tail with a truncation marker, for example the last 1 MiB of a runner log.
 
 ```python
@@ -719,7 +719,7 @@ The supervisor first leaves the provider's process group, so a provider that kil
 - every process that descends from the harness, from a member of its group, or from another reached process, such as tool commands started in their own sessions;
 - every process that inherited the marker, such as a service that a tool daemonizes during the stop, unless it had already left the harness when the stop began, or descends from such a process.
 
-The supervisor scans `/proc` when the stop begins and on every polling round until nothing it reached still runs. Two kinds of process are not reached: processes that had left the harness when the stop began, which are left for the sandbox owner, and a process that leaves the harness between two scans after dropping the marker from its environment. Keep `NEMO_GYM_SUPERVISOR` in the environment of tool commands; the Codex runner passes it through its environment allowlist.
+The supervisor scans `/proc` when the stop begins and on every polling round until nothing it reached still runs. Two kinds of process are not reached: processes that had left the harness when the stop began, which are left for the sandbox owner, and a process that leaves the harness between two scans after dropping the marker from its environment. Keep `NEMO_GYM_SUPERVISOR` in the environment of tool commands; the Codex launcher passes it through its environment allowlist.
 
 Shell-tool commands can run in their own sessions, so a harness-group kill alone may not reach them; a forced stop does. A background process left by a completed tool, even a plain `server &`, can then survive as a task service. Detachment depends on the harness and launch path: OpenClaw's [pinned child adapter](https://github.com/openclaw/openclaw/blob/e085fa1a3ffd32d0ea6917e1e6fb4ecbffbb77d2/src/process/supervisor/adapters/child.ts#L50-L100) disables detachment when `OPENCLAW_SERVICE_MARKER` is nonblank and can fall back to spawning with `detached: false`. Commands on those paths can remain in the harness group and stop at close.
 

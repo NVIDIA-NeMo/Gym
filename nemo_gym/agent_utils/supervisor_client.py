@@ -22,7 +22,7 @@ output.log            Launch shell         Captures supervisor and harness diagn
 Agents in the task sandbox often clean up with ``pkill -f python3``, ``pkill python3`` or
 ``killall python3``. These must not stop the supervisor or a runner, which would end the
 harness. The supervisor and the shared harness runner are bash scripts, so their names
-never mention python. A standard-library Python runner that opts in (Codex) runs under an
+never mention python. A standard-library Python runner that opts in runs under an
 interpreter link with a neutral name, from a file without a ``.py`` suffix, so neither its
 process name nor the supervisor's command line mentions python; a harness argv that keeps
 its own python (Hermes, Stirrup) still appears in the supervisor's command line. Gym stops

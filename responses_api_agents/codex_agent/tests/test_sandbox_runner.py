@@ -1,7 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Exercise the real Linux supervisor, not a mocked cleanup acknowledgement."""
+"""Run Codex's staged activation through the real bash runner, Node launcher and supervisor."""
 
+import asyncio
 import json
 import os
 import shutil
@@ -13,48 +14,59 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
-from responses_api_agents.codex_agent import sandbox_runner
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, RAISE_OOM_SCORE_ADJ, CodexSandboxSession
+from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision is required")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("node") is None, reason="Linux process supervision and Node are required"
+)
 
 
-def launch(tmp_path, code, timeout=3, python=sys.executable, **request_fields):
-    request = {
+class LocalFiles:
+    async def upload(self, source, destination):
+        shutil.copyfile(source, destination)
+
+
+def stage(tmp_path, command, *, env=None, timeout=3, model_base_url=None, **activation_fields):
+    """Stage ``command`` as the Codex CLI exactly as an activation does, and return the runner argv."""
+    runtime = tmp_path / "runtime"
+    (runtime / "node/bin").mkdir(parents=True)
+    (runtime / "node/bin/node").symlink_to(shutil.which("node"))
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, tmp_path / HARNESS_RUNNER_FILE)
+    shutil.copyfile(Path(__file__).parents[1] / LAUNCHER_FILE, tmp_path / LAUNCHER_FILE)
+    state = CodexSandboxSession(
+        request=seed(),
+        session=SandboxSession(
+            sandbox=LocalFiles(), session_dir=str(tmp_path), workdir=str(tmp_path), harness="Codex"
+        ),
+        runtime=str(runtime),
+    )
+    payload = {
         "directory": str(tmp_path),
-        "command": [python, "-c", code],
-        "cwd": str(tmp_path),
-        "env": {},
+        "command": command,
+        "model_base_url": model_base_url,
+        "invocation_id": "invocation",
         "timeout": timeout,
-        "cleanup_timeout": 2,
         "prompt": "task input",
-        **request_fields,
+        "cwd": str(tmp_path),
+        "env": env or {},
+        **activation_fields,
     }
-    path = tmp_path / "input.json"
-    path.write_text(json.dumps(request))
-    process = subprocess.Popen(
-        [
-            "bash",
-            str(SUPERVISOR_SCRIPT),
-            "--timeout",
-            str(timeout),
-            "--cleanup-timeout",
-            "0.5",
-            "--stop-file",
-            str(tmp_path / "stop.request"),
-            "--receipt",
-            str(tmp_path / "cleanup.json"),
-            "--",
-            python,
-            "-I",
-            sandbox_runner.__file__,
-            str(path),
-        ],
+    return asyncio.run(state.stage_activation(payload)).argv
+
+
+def launch(tmp_path, command, timeout=3, **options):
+    argv = stage(tmp_path, command, timeout=timeout, **options)
+    return subprocess.Popen(
+        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", str(timeout), "--cleanup-timeout", "0.5"]
+        + ["--stop-file", str(tmp_path / "stop.request"), "--receipt", str(tmp_path / "cleanup.json")]
+        + ["--", *argv],
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
     )
-    return process
 
 
 def result(tmp_path, process):
@@ -68,38 +80,52 @@ def result(tmp_path, process):
             process.wait()
 
 
-def test_capture_and_stdin(tmp_path):
-    process = launch(tmp_path, "import json,sys; print(json.dumps({'type':'test', 'prompt':sys.stdin.read()}))")
+def wait_for(path):
+    for _ in range(500):
+        if path.exists():
+            return
+        time.sleep(0.01)
+    raise AssertionError(f"{path} never appeared")
+
+
+def test_capture_stdin_and_environment(tmp_path, monkeypatch):
+    monkeypatch.setenv("SANDBOX_PROVIDER_API_KEY", "must-not-inherit")
+    # Would stop Node from starting the launcher at all.
+    monkeypatch.setenv("NODE_OPTIONS", "--require /nonexistent/preload.js")
+    task_environment = {"HOME": str(tmp_path / "task-home"), "XDG_DATA_HOME": str(tmp_path / "task-data")}
+    for key, value in task_environment.items():
+        monkeypatch.setenv(key, value)
+    script = (
+        'printf \'{"prompt": "%s", "key": "%s", "node_options": "%s", "home": "%s", "data": "%s", "codex": "%s"}\\n\' '
+        '"$(cat)" "${SANDBOX_PROVIDER_API_KEY-unset}" "${NODE_OPTIONS-unset}" "$HOME" "$XDG_DATA_HOME" "$CODEX_HOME"'
+    )
+    process = launch(tmp_path, ["bash", "-c", script], env={"CODEX_HOME": "/codex-home"})
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
-    assert summary["return_code"] == 0
+    assert summary["return_code"] == 0, (tmp_path / "stderr.log").read_text()
     recorded_at, event = json.loads((tmp_path / "events.jsonl").read_text())
     assert recorded_at > 0
-    assert event["prompt"] == "task input"
+    assert event == {
+        "prompt": "task input",
+        "key": "unset",
+        "node_options": "unset",
+        "home": task_environment["HOME"],
+        "data": task_environment["XDG_DATA_HOME"],
+        "codex": "/codex-home",
+    }
+    assert set(json.loads((tmp_path / "runtime.json").read_text())) == {"hostname", "pid"}
 
 
 @pytest.mark.parametrize("ending", ["natural", "timeout", "cancel"])
 def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
     try:
-        # A completed tool leaves its detached service adopted before close.
-        tool = (
-            "import pathlib,subprocess,sys; "
-            "p=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],"
-            "start_new_session=True,stdout=subprocess.DEVNULL,stderr=subprocess.DEVNULL); "
-            "pathlib.Path('child.pid').write_text(str(p.pid))"
-        )
-        code = (
-            "import subprocess,sys,time,pathlib; "
-            f"subprocess.run([sys.executable,'-c',{tool!r}],check=True); "
-            "pathlib.Path('ready').touch(); " + ("time.sleep(60)" if ending != "natural" else "pass")
-        )
-        process = launch(tmp_path, code, timeout=1 if ending == "timeout" else 3)
+        # A completed tool leaves its detached service, which no longer descends from Codex at the stop.
+        tool = "setsid sleep 60 </dev/null >/dev/null 2>&1 & echo $! > child.pid"
+        script = f"bash -c '{tool}'; touch ready; " + ("sleep 60" if ending != "natural" else "true")
+        process = launch(tmp_path, ["bash", "-c", script])
         if ending == "cancel":
-            for _ in range(200):
-                if (tmp_path / "ready").exists():
-                    break
-                time.sleep(0.01)
-            process.send_signal(signal.SIGTERM)
+            wait_for(tmp_path / "ready")
+            (tmp_path / "stop.request").touch()
         summary = result(tmp_path, process)
         assert summary["cleanup_confirmed"] is True
         assert summary["timed_out"] is (ending == "timeout")
@@ -113,113 +139,81 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
                 pass
 
 
-@pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
-def test_prefer_for_oom_kill_raises_the_score_and_never_lowers_it(tmp_path, start, expected):
-    path = tmp_path / "oom_score_adj"
-    path.write_text(start + "\n")
-    assert sandbox_runner.prefer_for_oom_kill(str(path)) == f"{start} -> {expected}"
-    assert path.read_text() == expected
-    assert sandbox_runner.prefer_for_oom_kill(str(tmp_path / "missing")).startswith("unchanged")
-
-
-@pytest.mark.parametrize("raise_score", [False, True])
-def test_codex_and_its_tools_inherit_the_raised_oom_score(tmp_path, raise_score):
-    start = int(open("/proc/self/oom_score_adj").read())
-    # Stands in for Codex: a tool it starts reports the score it inherited.
-    code = (
-        "import subprocess,sys; subprocess.run([sys.executable,'-c',"
-        "\"import pathlib; pathlib.Path('score').write_text(open('/proc/self/oom_score_adj').read())\"],check=True)"
-    )
-    process = launch(tmp_path, code, raise_oom_score_adj=raise_score)
-    summary = result(tmp_path, process)
-    assert summary["return_code"] == 0
-    assert int((tmp_path / "score").read_text()) == ((0 if start < 0 else 1000) if raise_score else start)
-
-
-def test_spawn_error_is_not_success(tmp_path):
-    process = launch(tmp_path, "raise RuntimeError('failed')")
+def test_stop_reaches_codex_through_the_launcher(tmp_path):
+    script = 'trap \'echo "{\\"type\\": \\"stopped\\"}"; exit 0\' TERM; touch ready; while :; do sleep 0.05; done'
+    process = launch(tmp_path, ["bash", "-c", script])
+    wait_for(tmp_path / "ready")
+    (tmp_path / "stop.request").touch()
     summary = result(tmp_path, process)
     assert summary["cleanup_confirmed"] is True
-    assert summary["return_code"] != 0
+    # Codex handled TERM and exited by itself, so its last events are kept.
+    assert summary["return_code"] == 0
+    assert json.loads((tmp_path / "events.jsonl").read_text())[1] == {"type": "stopped"}
+
+
+@pytest.mark.parametrize(
+    ("command", "status"),
+    [
+        (["bash", "-c", "exit 7"], 7),
+        (["bash", "-c", "kill -TERM $$"], 128 + signal.SIGTERM),
+        (["/missing/codex"], 127),
+    ],
+)
+def test_codex_status_reaches_the_receipt_as_a_shell_status(tmp_path, command, status):
+    summary = result(tmp_path, launch(tmp_path, command))
+    assert summary["cleanup_confirmed"] is True
+    assert summary["return_code"] == status
 
 
 def test_stop_marker_prevents_process_launch(tmp_path):
     (tmp_path / "stop.request").touch()
-    process = launch(tmp_path, "open('should-not-exist', 'w').close()")
-    summary = result(tmp_path, process)
+    summary = result(tmp_path, launch(tmp_path, ["bash", "-c", "touch should-not-exist"]))
     assert summary["cleanup_confirmed"] is True
-    assert summary["return_code"] != 0
+    assert summary["return_code"] is None
     assert not (tmp_path / "should-not-exist").exists()
-
-
-def test_runtime_environment_does_not_inherit_provider_credentials(tmp_path, monkeypatch):
-    monkeypatch.setenv("SANDBOX_PROVIDER_API_KEY", "must-not-inherit")
-    task_environment = {"HOME": str(tmp_path / "task-home"), "XDG_DATA_HOME": str(tmp_path / "task-data")}
-    for key, value in task_environment.items():
-        monkeypatch.setenv(key, value)
-    process = launch(
-        tmp_path,
-        "import os,json; print(json.dumps({key:os.environ.get(key) "
-        "for key in ('SANDBOX_PROVIDER_API_KEY', 'HOME', 'XDG_DATA_HOME')}))",
-    )
-    assert result(tmp_path, process)["cleanup_confirmed"]
-    _, event = json.loads((tmp_path / "events.jsonl").read_text())
-    assert event == {"SANDBOX_PROVIDER_API_KEY": None, **task_environment}
 
 
 def test_inherited_environment_is_opt_in_and_keeps_explicit_values(tmp_path, monkeypatch):
     monkeypatch.setenv("TASK_VARIABLE", "from-task-image")
     monkeypatch.setenv("HOME", "/root")
-    code = (
-        "import os,json; print(json.dumps({key: os.environ.get(key) "
-        "for key in ('TASK_VARIABLE', 'HOME', 'CODEX_HOME', 'PATH')}))"
+    monkeypatch.setenv("NODE_OPTIONS", "--max-old-space-size=2048")
+    script = (
+        'printf \'{"task": "%s", "home": "%s", "codex": "%s", "path": "%s", "node_options": "%s"}\\n\' '
+        '"$TASK_VARIABLE" "$HOME" "$CODEX_HOME" "$PATH" "$NODE_OPTIONS"'
     )
-    process = launch(tmp_path, code, inherit_env=True, env={"CODEX_HOME": "/tmp/session/.codex"})
+    process = launch(tmp_path, ["bash", "-c", script], inherit_env=True, env={"CODEX_HOME": "/tmp/session/.codex"})
     assert result(tmp_path, process)["cleanup_confirmed"]
     _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    # The task's whole environment, Node options included, as a plain codex exec in the task sees it.
     assert event == {
-        "TASK_VARIABLE": "from-task-image",
-        "HOME": "/root",
-        "CODEX_HOME": "/tmp/session/.codex",
-        "PATH": os.environ["PATH"],
+        "task": "from-task-image",
+        "home": "/root",
+        "codex": "/tmp/session/.codex",
+        "path": os.environ["PATH"],
+        "node_options": "--max-old-space-size=2048",
     }
 
 
-@pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")
-def test_python38_worker_captures_output_and_preserves_task_children(tmp_path):
-    try:
-        code = (
-            "import json,pathlib,subprocess,sys; "
-            "child=subprocess.Popen([sys.executable,'-c','import time; time.sleep(60)'],start_new_session=True); "
-            "pathlib.Path('child.pid').write_text(str(child.pid)); "
-            "print(json.dumps({'prompt':sys.stdin.read()}))"
-        )
-        process = launch(tmp_path, code, python=shutil.which("python3.8"))
-        receipt = result(tmp_path, process)
-        assert receipt["cleanup_confirmed"] is True
-        assert receipt["return_code"] == 0
-        _, event = json.loads((tmp_path / "events.jsonl").read_text())
-        assert event["prompt"] == "task input"
-        pid = int((tmp_path / "child.pid").read_text())
-        assert Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0] != "Z"
-    finally:
-        if (tmp_path / "child.pid").exists():
-            try:
-                os.kill(int((tmp_path / "child.pid").read_text()), signal.SIGKILL)
-            except ProcessLookupError:
-                pass
-
-
-def test_snapshot_retains_native_session_before_cleanup(tmp_path):
-    sessions = tmp_path / "home/.codex/sessions/2026/10/19"
-    sessions.mkdir(parents=True)
-    records = '{"type":"response_item","payload":{"call_id":"native-call"}}\n'
-    (sessions / "session.jsonl").write_text(records)
-    (sessions / "second.jsonl").write_text(records)
-    subprocess.run(
-        [sys.executable, "-I", sandbox_runner.__file__, "--snapshot", str(tmp_path)],
-        check=True,
-        capture_output=True,
-        timeout=10,
+@pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
+def test_oom_score_setup_raises_the_score_and_never_lowers_it(tmp_path, start, expected):
+    path = tmp_path / "oom_score_adj"
+    path.write_text(start + "\n")
+    setup = RAISE_OOM_SCORE_ADJ.replace("/proc/self/oom_score_adj", str(path))
+    ran = subprocess.run(["bash", "-c", setup], capture_output=True, text=True, timeout=10)
+    assert (ran.returncode, ran.stderr) == (0, f"oom_score_adj: {start} -> {expected}\n")
+    assert path.read_text().strip() == expected
+    missing = subprocess.run(
+        ["bash", "-c", setup.replace(str(path), str(tmp_path / "missing"))], capture_output=True, text=True, timeout=10
     )
-    assert (tmp_path / "native_session.jsonl").read_text().splitlines() == records.splitlines() * 2
+    assert (missing.returncode, missing.stderr) == (0, "oom_score_adj: unchanged\n")
+
+
+@pytest.mark.parametrize("raise_score", [False, True])
+def test_codex_and_its_tools_inherit_the_raised_oom_score(tmp_path, raise_score):
+    start = int(Path("/proc/self/oom_score_adj").read_text())
+    # Stands in for Codex: a tool it starts reports the score it inherited.
+    process = launch(tmp_path, ["bash", "-c", "cat /proc/self/oom_score_adj >score"], raise_oom_score_adj=raise_score)
+    assert result(tmp_path, process)["return_code"] == 0
+    assert int((tmp_path / "score").read_text()) == ((0 if start < 0 else 1000) if raise_score else start)
+    # The runner reports the change in the supervisor's log, not in Codex's stderr.
+    assert "oom_score_adj:" not in (tmp_path / "stderr.log").read_text()

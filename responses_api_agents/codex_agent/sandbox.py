@@ -11,7 +11,12 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_RUNNER_FILE,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle
@@ -19,9 +24,27 @@ from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
+# Uploaded beside the runner; runs Codex behind the 429 forwarder on the runtime's Node.
+LAUNCHER_FILE = "sandbox_launcher.mjs"
 # The longest the optional session-rollout copy may take, and the part of the capture budget kept free after it.
 _ARCHIVE_TIMEOUT_S = 120.0
 _ARCHIVE_RESERVE_S = 1.0
+# Runner setup for raise_oom_score_adj: make the runner, and with it Codex and every tool, the memory-cgroup OOM
+# killer's preferred victims. Raise oom_score_adj to 1000, or to 0 when the sandbox starts it below zero (a
+# Guaranteed pod's -997), so the sandbox never becomes the node's first victim in a global OOM. Raising needs no
+# privilege; a failure leaves the score unchanged. The supervisor and the exec daemon keep the sandbox's own score.
+RAISE_OOM_SCORE_ADJ = """if read -r before 2>/dev/null </proc/self/oom_score_adj && [[ $before =~ ^-?[0-9]+$ ]]; then
+    after=1000
+    ((before < 0)) && after=0
+    if echo "$after" 2>/dev/null >/proc/self/oom_score_adj; then
+        echo "oom_score_adj: $before -> $after" >&2
+    else
+        echo "oom_score_adj: unchanged" >&2
+    fi
+else
+    echo "oom_score_adj: unchanged" >&2
+fi
+"""
 
 
 class HarnessProcessInfo(BaseModel):
@@ -30,7 +53,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -99,17 +121,27 @@ class CodexSandboxSession(AgentSessionState):
         )
 
     async def stage_activation(self, payload: dict[str, JsonValue]) -> SandboxCommand:
-        """Stage the invocation and return the Codex worker command."""
+        """Stage the invocation and return the runner command that starts the Codex launcher."""
+        directory = self.session.session_dir
         await self.upload_json("input.json", payload)
-        return SandboxCommand(
-            argv=[
-                "python3",
-                "-I",
-                f"{self.session.session_dir}/{RUNNER_FILE}",
-                f"{self.session.session_dir}/input.json",
-            ],
-            stdlib_runner=True,
-        )
+        await self.upload_text("prompt.txt", payload["prompt"])
+        params = {
+            "cwd": self.session.workdir,
+            "command": [f"{self.runtime}/node/bin/node", f"{directory}/{LAUNCHER_FILE}", f"{directory}/input.json"],
+            "stdin": f"{directory}/prompt.txt",
+            "stdout": f"{directory}/stdout.log",
+            "stderr": f"{directory}/stderr.log",
+            "events": f"{directory}/events.jsonl",
+        }
+        if not payload.get("inherit_env"):
+            # The launcher passes Codex an allowlisted environment; task Node options must not reach the launcher.
+            # A Codex given the task's whole environment sees them, as a plain codex exec in the task would.
+            params["unset_env"] = ["NODE_OPTIONS"]
+        if payload.get("raise_oom_score_adj"):
+            # The runner's stderr is the supervisor's output.log, which records the change.
+            params["setup"] = RAISE_OOM_SCORE_ADJ
+        await self.upload_text("params.sh", shell_assignments(params))
+        return SandboxCommand(argv=["bash", f"{directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"])
 
     async def copy_session_rollouts(self, deadline: float | None = None) -> None:
         """Copy Codex's session rollouts (CODEX_HOME/sessions) to logs_dir/sessions by ``deadline``
@@ -153,8 +185,15 @@ class CodexSandboxSession(AgentSessionState):
         self.runtime_info = parse_runtime_info(runtime_payload)
         try:
             snapshot = await self.session.sandbox.exec(
-                f"python3 -I {shlex.quote(f'{self.session.session_dir}/{RUNNER_FILE}')} "
-                f"--snapshot {shlex.quote(self.session.session_dir)}",
+                "NODE_OPTIONS= "
+                + shlex.join(
+                    [
+                        f"{self.runtime}/node/bin/node",
+                        f"{self.session.session_dir}/{LAUNCHER_FILE}",
+                        "--snapshot",
+                        self.session.session_dir,
+                    ]
+                ),
                 timeout_s=10,
             )
             if snapshot.return_code != 0 or snapshot.error_type:

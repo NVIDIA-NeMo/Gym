@@ -12,14 +12,15 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from responses_api_agents.codex_agent import sandbox_runner
-from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
 
 
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
+pytestmark = pytest.mark.skipif(
+    sys.platform != "linux" or shutil.which("node") is None, reason="Linux process supervision and Node required"
+)
 
 
 class ExecOnlySandbox:
@@ -77,7 +78,10 @@ def make_session(tmp_path):
         ),
         runtime=str(tmp_path / "runtime"),
     )
-    shutil.copyfile(sandbox_runner.__file__, directory / "sandbox_runner")
+    (tmp_path / "runtime/node/bin").mkdir(parents=True)
+    (tmp_path / "runtime/node/bin/node").symlink_to(shutil.which("node"))
+    shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
+    shutil.copyfile(Path(__file__).parents[1] / LAUNCHER_FILE, directory / LAUNCHER_FILE)
     return state, provider, workdir
 
 

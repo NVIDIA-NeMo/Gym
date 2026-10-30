@@ -81,9 +81,9 @@ direct HTTP grants are rejected. The task sandbox supplies isolation, so `sandbo
 `danger-full-access`. No Codex CLI is required on the agent-server host.
 With several agent workers, session routing sends each session's requests to the worker that seeded it.
 
-The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine with Python 3.8+.
-POSIX sh installs missing Python and Bash using apt-get or apk when running as root,
-before invoking the Bash runtime installer; otherwise the image must provide them.
+The installer accepts Linux x86_64/aarch64 glibc and x86_64 musl/Alpine images; the task image needs bash
+but no Python. POSIX sh installs a missing bash using apt-get or apk when running as root,
+before invoking the Bash runtime installer; otherwise the image must provide it.
 The pinned Node 22.19.0 build has no arm64 musl binary.
 Older Alpine images use a checksum-verified private C++ library for Node. Runtime files live
 under `/tmp/nemo-gym-codex-node-*`, and private `CODEX_HOME` configuration lives under
@@ -169,9 +169,9 @@ blocks verification. Missing evidence stays retryable; a final negative receipt 
 the borrowed connection without making the failed activation gradable. The borrowing
 agent never destroys the sandbox.
 Cleanup coordinates lifecycle; it is not a security boundary against hostile task code.
-The supervisor is a bash script, and the runner above Codex runs as `gym-runner` (a link to the
-sandbox's `python3`) from a file without a `.py` suffix, so a task agent's `pkill -f python3`,
-`pkill python3` or `killall python3` does not end Codex, as it would not under Harbor.
+The supervisor and the shared `harness_runner.sh` are bash scripts, and `sandbox_launcher.mjs` runs on
+the runtime's private Node, so a task agent's `pkill -f python3`, `pkill python3` or `killall python3`
+does not end Codex, as it would not under Harbor.
 
 Responses and close observations preserve text, reasoning, tool events, partial output,
 CLI aggregate usage, and sandbox hostname/PID/version. Wall-time and the pinned CLI's explicit
@@ -205,7 +205,7 @@ when the sandbox starts it below zero), so a memory-cgroup OOM kill picks agent 
 than the sandbox's exec daemon or the supervisor. Docker's equivalent daemon runs outside the
 container's memory cgroup. The runner records the change in the supervisor's `output.log`.
 
-Native session transcripts supply tool-call IDs and outcomes. The sandbox forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
+Native session transcripts supply tool-call IDs and outcomes. Codex disables its native HTTP 429 retries, so `sandbox_launcher.mjs` runs it behind a loopback forwarder on the runtime's Node that retries a 429 twice, honoring `Retry-After` up to 30 seconds. The forwarder retains request statuses and invocation correlation across retries; native cumulative usage supplements CLI totals when a failed turn omits them. Missing/default-zero cache and reasoning details remain unknown, with observation gaps.
 Compare CLI totals with captured model calls; do not interpret unavailable usage as zero.
 Known model-metadata/compaction warnings remain visible as gaps after clean completion or a gradable model/wall-time limit.
 

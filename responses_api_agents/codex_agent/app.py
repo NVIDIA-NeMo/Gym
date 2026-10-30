@@ -35,7 +35,7 @@ from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -76,7 +76,7 @@ from responses_api_agents.codex_agent.observability import (
     parse_codex_usage,
     read_codex_observations,
 )
-from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
+from responses_api_agents.codex_agent.sandbox import LAUNCHER_FILE, CodexSandboxSession
 from responses_api_agents.codex_agent.setup_codex import ensure_codex
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
@@ -171,24 +171,9 @@ def _terminal_model_error(
 
 
 def _sandbox_prepare_command(workdir: str, directory: str, runtime: str) -> str:
-    validate = """
-from pathlib import Path
-import sys
-workdir = Path(sys.argv[1]).resolve(strict=True)
-if not workdir.is_dir():
-    raise ValueError("Codex workdir must be an existing directory")
-# The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
-contains = workdir != Path("/")
-for value in sys.argv[2:]:
-    owned = Path(value).resolve()
-    if workdir == owned or (contains and workdir in owned.parents) or owned in workdir.parents:
-        raise ValueError("Codex task workdir and adapter paths must be disjoint after resolving symlinks")
-"""
-    # The task may provide neither the Python worker runtime nor the Bash installer runtime.
-    # This bootstrap must remain POSIX sh so Alpine can install Bash before using it.
+    # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "Codex in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -203,10 +188,28 @@ if [ "$#" -gt 0 ]; then
     fi
 fi
 """
-    return (
-        bootstrap + f"python3 -I -c {shlex.quote(validate)} {shlex.quote(workdir)} "
-        f"{shlex.quote(directory)} {shlex.quote(runtime)} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
-    )
+    # Positional parameters WORKDIR SESSION_DIR RUNTIME. Resolve symlinks on the sandbox filesystem, not the
+    # agent server's; an adapter path that does not exist yet resolves through its nearest existing ancestor.
+    validate = """
+[ -d "$1" ] || { echo "Codex workdir must be an existing directory: $1" >&2; exit 1; }
+workdir=$(cd "$1" && pwd -P) || exit 1
+# Both paths drop a trailing slash, so the root is empty.
+workdir=${workdir%/}
+shift
+for owned in "$@"; do
+    path=$owned rest=
+    until [ -d "${path:-/}" ]; do rest=/${path##*/}$rest path=${path%/*}; done
+    owned=$(cd "${path:-/}" && pwd -P) || exit 1
+    owned=${owned%/}$rest
+    overlap=
+    # The root holds every path: a task image without WORKDIR runs there, as Harbor starts it.
+    if [ -n "$workdir" ]; then case "$owned/" in "$workdir/"*) overlap=1 ;; esac; fi
+    case "$workdir/" in "$owned/"*) overlap=1 ;; esac
+    [ -z "$overlap" ] || { echo "Codex task workdir and adapter paths must be disjoint after resolving symlinks" >&2; exit 1; }
+done
+"""
+    check_paths = f"(set -- {shlex.join([workdir, directory, runtime])}{validate})"
+    return bootstrap + f"{check_paths} && mkdir -p {shlex.quote(directory + '/home/.codex')}"
 
 
 def _redact(text: str, values: list[str]) -> str:
@@ -870,9 +873,8 @@ class CodexAgent(SimpleResponsesAPIAgent):
                     f"Codex installer exited {installed.return_code}, command={install_command}, "
                     f"error_type={installed.error_type}; stdout={installed.stdout}; stderr={installed.stderr}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
-            # The runner loads the transport from beside itself under this name.
-            await sandbox.upload(Path(__file__).with_name("sandbox_transport.py"), f"{directory}/sandbox_transport.py")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
+            await sandbox.upload(Path(__file__).with_name(LAUNCHER_FILE), f"{directory}/{LAUNCHER_FILE}")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -1018,7 +1020,10 @@ class CodexAgent(SimpleResponsesAPIAgent):
             else:
                 LOG.warning("Codex event transcript unavailable after interrupted activation")
         events = []
-        for line in raw.splitlines():
+        # The runner copies event lines verbatim; JSON may hold U+2028 and similar inside a string.
+        for line in raw.split("\n"):
+            if not line.strip():
+                continue
             try:
                 observed_at, event = json.loads(line)
                 if isinstance(event, dict):
