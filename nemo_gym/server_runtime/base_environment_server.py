@@ -7,8 +7,8 @@ import asyncio
 import json
 import logging
 from abc import abstractmethod
-from collections.abc import Awaitable, Callable
-from contextlib import AbstractAsyncContextManager, nullcontext
+from collections.abc import AsyncIterator, Awaitable, Callable
+from contextlib import AbstractAsyncContextManager, asynccontextmanager, nullcontext
 from dataclasses import dataclass, field
 from time import perf_counter
 from typing import Any, ClassVar, Generic, Optional, TypeVar
@@ -637,12 +637,12 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
     Other Environment Servers grant the agent a Resources Server's tools; this one owns the tools, their state and
     verification.
 
-    ``run`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the episode
-    ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a Resources
-    Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode token
-    reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and each is
-    recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call that runs
-    longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
+    ``run_episode`` holds the episode's state, and ``serve_tools`` grants the agent the episode's tools until the
+    episode ends. A tool call is a separate request to ``POST /<tool name>`` at the server's root, as on a
+    Resources Server, with the episode token in the ``X-NeMo-Gym-Episode-Token`` header. A request with an episode
+    token reaches only the tools. Calls to one episode run one at a time, each under the episode's rollout, and
+    each is recorded in ``ServedTools.calls``. When the episode ends, a call still running is cancelled. A call
+    that runs longer than ``tool_call_timeout_seconds`` is cancelled and answered 504. A client that disconnects
     cancels its call, which is recorded.
 
     The tool route takes every one-segment ``POST`` path that the server does not route when ``setup_webserver``
@@ -654,11 +654,16 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
 
     The base refuses ``checkpoint_mode = "exported"``: a restored attempt has a new episode ID, and the agent's
     grant still names the old one.
+
+    When the server shuts down, it finishes the cleanups of every episode still running, such as stopping its
+    sandbox.
     """
 
     config: BaseEnvironmentServerWithToolsConfig
     _episode_tokens: Optional[EpisodeTokens] = None
     _open_episodes: Optional[dict[EpisodeId, _OpenEpisode]] = None
+    # Keyed by id(): two attempts of one episode can run at once without checkpointing.
+    _running_cleanups: Optional[dict[int, CleanupContext]] = None
     _reserved_tool_names: frozenset[str] = frozenset()
 
     def __init_subclass__(cls, **kwargs: Any) -> None:
@@ -673,6 +678,7 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
         super().model_post_init(context)
         self._episode_tokens = EpisodeTokens(episode_token_secret())
         self._open_episodes = {}
+        self._running_cleanups = {}
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -685,11 +691,47 @@ class BaseEnvironmentServerWithTools(BaseEnvironmentServer[EpisodeRequestT, Epis
             route.path.strip("/").split("/")[0] for route in app.routes if getattr(route, "path", "/") != "/"
         )
         app.post("/{tool_name}")(self._tool_call_endpoint)
+
+        parent_lifespan = app.router.lifespan_context
+
+        @asynccontextmanager
+        async def lifespan(app: FastAPI) -> AsyncIterator[Any]:
+            try:
+                async with parent_lifespan(app) as state:
+                    yield state
+            finally:
+                await self.finish_running_cleanups()
+
+        app.router.lifespan_context = lifespan
         return app
 
     def _is_tool_path(self, path: str) -> bool:
         segments = path.strip("/").split("/")
         return len(segments) == 1 and segments[0] not in self._reserved_tool_names
+
+    async def run(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
+        key = id(cleanup)
+        self._running_cleanups[key] = cleanup
+
+        async def forget() -> None:
+            self._running_cleanups.pop(key, None)
+
+        # Registered first, so it runs last: the episode stays tracked until each of its cleanups has finished.
+        cleanup.register_cleanup("shutdown tracking", forget)
+        return await self.run_episode(request, cleanup)
+
+    @abstractmethod
+    async def run_episode(self, request: EpisodeRequestT, cleanup: CleanupContext) -> EpisodeResponseT:
+        """Run one episode, as ``BaseEnvironmentServer.run`` does. Register each resource's release in ``cleanup``."""
+
+    async def finish_running_cleanups(self) -> None:
+        """Finish the cleanups of every episode still running; the server runs this when it shuts down.
+
+        Shutdown cancels the running ``/run`` requests and does not wait for them, so a second cancellation can
+        interrupt an episode's cleanup partway. Cleanups are idempotent, so this runs each one that has not
+        finished, each within ``cleanup_timeout_seconds``.
+        """
+        await asyncio.gather(*(cleanup.aclose() for cleanup in list(self._running_cleanups.values())))
 
     def multiple_workers_unsupported_reason(self) -> Optional[str]:
         return "a tool call reaches whichever worker accepts it, and only the worker that runs the episode holds it"
