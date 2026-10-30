@@ -191,6 +191,20 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
             timeout,
             use_agent_sessions=use_agent_sessions,
         )
+        if scenario.compaction is not None:
+            agent_config = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
+            if harness in ("opencode", "pi"):
+                agent_config.update(context_window=32768 if scenario.compaction else 65536, max_output_tokens=8192)
+            elif harness == "codex":
+                agent_config.update(model_context_window=32768, model_auto_compact_token_limit=24000)
+            elif harness == "stirrup":
+                agent_config.update(context_window_tokens=32768)
+            elif harness == "hermes":
+                agent_config.update(
+                    compression_enabled=True, compression_threshold=0.1, max_turns=scenario.tool_steps + 4
+                )
+            elif harness == "simple":
+                agent_config.update(max_steps=scenario.tool_steps + 4)
         os.environ["NEMO_GYM_CONFIG_DICT"] = json.dumps(config)
         (directory / "launch.json").write_text(json.dumps(config, indent=2) + "\n")
         if use_agent_sessions:
