@@ -39,7 +39,7 @@ from harbor.environments.base import BaseEnvironment, ExecResult
 from harbor.models.environment_type import EnvironmentType
 from harbor.models.trial.paths import EnvironmentPaths
 
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxSpec,

@@ -24,7 +24,7 @@ from fastapi import FastAPI
 from pydantic import model_validator
 from verifiable_instructions import instructions_registry
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

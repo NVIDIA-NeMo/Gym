@@ -41,18 +41,16 @@ def _configure_async_http() -> None:
     from e2b.api import client_async
     from e2b.sandbox_async import main as sandbox_async
 
-    from nemo_gym import server_utils
+    from nemo_gym.client import http_client
     from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
+    from nemo_gym.utils import server_process
 
     # Only borrow Gym's pool when this process can already answer for its own
     # global config. Otherwise the first request would resolve it *from the CLI*
     # -- and in a Ray worker the CLI is Ray's, which Hydra's parser rejects with
     # sys.exit(2), killing the rollout rather than the request. The SDK's own
     # transport needs no Gym config at all, so that is the safe default here.
-    if (
-        getattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", None) is None
-        and not server_utils._has_injected_global_config_env()
-    ):
+    if http_client._GLOBAL_AIOHTTP_CLIENT is None and not server_process._has_injected_global_config_env():
         raise RuntimeError(
             "Gym's global config is not established in this process; leaving the e2b SDK on its own HTTP transport"
         )
@@ -109,7 +107,7 @@ def require_e2b_sdk(feature: str) -> Any:
                 #
                 # BaseException, not Exception, is deliberate. This runs lazily,
                 # so the first call can land inside a Ray worker, where importing
-                # nemo_gym.server_utils reaches Hydra's argument parser. Hydra
+                # nemo_gym.client.http_client reaches Hydra's argument parser. Hydra
                 # parses that worker's argv, does not recognise Ray's flags, and
                 # raises SystemExit(2) -- which `except Exception` would not
                 # catch. Every rollout then died before creating a sandbox.

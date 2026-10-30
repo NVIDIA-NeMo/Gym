@@ -37,7 +37,7 @@ def prepare(*, baseline_responses: str | Path | None = None, output_path: str | 
     if baseline_responses:
         responses = Path(baseline_responses).expanduser()
     else:
-        from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig
+        from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
         from nemo_gym.gitlab_utils import download_jsonl_dataset
 
         responses = Path(__file__).parent / "data" / BASELINE_ARTIFACT

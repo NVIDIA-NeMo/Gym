@@ -31,27 +31,15 @@ from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 from yarl import URL
 
-from nemo_gym._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
-from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
-from nemo_gym._checkpoint.environment import EnvironmentParticipant
-from nemo_gym._checkpoint.errors import RolloutIdRequiredError, StaleAttemptError
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseSeedSessionRequest,
-    BaseSeedSessionResponse,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.global_config import (
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -59,19 +47,40 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    EpisodeId,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    TaskId,
 )
 from nemo_gym.rollout_collection import _attach_trajectory_record
-from nemo_gym.rollout_observability import TrajectoryRecord
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseSeedSessionRequest,
+    BaseSeedSessionResponse,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    DirectHTTPToolAccess,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+    RolloutIdRequiredError,
+    SimpleResourcesServer,
+)
+from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
+from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointRequest,
+    CommitRequest,
+    ParticipantControlPlane,
+    RestoreRequest,
+)
+from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.trajectory import TrajectoryRecord
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,

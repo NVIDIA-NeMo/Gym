@@ -21,10 +21,9 @@ from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agen
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.agent_utils.supervisor_client import CLEANUP_PHASE_COUNT, STOP_REQUEST_FILE, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest, _AgentSessionRecord
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent import sandbox as hermes_sandbox
 from responses_api_agents.hermes_agent.app import (
     AGENT_TIMEOUT_METADATA_KEY,
@@ -1364,7 +1363,7 @@ def test_text_history_and_system_message_are_preserved(agent):
 
 
 async def test_required_resources_tools_are_rejected_before_connect(agent, state):
-    from nemo_gym.tool_access import DirectHTTPToolAccess
+    from nemo_gym.server_runtime import DirectHTTPToolAccess
 
     state.request.tool_accesses = [DirectHTTPToolAccess(name="required", required=True, base_url="http://tools")]
     with pytest.raises(HTTPException, match="only MCP tool grants"):

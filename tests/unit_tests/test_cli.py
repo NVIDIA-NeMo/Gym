@@ -29,7 +29,7 @@ from pytest import MonkeyPatch, raises
 
 import nemo_gym.cli.dataset
 import nemo_gym.cli.env
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.cli.env import (
     _FORCE_KILL_REAP_TIMEOUT_SEC,
@@ -56,14 +56,14 @@ from nemo_gym.cli.env import (
     test_environment_manifest as run_manifest_test,
 )
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     ConfigError,
     ConfigPathNotFoundError,
     NoServerInstancesError,
     ResourcesServerInstanceConfig,
 )
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.environment.scaffold import ScaffoldError
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentCatalogEntry
 
 
@@ -262,7 +262,7 @@ class TestCLI:
         server_name = "test_cli_server"
         server_path = tmp_path / "resources_servers" / server_name
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_GLOBAL_CONFIG_DICT",
             OmegaConf.create({"entrypoint": str(server_path)}),
         )
@@ -304,7 +304,7 @@ class TestCLI:
         sentinel = server_path / "sentinel.txt"
         sentinel.write_text("keep\n", encoding="utf-8")
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_GLOBAL_CONFIG_DICT",
             OmegaConf.create({"entrypoint": str(server_path)}),
         )
@@ -320,7 +320,7 @@ class TestCLI:
     ) -> None:
         server_path = tmp_path / "resources_servers" / "invalid-name"
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_GLOBAL_CONFIG_DICT",
             OmegaConf.create({"entrypoint": str(server_path)}),
         )
@@ -480,7 +480,7 @@ class TestRunHelperLaunchEnvironment:
     """RunHelper.start must pass config dict and path via process environment rather than command line."""
 
     def test_secrets_passed_in_env_not_command_line(self, monkeypatch: MonkeyPatch) -> None:
-        from nemo_gym.global_config import (
+        from nemo_gym.config.global_config import (
             NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
             NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
         )
@@ -584,7 +584,7 @@ class TestRunHelperH2PingSidecar:
         )
 
     def test_starts_before_servers_and_stops_after(self, monkeypatch: MonkeyPatch) -> None:
-        from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+        from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
         cfg = self._config(dry_run=False)
         events: list = []
@@ -765,7 +765,7 @@ class TestRunHelperServerReadiness:
     def test_readiness_failure_leaves_head_health_unready(self, failing_method: str) -> None:
         from fastapi.testclient import TestClient
 
-        from nemo_gym.config_types import BaseServerConfig
+        from nemo_gym.config.config_types import BaseServerConfig
         from nemo_gym.server_utils import HeadServer
 
         runner = RunHelper()
@@ -802,8 +802,8 @@ class TestRunHelperServerReadiness:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
         import socket
 
-        from nemo_gym.config_types import BaseServerConfig
-        from nemo_gym.server_utils import ServerClient
+        from nemo_gym.client.server_client import ServerClient
+        from nemo_gym.config.config_types import BaseServerConfig
 
         # A listening socket that never accepts completes the TCP handshake and then never answers.
         stalled_sockets = []
@@ -867,7 +867,7 @@ class TestServerSpinupTimeoutFromConfig:
         ids=["int", "float", "numeric_string", "zero", "null"],
     )
     def test_normalizes_numeric_values(self, value: object, expected: float) -> None:
-        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
+        config = OmegaConf.create({nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
 
         assert nemo_gym.cli.env._server_spinup_timeout_seconds(config) == expected
 
@@ -877,14 +877,14 @@ class TestServerSpinupTimeoutFromConfig:
     def test_environment_interpolation_yields_a_number(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setenv("GYM_STARTUP_TIMEOUT", "900")
         config = OmegaConf.create(
-            {nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "${oc.env:GYM_STARTUP_TIMEOUT}"}
+            {nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "${oc.env:GYM_STARTUP_TIMEOUT}"}
         )
 
         assert nemo_gym.cli.env._server_spinup_timeout_seconds(config) == 900.0
 
     @pytest.mark.parametrize("value", ["ten minutes", [600]])
     def test_malformed_value_is_a_config_error(self, value: object) -> None:
-        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
+        config = OmegaConf.create({nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: value})
 
         with raises(ConfigError, match="server_spinup_timeout_seconds` must be a number of seconds"):
             nemo_gym.cli.env._server_spinup_timeout_seconds(config)
@@ -924,7 +924,9 @@ class TestRunHelperStartUnwind:
 
     def test_invalid_timeout_fails_before_anything_starts(self, monkeypatch: MonkeyPatch) -> None:
         """Runs the real start() and shutdown(), so cleanup state must already exist at the earliest failure."""
-        config = OmegaConf.create({nemo_gym.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "ten minutes"})
+        config = OmegaConf.create(
+            {nemo_gym.config.global_config.SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: "ten minutes"}
+        )
         monkeypatch.setattr(nemo_gym.cli.env, "get_global_config_dict", MagicMock(return_value=config))
         monkeypatch.setattr(nemo_gym.cli.env.GlobalConfigDictParser, "raise_on_no_server_instances", MagicMock())
         initialize_ray = MagicMock()
@@ -1177,7 +1179,7 @@ class TestValidate:
         # chdir to a clean dir so a repo-local env.yaml isn't picked up; clear the parse cache.
         monkeypatch.chdir(tmp_path)
         monkeypatch.setattr(sys, "argv", ["gym", f"+config_paths=[{config_file}]"])
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         validate()
 
     def test_valid_config_passes(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
@@ -1188,6 +1190,33 @@ class TestValidate:
             "my_server:\n  resources_servers:\n    my_server:\n      entrypoint: app.py\n      domain: other\n",
         )
         assert "valid" in capsys.readouterr().out.lower()
+
+    @pytest.mark.parametrize("command", [validate, dump_config])
+    @pytest.mark.parametrize(
+        "override,options",
+        [("+sampling_options={}", {}), ("+sampling_options.generation={}", {"generation": {}})],
+    )
+    def test_offline_commands_ignore_non_server_mappings(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path, capsys, command, override: str, options: dict[str, object]
+    ) -> None:
+        config_file = tmp_path / "config.yaml"
+        config_file.write_text(
+            "my_server:\n  resources_servers:\n    my_server:\n      entrypoint: app.py\n      domain: other\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        monkeypatch.setattr(sys, "argv", ["gym", f"+config_paths=[{config_file}]", override])
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
+
+        command()
+
+        captured = capsys.readouterr()
+        assert "Could not check" not in captured.err
+        if command is validate:
+            assert "Config is valid" in captured.out
+        else:
+            resolved = OmegaConf.create(captured.out)
+            assert OmegaConf.to_container(resolved.sampling_options) == options
+            assert resolved.my_server.resources_servers.my_server.entrypoint == "app.py"
 
     def test_unknown_cross_reference_exits_nonzero(self, monkeypatch: MonkeyPatch, tmp_path) -> None:
         # An agent referencing a resources server that isn't defined -> ServerRefNotFoundError ->
@@ -1203,6 +1232,81 @@ class TestValidate:
         with raises(SystemExit) as exc_info:
             self._validate_config(monkeypatch, tmp_path, bad)
         assert exc_info.value.code == 1
+
+    @staticmethod
+    def _environment_server_config(environment_server_block: str) -> str:
+        """A resources server and an agent fronted by `my_env`, whose server type and fields the block gives."""
+        return (
+            "my_resources:\n  resources_servers:\n    my_resources:\n      entrypoint: app.py\n      domain: other\n"
+            "my_agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      entrypoint: app.py\n"
+            "      resources_server:\n        type: resources_servers\n        name: my_resources\n"
+            "      model_server:\n        type: responses_api_models\n        name: policy_model\n"
+            "my_env:\n  environment_servers:\n" + environment_server_block
+        )
+
+    _SINGLE_AGENT_TURN_LEGACY = (
+        "    single_agent_turn_legacy:\n"
+        "      entrypoint: app.py\n"
+        "      resources_server:\n        type: resources_servers\n        name: my_resources\n"
+        "      agent_server:\n        type: responses_api_agents\n        name: my_agent\n"
+    )
+
+    def test_environment_server_block_is_checked_against_its_server_config(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        # The block passes every type-level check, so validation used to print "valid" and only `gym env start`
+        # failed, when single_agent_turn_legacy launched and validated it against its own config class.
+        monkeypatch.setenv("COLUMNS", "1000")  # rich soft-wraps at 80 columns off-TTY, splitting the paths
+        block = self._SINGLE_AGENT_TURN_LEGACY + "      resources_tool_transport: [direct_http]\n"
+
+        with raises(SystemExit) as exc_info:
+            self._validate_config(monkeypatch, tmp_path, self._environment_server_config(block))
+
+        assert exc_info.value.code == 1
+        out = capsys.readouterr().out
+        assert (
+            "'my_env' (environment_servers/single_agent_turn_legacy/app.py) does not match "
+            "SingleAgentTurnEnvironmentServerConfig:" in out
+        )
+        block_path = "my_env.environment_servers.single_agent_turn_legacy"
+        assert f"{block_path}.cleanup_timeout_seconds: Field required" in out
+        assert f"{block_path}.resources_tool_transport: Extra inputs are not permitted" in out
+        assert "Config is valid" not in out
+
+    def test_complete_environment_server_block_passes(self, monkeypatch: MonkeyPatch, tmp_path, capsys) -> None:
+        block = self._SINGLE_AGENT_TURN_LEGACY + "      cleanup_timeout_seconds: 180\n"
+
+        self._validate_config(monkeypatch, tmp_path, self._environment_server_config(block))
+
+        assert "Config is valid" in capsys.readouterr().out
+
+    def test_environment_server_that_does_not_import_is_left_to_its_launch(
+        self, monkeypatch: MonkeyPatch, tmp_path, capsys
+    ) -> None:
+        # A server in the working directory whose own venv has a package this one lacks.
+        server_dir = tmp_path / "environment_servers" / "needs_its_venv"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("package_only_in_its_venv\n")
+        (server_dir / "app.py").write_text("import package_only_in_its_venv\n")
+        monkeypatch.setenv("COLUMNS", "1000")
+        block = (
+            "    needs_its_venv:\n"
+            "      entrypoint: app.py\n"
+            "      agent_server:\n        type: responses_api_agents\n        name: my_agent\n"
+        )
+
+        self._validate_config(monkeypatch, tmp_path, self._environment_server_config(block))
+
+        captured = capsys.readouterr()
+        assert "Config is valid" in captured.out
+        assert "Could not check Environment Server 'my_env' before launch" in captured.err
+        assert (
+            "Loading environment_servers/needs_its_venv/app.py here failed: "
+            "ModuleNotFoundError: No module named 'package_only_in_its_venv'" in captured.err
+        )
 
 
 class TestOnboardingCommandAdapters:

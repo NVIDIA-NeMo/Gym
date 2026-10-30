@@ -218,6 +218,14 @@ gym eval reverify --judge-failed-only --append \
   --output results/rollouts.jsonl
 ```
 
+## Reusing output after an identity-stamp upgrade
+
+Older reverification output may lack the Environment Server and result-type stamps. On resume, Gym fills missing stamps from the original producing rollouts **in memory** for export and aggregation; it does not rewrite cached rows. The saved output can therefore still mix unstamped cached rows with newly stamped rows.
+
+Before using that mixed file as `--rollouts` for another `--judge-failed-only` recovery, or passing it to standalone `gym eval aggregate`, create a fresh output from the **original producing rollouts**. Use a new `--output` path without `--resume` or `--append`, and keep the same verifier configuration. This writes the identities carried by those source records into the fresh results. Passing the mixed file itself as the source can still split one benchmark into separate metric groups; the missing-source guard does not detect this when matching but unstamped source rows exist.
+
+If the original producing rollouts also have no stamps, their existing agent-based grouping remains; Gym does not infer an Environment Server identity.
+
 ## Sharding
 
 For large rollout sets you can shard reverification across multiple jobs by splitting the input files, passing `--disable-aggregation` on each shard, and then combining with `gym eval aggregate`:
