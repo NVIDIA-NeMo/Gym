@@ -22,7 +22,7 @@ import json
 import pytest
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 
 
 class TestAnthropicConverter:

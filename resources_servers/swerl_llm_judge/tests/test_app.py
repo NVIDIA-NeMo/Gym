@@ -16,7 +16,7 @@ from unittest.mock import MagicMock
 
 from app import SWEJudgeResourcesServer, SWEJudgeResourcesServerConfig, SWEJudgeVerifyRequest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.server_utils import ServerClient
 
 

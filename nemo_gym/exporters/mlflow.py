@@ -35,9 +35,10 @@ from mlflow.utils.validation import (
 )
 from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.config_types import MLFlowConfig
+from nemo_gym.config.config_types import MLFlowConfig
+from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+from nemo_gym.exporters import run_failed
 from nemo_gym.exporters.base import BaseExporter
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
 
 logger = logging.getLogger(__name__)
@@ -165,7 +166,7 @@ class MLflowExporter(BaseExporter):
     def teardown(self) -> None:
         self._flush_pending_config()
         if self.client is not None and self.run_id is not None:
-            self.client.set_terminated(self.run_id, status="FINISHED")
+            self.client.set_terminated(self.run_id, status="FAILED" if run_failed() else "FINISHED")
         self.client = None
         self.run_id = None
         self.reopened = False

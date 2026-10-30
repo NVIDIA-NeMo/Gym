@@ -26,16 +26,14 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.openai_utils import (
-    MAX_NUM_TRIES,
-    NeMoGymAsyncOpenAI,
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
     ReasoningEffort,
 )
+from nemo_gym.openai_utils import MAX_NUM_TRIES, NeMoGymAsyncOpenAI, PermanentEndpointError
 
 
 LOG = logging.getLogger(__name__)

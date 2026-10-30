@@ -46,6 +46,27 @@ def test_publish_downloads_one_rendered_artifact_from_exact_attempt(page, monkey
     assert page.read_text() == f"Introduction\n{block}\nATIF reference\n"
 
 
+def test_default_target_embeds_results_before_the_conformance_guide(tmp_path, monkeypatch):
+    original = (publish.ROOT / publish.PAGE).read_text()
+    page = tmp_path / publish.PAGE
+    page.parent.mkdir(parents=True)
+    page.write_text(original)
+    block = publish.BEGIN + "\n| Harness | P0 | P1 | P2 |\n| pi | 7/7 | — | — |\n" + publish.END
+
+    def download(command, *, check):
+        assert check
+        (Path(command[command.index("--dir") + 1]) / "table.mdx").write_text(block)
+
+    monkeypatch.setattr(publish, "ROOT", tmp_path)
+    monkeypatch.setattr(publish, "source_run", lambda **kw: RUN)
+    monkeypatch.setattr(publish.subprocess, "run", download)
+    assert publish.main(["--run-id", "12", "--run-attempt", "2", "--strict"]) == 0
+    updated = page.read_text()
+    assert updated.index("## Results") < updated.index(block) < updated.index("## Inspect rollout evidence")
+    assert updated.split(publish.BEGIN)[0] == original.split(publish.BEGIN)[0]
+    assert updated.split(publish.END)[1] == original.split(publish.END)[1]
+
+
 def test_workflow_run_uses_triggering_run_without_latest_lookup(monkeypatch):
     commands = []
 
@@ -171,6 +192,7 @@ def test_workflow_renders_in_ci_and_publishes_from_trusted_helper():
     assert helper["with"]["ref"] == "main" and helper["with"]["persist-credentials"] is False
     insert = next(s for s in job["steps"] if s.get("name") == "Insert rendered harness measurements")
     assert insert["working-directory"] == "./publisher-source"
+    assert f'--page "$GITHUB_WORKSPACE/{publish.PAGE}"' in insert["run"]
     assert "--run-id" in insert["run"] and "--strict" in insert["run"]
     assert insert["env"]["SOURCE_RUN_ID"] == "${{ github.event.workflow_run.id }}"
     assert insert["env"]["SOURCE_RUN_ATTEMPT"] == "${{ github.event.workflow_run.run_attempt }}"

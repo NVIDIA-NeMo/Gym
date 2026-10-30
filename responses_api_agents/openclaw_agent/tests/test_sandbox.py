@@ -21,8 +21,7 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage, TaskId
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
@@ -1252,7 +1251,7 @@ async def test_invalid_or_expired_sandbox_cookie_never_uses_local_execution(setu
 
 
 def test_sandbox_close_cookie_blocks_legacy_run_with_configured_resources(setup):
-    from nemo_gym.config_types import ResourcesServerRef
+    from nemo_gym.config import ResourcesServerRef
 
     agent, sandbox = setup
     agent.config.resources_server = ResourcesServerRef(type="resources_servers", name="legacy-resources")
@@ -1552,7 +1551,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
     import nemo_gym.rollout_collection as collection
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-    from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+    from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     agent, sandbox = setup
     global_config = GlobalConfigDictParser().parse(

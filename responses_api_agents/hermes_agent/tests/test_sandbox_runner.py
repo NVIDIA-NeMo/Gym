@@ -22,8 +22,8 @@ from run_agent import AIAgent
 from tools.mcp_tool import shutdown_mcp_servers
 
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation
 from nemo_gym.server_utils import ServerClient
 from resources_servers.example_mcp_weather.app import (
@@ -389,7 +389,7 @@ def test_iteration_limit_summary_reaches_the_model_server(
                 "chatcmpl-summary",
             ]
         else:
-            from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+            from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
             agent = HermesAgent(
                 config=HermesAgentConfig(
@@ -491,7 +491,7 @@ def test_clients_hermes_builds_itself_use_the_model_server(restore_process_globa
 @pytest.mark.parametrize("cooperative", [True, False])
 @pytest.mark.parametrize("ending", ["deadline", "close"])
 def test_worker_stop_checkpoints_partial_work_before_hard_cleanup(tmp_path, cooperative, ending):
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from responses_api_agents.hermes_agent import sandbox_runner
 
     input_path, output_path = tmp_path / "input.json", tmp_path / "output.json"

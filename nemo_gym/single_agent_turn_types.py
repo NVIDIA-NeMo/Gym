@@ -8,12 +8,12 @@ from collections.abc import Mapping
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 from nemo_gym.base_resources_server import BaseVerifyResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     EpisodeFailure,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord, VerifierInvocation
 
 

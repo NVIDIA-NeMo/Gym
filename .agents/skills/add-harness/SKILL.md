@@ -135,7 +135,7 @@ Read the rollouts, not the exit code:
 - Reward, response, and failures sidecar for each task.
 - The agent closed before verification, and the sandbox owner cleaned up.
 - [Rollout health](../../../fern/versions/latest/pages/evaluation/rollout-health.mdx) counts: `unhealthy` is a finding; `unobserved` means a check lacked the evidence it reads. At the Evaluation level the turn checks are unobserved by design. At any level, name what each unobserved check was missing, for example a response without `usage` leaves the token-count check unobserved.
-- A 422 from the Model Server on a later model call usually means the harness sends back a field from an earlier response, which Gym's strict request validation rejects. Normalize that field in the request model in `nemo_gym/openai_utils.py`, with a unit test. Drop only values that carry nothing, and cover each empty form the harness can send back: its SDK can write `annotations: null` where the provider returned `[]`. Keep other values strict.
+- A 422 from the Model Server on a later model call usually means the harness sends back a field from an earlier response, which Gym's strict request validation rejects. Normalize that field in the request model in `nemo_gym/core/responses_api_types.py`, with a unit test. Drop only values that carry nothing, and cover each empty form the harness can send back: its SDK can write `annotations: null` where the provider returned `[]`. Keep other values strict.
 
 For a new harness or an upgrade that claims Terminal-Bench 2.1 support, complete the [TB 2.1 full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation) before merge. Run every task with 8 repeats at a pinned benchmark revision with a real model, and link the full results in the PR. This applies at every capability level; the small smoke run above and scripted probes do not satisfy it.
 
@@ -161,7 +161,7 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |
 | Catalog | The adapter README states the harness version, capability level, supported pairings, and limits. The [Tools](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#tools) table lists the harness; so do the [Sandboxed harnesses](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx#sandboxed-harnesses) table for a sandboxed harness and each paired benchmark's README harness table, where one exists. Each entry matches the adapter: its limits, the request fields it rejects, and whether it captures token IDs. | Docs diff |
 
-The [capability matrix](../../../fern/versions/latest/pages/reference/trajectory-capabilities.mdx) is published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
+The [conformance results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#results) are published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
 
 ## Step 8: Pre-commit and PR
 

@@ -13,7 +13,7 @@ from pydantic import TypeAdapter
 
 import nemo_gym.openai_utils as openai_utils
 from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
