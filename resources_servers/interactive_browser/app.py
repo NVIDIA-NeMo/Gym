@@ -56,8 +56,8 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY
 
 
 logger = logging.getLogger(__name__)

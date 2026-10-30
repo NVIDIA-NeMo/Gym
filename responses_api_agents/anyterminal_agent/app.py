@@ -34,6 +34,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from nemo_gym import PARENT_DIR
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
@@ -45,7 +46,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import apply_rollout_prefix
 
 
 def _format_container(container_formatter: str | list[str], task_name: str, docker_image: str) -> str:
@@ -227,7 +227,7 @@ if openclaw_defaults.get("workspace") == ".":
 try:
     from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymEasyInputMessage
     from nemo_gym.config import ModelServerRef, ResourcesServerRef
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
 except ModuleNotFoundError as exc:
     # This runs against the nemo-gym the sandbox image installed, which can predate the package
     # reorganization (#5166). A missing dependency other than nemo_gym still fails here.

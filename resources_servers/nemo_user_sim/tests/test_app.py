@@ -11,9 +11,9 @@ import pytest
 from fastapi import HTTPException
 
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import JUDGE_FAILED, SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, TaskId
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.nemo_user_sim import app as usersim_app
 from resources_servers.nemo_user_sim.app import (

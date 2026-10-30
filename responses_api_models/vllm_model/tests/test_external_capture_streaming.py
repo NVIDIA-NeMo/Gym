@@ -15,7 +15,7 @@ from fastapi.testclient import TestClient
 from nemo_gym import chat_streaming, responses_streaming
 from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from nemo_gym.token_id_capture.adapters.vllm import VLLMCaptureAdapter
 from nemo_gym.token_id_capture.lineage import FileLineageStore
 from nemo_gym.token_id_capture.records import ENGINE_REFUSED_CALL_REASON, UNCOMMITTED_CALL_REASON

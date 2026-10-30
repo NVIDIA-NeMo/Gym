@@ -23,6 +23,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -30,7 +31,6 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from resources_servers.image_tools import (
     ImageToolsGymToolConfig,
     ImageToolsGymToolLogic,

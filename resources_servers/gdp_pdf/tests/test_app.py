@@ -34,6 +34,7 @@ from benchmarks.gdp_pdf.prepare import (
     restore_original_prompt,
     write_example,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -47,7 +48,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
 )
 from nemo_gym.judge import JudgeError
-from nemo_gym.server_utils import ServerClient
 from resources_servers.gdp_pdf.app import (
     GdpPdfConfig,
     GdpPdfResourcesServer,

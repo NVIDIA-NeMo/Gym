@@ -20,8 +20,8 @@ from unittest.mock import MagicMock, patch
 from fastapi import HTTPException, Request
 from pytest import fixture, mark, raises
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.newton_bench.app import (
     BaseSeedSessionResponse,
     ExecutePythonRequest,

@@ -56,6 +56,7 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -67,7 +68,6 @@ from nemo_gym.core import (
     accumulate_response_usage,
     failure_kinds,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.vcqa_agent.judge import grade as judge_grade
 from responses_api_agents.vcqa_agent.materialize import (
     SharedWorkingTrees,

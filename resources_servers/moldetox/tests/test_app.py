@@ -21,8 +21,8 @@ from app import MolDeToxResourcesServer, MolDeToxStatus, MolDeToxVerifyRequest, 
 from metrics import canonical_smiles, decode_safe, exact_match, is_valid, levenshtein, score_smiles, tanimoto
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 
 
 # Task 3 single-step row id=2, endpoint cyp2c19_veith. The edit is a benzene ring

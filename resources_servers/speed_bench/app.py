@@ -40,7 +40,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import request as global_request
+from nemo_gym.client import request as global_request
 
 
 LOG = logging.getLogger(__name__)

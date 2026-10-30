@@ -48,6 +48,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -57,7 +58,6 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.swe_gym.swebench_specs import spec_for
 from resources_servers.swe_gym.verification import (
