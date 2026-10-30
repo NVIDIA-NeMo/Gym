@@ -70,6 +70,7 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
@@ -97,10 +98,7 @@ from nemo_gym.rollout_collection import (
     _RUN_FAILURE_ERRORS,
     AGENT_REQUEST_FAILED_FAILURE_CLASS,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
-    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,

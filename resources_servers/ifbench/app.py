@@ -25,7 +25,7 @@ import defusedxml.ElementTree  # noqa: F401
 import regex  # noqa: F401
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

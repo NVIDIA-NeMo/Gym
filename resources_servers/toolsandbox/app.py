@@ -71,8 +71,8 @@ from openai.types.chat.chat_completion_message_tool_call import (
 from openai.types.responses import FunctionToolParam
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import SimpleResourcesServer
 from nemo_gym.core import NeMoGymChatCompletion, NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+from nemo_gym.server_runtime import SimpleResourcesServer
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxCloseRequest,
     ToolSandboxCloseResponse,

@@ -15,7 +15,7 @@ from fastapi import Request
 
 import resources_servers.deepswe_external1.app as module
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
-from nemo_gym.reward_profile import select_measured
+from nemo_gym.metrics.reward_profile import select_measured
 from nemo_gym.sandbox import SandboxExecResult
 from resources_servers.deepswe.app import AgentSandboxSession, VerifierResult
 from resources_servers.deepswe.validate_golden import _empty_response

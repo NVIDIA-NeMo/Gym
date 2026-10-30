@@ -69,7 +69,7 @@ def _server(tmp_path: Path, **overrides) -> RnaDesignResourcesServer:
 
 
 def _client(tmp_path: Path, server: RnaDesignResourcesServer | None = None) -> TestClient:
-    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
     server = server or _server(tmp_path)
     app = server.setup_webserver()

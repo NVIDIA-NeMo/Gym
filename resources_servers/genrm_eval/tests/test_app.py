@@ -9,8 +9,8 @@ from unittest.mock import MagicMock, patch
 import pytest
 import tiktoken
 
-from nemo_gym.base_resources_server import AggregateMetricsRequest
 from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
 from resources_servers.genrm_eval.app import GenRMEvalConfig, GenRMEvalResourcesServer, GenRMEvalVerifyRequest
 
 
@@ -131,7 +131,7 @@ def test_configured_coverage_is_in_headline_metrics() -> None:
 def test_worker_entrypoint(is_worker: bool) -> None:
     with (
         patch("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
-        patch("nemo_gym.base_resources_server.SimpleResourcesServer.run_webserver") as start,
+        patch("nemo_gym.server_runtime.base_resources_server.SimpleResourcesServer.run_webserver") as start,
     ):
         module = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="worker_import")
     assert ("app" in module) == is_worker

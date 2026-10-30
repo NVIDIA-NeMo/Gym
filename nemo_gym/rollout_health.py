@@ -25,6 +25,11 @@ from typing import Any
 import orjson
 from pydantic import BaseModel, ValidationError
 
+from nemo_gym.artifacts.run_files import (
+    QUALITY_SUMMARY_FILENAME,
+    QUALITY_SUMMARY_SOURCES_KEY,
+    ROLLOUT_VERDICTS_FILENAME,
+)
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
@@ -53,11 +58,8 @@ from nemo_gym.health.checks import (
 from nemo_gym.health.timeouts import read_rollout_timing, summarize_timeouts
 from nemo_gym.health.types import (
     CALL_BINDING_INPUTS,
-    QUALITY_SUMMARY_FILENAME,
-    QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_ID_KEY,
     ROLLOUT_INDEX_KEY,
-    ROLLOUT_VERDICTS_FILENAME,
     TASK_INDEX_KEY,
     CheckInput,
     CheckScope,
@@ -587,10 +589,9 @@ def _rollout_accounting(
     In a legacy sidecar, a ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
     rollout's latest execution and leaves it missing, and a row never started is skipped.
     """
-    from nemo_gym.rollout_collection import (
-        NG_FAILURE_CLASS_KEY,
-        is_terminal_failure,
-    )
+    # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
+    from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollout_collection import is_terminal_failure
 
     expected = missing = not_started = omitted = final = not_final = 0
     by_class: Counter[str] = Counter()

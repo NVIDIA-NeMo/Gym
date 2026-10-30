@@ -12,7 +12,7 @@ from unittest.mock import AsyncMock
 import pytest
 from fastapi import FastAPI, HTTPException, Request
 
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification import JudgeError
 from resources_servers.workspace_bench import app, dataset
 
 

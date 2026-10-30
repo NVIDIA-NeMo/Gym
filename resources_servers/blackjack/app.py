@@ -27,8 +27,8 @@ from typing import ClassVar, Optional
 from fastapi import HTTPException
 from pydantic import JsonValue
 
-from nemo_gym._checkpoint.control import CheckpointMode
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import CheckpointMode
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 
 
