@@ -35,14 +35,25 @@ mapping:
 `leaf_profile` also runs once per leaf; its `sdg` carries `variants`
 (`{variant_id: {company_scope, role_ids}}`). `submit_leaf_profile` lists every variant once with
 `sec_obtainable`, `company_relation` (`none` for single-company variants, else `peer` or
-`counterparty`), and, when obtainable, exactly one entry per role with `filing_kinds`, `timing`,
-and `company`. `probe` rows carry `roles` (`{role_id: [candidate urls]}`); `submit_probe` takes
+`counterparty`), `relation_types` (1 to 3 substantive relation types for a `counterparty`
+variant, else empty), and, when obtainable, exactly one entry per role with `filing_kinds`,
+`timing`, and `company`.
+
+`relation_classify` rows carry `passages`, excerpts of one filing that name another company.
+`submit_relation` takes `relations`, 1 to 3 entries of `relation_type`, a `quote` copied from
+a passage, `specific_facts`, and `event_year`, plus `reason`. Relation types are
+`business_combination`, `asset_transaction`, `separation`, `joint_venture`,
+`collaboration_license`, `customer_supplier`, `financing`, and `dispute` (dealings between the
+two companies), and `valuation_reference`, `personnel_link`, `service_agent`, and `incidental`.
+It rewards 1 when some relation is a dealing.
+
+`probe` rows carry `roles` (`{role_id: [candidate urls]}`); `submit_probe` takes
 `feasible` and `documents` (`[{role_id, url}]` drawn from the candidates, at least one per role
 when feasible). `doc_match` rows carry `choices` (`{leaf_id: [modes]}`); `submit_match` takes a
 listed `leaf_id` and one of its modes, or `leaf_id` `none`.
 
 Verify returns the row plus `reward` and `sdg_result`. `sdg_result.status` is one of `mapped`,
-`profiled`, `probed`, `matched`, `judge_pass`, `judge_off_leaf`, `judge_fail`, `judge_unparsed`,
+`profiled`, `classified`, `probed`, `matched`, `judge_pass`, `judge_off_leaf`, `judge_fail`, `judge_unparsed`,
 `rejected`, `no_submission`, `answered`, `no_answer`, or `adjudicated`. Judged stages reward 1
 only on `judge_pass`, and `question_gen` also on `judge_off_leaf`: the judge failed only
 criterion 2 (faithful to the task), so the question is a sound finance question outside its leaf.

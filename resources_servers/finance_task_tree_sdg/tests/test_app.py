@@ -41,6 +41,7 @@ from resources_servers.finance_task_tree_sdg.app import (
     validate_leak_proposal,
     validate_match,
     validate_probe,
+    validate_relation,
     validate_revised_question,
     validate_verdict,
 )
@@ -56,6 +57,7 @@ _REPO_ROOT = Path(__file__).resolve().parents[3]
 _STAGES = (
     "eligibility",
     "leaf_profile",
+    "relation_classify",
     "probe",
     "doc_match",
     "question_gen",
@@ -591,16 +593,31 @@ def test_leaf_profile_covers_every_variant_and_role() -> None:
         "variant_id": "F01.T01.001:MC_SD",
         "sec_obtainable": True,
         "company_relation": "counterparty",
+        "relation_types": ["business_combination"],
         "roles": [{"role_id": "d1", "filing_kinds": ["8-K:1.01"], "timing": "any_before_as_of", "company": "either"}],
     }
-    assert validate_leaf_profile(multi, _PROFILE_VARIANTS)["variants"]["F01.T01.001:MC_SD"]["roles"]["d1"][
-        "company"
-    ] == "either"
+    profiled = validate_leaf_profile(multi, _PROFILE_VARIANTS)["variants"]["F01.T01.001:MC_SD"]
+    assert profiled["roles"]["d1"]["company"] == "either"
+    assert profiled["relation_types"] == ["business_combination"]
     assert result["variants"]["F01.T01.001:MC_SD"] == {
         "sec_obtainable": False,
         "company_relation": "peer",
+        "relation_types": [],
         "roles": {},
     }
+    for bad_types in (
+        [],
+        ["valuation_reference"],
+        ["financing"] * 2,
+        ["financing", "dispute", "separation", "joint_venture"],
+    ):
+        multi["variants"][1]["relation_types"] = bad_types
+        with pytest.raises(ToolError, match="relation_types"):
+            validate_leaf_profile(multi, _PROFILE_VARIANTS)
+    peer_with_types = _profile()
+    peer_with_types["variants"][1]["relation_types"] = ["financing"]
+    with pytest.raises(ToolError, match="relation_types must be empty"):
+        validate_leaf_profile(peer_with_types, _PROFILE_VARIANTS)
     with pytest.raises(ToolError, match="exactly once"):
         validate_leaf_profile(_profile(variants=_profile()["variants"][:1]), _PROFILE_VARIANTS)
     single_as_peer = _profile()
@@ -615,6 +632,63 @@ def test_leaf_profile_covers_every_variant_and_role() -> None:
     bad_kind["variants"][0]["roles"][0]["filing_kinds"] = ["press release"]
     with pytest.raises(ToolError, match="filing_kinds"):
         validate_leaf_profile(bad_kind, _PROFILE_VARIANTS)
+
+
+_PASSAGES = [
+    "On March 1, 2021, Acme Corp. completed its acquisition of Widget Inc. for $1.2 billion in cash.",
+    "Widget Inc.\nis also named in   our selected comparable companies.",
+]
+
+
+def _relation(kind: str = "business_combination", quote: str = "completed its acquisition of Widget Inc.", **extra):
+    return {"relation_type": kind, "quote": quote, "specific_facts": True, "event_year": 2021} | extra
+
+
+def test_relation_quotes_come_from_the_passages() -> None:
+    result = validate_relation(
+        {
+            "relations": [
+                _relation(),
+                _relation("valuation_reference", "Widget Inc. is also named in our", event_year=None),
+            ],
+            "reason": "closing of the merger",
+        },
+        _PASSAGES,
+    )
+    assert [item["relation_type"] for item in result["relations"]] == ["business_combination", "valuation_reference"]
+    assert result["relations"][1]["event_year"] is None
+    curly = validate_relation(
+        {"relations": [_relation(quote="the \u201cMerger Agreement\u201d \u2014 dated")], "reason": "r"},
+        ['the "Merger Agreement" - dated March 1'],
+    )
+    assert curly["relations"][0]["quote"] == "the \u201cMerger Agreement\u201d \u2014 dated"
+    cases = [
+        ([], "relations"),
+        ([_relation()] * 4, "relations"),
+        ([_relation("partnership")], "relation_type"),
+        ([_relation(), _relation()], "twice"),
+        ([_relation(quote="Acme agreed to buy Widget")], "copied exactly"),
+        ([_relation(specific_facts="yes")], "specific_facts"),
+        ([_relation(event_year=21)], "event_year"),
+    ]
+    for relations, message in cases:
+        with pytest.raises(ToolError, match=message):
+            validate_relation({"relations": relations, "reason": "x"}, _PASSAGES)
+    with pytest.raises(ToolError, match="reason"):
+        validate_relation({"relations": [_relation()]}, _PASSAGES)
+
+
+@pytest.mark.parametrize(("kind", "reward"), [("business_combination", 1.0), ("personnel_link", 0.0)])
+async def test_relation_verify_rewards_a_dealing(kind: str, reward: float) -> None:
+    server = _server("relation_classify")
+    server.server_client.post = AsyncMock()
+    args = {"relations": [_relation(kind)], "reason": "x"}
+    result = await server.verify(
+        MagicMock(session={}), _request(_response(_call("submit_relation", args)), {"passages": _PASSAGES})
+    )
+    assert result.sdg_result["status"] == "classified"
+    assert result.reward == reward
+    server.server_client.post.assert_not_awaited()
 
 
 def test_probe_documents_come_from_the_candidates() -> None:
@@ -637,9 +711,10 @@ def test_probe_documents_come_from_the_candidates() -> None:
 
 def test_match_leaf_and_mode_come_from_the_choices() -> None:
     choices = {"F01.T01.001": ["SC_SD", "SC_MD"]}
-    assert validate_match({"leaf_id": "F01.T01.001", "variant_mode": "SC_MD", "reason": "x"}, choices)[
-        "variant_mode"
-    ] == "SC_MD"
+    assert (
+        validate_match({"leaf_id": "F01.T01.001", "variant_mode": "SC_MD", "reason": "x"}, choices)["variant_mode"]
+        == "SC_MD"
+    )
     assert validate_match({"leaf_id": "none", "reason": "nothing fits"}, choices)["leaf_id"] == "none"
     with pytest.raises(ToolError, match="leaf_id"):
         validate_match({"leaf_id": "F99", "variant_mode": "SC_SD", "reason": "x"}, choices)

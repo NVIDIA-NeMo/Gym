@@ -1,0 +1,49 @@
+# Task-tree finance SDG, stage relation_classify: Type the relationship a filing's passages describe between its filer and another company.
+tt_sdg_relation_classify_resources_server:
+  resources_servers:
+    finance_task_tree_sdg:
+      allowed_agents: [finance_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: Type the relationship a filing's passages describe between its filer and another company
+      value: Generate expert finance research questions from the task tree
+      stage: relation_classify
+
+tt_sdg_relation_classify_agent:
+  responses_api_agents:
+    finance_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: tt_sdg_relation_classify_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      no_tool_call_nudge: Continue. Finish by calling the submission tool.
+      continue_if_not_tool_call: true
+      prose_only_behavior: nudge
+      tool_call_execution: sequential
+      tool_error_observation: error_prefix
+      raise_on_tool_http_error: true
+      done_tool_requires_success: true
+      done_tools: [submit_relation]
+      max_time_seconds: null
+      abort_on_tool_error_types: []
+      max_steps: 6
+      model_call_timeout: null
+      truncate_on_overflow: false
+      tool_call_timeout: 300
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/finance_task_tree_sdg/data/example_relation_classify.jsonl
+          license: Apache 2.0
+
+tt_sdg_relation_classify_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: tt_sdg_relation_classify_agent

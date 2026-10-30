@@ -24,7 +24,9 @@ The ``eligibility`` stage runs once per task-tree leaf before sampling: it maps
 the leaf to the SIC industries whose companies can support it, with no judge.
 ``leaf_profile`` also runs once per leaf: for each variant it says whether SEC
 filings can supply the inputs, how multi-company slots must be related, and
-which filing kinds can fill each source role. ``probe`` checks that a sampled
+which filing kinds can fill each source role. ``relation_classify`` types the
+relationship a filing's passages describe between its filer and another
+company, quoting the passages. ``probe`` checks that a sampled
 slot's candidate filings hold what the leaf needs, and ``doc_match`` picks the
 task-tree leaf a sampled filing can best support. None of these has a judge.
 """
@@ -84,6 +86,7 @@ logger = logging.getLogger(__name__)
 Stage = Literal[
     "eligibility",
     "leaf_profile",
+    "relation_classify",
     "probe",
     "doc_match",
     "question_gen",
@@ -110,10 +113,24 @@ FILING_KINDS = (
     "DEF 14A",
     "S-4",
     "FWP",
-    "4",
 )
 ROLE_TIMINGS = ("target_fiscal_year", "prior_fiscal_year", "following_fiscal_year", "any_before_as_of")
 COMPANY_RELATIONS = ("none", "peer", "counterparty")
+# Dealings between two companies that a counterparty question can be built on.
+SUBSTANTIVE_RELATIONS = (
+    "business_combination",
+    "asset_transaction",
+    "separation",
+    "joint_venture",
+    "collaboration_license",
+    "customer_supplier",
+    "financing",
+    "dispute",
+)
+# Ways a filing names another company without a dealing between them.
+INCIDENTAL_RELATIONS = ("valuation_reference", "personnel_link", "service_agent", "incidental")
+RELATION_TYPES = SUBSTANTIVE_RELATIONS + INCIDENTAL_RELATIONS
+MAX_RELATIONS = 3
 # Whose filing fills a source role in a multi-company slot.
 ROLE_COMPANIES = ("first", "second", "either")
 
@@ -126,6 +143,7 @@ _JUDGE_PROMPTS: dict[str, str] = {
 _DONE_TOOLS: dict[str, tuple[str, ...]] = {
     "eligibility": ("submit_eligibility",),
     "leaf_profile": ("submit_leaf_profile",),
+    "relation_classify": ("submit_relation",),
     "probe": ("submit_probe",),
     "doc_match": ("submit_match",),
     "question_gen": ("submit_question", "submit_rejection"),
@@ -137,6 +155,7 @@ _DONE_TOOLS: dict[str, tuple[str, ...]] = {
 _STAGE_TOOLS: dict[str, tuple[str, ...]] = {
     "eligibility": ("submit_eligibility",),
     "leaf_profile": ("submit_leaf_profile",),
+    "relation_classify": ("submit_relation",),
     "probe": ("edgar_search", "fetch_url", "python_exec", "submit_probe"),
     "doc_match": ("fetch_url", "submit_match"),
     "question_gen": ("edgar_search", "fetch_url", "python_exec", "submit_question", "submit_rejection"),
@@ -259,6 +278,17 @@ def validate_leaf_profile(args: dict[str, Any], variants: dict[str, dict[str, An
         allowed = ("none",) if spec["company_scope"] == "single_company" else COMPANY_RELATIONS[1:]
         if relation not in allowed:
             raise ToolError(f"{variant_id}: company_relation must be one of {list(allowed)}")
+        relation_types = entry.get("relation_types") or []
+        if not isinstance(relation_types, list) or len(set(map(str, relation_types))) != len(relation_types):
+            raise ToolError(f"{variant_id}: relation_types must be a list of distinct relation types")
+        if relation == "counterparty":
+            if not 1 <= len(relation_types) <= MAX_RELATIONS or not set(relation_types) <= set(SUBSTANTIVE_RELATIONS):
+                raise ToolError(
+                    f"{variant_id}: a counterparty variant needs 1 to {MAX_RELATIONS} relation_types from "
+                    f"{list(SUBSTANTIVE_RELATIONS)}"
+                )
+        elif relation_types:
+            raise ToolError(f"{variant_id}: relation_types must be empty unless company_relation is 'counterparty'")
         roles = entry.get("roles")
         if not isinstance(roles, list) or not all(isinstance(role, dict) for role in roles):
             raise ToolError(f"{variant_id}: roles must be a list of objects")
@@ -269,11 +299,7 @@ def validate_leaf_profile(args: dict[str, Any], variants: dict[str, dict[str, An
                 raise ToolError(f"{variant_id}: roles must cover exactly these role ids: {sorted(spec['role_ids'])}")
             for role in roles:
                 kinds = role.get("filing_kinds")
-                if (
-                    not isinstance(kinds, list)
-                    or not kinds
-                    or not all(kind in FILING_KINDS for kind in kinds)
-                ):
+                if not isinstance(kinds, list) or not kinds or not all(kind in FILING_KINDS for kind in kinds):
                     raise ToolError(
                         f"{variant_id}/{role['role_id']}: filing_kinds must be a non-empty list from {list(FILING_KINDS)}"
                     )
@@ -288,11 +314,56 @@ def validate_leaf_profile(args: dict[str, Any], variants: dict[str, dict[str, An
                     "timing": role["timing"],
                     "company": company,
                 }
-        profiled[variant_id] = {"sec_obtainable": obtainable, "company_relation": relation, "roles": mapped}
+        profiled[variant_id] = {
+            "sec_obtainable": obtainable,
+            "company_relation": relation,
+            "relation_types": list(relation_types),
+            "roles": mapped,
+        }
     reason = _non_empty_str(args, "reason")
     if reason is None:
         raise ToolError("reason is required")
     return {"variants": profiled, "reason": reason}
+
+
+_PLAIN_PUNCTUATION = str.maketrans(
+    {"\u201c": '"', "\u201d": '"', "\u2018": "'", "\u2019": "'", "\u2013": "-", "\u2014": "-"}
+)
+
+
+def _squash(text: str) -> str:
+    return " ".join(text.translate(_PLAIN_PUNCTUATION).split())
+
+
+def validate_relation(args: dict[str, Any], passages: list[str]) -> dict[str, Any]:
+    """``passages`` are the filing excerpts the row showed; every quote must be copied from one of them."""
+    entries = args.get("relations")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= MAX_RELATIONS:
+        raise ToolError(f"relations must be a list of 1 to {MAX_RELATIONS} objects")
+    texts = [_squash(passage) for passage in passages]
+    relations: list[dict[str, Any]] = []
+    for entry in entries:
+        if not isinstance(entry, dict):
+            raise ToolError("each relation must be an object")
+        kind = entry.get("relation_type")
+        if kind not in RELATION_TYPES:
+            raise ToolError(f"relation_type must be one of {list(RELATION_TYPES)}")
+        if any(item["relation_type"] == kind for item in relations):
+            raise ToolError(f"relation_type {kind!r} is listed twice; give each type once")
+        quote = _non_empty_str(entry, "quote")
+        if quote is None or not any(_squash(quote) in text for text in texts):
+            raise ToolError(f"{kind}: quote must be a sentence copied exactly from one of the passages")
+        specific = entry.get("specific_facts")
+        if not isinstance(specific, bool):
+            raise ToolError(f"{kind}: specific_facts must be a boolean")
+        year = entry.get("event_year")
+        if year is not None and (isinstance(year, bool) or not isinstance(year, int) or not 1900 <= year <= 2100):
+            raise ToolError(f"{kind}: event_year must be a four-digit year or null")
+        relations.append({"relation_type": kind, "quote": quote, "specific_facts": specific, "event_year": year})
+    reason = _non_empty_str(args, "reason")
+    if reason is None:
+        raise ToolError("reason is required")
+    return {"relations": relations, "reason": reason}
 
 
 def validate_probe(args: dict[str, Any], roles: dict[str, list[str]]) -> dict[str, Any]:
@@ -552,6 +623,9 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
         if name == "submit_leaf_profile":
             validate_leaf_profile(args, session.sdg.get("variants") or {})
             return "Leaf profile submitted."
+        if name == "submit_relation":
+            validate_relation(args, list(session.sdg.get("passages") or []))
+            return "Relation submitted."
         if name == "submit_probe":
             validate_probe(args, session.sdg.get("roles") or {})
             return "Probe submitted."
@@ -684,6 +758,10 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
         if stage == "leaf_profile":
             result.update(status="profiled", **validate_leaf_profile(args, body.sdg.get("variants") or {}))
             return self._respond(body, 1.0, result)
+        if stage == "relation_classify":
+            result.update(status="classified", **validate_relation(args, list(body.sdg.get("passages") or [])))
+            substantive = any(item["relation_type"] in SUBSTANTIVE_RELATIONS for item in result["relations"])
+            return self._respond(body, 1.0 if substantive else 0.0, result)
         if stage == "probe":
             result.update(status="probed", **validate_probe(args, body.sdg.get("roles") or {}))
             return self._respond(body, 1.0 if result["feasible"] else 0.0, result)
