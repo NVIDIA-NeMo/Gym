@@ -11,7 +11,7 @@ from pathlib import Path
 
 from environment_servers.harbor.tests.conftest import TASK_TOML, AgentSandbox, FakeSandbox, make_server, run_episode
 from environment_servers.harbor.tests.test_task_data import episode_with
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 
 

@@ -36,41 +36,42 @@ from nemo_gym import PARENT_DIR
 from nemo_gym._checkpoint.control import CheckpointRequest
 from nemo_gym._checkpoint.generation_cut import GenerationCutInventory, GenerationCutPrefixAck, GenerationCutReceipt
 from nemo_gym._checkpoint.model import PolicyModelParticipant, generation_cut_requester
-from nemo_gym.openai_utils import (
-    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
-    NeMoGymAsyncOpenAI,
+from nemo_gym.core import (
     NeMoGymChatCompletion,
-    NeMoGymChatCompletionAssistantMessageForTrainingParam,
-    NeMoGymChatCompletionAssistantMessageParam,
-    NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
     NeMoGymChatCompletionMessageForTraining,
+    NeMoGymChoice,
+    NeMoGymEasyInputMessage,
+    NeMoGymFunctionCallOutput,
+    NeMoGymMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInput,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
+    rollout_context,
+)
+from nemo_gym.core.responses_api_types import (
+    CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    NeMoGymChatCompletionAssistantMessageForTrainingParam,
+    NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionContentPartTextParam,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionUserMessageParam,
-    NeMoGymChoice,
-    NeMoGymEasyInputMessage,
     NeMoGymFunction,
-    NeMoGymFunctionCallOutput,
     NeMoGymFunctionToolParam,
-    NeMoGymMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInput,
     NeMoGymResponseInputText,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseReasoningItem,
-    NeMoGymSummary,
-    PermanentEndpointError,
 )
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.token_id_capture import (
     CaptureContext,

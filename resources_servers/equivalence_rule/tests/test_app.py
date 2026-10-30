@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 from pytest import approx
 
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,

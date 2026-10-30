@@ -8,7 +8,7 @@ import tempfile
 from pathlib import Path
 
 
-PAGE = Path("fern/versions/latest/pages/reference/trajectory-capabilities.mdx")
+PAGE = Path("fern/versions/latest/pages/observability/harness-conformance.mdx")
 BEGIN = "{/* BEGIN GENERATED TE TABLE */}"
 END = "{/* END GENERATED TE TABLE */}"
 

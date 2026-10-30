@@ -130,7 +130,7 @@ def test_configured_coverage_is_in_headline_metrics() -> None:
 @pytest.mark.parametrize("is_worker", [False, True])
 def test_worker_entrypoint(is_worker: bool) -> None:
     with (
-        patch("nemo_gym.server_utils.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
+        patch("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", return_value=is_worker),
         patch("nemo_gym.base_resources_server.SimpleResourcesServer.run_webserver") as start,
     ):
         module = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="worker_import")

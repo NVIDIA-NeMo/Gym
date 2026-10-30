@@ -27,9 +27,9 @@ import pytest
 from pydantic import ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
-from nemo_gym.sandbox import (
-    AsyncSandbox,
-    Sandbox,
+from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, _AsyncLoopRunner
+from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, resolve_provider_metadata
+from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
@@ -40,15 +40,8 @@ from nemo_gym.sandbox import (
     SupportsSandboxEndpoint,
     SupportsSandboxPauseResume,
     clamp_resource_requests,
-    create_provider,
-    get_provider_class,
-    list_providers,
-    register_provider,
-    resolve_provider_config,
-    resolve_provider_metadata,
 )
-from nemo_gym.sandbox.api import _AsyncLoopRunner
-from nemo_gym.sandbox.config import SandboxConfig
+from nemo_gym.sandbox.providers.registry import create_provider, get_provider_class, list_providers, register_provider
 from nemo_gym.sandbox.utils import rewrite_image
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
@@ -841,7 +834,7 @@ def test_resolve_provider_metadata() -> None:
 
 
 def test_resolve_provider_volume_sources() -> None:
-    from nemo_gym.sandbox import resolve_provider_volume_sources
+    from nemo_gym.sandbox.config import resolve_provider_volume_sources
 
     block = {
         "opensandbox": {"shared_storage": {"host_path": "/mnt/shared"}},
@@ -1570,7 +1563,7 @@ def test_opensandbox_implements_connectable_provider(monkeypatch) -> None:
 
 
 async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> None:
-    from nemo_gym.sandbox import ConnectableProvider
+    from nemo_gym.sandbox.providers.base import ConnectableProvider
 
     opensandbox_provider_module, OpenSandboxProvider, *_unused = _require_opensandbox_provider()
 
@@ -1627,7 +1620,7 @@ async def _assert_opensandbox_implements_connectable_provider(monkeypatch) -> No
 
 
 async def test_create_pty_requires_capability_and_start() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     # Capability is checked before start state, matching endpoint().
     plain = AsyncSandbox(PlainSandboxProvider())
@@ -1678,7 +1671,7 @@ async def test_create_pty_requires_capability_and_start() -> None:
 
 
 async def test_pty_exec_collects_output_and_exit() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class FakePtySession:
         def __init__(self, out: list[bytes], err: list[bytes], code: int) -> None:
@@ -1726,7 +1719,7 @@ async def test_pty_exec_collects_output_and_exit() -> None:
 
 
 async def test_pty_exec_timeout_closes_session() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class HangingSession:
         def __init__(self) -> None:
@@ -1760,7 +1753,7 @@ async def test_pty_exec_timeout_closes_session() -> None:
 
 
 async def test_pty_exec_on_existing_session() -> None:
-    from nemo_gym.sandbox import SandboxPtyError, SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
 
     class NoCreateProvider(PlainSandboxProvider):
         async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
@@ -1855,7 +1848,7 @@ class _DrainOnceSession:
 
 
 async def test_pty_exec_reuses_default_shell_session() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class OneCreateProvider(PlainSandboxProvider):
         def __init__(self) -> None:
@@ -1883,7 +1876,7 @@ async def test_pty_exec_reuses_default_shell_session() -> None:
 
 
 async def test_pty_exec_never_reuses_custom_command_sessions() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class MixedProvider(PlainSandboxProvider):
         def __init__(self) -> None:
@@ -1910,7 +1903,7 @@ async def test_pty_exec_never_reuses_custom_command_sessions() -> None:
 
 
 async def test_pty_exec_shaping_args_force_one_shot() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class MixedProvider(PlainSandboxProvider):
         def __init__(self) -> None:
@@ -1938,7 +1931,7 @@ async def test_pty_exec_shaping_args_force_one_shot() -> None:
 
 
 async def test_pty_exec_implicit_timeout_retires_session() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class HangingLiveProvider(PlainSandboxProvider):
         async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> _LiveShellSession:
@@ -1956,7 +1949,7 @@ async def test_pty_exec_implicit_timeout_retires_session() -> None:
 
 
 async def test_pty_exec_serializes_shared_session_use() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class SerialShell(_LiveShellSession):
         def __init__(self) -> None:
@@ -1997,7 +1990,7 @@ async def test_pty_attach_requires_capability() -> None:
 
 
 async def test_pty_exec_marker_edges() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class ScriptedSession:
         """Replies with a scripted marker line, optionally split across chunks."""
@@ -2102,7 +2095,7 @@ async def test_pty_exec_detach_mangled_exit_maps_to_pty_error() -> None:
 
 
 async def test_pty_exec_detach_private_session_is_closed_and_not_default() -> None:
-    from nemo_gym.sandbox import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtySpec
 
     class DetachProvider(PlainSandboxProvider):
         def __init__(self) -> None:

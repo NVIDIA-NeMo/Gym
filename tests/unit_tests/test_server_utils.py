@@ -26,36 +26,43 @@ from unittest.mock import AsyncMock, MagicMock
 
 import orjson
 import uvicorn
-from aiohttp import ClientOSError, ClientResponseError, RequestInfo, ServerDisconnectedError, TCPConnector
+from aiohttp import (
+    ClientOSError,
+    ClientPayloadError,
+    ClientResponseError,
+    ClientSession,
+    ClientTimeout,
+    RequestInfo,
+    ServerDisconnectedError,
+    TCPConnector,
+)
 from fastapi import Request
 from fastapi.exception_handlers import request_validation_exception_handler
 from fastapi.exceptions import RequestValidationError
 from multidict import CIMultiDict, CIMultiDictProxy
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fail, mark, raises
 from requests.exceptions import ProxyError
 from uvicorn.protocols.http.httptools_impl import HttpToolsProtocol
 from yarl import URL
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 import nemo_gym.server_utils
-from nemo_gym.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import BaseRunServerInstanceConfig, ConfigError, HeadServerUnreachableError
+from nemo_gym.config.global_config import (
     DRY_RUN_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import (
-    IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME,
     NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME,
     NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME,
     BaseServer,
     BaseServerConfig,
     ClientDisconnectCancellationMiddleware,
     ConnectionError,
-    DictConfig,
     GlobalAIOHTTPAsyncClientConfig,
     HeadServer,
     KeepaliveHttpToolsProtocol,
@@ -68,11 +75,13 @@ from nemo_gym.server_utils import (
     _set_tcp_keepalive,
     _validation_exception_handler,
     format_exception_with_response_body,
+    get_response_json,
     initialize_ray,
     raise_for_status,
 )
 from nemo_gym.telemetry import connection_pool
 from nemo_gym.telemetry.connection_pool import connection_pool_capacity, report_connection_pool_capacity
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 
 
 _TCP_KEEPALIVE_TEST_IDLE = 42
@@ -156,6 +165,161 @@ class TestRequestRetries:
         assert actual is response
         assert send.await_count == 2
         sleep.assert_awaited_once_with(0.5)
+
+    @staticmethod
+    async def _short_body_server(replies: list[bytes]) -> tuple[asyncio.Server, str]:
+        """A loopback server that sends each reply in turn, then closes the connection.
+
+        A request past the scripted replies gets a complete 599 reply, so it is never retried as a dropped
+        connection and the test's own request count fails instead of hanging.
+        """
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            writer.write(
+                replies.pop(0) if replies else b"HTTP/1.1 599 Unexpected Extra Request\r\nContent-Length: 0\r\n\r\n"
+            )
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/run"
+
+    _CUT_OFF = b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 100\r\n\r\n" + b'{"rew'
+    _HEALTHY = b'HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n{"reward": 1.0}'
+
+    @mark.parametrize(
+        "options",
+        [{}, {"_resend_after_disconnect": False}, {"_resend_after_disconnect": False, "_max_num_tries": 2}],
+    )
+    async def test_cut_off_body_without_a_resend_bound_goes_back_to_the_caller(
+        self, monkeypatch: MonkeyPatch, options
+    ) -> None:
+        """Each /run sent starts an episode, so with no bound a cut-off reply is not resent: the caller's read raises."""
+        replies = [self._CUT_OFF, self._CUT_OFF, self._HEALTHY]
+        server, url = await self._short_body_server(replies)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, json={}, **options
+            )
+            assert response.status == 200
+            with raises(ClientPayloadError):
+                await get_response_json(response)
+        assert len(replies) == 2  # One request, so one episode.
+
+    async def test_one_cut_off_body_then_a_healthy_reply_recovers_within_the_caller_bound(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        replies = [self._CUT_OFF, self._HEALTHY]
+        server, url = await self._short_body_server(replies)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, _max_num_tries=2
+            )
+            assert await get_response_json(response) == {"reward": 1.0}
+        assert replies == []
+
+    @mark.parametrize("limits", [{"_max_num_tries": 2}, {"_max_connection_retries": 2}])
+    async def test_cut_off_body_stops_at_the_configured_attempt_bound(self, monkeypatch: MonkeyPatch, limits) -> None:
+        replies = [b"HTTP/1.1 200 OK\r\nContent-Length: 100\r\n\r\n{}"] * 3
+        server, url = await self._short_body_server(replies)
+        monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            with raises(ClientPayloadError):
+                await nemo_gym.server_utils.request("POST", url, _internal=True, _read_body=True, json={}, **limits)
+        assert len(replies) == 1
+
+    @mark.parametrize("limits", [{"_max_num_tries": 3}, {"_max_connection_retries": 3}])
+    async def test_cancellation_during_body_read_is_not_replayed(self, monkeypatch: MonkeyPatch, limits) -> None:
+        response = MagicMock(read=AsyncMock(side_effect=asyncio.CancelledError()))
+        client = MagicMock(request=AsyncMock(return_value=response))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        with raises(asyncio.CancelledError):
+            await nemo_gym.server_utils.request(
+                "POST", "http://agent/run", _internal=True, _read_body=True, json={}, **limits
+            )
+        assert client.request.await_count == 1
+        assert response.read.await_count == 1
+
+    @mark.parametrize("options", [{}, {"_resend_after_disconnect": False, "_max_num_tries": 2}])
+    async def test_without_a_resend_bound_the_reply_goes_back_unread(self, monkeypatch: MonkeyPatch, options) -> None:
+        """Nothing is read that cannot be retried, so the caller's own read sees the reply exactly as sent."""
+        response = MagicMock(read=AsyncMock())
+        client = MagicMock(request=AsyncMock(return_value=response))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+        returned = await nemo_gym.server_utils.request(
+            "POST", "http://agent/run", _internal=True, _read_body=True, json={}, **options
+        )
+        assert returned is response and response.read.await_count == 0
+
+    _COMPLETE_500 = (
+        b"HTTP/1.1 500 Internal Server Error\r\nContent-Type: application/json\r\nContent-Length: 39\r\n\r\n"
+        b'{"detail": "verifier failed: KeyError"}'
+    )
+
+    @mark.parametrize("options", [{}, {"_max_num_tries": 2}, {"_max_connection_retries": 2}])
+    async def test_a_complete_error_reply_keeps_its_body_for_raise_for_status(
+        self, monkeypatch: MonkeyPatch, options
+    ) -> None:
+        replies = [self._COMPLETE_500]
+        server, url = await self._short_body_server(replies)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, json={}, **options
+            )
+            with raises(ClientResponseError) as caught:
+                await raise_for_status(response)
+        assert caught.value.status == 500
+        assert caught.value.response_content == b'{"detail": "verifier failed: KeyError"}'
+        assert replies == []
+
+    @staticmethod
+    async def _stalled_body_server(stall_s: float) -> tuple[asyncio.Server, str, list[int]]:
+        """A loopback server that sends the headers and part of the body, waits `stall_s`, then sends the rest."""
+        requests: list[int] = []
+
+        async def handle(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
+            await reader.readuntil(b"\r\n\r\n")
+            requests.append(1)
+            writer.write(b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: 15\r\n\r\n" + b'{"rew')
+            await writer.drain()
+            await asyncio.sleep(stall_s)
+            writer.write(b'ard": 1.0}')
+            await writer.drain()
+            writer.close()
+
+        server = await asyncio.start_server(handle, "127.0.0.1", 0)
+        return server, f"http://127.0.0.1:{server.sockets[0].getsockname()[1]}/run", requests
+
+    @mark.parametrize("options", [{}, {"_resend_after_disconnect": False}])
+    async def test_an_explicit_total_timeout_during_the_body_keeps_its_original_error(
+        self, monkeypatch: MonkeyPatch, options
+    ) -> None:
+        server, url, requests = await self._stalled_body_server(2.0)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request(
+                "POST", url, _internal=True, _read_body=True, json={}, timeout=ClientTimeout(total=0.1), **options
+            )
+            assert response.status == 200
+            with raises(TimeoutError):
+                await get_response_json(response)
+        assert requests == [1]
+
+    async def test_a_slow_body_without_an_explicit_timeout_still_completes(self, monkeypatch: MonkeyPatch) -> None:
+        """No deadline is added: the default client has no total timeout for a reply body."""
+        server, url, requests = await self._stalled_body_server(0.3)
+        async with server, ClientSession() as session:
+            monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: session)
+            response = await nemo_gym.server_utils.request("POST", url, _internal=True, _read_body=True, json={})
+            assert await get_response_json(response) == {"reward": 1.0}
+        assert requests == [1]
 
 
 class TestServerUtils:
@@ -378,7 +542,7 @@ class TestServerUtils:
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         httpx_client_mock = MagicMock()
@@ -431,7 +595,7 @@ class TestServerUtils:
 
         # `gym eval run --no-serve` initializes a partial local config.
         # It must still fetch the full config from the running head server.
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", global_config_dict)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         response = MagicMock(content=b'"remote_server: {host: remote, port: 1234}"')
@@ -448,7 +612,7 @@ class TestServerUtils:
         get_global_config_dict_mock = MagicMock(return_value=global_config_dict)
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "head_server: {host: '', port: 0}")
 
         def boom(*args, **kwargs):
@@ -472,7 +636,7 @@ class TestServerUtils:
         get_global_config_dict_mock.return_value = global_config_dict
         monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", get_global_config_dict_mock)
 
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
 
         httpx_client_mock = MagicMock()
@@ -576,6 +740,24 @@ class TestServerUtils:
             url_path="blah blah",
         )
         assert "my mock response" == actual_response
+
+    @mark.parametrize(
+        "url_path, bound, reads_body",
+        [("/run", {"_max_num_tries": 2}, True), ("/run", {}, False), ("/v1/responses", {"_max_num_tries": 2}, False)],
+    )
+    async def test_ServerClient_reads_run_reply_inside_request(
+        self, monkeypatch: MonkeyPatch, url_path: str, bound: dict, reads_body: bool
+    ) -> None:
+        server_client = ServerClient(
+            head_server_config=BaseServerConfig(host="abcdef", port=12345),
+            global_config_dict=DictConfig({"my_server": {"a": {"b": {"host": "xyz", "port": 54321}}}}),
+        )
+        response = MagicMock(read=AsyncMock())
+        client = MagicMock(request=AsyncMock(return_value=response))
+        monkeypatch.setattr(nemo_gym.server_utils, "get_global_aiohttp_client", lambda: client)
+
+        assert await server_client.post(server_name="my_server", url_path=url_path, json={}, **bound) is response
+        assert response.read.await_count == int(reads_body)
 
     @mark.parametrize("tracing_enabled", [False, True])
     @mark.parametrize("internal", [False, True])
@@ -685,7 +867,7 @@ class TestServerUtils:
 
         The client must come up with the default limits instead of parsing that argv and exiting.
         """
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv(NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
@@ -713,18 +895,18 @@ class TestServerUtils:
             defaults = GlobalAIOHTTPAsyncClientConfig()
             assert client.connector.limit == defaults.global_aiohttp_connector_limit
             assert client.connector.limit_per_host == defaults.global_aiohttp_connector_limit_per_host
-            assert nemo_gym.global_config._GLOBAL_CONFIG_DICT is None
+            assert nemo_gym.config.global_config._GLOBAL_CONFIG_DICT is None
         finally:
             await client.close()
 
     async def test_get_global_aiohttp_client_parses_an_explicit_parser_config(self, monkeypatch: MonkeyPatch) -> None:
         """A caller that passes a parser config gets the limits it describes, not the defaults."""
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         monkeypatch.delenv(nemo_gym.server_utils.NEMO_GYM_FASTAPI_NUM_WORKERS, raising=False)
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT", None)
         monkeypatch.setattr(nemo_gym.server_utils, "_GLOBAL_AIOHTTP_CLIENT_CONFIG", None)
-        parser_config = nemo_gym.global_config.GlobalConfigDictParserConfig(
+        parser_config = nemo_gym.config.global_config.GlobalConfigDictParserConfig(
             initial_global_config_dict=DictConfig(
                 {"global_aiohttp_connector_limit": 7, "global_aiohttp_connector_limit_per_host": 3}
             ),

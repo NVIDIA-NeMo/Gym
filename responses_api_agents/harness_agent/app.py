@@ -37,17 +37,21 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import PROVIDER_OOM_KILLED, PROVIDER_UNAVAILABLE
-from nemo_gym.global_config import get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    failure_kinds,
+)
+from nemo_gym.sandbox import (
+    ConnectableProvider,
+    SandboxCreateError,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
 from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxCreateError, SandboxSpec
-from nemo_gym.sandbox.providers.registry import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
 
 
@@ -116,7 +120,9 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     )
     if not infra:
         return None
-    return PROVIDER_OOM_KILLED if any(marker in text for marker in _OOM_MARKERS) else PROVIDER_UNAVAILABLE
+    if any(marker in text for marker in _OOM_MARKERS):
+        return failure_kinds.PROVIDER_OOM_KILLED
+    return failure_kinds.PROVIDER_UNAVAILABLE
 
 
 def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:

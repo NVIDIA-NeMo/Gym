@@ -46,13 +46,13 @@ from typing import Any, ClassVar, Dict, List, Optional
 
 from pydantic import Field
 
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
 )
+from nemo_gym.judge import call_judge
 from nemo_gym.prompt import PromptConfig, fill_prompt, load_prompt_config
 from nemo_gym.reward_profile import compute_subset_metrics
 from resources_servers.math_with_judge.app import (
