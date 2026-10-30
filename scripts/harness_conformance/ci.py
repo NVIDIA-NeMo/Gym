@@ -27,17 +27,14 @@ def select_harnesses(paths: list[str]) -> list[str]:
         adapter = next((name for name in HARNESSES if path.startswith(f"responses_api_agents/{name}_agent/")), None)
         if adapter:
             selected.add(adapter)
-        elif path.startswith(("nemo_gym/cli/", "nemo_gym/data/tasks/")) and path not in (
-            "nemo_gym/cli/__init__.py",
-            "nemo_gym/cli/utils.py",
-        ):
+        elif path.startswith(("nemo_gym/orchestration/", "nemo_gym/cli/", "nemo_gym/eval/", "nemo_gym/environment/")):
+            continue
+        elif path.startswith("nemo_gym/data/tasks/"):
             # Probes construct their own rows and call the collector directly.
-            # A change to either of these two still runs every harness.
             continue
         elif path.startswith(
             (
                 "nemo_gym/",
-                "responses_api_agents/shared/",
                 "environment_servers/legacy_agent/",
                 "environment_servers/single_agent_turn/",
                 "environment_servers/single_agent_turn_legacy/",
@@ -64,12 +61,19 @@ def select_harnesses(paths: list[str]) -> list[str]:
                     "environment_servers/",
                     "tests/",
                     "benchmarks/",
+                    "environments/",
+                    "docker/",
+                    ".agents/",
                     "fern/",
                     "docs/",
                 )
             )
             or ("/" not in path and path.endswith(".md"))
             or path in ("LICENSE", ".gitignore")
+            or (
+                path.startswith(".github/workflows/")
+                and path not in (".github/workflows/harness-conformance.yml", ".github/workflows/cicd-main.yml")
+            )
         ):
             continue
         else:
