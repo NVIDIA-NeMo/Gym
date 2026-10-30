@@ -91,6 +91,45 @@ def test_canonical_counts_cannot_be_swapped_between_calls(behavior_episode):
     assert failed_model_checks(record, witness["attempts"]) == {"model.token_counts"}
 
 
+@pytest.mark.parametrize("usage", [True, False])
+@pytest.mark.parametrize("mutation", [None, "prompt_tokens", "cached_tokens", "total_tokens", "finish_reason"])
+def test_messages_usage_and_stop_reason_are_checked_independently(usage, mutation):
+    request = {"messages": [{"role": "user", "content": "hello"}], "max_tokens": 100}
+    response = {"id": "r", "type": "message", "stop_reason": "end_turn", "content": []}
+    stats = {}
+    if usage:
+        response["usage"] = {
+            "input_tokens": 20,
+            "output_tokens": 8,
+            "cache_read_input_tokens": 3,
+            "cache_creation_input_tokens": 2,
+        }
+        stats = {"prompt_tokens": 25, "completion_tokens": 8, "total_tokens": 33, "cached_tokens": 3}
+    metadata = {"status_code": 200, "response_id": "r", "finish_reason": "end_turn"}
+    call = {"request": request, "response": response, "response_metadata": metadata, "token_stats": stats}
+    record = {"ng_trajectory": {"model_calls": [call]}}
+    attempts = [{"request": request, "response": response, "status_code": 200}]
+    if mutation == "finish_reason":
+        metadata[mutation] = "stop"
+    elif mutation:
+        stats[mutation] = 0
+    assert failed_model_checks(record, attempts) == (
+        {"model.response_metadata"} if mutation == "finish_reason" else {"model.token_counts"} if mutation else set()
+    )
+
+
+def test_auxiliary_calls_are_required_in_canonical_exchange_comparison(behavior_episode):
+    record, witness = behavior_episode
+    auxiliary = copy.deepcopy(witness["attempts"][0])
+    witness["auxiliary_calls"] = [auxiliary]
+    options = dict(http_errors=(), terminal_error=False, tool_steps=2, expected_reward=0.0, fingerprint=fingerprint)
+    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
+    assert checks["model.saved_exchanges"]["status"] == "fail"
+    record["ng_trajectory"]["model_calls"].append(copy.deepcopy(record["ng_trajectory"]["model_calls"][0]))
+    checks = {c["id"]: c for c in inspect_behavior(witness, record, **options)}
+    assert checks["model.saved_exchanges"]["status"] == "pass"
+
+
 def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     record, witness = behavior_episode
     inv = record["ng_trajectory"]["invocations"][0]
@@ -100,6 +139,34 @@ def test_missing_tool_request_blocks_only_request_comparison(behavior_episode):
     assert checks["tools.witness_request"]["status"] == "fail"
     assert checks["tools.witness_status"]["status"] == "pass"
     assert checks["tools.witness_output"]["status"] == "pass"
+
+
+@pytest.mark.parametrize("mutation", [None, "arguments", "duplicate", "missing", "extra"])
+def test_native_terminal_witness_joins_by_exact_request_without_a_wire_id(behavior_episode, mutation):
+    record, witness = behavior_episode
+    for index, expected in enumerate(witness["tool_calls"]):
+        expected["arguments"] = {"keystrokes": f"echo unique-marker-{index}\n", "duration": 0.2}
+        for inv in record["ng_trajectory"]["invocations"]:
+            for item in inv["conversation"]:
+                if item.get("type") == "function_call" and item.get("call_id") == expected["id"]:
+                    item["arguments"] = json.dumps(expected["arguments"])
+        expected["wire_id"] = False
+        expected["id"] = f"independent-command-{index}"
+    tools = record["ng_trajectory"]["tool_calls"]
+    inv = record["ng_trajectory"]["invocations"][0]
+    request = next(i for i in inv["conversation"] if i.get("type") == "function_call")
+    if mutation == "arguments":
+        request["arguments"] = '{"keystrokes":"different command"}'
+    elif mutation == "duplicate":
+        inv["conversation"].append(copy.deepcopy(request))
+    elif mutation == "missing":
+        tools.pop()
+    elif mutation == "extra":
+        tools.append({**tools[0], "tool_call_id": "unwitnessed"})
+    checks = {c["id"]: c for c in tool_checks(record, witness["tool_calls"])}
+    assert checks["tools.witness_ids"]["status"] == ("pass" if mutation is None else "fail")
+    if mutation is None:
+        assert all(c["status"] == "pass" for c in checks.values())
 
 
 def test_the_scripted_finish_call_is_not_compared_with_the_shell_witness(behavior_episode):
