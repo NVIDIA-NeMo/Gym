@@ -20,17 +20,21 @@ from typing import Any, Optional
 
 from pydantic import BaseModel
 
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.config.global_config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,
 )
+from nemo_gym.episode_types import EpisodeId
+
+
+VERIFIER_INVOCATION_HEADER = "x-ng-verifier-invocation-id"
 
 
 _ROLLOUT_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_rollout_id", default=None)
+_VERIFIER_INVOCATION_ID: ContextVar[Optional[str]] = ContextVar("nemo_gym_verifier_invocation_id", default=None)
 
 # A capture id is a path segment in ``/ng-rollout/<id>/...``.
 # Restrict it to characters that survive a path round trip.
@@ -120,8 +124,26 @@ def rollout_context(rollout_id: Optional[str]) -> Iterator[None]:
         _ROLLOUT_ID.reset(token)
 
 
+def current_verifier_invocation_id() -> Optional[str]:
+    """Return the enclosing verify execution, if any."""
+    return _VERIFIER_INVOCATION_ID.get()
+
+
+@contextmanager
+def verifier_invocation_context(invocation_id: str) -> Iterator[None]:
+    """Carry one verify execution's identity across its concurrent judge calls."""
+    token = _VERIFIER_INVOCATION_ID.set(invocation_id)
+    try:
+        yield
+    finally:
+        _VERIFIER_INVOCATION_ID.reset(token)
+
+
 class RolloutContextMiddleware:
     """Strip a rollout prefix and expose it to downstream Gym calls for this request."""
+
+    # Correlation prefixes are handled before resource routes; direct MCP dispatch has no prefix.
+    skipped_on_direct_mcp_dispatch = True
 
     # Match the same id characters as ``ROLLOUT_ID_PATTERN``.
     # Anchor the id between the prefix and the remaining path.

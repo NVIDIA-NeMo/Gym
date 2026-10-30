@@ -24,7 +24,7 @@ from nooa import Agent
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 
 
@@ -91,15 +91,18 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None, gt=0, description="Optional shared model-call limit per rollout; null disables the limit."
     )
 
-    @field_validator("nooa")
-    @classmethod
-    def require_embedded_execution(cls, value: NOOAInvocationConfig) -> NOOAInvocationConfig:
-        if value.execution_mode != "embedded":
-            raise ValueError(
-                "nooa.execution_mode='sandboxed' is unavailable in this agent server; "
-                "use 'embedded' until sandbox sessions are supported"
-            )
-        return value
+    sandbox_runner_timeout_seconds: float = Field(
+        default=21420,
+        gt=0,
+        allow_inf_nan=False,
+        description="Finite sandbox worker ceiling in seconds; separate from the environment's episode timeout.",
+    )
+    session_close_timeout_seconds: float = Field(
+        default=30,
+        gt=0,
+        allow_inf_nan=False,
+        description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
+    )
 
 
 def load_agent_class(path: str) -> type[Agent]:

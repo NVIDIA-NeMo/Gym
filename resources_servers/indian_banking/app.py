@@ -29,7 +29,7 @@ from fastapi import FastAPI
 from pydantic import Field
 
 from nemo_gym.base_resources_server import BaseResourcesServerConfig
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,

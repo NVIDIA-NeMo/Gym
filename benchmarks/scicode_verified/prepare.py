@@ -14,7 +14,7 @@ import urllib.request
 from pathlib import Path
 from typing import Dict
 
-from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
 
 BENCHMARK_DIR = Path(__file__).parent

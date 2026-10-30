@@ -42,6 +42,6 @@ __getattr__ = moved_attr_getter(
         "VersionConfig": "nemo_gym.cli.general",
         "version": "nemo_gym.cli.general",
         # Never actually lived in cli; reachable via the old module's top-level import.
-        "GlobalConfigDictParserConfig": "nemo_gym.global_config",
+        "GlobalConfigDictParserConfig": "nemo_gym.config.global_config",
     },
 )

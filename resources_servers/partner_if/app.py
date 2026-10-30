@@ -18,7 +18,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verifier_fixture import VerifierFixture
@@ -32,7 +32,7 @@ from resources_servers.partner_if.grading_contract import (
     Evaluation,
     GradingContract,
 )
-from resources_servers.partner_if.grading_service import grade, unanswered
+from resources_servers.partner_if.grading_service import JudgeRejection, grade, unanswered
 from resources_servers.partner_if.llm import MAX_JUDGE_INPUT_CHARS, PROTOCOL
 from resources_servers.partner_if.metrics import PartnerIFMetricsMixin
 from resources_servers.partner_if.native_evidence import LiveAgentCapture, live_agent_evidence, visible_events
@@ -81,6 +81,8 @@ class VerifyResponse(VerifyRequest, BaseVerifyResponse):
     judge_protocol: str = PROTOCOL
     judge_response: NeMoGymResponse | None = None
     judge_request: dict | None = None
+    # Judge replies that failed validation before `judge_response`, each with its reason; the judge was asked again.
+    judge_rejected_responses: list[JudgeRejection] = Field(default_factory=list, exclude_if=lambda value: not value)
     grading_result: Evaluation | None = None
     # Whether grading ran to completion, as Gym's evidence gate reads it: a masked rollout's did not.
     evaluation_completed: bool | None = None

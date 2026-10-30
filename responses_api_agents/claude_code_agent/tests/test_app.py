@@ -25,7 +25,7 @@ import yaml
 from fastapi import Request
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.config import SKILLS_REF_KEY_NAME
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -903,6 +903,8 @@ class TestParseStreamJson:
             ({"subtype": "success"}, 7, ("failed", "process_exit_7")),
             ({"subtype": "error_max_turns", "is_error": True}, 0, ("incomplete", "error_max_turns")),
             ({"subtype": "error_during_execution", "is_error": True}, 0, ("failed", "error_during_execution")),
+            ({"subtype": "success", "is_error": True}, 0, ("failed", "agent_error")),
+            ({"is_error": True}, 0, ("failed", "agent_error")),
             ({"subtype": "error_max_turns", "is_error": True}, 7, ("incomplete", "error_max_turns")),
             ({}, 7, ("failed", "process_exit_7")),
             ({}, 0, ("incomplete", "result_missing")),
@@ -998,6 +1000,32 @@ class TestParseStreamJson:
         assert usage["input_tokens"] == 100
         assert usage["output_tokens"] == 50
 
+    def test_result_usage_is_the_total(self) -> None:
+        # The result event's usage is cumulative: the assistant messages are not added to it.
+        assistant = _event("assistant", message={"id": "m1", "content": [], "usage": {"input_tokens": 60}})
+        result = _event("result", usage={"input_tokens": 60, "output_tokens": 9})
+        _, usage = parse_stream_json(f"{assistant}\n{result}")
+        assert (usage["input_tokens"], usage["output_tokens"]) == (60, 9)
+
+    def test_message_usage_counted_once_per_message(self) -> None:
+        # Without a result event (the CLI was killed), stream-json's one event per content block
+        # repeats the message's usage; count each message once, with its latest usage.
+        thinking = _event(
+            "assistant",
+            message={"id": "m1", "content": [{"type": "thinking", "thinking": "hmm"}], "usage": {"input_tokens": 40}},
+        )
+        text = _event(
+            "assistant",
+            message={
+                "id": "m1",
+                "content": [{"type": "text", "text": "done"}],
+                "usage": {"input_tokens": 40, "output_tokens": 3},
+            },
+        )
+        second = _event("assistant", message={"id": "m2", "content": [], "usage": {"input_tokens": 50}})
+        _, usage = parse_stream_json(f"{thinking}\n{text}\n{second}")
+        assert (usage["input_tokens"], usage["output_tokens"]) == (90, 3)
+
     def test_result_event_exposes_num_turns(self) -> None:
         result = _event(
             "result",
@@ -1016,6 +1044,24 @@ class TestParseStreamJson:
             "is_error": False,
             "duration_ms": 1234,
         }
+
+    @pytest.mark.parametrize(
+        ("text", "expected"),
+        [
+            (
+                "API Error: Claude Code is unable to respond to this request, which appears to violate our Usage "
+                "Policy (https://www.anthropic.com/legal/aup). Try rephrasing the request.",
+                ("failed", "refusal"),
+            ),
+            ("API Error: 500 upstream unavailable", ("failed", "agent_error")),
+        ],
+    )
+    def test_error_result_with_success_subtype_is_classified(self, text: str, expected: tuple[str, str]) -> None:
+        # Claude Code 2.1.108 reports a model refusal or API error with subtype "success" and is_error true.
+        result = _event("result", subtype="success", is_error=True, result=text, stop_reason="stop_sequence")
+        _, metadata = parse_stream_json(result)
+        assert metadata["error_message"] == text
+        assert _invocation_outcome(metadata, 0) == expected
 
     def test_num_turns_absent_when_no_result_event(self) -> None:
         assistant = self._assistant([{"type": "text", "text": "hi"}])

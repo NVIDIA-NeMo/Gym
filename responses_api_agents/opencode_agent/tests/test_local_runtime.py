@@ -12,7 +12,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 
 from nemo_gym.base_responses_api_agent import AGENT_SESSION_COOKIE_KEY
-from nemo_gym.global_config import GlobalConfigDictParser
+from nemo_gym.config import GlobalConfigDictParser
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage
 from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.server_utils import ServerClient

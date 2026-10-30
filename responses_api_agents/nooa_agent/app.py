@@ -23,11 +23,14 @@ from fastapi import Body, FastAPI, HTTPException, Request
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
+    AgentSessionSetupError,
     AgentSessionState,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_correlation import rollout_context
+from nemo_gym.rollout_observability import AgentInvocation
+from nemo_gym.sandbox import AsyncSandbox, create_provider, resolve_provider_config
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
@@ -38,6 +41,8 @@ from responses_api_agents.nooa_agent.runner import (
     NOOARunRequest,
     NOOARunResult,
 )
+from responses_api_agents.nooa_agent.sandbox_runner import SandboxNOOARunner
+from responses_api_agents.nooa_agent.sandbox_runtime import prepare_nooa_runtime
 from responses_api_agents.nooa_agent.termination import NOOATerminationReason
 
 
@@ -80,12 +85,45 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             tool_access=access,
             resources_cookies=dict(access.cookies) if access else {},
         )
-        state.runner = InProcessNOOARunner(
-            invocation=self.config.nooa,
-            server_client=self.server_client,
-            model_server_name=self.config.model_server.name,
-            max_policy_calls=self.config.max_policy_calls,
-        )
+        if self.config.nooa.execution_mode == "embedded":
+            state.runner = InProcessNOOARunner(
+                invocation=self.config.nooa,
+                server_client=self.server_client,
+                model_server_name=self.config.model_server.name,
+                max_policy_calls=self.config.max_policy_calls,
+            )
+        else:
+            if body.sandbox_access is None:
+                raise HTTPException(422, "Sandboxed NOOA requires Resources-provided sandbox_access")
+            model_base_url = self.resolve_model_base_url(self.config.model_server.name).removesuffix("/v1")
+            connection = body.sandbox_access.connection
+            provider = create_provider(
+                resolve_provider_config(connection.provider_config_ref, self.server_client.global_config_dict)
+            )
+            try:
+                sandbox = await AsyncSandbox.connect(connection.descriptor, provider=provider)
+            except BaseException:
+                await provider.aclose()
+                raise
+            runner = SandboxNOOARunner(
+                sandbox=sandbox,
+                workdir=body.sandbox_access.workdir,
+                python="",
+                invocation=self.config.nooa,
+                model_base_url=model_base_url,
+                model_server_name=self.config.model_server.name,
+                timeout=self.config.sandbox_runner_timeout_seconds,
+                close_timeout=self.config.session_close_timeout_seconds,
+                max_policy_calls=self.config.max_policy_calls,
+            )
+            state.runner = runner
+            try:
+                runner.python = await prepare_nooa_runtime(sandbox)
+                await runner.prepare()
+            except BaseException as error:
+                # Main retains this state for close while rejecting activation
+                # and seed retries against an incompletely initialized runtime.
+                raise AgentSessionSetupError(state, error=error) from error
         return state
 
     async def responses(
@@ -111,7 +149,13 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 state.activation_key = key
                 state.execution = asyncio.create_task(self._execute_session(state, body, route))
             execution = state.execution
-        return await asyncio.shield(execution)
+        try:
+            return await asyncio.shield(execution)
+        except asyncio.CancelledError:
+            request_task = asyncio.current_task()
+            if state.closing and request_task is not None and not request_task.cancelling():
+                raise HTTPException(409, "Agent session is closing") from None
+            raise
 
     async def _execute_session(
         self, state: NOOASessionState, body: NeMoGymResponseCreateParamsNonStreaming, route: str
@@ -150,16 +194,64 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         async with state.lock:
             state.closing = True
             execution = state.execution
+        if isinstance(state.runner, SandboxNOOARunner):
+            # Stop the worker and capture its final evidence before cancelling
+            # the controller task that may still be waiting for provider I/O.
+            # An unconfirmed stop raises here and leaves this state retryable.
+            await state.runner.close()
         if execution is not None:
             if not execution.done():
                 execution.cancel()
+                done, _ = await asyncio.wait({execution}, timeout=self.config.session_close_timeout_seconds)
+                if not done:
+                    raise TimeoutError(
+                        "NOOA activation did not stop within the session close timeout; close must retry"
+                    )
             await asyncio.gather(execution, return_exceptions=True)
+        if isinstance(state.runner, SandboxNOOARunner):
+            recovered = state.runner.artifact or state.runner.checkpoint
+            if recovered is not None:
+                state.resources_cookies.update(recovered.resource_cookies)
+                state.model_cookies.update(recovered.model_cookies)
+                if state.result is None and recovered.response is not None:
+                    state.result = recovered.run_result()
+                    # Late evidence cannot turn a failed activation into a
+                    # successful or gradable result.
+                    if execution is not None and execution.cancelled():
+                        state.result.termination_reason = NOOATerminationReason.CANCELLED
+                    elif execution is not None and (error := execution.exception()) is not None:
+                        state.result.termination_reason = NOOATerminationReason.INFRASTRUCTURE_ERROR
+                        state.result.termination_error = str(error)
+                if state.result is not None:
+                    state.result.resource_cookies.update(recovered.resource_cookies)
+                    state.result.model_cookies.update(recovered.model_cookies)
         return self._session_evidence(state)
 
     def _session_evidence(self, state: NOOASessionState) -> AgentCloseSessionResponse:
-        observations = None
+        observations = state.runner.observations if isinstance(state.runner, SandboxNOOARunner) else None
         if state.result is not None:
-            _, observations = finalize_run_result(state.result)
+            _, finalized = finalize_run_result(state.result)
+            if observations is None:
+                observations = finalized
+            else:
+                # The runner may have captured newer records and cleanup gaps
+                # after the activation produced its result. Keep both sets of
+                # gaps, including the normalized activation failure.
+                observations = observations.model_copy(
+                    update={
+                        "records": list(
+                            {
+                                ("invocation", record.invocation_id)
+                                if isinstance(record, AgentInvocation)
+                                else ("record", record.model_dump_json()): record
+                                for record in [*finalized.records, *observations.records]
+                            }.values()
+                        ),
+                        "gaps": list(
+                            {gap.model_dump_json(): gap for gap in [*observations.gaps, *finalized.gaps]}.values()
+                        ),
+                    }
+                )
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=observations,

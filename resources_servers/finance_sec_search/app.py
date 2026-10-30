@@ -56,7 +56,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionLostError,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.judge import JudgeError, call_judge, reraise_judge_errors
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,

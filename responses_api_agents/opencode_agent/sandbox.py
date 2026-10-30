@@ -6,20 +6,27 @@ import asyncio
 import json
 import logging
 import tempfile
+import time
 from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_RUNNER_FILE,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.sandbox import read_text, upload_text
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+from responses_api_agents.opencode_agent.snapshot import snapshot
 
 
 LOG = logging.getLogger(__name__)
@@ -45,7 +52,6 @@ class HarnessProcessInfo(BaseModel):
     model_config = ConfigDict(extra="forbid", strict=True)
     hostname: str
     pid: int
-    python: str | None = None
 
 
 def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
@@ -55,6 +61,42 @@ def parse_runtime_info(payload: object) -> HarnessProcessInfo | None:
     except ValidationError:
         LOG.warning("OpenCode runtime metadata is missing or malformed")
         return None
+
+
+_TASK_DIRECTORY_KEYS = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME")
+# Record the task's home and XDG directories, before OpenCode's overrides, for the
+# task_environment.mjs shell.env hook. Defaults follow the XDG specification.
+_TASK_ENV_SETUP = r"""json() {
+    local value=${1//\\/\\\\} code octal character escaped
+    value=${value//\"/\\\"}
+    # JSON forbids raw control characters; a bash string cannot hold NUL.
+    for ((code = 1; code < 32; code++)); do
+        printf -v octal '%03o' "$code"
+        printf -v character "\\$octal"
+        printf -v escaped '\\u%04x' "$code"
+        value=${value//"$character"/"$escaped"}
+    done
+    printf '"%s"' "$value"
+}
+home=${HOME:-~}
+printf '{"HOME": %s, "XDG_DATA_HOME": %s, "XDG_CONFIG_HOME": %s, "XDG_CACHE_HOME": %s, "XDG_STATE_HOME": %s}' \
+    "$(json "$home")" \
+    "$(json "${XDG_DATA_HOME:-${home%/}/.local/share}")" \
+    "$(json "${XDG_CONFIG_HOME:-${home%/}/.config}")" \
+    "$(json "${XDG_CACHE_HOME:-${home%/}/.cache}")" \
+    "$(json "${XDG_STATE_HOME:-${home%/}/.local/state}")" >"$task_env" || exit 1
+"""
+
+
+def runner_setup(directory: str, private_directories: list[str]) -> str:
+    """Bash run in the sandbox before the CLI: fresh receipt, task directories, private directories."""
+    return (
+        # Never accept an initialization receipt left by an earlier invocation.
+        f"rm -f -- {quote(f'{directory}/task-environment.ready')} || exit 1\n"
+        f"task_env={quote(f'{directory}/task-env.json')}\n"
+        + _TASK_ENV_SETUP
+        + f"mkdir -p -- {' '.join(quote(path) for path in private_directories)}\n"
+    )
 
 
 @dataclass
@@ -70,7 +112,6 @@ class OpenCodeSandboxSession(AgentSessionState):
     session: SandboxSession[str]
     runtime: str
     sandbox_id: str | None = None
-    python_executable: str = "python3"
     model_ref: ModelServerRef | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
@@ -86,6 +127,7 @@ class OpenCodeSandboxSession(AgentSessionState):
     trajectory: TrajectoryRecord | None = None
     activation_trajectory: TrajectoryRecord | None = None
     activation_id: int | None = None
+    close_requested_at: float | None = None
     _retained_activations: dict[int, tuple[AgentObservationBundle, TrajectoryRecord | None]] = field(
         default_factory=dict, init=False, repr=False
     )
@@ -177,16 +219,14 @@ class OpenCodeSandboxSession(AgentSessionState):
                 },
             )
 
-    async def upload_json(self, name: str, payload: JsonValue) -> None:
-        """Stage adapter input using the shared text-transfer utility."""
-        await upload_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}", text=json.dumps(payload))
-
     async def read_text(self, name: str) -> str:
         """Read adapter output using file transfer."""
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
 
     async def close(self, timeout: float) -> None:
         """Capture and release before cancelling the HTTP activation."""
+        if self.close_requested_at is None:
+            self.close_requested_at = time.time()
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -233,33 +273,46 @@ class OpenCodeSandboxSession(AgentSessionState):
             await self.session.sandbox.upload(
                 Path(__file__).with_name("task_environment.mjs"), f"{self.session.session_dir}/task_environment.mjs"
             )
-        await self.upload_json("input.json", payload)
+        directory = self.session.session_dir
+        await upload_text(self.session.sandbox, path=f"{directory}/prompt.txt", text=payload["prompt"])
+        env = payload["env"]
+        params = {
+            "cwd": payload["cwd"],
+            "command": payload["command"],
+            "env": env,
+            "stdin": f"{directory}/prompt.txt",
+            "stdout": f"{directory}/stdout.jsonl",
+            "stderr": f"{directory}/stderr.log",
+            "setup": runner_setup(directory, [env[key] for key in _TASK_DIRECTORY_KEYS]),
+        }
+        if payload.get("path_prefix"):
+            # Preinstalled runtime tools come first; the task's own PATH still follows.
+            params["setup"] += f"PATH={quote(':'.join(payload['path_prefix']))}:$PATH\n"
+        await upload_text(self.session.sandbox, path=f"{directory}/params.sh", text=shell_assignments(params))
         return SandboxCommand(
-            python=self.python_executable,
-            argv=[
-                self.python_executable,
-                "-I",
-                f"{self.persistent_directory}/{RUNNER_FILE}",
-                f"{self.session.session_dir}/input.json",
-            ],
-            stdlib_runner=True,
+            argv=["bash", f"{self.persistent_directory}/{HARNESS_RUNNER_FILE}", f"{directory}/params.sh"]
         )
 
     async def collect_artifacts(self, *, timeout: float) -> str:
         """Snapshot only after cleanup; keep observations before sandbox release."""
+        with tempfile.TemporaryDirectory(prefix="opencode-snapshot-") as directory:
+            return await self._collect_artifacts(Path(directory), timeout=timeout)
+
+    async def _collect_artifacts(self, directory: Path, *, timeout: float) -> str:
+        capture_started_at = time.time()
         previous_session_id = self.harness_session_id
         try:
             self.stderr = (await self.read_text("stderr.log"))[-16000:]
         except Exception:
             LOG.warning("OpenCode stderr log unavailable", exc_info=True)
         try:
-            await self.snapshot(timeout)
+            await self.snapshot(directory, timeout)
         except Exception as error:
             if self.stderr:
                 raise RuntimeError(format_error_message(str(error), stderr=self.stderr)) from error
             raise
         if self.is_continuation:
-            export_text = await self._read_export()
+            export_text = await self._read_export(directory)
             export = json.loads(export_text)
             harness_session_id = export.get("session_id")
             if not isinstance(harness_session_id, str) or not harness_session_id:
@@ -273,33 +326,49 @@ class OpenCodeSandboxSession(AgentSessionState):
         except Exception:
             LOG.warning("OpenCode event log unavailable", exc_info=True)
         try:
-            with tempfile.TemporaryDirectory(prefix="opencode-observations-") as directory:
-                path = Path(directory) / "observations.db"
-                await self.session.sandbox.download(f"{self.session.session_dir}/observations.db", path)
-                trajectory = TrajectoryRecord(
-                    task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
-                )
-                observations = await asyncio.to_thread(
-                    parse_opencode_observations,
-                    path,
-                    self.request.episode_id.capture_key,
+            trajectory = TrajectoryRecord(
+                task_id=self.request.task_id.task_id, rollout_id=self.request.episode_id.capture_key
+            )
+            database = directory / "observations.db"
+            if not database.is_file():
+                raise FileNotFoundError(f"OpenCode observations were not captured: {database}")
+            observations = await asyncio.to_thread(
+                parse_opencode_observations,
+                database,
+                self.request.episode_id.capture_key,
+                trajectory,
+                require_terminal_finish=True,
+                model_ref=self.model_ref,
+                message_ids=set(export.get("activation_message_ids", [])) if self.is_continuation else None,
+            )
+            lifecycle = json.dumps(
+                {
+                    "capture_started_at": capture_started_at,
+                    "parse_completed_at": time.time(),
+                    "close_requested_at": self.close_requested_at,
+                    "cleanup": {
+                        key: self.session.cleanup.get(key) for key in ("cleanup_confirmed", "timed_out", "return_code")
+                    }
+                    if self.session.cleanup is not None
+                    else None,
+                },
+                separators=(",", ":"),
+            )
+            for gap in trajectory.gaps:
+                if gap.code == "turns_unavailable":
+                    gap.detail = (gap.detail or "") + "; capture_lifecycle=" + lifecycle
+            if self.is_continuation:
+                assert self.activation_id is not None
+                scope_opencode_activation(
+                    observations,
                     trajectory,
-                    require_terminal_finish=True,
-                    model_ref=self.model_ref,
-                    message_ids=set(export.get("activation_message_ids", [])) if self.is_continuation else None,
+                    invocation_prefix=self.invocation_prefix,
+                    activation_id=self.activation_id,
                 )
-                if self.is_continuation:
-                    assert self.activation_id is not None
-                    scope_opencode_activation(
-                        observations,
-                        trajectory,
-                        invocation_prefix=self.invocation_prefix,
-                        activation_id=self.activation_id,
-                    )
-                    self.activation_observations = observations
-                    self.activation_trajectory = trajectory
-                else:
-                    self.observations = observations
+                self.activation_observations = observations
+                self.activation_trajectory = trajectory
+            else:
+                self.observations = observations
         except Exception:
             LOG.exception("Failed to parse OpenCode observations")
             observations = AgentObservationBundle(
@@ -323,7 +392,7 @@ class OpenCodeSandboxSession(AgentSessionState):
             # Preserve the single-turn evidence/error order. The response layer
             # parses this raw export and translates malformed content to 502.
             await self._check_task_environment()
-            return await self._read_export()
+            return await self._read_export(directory)
         try:
             await self._check_task_environment()
         except Exception as error:
@@ -345,10 +414,10 @@ class OpenCodeSandboxSession(AgentSessionState):
             ) from error
         return export_text
 
-    async def _read_export(self) -> str:
+    async def _read_export(self, directory: Path) -> str:
         try:
-            return await self.read_text("export.json")
-        except Exception as error:
+            return (directory / "export.json").read_text()
+        except OSError as error:
             logs = await self.session.read_output_log()
             raise RuntimeError(
                 format_error_message(
@@ -365,15 +434,42 @@ class OpenCodeSandboxSession(AgentSessionState):
                 format_error_message("OpenCode task environment initialization was not confirmed", stderr=self.stderr)
             ) from error
 
-    async def snapshot(self, timeout: float) -> None:
-        """Capture SQLite after CLI completion; borrowed task services may remain alive."""
+    async def snapshot(self, directory: Path, timeout: float) -> None:
+        """Copy SQLite out after CLI completion and export it here; borrowed task services may remain alive."""
         if self.session.cleanup is None or not self.session.cleanup["cleanup_confirmed"]:
             raise RuntimeError("OpenCode transcript capture requires confirmed cleanup")
-        captured = await self.session.sandbox.exec(
-            f"{quote(self.python_executable)} -I {quote(f'{self.persistent_directory}/{RUNNER_FILE}')} "
-            f"--snapshot {quote(self.session.session_dir)} {quote(self.persistent_directory)}",
-            cwd=self.session.workdir,
-            timeout_s=timeout,
-        )
-        if captured.return_code != 0 or captured.error_type:
-            raise RuntimeError(f"OpenCode transcript capture failed: {captured.stderr}")
+        database = f"{self.persistent_directory}/data/opencode"
+        deadline = asyncio.get_running_loop().time() + timeout
+        try:
+            async with asyncio.timeout_at(deadline):
+                # A stopped CLI may leave its write-ahead log behind; it holds the latest messages.
+                listed = await self.session.sandbox.exec(
+                    "for name in opencode.db opencode.db-wal opencode.db-shm; "
+                    f'do [ ! -e {quote(database)}/"$name" ] || echo "$name"; done',
+                    cwd=self.session.workdir,
+                    timeout_s=timeout,
+                )
+            if listed.return_code != 0 or listed.error_type:
+                raise RuntimeError(listed.stderr)
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error
+        names = (listed.stdout or "").split()
+        if "opencode.db" not in names:
+            return  # No export: collection reports the missing result with the CLI logs.
+        try:
+            async with asyncio.timeout_at(deadline):
+                for name in names:
+                    await self.session.sandbox.download(f"{database}/{name}", directory / name)
+        except Exception:
+            LOG.warning("OpenCode session database unavailable", exc_info=True)
+            return
+        try:
+            await asyncio.to_thread(
+                snapshot,
+                directory / "opencode.db",
+                directory,
+                harness_session_id=self.harness_session_id,
+                previous_message_ids=self.message_ids,
+            )
+        except Exception as error:
+            raise RuntimeError(f"OpenCode transcript capture failed: {error}") from error

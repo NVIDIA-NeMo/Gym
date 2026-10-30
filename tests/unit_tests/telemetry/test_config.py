@@ -117,7 +117,7 @@ def test_none_global_config_yields_a_disabled_config():
 
 def test_telemetry_is_a_reserved_top_level_key():
     """Otherwise Gym's config parser reads `telemetry:` as a server instance definition."""
-    from nemo_gym.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
+    from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS
     from nemo_gym.telemetry.setup import TELEMETRY_KEY_NAME
 
     assert TELEMETRY_KEY_NAME in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS

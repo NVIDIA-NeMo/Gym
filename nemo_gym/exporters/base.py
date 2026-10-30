@@ -13,15 +13,23 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import logging
+import os
 from abc import ABC, abstractmethod
 from copy import deepcopy
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
-from omegaconf import DictConfig
+import orjson
+from omegaconf import DictConfig, OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.secret_utils import recursively_hide_secrets
+from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
+from nemo_gym.config.secret_utils import recursively_hide_secrets
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.path_utils import exporter_run_id_path_for
+from nemo_gym.run_artifacts import RunArtifacts
 
 
 logger = logging.getLogger(__name__)
@@ -29,7 +37,139 @@ logger = logging.getLogger(__name__)
 _BOOL = TypeAdapter(bool)
 
 
-class BaseExporter(ABC):
+class ExportState(str, Enum):
+    SUCCEEDED = "succeeded"
+    SKIPPED = "skipped"
+    FAILED = "failed"
+
+
+@dataclass(frozen=True)
+class ExportResult:
+    """What one exporter did with one finished run."""
+
+    state: ExportState
+    exit_code: int = 0
+    error: Optional[str] = None
+    detail: dict[str, Any] = field(default_factory=dict)
+
+    @classmethod
+    def succeeded(cls, **detail: Any) -> "ExportResult":
+        return cls(ExportState.SUCCEEDED, detail=detail)
+
+    @classmethod
+    def skipped(cls, **detail: Any) -> "ExportResult":
+        return cls(ExportState.SKIPPED, detail=detail)
+
+    @classmethod
+    def failed(cls, error: str, *, exit_code: int = 1, **detail: Any) -> "ExportResult":
+        return cls(ExportState.FAILED, exit_code=exit_code, error=error, detail=detail)
+
+
+class Exporter(ABC):
+    """Sends a finished run to a destination, or converts it to another format.
+
+    An exporter receives the run's `RunArtifacts` and decides which of those files it reads. Its settings
+    come from `config_model`, validated from the export command's own config before `export` is called.
+    Importing a backend's SDK belongs inside `export`, so listing exporters never loads one.
+    """
+
+    # Identifier used on the command line and in logs, e.g. "atif".
+    name: ClassVar[str]
+    config_model: ClassVar[type[RunExportConfig]]
+
+    def __init__(self, config: RunExportConfig) -> None:
+        self.config = config
+
+    @classmethod
+    def from_global_config(cls, global_config_dict: DictConfig) -> "Exporter":
+        """Build the exporter from the export command's resolved config, validating it first."""
+        return cls(cls.config_model.model_validate(global_config_dict))
+
+    @abstractmethod
+    def export(self, artifacts: RunArtifacts) -> ExportResult:
+        """Export the run. Report an expected failure in the result; raise only for a bug."""
+
+
+def _live_run_id(artifacts: RunArtifacts, name: str) -> Optional[str]:
+    """The backend run a live exporter recorded for this run, or None when there is none or it cannot be read."""
+    try:
+        return artifacts.exporter_run_id_fpath(name).read_text().strip() or None
+    except OSError:
+        return None
+
+
+def _write_marker_atomically(marker: Path, run_id: str) -> None:
+    """Publish the already-exported marker only once it is fully written, so a failed write leaves none."""
+    marker.parent.mkdir(parents=True, exist_ok=True)
+    temporary = marker.with_name(f".{marker.name}.{os.getpid()}.tmp")
+    try:
+        temporary.write_text(run_id)
+        temporary.replace(marker)
+    finally:
+        temporary.unlink(missing_ok=True)
+
+
+def _upload_intent(config: DictConfig) -> UploadRolloutsConfigMixin:
+    """The upload settings in `config`, resolving only those values.
+
+    A saved run config keeps its `${...}` interpolations unresolved, and resolving all of it would need the
+    environment the run had. The canonical key wins over the deprecated one, as in the settings model, so a
+    deprecated value that loses is never evaluated.
+    """
+    values = OmegaConf.to_container(config, resolve=False)
+    for key in ("upload_rollouts", DEPRECATED_UPLOAD_ROLLOUTS_KEY):
+        if key in values:
+            values[key] = config[key]
+            break
+    return UploadRolloutsConfigMixin.model_validate(values)
+
+
+def _aggregation_failure(aggregate_metrics: Path) -> Optional[str]:
+    """Why the aggregate metrics file is not a complete result, or None.
+
+    A failed `/aggregate_metrics` request leaves an `aggregation_error` entry beside the healthy agents'
+    metrics. A live run keeps those partial metrics and reports the failure, but an export marks the run
+    done, so it must not send a partial result.
+    """
+    from nemo_gym.batch_status import AGGREGATION_ERROR_KEY
+
+    try:
+        entries = orjson.loads(aggregate_metrics.read_bytes())
+    except orjson.JSONDecodeError as exc:
+        return f"Aggregate metrics {aggregate_metrics} are not valid JSON ({exc}). Run `gym eval aggregate` again."
+    failed = sorted(
+        str((entry.get("agent_ref") or {}).get("name", "<unknown>"))
+        for entry in entries
+        if isinstance(entry, dict) and AGGREGATION_ERROR_KEY in entry
+    )
+    if failed:
+        return f"Aggregation failed for agents: {', '.join(failed)}. Run `gym eval aggregate` again."
+    return None
+
+
+def unexportable_reason(artifacts: RunArtifacts, *, rollouts_required: bool = True) -> Optional[str]:
+    """What is missing for the run to be exported faithfully, or None when it can be.
+
+    Pass `rollouts_required=False` when the exporter does not read the rollouts file. When that file is there,
+    the aggregate metrics must still not be older than it.
+    """
+    rollouts = artifacts.rollouts_jsonl_fpath
+    if rollouts_required and not rollouts.is_file():
+        return f"Rollouts file not found: {rollouts}"
+    aggregate_metrics = artifacts.aggregate_metrics_json_fpath
+    if not aggregate_metrics.is_file():
+        return f"Aggregate metrics not found: {aggregate_metrics}. Run `gym eval aggregate` first."
+    if rollouts.is_file() and aggregate_metrics.stat().st_mtime < rollouts.stat().st_mtime:
+        return f"Aggregate metrics {aggregate_metrics} are older than {rollouts}. Run `gym eval aggregate` again."
+    if not artifacts.resolved_config_yaml_fpath.is_file():
+        return (
+            f"Saved run config not found: {artifacts.resolved_config_yaml_fpath}. "
+            "The run predates saving it; re-run it, or export it live."
+        )
+    return _aggregation_failure(aggregate_metrics)
+
+
+class BaseExporter(Exporter):
     """Sink for the run metadata a NeMo Gym eval produces: config, metrics, rollouts.
 
     A backend (W&B, MLflow, ...) subclasses this and wraps its own run handle. Lifecycle is
@@ -41,10 +181,11 @@ class BaseExporter(ABC):
     implement the unwrapped `_*` hooks and may raise freely.
     """
 
-    # Config key prefix and identifier used in logs, e.g. "wandb".
-    name: ClassVar[str]
+    # Every record-level exporter reads the run from the same rollouts file; the rest is its backend's settings.
+    config_model: ClassVar[type[RunExportConfig]] = RunExportConfig
 
     def __init__(self, global_config_dict: DictConfig) -> None:
+        # `config` is the subclass's own backend settings, validated from `global_config_dict`.
         self.global_config_dict = global_config_dict
         # Whether `setup` reopened the run recorded next to the output.
         self.reopened = False
@@ -54,6 +195,25 @@ class BaseExporter(ABC):
         self._recorded: Optional[str] = None
         # A reopened run's config, masked: logged once the run continues, dropped if the output starts over.
         self._pending_config: Optional[DictConfig] = None
+        # Set only while `export()` is running, which is how the run-id hooks below tell a post-run export from a
+        # live run (where it stays None). While it is set, the marker path comes from these artifacts instead of
+        # `output_jsonl_fpath`, a recorded run id is not reused to resume, and the run id is held back in
+        # `_pending_run_id` rather than written to the marker.
+        self._exported_artifacts: Optional[RunArtifacts] = None
+        # The backend run id reported during a post-run export. `export()` writes it to the marker once the whole
+        # run has been sent.
+        self._pending_run_id: Optional[str] = None
+
+    @classmethod
+    def from_global_config(cls, global_config_dict: DictConfig) -> "BaseExporter":
+        """Build the exporter from the whole resolved config.
+
+        This overrides `Exporter.from_global_config` because these exporters have always been built from the full
+        config (a live run has no settings model of its own) instead of from a validated model. So only the shared
+        settings are validated here, and each backend validates its own in its constructor.
+        """
+        cls.config_model.model_validate(global_config_dict)
+        return cls(global_config_dict)
 
     @abstractmethod
     def setup(self) -> None:
@@ -154,13 +314,13 @@ class BaseExporter(ABC):
         """`<output stem>_<name>_run_id` next to `output_jsonl_fpath`, or None when the run has no output.
 
         A resumed or resubmitted run writes to the same output, so a backend that records its run id there
-        reopens that run instead of starting a new one. Deleting the file starts a new run.
+        reopens that run instead of starting a new one. Deleting the file starts a new run. Only a live run
+        reads or writes it; a post-run export keeps its own marker (`RunArtifacts.export_done_fpath`).
         """
         output = self.global_config_dict.get("output_jsonl_fpath")
         if not output:
             return None
-        output = Path(output)
-        return output.with_name(f"{output.stem}_{self.name}_run_id")
+        return exporter_run_id_path_for(Path(output), self.name)
 
     def _recorded_run_id(self) -> Optional[str]:
         """The run to reopen: the one recorded next to the output, when this run continues that output.
@@ -169,6 +329,8 @@ class BaseExporter(ABC):
         starts its rollouts anew, so it starts a new tracking run too, as does a resume that finds nothing to resume
         (`start_over`).
         """
+        if self._exported_artifacts is not None:
+            return None
         run_id_fpath = self._run_id_fpath()
         continues = self._flag("resume_from_cache") or (self._flag("judge_failed_only") and self._flag("append"))
         if self._starting_over or run_id_fpath is None or not run_id_fpath.exists() or not continues:
@@ -188,10 +350,93 @@ class BaseExporter(ABC):
             return False
 
     def _record_run_id(self, run_id: str) -> None:
+        if self._exported_artifacts is not None:
+            # Post-run exports leave the marker until the whole run has been sent.
+            self._pending_run_id = run_id
+            return
         run_id_fpath = self._run_id_fpath()
         if run_id_fpath is not None:
             run_id_fpath.parent.mkdir(parents=True, exist_ok=True)
             run_id_fpath.write_text(run_id)
+
+    def export(self, artifacts: RunArtifacts) -> ExportResult:
+        """Send a finished run to the backend: its saved config, aggregate metrics and (optionally) rollouts.
+
+        Skipped, without contacting the backend, when the run was already exported. Failures come back in the
+        result rather than being swallowed the way live `export_*` calls are.
+        """
+        marker = artifacts.export_done_fpath(self.name)
+        if marker.exists():
+            return ExportResult.skipped(reason="already exported", run_id=marker.read_text().strip())
+        # The rollouts file is only required below, when the rollouts are actually uploaded.
+        unexportable = unexportable_reason(artifacts, rollouts_required=False)
+        if unexportable is not None:
+            return ExportResult.failed(unexportable)
+
+        live_run_id = _live_run_id(artifacts, self.name)
+        if live_run_id is not None:
+            # A live run's marker proves the backend run was opened, not that every upload landed, so it cannot
+            # stand in for this export. Say so, as this run may now be in the backend twice.
+            logger.warning(
+                f"Exporter {self.name} logged {artifacts.rollouts_jsonl_fpath} live as run {live_run_id}; "
+                "this export sends it again as a separate run."
+            )
+        self._exported_artifacts, self._pending_run_id = artifacts, None
+        try:
+            saved_config = OmegaConf.load(artifacts.resolved_config_yaml_fpath)
+            upload = self._upload_enabled(saved_config)
+            if upload and not artifacts.rollouts_jsonl_fpath.is_file():
+                return ExportResult.failed(
+                    f"Rollouts file not found: {artifacts.rollouts_jsonl_fpath}. "
+                    "Pass `+upload_rollouts=false` to export without the rollouts."
+                )
+            metrics = flatten_aggregate_metrics(orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()))
+            rollouts = self._read_rollouts(artifacts) if upload else None
+            with self:
+                self._log_config(saved_config)
+                self._log_metrics(metrics)
+                if rollouts is not None:
+                    self._log_rollouts(rollouts)
+            run_id = self._pending_run_id
+            if not run_id:
+                # The marker records which backend run holds this export, and a skipped repeat reports it. A backend
+                # that never reports one is a bug in the exporter, and it shows on the first export.
+                raise RuntimeError(
+                    f"The {self.name} exporter did not report a run id: its setup() must call _record_run_id(). "
+                    "The export is not marked as done."
+                )
+            _write_marker_atomically(marker, run_id)
+        except Exception as exc:
+            logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
+            return ExportResult.failed(f"{type(exc).__name__}: {exc}")
+        finally:
+            self._exported_artifacts = None
+        detail = {"run_id": run_id, "uploaded_rollouts": rollouts is not None}
+        if live_run_id is not None:
+            detail["live_run_id"] = live_run_id
+        return ExportResult.succeeded(**detail)
+
+    def _upload_enabled(self, saved_config: DictConfig) -> bool:
+        """Whether the rollouts are uploaded, as a live run would have decided.
+
+        An explicit `upload_rollouts=` on the export command wins; otherwise the run's own saved setting does.
+        """
+        explicit = _upload_intent(self.global_config_dict)
+        if "upload_rollouts" in explicit.model_fields_set:
+            return explicit.upload_rollouts
+        return _upload_intent(saved_config).upload_rollouts
+
+    @staticmethod
+    def _read_rollouts(artifacts: RunArtifacts) -> list[dict[str, Any]]:
+        """The rollouts a live run would have uploaded."""
+        from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
+
+        # Rows flagged as drained stand for tasks the dispatch budget never started, so there is nothing to upload,
+        # and a live run leaves them out of its upload too. `_rollout_for_export` drops the bulky trajectory and
+        # raw model-call payloads, the same trimming a live run applies.
+        with artifacts.rollouts_jsonl_fpath.open("rb") as f:
+            rows = (orjson.loads(line) for line in f if line.strip())
+            return [_rollout_for_export(row) for row in rows if not row.get(NG_DISPATCH_DRAINED_KEY)]
 
     def __enter__(self) -> "BaseExporter":
         self.setup()

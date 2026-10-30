@@ -32,7 +32,7 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
@@ -44,7 +44,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -69,9 +69,13 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
 from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
 from nemo_gym.tool_access import MCPToolAccess, ToolAccess
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
@@ -120,6 +124,46 @@ def _ends_on_finish_tool(messages: list[Any]) -> bool:
         if message.get("role") == "toolResult":
             results.append(message)
     return False
+
+
+def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
+    """True when the run had not ended and had submitted nothing, so a stop at its deadline is a timeout.
+
+    A finish tool call that succeeded is a submission; gym_mcp.mjs marks only those results terminal. Pi reports each
+    call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
+    call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
+    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless the reply
+    was an empty `length` reply that Pi counts as a context overflow: Pi compacts to retry it (Pi 0.80.2 then exits
+    with code 1, a failure).
+    """
+    if any(
+        event.get("type") == "tool_execution_end"
+        and isinstance(event.get("result"), dict)
+        and isinstance(event["result"].get("details"), dict)
+        and event["result"]["details"].get("terminal") is True
+        for _, event in events
+    ):
+        return False
+    replies = [
+        index
+        for index, (_, event) in enumerate(events)
+        if event.get("type") == "message_end"
+        and isinstance(event.get("message"), dict)
+        and event["message"].get("role") == "assistant"
+    ]
+    if not replies:
+        return True
+    last = events[replies[-1]][1]["message"]
+    # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
+    called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
+    # pi-ai also counts an empty `length` reply at a full context as an overflow, and Pi compacts to retry it (Pi
+    # 0.80.2 then exits with code 1, a failure). Pi never retries a `stop` reply, so its compaction for an overflow
+    # after one runs after the run has ended.
+    recovering = last.get("stopReason") == "length" and any(
+        event.get("type") == "compaction_start" and event.get("reason") == "overflow"
+        for _, event in events[replies[-1] + 1 :]
+    )
+    return called_tools or recovering or last.get("stopReason") not in ("stop", "length")
 
 
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
@@ -173,7 +217,6 @@ def _sandbox_prepare_command(directory: str) -> str:
     # Keep the bootstrap POSIX sh: Bash must exist before its installer can run.
     bootstrap = """set -eu
 set --
-command -v python3 >/dev/null 2>&1 || set -- "$@" python3
 command -v bash >/dev/null 2>&1 || set -- "$@" bash
 if [ "$#" -gt 0 ]; then
     [ "$(id -u)" = 0 ] || { echo "Pi in the task sandbox requires $*: preinstall these tools or use a root image." >&2; exit 1; }
@@ -268,6 +311,29 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             )
 
     return output_items, {"input_tokens": input_tokens, "output_tokens": output_tokens}
+
+
+def _parse_recorded_events(raw: str) -> list[tuple[float, dict[str, Any]]]:
+    """Read the runner's ``[seen_at, event]`` lines, skipping any it kept that are not valid records."""
+    events = []
+    # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
+    for line in raw.split("\n"):
+        if not line.strip():
+            continue
+        try:
+            record = json.loads(line)
+        except (ValueError, RecursionError):
+            record = None
+        if (
+            isinstance(record, list)
+            and len(record) == 2
+            and type(record[0]) in (int, float)
+            and isinstance(record[1], dict)
+        ):
+            events.append((float(record[0]), record[1]))
+        else:
+            LOG.warning("Skipping malformed Pi event record")
+    return events
 
 
 async def _read_pi_stdout(stream: asyncio.StreamReader) -> tuple[str, list[tuple[float, dict[str, Any]]]]:
@@ -594,7 +660,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
         default_factory=list,
         description=(
             "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run "
-            "when every tool call of that turn is one of them."
+            "when every tool call of that turn is one of them. Only one required grant may offer each; an optional "
+            "grant that also offers one is left out."
         ),
     )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -733,7 +800,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                     f"Pi sandbox installation failed (exit {installed.return_code}, "
                     f"error_type={installed.error_type}): {details[-16000:]}"
                 )
-            await sandbox.upload(Path(__file__).with_name("sandbox_runner.py"), f"{directory}/{RUNNER_FILE}")
+            await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         except BaseException as error:
             try:
                 await state.close(self.config.session_close_timeout_seconds)
@@ -890,34 +957,37 @@ class PiAgent(SimpleResponsesAPIAgent):
             command += ["--thinking", self.config.thinking]
         if system:
             command += ["--append-system-prompt", system]
-        payload = {
-            "directory": state.session.session_dir,
-            "command": command,
-            "prompt": prompt,
-            "cwd": state.session.workdir,
-            "env": {
-                "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
-                "PI_SKIP_VERSION_CHECK": "1",
-                "PI_TELEMETRY": "0",
-                "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
-                **mcp_env,
-            },
+        env = {
+            "PI_CODING_AGENT_DIR": f"{state.session.session_dir}/home/.pi/agent",
+            "PI_SKIP_VERSION_CHECK": "1",
+            "PI_TELEMETRY": "0",
+            "NEMO_GYM_PI_BASH_TIMEOUT": str(self.config.sandbox_bash_timeout_seconds),
+            **mcp_env,
         }
         try:
             async with self.sem:
-                raw = await state.execute(
-                    payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
-                )
+                try:
+                    raw = await state.execute(
+                        command=command,
+                        env=env,
+                        prompt=prompt,
+                        timeout=timeout,
+                        close_timeout=self.config.session_close_timeout_seconds,
+                    )
+                except TimeoutError:
+                    # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
+                    # expired as well, the run is still a timeout, as Stirrup counts it, when the supervisor
+                    # confirmed the deadline and the events were captured.
+                    cleanup, raw = state.session.cleanup, state.session.artifacts
+                    if not (cleanup and cleanup["timed_out"] and raw is not None):
+                        raise
+                    LOG.warning("The sandbox provider stopped waiting for Pi's supervisor after Pi's deadline")
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
             raw = state.session.artifacts if state.session.artifacts is not None else ""
-            events, output = [], []
-            for line in (part for part in raw.split("\n") if part.strip()):
+            events, output = _parse_recorded_events(raw), []
+            for _, event in events:
                 try:
-                    observed_at, event = json.loads(line)
-                    if not isinstance(event, dict):
-                        continue
-                    events.append((float(observed_at), event))
                     parsed, _ = parse_pi_events(json.dumps(event))
                     output.extend(parsed)
                 except (ValueError, TypeError, AttributeError):
@@ -948,8 +1018,7 @@ class PiAgent(SimpleResponsesAPIAgent):
                 if isinstance(record, AgentInvocation):
                     record.status = "incomplete"
             raise
-        # JSONL: split on "\n" only; str.splitlines() would also split inside strings on U+2028/U+0085.
-        events = [tuple(json.loads(line)) for line in raw.split("\n") if line.strip()]
+        events = _parse_recorded_events(raw)
         output = []
         usage = {"input_tokens": 0, "output_tokens": 0}
         cached_tokens: int | None = 0
@@ -1018,9 +1087,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
             model_limit, terminal_error = False, recovery_error
             compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
-        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
-            # Expected model limits/interruptions do not invalidate partial work.
-            # They must not erase an independently confirmed worker or cleanup failure.
+        terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+        retrying = terminal.get("willRetry") is True
+        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted") or (cleanup["timed_out"] and retrying):
+            # Expected model limits/interruptions, including a deadline before Pi's retry of an error, do not
+            # invalidate partial work. They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
         execution_error = cleanup["error"]
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
@@ -1073,6 +1144,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 **({"harness_hostname": runtime.hostname, "harness_pid": str(runtime.pid)} if runtime else {}),
                 "pi_version": self.config.pi_version,
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
+                # Stirrup's timeout report: the deadline stopped a run that had neither ended nor submitted.
+                **({"stop_reason": "wall_time"} if cleanup["timed_out"] and _was_still_working(events) else {}),
             },
         )
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
@@ -1111,11 +1184,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 )
             )
         if error:
-            terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
             assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
-            if not execution_error and _reported_model_error(
-                assistant, cleanup, will_retry=terminal.get("willRetry") is True
-            ):
+            if not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying):
                 # Classify a failed compaction call, not the overflow it was recovering from.
                 return self.report_outcome(response, compaction_failure or assistant)
             raise RuntimeError(f"Pi agent failed: {error}")

@@ -10,9 +10,18 @@ from collections.abc import Iterable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Annotated, Any, Literal, Optional
 
-from pydantic import BaseModel, ConfigDict, Field, SerializerFunctionWrapHandler, model_serializer, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    field_validator,
+    model_serializer,
+    model_validator,
+)
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.failure_kinds import validate_failure_kind
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseInputItem
 
 
@@ -24,6 +33,7 @@ NG_AGENT_OBSERVATIONS_KEY = "ng_agent_observations"
 # The producer trajectory slot: a harness's own turns, forwarded on a result and replaced by the
 # collector's canonical projection.
 NG_TRAJECTORY_KEY = "ng_trajectory"
+NG_VERIFIER_INVOCATIONS_KEY = "ng_verifier_invocations"
 
 
 class ObservationModel(BaseModel):
@@ -164,6 +174,34 @@ class AgentInvocation(ObservationModel):
             if getattr(self, key) is None:
                 result.pop(key, None)
         return result
+
+
+class VerifierInvocation(ObservationModel):
+    """One verify() execution, its outcome, and all model attempts made while grading.
+
+    Captured calls establish ownership. The shared verify boundary records the
+    execution outcome, including for programmatic verifiers with no model calls.
+    """
+
+    kind: Literal["verifier_invocation"] = "verifier_invocation"
+    invocation_id: str
+    status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown"
+    failure_kind: Optional[str] = None
+    model_calls: list[ModelCallRef] = Field(default_factory=list)
+
+    @field_validator("failure_kind")
+    @classmethod
+    def validate_failure_kind(cls, value: Optional[str]) -> Optional[str]:
+        return validate_failure_kind(value)
+
+
+def exclude_verifier_model_calls(
+    calls: Iterable[ModelCallRecord],
+    verifier_invocations: Iterable[VerifierInvocation],
+) -> list[ModelCallRecord]:
+    """Exclude explicitly verifier-owned attempts from agent and step joins."""
+    verifier_call_ids = {ref.model_call_id for inv in verifier_invocations for ref in inv.model_calls}
+    return [call for call in calls if call.model_call_id not in verifier_call_ids]
 
 
 class ToolCallObservation(ObservationModel):
@@ -316,6 +354,7 @@ class TrajectoryRecord(ObservationModel):
     task_id: str
     rollout_id: str
     invocations: list[AgentInvocation] = Field(default_factory=list)
+    verifier_invocations: list[VerifierInvocation] = Field(default_factory=list)
     turns: list[TrajectoryTurn] = Field(default_factory=list)
     model_calls: list[TrajectoryModelCall] = Field(default_factory=list)
     tool_calls: list[TrajectoryToolCall] = Field(default_factory=list)
@@ -323,7 +362,7 @@ class TrajectoryRecord(ObservationModel):
 
     @model_validator(mode="after")
     def validate_identity(self) -> "TrajectoryRecord":
-        invocation_ids = [invocation.invocation_id for invocation in self.invocations]
+        invocation_ids = [invocation.invocation_id for invocation in [*self.invocations, *self.verifier_invocations]]
         if len(invocation_ids) != len(set(invocation_ids)):
             raise ValueError("invocation_id must be unique within a trajectory")
         model_call_ids = [call.model_call_id for call in self.model_calls if call.model_call_id]
@@ -427,11 +466,11 @@ def join_assistant_message_calls(
     return result, projected
 
 
-def join_model_call_observations(
+def join_agent_model_calls(
     bundle: AgentObservationBundle,
     calls: Iterable[ModelCallRecord],
 ) -> AgentObservationBundle:
-    """Resolve harness call references against captured model calls without guessing ownership."""
+    """Join captured calls to agent invocations and their compactions without guessing ownership."""
 
     result = bundle.model_copy()
     result.records = [

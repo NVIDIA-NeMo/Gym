@@ -37,7 +37,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.server_utils import ServerClient
-from nemo_gym.token_id_capture import TokenCaptureStore, TokenEntry
+from nemo_gym.token_id_capture.records import TokenEntry
+from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
 PTOKS = [1, 2, 3]

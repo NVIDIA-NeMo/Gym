@@ -89,9 +89,18 @@ async def start_model_relay(port: int) -> web.AppRunner:
 async def main() -> None:
     from fastapi import Request
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
+    try:
+        from nemo_gym.config import ModelServerRef, ResourcesServerRef
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.server_utils import ServerClient
+    except ModuleNotFoundError as exc:
+        # This runs against the nemo-gym the sandbox image installed, which can predate the package
+        # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+        if not (exc.name or "").startswith("nemo_gym."):
+            raise
+        from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # path before nemo_gym 0.8.0
+        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming  # path before nemo_gym 0.8.0
+        from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 
     logging.basicConfig(level=logging.WARNING)
     settings = json.loads(Path(sys.argv[1]).read_text())

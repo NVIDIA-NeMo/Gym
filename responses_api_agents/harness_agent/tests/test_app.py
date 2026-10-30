@@ -23,9 +23,9 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.providers.base import ConnectableProvider, SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox import ConnectableProvider, SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.harness_agent.app import (

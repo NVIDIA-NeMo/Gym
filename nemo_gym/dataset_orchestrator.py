@@ -14,7 +14,7 @@
 # limitations under the License.
 from typing import Union
 
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     UploadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )

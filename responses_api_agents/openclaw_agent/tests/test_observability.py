@@ -4,7 +4,7 @@
 import json
 from pathlib import Path
 
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
 from nemo_gym.rollout_observability import (
     AgentInvocation,
@@ -306,7 +306,7 @@ def test_reports_intra_session_branching() -> None:
 def _time_split(observations) -> tuple:
     """The run-health timeouts section's policy, tool and untracked shares for a 100-second timed-out rollout whose
     only model call ran for its first 40 seconds, with these observations attached as collection attaches them."""
-    from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+    from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
     from nemo_gym.health.timeouts import ELAPSED_S_KEY, read_rollout_timing, summarize_timeouts
     from nemo_gym.rollout_collection import _attach_trajectory_record
 

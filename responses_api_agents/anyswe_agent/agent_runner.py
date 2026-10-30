@@ -150,9 +150,21 @@ def main() -> None:
     agent_kwargs = _json_env("NGSWE_AGENT_KWARGS")
     sampling = _json_env("NGSWE_SAMPLING")
 
-    from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-    from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-    from nemo_gym.server_utils import ServerClient
+    try:
+        from nemo_gym.config import ModelServerRef, ResourcesServerRef
+        from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.server_utils import ServerClient
+    except ModuleNotFoundError as exc:
+        # This runs against the nemo-gym the sandbox image installed, which can predate the package
+        # reorganization (#5166). A missing dependency other than nemo_gym still fails here.
+        if not (exc.name or "").startswith("nemo_gym."):
+            raise
+        from nemo_gym.config_types import ModelServerRef, ResourcesServerRef  # path before nemo_gym 0.8.0
+        from nemo_gym.openai_utils import (
+            NeMoGymEasyInputMessage,
+            NeMoGymResponseCreateParamsNonStreaming,
+        )  # path before nemo_gym 0.8.0
+        from nemo_gym.server_utils import ServerClient  # path before nemo_gym 0.8.0
 
     module = importlib.import_module(os.environ["NGSWE_AGENT_MODULE"])
     agent_class = getattr(module, os.environ["NGSWE_AGENT_CLASS"])
@@ -190,15 +202,17 @@ def main() -> None:
         **sampling,
     )
     request = Request({"type": "http", "path_params": {}})
-    response = asyncio.run(agent.responses(request=request, body=body))
-    Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
-    print(f"agent finished: {len(response.output)} output items", flush=True)
-
-    patch = _extract_patch(repo, index_path, baseline_tree) if repo and baseline_tree else b""
-    index_path.unlink(missing_ok=True)
-    if repo:
-        print(f"patch: {len(patch)} bytes from {repo}", flush=True)
-    Path("/trajectories_mount/patch.diff").write_bytes(patch)
+    try:
+        response = asyncio.run(agent.responses(request=request, body=body))
+        Path("/trajectories_mount/response.json").write_text(response.model_dump_json())
+        print(f"agent finished: {len(response.output)} output items", flush=True)
+    finally:
+        # A harness that stops on an error (a turn limit, say) still left edits, so they are graded too.
+        patch = _extract_patch(repo, index_path, baseline_tree) if repo and baseline_tree else b""
+        index_path.unlink(missing_ok=True)
+        if repo:
+            print(f"patch: {len(patch)} bytes from {repo}", flush=True)
+        Path("/trajectories_mount/patch.diff").write_bytes(patch)
 
 
 if __name__ == "__main__":

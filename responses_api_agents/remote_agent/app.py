@@ -53,8 +53,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
+from nemo_gym.config import SKILLS_REF_KEY_NAME, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,

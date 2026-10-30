@@ -22,9 +22,9 @@ import wandb.util
 from omegaconf import DictConfig, OmegaConf
 from wandb import Run, Table
 
-from nemo_gym.config_types import WANDBConfig
+from nemo_gym.config.config_types import WANDBConfig
+from nemo_gym.config.global_config import RESULTS_DIR_KEY_NAME
 from nemo_gym.exporters.base import BaseExporter
-from nemo_gym.global_config import RESULTS_DIR_KEY_NAME
 
 
 # Increase row limit since some of our rollouts are pretty hefty
@@ -47,8 +47,10 @@ class WandbExporter(BaseExporter):
         self.run: Optional[Run] = None
 
     def setup(self) -> None:
-        # The wandb SDK reads the key from the environment rather than from init kwargs.
-        environ["WANDB_API_KEY"] = self.config.wandb_api_key
+        # The wandb SDK reads the key from the environment rather than from init kwargs. A key in the config
+        # overrides the environment; without one, the SDK keeps using the key it already finds there.
+        if self.config.wandb_api_key is not None:
+            environ["WANDB_API_KEY"] = self.config.wandb_api_key
         # A resumed or resubmitted run resumes the W&B run recorded next to its output.
         run_id = self._recorded_run_id()
         resume = {"id": run_id, "resume": "allow"} if run_id is not None else {}

@@ -18,7 +18,7 @@ import pytest
 from stirrup.core.models import AssistantMessage, TokenUsage, ToolCall, UserMessage
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.episode_types import EpisodeId
 from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming

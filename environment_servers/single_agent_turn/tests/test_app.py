@@ -32,7 +32,7 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
 from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
 from nemo_gym.failure_kinds import MODEL_TRANSPORT_ERROR
 from nemo_gym.openai_utils import NeMoGymResponse
@@ -133,7 +133,7 @@ class _Client(ServerClient):
             payload["agent_session_id"] = body["agent_session_id"]
         elif url_path == "/close_session":
             payload["resources_session_id"] = body["resources_session_id"]
-        return _Response(payload, response.headers)
+        return type(response)(payload, response.headers)
 
     def _resolve_base_url(self, server_name: str) -> str:
         return f"http://{server_name}:8000"
@@ -620,6 +620,36 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
 
     assert metrics == AggregateMetrics()
     assert client.calls == []
+
+
+def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:
+    return SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), "resources_server": None}
+    )
+
+
+async def test_an_unset_resources_server_is_the_agents_own() -> None:
+    # A server that replaced a legacy_agent relay binds the resources server the agent's /run used.
+    configured, client = _environment_server(resources_tool_transports=["direct_http"])
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
+    )
+    environment_server = SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
+
+    result = await environment_server.run_request(_request())
+
+    assert result.result.reward == 1.0
+    resources_calls = [path for server, path, _ in client.calls if server == "agents_resources"]
+    assert resources_calls == ["/seed_session", "/verify", "/close_session"]
+    create_body = AgentSeedSessionRequest.model_validate(client.calls[1][2]["json"])
+    assert [access.name for access in create_body.tool_accesses] == ["agents_resources.direct_http"]
+
+
+def test_a_server_whose_agent_names_no_resources_server_does_not_start() -> None:
+    configured, client = _environment_server()
+
+    with pytest.raises(ValueError, match="sets no resources_server"):
+        SingleAgentTurnEnvironmentServer(config=_unbound_config(configured), server_client=client)
 
 
 @pytest.mark.parametrize("close_cookies", [{}, None])
@@ -1540,3 +1570,88 @@ async def test_invalid_outcome_is_retained_without_grading_or_retry(raw: str) ->
     assert result.failure.partial_response.model_dump(mode="json") == response
     assert "/verify" not in [path for _, path, _ in client.calls]
     assert [path for _, path, _ in client.calls][-1] == "/close_session"
+
+
+@pytest.mark.parametrize("outcome", ["completed", "judge_failure", "exception", "timeout"])
+async def test_verifier_evidence_reaches_collector_through_result_or_failure(outcome, tmp_path):
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_resources_server import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
+    from nemo_gym.judge import JudgeError
+    from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            if outcome == "judge_failure":
+                raise JudgeError("judge unavailable")
+            if outcome == "exception":
+                raise RuntimeError("scoring broke")
+            if outcome == "timeout":
+                raise TimeoutError("grading deadline")
+            return BaseVerifyResponse(**body.model_dump(), reward=0.0)
+
+    environment, client = _environment_server()
+    resources_client = MagicMock(spec=ServerClient)
+    resources_client.global_config_dict = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(tmp_path),
+    }
+    resources = Resources(
+        config=BaseResourcesServerConfig(name="resources", host="resources", port=8000, entrypoint="app.py"),
+        server_client=resources_client,
+    )
+    http_response = TestClient(resources.setup_webserver()).post(
+        "/ng-rollout/rollout-a2/verify",
+        json={"responses_create_params": {"input": "task"}, "response": _agent_response().model_dump(mode="json")},
+    )
+
+    class VerifyResponse(_Response):
+        ok = http_response.is_success
+        status = http_response.status_code
+        content = SimpleNamespace(read=AsyncMock(return_value=http_response.content))
+
+        def raise_for_status(self):
+            if not self.ok:
+                raise ClientResponseError(
+                    request_info=SimpleNamespace(
+                        url="http://resources/verify", real_url="http://resources/verify", method="POST", headers={}
+                    ),
+                    history=(),
+                    status=self.status,
+                    message="verification failed",
+                )
+
+    client.responses[4] = VerifyResponse(http_response.json())
+    episode = await environment.run_request(_request())
+    assert (episode.failure is not None) == (outcome in {"exception", "timeout"})
+    if episode.result is not None:
+        assert episode.result.reward == 0.0
+        assert episode.result.mask_sample == (outcome == "judge_failure")
+    else:
+        assert episode.failure.stage == "verification"
+        assert episode.failure.terminal is False  # HTTP 500 remains retryable.
+
+    record = _episode_record(episode.model_dump(mode="json"))
+    legacy_record = SingleAgentTurnLegacyEnvironmentServer(
+        config=environment.config, server_client=client
+    )._legacy_result(episode)
+    assert legacy_record["ng_verifier_invocations"] == record["ng_verifier_invocations"]
+    _attach_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    (invocation,) = record["ng_trajectory"]["verifier_invocations"]
+    expected_status = {
+        "completed": "completed",
+        "judge_failure": "failed",
+        "exception": "failed",
+        "timeout": "incomplete",
+    }
+    assert invocation["status"] == expected_status[outcome]
+    expected_kind = {
+        "completed": None,
+        "judge_failure": "judge_failed",
+        "exception": "verifier_error",
+        "timeout": "transport_timeout",
+    }
+    assert invocation["failure_kind"] == expected_kind[outcome]
+    assert invocation["model_calls"] == []
+    assert "ng_verifier_invocations" not in record  # Only the canonical trajectory is persisted.
+    assert list(tmp_path.iterdir()) == []  # Resources never writes verifier sidecars.

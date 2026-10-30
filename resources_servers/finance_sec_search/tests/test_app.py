@@ -31,7 +31,7 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
 )
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import (

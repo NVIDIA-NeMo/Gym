@@ -18,7 +18,7 @@ from app import (
 )
 
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ModelServerRef
+from nemo_gym.config import ModelServerRef
 from nemo_gym.judge import JudgeError
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import ServerClient

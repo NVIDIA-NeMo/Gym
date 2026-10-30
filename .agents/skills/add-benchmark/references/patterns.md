@@ -311,7 +311,7 @@ For benchmarks where the model gets error feedback and retries:
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_utils import raise_for_status
 

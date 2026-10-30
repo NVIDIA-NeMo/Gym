@@ -15,11 +15,13 @@
 
 import asyncio
 import json
+import logging
 import sqlite3
 import sys
 from asyncio import Semaphore
 from contextlib import nullcontext
 from copy import deepcopy
+from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import time
@@ -42,8 +44,7 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -69,26 +70,57 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    SandboxResources,
+    SandboxSpec,
+    cpu_cap_env,
+    create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
+)
 from nemo_gym.sandbox.agent_tools import (
     restricted_network_policy,
     sandbox_server_url,
     seed_mcp_servers,
     verify_agent_response,
 )
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.utils import cpu_cap_env
 from nemo_gym.server_utils import (
     SESSION_ID_KEY,
     is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
     raise_for_status,
 )
-from responses_api_agents.opencode_agent.observability import append_opencode_turns, scope_opencode_trajectory
+from responses_api_agents.opencode_agent.observability import (
+    append_opencode_turns,
+    opencode_tool_outcome,
+    scope_opencode_trajectory,
+)
 from responses_api_agents.opencode_agent.runtime import (
     OBSERVABILITY_PATCH,
     OPENCODE_VERSION,
     apply_observability_patch,
 )
+
+
+LOGGER = logging.getLogger(__name__)
+
+DEPRECATION_WARNING = (
+    "DEPRECATED: opencode_sandboxed_agent runs each episode through its own legacy /run path and will be removed "
+    "after the environment-server migration. Where the resources server returns sandbox_access, switch to a session "
+    "harness in its allowed_agents under an environment server: opencode_agent where listed (Terminal Bench 2.1), "
+    "otherwise another such as pi_agent or codex_agent (SWE-bench Pro). Setups with no session path yet keep "
+    "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
+    "the HLE search presets (tool_servers) and vibench_agent. "
+    "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
@@ -245,19 +277,17 @@ def parse_opencode_observations(
             conversation.append(call)
             first_item_id_by_message.setdefault((session_id, message_id), call_id)
             native_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if native_status == "completed" and native_time.get("compacted") is not None:
-                observed_tool_output = "[Old tool result content cleared]"
-            else:
-                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
-            if observed_tool_output is not None:
+            outcome = opencode_tool_outcome(part.get("tool"), state)
+            if outcome.output is not None:
                 result = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=call_id,
-                    output=str(observed_tool_output),
+                    output=outcome.output,
                     status=response_status,
                 )
                 conversation.append(result)
+            if outcome.gap is not None:
+                gaps.append(ObservationGap(code=outcome.gap, invocation_id=session_id, detail=observed_call_id))
 
             native_start = native_time.get("start")
             native_end = native_time.get("end")
@@ -271,26 +301,7 @@ def parse_opencode_observations(
             started_at = _milliseconds(native_start) if valid_interval else None
             completed_at = _milliseconds(native_end) if valid_interval else None
             duration_ms = float(native_end - native_start) if valid_interval else None
-            status = {
-                "completed": "completed",
-                "error": "failed",
-                "running": "incomplete",
-                "pending": "incomplete",
-            }.get(native_status, "unknown")
-            if native_status == "completed" and part.get("tool") == "bash":
-                # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the native artifact.
-                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-                exit_code = metadata.get("exit")
-                if type(exit_code) is int:
-                    status = "completed" if exit_code == 0 else "failed"
-                else:
-                    status = "unknown"
-                    gaps.append(
-                        ObservationGap(
-                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
-                        )
-                    )
+            status = outcome.status
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -302,7 +313,7 @@ def parse_opencode_observations(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if status == "failed" else None,
+                        error_type=outcome.error_type,
                     )
                 )
             else:
@@ -337,7 +348,7 @@ def parse_opencode_observations(
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = status
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(status, status)
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))
@@ -555,6 +566,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        _warn_deprecated_once()
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()

@@ -27,7 +27,7 @@ from unittest.mock import AsyncMock, MagicMock
 from pytest import fixture, mark, raises
 from tenacity import RetryError, wait_none
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,

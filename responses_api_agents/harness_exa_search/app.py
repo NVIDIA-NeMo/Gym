@@ -15,8 +15,7 @@ from pydantic import ConfigDict, Field, SecretStr
 
 from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import get_first_server_config_dict
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server_config_dict
 from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -25,8 +24,9 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     SupportsSandboxEndpoint,
     create_provider,
+    resolve_provider_config,
+    resolve_provider_metadata,
 )
-from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_utils import get_response_json, raise_for_status, trace_context_path_segment
 from responses_api_agents.harness_agent.app import _FABRIC_ADAPTERS, resolve_agent
 
