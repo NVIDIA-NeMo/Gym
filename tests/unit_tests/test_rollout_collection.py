@@ -12573,6 +12573,18 @@ class TestRunExamplesMaterializedTasks:
 
         post.assert_not_awaited()
 
+    async def test_a_row_carrying_an_agent_still_needs_its_taskset_route(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The taskset route, not the row's agent, picks the Environment Server for a materialized row.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+        row = self._materialized_row("other_taskset") | {AGENT_REF_KEY_NAME: {"name": "my_agent"}}
+
+        with pytest.raises(ValueError, match="environment_server_routes.other_taskset"):
+            RolloutCollectionHelper().run_examples([row])
+
+        post.assert_not_awaited()
+
     @pytest.mark.parametrize("named_by", ["caller", "row"])
     async def test_an_environment_server_already_named_wins_over_the_taskset_route(
         self, monkeypatch: pytest.MonkeyPatch, named_by: str
@@ -12591,7 +12603,7 @@ class TestRunExamplesMaterializedTasks:
     async def test_gyms_own_dispatch_leaves_materialized_rows_unattributed(
         self, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        # `gym eval run` dispatches through the shared internal path; the records it stores for these rows keep no agent.
+        # `gym eval run` dispatches through the shared internal path; the records it stores keep no agent.
         post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
 
         completed = await next(RolloutCollectionHelper()._run_examples_with_metadata([self._materialized_row()]))
@@ -12692,3 +12704,25 @@ class TestRunExamplesMaterializedTasks:
         finally:
             await completions.aclose()
             await asyncio.gather(waiter, return_exceptions=True)
+
+    async def test_episode_records_keep_every_drained_outcome_when_one_reply_cannot_be_converted(self) -> None:
+        loop = asyncio.get_running_loop()
+
+        def settled(reply: dict) -> asyncio.Future:
+            future = loop.create_future()
+            future.set_result(_CompletedRollout(row=self._materialized_row(), result=reply, rollout_latency_ms=None))
+            return future
+
+        reserved = self._reply(result={"reward": 1.0, "_ng_no_persist": True})
+        handled = self._reply(failure={"failure_reason": "sandbox lost", "terminal": False})
+        internal = MagicMock()
+        internal.aclose_and_drain = AsyncMock(return_value=[settled(reserved), settled(handled)])
+        completions = nemo_gym.rollout_collection._RowResultIterator(internal, episode_records=True)
+
+        unconvertible, converted = await completions.aclose_and_drain()
+
+        with pytest.raises(ValueError, match="reserved for rollout collection"):
+            await unconvertible
+        _, record = await converted
+        assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert record[MASK_SAMPLE_KEY] is True

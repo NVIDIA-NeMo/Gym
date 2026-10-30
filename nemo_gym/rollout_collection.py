@@ -2901,7 +2901,15 @@ class _RowResultIterator:
                 outcome.set_exception(error)
                 outcome.exception()
             else:
-                outcome.set_result(self._caller_result(task.result()))
+                # A result episode_records cannot convert fails its own outcome, as it would when awaited, so the
+                # other drained outcomes, transferred only once, are not lost with it.
+                try:
+                    caller_result = self._caller_result(task.result())
+                except Exception as error:
+                    outcome.set_exception(error)
+                    outcome.exception()
+                else:
+                    outcome.set_result(caller_result)
             outcomes.append(outcome)
         return outcomes
 
@@ -4953,10 +4961,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         A materialized task row (``task_id.taskset`` plus ``task_input``) is routed by its taskset through
         ``environment_server_routes``, as ``gym eval run`` routes it, unless ``environment_server_name`` or the row
-        already names an Environment Server; a taskset without a route raises before any row is dispatched. The row
-        is also stamped with the ``agent_ref`` of the agent that Environment Server binds, so it names the agent it
-        ran on (``gym eval run`` leaves the records it stores for these rows unattributed). Its ``/run`` reply is the
-        Environment Server's ``BaseEpisodeResponse``; ``episode_records`` below flattens it.
+        already names an Environment Server; a taskset without a route raises before any row is dispatched, even when
+        the row carries an ``agent_ref``: the taskset route, not the agent, picks the Environment Server. The row is
+        also stamped with the ``agent_ref`` of the agent that Environment Server binds (its ``agent_server``, or its
+        only agent; a server in front of several agents without an ``agent_server`` binds none, and the row stays
+        unattributed), so it names the agent it ran on (``gym eval run`` leaves the records it stores for these rows
+        unattributed). Its ``/run`` reply is the Environment Server's ``BaseEpisodeResponse``; ``episode_records``
+        below flattens it.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
@@ -5014,12 +5025,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
 
-        ``episode_records=True`` resolves each materialized row's result to the flat record ``gym eval run`` stores
-        for it instead: a ``BaseEpisodeResponse`` becomes the result's own fields (or the ``_ng_failure_*`` fields of
-        a handled failure) plus ``_ng_task_id`` and the row's ``task_data`` provenance (``_ng_digest``,
-        ``_ng_dataset_digest``). A handled Environment Server failure also gets ``reward`` 0.0 and ``mask_sample``
-        True, so a trainer masks the episode instead of scoring it. Flat rows' results are unaffected. It applies to
-        every outcome the iterator hands back, including those from ``aclose_and_drain()``.
+        ``episode_records=True`` resolves each materialized row's result to the record fields ``gym eval run`` stores
+        for it instead (without the collector's own bookkeeping): a ``BaseEpisodeResponse`` becomes the result's own
+        fields (or the ``_ng_failure_*`` fields of a handled failure) plus ``_ng_task_id`` and the row's
+        ``task_data`` provenance (``_ng_digest``, ``_ng_dataset_digest``). A handled Environment Server failure also
+        gets ``reward`` 0.0 and ``mask_sample`` True, so a trainer masks the episode instead of scoring it. Flat rows'
+        results are unaffected. It applies to every outcome the iterator hands back, including those from
+        ``aclose_and_drain()``; a reply that cannot be converted raises from its own outcome.
         """
 
         return _RowResultIterator(
