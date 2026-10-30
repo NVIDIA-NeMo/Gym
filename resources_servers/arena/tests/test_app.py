@@ -25,15 +25,15 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
+from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from nemo_gym.server_utils import ServerClient
 from resources_servers.arena.app import (
     ArenaResourcesServer,
@@ -1422,8 +1422,25 @@ class TestArenaResourcesServer:
             "style_reference_token_count": 10,
             "games": None,
         }
-        context_exceeded = truncated | {
+        # Rollouts saved before vllm_model marked context rejections carry no usage.
+        context_exceeded_without_marker = truncated | {
             "response": {"incomplete_details": {"reason": "max_output_tokens"}, "usage": None}
+        }
+        # vllm_model now reports zero usage for a context rejection and marks it in metadata.
+        context_exceeded = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "metadata": {"nemo_gym_context_window_exceeded": "true"},
+            }
+        }
+        # vllm_model also reports zero usage, without the marker, when the output budget alone exceeds the
+        # context window (invalid_output_token_parameter); that rejection stays an output-limit failure.
+        output_budget_rejected = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            }
         }
         reasoning_only = truncated | {
             "response": {"status": "completed"},
@@ -1431,16 +1448,25 @@ class TestArenaResourcesServer:
             "policy_reasoning": "Reasoning without a final answer",
         }
 
-        metrics = reference_server.compute_metrics([[win], [truncated], [context_exceeded], [reasoning_only]])
+        metrics = reference_server.compute_metrics(
+            [
+                [win],
+                [truncated],
+                [context_exceeded_without_marker],
+                [context_exceeded],
+                [output_budget_rejected],
+                [reasoning_only],
+            ]
+        )
 
-        assert metrics["max_token_reached_rate"] == approx(1 / 4)
-        assert metrics["context_window_exceeded_rate"] == approx(1 / 4)
+        assert metrics["max_token_reached_rate"] == approx(2 / 6)
+        assert metrics["context_window_exceeded_rate"] == approx(2 / 6)
         assert metrics["rollout_failure_rate"] == approx(0.0)
-        assert metrics["reasoning_only_response_rate"] == approx(1 / 4)
+        assert metrics["reasoning_only_response_rate"] == approx(1 / 6)
         assert metrics["missing_judgment_rate"] == approx(0.0)
-        assert metrics["win_rate_no_SC"] == approx(1 / 4, abs=0.05)
-        assert metrics["win_rate"] == approx(1 / 4, abs=0.05)
-        assert metrics["verbosity_acceptance_rate"] == approx(1 / 4)
+        assert metrics["win_rate_no_SC"] == approx(1 / 6, abs=0.05)
+        assert metrics["win_rate"] == approx(1 / 6, abs=0.05)
+        assert metrics["verbosity_acceptance_rate"] == approx(1 / 6)
 
     @mark.parametrize("style_control_method", ["bradley_terry", "none"])
     def test_compute_metrics_v2_max_token_response_remains_failure(

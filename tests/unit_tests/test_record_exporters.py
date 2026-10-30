@@ -27,7 +27,7 @@ from pytest import MonkeyPatch
 import nemo_gym.exporters as exporters_module
 import nemo_gym.exporters.mlflow as mlflow_module
 import nemo_gym.exporters.wandb as wandb_module
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.exporters import load_run_exporter_class
 from nemo_gym.exporters.base import BaseExporter, ExportState, _write_marker_atomically
 from nemo_gym.exporters.metrics import flatten_aggregate_metrics
@@ -530,7 +530,7 @@ class TestRegisteredBackends:
 
 
 def test_skip_exporters_leaves_live_exporters_unopened(monkeypatch: MonkeyPatch) -> None:
-    import nemo_gym.global_config as global_config
+    import nemo_gym.config.global_config as global_config
 
     opened = MagicMock()
     monkeypatch.setattr(global_config, "setup_exporters", opened)

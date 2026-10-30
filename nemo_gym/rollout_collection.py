@@ -49,7 +49,7 @@ from tqdm.asyncio import tqdm
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
 from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
     BaseNeMoGymCLIConfig,
@@ -59,11 +59,7 @@ from nemo_gym.config_types import (
     RemovedRolloutOptionsMixin,
     UploadRolloutsConfigMixin,
 )
-from nemo_gym.episode_types import EpisodeId, is_materialized_task_row
-from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
-from nemo_gym.exporters.metrics import flatten_aggregate_metrics
-from nemo_gym.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     AGENT_SERVER_TYPE_KEY_NAME,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
@@ -87,6 +83,11 @@ from nemo_gym.global_config import (
     pairing_override_enabled,
     resolve_dataset_agent,
 )
+from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, is_namespaced, is_registered
+from nemo_gym.episode_types import is_materialized_task_row
+from nemo_gym.exporters import export_metrics, export_rollouts, get_exporters
+from nemo_gym.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -96,18 +97,11 @@ from nemo_gym.observability.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
-from nemo_gym.path_utils import (
-    aggregate_metrics_path_for,
-    aggregation_sources_path_for,
-    failures_path_for,
-    materialized_path_for,
-    resubmit_offset_path_for,
-)
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
 from nemo_gym.rollout_observability import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
@@ -118,6 +112,7 @@ from nemo_gym.rollout_observability import (
     TrajectoryTokenStats,
     TrajectoryToolCall,
     TrajectoryTurn,
+    VerifierInvocation,
 )
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
@@ -134,6 +129,13 @@ from nemo_gym.telemetry.gym_metrics import (
 from nemo_gym.telemetry.observer import MeteredAdmission, count_resident, driver_metrics, observe_event_loop
 from nemo_gym.telemetry.setup import is_metrics_exporter_active, is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.utils.path_utils import (
+    aggregate_metrics_path_for,
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 
 
 if TYPE_CHECKING:
@@ -551,6 +553,8 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if failure.get("trajectory") is not None:
             # The harness's own turns before the failure, in the producer's slot the projection reads first.
             record[NG_TRAJECTORY_KEY] = failure["trajectory"]
+        if failure.get("verifier_invocations") is not None:
+            record[NG_VERIFIER_INVOCATIONS_KEY] = failure["verifier_invocations"]
         return record
     result = response.get("result")
     if not isinstance(result, Mapping):
@@ -687,13 +691,19 @@ def _turns_from_model_calls(
     invocations: list[AgentInvocation],
     model_calls: list[TrajectoryModelCall],
     resolved: Any,
+    *,
+    verifier_invocations: Iterable[VerifierInvocation] = (),
 ) -> list[TrajectoryTurn]:
     """Build one turn per captured model call that returned a response, for an agent that sent no trajectory.
 
     A call belongs to the invocation whose ``model_calls`` reference it. Unreferenced calls stay
     in the raw evidence but do not become turns: even a single-agent rollout may capture judge
-    or auxiliary calls that do not belong to the agent.
+    or auxiliary calls that do not belong to the agent. Explicit verifier ownership also excludes
+    a call from turns when an agent incorrectly references it; retain both ownership claims for validation.
     """
+    verifier_call_ids = {
+        ref.model_call_id for invocation in verifier_invocations for ref in invocation.model_calls if ref.model_call_id
+    }
     invocation_by_call_id: dict[str, str] = {}
     invocation_by_response_id: dict[str, str] = {}
     for invocation in invocations:
@@ -708,6 +718,8 @@ def _turns_from_model_calls(
     tool_counts: Counter = Counter()
     for call in model_calls:
         metadata = call.response_metadata
+        if call.model_call_id in verifier_call_ids:
+            continue
         if call.response is None or (metadata.status_code is not None and metadata.status_code >= 400):
             # HTTP error payloads are retained attempts, not model decisions.
             continue
@@ -748,6 +760,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     task_id, rollout_id = _trajectory_identity(row)
     gaps: list[ObservationGap] = []
     invocations: list[AgentInvocation] = []
+    verifier_invocations: list[VerifierInvocation] = []
     turns: list[TrajectoryTurn] = []
     tools: list[TrajectoryToolCall] = []
     model_calls: list[TrajectoryModelCall] = []
@@ -775,6 +788,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 turns = trajectory.turns
             gaps.extend(trajectory.gaps)
             invocations = trajectory.invocations
+            verifier_invocations = trajectory.verifier_invocations
             tools = trajectory.tool_calls
             model_calls = trajectory.model_calls
         except Exception as exc:
@@ -892,6 +906,24 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
             projected = TrajectoryModelCall.model_validate(merged)
             model_calls[position] = projected
 
+    # Join returned verifier outcomes with model-call references reconstructed from capture.
+    for raw_invocation in [
+        *(capture.get("verifier_invocations") or []),
+        *(result.get(NG_VERIFIER_INVOCATIONS_KEY) or []),
+    ]:
+        try:
+            invocation = VerifierInvocation.model_validate(raw_invocation)
+            existing = next((i for i in verifier_invocations if i.invocation_id == invocation.invocation_id), None)
+            if existing is None:
+                verifier_invocations.append(invocation)
+            else:
+                existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+                if invocation.status != "unknown":
+                    existing.status = invocation.status
+                    existing.failure_kind = invocation.failure_kind
+        except Exception:
+            gaps.append(ObservationGap(code="verifier_invocation_invalid"))
+
     for raw_gap in capture.get("gaps") or []:
         if isinstance(raw_gap, dict):
             try:
@@ -901,7 +933,14 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
     if not isinstance(raw_trajectory, dict):
         # An agent that sends its own trajectory owns its turns, and an empty list there means no turn
         # completed. Otherwise, build turns only from calls explicitly referenced by invocations.
-        turns = _turns_from_model_calls(task_id, rollout_id, invocations, model_calls, result.get("resolved"))
+        turns = _turns_from_model_calls(
+            task_id,
+            rollout_id,
+            invocations,
+            model_calls,
+            result.get("resolved"),
+            verifier_invocations=verifier_invocations,
+        )
     if not model_calls:
         gaps.append(ObservationGap(code="model_calls_unavailable"))
     if not turns and not producer_turns_observed:
@@ -917,6 +956,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
         task_id=task_id,
         rollout_id=rollout_id,
         invocations=invocations,
+        verifier_invocations=verifier_invocations,
         turns=turns,
         model_calls=model_calls,
         tool_calls=tools,
@@ -942,8 +982,11 @@ def _record_policy_model_server(result: dict[str, Any], global_config: Any, agen
 
 
 def _strip_capture_payloads(result: dict[str, Any]) -> None:
+    result.pop(NG_VERIFIER_INVOCATIONS_KEY, None)
     capture = result.get("ng_model_call_capture")
     calls = capture.get("calls") if isinstance(capture, dict) else None
+    if isinstance(capture, dict):
+        capture.pop("verifier_invocations", None)
     for call in calls if isinstance(calls, list) else []:
         if isinstance(call, dict):
             for key in _MODEL_CALL_PAYLOAD_KEYS:
@@ -1038,7 +1081,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
         return None
 
     # Index captured calls by both identities ModelCallRef supports, mirroring
-    # join_model_call_observations: a ref may carry model_call_id, or the exact
+    # join_agent_model_calls: a ref may carry model_call_id, or the exact
     # (model_ref, response_id) pair.
     calls_by_id: dict[str, list[int]] = {}
     calls_by_response: dict[tuple[str, str, str], list[int]] = {}
@@ -1074,7 +1117,7 @@ def _build_ng_perf(result: dict[str, Any], *, rollout_latency_ms: Optional[float
     # De-duplicate by matched call *position* rather than model_call_id; the id is
     # optional because a (model_ref, response_id)-only match has none. One physical call
     # can't be claimed twice even if two invocations' refs both resolve to it (e.g. a
-    # join_model_call_observations conflict that left a ref attached to its losing
+    # join_agent_model_calls conflict that left a ref attached to its losing
     # invocation, unremoved, just gap-flagged).
     seen_positions: set[int] = set()
     owned_calls = []
@@ -1815,7 +1858,7 @@ def is_terminal_failure(record: Mapping[str, Any], *, retry_terminal_timeouts: b
 
     ``timeout_exceeded`` is an ``_ng_failure_class`` label that agents already
     write to the failures sidecar (pinchbench, nooa). It predates
-    ``nemo_gym.failure_kinds`` and is not registered there; ``agent_timeout`` is
+    ``nemo_gym.core.failure_kinds`` and is not registered there; ``agent_timeout`` is
     the shared name.
 
     As ``failure_kinds`` requires, this function decides retryability for the
@@ -3776,7 +3819,9 @@ class RolloutCollectionHelper(BaseModel):
                 # Fold this rollout's captured model calls into its record (uniform across agents; no-op
                 # when capture is off). Never alters the harness output/reward already in `result`.
                 # A failed episode that returned agent evidence made model calls worth joining.
-                if capture_dirs and (not no_result or NG_AGENT_OBSERVATIONS_KEY in result):
+                if capture_dirs and (
+                    not no_result or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+                ):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.
                     rollout_id_for_capture = maybe_rollout_id_from_run_body(result)
@@ -3792,6 +3837,7 @@ class RolloutCollectionHelper(BaseModel):
                     "ng_model_call_capture" in result
                     or NG_AGENT_OBSERVATIONS_KEY in result
                     or NG_TRAJECTORY_KEY in result
+                    or NG_VERIFIER_INVOCATIONS_KEY in result
                 ):
                     _attach_trajectory_record(row, result)
 
@@ -4375,7 +4421,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         """Stamp an agent_ref onto every row that carries only a task_source.
 
         task_source names the config instance that declared the row's dataset. Resolution is
-        :func:`~nemo_gym.global_config.resolve_dataset_agent` — the same rules benchmark
+        :func:`~nemo_gym.config.global_config.resolve_dataset_agent` — the same rules benchmark
         discovery uses, so dispatch can never disagree with the listing. Conflicting `agent:`
         pins across one instance's datasets are a hard error (rows carry only the instance
         name), as are unknown/non-routable instances; +agent_map is the disambiguator.
@@ -5294,7 +5340,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
 # Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

@@ -15,7 +15,7 @@ from starlette.requests import Request
 from nemo_gym._checkpoint.agent import ActivationOutOfOrderError, AgentSessionRecord
 from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
 from nemo_gym._checkpoint.errors import StaleAttemptError
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core import EpisodeId
 from nemo_gym.server_utils import ServerClient
 from resources_servers.single_step_tool_use_with_argument_comparison.app import (
     SingleStepToolUseArgumentComparisonResourcesServer,

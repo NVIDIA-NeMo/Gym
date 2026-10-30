@@ -8,7 +8,7 @@ import pytest
 from fastapi import HTTPException
 
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentCloseSessionResponse
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap
 from nemo_gym.server_utils import ServerClient
 from nemo_gym.tool_access import DirectHTTPToolAccess

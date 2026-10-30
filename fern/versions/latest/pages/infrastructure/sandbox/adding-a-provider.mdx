@@ -141,7 +141,7 @@ The registry in `nemo_gym.sandbox.providers.registry` maps provider names from c
 External packages and tests can register a provider directly:
 
 ```python
-from nemo_gym.sandbox.providers.registry import register_provider
+from nemo_gym.sandbox import register_provider
 
 
 register_provider("my_provider", MySandboxProvider)
