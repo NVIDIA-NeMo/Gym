@@ -40,13 +40,13 @@ linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is 
 # -- the bash supervisor -------------------------------------------------------------------------------------------
 
 
-def _start(tmp_path: Path, *command: str, timeout: str = "30") -> subprocess.Popen:
+def _start(tmp_path: Path, *command: str, timeout: str = "30", pause_mode: str = "stop") -> subprocess.Popen:
     return subprocess.Popen(
         ["bash", str(SUPERVISOR_SCRIPT), "--timeout", timeout, "--cleanup-timeout", "1"]
         + ["--receipt", str(tmp_path / CLEANUP_RECEIPT_FILE), "--stop-file", str(tmp_path / "stop.request")]
         + ["--pause-file", str(tmp_path / PAUSE_REQUEST_FILE), "--paused", str(tmp_path / PAUSED_FILE)]
         + ["--continue-file", str(tmp_path / CONTINUE_REQUEST_FILE), "--continued", str(tmp_path / CONTINUED_FILE)]
-        + ["--", *command],
+        + ["--pause-mode", pause_mode, "--", *command],
         cwd=tmp_path,
         # Not pipes: a service the harness left running would hold them open.
         stdout=subprocess.DEVNULL,
@@ -79,6 +79,18 @@ def _state(pid: int) -> str:
         return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[0]
     except FileNotFoundError:
         return "gone"
+
+
+def _start_time(pid: int) -> str:
+    return Path(f"/proc/{pid}/stat").read_text().rsplit(")", 1)[1].split()[19]
+
+
+def _is_identity_of_a_live_process(identity: str) -> bool:
+    pid, start = identity.split(".")
+    try:
+        return _start_time(int(pid)) == start
+    except FileNotFoundError:
+        return False
 
 
 def _finish(process: subprocess.Popen) -> None:
@@ -158,7 +170,15 @@ def test_a_pause_before_the_launch_holds_it_until_continued(tmp_path: Path) -> N
     process = _start(tmp_path, "touch", "started")
     try:
         paused = _acknowledgement(tmp_path / PAUSED_FILE, 1)
-        assert paused == {"seq": 1, "confirmed": True, "pids": [], "error": None}
+        assert paused == {
+            "seq": 1,
+            "confirmed": True,
+            "pids": [],
+            "error": None,
+            "mode": "stop",
+            "identity": paused["identity"],
+        }
+        assert _is_identity_of_a_live_process(paused["identity"])
         time.sleep(0.3)
         assert not (tmp_path / "started").exists()
         _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
@@ -229,6 +249,44 @@ def test_a_stop_while_paused_continues_the_harness_so_it_can_save_on_term(tmp_pa
         assert (tmp_path / "checkpoint").read_text() == "saved\n"
     finally:
         _finish(process)
+
+
+@linux_only
+def test_a_hold_pause_signals_nothing_names_the_supervisor_and_credits_the_deadline(tmp_path: Path) -> None:
+    # The worker needs 2.5 seconds of a 1.5 second budget; the pause holds the budget for about 2 of them.
+    worker = "touch ready; for _ in $(seq 1 125); do printf . >> worker.ticks; sleep 0.02; done; touch finished"
+    process = _start(tmp_path, "bash", "-c", worker, timeout="1.5", pause_mode="hold")
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        paused = _acknowledgement(tmp_path / PAUSED_FILE, 1)
+        assert paused["confirmed"] is True and paused["pids"] == [] and paused["mode"] == "hold", paused
+        assert _is_identity_of_a_live_process(paused["identity"])
+        # Nothing is stopped: the harness keeps running while the pause holds.
+        before = _ticks(tmp_path)["worker"]
+        time.sleep(2)
+        assert _ticks(tmp_path)["worker"] > before
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        continued = _acknowledgement(tmp_path / CONTINUED_FILE, 1)
+        assert continued["confirmed"] is True and continued["identity"] == paused["identity"], continued
+        process.wait(timeout=15)
+        receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
+        assert receipt["timed_out"] is False and receipt["return_code"] == 0, receipt
+        assert (tmp_path / "finished").exists()
+    finally:
+        _finish(process)
+
+
+def test_the_pause_mode_must_be_stop_or_hold(tmp_path: Path) -> None:
+    result = subprocess.run(
+        ["bash", str(SUPERVISOR_SCRIPT), "--timeout", "1", "--cleanup-timeout", "1", "--receipt", "r"]
+        + ["--stop-file", "s", "--pause-mode", "freeze", "--", "true"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 2 and "stop or hold" in result.stderr
 
 
 @linux_only
@@ -383,6 +441,34 @@ async def test_a_session_pauses_and_continues_its_running_harness(tmp_path: Path
     assert session.cleanup is not None and session.cleanup["stopped"] is False
     # The receipt answers a pause of a harness that has ended.
     assert (await session.pause_harness(timeout=1)).status == "finished"
+
+
+@linux_only
+async def test_a_hold_session_keeps_its_harness_running_and_records_the_pause_it_holds(tmp_path: Path) -> None:
+    session = _session(tmp_path, pause_mode="hold")
+    launch_dir = tmp_path / "launch-1"
+    running = asyncio.create_task(
+        session.execute(
+            stage_activation=_ticking_stage(launch_dir),
+            collect=AsyncMock(return_value="artifacts"),
+            timeout=30,
+            close_timeout=3,
+        )
+    )
+    async with asyncio.timeout(15):
+        while not (launch_dir / "ticks").exists():
+            await asyncio.sleep(0.02)
+    paused = await session.pause_harness(timeout=10)
+    assert paused.confirmed and paused.pids == () and paused.mode == "hold", paused
+    assert paused.identity is not None and _is_identity_of_a_live_process(paused.identity)
+    before = len((launch_dir / "ticks").read_text())
+    await asyncio.sleep(0.3)
+    assert len((launch_dir / "ticks").read_text()) > before
+    state = session.checkpoint_state()
+    assert state["pause_seq"] == 1 and state["supervisor_identity"] == paused.identity
+    assert (await session.continue_harness(timeout=10)).confirmed
+    assert "pause_seq" not in session.checkpoint_state()
+    assert await asyncio.wait_for(running, 30) == "artifacts"
 
 
 @linux_only
