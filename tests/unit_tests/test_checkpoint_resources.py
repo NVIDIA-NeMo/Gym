@@ -25,8 +25,8 @@ from nemo_gym.base_resources_server import (
     ResourcesCloseSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core.episode import EpisodeId
 
 
 AUTH = {"authorization": "Bearer t"}
@@ -1414,7 +1414,7 @@ async def test_a_restart_only_seed_waits_again_when_a_new_checkpoint_closes_befo
 @pytest.mark.parametrize("path", ["/ng-rollout/r/seed_session", "/close_session", "/verify"])
 async def test_a_session_change_survives_a_disconnect_once_the_reply_has_started(path: str) -> None:
     from nemo_gym._checkpoint.resources import ResourcesCheckpointMiddleware
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core.episode import rollout_context
 
     server, _ = make_server()
     participant = server._checkpoint

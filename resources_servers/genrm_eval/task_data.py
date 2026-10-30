@@ -48,3 +48,18 @@ class TaskData(BaseModel):
     response_2_style_value: int | None = Field(
         default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
     )
+    example_id: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    subset: str | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    comparisons: int | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    correct_pairs: int | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )
+    flipped: bool | None = Field(
+        default=None, json_schema_extra={"consumed_by": ["metrics"], "legacy_location": "verifier_metadata"}
+    )

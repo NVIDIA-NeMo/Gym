@@ -11,7 +11,7 @@ from nooa.config import CodeActConfig, PredictConfig
 from nooa.errors import GenerationError
 from nooa.strategies.predict import PredictStrategy
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
 from responses_api_agents.nooa_agent.gym_llm import (
     InvalidPolicyOutputError,
     OutputTokenLimitExceeded,

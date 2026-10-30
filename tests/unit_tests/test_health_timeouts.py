@@ -20,10 +20,12 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 
-import nemo_gym.exporters
+import nemo_gym.artifacts.exporters
+from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
+from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.cli.eval import _health_check_collected_rollouts
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -36,11 +38,9 @@ from nemo_gym.health.timeouts import (
     read_rollout_timing,
     summarize_timeouts,
 )
-from nemo_gym.health.types import QUALITY_SUMMARY_FILENAME, RunHealthLimits
-from nemo_gym.path_utils import failures_path_for
-from nemo_gym.reward_profile import compute_aggregate_metrics
+from nemo_gym.health.types import RunHealthLimits
+from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
 from nemo_gym.rollout_collection import (
-    NG_FAILURE_CLASS_KEY,
     RolloutAggregationConfig,
     RolloutAggregationHelper,
     RolloutCollectionConfig,
@@ -48,6 +48,7 @@ from nemo_gym.rollout_collection import (
     _attach_trajectory_record,
 )
 from nemo_gym.rollout_health import health_check_run_dir
+from nemo_gym.utils.path_utils import failures_path_for
 from tests.unit_tests.test_rollout_collection import (  # noqa: F401 - fixture
     FakeResponse,
     empty_global_config,
@@ -715,7 +716,7 @@ async def test_collection_writes_and_exports_the_section_and_a_recheck_agrees(
 ) -> None:
     _fake_servers(monkeypatch)
     export_metrics = MagicMock()
-    monkeypatch.setattr(nemo_gym.exporters, "export_metrics", export_metrics)
+    monkeypatch.setattr(nemo_gym.artifacts.exporters, "export_metrics", export_metrics)
     output = tmp_path / "rollouts.jsonl"
 
     await RolloutCollectionHelper().run_from_config(
@@ -774,7 +775,7 @@ def test_gym_eval_run_exports_the_section_after_its_health_check(
 ) -> None:
     """`gym eval run` computes health after its servers stop, outside rollout collection, and exports from there."""
     export_metrics = MagicMock()
-    monkeypatch.setattr(nemo_gym.exporters, "export_metrics", export_metrics)
+    monkeypatch.setattr(nemo_gym.artifacts.exporters, "export_metrics", export_metrics)
 
     _health_check_collected_rollouts(_saved_run(tmp_path), _HEALTH_CONFIG)
 
@@ -784,7 +785,9 @@ def test_gym_eval_run_exports_the_section_after_its_health_check(
 def test_a_failed_export_is_logged_and_does_not_stop_the_run(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
 ) -> None:
-    monkeypatch.setattr(nemo_gym.exporters, "export_metrics", MagicMock(side_effect=ConnectionError("tracking down")))
+    monkeypatch.setattr(
+        nemo_gym.artifacts.exporters, "export_metrics", MagicMock(side_effect=ConnectionError("tracking down"))
+    )
 
     _health_check_collected_rollouts(_saved_run(tmp_path), _HEALTH_CONFIG)
 
@@ -821,7 +824,7 @@ async def test_run_examples_output_is_unchanged(monkeypatch: pytest.MonkeyPatch)
 
 @pytest.mark.parametrize("never_started,expected_timeouts", [(False, 0), (True, 1)])
 def test_timeout_selection_respects_omitted_retry_state(tmp_path: Path, never_started: bool, expected_timeouts: int):
-    from nemo_gym.path_utils import materialized_path_for
+    from nemo_gym.utils.path_utils import materialized_path_for
 
     output = tmp_path / "rollouts.jsonl"
     output.write_text("")

@@ -147,7 +147,7 @@ def test_masked_numeric_reward_is_valid_evidence(record, reward):
 @pytest.mark.asyncio
 async def test_judge_failsafe_response_satisfies_te6(record):
     from nemo_gym.base_resources_server import BaseVerifyRequest, BaseVerifyResponse
-    from nemo_gym.judge import JudgeError, judge_failsafe
+    from nemo_gym.verification.judge import JudgeError, judge_failsafe
 
     @judge_failsafe
     async def verify(body):
@@ -220,7 +220,7 @@ def test_failed_response_without_response_id_preserves_status(record):
 
 
 def test_turn_resolution_is_required_by_te3(record):
-    from nemo_gym.rollout_observability import TrajectoryTurn
+    from nemo_gym.trajectory.trajectory_record import TrajectoryTurn
 
     turn = record["ng_trajectory"]["turns"][0]
     del turn["resolved"]
@@ -245,7 +245,7 @@ def test_turns_do_not_need_copies_of_model_content(record, missing):
 
 @pytest.mark.parametrize("field", ["tool_name", "status"])
 def test_optional_tool_fields_remain_required_by_te5(record, field):
-    from nemo_gym.rollout_observability import TrajectoryToolCall
+    from nemo_gym.trajectory.trajectory_record import TrajectoryToolCall
 
     tool = record["ng_trajectory"]["tool_calls"][0]
     del tool[field]

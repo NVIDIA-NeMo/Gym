@@ -46,6 +46,7 @@ from fastapi import Body, Request, Response
 from pydantic import ConfigDict, PrivateAttr, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.base_resources_server import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -53,9 +54,16 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
 )
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import (
+    get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
+    raise_for_status,
+)
+from nemo_gym.client import (
+    request as http_request,
+)
+from nemo_gym.config import SKILLS_REF_KEY_NAME, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -64,15 +72,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
-    raise_for_status,
-)
-from nemo_gym.server_utils import (
-    request as http_request,
-)
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"

@@ -29,11 +29,11 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
 from nemo_gym.sandbox import get_provider_class, resolve_provider_config, resolve_provider_metadata
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import CCCSandboxConfig, evaluate_in_sandbox
 

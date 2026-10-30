@@ -18,8 +18,8 @@ from unittest.mock import MagicMock
 import yaml
 from app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
 
 
 class TestApp:
@@ -944,7 +944,7 @@ class TestComputeMetrics:
     async def test_mcqa_server_returns_pass_majority_metrics(self) -> None:
         """MCQA server overrides compute_metrics to compute pass@k and majority@k."""
         from nemo_gym.base_resources_server import AggregateMetricsRequest
-        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+        from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
         config = MCQAResourcesServerConfig(host="127.0.0.1", port=12345, entrypoint="app.py", name="mcqa")
         server = MCQAResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))

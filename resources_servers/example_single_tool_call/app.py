@@ -32,9 +32,9 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionFence,
     SimpleResourcesServer,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
 
 
 class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):

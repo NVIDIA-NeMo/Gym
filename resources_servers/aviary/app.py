@@ -34,7 +34,7 @@ from aviary.core import (
     ToolResponseMessage,
 )
 from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
 
 from .schemas import (
     AviaryAgentVerifyRequest,

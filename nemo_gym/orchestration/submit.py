@@ -13,11 +13,11 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-from nemo_gym.decorators import experimental
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
+from nemo_gym.utils.decorators import experimental
 
 
 _EXECUTORS = {

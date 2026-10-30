@@ -34,8 +34,8 @@ from nemo_gym.comparison.loading import (
 from nemo_gym.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
 from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
 from nemo_gym.comparison.schema import ComparisonConfig
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.path_utils import aggregate_metrics_path_for
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
 
 AGENT = "bird_sql_simple_agent"

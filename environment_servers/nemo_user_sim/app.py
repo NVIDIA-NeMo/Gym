@@ -44,26 +44,27 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.client import format_exception_with_response_body, get_response_json, raise_for_status
+from nemo_gym.client import request as http_request
+from nemo_gym.config import (
     TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ModelServerRef,
     ResourcesServerRef,
+    get_first_server_config_dict,
 )
-from nemo_gym.failure_kinds import FailureStage
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
+    FailureStage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
-from nemo_gym.server_utils import format_exception_with_response_body, get_response_json, raise_for_status
-from nemo_gym.server_utils import request as http_request
+from nemo_gym.trajectory import AgentObservationBundle, ToolCallObservation, TrajectoryRecord
 from resources_servers.nemo_user_sim.episode_contracts import (
     UserSimInvocation,
     UserSimSeedResponse,

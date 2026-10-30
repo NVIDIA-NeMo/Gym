@@ -83,9 +83,8 @@ from nemo_gym._checkpoint.steps import (
     CHECKPOINT_VERIFY_HEADER,
     StepType,
 )
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.rollout_correlation import current_episode_id
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client.server_client import SESSION_ID_KEY
+from nemo_gym.core.episode import EpisodeId, current_episode_id
 
 
 LOGGER = logging.getLogger(__name__)

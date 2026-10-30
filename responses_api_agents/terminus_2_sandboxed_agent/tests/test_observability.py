@@ -13,11 +13,11 @@ from pydantic import TypeAdapter
 
 import nemo_gym.openai_utils as openai_utils
 from nemo_gym.base_responses_api_model import CaptureStore
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     Terminus2Agent,
@@ -597,7 +597,7 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
     """A policy cut off at max_output_tokens inside <think> leaves a reasoning-only output in the
     trajectory (the harness compacts and goes on); the harbor environment server's ATIF export must
     accept that shape and grade the episode, not mask it (review fix)."""
-    from nemo_gym.atif_export import transcript_to_atif
+    from nemo_gym.trajectory import transcript_to_atif
 
     inner = openai_utils.request
     seen = {"calls": 0}

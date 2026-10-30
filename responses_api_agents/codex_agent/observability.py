@@ -12,13 +12,13 @@ from typing import Literal
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)

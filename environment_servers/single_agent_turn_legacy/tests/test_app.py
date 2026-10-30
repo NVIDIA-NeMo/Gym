@@ -14,16 +14,16 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
-import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AgentServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.episode_types import MaterializedTask
+from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 
 
@@ -33,7 +33,7 @@ class _Cookie:
 
 def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
 
     namespace = runpy.run_path(

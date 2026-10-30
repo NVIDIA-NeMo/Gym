@@ -19,8 +19,8 @@ from typing import Optional
 
 from omegaconf import DictConfig
 
-from nemo_gym.config_types import BaseNeMoGymCLIConfig
-from nemo_gym.global_config import JSON_OUTPUT_KEY_NAME, GlobalConfigDictParserConfig, get_global_config_dict
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.config.global_config import JSON_OUTPUT_KEY_NAME, GlobalConfigDictParserConfig, get_global_config_dict
 
 
 def dev_test():  # pragma: no cover

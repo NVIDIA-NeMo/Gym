@@ -23,10 +23,9 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import SandboxStatus
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.codex_agent.app import CodexAgent, CodexAgentConfig, _model_endpoint_error
@@ -523,8 +522,9 @@ def test_mcp_tool_timeout_must_be_positive_and_within_the_run_timeout(setup, val
     CodexAgentConfig(**(agent.config.model_dump() | {"timeout": 600, "mcp_tool_timeout_seconds": 600}))
 
 
+@pytest.mark.parametrize("native", [False, True])
 @pytest.mark.parametrize("started", [False, True])
-def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
+def test_startup_failure_reports_the_codex_stderr_tail(setup, started, native):
     agent, sandbox = setup
     # Codex repeats a failed server's error body, up to 8 KiB, after the line's start that names the server.
     stderr = (
@@ -543,6 +543,12 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
     def publish_with_stderr():
         publish()
         sandbox.files[f"{sandbox.directory}/stderr.log"] = stderr
+        if native:
+            # Observations then come from Codex's own transcript instead of the CLI events. Codex 0.144.4 writes
+            # none before a startup failure, but the stderr tail and its gap must not depend on the path.
+            sandbox.files[f"{sandbox.directory}/native_session.jsonl"] = native_transcript(
+                [{"type": "message", "role": "user", "content": [{"type": "input_text", "text": "task"}]}]
+            )
 
     sandbox.publish = publish_with_stderr
     with TestClient(agent.setup_webserver()) as client:
@@ -551,18 +557,21 @@ def test_startup_failure_reports_the_codex_stderr_tail(setup, started):
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
     assert result.status_code == 502
     detail = result.json()["detail"]
-    gaps = {gap["code"]: gap["detail"] for gap in closed["agent_observations"]["gaps"]}
+    gaps = closed["agent_observations"]["gaps"]
+    # Only the CLI-events path lacks the model-call join key, so this shows which path built the observations.
+    assert ("model_call_join_key_unavailable" in [gap["code"] for gap in gaps]) is not native
+    startup_gaps = [gap["detail"] for gap in gaps if gap["code"] == "agent_startup_failed"]
     if started:
         # A turn started, so the event stream explains the failure; stderr is not appended.
         assert "stderr:" not in detail
-        assert "agent_startup_failed" not in gaps
+        assert startup_gaps == []
     else:
         assert "required MCP servers failed to initialize: gdpval_resources_server" in detail
         assert detail.endswith(" (-32603)")
         assert len(detail) < 2100, "the stderr tail is bounded"
         assert "x" * 600 not in detail, "long stderr lines are shortened"
         # Environment Servers record the observations, not the 502 body.
-        assert gaps["agent_startup_failed"] in detail
+        assert len(startup_gaps) == 1 and startup_gaps[0] in detail
 
 
 def test_startup_failure_stderr_hides_the_grant_tokens(setup):
@@ -868,7 +877,7 @@ def test_only_the_failure_that_ended_the_run_is_checked(transcript, ended_by_end
 @pytest.mark.parametrize("case", list(CODEX_0154_ENDPOINT_FAILURES))
 def test_codex_0154_endpoint_outage_is_retried_not_graded(setup, case, ending) -> None:
     from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     message, retries = CODEX_0154_ENDPOINT_FAILURES[case]
@@ -910,7 +919,7 @@ CODEX_NATIVE_ENDPOINT_FAILURES = {
 @pytest.mark.parametrize("case", list(CODEX_NATIVE_ENDPOINT_FAILURES))
 def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) -> None:
     from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     message = CODEX_NATIVE_ENDPOINT_FAILURES[case]
@@ -941,7 +950,7 @@ def test_native_endpoint_failures_are_retried_not_graded(setup, case, ending) ->
 def test_reported_provider_failure_keeps_its_classified_outcome(setup, message, action) -> None:
     """Codex exited 1 on turn.failed: the outcome policy decides it, not verify_after_agent_error."""
     from environment_servers.single_agent_turn.app import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
@@ -2145,7 +2154,7 @@ async def test_independent_configs_collect_flat_rows_through_environment_run(set
     A failed Codex run bypasses verification unless verify_after_agent_error grades it."""
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
     from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.server_utils import BaseServerConfig
 
@@ -3293,7 +3302,7 @@ async def test_failed_native_snapshot_preserves_collected_cli_events(setup):
 @pytest.mark.parametrize("transport_error", ["timed out", "IncompleteRead(0 bytes read, 20 more expected)", None])
 def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
     from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     sandbox.result["return_code"] = 1
@@ -3365,7 +3374,7 @@ def test_post_header_failure_reaches_outcome_policy(setup, transport_error):
 )
 def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expected):
     from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     sandbox.result["return_code"] = 1

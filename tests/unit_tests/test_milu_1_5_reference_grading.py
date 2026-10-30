@@ -5,8 +5,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from resources_servers.mcqa.app import MCQAResourcesServer, MCQAResourcesServerConfig, MCQAVerifyRequest
 
 

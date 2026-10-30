@@ -25,16 +25,16 @@ import yaml
 from fastapi import Request
 from pydantic import ValidationError
 
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import SKILLS_REF_KEY_NAME
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.codex_agent.app import (
     CodexAgent,
     CodexAgentConfig,

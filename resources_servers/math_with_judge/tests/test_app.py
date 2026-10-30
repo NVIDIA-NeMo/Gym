@@ -24,19 +24,19 @@ from pytest import approx, fixture, mark, raises, skip
 from sympy import sympify
 
 from nemo_gym.base_resources_server import ReverifyMode
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from nemo_gym.telemetry.resources_operations import ResourcesOperation
+from nemo_gym.verification import JudgeError
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -1256,7 +1256,7 @@ class TestAggregateMetrics:
 
     async def test_produces_symbolic_and_judge_accuracy(self) -> None:
         from nemo_gym.base_resources_server import AggregateMetricsRequest
-        from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+        from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 
         config = LibraryJudgeMathResourcesServerConfig(
             host="127.0.0.1",
@@ -1319,9 +1319,9 @@ async def test_failure_zero_uses_verifier_fields_and_counts_every_repeat():
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from nemo_gym.config_types import ResourcesServerRef
-    from nemo_gym.openai_utils import NeMoGymResponse
-    from nemo_gym.reward_profile import compute_pass_majority_metrics
+    from nemo_gym.config import ResourcesServerRef
+    from nemo_gym.core import NeMoGymResponse
+    from nemo_gym.metrics import compute_pass_majority_metrics
     from nemo_gym.sandbox import agent_tools
     from resources_servers.math_with_judge.app import LibraryJudgeMathResourcesServer, LibraryJudgeMathVerifyRequest
 

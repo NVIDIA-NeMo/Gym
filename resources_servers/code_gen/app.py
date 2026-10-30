@@ -33,15 +33,15 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.reward_profile import (
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.metrics import (
     add_avg_sample_std_dev,
     compute_pass_majority_metrics,
     compute_subset_metrics,
     highest_k_metrics,
 )
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationConfig, SandboxVerificationError
+from nemo_gym.verification import SandboxVerificationConfig, SandboxVerificationError
 
 
 LOG = logging.getLogger(__name__)

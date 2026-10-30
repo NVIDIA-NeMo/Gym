@@ -56,21 +56,22 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import (
+from nemo_gym.client import apply_rollout_prefix
+from nemo_gym.config import (
     CACHE_DIR_KEY_NAME,
     RESULTS_DIR_KEY_NAME,
-    OmegaConf,
+    ModelServerRef,
     get_global_config_dict,
     maybe_get_global_config_dict,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.config.global_config import OmegaConf
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    current_rollout_id,
 )
-from nemo_gym.profiling import Profiler
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.server_utils import apply_rollout_prefix, get_first_server_config_dict
+from nemo_gym.server_utils import get_first_server_config_dict
+from nemo_gym.telemetry import Profiler
 from responses_api_agents.swe_agents.opencode_replay import (
     build_replay_subagent_manifest,
     merge_replay_subagent_trajectories,

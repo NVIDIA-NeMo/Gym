@@ -154,6 +154,8 @@ Key points:
 
 For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 
+For a coding harness in a task sandbox, pair the resources server with a session harness (`pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `hermes_agent`) through an environment server; see [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Do not wire a new benchmark to `opencode_sandboxed_agent`, `pi_sandboxed_agent` or `hermes_sandboxed_agent`, or to the `/run` path of `terminus_2_sandboxed_agent` or `miniswe_sandboxed_agent`: that legacy path is deprecated, even though older presets still use it.
+
 For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
 ```yaml
 datasets:
@@ -248,7 +250,7 @@ Use the [`add-harness`](../add-harness/SKILL.md) skill. It covers the session co
 ## Constraints
 
 - Use NeMo Gym's OpenAI client (`nemo_gym/openai_utils.py`), not LiteLLM/Anthropic/other
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.server_utils.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx` for the rationale.
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through `nemo_gym.client.http_client.request()` (aiohttp). httpx has O(n^2) connection pooling that hangs at high concurrency. When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter — see `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the pattern and `fern/versions/latest/pages/infrastructure/engineering-notes/aiohttp-vs-httpx.mdx` for the rationale.
 - Pass configuration through Gym config (YAML), not environment variables
 - Code must run on Linux
 - `/run` endpoint must be async

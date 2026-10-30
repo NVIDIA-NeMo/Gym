@@ -67,8 +67,8 @@ from nemo_gym._checkpoint.generation_cut import (
 )
 from nemo_gym._checkpoint.telemetry import checkpoint_span
 from nemo_gym.chat_streaming import SSE_KEEPALIVE
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
 from nemo_gym.telemetry.gym_metrics import record_checkpoint_event
 from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
@@ -1024,7 +1024,7 @@ def generation_cut_requester(
     """
 
     async def request_cut(backend: str, inventory: GenerationCutInventory) -> GenerationCutReceipt:
-        from nemo_gym.server_utils import get_response_json, raise_for_status, request
+        from nemo_gym.client.http_client import get_response_json, raise_for_status, request
 
         response = await request(
             method="POST",

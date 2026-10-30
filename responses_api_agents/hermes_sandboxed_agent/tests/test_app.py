@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import logging
 import shlex
 import shutil
 import sys
@@ -13,9 +14,11 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from nemo_gym.agent_utils.supervisor_client import DEFAULT_CLEANUP_TIMEOUT
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from responses_api_agents.hermes_sandboxed_agent import app
 from responses_api_agents.hermes_sandboxed_agent.app import (
     MAX_OUTPUT_BYTES,
     HermesSandboxedAgent,
@@ -42,6 +45,21 @@ def agent(tmp_path):
         ),
         server_client=MagicMock(spec=ServerClient),
     )
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(agent, caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            HermesSandboxedAgent(config=agent.config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("hermes_sandboxed_agent", "legacy /run", "Use hermes_agent", "hermes_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
 
 
 def test_input_preserves_system_and_history():

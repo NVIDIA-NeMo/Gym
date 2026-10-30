@@ -19,11 +19,11 @@ from fastapi import Request
 from pytest import fixture, raises
 
 from nemo_gym.base_resources_server import BaseSeedSessionRequest
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.workplace_assistant.app import (
     WorkbenchRequest,
     WorkbenchResourcesServer,

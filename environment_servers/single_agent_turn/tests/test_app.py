@@ -17,7 +17,6 @@ from aiohttp import ClientConnectionError, ClientPayloadError, ClientResponseErr
 from omegaconf import OmegaConf
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
-import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
@@ -32,14 +31,13 @@ from nemo_gym.base_resources_server import (
     ResourcesSeedSessionRequest,
 )
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.config_types import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
-from nemo_gym.failure_kinds import MODEL_TRANSPORT_ERROR
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentObservationBundle, TrajectoryRecord
-from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.core import MODEL_TRANSPORT_ERROR, EpisodeId, NeMoGymResponse, TaskId, current_rollout_id
+from nemo_gym.episode_types import MaterializedTask
+from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnResponse, SingleAgentTurnTaskInput
+from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 
 
 class _Cookie:
@@ -48,7 +46,7 @@ class _Cookie:
 
 def test_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
 
     namespace = runpy.run_path(
@@ -1577,8 +1575,8 @@ async def test_verifier_evidence_reaches_collector_through_result_or_failure(out
     from fastapi.testclient import TestClient
 
     from nemo_gym.base_resources_server import BaseResourcesServerConfig, BaseVerifyResponse, SimpleResourcesServer
-    from nemo_gym.judge import JudgeError
     from nemo_gym.rollout_collection import _attach_trajectory_record, _episode_record
+    from nemo_gym.verification import JudgeError
 
     class Resources(SimpleResourcesServer):
         async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:

@@ -48,25 +48,24 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME
-from nemo_gym.metrics_config import Stat
-from nemo_gym.openai_utils import (
+from nemo_gym.client import raise_for_status
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.metrics import Stat
 from nemo_gym.prompt import PromptConfig, load_prompt_config
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import raise_for_status
 
 
 LOG = logging.getLogger(__name__)

@@ -22,6 +22,7 @@ from environment_servers.swe_together.context import INCREMENTAL_NOTICE, project
 from environment_servers.swe_together.egress import DependencyAccess, install_trust_bundle
 from environment_servers.swe_together.evaluation import PASS_THRESHOLD, interaction_metrics, run_judge
 from environment_servers.swe_together.guidance import session_analysis
+from environment_servers.swe_together.judge_evidence import collect_judge_evidence
 from environment_servers.swe_together.metrics import aggregate
 from environment_servers.swe_together.model_client import AuxiliaryModel, error_evidence
 from environment_servers.swe_together.repo_config import discover_repo_config_files
@@ -54,22 +55,33 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
     TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ModelServerRef,
+    get_first_server_config_dict,
+)
+from nemo_gym.core import (
+    JUDGE_FAILED,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    verifier_invocation_context,
 )
 from nemo_gym.episode_types import EpisodeFailure
-from nemo_gym.failure_kinds import JUDGE_FAILED
-from nemo_gym.global_config import TOKEN_ID_CAPTURE_BLOCK, get_first_server_config_dict
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import compute_aggregate_metrics
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_response_json, is_nemo_gym_fastapi_entrypoint, raise_for_status
+from nemo_gym.metrics import compute_aggregate_metrics
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxAccess,
+    SandboxResources,
+    SandboxSpec,
+    resolve_provider_config,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 LOGGER = logging.getLogger(__name__)
@@ -339,7 +351,14 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             stage = "cleanup"
             await agent_cleanup.close()
             stage = "verification"
-            verification = await self._verify(state, initial, activations)
+            # Interaction scoring is part of grading, so its captured calls belong to this verifier invocation.
+            with verifier_invocation_context(f"verify-{uuid4().hex}"):
+                verification = await self._verify(state, initial, activations)
+            trajectory = agent_close.trajectory
+            if verification.get("judge_capture_episode"):
+                trajectory = await collect_judge_evidence(
+                    trajectory, verification, self.server_client.global_config_dict, state.directory
+                )
             await judge_cleanup.close()
             await candidate_cleanup.close()
             await runtime_cleanup.close()
@@ -353,7 +372,7 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                         "ng_activations": activations,
                         "ng_steps": steps,
                         "ng_agent_close": agent_close,
-                        "ng_trajectory": request.trajectory_for_collection(agent_close.trajectory),
+                        "ng_trajectory": request.trajectory_for_collection(trajectory),
                         "ng_agent_observations": agent_close.agent_observations,
                         "cleanup_receipts": state.cleanup_receipts,
                         "artifact_directory": str(state.directory),
@@ -819,6 +838,4 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 if __name__ == "__main__":
     SWETEnvironmentServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    from nemo_gym.server_utils import create_nemo_gym_fastapi_app
-
-    app = create_nemo_gym_fastapi_app(SWETEnvironmentServer)
+    app = SWETEnvironmentServer.run_webserver()  # noqa: F401

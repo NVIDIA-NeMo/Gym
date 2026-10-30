@@ -27,16 +27,15 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 from starlette.middleware.base import BaseHTTPMiddleware
 
-from nemo_gym import server_utils
 from nemo_gym.base_responses_api_model import CaptureStore, _CaptureMiddleware
-from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    PermanentEndpointError,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.observability.model_calls import aggregate_model_call_metrics, read_model_call_records
+from nemo_gym.openai_utils import PermanentEndpointError
 from responses_api_models.openai_model import app as openai_model_module
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
@@ -543,6 +542,37 @@ class TestApp:
 
         assert await server.embeddings({"input": "hi"}) == {"data": []}
         assert server._client.create_embeddings.await_count == 2
+
+    @pytest.mark.parametrize("stream", [False, True])
+    async def test_reasoning_replayed_without_id_is_forwarded_without_id(self, stream: bool) -> None:
+        server = self._setup_server()
+        client = TestClient(server.setup_webserver())
+        called_args = {}
+
+        async def mock_create_response(**kwargs):
+            called_args.update(kwargs)
+            return {
+                "id": "resp_1",
+                "created_at": 0.0,
+                "model": "dummy_model",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            }
+
+        server._client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        server._client.create_response = AsyncMock(side_effect=mock_create_response)
+        reasoning = {"type": "reasoning", "summary": [], "encrypted_content": "opaque-content"}
+        body = {"input": [{"role": "user", "content": "hi", "type": "message"}, reasoning]}
+        if stream:
+            body["stream"] = True
+
+        res = client.post("/v1/responses", json=body)
+
+        assert res.status_code == 200
+        assert called_args["input"][1] == reasoning
 
     @pytest.mark.parametrize("replacement, expected_effort", [("minimal", "minimal"), ("low", "low"), (None, "none")])
     async def test_responses_reasoning_effort_none_replacement_is_configurable(
@@ -1250,7 +1280,7 @@ class TestRefusedProviderConnection:
             return await send(method, url, **kwargs)
 
         session.request = request
-        monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: session)
         yield attempts
         await session.close()
 

@@ -24,9 +24,8 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import BaseModel
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import BenchmarkDatasetConfig, ConfigError, DatasetConfig
-from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
-from nemo_gym.global_config import (
+from nemo_gym.config.config_types import BenchmarkDatasetConfig, ConfigError, DatasetConfig
+from nemo_gym.config.global_config import (
     POLICY_MODEL_KEY_NAME,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -34,6 +33,7 @@ from nemo_gym.global_config import (
     resolve_dataset_agent,
     taskset_environment_server_name,
 )
+from nemo_gym.discovery import _parse_no_environment_tolerating_unset_values, discover_components
 
 
 BENCHMARKS_SUBDIR = "benchmarks"
@@ -213,7 +213,7 @@ def discover_benchmarks() -> Dict[str, BenchmarkConfig]:
 
 # Backward-compatibility shims (CLI refactor): these symbols moved to `nemo_gym.cli.eval`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(
