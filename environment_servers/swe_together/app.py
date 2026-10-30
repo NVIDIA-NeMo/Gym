@@ -719,8 +719,9 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
             "protocol_profile": self.config.protocol_profile,
         }
         deadline = monotonic() + self.config.grading_timeout_seconds
+        grading = asyncio.timeout(self.config.grading_timeout_seconds)
         try:
-            async with asyncio.timeout(self.config.grading_timeout_seconds):
+            async with grading:
                 await state.snapshots.capture(state.sandbox, len(activations))
                 patch = state.snapshots.final_patch
                 if self.config.scoring_profile == "reference" and len(patch.strip()) < 100:
@@ -770,6 +771,16 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
                 evaluation_completed=False,
                 failure_kind=JUDGE_FAILED,
                 failure_reason=f"{type(error).__name__}: {error}",
+                # Only this server's own grading deadline is a grading_timeout; a provider TimeoutError is not.
+                judge_failure_cause=getattr(
+                    error,
+                    "cause",
+                    "grading_timeout"
+                    if grading.expired()
+                    else "judge_transport_error"
+                    if result.get("judge_transport_error")
+                    else "judge_error",
+                ),
                 _ng_failure_class=JUDGE_FAILED,
                 _ng_failure_judge_error=str(error),
             )
@@ -808,6 +819,4 @@ class SWETEnvironmentServer(BaseEnvironmentServer[SWETRequest, SWETResponse]):
 if __name__ == "__main__":
     SWETEnvironmentServer.run_webserver()
 elif is_nemo_gym_fastapi_entrypoint(__file__):
-    from nemo_gym.server_utils import create_nemo_gym_fastapi_app
-
-    app = create_nemo_gym_fastapi_app(SWETEnvironmentServer)
+    app = SWETEnvironmentServer.run_webserver()  # noqa: F401

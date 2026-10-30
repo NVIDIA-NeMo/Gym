@@ -305,3 +305,75 @@ def test_compaction_boundary_uses_only_emitted_assistant_items(tmp_path, current
     bundle = _parse_opencode_session(db, "fallback", message_ids=ids)
     compaction = next(r for r in bundle.records if isinstance(r, ContextCompactionObservation))
     assert compaction.first_kept_item_id == ("p2" if role == "assistant" else None)
+
+
+@pytest.mark.parametrize("persisted_step", [False, True])
+def test_final_activation_preserves_native_step_or_explicit_gap(tmp_path, persisted_step):
+    from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+    from responses_api_agents.opencode_agent.observability import scope_opencode_activation
+    from responses_api_agents.opencode_agent.tests.test_model_call_correlation import (
+        POLICY,
+        CaptureStore,
+        _capture,
+        _merge,
+    )
+
+    parts = [{"type": "text", "text": "private answer"}]
+    if persisted_step:
+        parts = [{"type": "step-start"}, *parts, {"type": "step-finish"}]
+    db = _session_db(tmp_path, [({"role": "assistant", "time": {"created": 1000}}, parts)])
+    trajectory, observations = _trajectory(
+        partial(_parse_opencode_session, require_terminal_finish=True, message_ids={"m0"}, model_ref=POLICY), db
+    )
+    scope_opencode_activation(observations, trajectory, invocation_prefix="session:activation-8", activation_id=8)
+    # Close serialization must retain evidence even when the invocation itself was interrupted.
+    for invocation in observations.records:
+        if isinstance(invocation, AgentInvocation):
+            invocation.status = "incomplete"
+            invocation.stop_reason = "session_budget_exhausted"
+    close = AgentCloseSessionResponse(
+        agent_session_id="session", agent_observations=observations, trajectory=trajectory, cleanup_confirmed=True
+    )
+    result = json.loads(close.model_dump_json())
+    canonical = _build_trajectory_record(
+        {"_ng_task_index": 0, "_ng_rollout_index": 0},
+        {"ng_agent_observations": result["agent_observations"], "ng_trajectory": result["trajectory"]},
+    )
+    assert len(canonical.turns) == int(persisted_step)
+    # A successful captured response is joined only when its native provider step exists.
+    restored = AgentCloseSessionResponse.model_validate(result)
+    store = CaptureStore(tmp_path / "capture")
+    _capture(store, "final-call", "m0", session="session:activation-8:root")
+    _, bundle, joined = _merge(store, restored.agent_observations, restored.trajectory)
+    assert len(joined.turns) == int(persisted_step)
+    if persisted_step:
+        assert [call.model_call_id for call in joined.turns[0].model_calls] == ["final-call"]
+    else:
+        assert any(gap.code == "assistant_message_call_unmatched" for gap in bundle.gaps)
+    if persisted_step:
+        assert canonical.turns[0].source_message_id == "m0"
+        assert canonical.turns[0].activation_id == 8
+        assert all(gap.code != "turns_unavailable" for gap in canonical.gaps)
+    else:
+        gap = next(gap for gap in canonical.gaps if gap.code == "turns_unavailable")
+        diagnostic = json.loads(gap.detail.split("native_capture_diagnostics=", 1)[1])
+        assert diagnostic["messages"][0]["time"] == {"created": 1000}
+        assert [part["type"] for part in diagnostic["parts"]] == ["text"]
+        assert "private answer" not in gap.detail
+
+
+def test_native_gap_diagnostics_are_bounded_and_content_free(tmp_path):
+    db = _session_db(
+        tmp_path,
+        [({"role": "assistant", "time": {"created": 1000}}, [{"type": "text", "text": "secret"}] * 5)] * 40,
+    )
+    trajectory, _ = _trajectory(_parse_opencode_session, db)
+    assert trajectory.turns == []
+    gap = next(gap for gap in trajectory.gaps if gap.code == "turns_unavailable")
+    diagnostic = json.loads(gap.detail.split("native_capture_diagnostics=", 1)[1])
+    assert diagnostic["message_count"] == 40
+    assert len(diagnostic["messages"]) == 32
+    assert diagnostic["part_count"] == 160
+    assert len(diagnostic["parts"]) == 128
+    assert diagnostic["truncated"] is True
+    assert "secret" not in gap.detail
