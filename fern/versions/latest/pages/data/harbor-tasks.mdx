@@ -539,12 +539,6 @@ planner, the services the task's artifacts and collect hooks name, the non-root 
 reason names the task's Compose file and the overlay files merged onto it. The template is read and compiled once,
 when the block is read.
 
-For an image-only task with recorded image settings, attaching services preserves the image's startup user and
-working directory. Dockerfile `RUN` commands finish first, including creation of a user or its `WORKDIR`; the
-entrypoint and image health check then use the Dockerfile's final settings. `[agent].user` and
-`[environment].workdir` apply to subsequent agent commands. An explicit `services.main.user` or
-`services.main.working_dir` in a job overlay overrides the startup default.
-
 ```yaml
 harbor_environment_server:
   environment_servers:
@@ -555,5 +549,16 @@ harbor_environment_server:
           - {name: hindsight-memory, transport: streamable-http, url: "http://hindsight:8888/mcp/default/"}
         prompt_template: /path/memory_prompt.md.j2
 ```
+
+For a Dockerfile task whose image configuration the loader has resolved, attaching services preserves the
+image's startup user and working directory. Dockerfile `RUN` commands finish before the entrypoint and image
+health check, which use the Dockerfile's final settings. Named and external volumes are already mounted during
+these commands, so `RUN` can write to shared storage. Log links and uploads are applied after setup.
+`[agent].user` and `[environment].workdir` apply to subsequent agent commands. An explicit `services.main.user`
+or `services.main.working_dir` in a job overlay overrides the startup default.
+
+On both single-sandbox and composed paths, a numeric image user with no account name is passed to the sandbox
+provider as an integer user ID. Startup, health checks, and agent commands use the provider's numeric-user
+support instead of trying to switch to an account named by those digits.
 
 See the environment server README, "Job-level Compose overlay", for the merge rules and what the group cannot run.

@@ -1039,11 +1039,18 @@ class TestEntrypoint:
     async def test_numeric_image_user_without_a_name_stays_numeric_with_a_warning(self, tmp_path, monkeypatch, caplog):
         sandbox = EntrypointSandbox(passwd={"0": "root"})
         record = ENTRYPOINT_CONFIG | {"User": "1000"}
-        server, task, sandbox = self.entrypoint_server(tmp_path, monkeypatch, sandbox=sandbox, record=record)
+        server, task, sandbox = self.entrypoint_server(
+            tmp_path, monkeypatch, sandbox=sandbox, record=record, toml=HEALTHCHECK_TOML
+        )
         with caplog.at_level("WARNING", logger="environment_servers.harbor.users"):
             response = await run_episode(server, task)
         assert response.failure is None, response.failure
-        assert sandbox.launch()["user"] == "1000"
+        assert sandbox.launch()["user"] == 1000 and sandbox.default_user == 1000
+        (check,) = [r for r in sandbox.execs if r["command"] == "test -f /app/ready.txt"]
+        assert check["user"] == 1000
+        (seed,) = [kwargs["json"] for _, path, kwargs in server.server_client.calls if path == "/v1/agent_sessions"]
+        assert seed["sandbox_access"]["user"] == 1000
+        assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
         warnings = [r.getMessage() for r in caplog.records if "USER 1000 names no user" in r.getMessage()]
         assert len(warnings) == 1
 

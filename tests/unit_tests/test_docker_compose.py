@@ -684,7 +684,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
     image_data = tmp_path / "image-data"
     image_data.mkdir()
     (image_data / "seed").write_text("image data")
-    workdir = tmp_path / "work" if with_setup else tmp_path
+    workdir = tmp_path / "work"
     startup_cwd = tmp_path / "startup-cwd"
 
     async def setup(sandbox):

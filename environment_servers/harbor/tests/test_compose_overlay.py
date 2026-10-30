@@ -19,6 +19,7 @@ from environment_servers.harbor import sandboxes as harbor_sandboxes
 from environment_servers.harbor.entrypoint import entrypoint_to_run
 from environment_servers.harbor.tests.conftest import (
     COMPOSE_YAML,
+    HEALTHCHECK_TOML,
     IMAGE_CONFIGS,
     IMAGE_PATH,
     TASK_TOML,
@@ -413,6 +414,8 @@ class TestGroup:
                 return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
 
         run = "RUN true\n" if with_run else ""
+        if image_user == "root" and with_run:
+            startup_user = None  # Overlay sandboxes are created as root, before installing the agent's user.
         server, task, *_ = overlay_server(
             tmp_path,
             monkeypatch,
@@ -437,6 +440,103 @@ class TestGroup:
             await server._set_default_user(compose.services["main"], task, server._overlay_names.pop("r1"))
             await compose.services["main"].exec("id")
             assert sandbox.execs[-1]["user"] == "other"
+        finally:
+            await compose.stop()
+
+    @pytest.mark.parametrize(
+        "startup",
+        ["none", "keepalive", "cleared-entrypoint", "disabled-healthcheck", "entrypoint", "healthcheck", "command"],
+    )
+    @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
+    async def test_image_group_is_checked_before_create_only_when_startup_uses_it(
+        self, tmp_path, monkeypatch, startup, with_run
+    ):
+        from nemo_gym.sandbox.adapters import docker_compose
+
+        overlay = volume_free_overlay(tmp_path)
+        if startup == "command":
+            with overlay.files[0].open("a") as file:
+                file.write('    command: ["touch", "/tmp/started"]\n')
+        config = {"Env": [f"PATH={IMAGE_PATH}"]}
+        if startup in ("entrypoint", "cleared-entrypoint"):
+            config["Entrypoint"] = ["/entry.sh"]
+        elif startup == "keepalive":
+            config["Entrypoint"] = ["sh", "-c", "sleep infinity"]
+        elif startup in ("healthcheck", "disabled-healthcheck"):
+            config["Healthcheck"] = {"Test": ["CMD", "true"]}
+        with overlay.files[0].open("a") as file:
+            if startup == "cleared-entrypoint":
+                file.write("    entrypoint: []\n")
+            elif startup == "disabled-healthcheck":
+                file.write("    healthcheck:\n      disable: true\n")
+        run = "RUN true\n" if with_run else ""
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n').replace(
+                "[verifier]\n", '[verifier]\nuser = "root"\n'
+            ),
+            dockerfile=f"FROM ubuntu:24.04\n{run}USER app:app\nWORKDIR /app\n",
+            image_config=config,
+            overlay=overlay,
+        )
+        sandbox = FakeSandbox()
+        provider = DirectoryProvider(task, sandbox)
+        monkeypatch.setattr(docker_compose, "create_provider", lambda config: provider)
+        write_image_config(
+            task.path.parent, "org/memory:1", Cmd=["memory-server"], Healthcheck={"Test": ["CMD", "true"]}
+        )
+        if startup in ("none", "keepalive", "cleared-entrypoint", "disabled-healthcheck"):
+            compose = await harbor_app.HarborEnvironmentServer._create_compose(server, task, "r1")
+            try:
+                assert compose._ready
+                assert compose.services["main"].default_user is None
+            finally:
+                await compose.stop()
+        else:
+            with pytest.raises(HTTPException, match="app:app"):
+                await harbor_app.HarborEnvironmentServer._create_compose(server, task, "r1")
+            assert not provider.created, "Reject unsupported startup users before provisioning any service"
+            assert not sandbox.execs, "Reject unsupported startup users before running Dockerfile setup"
+
+    async def test_root_startup_without_agent_override_uses_plain_exec(self, tmp_path, monkeypatch):
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            image_config={
+                "Env": [f"PATH={IMAGE_PATH}"],
+                "Entrypoint": ["/entry.sh"],
+                "Healthcheck": {"Test": ["CMD", "true"]},
+            },
+            overlay=volume_free_overlay(tmp_path),
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            assert entrypoint_exec_of(sandbox)["user"] is None
+            (check,) = [r for r in sandbox.execs if r["command"] == "true"]
+            assert check["user"] is None
+        finally:
+            await compose.stop()
+
+    async def test_unnamed_image_uid_runs_the_groups_task_healthcheck_as_an_integer(self, tmp_path, monkeypatch):
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=HEALTHCHECK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n'),
+            dockerfile="FROM ubuntu:24.04\nRUN true\nUSER 12345\nWORKDIR /app\n",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entry.sh"]},
+            overlay=volume_free_overlay(tmp_path),
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            names = server._overlay_names.pop("r1")
+            main = compose.services["main"]
+            await server._set_default_user(main, task, names)
+            image_user = await server._image_user_name(main, task, names)
+            await server._wait_healthy(main, task, user=image_user, workdir="/app", compose_managed=True)
+            (check,) = [r for r in sandbox.execs if r["command"] == "test -f /app/ready.txt"]
+            assert check["user"] == 12345
+            assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
         finally:
             await compose.stop()
 
@@ -488,6 +588,7 @@ class TestGroup:
             entry = entrypoint_exec_of(sandbox)
             assert entry["user"] == "operator" and entry["cwd"] == "/operator"
             assert sandbox.dirs["/home/app/work"] == "app"
+            assert sandbox.dirs.get("/operator") == "root"
         finally:
             await compose.stop()
 

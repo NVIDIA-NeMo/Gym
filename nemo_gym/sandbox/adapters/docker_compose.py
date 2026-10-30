@@ -114,9 +114,9 @@ class AsyncSandboxCompose:
     its shared storage; ``service_volume_sources`` gives a service on its own provider that provider's
     mapping, which its volumes resolve through instead. ``service_setup`` names, per service, a coroutine
     function the group awaits with that service's sandbox once it is created and its runtime is configured,
-    before its uploads, its command, its hooks and its healthcheck: the caller's own image setup (the Harbor
-    server runs an overlay Dockerfile's ``RUN`` lines there, so they precede the mounts and the command, as
-    a build precedes ``compose up``). For a service with setup, its working directory is applied afterwards:
+    before its log links, uploads, command, hooks and healthcheck. Named/external volumes are already mounted
+    when the sandbox is created, so setup (including Harbor's overlay Dockerfile ``RUN`` lines) can write to
+    shared storage. For a service with setup, its working directory is applied afterwards:
     setup may create that directory under a different user. An exception fails the start and stops the group.
     """
 
@@ -614,6 +614,7 @@ class AsyncSandboxCompose:
                                 f"elif test -d {target}; then cp -a {target}/. {root}/; "
                                 f"elif test -e {target}; then exit 1; fi",
                                 user="root",
+                                cwd="/",  # The service's working directory may not exist in the seed image.
                                 timeout_s=300,
                             )
                             if result.return_code:

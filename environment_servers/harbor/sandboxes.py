@@ -18,6 +18,7 @@ import logging
 import math
 import os
 import random
+import shlex
 import shutil
 import tempfile
 from collections.abc import Awaitable, Callable, Mapping
@@ -28,6 +29,7 @@ from typing import Any
 import yaml
 from fastapi import HTTPException
 
+from environment_servers.harbor.entrypoint import is_keepalive_entrypoint
 from environment_servers.harbor.network_policy import phase_network_policy
 from environment_servers.harbor.overlay import HarborOverlayError
 from environment_servers.harbor.session import _task_sandbox_env, resolve_env_templates
@@ -700,15 +702,38 @@ class HarborSandboxMixin:
         provider_config = resolve_provider_config(task_ref, global_config_dict)
         platform = self._compose_platform()
         # An overlay task's Dockerfile RUN lines run inside the group's start, on main once it exists and before
-        # its bind-mount uploads, its command and its healthcheck: Harbor's order (a build, then `compose up` with
-        # the mounts). The overlay keeps its own budget on top of the start's, and the names it resolved wait for
-        # the seed under the episode key.
+        # its log links, uploads, command and healthcheck. Named/external volumes are already mounted at sandbox
+        # creation, so RUN lines can write to shared storage. The overlay keeps its own budget on top of the
+        # start's, and the names it resolved wait for the seed under the episode key.
         service_setup: dict[str, Callable[[AsyncSandbox], Awaitable[None]]] = {}
         timeout_s = self.config.sandbox_ready_timeout_s
         overlay_failure: list[HarborOverlayError] = []
         if task.overlay:
             timeout_s += task.config.environment.build_timeout_sec
         image_startup = not task.needs_compose and task.image_shell is not None
+        main = document["services"]["main"]
+        startup_command = False
+        for field in ("entrypoint", "command"):
+            value = main.get(field) or []
+            argv = shlex.split(value) if isinstance(value, str) else value
+            if argv and not is_keepalive_entrypoint(argv):
+                startup_command = True
+        healthcheck = main.get("healthcheck") or {}
+        startup_uses_image_user = (
+            image_startup
+            and main.get("user") in (None, "")
+            and (
+                startup_command
+                or (
+                    bool(healthcheck.get("test"))
+                    and not healthcheck.get("disable")
+                    and healthcheck["test"] != ["NONE"]
+                )
+            )
+        )
+        if startup_uses_image_user:
+            # Fail before creating any service or running setup; an unused image identity needs no support.
+            self._refuse_unsupported_group(task, task.entrypoint_user, global_config_dict, "image startup")
         own_workdir = task.built_image is None and task.entrypoint_workdir and not _is_root(task.entrypoint_user)
         if task.overlay or image_startup or own_workdir:
 
@@ -724,12 +749,14 @@ class HarborSandboxMixin:
                     # The adapter defers WORKDIR until this hook has run. A built image already owns its
                     # directory; a Dockerfile overlay creates it under the USER in effect at that step.
                     await self._own_workdir(sandbox, task.entrypoint_workdir, task.entrypoint_user, create=True)
-                if image_startup and document["services"]["main"].get("user") in (None, ""):
+                if startup_uses_image_user:
                     # Startup belongs to the image, even when [agent].user names someone else. The seed
                     # installs the agent's default after the group has started. An explicit Compose user
                     # replaces the image identity, so do not resolve or validate an unused image user.
+                    creation_user = sandbox.default_user
                     await self._set_default_user(sandbox, task, names, role="verifier")
-                    if sandbox.default_user is None:
+                    if sandbox.default_user is None and not _is_root(creation_user):
+                        # Some providers retain the user they were created with when exec names no user.
                         sandbox.set_default_user("root")
                 self._overlay_names[episode_key] = names
 

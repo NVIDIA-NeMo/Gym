@@ -257,7 +257,7 @@ def synthesized_group(task: HarborTask | None = None) -> dict[str, Any]:
     so an extra Compose file extends a plain image task the same way it extends a Compose task. The sandbox
     adapter fills ``main``'s image and command from the task, as it does for a task file that leaves them out.
 
-    When the loader knows the image configuration, preserve its resolved ENTRYPOINT (including an explicit
+    For a Dockerfile task whose image configuration the loader resolved, preserve its ENTRYPOINT (including an explicit
     clear) and final WORKDIR instead of inheriting the base image's settings. The server's setup hook runs
     any Dockerfile RUN lines and installs the image's startup user before the command and healthcheck. The
     adapter defers the working directory until that setup finishes, so it cannot create a root-owned directory
@@ -265,7 +265,7 @@ def synthesized_group(task: HarborTask | None = None) -> dict[str, Any]:
     inside the running image, while an explicit user in a job overlay still wins over the installed default.
 
     ``[agent].user`` and ``[environment].workdir`` apply to the agent's later commands, independently of startup.
-    A prebuilt image without recorded configuration is left to image resolution; without a task, main is empty.
+    A prebuilt ``docker_image`` task without a Dockerfile is left to image resolution; without a task, main is empty.
     """
     main: dict[str, Any] = {}
     if task is not None and task.image_shell is not None:
