@@ -266,7 +266,7 @@ def run_suite(
         "suite_sha256": digest_file(output / "suite.json"),
         "harnesses": rows,
         "limits": [
-            "local harness runtime and controlled Chat/Responses model only; no remote sandbox qualification",
+            "local harness runtime and controlled Chat/Responses/Messages model only; no remote sandbox qualification",
             "multimodal, compaction, parallelism and deployment health are outside this suite",
         ],
     }

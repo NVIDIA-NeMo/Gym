@@ -15,6 +15,7 @@ import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
 from scripts.harness_conformance.provider import Probe
+from scripts.harness_conformance.registry import CONFIG_CLASSES
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
 from scripts.harness_conformance.scenarios import SCENARIOS
 
@@ -102,7 +103,7 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
         import importlib
 
         module = importlib.import_module(f"responses_api_agents.{harness}_agent.app")
-        getattr(module, HARNESSES[harness] + "Config").model_validate(agent)
+        getattr(module, CONFIG_CLASSES.get(harness, HARNESSES[harness] + "Config")).model_validate(agent)
 
 
 def test_session_detection_distinguishes_base_stubs_and_inherited_implementations():

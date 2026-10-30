@@ -43,6 +43,21 @@ def _terminal_error_reported(attempts: list[dict], responses: list[dict], expect
     return isinstance(message, str) and bool(message) and isinstance(reported, str) and message in reported
 
 
+def _tool_request_matches(expected: dict, request: dict, tool: dict) -> bool:
+    try:
+        arguments = json.loads(request["arguments"])
+    except (KeyError, TypeError, ValueError):
+        return False
+    name = request.get("name")
+    if request.get("namespace"):
+        name = f"{request['namespace']}__{name}"
+    return (
+        name == expected["name"]
+        and arguments == expected["arguments"]
+        and tool.get("tool_name") == request.get("name")
+    )
+
+
 def tool_checks(
     record: dict | None,
     witnessed: list[dict],
@@ -58,9 +73,29 @@ def tool_checks(
         t for t in _objects(trajectory.get("tool_calls")) if finish_id is None or t.get("tool_call_id") != finish_id
     ]
     invocations = _objects(trajectory.get("invocations"))
-    wanted = Counter(t.get("id") for t in witnessed)
+    matched = {}
+    for expected in witnessed:
+        if expected.get("wire_id", True):
+            candidates = [t for t in tools if t.get("tool_call_id") == expected.get("id")]
+        else:
+            # Native terminal JSON has no upstream call ID. Resolve exactly one
+            # saved request by its independently prescribed name and arguments.
+            candidates = [
+                t
+                for t in tools
+                for inv in invocations
+                if inv.get("invocation_id") == t.get("invocation_id")
+                for item in _objects(inv.get("conversation"))
+                if item.get("type") == "function_call"
+                and item.get("call_id") == t.get("tool_call_id")
+                and _tool_request_matches(expected, item, t)
+            ]
+        if len(candidates) == 1:
+            matched[expected["id"]] = candidates[0]
+    wanted = Counter(t.get("tool_call_id") for t in matched.values())
     identities = (
         all(isinstance(t.get("tool_call_id"), str) for t in tools)
+        and len(matched) == len(witnessed)
         and wanted == Counter(t.get("tool_call_id") for t in tools)
         and all(n == 1 for n in wanted.values())
     )
@@ -78,15 +113,14 @@ def tool_checks(
     )
     values = {"join": [], "request": [], "status": [], "output": []}
     if identities and record is not None:
-        by_id = {t["tool_call_id"]: t for t in tools}
         for expected in witnessed:
-            tool = by_id[expected["id"]]
+            tool = matched[expected["id"]]
             items = [
                 item
                 for inv in invocations
                 if inv.get("invocation_id") == tool.get("invocation_id")
                 for item in _objects(inv.get("conversation"))
-                if item.get("call_id") == expected["id"]
+                if item.get("call_id") == tool["tool_call_id"]
             ]
             requests = [i for i in items if i.get("type") == "function_call"]
             values["join"].append(len(requests) == 1)
@@ -99,18 +133,7 @@ def tool_checks(
             if len(requests) != 1:
                 continue
             request = requests[0]
-            try:
-                arguments = json.loads(request["arguments"])
-            except (KeyError, TypeError, ValueError):
-                arguments = None
-            name = request.get("name")
-            if request.get("namespace"):
-                name = f"{request['namespace']}__{name}"
-            values["request"].append(
-                name == expected["name"]
-                and arguments == expected["arguments"]
-                and tool.get("tool_name") == request.get("name")
-            )
+            values["request"].append(_tool_request_matches(expected, request, tool))
     results.run(
         BehavioralCheck(
             id="tools.witness_join",
@@ -363,7 +386,12 @@ def inspect_behavior(
     )
     return (
         results.dump()
-        + model_checks(record, attempts + judges, fingerprint=fingerprint, available=available)
+        + model_checks(
+            record,
+            attempts + judges + (witness or {}).get("auxiliary_calls", []),
+            fingerprint=fingerprint,
+            available=available,
+        )
         + tool_checks(
             record,
             tools,
@@ -387,9 +415,12 @@ def model_checks(
         response = attempt["response"] or {}
         exchange = fingerprint(attempt["request"], attempt["status_code"], response)
         expected_exchanges[exchange] += 1
-        chat = "messages" in attempt["request"]
+        messages_api = response.get("type") == "message"
+        chat = "messages" in attempt["request"] and not messages_api
         choices = response.get("choices") or []
         finish = choices[0].get("finish_reason") if chat and choices else None
+        if messages_api:
+            finish = response.get("stop_reason")
         expected_metadata[
             (exchange, json.dumps(response.get("id")), json.dumps(response.get("status")), json.dumps(finish))
         ] += 1
@@ -403,6 +434,20 @@ def model_checks(
             usage.get("total_tokens"),
             (usage.get("prompt_tokens_details" if chat else "input_tokens_details") or {}).get("cached_tokens"),
         )
+        if messages_api:
+            # Messages input_tokens excludes both cache reads and cache writes.
+            # Canonical prompt_tokens counts the whole prompt exactly once.
+            prompt = usage.get("input_tokens")
+            if prompt is not None:
+                prompt += (usage.get("cache_read_input_tokens") or 0) + (usage.get("cache_creation_input_tokens") or 0)
+            completion = usage.get("output_tokens")
+            counts = (
+                prompt,
+                completion,
+                None,
+                prompt + completion if prompt is not None and completion is not None else None,
+                usage.get("cache_read_input_tokens"),
+            )
         expected_tokens[(exchange, json.dumps(counts))] += 1
     for call in calls:
         metadata = _mapping(call.get("response_metadata"))
