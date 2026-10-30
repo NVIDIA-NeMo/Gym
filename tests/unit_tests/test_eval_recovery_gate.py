@@ -45,7 +45,7 @@ def inventory(n: int, repeats: int = 1) -> list[dict]:
 
 def infra_failure(task: int, *, attempt: int, terminal: bool = False, kind: str = "provider_unavailable") -> dict:
     event = {
-        "event_id": f"e{task}-{attempt}",
+        "event_id": f"f{task}-{attempt}",
         "boundary": "model",
         "failure_kind": kind,
         "operation": "chat_completions",

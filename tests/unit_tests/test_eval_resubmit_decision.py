@@ -2166,3 +2166,83 @@ def test_projected_explicit_final_model_zero_stays_settled(tmp_path):
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
     assert decision.action == RecoveryAction.NOOP
     assert decision.counts["model_final"] == 1
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "missing_cause",
+        "self_cycle",
+        "two_event_cycle",
+        "nonstring_cause",
+        "plain_dispatch",
+        "legacy_empty",
+        "legacy_observations",
+        "unselected_broken",
+        "dangling_id",
+        "list_id",
+        "dict_id",
+    ],
+)
+@pytest.mark.parametrize("mode", ["default", "terminal", "explicit_fail"])
+def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, case, mode):
+    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.rollout_collection import _agent_request_failure_row, _collection_failure_report
+
+    failure = TimeoutError("dispatch did not reach the agent")
+    row = _agent_request_failure_row(failure, None)
+    row = FailureReportRow.merged_into(row, _collection_failure_report(failure, row["_ng_failure_class"], {}))
+    row.update(ident(0, _ng_failure_max_attempts=3))
+    selected_id = row["_ng_failure_id"]
+    selected = row["_ng_failure_events"][selected_id]
+    if case == "missing_cause":
+        selected["cause_id"] = "missing"
+    elif case == "self_cycle":
+        selected["cause_id"] = selected_id
+    elif case == "two_event_cycle":
+        selected["cause_id"] = "other"
+        row["_ng_failure_events"]["other"] = {**selected, "event_id": "other", "cause_id": selected_id}
+    elif case == "nonstring_cause":
+        selected["cause_id"] = ["invalid"]
+    elif case == "legacy_empty":
+        del row["_ng_failure_events"], row["_ng_failure_id"]
+        row["failure_kind"] = "provider_unavailable"
+    elif case == "legacy_observations":
+        del row["_ng_failure_id"]
+        row["failure_kind"] = "provider_unavailable"
+    elif case == "dangling_id":
+        row["_ng_failure_events"] = {}
+        row["failure_kind"] = "provider_unavailable"
+    elif case in {"list_id", "dict_id"}:
+        row["_ng_failure_id"] = ["invalid"] if case == "list_id" else {"id": "invalid"}
+        row["failure_kind"] = "provider_unavailable"
+    elif case == "unselected_broken":
+        row["_ng_failure_events"]["other"] = {
+            "event_id": "other",
+            "boundary": "resources_server",
+            "operation": "verify",
+            "cause_id": "missing",
+        }
+    if mode == "terminal":
+        row["_ng_failure_terminal"] = True
+    policy = (
+        RecoveryOutcomePolicyConfig(default_action="fail")
+        if mode == "explicit_fail"
+        else RecoveryOutcomePolicyConfig()
+    )
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row], retries=0, walltime=0)
+    before = {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}
+    collected = collect(job)
+    assert collected.failures[0].get("_ng_failure_id") == row.get("_ng_failure_id")
+    assert collected.failures[0].get("_ng_failure_events") == row.get("_ng_failure_events")
+    decision = decide_from_collected(
+        collected, max_infra_retries=3, max_walltime_s=3600, live_job=False, outcome_policy=policy
+    )
+    if mode != "default":
+        assert decision.identities["terminal"] == [(0, 0)] and decision.action == RecoveryAction.STOP
+    elif case in {"plain_dispatch", "legacy_empty", "legacy_observations", "unselected_broken"}:
+        assert decision.identities["retryable"] == [(0, 0)] and decision.action == RecoveryAction.RESUBMIT
+    else:
+        assert decision.identities["unknown"] == [(0, 0)] and decision.action == RecoveryAction.STOP
+    assert decision.evidence[0].attempts == 1 and decision.evidence[0].max_attempts == 3
+    assert before == {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").iterdir()}

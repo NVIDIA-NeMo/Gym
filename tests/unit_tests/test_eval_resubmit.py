@@ -841,6 +841,17 @@ def _provider_failures(task: int, attempts: int, cap: int) -> str:
             "_ng_failure_terminal": False,
             "_ng_failure_max_attempts": cap,
             "_ng_failure_id": f"f{task}-{attempt}",
+            "_ng_failure_events": {
+                f"f{task}-{attempt}": {
+                    "event_id": f"f{task}-{attempt}",
+                    "boundary": "model",
+                    "failure_kind": "provider_unavailable",
+                    "operation": "model_request",
+                    "operation_id": f"op{task}",
+                    "attempt_id": f"a{task}-{attempt}",
+                    "cause_id": None,
+                }
+            },
         }
         for attempt in range(attempts)
     ]

@@ -159,7 +159,10 @@ def _events(row: Mapping[str, Any]) -> list[tuple[str | None, str | None, str | 
     if not isinstance(events, Mapping):
         return []
     return [
-        (e.get("boundary"), e.get("operation"), e.get("operation_id"), e.get("attempt_id"), e.get("cause_id"))
+        tuple(
+            e.get(key) if isinstance(e.get(key), str) else None
+            for key in ("boundary", "operation", "operation_id", "attempt_id", "cause_id")
+        )
         for e in events.values()
         if isinstance(e, Mapping)
     ]
@@ -190,7 +193,8 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
     """The failure kind and HTTP status the policy selects on: the event ``failure_id`` selects first, then the
     row's own producer fields ``failure_kind`` and ``_ng_failure_http_status``. No other saved event is searched."""
     events = row.get(FAILURE_EVENTS)
-    selected = events.get(row.get(FAILURE_ID)) if isinstance(events, Mapping) else None
+    selected_id = row.get(FAILURE_ID)
+    selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
     selected = selected if isinstance(selected, Mapping) else {}
     kind = selected.get("failure_kind") if isinstance(selected.get("failure_kind"), str) else row.get("failure_kind")
     status = next(
@@ -235,7 +239,11 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     events = row.get(FAILURE_EVENTS)
     if row.get(FAILURE_ID) is None and not events:
         return []
-    if not isinstance(events, Mapping) or not isinstance(events.get(row.get(FAILURE_ID)), Mapping):
+    if (
+        not isinstance(row.get(FAILURE_ID), str)
+        or not isinstance(events, Mapping)
+        or not isinstance(events.get(row.get(FAILURE_ID)), Mapping)
+    ):
         return None
     chain: list[tuple[str | None, ...]] = []
     seen: set[str] = set()
@@ -252,7 +260,10 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
 
 def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
-    chain = _cause_chain(row) or []
+    chain = _cause_chain(row)
+    if chain is None:
+        # A legacy row may carry observations without selecting one; they are not its causal failure.
+        return row.get(FAILURE_ID) is not None
     return any(
         boundary == FailureBoundary.RESOURCES_SERVER and operation == "verify" for boundary, operation, *_ in chain
     ) or (
@@ -346,7 +357,7 @@ def decide_recovery(
                     identity=identity,
                     state=state,
                     failure_kind=row.get("failure_kind") if judge else None,
-                    failure_id=row.get(FAILURE_ID),
+                    failure_id=row.get(FAILURE_ID) if isinstance(row.get(FAILURE_ID), str) else None,
                     events=_events(row),
                 )
             )
@@ -374,7 +385,7 @@ def decide_recovery(
                     identity=identity,
                     state=state,
                     failure_kind=kind,
-                    failure_id=last.get(FAILURE_ID),
+                    failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                     events=_events(last),
                 )
             )
@@ -424,7 +435,7 @@ def decide_recovery(
                 identity=identity,
                 state=state,
                 failure_kind=kind,
-                failure_id=last.get(FAILURE_ID),
+                failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                 attempts=len(rows),
                 max_attempts=cap,
                 events=_events(last),
