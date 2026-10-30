@@ -52,6 +52,8 @@ gdpval_nooa_agent:
     nooa_agent:
       runtime_wheelhouse: ${oc.env:NOOA_RUNTIME_WHEELHOUSE}
       runtime_wheelhouse_required: true
+      # Bundle for musl (Alpine/BusyBox) task images, prepared with --target x86_64/musl; unset = those tasks fail at setup.
+      runtime_wheelhouse_musl: ${oc.env:NOOA_RUNTIME_WHEELHOUSE_MUSL,null}
       # Atom's context accounting; the sealed endpoint's window. Identical for every run of this recipe.
       context_window: 1048576
       # Keep NOOA's own OTLP JSONL trace per rollout under <artifacts_dir>/<rollout_id>/ for debugging.

@@ -66,6 +66,11 @@ done
 # 3. Offline runtime: validate the prepared bundle against this checkout, for the pods' platform.
 python -m responses_api_agents.nooa_agent.offline_runtime --output "$NOOA_RUNTIME_WHEELHOUSE" \
   --target "${NOOA_RUNTIME_TARGET:-x86_64/gnu}" --validate-only || fail 3 "offline runtime at $NOOA_RUNTIME_WHEELHOUSE does not validate"
+# Optional musl bundle for Alpine/BusyBox task images (SWE-bench Pro has 18): validated the same way when set.
+if [ -n "${NOOA_RUNTIME_WHEELHOUSE_MUSL:-}" ]; then
+  python -m responses_api_agents.nooa_agent.offline_runtime --output "$NOOA_RUNTIME_WHEELHOUSE_MUSL" \
+    --target "${NOOA_RUNTIME_TARGET_MUSL:-x86_64/musl}" --validate-only || fail 3 "musl runtime at $NOOA_RUNTIME_WHEELHOUSE_MUSL does not validate"
+fi
 
 # 4. Resolve the exact config the run will use, and check that every file it names exists.
 CONFIGS=()
@@ -92,7 +97,7 @@ def walk(o, path=""):
             walk(v, f"{path}[{i}]")
     elif isinstance(o, str):
         looks_like_file = o.endswith((".jsonl", ".py", ".yaml", ".yml", ".json", ".txt", ".sh")) and "/" in o and " " not in o
-        looks_like_dir = path.endswith(("runtime_wheelhouse",))
+        looks_like_dir = path.endswith(("runtime_wheelhouse", "runtime_wheelhouse_musl"))
         if (looks_like_file or looks_like_dir) and not o.startswith(("http://", "https://")) and not os.path.exists(o):
             missing.append((path, o))
 walk(yaml.safe_load(open(sys.argv[1])))

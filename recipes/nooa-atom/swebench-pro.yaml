@@ -55,6 +55,8 @@ swebench_pro_nooa_agent:
     nooa_agent:
       runtime_wheelhouse: ${oc.env:NOOA_RUNTIME_WHEELHOUSE}
       runtime_wheelhouse_required: true
+      # Bundle for musl (Alpine/BusyBox) task images, prepared with --target x86_64/musl; unset = those tasks fail at setup.
+      runtime_wheelhouse_musl: ${oc.env:NOOA_RUNTIME_WHEELHOUSE_MUSL,null}
       context_window: 1048576
       trace_jsonl: true
       artifacts_dir: ${oc.env:NOOA_ARTIFACTS_DIR,nooa-artifacts}
