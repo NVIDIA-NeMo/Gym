@@ -22,8 +22,8 @@ from typing import Any
 from aiohttp import ClientError, ClientResponseError
 from pydantic import BaseModel, ConfigDict
 
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.agentic_if.if_grading.contracts import IFResult
 
 

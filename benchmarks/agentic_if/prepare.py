@@ -20,7 +20,7 @@ from collections.abc import Callable
 from pathlib import Path, PurePosixPath
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig
+from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 from resources_servers.agentic_if.task_variants.builder import digest
 from resources_servers.agentic_if.task_variants.runtime import validate_runtime

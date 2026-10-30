@@ -6,7 +6,7 @@ import hashlib
 import json
 from collections.abc import Sequence
 
-from nemo_gym.openai_utils import NeMoGymResponseOutputItem
+from nemo_gym.core import NeMoGymResponseOutputItem
 from resources_servers.agentic_if.episode.opencode_export import export_output
 
 

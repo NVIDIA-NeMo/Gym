@@ -25,9 +25,8 @@ from pydantic import TypeAdapter, ValidationError
 from nemo_gym import PARENT_DIR
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
+from nemo_gym.core import EpisodeId, TaskId, rollout_context
 from nemo_gym.judge import JudgeError
-from nemo_gym.rollout_correlation import rollout_context
 from nemo_gym.sandbox.providers import SandboxExecResult
 from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from nemo_gym.task_data import validate_jsonl_rows

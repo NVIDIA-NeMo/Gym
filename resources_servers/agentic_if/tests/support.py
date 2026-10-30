@@ -19,9 +19,8 @@ from types import SimpleNamespace
 from aiohttp import ClientResponseError
 
 from nemo_gym.base_resources_server import ResourcesSeedSessionResponse
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+from nemo_gym.core import NeMoGymResponse, current_rollout_id
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.sandbox.providers import SandboxExecResult
 from resources_servers.agentic_if.episode.session_evidence import row_prompt_texts
 from resources_servers.agentic_if.if_grading.contracts import SessionInfo

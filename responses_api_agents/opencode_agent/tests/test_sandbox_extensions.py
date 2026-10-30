@@ -21,7 +21,7 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedRejectedError
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.opencode_agent.app import (

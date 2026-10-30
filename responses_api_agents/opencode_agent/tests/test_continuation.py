@@ -752,8 +752,8 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
 
 @pytest.mark.parametrize("return_session_trajectory", [False, True])
 def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
-    from nemo_gym.base_responses_api_model import ModelCallRecord
     from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
+    from nemo_gym.observability.model_calls import ModelCallRecord
     from nemo_gym.rollout_collection import _build_trajectory_record
     from nemo_gym.rollout_observability import (
         AgentObservationBundle,

@@ -6,8 +6,8 @@ import hashlib
 
 from aiohttp import ClientConnectionError
 
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import NeMoGymResponse
 from resources_servers.agentic_if.episode.judging import JudgeLedger, JudgeUsage, judge_usage, vote_key
 from resources_servers.agentic_if.if_grading.contracts import CheckResult, IFResult
 from resources_servers.agentic_if.tests.support import JUDGE_USAGE, http_error, judge_reply

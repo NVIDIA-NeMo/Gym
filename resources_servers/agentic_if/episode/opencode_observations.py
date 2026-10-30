@@ -8,7 +8,7 @@ from copy import deepcopy
 
 from pydantic import JsonValue
 
-from nemo_gym.openai_utils import NeMoGymResponseOutputItem
+from nemo_gym.core import NeMoGymResponseOutputItem
 from nemo_gym.responses_converter import ResponsesConverter
 from resources_servers.agentic_if.episode.opencode_context import generated_content as _generated_content
 from resources_servers.agentic_if.episode.opencode_context import output_digest

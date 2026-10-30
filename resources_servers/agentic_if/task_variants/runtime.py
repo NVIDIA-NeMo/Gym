@@ -9,7 +9,7 @@ from typing import Literal
 
 from pydantic import Field, JsonValue, SerializerFunctionWrapHandler, StrictInt, model_serializer, model_validator
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.agentic_if.if_grading.contracts import Contract, EventReceipt, ResolvedCheck
 from resources_servers.agentic_if.task_variants.builder import actor_input_digest, content_text, digest
 from resources_servers.agentic_if.task_variants.catalog import BUILTIN_ARGUMENTS

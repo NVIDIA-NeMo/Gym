@@ -12,10 +12,8 @@ from copy import deepcopy
 from pydantic import JsonValue
 
 from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.sandbox import AsyncSandbox, create_provider
-from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.sandbox import AsyncSandbox, SandboxAccess, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.server_utils import ServerClient, get_response_json, raise_for_status
 from resources_servers.agentic_if.episode.agent_user import check_agent_user, is_root_agent_user, normalize_agent_user

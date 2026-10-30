@@ -15,8 +15,8 @@ from copy import deepcopy
 from aiohttp import ClientResponseError
 from pydantic import JsonValue
 
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import NeMoGymResponse
 
 from .configuration import config_hash, load_config, votes_for
 from .contracts import InstructionContext, JudgeDecision
