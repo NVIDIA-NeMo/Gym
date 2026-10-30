@@ -391,6 +391,12 @@ def test_capture_owner_wire_names_round_trip_without_changing_storage_keys() -> 
         assert "rollout_id" not in payload
         assert model.__class__.model_validate_json(model.model_dump_json()) == model
         payload["rollout_id"] = payload.pop("capture_key")
+        legacy = model.__class__.model_validate(payload)
+        assert legacy == model
+        assert legacy.rollout_id == model.capture_key
+        assert legacy.model_dump() == model.model_dump()
+        # Duplicate spellings are ambiguous even when their values agree.
+        payload["capture_key"] = model.capture_key
         with pytest.raises(ValidationError, match="capture_key|rollout_id"):
             model.__class__.model_validate(payload)
     assert record.staging_key == staging_key(capture_key="rollout-1", model_call_id="call-1") == "rollout-1/call-1"
@@ -399,6 +405,27 @@ def test_capture_owner_wire_names_round_trip_without_changing_storage_keys() -> 
     payload["capture_key"] = payload.pop("source_capture_key")
     with pytest.raises(ValidationError, match="capture_key"):
         CallRecord.model_validate(payload)
+
+
+def test_legacy_staging_digest_keyword_preserves_bytes() -> None:
+    args = _digest_args()
+    expected = compute_staging_digest(**args)
+    args["rollout_id"] = args.pop("capture_key")
+    assert compute_staging_digest(**args) == expected
+    args["capture_key"] = args["rollout_id"]
+    with pytest.raises(ValueError, match="not both"):
+        compute_staging_digest(**args)
+
+
+def test_legacy_identity_does_not_bypass_integrity_validation() -> None:
+    payload = _record_payload()
+    payload["rollout_id"] = "wrong-owner"
+    del payload["capture_key"]
+    with pytest.raises(ValidationError, match="digest"):
+        StagedCallRecord.model_validate(payload)
+    for value in ("", None, 123):
+        with pytest.raises(ValidationError):
+            CaptureAdmission(rollout_id=value, model_call_id="call-1", mode="text")
 
 
 @pytest.mark.parametrize(

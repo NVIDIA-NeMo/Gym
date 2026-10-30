@@ -96,6 +96,11 @@ a final answer and disables tools when the budget is reached. The paired
 instruction before token lineage resolution and capture. See the
 [model adapter documentation](../../responses_api_models/vllm_model/README.md#stock-opencode-11711-training).
 
+The reserve requires backend support for `nemo_final_answer_reserve`. With a
+backend that does not implement it, set `final_answer_reserve: null`; this disables
+the final-answer plugin and uses OpenCode's native step behavior. It does not
+reserve context for a final answer.
+
 For evaluation, configure the same `turn_budget` on the agent and model gateway
 to enforce a hard limit. For example:
 

@@ -20,6 +20,7 @@ from __future__ import annotations
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
+    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -132,6 +133,21 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
+class _CaptureIdentityCompat:
+    """Read-only identity spelling used by older training-framework clients.
+
+    ``capture_key`` remains the canonical field and serialized wire name. The
+    input alias on identity records also accepts legacy ``rollout_id`` payloads;
+    supplying both names is rejected by the records' extra-field validation.
+    """
+
+    capture_key: str
+
+    @property
+    def rollout_id(self) -> str:
+        return self.capture_key
+
+
 class ReplayItem(_WireModel):
     """Prompt-content identity before gateway conversion, without media payloads."""
 
@@ -191,7 +207,7 @@ class GenerationCutContinuation(_WireModel):
         return self
 
 
-class CaptureAdmission(_WireModel):
+class CaptureAdmission(_CaptureIdentityCompat, _WireModel):
     """Gate-to-worker identity and exact-prefix contract for one model call.
 
     A ``token_in`` admission carries its prefix in one of two encodings.
@@ -201,7 +217,7 @@ class CaptureAdmission(_WireModel):
     It passes that list to ``CaptureAdapter.enter_prefix`` and to ``RolloutTokenCapture.begin_call``.
     """
 
-    capture_key: Identifier
+    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
@@ -247,7 +263,7 @@ class CaptureAdmission(_WireModel):
         return self
 
 
-class StagedCallBaseSnapshot(_DigestWireModel):
+class StagedCallBaseSnapshot(_CaptureIdentityCompat, _DigestWireModel):
     """Token columns and metadata for one staged call.
 
     This model excludes the optional ``extras`` payload.
@@ -256,7 +272,7 @@ class StagedCallBaseSnapshot(_DigestWireModel):
     A consumer that loads extras must verify them separately with ``compute_extras_digest``.
     """
 
-    capture_key: Identifier
+    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     mode: CaptureMode
@@ -417,10 +433,10 @@ class StageResult(_WireModel):
         return self
 
 
-class CommitCoords(_DigestWireModel):
+class CommitCoords(_CaptureIdentityCompat, _DigestWireModel):
     """Metadata returned after an inference worker stages one call."""
 
-    capture_key: Identifier
+    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt
@@ -528,14 +544,14 @@ class CallRecord(_DigestWireModel):
         return self
 
 
-class CaptureLedgerCommit(_WireModel):
+class CaptureLedgerCommit(_CaptureIdentityCompat, _WireModel):
     """One successfully staged call, as handed to ``CaptureLedger.record``.
 
     ``record`` is the manifest row. The remaining fields feed parent resolution
     and are not part of the manifest.
     """
 
-    capture_key: Identifier
+    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
     record: CallRecord
     staging_chain: tuple[Identifier, ...] = ()
     request_items: list[dict]
@@ -549,10 +565,10 @@ class ManifestFailure(_WireModel):
     reason: Identifier
 
 
-class RolloutManifest(_WireModel):
+class RolloutManifest(_CaptureIdentityCompat, _WireModel):
     """The token-free ledger read returned by the manifest control route."""
 
-    capture_key: Identifier
+    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
     attempted_call_ids: list[Identifier] = Field(default_factory=list)
@@ -571,10 +587,10 @@ class RolloutRemoval(_WireModel):
     absent: list[Identifier] = Field(default_factory=list)
 
 
-class RolloutReceipt(_DigestWireModel):
+class RolloutReceipt(_CaptureIdentityCompat, _DigestWireModel):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
-    capture_key: Identifier
+    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)
