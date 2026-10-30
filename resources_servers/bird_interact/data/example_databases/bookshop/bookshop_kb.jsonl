@@ -1,0 +1,4 @@
+{"id": 0, "knowledge": "Bestseller", "description": "A book that sold many copies.", "definition": "A book whose quantity sold across all its sales is at least 10.", "type": "domain_knowledge", "children_knowledge": -1}
+{"id": 1, "knowledge": "Discount Rate", "description": "How much of the list price a sale gave up.", "definition": "1 - unit_price / list_price, for one sale.", "type": "calculation_knowledge", "children_knowledge": -1}
+{"id": 2, "knowledge": "Recent Release", "description": "A book published lately.", "definition": "A book with published_year 2022 or later.", "type": "domain_knowledge", "children_knowledge": -1}
+{"id": 3, "knowledge": "Revenue", "description": "Money taken in from sales.", "definition": "The sum of quantity * unit_price over the sales.", "type": "calculation_knowledge", "children_knowledge": -1}
