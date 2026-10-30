@@ -154,7 +154,10 @@ Sandbox support is opt-in: without `sandbox_provider` the server runs as above.
    the server down;
 2. moves file content between the workspace and the file apps (Google Drive, Box, SharePoint,
    OneDrive) without passing it through the model: the sandbox gets `COMPANY_API_URL` and
-   `COMPANY_API_TOKEN`, and `README.md` in the workspace documents the file API for the
+   `COMPANY_API_TOKEN`, in its environment and in `/etc/company-api.env` for a harness whose
+   shell does not inherit the sandbox's environment (Codex starts its shell with `PATH`, `HOME`,
+   the locale and the XDG folders alone; the apps' commands read the file, and the guide says
+   `. /etc/company-api.env`), and `README.md` in the workspace documents the file API for the
    episode's file apps (`GET`/`PUT /v1/files/{app}/{file_id}`,
    `POST /v1/files?app=&name=&parent=&mime_type=`). Files and folders are named by id: the server
    reads what an app's op also wants (SharePoint's library, folder and name) from the world.

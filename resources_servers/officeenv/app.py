@@ -406,6 +406,20 @@ An endpoint answers with the app's JSON; a call that fails answers with the app'
 HTTP error status.""",
 }
 FIND_FILES = {"tools": "the apps' tools", "cli": "the apps' commands", "api_search": "the apps' endpoints"}
+
+# The API's URL and token as a shell reads them, for a harness whose shell does not inherit the sandbox's environment
+# (Codex starts its shell with PATH, HOME, the locale and the XDG folders alone): the apps' commands read the file
+# when the variables are unset, and the guide says how to read it.
+CREDENTIALS_PATH = "/etc/company-api.env"
+CREDENTIALS_GUIDE = f"""The API's URL and token are in the environment variables {API_URL_ENV} and {API_TOKEN_ENV}; a shell
+started without them gets them with `. {CREDENTIALS_PATH}`."""
+
+
+def api_credentials(url: str, token: str) -> str:
+    """The file at CREDENTIALS_PATH: the episode's API URL and token, set and exported by a shell that sources it."""
+    return f"{API_URL_ENV}={shlex.quote(url)}\n{API_TOKEN_ENV}={shlex.quote(token)}\nexport {API_URL_ENV} {API_TOKEN_ENV}\n"
+
+
 GET_ATTACHMENT = {
     "tools": "{prefix}gmail_get_attachment",
     "cli": "gmail get-attachment",
@@ -480,7 +494,7 @@ def workspace_guide(
         if "gmail" in apps:
             get = GET_ATTACHMENT[surface].format(prefix=prefix)
             files += "\n" + MAIL_GUIDE.format(get=get, workdir=workdir, limit=content_limit)
-    return f"# Company apps\n\n{intro}\n\n{files}"
+    return f"# Company apps\n\n{intro}\n\n{CREDENTIALS_GUIDE}\n\n{files}"
 
 
 # The file apps' ops that answer a file's content, and those that take content to store. In a sandboxed episode the
@@ -1656,11 +1670,13 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
 
     async def _lend_sandbox(self, session_id: str, episode: _Episode, *, task_id: str) -> None:
         """Start the episode's sandbox with the workspace guide, for a `cli` episode its apps' commands, and the
-        episode's file API in its environment."""
+        episode's API (its URL and token) in its environment and at CREDENTIALS_PATH."""
         config = self.config.sandbox_config
         if not config.image:
             raise ValueError("Set sandbox_config.image to the episode sandbox image (see sandbox/Dockerfile)")
         named_configs = get_global_config_dict()
+        token = token_urlsafe(32)
+        files_api_url = self.config.files_api_url or f"http://{self.config.host}:{self.config.port}"
         guide = workspace_guide(
             config.inline_file_bytes,
             episode.apps,
@@ -1668,7 +1684,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             prefix=config.mcp_tool_prefix,
             workdir=self._workdir(),
         )
-        files = {self._guide_path(): guide}
+        files = {self._guide_path(): guide, CREDENTIALS_PATH: api_credentials(files_api_url.rstrip("/"), token)}
         if episode.surface == "cli":
             files[APP_COMMAND_PATH] = APP_COMMAND_SOURCE
         if config.host_relay:
@@ -1681,8 +1697,6 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             files=files,
             named_configs=named_configs,
         )
-        token = token_urlsafe(32)
-        files_api_url = self.config.files_api_url or f"http://{self.config.host}:{self.config.port}"
         spec = replace(spec, env={**spec.env, API_URL_ENV: files_api_url.rstrip("/"), API_TOKEN_ENV: token})
         provider_config = resolve_provider_config(self.config.sandbox_provider, named_configs)
         if config.block_internet:

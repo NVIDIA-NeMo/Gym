@@ -46,6 +46,7 @@ from resources_servers.officeenv.app import (
     CLI_USER_AGENT,
     CONTENT_DOWNLOADS,
     CONTENT_UPLOADS,
+    CREDENTIALS_PATH,
     FILE_APPS,
     RELAY_PATH,
     RELAY_SOURCE,
@@ -56,6 +57,7 @@ from resources_servers.officeenv.app import (
     OfficeEnvResourcesServerConfig,
     OfficeEnvSandboxConfig,
     _path_part,
+    api_credentials,
     content_description,
     content_schema,
     egress_urls,
@@ -362,7 +364,11 @@ def test_a_seed_lends_a_sandbox_with_the_episode_file_api_and_close_stops_it(san
         assert sandbox.spec.metadata["officeenv-task"] == "sandbox-files"
         assert sandbox.spec.env["COMPANY_API_URL"] == "http://10.0.0.1:8080"  # this server's host and port
         assert sandbox.spec.env["COMPANY_API_TOKEN"] == server._episodes["rs-1"].token
-        assert sandbox.spec.files == {"/workspace/README.md": workspace_guide(8192, ("gdrive", "user"))}  # its apps
+        assert sandbox.spec.files == {
+            "/workspace/README.md": workspace_guide(8192, ("gdrive", "user")),  # its apps
+            # the URL and token again, for a shell started without the sandbox's environment
+            CREDENTIALS_PATH: api_credentials("http://10.0.0.1:8080", server._episodes["rs-1"].token),
+        }
 
         token = seeded.json()["resources_tools"]["headers"][NEMO_GYM_MCP_SESSION_TOKEN_HEADER]
         listed = {tool["name"] for tool in rpc(client, "tools/list", {}, token).json()["result"]["tools"]}
@@ -1716,6 +1722,7 @@ def test_the_sandbox_gets_the_command_without_its_comments() -> None:
     lines = APP_COMMAND_SOURCE.splitlines()
     assert lines[0] == "#!/bin/sh" and not any(line.lstrip().startswith("#") for line in lines[1:])
     assert '-A "${0##*/}-cli/1.0"' in APP_COMMAND_SOURCE and CLI_USER_AGENT == "{app}-cli/1.0"
+    assert f". {CREDENTIALS_PATH}" in APP_COMMAND_SOURCE  # for a shell started without the API's variables
     assert not ENVIRONMENT_NAMES.search(APP_COMMAND_SOURCE)
 
 
@@ -1788,6 +1795,26 @@ def test_an_apps_command_runs_through_the_server(sandboxes, tmp_path) -> None:
         assert refused.returncode == 1 and "invalid bearer token" in refused.stderr, refused
         saved = json.loads(run("download-file", "--file-id=F_BOOK").stdout)
         assert saved["savedTo"] == "/workspace/drive/F_BOOK/ledger.xlsx" and "contentBase64" not in saved
+
+        # a shell started without the API's variables: the command reads them from the file the seed wrote (here at a
+        # path of the test's own, since /etc is the host's), and so does a shell that sources it, as the guide says
+        credentials = tmp_path / "api.env"
+        written = sandboxes.started[0].spec.files[CREDENTIALS_PATH]
+        credentials.write_text(written.replace("http://10.0.0.1:8080", f"http://127.0.0.1:{port}"))
+        script.write_text(APP_COMMAND_SOURCE.replace(CREDENTIALS_PATH, str(credentials)))
+        bare = {key: value for key, value in env.items() if not key.startswith("COMPANY_API_")}
+        listed = subprocess.run(
+            ["sh", str(command), "list-files"], env=bare, capture_output=True, text=True, timeout=60
+        )
+        assert listed.returncode == 0 and "ledger.csv" in listed.stdout, listed
+        sourced = subprocess.run(
+            ["sh", "-c", f". {shlex.quote(str(credentials))} && sh -c 'echo \"$COMPANY_API_TOKEN\"'"],
+            env=bare,
+            capture_output=True,
+            text=True,
+            timeout=60,
+        )
+        assert sourced.stdout.strip() == env["COMPANY_API_TOKEN"]  # set and exported
 
         # the file API as the guide gives it (curl -sf) moves files on a cli episode too, and an app's error is a
         # failure curl reports
@@ -2087,10 +2114,9 @@ def test_the_guide_says_how_each_surface_reaches_the_apps() -> None:
     assert "Downloading a file with the apps' commands saves it" in cli and "Getting one (gmail get-attachment)" in cli
     assert 'curl -sS -X POST "$COMPANY_API_URL/v1/<app>/<operation>"' in endpoints
     assert "your company_api_search\ntool" in endpoints and "with the apps' endpoints" in endpoints
-    assert all(
-        guide.startswith("# Company apps\n\n") and "$COMPANY_API_URL/v1/files" in guide
-        for guide in (tools, cli, endpoints)
-    )
+    for guide in (tools, cli, endpoints):
+        assert guide.startswith("# Company apps\n\n") and "$COMPANY_API_URL/v1/files" in guide
+        assert f"a shell\nstarted without them gets them with `. {CREDENTIALS_PATH}`" in guide
 
 
 # Guarding a server that sandboxes can reach.

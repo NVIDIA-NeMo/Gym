@@ -9,6 +9,11 @@
 # app's error on stderr with exit 1. POSIX sh and curl only, so it runs on a bare image. It names itself in its
 # User-Agent (app.py's CLI_USER_AGENT), without which the server refuses the call: the commands are the way in. The
 # sandbox gets it without comments, so reading it shows a company CLI and nothing of the environment behind it.
+# A shell started without the sandbox's environment (some harnesses pass their shell a few variables only) reads the
+# API's URL and token from the file the server writes (app.py's CREDENTIALS_PATH).
+if [ -z "${COMPANY_API_URL-}" ] && [ -r /etc/company-api.env ]; then
+  . /etc/company-api.env
+fi
 body=$(mktemp) && head=$(mktemp) || exit 125
 printf '%s\0' "${0##*/}" "$@" | curl -sS -X POST --data-binary @- -D "$head" -o "$body" \
   -A "${0##*/}-cli/1.0" -H "Authorization: Bearer ${COMPANY_API_TOKEN-}" \
