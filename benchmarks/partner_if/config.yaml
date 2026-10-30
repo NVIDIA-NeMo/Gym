@@ -151,9 +151,9 @@ partner_if_swe:
       judge_max_concurrency: 2
 
 # OpenCode with opencode_agent's command deny-list and without the web, subagent and skill tools; it keeps its default
-# step limit and compaction. The agent inherits only the deny-list (permissions/default.yaml), not opencode_agent.yaml:
-# OpenCode 1.17.11 places the keys of a `tools` map, such as the one opencode_agent.yaml sets, before the permission
-# map's "*" rule, and the last matching rule wins, so with that map none of the denials apply.
+# step limit and compaction. The agent inherits only the deny-list (permissions/default.yaml), not opencode_agent.yaml.
+# Restrict tools here with `permission` rules only: OpenCode 1.17.11 places the keys of a `tools` map before the
+# permission map's "*" rule, and the last matching rule wins, so a `tools` map would void these denials.
 partner_if_swe_agent:
   _inherit_from: opencode_agent
   responses_api_agents:
