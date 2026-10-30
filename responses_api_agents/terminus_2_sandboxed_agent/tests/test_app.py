@@ -26,7 +26,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.rollout_observability import TrajectoryRecord, TrajectoryTurn
-from nemo_gym.server_utils import GlobalAIOHTTPAsyncClientConfig, ServerClient
+from nemo_gym.server_utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, GlobalAIOHTTPAsyncClientConfig, ServerClient
 from responses_api_agents.terminus_2_sandboxed_agent import app as app_module
 from responses_api_agents.terminus_2_sandboxed_agent.app import (
     NeMoGymLLM,
@@ -1325,3 +1325,24 @@ class TestAgentTimeout:
         # Config allows 10 s; the task declares 0.01 s, so the run times out under the task's budget.
         _, _, (response, _) = await _execute_with_harness(monkeypatch, run, metadata={"agent_timeout_sec": "0.01"})
         assert response.metadata["terminus2_outcome"] == "timeout"
+
+
+@pytest.mark.parametrize(("legacy_run", "worker"), [(True, False), (False, False), (True, True)])
+def test_only_the_legacy_run_configuration_logs_the_deprecation_once(caplog, monkeypatch, legacy_run, worker):
+    """A resources_server selects the deprecated flat /run path; episode sessions start without a warning.
+
+    Workers of a multi-worker server rebuild it after the main process has logged the warning.
+    """
+    app_module._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    config = _native_config()
+    if legacy_run:
+        config.resources_server = ResourcesServerRef(type="resources_servers", name="terminal_bench_2_1")
+    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+        for _ in range(2):
+            Terminus2Agent(config=config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
+    assert warnings == ([app_module.DEPRECATION_WARNING] if legacy_run and not worker else [])
+    for phrase in ("legacy /run", "episode sessions", "gym eval run terminal_bench_2_1", "README.md"):
+        assert phrase in app_module.DEPRECATION_WARNING

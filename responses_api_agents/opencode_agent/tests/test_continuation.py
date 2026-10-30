@@ -548,7 +548,9 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
     async def interrupted(**kwargs):
         result = await launch(**kwargs)
         sandbox.files[f"{payloads[-1]['directory']}/stdout.jsonl"] = (
-            json.dumps({"type": "error"}) if error_event else ""
+            json.dumps({"type": "error", "error": {"name": "APIError", "data": {"statusCode": 400}}})
+            if error_event
+            else ""
         )
         return result
 
@@ -562,6 +564,9 @@ def test_opencode_error_during_timeout_fails_http_activation(setup, tmp_path, pr
         if error_event:
             assert response.status_code == 502
             assert "OpenCode emitted an error event" in response.json()["detail"]
+            assert (
+                '"name": "APIError"' in response.json()["detail"] and '"statusCode": 400' in response.json()["detail"]
+            )
         else:
             assert response.status_code == 200 and response.json()["status"] == "incomplete"
         invocation = roots(close(client, request)["agent_observations"])[-1]
@@ -629,8 +634,8 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
     from nemo_gym.rollout_observability import (
         AgentObservationBundle,
         TrajectoryRecord,
+        join_agent_model_calls,
         join_assistant_message_calls,
-        join_model_call_observations,
     )
 
     agent, sandbox = setup
@@ -670,7 +675,7 @@ def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tm
                 },
             )
         )
-    bundle = join_model_call_observations(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
     bundle, trajectory = join_assistant_message_calls(
         bundle, TrajectoryRecord.model_validate(receipt["trajectory"]), calls
     )
@@ -946,3 +951,31 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
         assert con.execute("select count(*) from message").fetchone()[0] == 2
     with pytest.raises(RuntimeError, match="unexpected session"):
         snapshot(database, activation, harness_session_id="wrong", previous_message_ids=[])
+
+
+def test_missing_native_step_diagnostics_survive_http_close(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+
+    async def launch_without_step(**kwargs):
+        result = await launch(**kwargs)
+        with sqlite3.connect(tmp_path / "session.db") as con:
+            con.execute("delete from part where id like 'step-%'")
+        return result
+
+    sandbox.launch.side_effect = launch_without_step
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1).status_code == 200
+        receipt = close(client, request)
+        assert receipt["trajectory"]["turns"] == []
+        gap = next(gap for gap in receipt["trajectory"]["gaps"] if gap["code"] == "turns_unavailable")
+        native, lifecycle = gap["detail"].split("; capture_lifecycle=")
+        metadata = json.loads(native.split("; native_capture_diagnostics=")[1])
+        assert [part["type"] for part in metadata["parts"]] == ["text"]
+        capture = json.loads(lifecycle)
+        assert capture["capture_started_at"] <= capture["parse_completed_at"]
+        assert capture["cleanup"] == {"cleanup_confirmed": True, "timed_out": False, "return_code": 0}
+        assert "Answer 0" not in gap["detail"]
+        assert close(client, request) == receipt

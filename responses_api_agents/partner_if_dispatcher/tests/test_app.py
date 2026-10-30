@@ -110,6 +110,54 @@ def test_routes_the_complete_episode_without_rewriting_native_fields(harness):
         assert request.task.task_input.responses_create_params.input == "original"
 
 
+def test_tool_executions_in_the_agent_reply_reach_the_agent_observations():
+    from nemo_gym.harness_capabilities.checker import inspect_record
+    from nemo_gym.rollout_collection import _attach_trajectory_record
+
+    module = importlib.import_module("responses_api_agents.partner_if_dispatcher.app")
+    invocation = {
+        "kind": "agent_invocation",
+        "invocation_id": "root",
+        "conversation": [
+            {"type": "function_call", "call_id": "call-1", "name": "search", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": "call-1", "output": "found"},
+        ],
+    }
+    execution = {
+        "kind": "tool_call",
+        "invocation_id": "root",
+        "tool_call_id": "call-1",
+        "tool_name": "search",
+        "timing_source": "executor",
+        "status": "completed",
+    }
+    result = {
+        "reward": 1,
+        "ng_agent_observations": {"source": "simple_agent", "records": [invocation]},
+        "response": {
+            "_ng_trajectory": {
+                "task_id": "unscoped",
+                "rollout_id": "unscoped",
+                "invocations": [invocation],
+                "tool_calls": [execution | {"output": "found"}],
+            }
+        },
+    }
+    adapter, _ = server(_Upstream(json.dumps(result).encode()))
+    with TestClient(adapter.setup_webserver()) as client:
+        response = client.post(
+            "/run", json={"verifier_metadata": {"partner_if": {"task_id": "task-tools"}}, "task_source": "dispatcher"}
+        )
+    row = response.json()
+    [_, added] = row["ng_agent_observations"]["records"]
+    assert {key: added[key] for key in execution} == execution and added.get("output") is None
+    # Each execution is added once, and collection joins its output from the conversation.
+    assert module._with_reply_tool_observations(response.content) == response.content
+    _attach_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, row)
+    assert [tool["output"] for tool in row["ng_trajectory"]["tool_calls"]] == ["found"]
+    assert inspect_record(row)["evidence"]["TE-5"]["verdict"] == "fulfilled"
+
+
 @pytest.mark.parametrize(
     "payload", [{}, [], {"verifier_metadata": {}}, {"verifier_metadata": {"partner_if": {"task_id": "unknown"}}}]
 )

@@ -8,6 +8,7 @@ import sys
 import tempfile
 from copy import deepcopy
 from dataclasses import dataclass
+from functools import cache
 from pathlib import Path
 from time import perf_counter, time
 from traceback import format_exc
@@ -66,6 +67,7 @@ from nemo_gym.server_utils import (
     get_response_json,
     get_server_url,
     is_nemo_gym_fastapi_entrypoint,
+    is_nemo_gym_fastapi_worker,
     raise_for_status,
 )
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
@@ -80,6 +82,24 @@ from responses_api_agents.terminus_2_sandboxed_agent.terminal_mounts import priv
 
 
 LOGGER = logging.getLogger(__name__)
+
+# Episode sessions under an environment server are not deprecated; only the flat /run path, which a configured
+# resources_server selects, is.
+DEPRECATION_WARNING = (
+    "DEPRECATED: terminus_2_sandboxed_agent is configured for its legacy /run path (resources_server is set), "
+    "which will be removed after the environment-server migration. For Harbor task folders, run it on episode "
+    "sessions under the harbor environment server (gym eval run <tasks> --agent terminus_2_sandboxed_agent; for "
+    "TB 2.1, gym eval run terminal_bench_2_1 --agent terminus_2_sandboxed_agent); for other benchmarks, use a "
+    "session-capable harness such as pi_agent, codex_agent or opencode_agent. "
+    "See responses_api_agents/terminus_2_sandboxed_agent/README.md."
+)
+
+
+@cache
+def _warn_deprecated_once() -> None:
+    # Workers of a multi-worker server rebuild it after the main process has already logged this.
+    if not is_nemo_gym_fastapi_worker():
+        LOGGER.warning(DEPRECATION_WARNING)
 
 
 class Terminus2AgentConfig(BaseResponsesAPIAgentConfig):
@@ -620,6 +640,8 @@ class Terminus2Agent(SimpleResponsesAPIAgent):
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
+        if self.config.resources_server is not None:
+            _warn_deprecated_once()
         self._session_sandboxes: dict[str, AsyncSandbox] = {}
         # Episode sessions are process-local. A deployment without a resources server exists only to serve
         # sessions, so a hand-written config with several workers fails at `gym env start` rather than on
