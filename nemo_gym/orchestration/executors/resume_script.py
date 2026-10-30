@@ -97,6 +97,7 @@ fi
 _gym_accumulated=$((10#$_gym_accumulated))
 _retries=$((10#$_retries))
 _gym_needs_retry=0
+_gym_stop_reason=""
 
 if [[ "$_prev_slurm_job_id" != "" ]]; then
     _accounting=""
@@ -121,8 +122,14 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         TIMEOUT)
             # Scheduler allocation timeout continues the planned segments. This is not a model timeout.
             ;;
-        FAILED|PREEMPTED|NODE_FAIL|OUT_OF_MEMORY|BOOT_FAIL|DEADLINE)
+        PREEMPTED|NODE_FAIL|BOOT_FAIL)
+            # The scheduler names the infrastructure cause: the node was taken, died, or never booted.
             _gym_needs_retry=1 ;;
+        FAILED|OUT_OF_MEMORY|DEADLINE)
+            # These states do not establish a retryable infrastructure cause. A FAILED exit code can come
+            # from invalid configuration, an OOM may be workload-dependent, and a deadline has passed.
+            # Stop after the elapsed time is counted below; a typed recovery goes through "gym eval resubmit --recover".
+            _gym_stop_reason="Previous job $_prev_slurm_job_id ended $_prev_state without an infrastructure cause. Chain stopped with rollouts missing; it does not retry." ;;
         *)
             _gym_stop_incomplete "Previous job state is unknown or nonterminal; refusing to resume." ;;
     esac
@@ -130,6 +137,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _gym_stop_incomplete "Previous job elapsed accounting is unknown or malformed."
     _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed))
     echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
+    [[ -z "$_gym_stop_reason" ]] || _gym_stop_incomplete "$_gym_stop_reason"
 elif [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" == 1 ]]; then
     # Recovery is another allocation, not a fresh allowance. A plain manual resubmit reset above is explicit.
     _gym_needs_retry=1

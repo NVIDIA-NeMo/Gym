@@ -41,10 +41,11 @@ What the next job does with the previous job's state:
 | `COMPLETED` | Exits successfully. |
 | `CANCELLED...` | Stops the chain. |
 | `TIMEOUT` | Continues the planned allocation segments within the remaining `max_walltime`. This scheduler state does not classify a model response timeout. |
-| `FAILED`, `PREEMPTED`, `NODE_FAIL`, `OUT_OF_MEMORY`, `BOOT_FAIL`, `DEADLINE` | Resumes only with remaining retry and walltime budgets; records one admitted retry before work. |
+| `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Resumes only with remaining retry and walltime budgets; records one admitted retry before work. |
+| `FAILED`, `OUT_OF_MEMORY`, `DEADLINE` | Preserves known elapsed time and stops. These states alone do not establish a retryable infrastructure cause. |
 | unknown, malformed or nonterminal accounting | Stops without dispatching more work. |
 
-Preemption and node failure count against `max_retries`; `max_retries: 0` admits no retry after either. Scheduler allocation timeouts retain the planned-segment behavior, bounded by `max_walltime`. Unknown elapsed time cannot grant a fresh allowance.
+Preemption and node failure count against `max_retries`; `max_retries: 0` admits no retry after either. Scheduler allocation timeouts retain the planned-segment behavior, bounded by `max_walltime`. Unknown elapsed time cannot grant a fresh allowance. A generic `FAILED` state can represent invalid configuration or an application failure; the chain never classifies it as infrastructure failure from its exit code or log text. Saved-evidence recovery remains subject to the checks below.
 
 ## What gets resumed
 
@@ -56,7 +57,7 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | --- | --- |
 | `.gym_job_chain` | The Slurm job ID of every job in the chain, one per line. |
 | `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
-| `.gym_infra_retries` | Count of non-timeout retries so far. |
+| `.gym_infra_retries` | Count of infrastructure retries so far. |
 | `.gym_followup_queued.<job ID>` | The claim that this job has queued its successor, so a requeue of the same job does not queue a second one. |
 
 ## Recover from saved evidence

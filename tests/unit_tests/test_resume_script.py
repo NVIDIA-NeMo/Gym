@@ -201,11 +201,11 @@ def _run_prologue(
 def test_max_retries_allows_exactly_that_many_retries(tmp_path):
     resume = ResumeConfig(max_retries=3)
     for _ in range(3):
-        result = _run_prologue(tmp_path, resume, "FAILED")
+        result = _run_prologue(tmp_path, resume, "PREEMPTED")
         assert result.returncode == 0, result.stdout
         assert "REACHED_WORK" in result.stdout
 
-    result = _run_prologue(tmp_path, resume, "FAILED")
+    result = _run_prologue(tmp_path, resume, "PREEMPTED")
     assert result.returncode == 1
     assert "REACHED_WORK" not in result.stdout
 
@@ -482,7 +482,7 @@ def test_zero_retry_budget_never_reaches_work_after_failure(tmp_path, state):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-@pytest.mark.parametrize("state", ["PREEMPTED", "NODE_FAIL"])
+@pytest.mark.parametrize("state", ["PREEMPTED", "NODE_FAIL", "BOOT_FAIL"])
 def test_infrastructure_retry_is_spent_once_before_work(tmp_path, state):
     resume = ResumeConfig(max_retries=1)
     first = _run_prologue(tmp_path, resume, state)
@@ -518,7 +518,7 @@ def test_unknown_accounting_cannot_run_or_change_counters(tmp_path, state, elaps
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-@pytest.mark.parametrize("state", ["TIMEOUT", "FAILED", "PREEMPTED", "NODE_FAIL"])
+@pytest.mark.parametrize("state", ["TIMEOUT", "BOOT_FAIL", "PREEMPTED", "NODE_FAIL"])
 def test_remaining_walltime_shortens_four_hour_allocation(tmp_path, state):
     (tmp_path / ".gym_accumulated_walltime").write_text("3600\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), state, elapsed="3630")
@@ -635,3 +635,27 @@ def test_requeued_manual_resubmit_does_not_reset_spent_history_again(tmp_path):
     assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
     assert (tmp_path / ".gym_accumulated_walltime").read_text() == "600\n"
     assert (tmp_path / ".gym_infra_retries").read_text() == "1\n"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("state", ["FAILED", "OUT_OF_MEMORY", "DEADLINE"])
+@pytest.mark.parametrize("saved_output", [False, True])
+def test_a_failure_without_scheduler_infrastructure_cause_stops_and_keeps_its_elapsed_time(
+    tmp_path, state, saved_output
+):
+    # A FAILED job's exit code does not tell a broken config from a broken node, and the same allocation runs the
+    # same config again. So, with retries and walltime left, the chain stops instead of spending another job.
+    (tmp_path / ".gym_accumulated_walltime").write_text("600\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    if saved_output:
+        (tmp_path / "rollouts.jsonl").write_text('{"reward": 0.0}\n')
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=3, max_walltime="04:00:00"), state, elapsed="42")
+    assert result.returncode == 1, result.stdout
+    assert "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "642"
+    assert (tmp_path / ".gym_infra_retries").read_text() == "1\n"
+    assert state in (tmp_path / ".gym_chain_incomplete").read_text()
+    assert not (tmp_path / ".gym_job_chain").exists()
+    if saved_output:
+        assert (tmp_path / "rollouts.jsonl").read_text() == '{"reward": 0.0}\n'
