@@ -27,7 +27,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import reraise_judge_errors
+from nemo_gym.verification import reraise_judge_errors
 
 
 LOG = logging.getLogger(__name__)

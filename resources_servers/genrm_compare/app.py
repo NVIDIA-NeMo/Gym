@@ -58,7 +58,7 @@ from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification import JudgeError
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,

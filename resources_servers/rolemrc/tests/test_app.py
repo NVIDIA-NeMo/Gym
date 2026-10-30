@@ -30,7 +30,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification import JudgeError
 from resources_servers.rolemrc.app import (
     RoleMRCResourcesServer,
     RoleMRCResourcesServerConfig,

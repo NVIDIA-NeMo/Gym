@@ -264,7 +264,7 @@ async def test_reverify_cannot_run_the_swe_verification_again():
 
 
 async def test_the_verifier_fixture_grades_its_cases_without_a_judge_or_a_sandbox():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification import exercise_verifier_fixture
     from resources_servers.partner_if.swe_app import VERIFIER_FIXTURE
 
     with patch(JUDGE, new_callable=AsyncMock) as judge, patch(SCALE_SWE_VERIFY, AsyncMock()) as verify:

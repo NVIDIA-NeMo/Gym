@@ -67,7 +67,7 @@ Deliberate, minimal deviations from upstream:
   the scale) counts as 0.0 for that rubric item (``n_judge_parse_failed``);
   upstream raises and loses the whole conversation.
 * A judge call that fails (the judge model server has already retried) raises
-  ``nemo_gym.judge.JudgeError``: ``judge_failsafe`` masks the row and routes it to
+  ``nemo_gym.verification.judge.JudgeError``: ``judge_failsafe`` masks the row and routes it to
   the failures sidecar, so it is neither scored as a policy zero nor counted in
   the metrics, and ``gym eval reverify --judge-failed-only`` can retry it.
 """
@@ -96,8 +96,8 @@ from nemo_gym.base_resources_server import (
 )
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.judge import JudgeError, call_judge
 from nemo_gym.reward_profile import compute_subset_metrics
+from nemo_gym.verification import JudgeError, call_judge
 from resources_servers.beam.prompts import (
     BINARY_LLM_JUDGE_BASE_PROMPT,
     EQUIVALENCE_SYSTEM_PROMPT,

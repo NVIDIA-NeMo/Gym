@@ -21,8 +21,7 @@ from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.judge import JudgeError
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import JudgeError, exercise_verifier_fixture
 
 
 async def test_verifier_fixture() -> None:

@@ -35,7 +35,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import reraise_judge_errors
+from nemo_gym.verification import reraise_judge_errors
 from resources_servers.arena.arena import (
     _extract_thinking_content,
     _extract_verdict,

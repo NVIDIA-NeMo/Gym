@@ -11,8 +11,8 @@ from pydantic import ValidationError
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.judge import JudgeError, judge_failsafe
 from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
+from nemo_gym.verification import JudgeError, judge_failsafe
 from resources_servers.sciknoweval.app import (
     SciKnowEvalResourcesServer,
     SciKnowEvalResourcesServerConfig,
@@ -333,7 +333,7 @@ def test_benchmark_judge_config_validates():
 
 
 async def test_workload_verifier_fixture():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification import exercise_verifier_fixture
     from resources_servers.sciknoweval.app import VERIFIER_FIXTURE
 
     results = await exercise_verifier_fixture(

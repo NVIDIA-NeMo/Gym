@@ -54,7 +54,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import call_judge
+from nemo_gym.verification import call_judge
 
 
 # ---------------------------------------------------------------------------

@@ -18,7 +18,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 from resources_servers.chemcotbench.scoring_pool import ScoringPool, ScoringWorkerError
 from resources_servers.chemcotbench.setup_molopt import ensure_molopt_runtime
 from resources_servers.chemcotbench.setup_upstream import DATA_REVISION, REPO_REVISION, ensure_data, ensure_repository

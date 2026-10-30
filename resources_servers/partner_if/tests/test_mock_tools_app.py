@@ -20,7 +20,8 @@ from nemo_gym.core import NeMoGymResponse
 from nemo_gym.mcp_auto_exposure import harvest_tools
 from nemo_gym.server_utils import SimpleServer, entrypoint_ray_enabled
 from nemo_gym.testing.session_conformance import check_resources_session_contract
-from nemo_gym.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
+from nemo_gym.verification.verifier_fixture import load_verifier_fixture
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
 from resources_servers.partner_if.example_tools import NotesBackend
