@@ -1,0 +1,31 @@
+name: agentic_if
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: instruction_following
+description: Instruction following by a coding agent (OpenCode) that completes repository and terminal tasks in
+  their sandboxes; reward is the task's own verifier result, and an LLM judge's per-instruction verdicts give
+  if_all, if_frac and task_and_if.
+modality: text
+licensing: internal
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: agentic_if
+agent_server: opencode_agent
+datasets:
+- name: agentic_if
+  type: benchmark
+  jsonl_fpath: benchmarks/agentic_if/data/agentic_if_benchmark.jsonl
+  prepare_script: benchmarks/agentic_if/prepare.py
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

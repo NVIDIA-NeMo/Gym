@@ -397,8 +397,8 @@ def test_http_preserves_typed_literal_think_tags_and_unique_ids(setup, tmp_path,
     "override",
     [
         {"max_output_tokens": 123},
-        {"temperature": 0.2},
-        {"top_p": 0.9},
+        {"top_logprobs": 2},
+        {"reasoning": {"effort": "high"}},
         {"tools": [{"type": "function", "name": "foo"}]},
         {"input": [{"role": "assistant", "content": "old turn"}]},
     ],
@@ -418,7 +418,7 @@ def test_rejected_request_does_not_consume_activation(setup):
     with TestClient(agent.setup_webserver()) as client:
         client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).raise_for_status()
         path = "/ng-rollout/opencode-smoke-a2/v1/responses"
-        assert client.post(path, json={"input": "task", "temperature": 0.2}).status_code == 422
+        assert client.post(path, json={"input": "task", "max_output_tokens": 5}).status_code == 422
         sandbox.launch.assert_not_awaited()
         accepted = client.post(path, json={"input": "task"})
         assert accepted.status_code == 200, accepted.text

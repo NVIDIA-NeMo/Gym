@@ -746,6 +746,122 @@ def test_ordinary_seed_does_not_add_continuation_capabilities(setup):
         assert "cleanup_confirmed" not in receipt and "trajectory" not in receipt
 
 
+@pytest.mark.parametrize("return_session_trajectory", [False, True])
+def test_returned_session_turns_leave_out_the_compaction_call(setup, tmp_path, return_session_trajectory):
+    from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
+    from nemo_gym.observability.model_calls import ModelCallRecord
+    from nemo_gym.rollout_collection import _build_trajectory_record
+    from nemo_gym.trajectory import AgentObservationBundle, ContextCompactionObservation, TrajectoryRecord
+    from nemo_gym.trajectory.trajectory_record import join_agent_model_calls, join_assistant_message_calls
+    from responses_api_agents.opencode_agent.tests.test_app import _session_db
+
+    def reply(*parts, **message):
+        info = {"role": "assistant", "finish": "stop", "time": {"created": 1, "completed": 2}, **message}
+        return info, [{"type": "step-start"}, *parts, {"type": "step-finish"}]
+
+    tool = {
+        "type": "tool",
+        "tool": "bash",
+        "callID": "tool-1",
+        "state": {
+            "status": "completed",
+            "input": {"command": "pwd"},
+            "output": "/app",
+            "time": {"start": 1, "end": 2},
+        },
+    }
+    database = _session_db(
+        tmp_path,
+        [
+            ("user", [{"type": "text", "text": "task"}]),
+            reply(tool, finish="tool-calls"),
+            ("user", [{"type": "compaction", "auto": True}]),
+            reply({"type": "text", "text": "summary"}, summary=True, parentID="m2"),
+            reply({"type": "text", "text": "Fixed"}),
+        ],
+    )
+    agent, sandbox = setup
+    agent.config.return_session_trajectory = return_session_trajectory
+    download = sandbox.download
+
+    async def download_database(source, destination):
+        if source.endswith("/opencode.db"):
+            Path(destination).write_bytes(database.read_bytes())
+        else:
+            await download(source, destination)
+
+    sandbox.download = download_database
+    request = seed()
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=request.model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post(f"/ng-rollout/{request.episode_id.capture_key}/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        receipt = close(client, request)
+    if not return_session_trajectory:
+        # The default keeps the existing protocol: collection builds the turns from the captured calls.
+        assert "trajectory" not in receipt
+        return
+    trajectory = TrajectoryRecord.model_validate(receipt["trajectory"])
+    assert [turn.source_message_id for turn in trajectory.turns] == ["m1", "m4"]
+
+    output = response.json()
+    calls = [
+        ModelCallRecord(
+            call_index=index,
+            model_call_id=f"capture-{index}",
+            response_id=f"reply-{index}",
+            model_ref=agent.config.model_server,
+            model="fixture",
+            dialect="responses",
+            status_code=200,
+            response_status="completed",
+            client_session_id="root",
+            client_assistant_message_id=message_id,
+            started_at=float(index),
+            completed_at=index + 0.5,
+            tokens_in=13,
+            tokens_out=3,
+            tokens_total=16,
+            tokens_reasoning=1,
+            cached_tokens=3,
+            request={"input": [{"role": "user", "content": "task"}]},
+            response={
+                "id": f"reply-{index}",
+                "status": "completed",
+                "output": output["output"],
+                "usage": output["usage"],
+            },
+        )
+        for index, message_id in enumerate(["m1", "m3", "m4"])
+    ]
+    bundle = join_agent_model_calls(AgentObservationBundle.model_validate(receipt["agent_observations"]), calls)
+    bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+    [compaction] = [record for record in bundle.records if isinstance(record, ContextCompactionObservation)]
+    assert [ref.model_call_id for ref in compaction.model_calls] == ["capture-1"]
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "task_id": "task",
+        "_ng_rollout_id": request.episode_id.capture_key,
+    }
+    result = {
+        "ng_agent_observations": bundle.model_dump(mode="json"),
+        "ng_trajectory": trajectory.model_dump(mode="json"),
+        "ng_model_call_capture": {"calls": [call.model_dump(mode="json") for call in calls]},
+        "response": output,
+    }
+    canonical = _build_trajectory_record(row, result)
+    assert [[ref.model_call_id for ref in turn.model_calls] for turn in canonical.turns] == [
+        ["capture-0"],
+        ["capture-2"],
+    ]
+    result["ng_trajectory"] = canonical.model_dump(mode="json")
+    report = inspect_record(row | result, scope=EvidenceScope(tools=False, verifier=False))
+    failed = [check for check in report["checks"] if check["status"] == "fail"]
+    assert not failed, failed
+
+
 def test_provider_preparation_timeout_does_not_brick_unstarted_session(setup, tmp_path):
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
