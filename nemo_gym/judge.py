@@ -38,8 +38,9 @@ exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
 
 import functools
 import re
-from typing import Any, Awaitable, Callable, Type, TypeVar
+from typing import Any, Awaitable, Callable, Optional, Type, TypeVar
 
+from aiohttp import ClientTimeout
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -81,6 +82,7 @@ async def call_judge(
     url_path: str,
     json: Any,
     response_model: Type[ResponseT],
+    timeout_seconds: Optional[float] = None,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; raise JudgeError on failure.
 
@@ -88,17 +90,29 @@ async def call_judge(
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
     status check comes before parsing so an auth or server error reports the HTTP
     failure itself, not a validation error against the error body.
+
+    ``timeout_seconds`` bounds a single attempt. Gym's shared aiohttp client is built with no
+    timeout, so without this one unanswered judge call hangs its rollout until the job's wall
+    clock, and a caller's retry loop never gets to run.
+
     The enclosing verify execution supplies the invocation identity; all its judge
     calls and retries share that identity. Standalone calls do not invent a verifier execution.
     """
 
     async def _call() -> ResponseT:
+        # Two independent concerns, both expressed as kwargs on the same POST: the deadline that
+        # bounds this attempt, and the verifier-invocation header that ties it to its execution.
+        kwargs: dict[str, Any] = {}
+        if timeout_seconds is not None:
+            kwargs["timeout"] = ClientTimeout(total=timeout_seconds)
         invocation_id = current_verifier_invocation_id()
+        if invocation_id:
+            kwargs["headers"] = {VERIFIER_INVOCATION_HEADER: invocation_id}
         http_response = await server_client.post(
             server_name=server_name,
             url_path=url_path,
             json=json,
-            **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
+            **kwargs,
         )
         await raise_for_status(http_response)
         return response_model.model_validate(await get_response_json(http_response))
