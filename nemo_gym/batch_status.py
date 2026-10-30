@@ -16,6 +16,7 @@
 
 import hashlib
 import json
+import logging
 import os
 import re
 from collections import Counter, defaultdict
@@ -24,7 +25,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 from time import monotonic
-from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
+from typing import Any, Dict, Iterable, List, Literal, Mapping, Optional, Sequence
 
 import orjson
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
@@ -42,11 +43,17 @@ from nemo_gym.global_config import (
 )
 
 
+logger = logging.getLogger(__name__)
+
+
 AGGREGATION_ERROR_KEY = "aggregation_error"
 BATCH_STATUS_FNAME = "batch_status.json"
 BATCH_STATUS_WRITE_INTERVAL_SECONDS = 5.0
 _DATASET_DIGEST_DOMAIN = b"nemo-gym-batch-dataset-v1\0"
 _FAILURE_CLASS_KEY = "_ng_failure_class"
+# Mirrors of rollout_collection's omitted-rollout markers (that module imports this one).
+_OMITTED_ROLLOUT_KEY = "_ng_omitted_rollout"
+_DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MISSING = object()
 
@@ -464,12 +471,16 @@ class BatchStatusTracker:
 
         latest_failures = {}
         for position, failure in enumerate(failure_rows):
+            # A never-started row is no execution and changes nothing.
+            if failure.get(_OMITTED_ROLLOUT_KEY) and failure.get(_DISPATCH_DRAINED_KEY):
+                continue
             identity = self._validated_rollout_identity(failure, record_kind="failure", row_index=position)
             latest_failures[identity] = failure
 
         failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
         for (agent_name, task_index, rollout_index), failure in latest_failures.items():
-            if (task_index, rollout_index) in completed_by_agent[agent_name]:
+            # An interrupted latest attempt hides the older failure, as the run health check reads it.
+            if (task_index, rollout_index) in completed_by_agent[agent_name] or failure.get(_OMITTED_ROLLOUT_KEY):
                 continue
             failures_by_agent[agent_name][failure.get(_FAILURE_CLASS_KEY) or "unknown"] += 1
 
@@ -555,3 +566,148 @@ class BatchStatusTracker:
         self._last_write = now
         self._last_progress_count = progress_count
         return True
+
+
+def disable_run_status(status_fpath: Path, error: Exception) -> None:
+    """Try once to replace unreliable run counts with a timestamped disabled state."""
+    reason = type(error).__name__
+    logger.warning("Run status disabled (%s).", reason)
+    try:
+        _atomic_write_json(
+            status_fpath,
+            {
+                "schema_version": "1",
+                "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+                "tracking": "disabled",
+                "reason": reason,
+                "members": {},
+            },
+        )
+    except Exception as write_error:
+        # Reporting must remain best-effort even when the status artifact is unwritable.
+        logger.debug("Could not save disabled run status (%s).", type(write_error).__name__)
+
+
+class RunStatusTracker(BatchStatusTracker):
+    """Track any materialized run without requiring an Eval Factory manifest."""
+
+    def __init__(
+        self,
+        status_fpath: Path,
+        materialized_rows: Iterable[Mapping[str, Any]],
+        *,
+        write_interval_seconds: Optional[float] = None,
+    ) -> None:
+        self.status_fpath = status_fpath
+        self._expected_rollout_identities = {
+            (row[AGENT_REF_KEY_NAME]["name"], row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+            for row in materialized_rows
+        }
+        self.write_interval_seconds = (
+            BATCH_STATUS_WRITE_INTERVAL_SECONDS if write_interval_seconds is None else write_interval_seconds
+        )
+        self._last_write = 0.0
+        self._last_progress_count = 0
+        self.enabled = True
+        self._expected_by_agent = Counter(agent for agent, _, _ in self._expected_rollout_identities)
+        self._completed: set[tuple[str, int, int]] = set()
+        self._failures: Dict[tuple[str, int, int], str] = {}
+        self._completed_by_agent: Counter[str] = Counter()
+        self._failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        self._completed_cursor = 0
+        self._failure_cursor = 0
+
+    def build_status(
+        self,
+        completed_results: Sequence[Mapping[str, Any]],
+        failure_rows: Sequence[Mapping[str, Any]],
+        *,
+        aggregate_metrics_fpath: Optional[Path] = None,
+        aggregation_deferred: bool = False,
+    ) -> Dict[str, Any]:
+        """Count unique completions and the latest outstanding failure for each rollout."""
+        if len(completed_results) < self._completed_cursor or len(failure_rows) < self._failure_cursor:
+            raise ConfigError("Run status progress must be append-only")
+        for position in range(self._completed_cursor, len(completed_results)):
+            identity = self._validated_rollout_identity(
+                completed_results[position], record_kind="completed result", row_index=position
+            )
+            if identity not in self._completed:
+                self._completed.add(identity)
+                self._completed_by_agent[identity[0]] += 1
+                previous = self._failures.pop(identity, None)
+                if previous is not None:
+                    self._failures_by_agent[identity[0]][previous] -= 1
+        for position in range(self._failure_cursor, len(failure_rows)):
+            row = failure_rows[position]
+            # A never-started row is no execution and changes nothing.
+            if row.get(_OMITTED_ROLLOUT_KEY) and row.get(_DISPATCH_DRAINED_KEY):
+                continue
+            identity = self._validated_rollout_identity(row, record_kind="failure", row_index=position)
+            if identity in self._completed:
+                continue
+            previous = self._failures.get(identity)
+            if previous is not None:
+                self._failures_by_agent[identity[0]][previous] -= 1
+            if row.get(_OMITTED_ROLLOUT_KEY):
+                # An interrupted attempt is the latest execution: it hides the older failure, as the run health check
+                # reads it, and is no failure itself.
+                self._failures.pop(identity, None)
+                continue
+            failure_class = row.get(_FAILURE_CLASS_KEY) or "unknown"
+            self._failures[identity] = failure_class
+            self._failures_by_agent[identity[0]][failure_class] += 1
+        self._completed_cursor = len(completed_results)
+        self._failure_cursor = len(failure_rows)
+        aggregates, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+        members = {}
+        for agent, expected in sorted(self._expected_by_agent.items()):
+            entry = aggregates.get(agent)
+            if aggregation_deferred:
+                aggregation_status = "deferred"
+            elif aggregate_metrics_fpath is None:
+                aggregation_status = "pending"
+            elif artifact_error or entry is None or AGGREGATION_ERROR_KEY in entry:
+                aggregation_status = "error"
+            else:
+                aggregation_status = "complete"
+            members[agent] = {
+                "expected_rollout_count": expected,
+                "completed_rollout_count": self._completed_by_agent[agent],
+                "remaining_rollout_count": expected - self._completed_by_agent[agent],
+                "failures_by_class": dict(
+                    sorted((key, count) for key, count in self._failures_by_agent[agent].items() if count)
+                ),
+                "aggregation_status": aggregation_status,
+            }
+        return {
+            "schema_version": "1",
+            "tracking": "enabled",
+            "updated_at": datetime.now(timezone.utc).isoformat().replace("+00:00", "Z"),
+            "members": members,
+        }
+
+    def write_status(
+        self,
+        completed_results: Sequence[Mapping[str, Any]],
+        failure_rows: Sequence[Mapping[str, Any]],
+        *,
+        aggregate_metrics_fpath: Optional[Path] = None,
+        aggregation_deferred: bool = False,
+        force: bool = False,
+    ) -> bool:
+        """Report progress best-effort; one mismatch or write error disables this tracker."""
+        if not self.enabled:
+            return False
+        try:
+            return super().write_status(
+                completed_results,
+                failure_rows,
+                aggregate_metrics_fpath=aggregate_metrics_fpath,
+                aggregation_deferred=aggregation_deferred,
+                force=force,
+            )
+        except Exception as error:
+            self.enabled = False
+            disable_run_status(self.status_fpath, error)
+            return False

@@ -48,7 +48,14 @@ from tqdm.asyncio import tqdm
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.batch_status import AGGREGATION_ERROR_KEY, BatchStatusTracker
+from nemo_gym.batch_status import (
+    AGGREGATION_ERROR_KEY,
+    BatchStatusTracker,
+    RunStatusTracker,
+    _atomic_write_json,
+    _read_aggregate_entries,
+    disable_run_status,
+)
 from nemo_gym.config_types import (
     AgentWithoutEnvironmentServerError,
     AmbiguousEnvironmentServerError,
@@ -99,6 +106,7 @@ from nemo_gym.omitted_rollouts import omitted_rollout_record
 from nemo_gym.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
+    batch_status_path_for,
     failures_path_for,
     materialized_path_for,
     resubmit_offset_path_for,
@@ -619,7 +627,14 @@ def _batch_status_row(result: Dict, agent_refs_by_key: Dict[Tuple[int, int], Dic
     """Keep status identities and failure classes without retaining rollout payloads."""
     status_row = {
         key: result[key]
-        for key in (AGENT_REF_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, NG_FAILURE_CLASS_KEY)
+        for key in (
+            AGENT_REF_KEY_NAME,
+            TASK_INDEX_KEY_NAME,
+            ROLLOUT_INDEX_KEY_NAME,
+            NG_FAILURE_CLASS_KEY,
+            NG_OMITTED_ROLLOUT_KEY,
+            NG_DISPATCH_DRAINED_KEY,
+        )
         if key in result
     }
     if AGENT_REF_KEY_NAME not in status_row:
@@ -2390,6 +2405,57 @@ def _raise_for_aggregation_errors(metrics_fpath: Optional[Path]) -> None:
         )
 
 
+def _latest_status_failure_rows(failures_fpath: Path, agent_refs_by_key: Dict[Tuple[int, int], Dict]) -> List[Dict]:
+    """The latest started attempt per rollout in a failures sidecar, compacted to status rows as it is read.
+
+    Unlike ``_latest_failure_rows`` it keeps an interrupted attempt's omitted-rollout row, so run status can clear the
+    older failure it hides, and it never holds a failed rollout's full payload.
+    """
+    latest: Dict[Tuple[Any, Any], Dict] = {}
+    if not failures_fpath.exists():
+        return []
+    with failures_fpath.open("rb") as f:
+        for line_no, line in enumerate(f, 1):
+            line = line.strip()
+            if not line:
+                continue
+            row = _batch_status_row(loads_jsonl_line(line, failures_fpath, line_no), agent_refs_by_key)
+            if not is_unstarted_rollout_row(row):
+                latest[(row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME))] = row
+    return list(latest.values())
+
+
+def _refresh_shard_status_aggregation(input_paths: List[str], aggregate_metrics_fpath: Optional[Path]) -> None:
+    """Mark each shard's run status with the outcome of the aggregation that merged it, keeping its counts.
+
+    EvalRDL sums the shards' status files, so the merged output gets no status file of its own.
+    """
+    entries, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
+    for path in input_paths:
+        status_fpath = batch_status_path_for(Path(path))
+        # Run status is best-effort: a shard whose status cannot be read or written is logged and skipped, never a
+        # reason to fail the aggregation or hide its own error.
+        try:
+            status = orjson.loads(status_fpath.read_bytes())
+            members = status.get("members")
+            if status.get("tracking") != "enabled" or not isinstance(members, dict):
+                continue
+            for agent, member in members.items():
+                entry = entries.get(agent)
+                failed = (
+                    aggregate_metrics_fpath is None
+                    or artifact_error
+                    or entry is None
+                    or AGGREGATION_ERROR_KEY in entry
+                )
+                member["aggregation_status"] = "error" if failed else "complete"
+            _atomic_write_json(status_fpath, status)
+        except FileNotFoundError:
+            continue
+        except Exception:
+            logger.warning(f"Could not update the run status at {status_fpath}.", exc_info=True)
+
+
 def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], Dict[str, Any]]:
     """The last failed attempt recorded for each rollout across the failures sidecars.
 
@@ -3537,7 +3603,6 @@ class RolloutCollectionHelper(BaseModel):
         if config.batch_manifest_fpath:
             materialized_rows = input_rows
             if not should_clear_outputs:
-                # A resume validates the full dataset, including attempts already completed.
                 with config.materialized_jsonl_fpath.open("rb") as materialized_file:
                     materialized_rows = [orjson.loads(line) for line in materialized_file if line.strip()]
             batch_tracker = BatchStatusTracker(Path(config.batch_manifest_fpath), materialized_rows)
@@ -3545,6 +3610,35 @@ class RolloutCollectionHelper(BaseModel):
                 (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
                 for row in materialized_rows
             }
+        else:
+
+            def status_rows():
+                def compact(row):
+                    status_row = _batch_status_row(row, {})
+                    if AGENT_REF_KEY_NAME not in status_row:
+                        status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
+                    key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
+                    batch_agent_refs[key] = status_row[AGENT_REF_KEY_NAME]
+                    return status_row
+
+                if should_clear_outputs:
+                    for row in input_rows:
+                        yield compact(row)
+                else:
+                    # Do not retain decoded task payloads (which can include base64 media).
+                    with config.materialized_jsonl_fpath.open("rb") as materialized_file:
+                        for line in materialized_file:
+                            if line.strip():
+                                yield compact(orjson.loads(line))
+
+            status_fpath = batch_status_path_for(output_fpath)
+            try:
+                if should_clear_outputs:
+                    # Do not present a previous run's counts if tracker setup fails.
+                    status_fpath.unlink(missing_ok=True)
+                batch_tracker = RunStatusTracker(status_fpath, status_rows())
+            except Exception as error:
+                disable_run_status(status_fpath, error)
 
         if should_clear_outputs:
             # Validate before replacing any saved inputs or clearing their corresponding results.
@@ -3565,18 +3659,22 @@ class RolloutCollectionHelper(BaseModel):
         batch_completed_rows: List[Dict] = []
         batch_failure_rows: List[Dict] = []
         if batch_tracker is not None:
-            if output_fpath.exists():
-                with output_fpath.open("rb") as existing_results:
-                    batch_completed_rows = [
-                        _batch_status_row(orjson.loads(line), batch_agent_refs)
-                        for line in existing_results
-                        if line.strip()
-                    ]
-            batch_failure_rows = [
-                _batch_status_row(row, batch_agent_refs) for row in _latest_failure_rows([failures_fpath]).values()
-            ]
-            batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
-            print(f"Validated batch manifest and initialized status at {batch_tracker.status_fpath}")
+            try:
+                if output_fpath.exists():
+                    with output_fpath.open("rb") as existing_results:
+                        batch_completed_rows = [
+                            _batch_status_row(orjson.loads(line), batch_agent_refs)
+                            for line in existing_results
+                            if line.strip()
+                        ]
+                batch_failure_rows = _latest_status_failure_rows(failures_fpath, batch_agent_refs)
+                if batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True):
+                    print(f"Initialized run status at {batch_tracker.status_fpath}")
+            except Exception as error:
+                if config.batch_manifest_fpath:
+                    raise
+                disable_run_status(batch_tracker.status_fpath, error)
+                batch_tracker = None
 
         semaphore = nullcontext()
         if config.num_samples_in_parallel:
@@ -3903,10 +4001,13 @@ class RolloutCollectionHelper(BaseModel):
                     # bounds wallclock. The sidecar row, when asked for, is counted by no reader.
                     if config.record_omitted_rollouts:
                         write_started = perf_counter()
-                        omitted_bytes = orjson.dumps(omitted_rollout_record(result))
+                        omitted_row = omitted_rollout_record(result)
+                        omitted_bytes = orjson.dumps(omitted_row)
                         failures_file.write(omitted_bytes + b"\n")
                         failures_file.flush()
                         _record_output_write(write_started, omitted_bytes)
+                        if batch_tracker is not None and not is_unstarted_rollout_row(omitted_row):
+                            batch_failure_rows.append(_batch_status_row(omitted_row, batch_agent_refs))
                     if not result.get(NG_DISPATCH_DRAINED_KEY):
                         # A drained row never ran, so it is not an attempt.
                         _record_rollout_outcome(result, "omitted", dispatch_name)
@@ -3935,7 +4036,7 @@ class RolloutCollectionHelper(BaseModel):
                     ):
                         health_outcome = "failed"
                     _record_output_write(write_started, serialized)
-                    if batch_tracker is not None:
+                    if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                         batch_failure_rows.append(_batch_status_row(result, batch_agent_refs))
                 else:
                     # Success → main jsonl.
@@ -3951,7 +4052,7 @@ class RolloutCollectionHelper(BaseModel):
                     if config.retain_results_in_memory:
                         persisted_rows.append(row)
                         persisted_results.append(result)
-                    if batch_tracker is not None:
+                    if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                         batch_completed_rows.append(_batch_status_row(result, batch_agent_refs))
                     try:
                         rollout_id = maybe_rollout_id_from_run_body(result)
@@ -3973,7 +4074,7 @@ class RolloutCollectionHelper(BaseModel):
                 if counts_left[dispatch_name] <= 0:
                     counts_left.pop(dispatch_name)
 
-                if batch_tracker is not None:
+                if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows)
 
                 agent_name = dispatch_name
@@ -4085,7 +4186,7 @@ class RolloutCollectionHelper(BaseModel):
                 else []
             )
             if input_rows and persisted_count == 0 and not counted and not missing:
-                if batch_tracker is not None:
+                if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
                 drained_note = (
                     f" {latency_tracker.drained} of them were never started because dispatch_budget_s ran out; "
@@ -4099,6 +4200,12 @@ class RolloutCollectionHelper(BaseModel):
                 )
             collection_succeeded = True
         finally:
+            if not collection_succeeded and batch_tracker is not None and getattr(batch_tracker, "enabled", True):
+                # Results persisted inside the write throttle would otherwise never reach the status file.
+                try:
+                    batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
+                except Exception:
+                    logger.warning("Could not write the final run status.", exc_info=True)
             try:
                 if timing_heartbeat is not None:
                     timing_heartbeat.cancel()
@@ -4181,7 +4288,7 @@ class RolloutCollectionHelper(BaseModel):
                 raise_on_error=False,  # Write batch status before reporting aggregation failures below.
             )
 
-        if batch_tracker is not None:
+        if batch_tracker is not None and getattr(batch_tracker, "enabled", True):
             batch_tracker.write_status(
                 batch_completed_rows,
                 batch_failure_rows,
@@ -5275,6 +5382,8 @@ class RolloutAggregationHelper(BaseModel):
                 aggregate_metrics_fpath=aggregate_metrics_fpath,
                 force=True,
             )
+        else:
+            _refresh_shard_status_aggregation(input_paths, aggregate_metrics_fpath)
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
