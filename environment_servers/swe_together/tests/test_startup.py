@@ -2,9 +2,13 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import os
+import runpy
 import subprocess
 import sys
 from pathlib import Path
+
+import nemo_gym.server_utils
+from nemo_gym.server_utils import SimpleServer
 
 
 def test_app_import_from_component_working_directory():
@@ -26,3 +30,17 @@ def test_app_import_from_component_working_directory():
         timeout=45,
     )
     assert result.returncode == 0, result.stdout + result.stderr
+
+
+def test_module_exports_app_for_multi_worker_import(monkeypatch):
+    """With several workers, uvicorn imports the entrypoint in each worker and serves its module-level app."""
+    worker_app = object()
+    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
+
+    namespace = runpy.run_path(
+        str(Path(__file__).parents[1] / "app.py"),
+        run_name="environment_servers.swe_together.worker_test",
+    )
+
+    assert namespace["app"] is worker_app

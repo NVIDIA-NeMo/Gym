@@ -18,6 +18,7 @@ import copy
 import json
 import logging
 import os
+import re
 import shlex
 import shutil
 import signal
@@ -61,9 +62,10 @@ from nemo_gym.openai_utils import (
 from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, SandboxObservation
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
 from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
+from nemo_gym.sandbox.config import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.kilocode_agent.observability import read_kilo_observations
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession
 from responses_api_agents.kilocode_agent.setup_kilocode import ensure_kilo
@@ -91,6 +93,8 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
     sqlite parser: ``text`` -> assistant message, ``tool_use`` -> function_call (+ output),
     ``step_finish`` -> token usage, ``reasoning`` -> buffered <think> block prepended to the next
     assistant message (a trailing reasoning run is surfaced on its own so it is not dropped).
+    ``error`` events are left to ``_scan_run_events`` and never logged here: they can carry MCP grant
+    credentials, which only the session path redacts.
     """
     output_items: list[Any] = []
     input_tokens = 0
@@ -183,9 +187,6 @@ def parse_kilo_events(stdout: str) -> tuple[list[Any], dict[str, int]]:
                     )
                 )
 
-        elif etype == "error":
-            LOG.warning("kilo run reported error event: %s", str(event.get("error"))[:500])
-
     # A run that ends on reasoning (some vLLM reasoning parsers route the final answer through the
     # reasoning channel) is surfaced as a think-tagged message rather than dropped.
     if buffered_think:
@@ -225,6 +226,9 @@ def _runtime_failure(artifacts: KiloArtifacts, cleanup: CleanupReceipt | None) -
     if not artifacts.task_environment_ready:
         # Kilo continues when a plugin fails to load; its tools then ran with Kilo's private HOME.
         return "Kilo did not confirm its task-environment plugin"
+    if not artifacts.required_mcp_ready:
+        # The plugin confirms required MCP servers before the first model request.
+        return "Kilo did not confirm its required MCP servers before model activation"
     if cleanup["timed_out"]:
         return None
     if cleanup["return_code"] == HARNESS_RUNNER_FAILED:
@@ -249,6 +253,8 @@ def _run_outcome(
         return "failed", _error_name(error)
     if not artifacts.task_environment_ready:
         return "failed", "task_environment_unconfirmed"
+    if not artifacts.required_mcp_ready:
+        return "failed", "required_mcp_unconfirmed"
     if cleanup is not None and cleanup["timed_out"]:
         return "timeout", "agent_timeout"
     if cancelled:
@@ -379,8 +385,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         self.sem = Semaphore(self.config.concurrency)
 
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> KiloSandboxSession:
-        if any(access.required for access in self.effective_tool_accesses(body)):
-            raise HTTPException(422, "Kilo sandbox sessions do not support required external tool grants")
+        grants = self._mcp_grants(body)
         if self.config.model_server is None:
             raise HTTPException(422, "Kilo sandbox sessions require a Gym model_server")
         if not self.config.kilo_version or self.config.command != "kilo":
@@ -407,7 +412,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         session_dir = f"/tmp/nemo-gym-kilo-sessions/{uuid4().hex}"
         if session_dir.startswith(workdir.rstrip("/") + "/") or workdir.startswith("/tmp/nemo-gym-kilo-sessions"):
             raise HTTPException(422, "Kilo task workdir must be disjoint from its session directory")
-        provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
+        global_config = get_global_config_dict()
+        provider = create_provider(resolve_provider_config(provider_ref, global_config))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
         else:
@@ -420,6 +426,11 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         # retained session lets close stop it.
         state = KiloSandboxSession(
             request=body,
+            runtime_dir=session_dir,
+            required_mcp_servers=tuple(access.name for access in grants if access.required),
+            mcp_header_values=tuple(
+                value for access in grants for value in access.connection.headers.values() if value
+            ),
             provider_name=provider.name,
             sandbox_id=sandbox.sandbox_id,
             session=SandboxSession(
@@ -433,8 +444,16 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         try:
             if owns_sandbox:
                 settings = self.config.sandbox_config.copy()
+                settings["metadata"] = {
+                    **resolve_provider_metadata(provider_ref, global_config),
+                    **(settings.get("metadata") or {}),
+                    "gym-agent": "kilocode",
+                    "gym-session": body.agent_session_id[:63],
+                    "gym-rollout": body.episode_id.capture_key[:63],
+                }
                 settings.setdefault("workdir", workdir)
-                settings.setdefault("ttl_s", self.config.setup_timeout + self.config.timeout + 600)
+                setup_budget = self.config.setup_timeout * (2 if state.required_mcp_servers else 1)
+                settings.setdefault("ttl_s", setup_budget + self.config.timeout + 600)
                 await sandbox.start(SandboxSpec(**settings))
                 state.sandbox_id = sandbox.sandbox_id
                 # Providers need not create the workdir; borrowed task preparation belongs to Resources.
@@ -442,6 +461,12 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 if workspace.return_code != 0 or workspace.error_type:
                     raise RuntimeError(f"Cannot create Kilo sandbox workdir: {workspace.stderr or workspace.stdout}")
             await state.install_runtime(version=self.config.kilo_version, timeout=self.config.setup_timeout)
+            if state.required_mcp_servers:
+                await state.prepare_mcp(
+                    config=json.dumps(self._sandbox_config(state, rollout_id=body.episode_id.capture_key)),
+                    timeout=self.config.setup_timeout,
+                    close_timeout=self.config.session_close_timeout_seconds,
+                )
         except BaseException as error:
             try:
                 await state.close(timeout=self.config.session_close_timeout_seconds)
@@ -450,6 +475,46 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 raise AgentSessionSetupError(state, error=error) from error
             raise
         return state
+
+    def _mcp_grants(self, body: AgentSeedSessionRequest) -> list[MCPToolAccess]:
+        """Validate external tool access before allocating a sandbox or overwriting static config."""
+        accesses = self.effective_tool_accesses(body)
+        unsupported = [access.name for access in accesses if access.required and not isinstance(access, MCPToolAccess)]
+        if unsupported:
+            raise HTTPException(
+                422, "Kilo supports only MCP tool grants; unsupported required grants: " + ", ".join(unsupported)
+            )
+        grants = [access for access in accesses if isinstance(access, MCPToolAccess)]
+        static = self.config.kilo_config.get("mcp") or {}
+        if not isinstance(static, dict):
+            raise HTTPException(422, "kilo_config.mcp must be a mapping")
+        names: dict[str, str] = {}
+        for name in [*static, *(access.name for access in grants)]:
+            # Kilo uses this namespace in model-visible MCP tool names.
+            normalized = re.sub(r"[^a-zA-Z0-9_-]", "_", name)
+            if normalized in names:
+                raise HTTPException(422, f"Kilo MCP server names collide: {names[normalized]!r} and {name!r}")
+            names[normalized] = name
+        return grants
+
+    def _sandbox_config(self, state: KiloSandboxSession, *, rollout_id: str) -> dict[str, Any]:
+        config = self._build_kilo_config(self._resolve_model_base_url(rollout_id))
+        # The no-model seed preflight must resolve the same provider/model as activation.
+        config["model"] = self._effective_model()
+        grants = self._mcp_grants(state.request)
+        if grants:
+            # As in _mcp_grants, a null kilo_config.mcp means no static servers.
+            servers = config["mcp"] = config.get("mcp") or {}
+            for access in grants:
+                servers[access.name] = {
+                    "type": "remote",
+                    "url": str(access.connection.url),
+                    "headers": dict(access.connection.headers),
+                    "enabled": True,
+                    "oauth": False,
+                }
+        config.setdefault("plugin", []).append(state.task_environment_plugin)
+        return config
 
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         if not isinstance(state, KiloSandboxSession):
@@ -794,9 +859,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         command[:1] = state.kilo_argv
         # --pure only skips plugins named in kilo.json; here that would skip the task-environment plugin.
         command.remove("--pure")
-        config = self._build_kilo_config(self._resolve_model_base_url(rollout_id))
-        # Kilo's own HOME and XDG directories stay private; tool shells get the task's through this hook.
-        config.setdefault("plugin", []).append(state.task_environment_plugin)
+        config = self._sandbox_config(state, rollout_id=rollout_id)
         async with self.sem:
             state.started_at = perf_counter()
             artifacts = await state.session.execute(
@@ -817,7 +880,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         )
         if problem is not None:
             # Agent sessions must not hand a failed run to the verifier, where it would score as a zero.
-            raise RuntimeError(problem)
+            raise RuntimeError(state.redact_diagnostics(problem))
         response.metadata = {
             "harness_execution": "sandbox",
             **(
