@@ -50,7 +50,7 @@ from nemo_gym._checkpoint.control import CheckpointMode
 from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym._checkpoint.participant_workers import install_server_participant
 from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym._checkpoint.steps import CHECKPOINT_RESTART_HEADER
+from nemo_gym._checkpoint.steps import CHECKPOINT_REBINDS_TOOLS_HEADER, CHECKPOINT_RESTART_HEADER
 from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
     AgentContinuationRequirements,
@@ -351,6 +351,8 @@ class _AgentSessionRecord:
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
     close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
+    # Installed by a checkpoint restore and not yet seeded again by its replacement attempt.
+    restored: bool = False
 
 
 # Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
@@ -547,8 +549,21 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     # Agents that implement the AgentSessionHooks methods declare "exported".
     # The default fails closed: unfinished rollouts are restarts, which start over from their input after a crash.
     checkpoint_mode: ClassVar[CheckpointMode] = "restart_only"
+    # Whether a restored session takes the tool grants its replacement attempt's seed carries,
+    # such as a new MCP session token, in ``_rebind_restored_agent_session_state``.
+    # The seed reply says so, and an environment server then continues an episode with tool grants after a restore
+    # instead of starting it over.
+    rebinds_tool_accesses: ClassVar[bool] = False
     _checkpoint_participant: Optional[AgentSessionParticipant] = PrivateAttr(default=None)
     _restart_only: Optional[RestartOnlyAgentParticipant] = PrivateAttr(default=None)
+
+    def checkpoint_mode_in_effect(self) -> CheckpointMode:
+        """How this instance takes part in checkpoints; the class's ``checkpoint_mode`` unless an override knows better.
+
+        Status, discovery and seed replies report it. An agent whose capture depends on its configuration,
+        such as on a sandbox provider that can snapshot, overrides it.
+        """
+        return self.checkpoint_mode
 
     @property
     def checkpoint_participant(self) -> Optional[AgentSessionParticipant]:
@@ -573,7 +588,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         settings = checkpoint_settings(getattr(self.server_client, "global_config_dict", None))
         if settings is None:
             return
-        if self.checkpoint_mode == "restart_only":
+        mode = self.checkpoint_mode_in_effect()
+        if mode not in _AGENT_CHECKPOINT_MODES:
+            raise ValueError(f"{type(self).__name__}.checkpoint_mode_in_effect() returned {mode!r}")
+        if mode == "restart_only":
             # Fail closed: in-flight work is reported as restarts,
             # which never hold up a checkpoint and start over after a crash.
             self._restart_only = RestartOnlyAgentParticipant(self.retire_agent_session)
@@ -591,8 +609,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             instance_name=self.config.name,
         )
 
-    async def export_agent_sessions(self, session_keys: list[str]) -> dict[str, dict[str, JsonValue]]:
-        """Return the state of every session in ``session_keys`` for a checkpoint."""
+    async def export_agent_sessions(
+        self, session_keys: list[str], *, checkpoint_id: str
+    ) -> dict[str, dict[str, JsonValue]]:
+        """Return the state of every session in ``session_keys`` for checkpoint ``checkpoint_id``."""
         raise NotImplementedError
 
     async def restore_agent_sessions(self, sessions: list[RestoredAgentSession]) -> None:
@@ -615,6 +635,32 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 else:
                     await self._close_agent_session_state(record.state)
             record.state = None
+
+    async def release_external_state(self, kept: frozenset[str]) -> None:
+        """Delete what exports of checkpoints outside ``kept`` kept outside Gym, such as snapshots of sandboxes the
+        agent owns. The default keeps nothing outside Gym."""
+
+    def _seed_restarts(self, body: AgentSeedSessionRequest) -> bool:
+        """Whether this agent cannot capture the session ``body`` seeds, so its episode starts over after a crash.
+
+        An exported agent whose session state lives where no checkpoint reaches it, such as a sandbox it owns
+        without a snapshot, says so here. The seed reply then carries the restart header,
+        and the session is never exported nor waited for.
+        """
+        return False
+
+    async def _rebind_restored_agent_session_state(
+        self, state: AgentSessionState, body: AgentSeedSessionRequest
+    ) -> AgentSessionState:
+        """Re-bind a restored session to the seed of the attempt that continues it, and return its state.
+
+        After a restore the environment server seeds the session again under the replacement attempt, with that
+        attempt's sandbox access and tool grants, which differ from the restored request.
+        An agent whose session borrows a sandbox overrides this to connect the new sandbox, and to take the new
+        grants if it declares ``rebinds_tool_accesses``. The base sets ``state.request`` to ``body`` afterwards.
+        The default refuses, as for any other seed that conflicts with the bound one.
+        """
+        raise HTTPException(409, "agent_session_id is already bound to another seed request")
 
     def effective_tool_accesses(self, request: AgentSeedSessionRequest) -> list[ToolAccess]:
         """Overlay episode-scoped tool access onto configured declarations by name."""
@@ -680,7 +726,10 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             error = AgentSeedRejectedError("This agent does not implement episode sessions")
             _log_seed_refusal(body.agent_session_id, error)
             raise error
-        if self._restart_only is not None and response is not None:
+        restarts = self._restart_only is not None or (
+            self._checkpoint_participant is not None and self._seed_restarts(body)
+        )
+        if restarts and response is not None:
             # This agent cannot capture the session, so the episode that seeds it starts over after a crash.
             response.headers[CHECKPOINT_RESTART_HEADER] = "1"
         capabilities = self._agent_continuation_capabilities() if body.continuation is not None else None
@@ -720,7 +769,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     raise
                 try:
                     if participant is not None:
-                        participant.open_session(body.agent_session_id, body.episode_id, seed=True)
+                        participant.open_session(body.agent_session_id, body.episode_id, seed=True, restart=restarts)
                     elif self._restart_only is not None:
                         self._restart_only.open_session(body.agent_session_id, body.episode_id)
                 except Exception:
@@ -728,8 +777,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     # so the lock's exit drops the record and, with several workers, its claim.
                     await self._undo_seed(body.agent_session_id, record)
                     raise
-            elif record.state.request != body:
-                raise HTTPException(409, "agent_session_id is already bound to another seed request")
+            elif record.state.request != body or (record.restored and self._rebinds_restored_sessions()):
+                # An agent that re-binds restored sessions does so even for an unchanged seed:
+                # its restore installed the session without a connection to the sandbox the seed names.
+                if not self._rebinds(record, body):
+                    raise HTTPException(409, "agent_session_id is already bound to another seed request")
+                record.state = await self._rebind_restored_agent_session_state(
+                    record.state, body.model_copy(deep=True)
+                )
+                record.state.request = body.model_copy(deep=True)
+                record.restored = False
+            if participant is not None and self.rebinds_tool_accesses and response is not None:
+                response.headers[CHECKPOINT_REBINDS_TOOLS_HEADER] = "1"
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return AgentSeedSessionResponse(
                 agent_session_id=body.agent_session_id,
@@ -812,6 +871,25 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.close_task.add_done_callback(lambda done: None if done.cancelled() else done.exception())
         return await asyncio.shield(record.close_task)
 
+    def _rebinds_restored_sessions(self) -> bool:
+        """Whether this agent re-binds restored sessions, by overriding ``_rebind_restored_agent_session_state``."""
+        return (
+            type(self)._rebind_restored_agent_session_state
+            is not SimpleResponsesAPIAgent._rebind_restored_agent_session_state
+        )
+
+    def _rebinds(self, record: _AgentSessionRecord, body: AgentSeedSessionRequest) -> bool:
+        """Whether ``body`` is the replacement attempt's seed of a restored session that nothing has used yet."""
+        participant = self._checkpoint_participant
+        state = record.state
+        return (
+            participant is not None
+            and record.restored
+            and participant.restored_episode(body.agent_session_id) == body.episode_id
+            and state.request.task_id == body.task_id
+            and state.request.continuation == body.continuation
+        )
+
     def _require_current_session(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
         if self._session_records.get(agent_session_id) is not record:
             raise StaleAttemptError(f"agent session {agent_session_id!r} was retired while it closed")
@@ -841,7 +919,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
 
     def _install_restored_session(self, agent_session_id: str, state: AgentSessionState) -> None:
         """Install a session restored from a checkpoint, as its replacement attempt's seed would have."""
-        self._session_records[agent_session_id] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+        self._session_records[agent_session_id] = _AgentSessionRecord(
+            state=state, episode_id=state.request.episode_id, restored=True
+        )
 
     def _free_session(self, agent_session_id: str) -> None:
         """Free a retired session that has no close receipt: its episode's close then finds nothing to free."""

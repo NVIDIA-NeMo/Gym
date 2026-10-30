@@ -74,6 +74,17 @@ CHECKPOINT_RESTART_HEADER = "x-ng-checkpoint-restart"
 CHECKPOINT_CLOSE_FOLLOWS_HEADER = "x-ng-checkpoint-close-follows"
 
 
+# An agent that hands a restored session fresh tool grants when its replacement attempt seeds it again,
+# such as a new MCP session token, says so on its seed reply.
+# An episode whose agent holds such grants can then continue after a restore instead of starting over.
+CHECKPOINT_REBINDS_TOOLS_HEADER = "x-ng-checkpoint-rebinds-tools"
+
+
+def seed_rebinds_tools(headers: Optional[Mapping[str, str]]) -> bool:
+    """Whether an agent seed reply says the agent takes fresh tool grants when a restored session is seeded again."""
+    return (headers or {}).get(CHECKPOINT_REBINDS_TOOLS_HEADER) == "1"
+
+
 def seed_restarts(headers: Optional[Mapping[str, str]]) -> bool:
     """Whether a seed reply says its session cannot be captured, so its episode must start over after a crash."""
     return (headers or {}).get(CHECKPOINT_RESTART_HEADER) == "1"
@@ -94,6 +105,25 @@ class _Episode:
     suspended_remaining: Optional[float] = None
     # Set when the owner's final cleanup starts: a retire then waits for the episode without cancelling it.
     finishing: bool = False
+    # The deadline's whole budget in seconds, from when the episode began, or ``None`` without a deadline.
+    budget: Optional[float] = None
+
+    def remaining(self) -> Optional[float]:
+        """Seconds left before the deadline, not counting time parked for checkpoints; ``None`` without one."""
+        if self.suspended_remaining is not None:
+            return self.suspended_remaining
+        if self.deadline is None or self.deadline.when() is None:
+            return None
+        return self.deadline.when() - asyncio.get_running_loop().time()
+
+    def charge(self, seconds: float) -> None:
+        """Bring the deadline forward by ``seconds`` that an earlier attempt already spent."""
+        if seconds <= 0:
+            return
+        if self.suspended_remaining is not None:
+            self.suspended_remaining -= seconds
+        elif self.deadline is not None and self.deadline.when() is not None:
+            self.deadline.reschedule(self.deadline.when() - seconds)
 
     def suspend_deadline(self) -> None:
         if self.deadline is None or self.deadline.when() is None or self.suspended_remaining is not None:
@@ -161,6 +191,7 @@ class EpisodeSteps:
             boundary=continuation,
             restart=restart,
         )
+        episode.budget = episode.remaining()
         self._episodes[key] = episode
         self._blocking += _blocks(episode)
 
@@ -181,6 +212,24 @@ class EpisodeSteps:
         episode = self._episodes[key]
         continuation, episode.continuation = episode.continuation, None
         return continuation
+
+    def elapsed(self, key: str) -> Optional[float]:
+        """Seconds of the episode's budget spent so far, not counting time parked for checkpoints.
+
+        ``None`` for an episode without a deadline. It includes what ``charge`` added.
+        """
+        episode = self._episodes[key]
+        remaining = episode.remaining()
+        if episode.budget is None or remaining is None:
+            return None
+        return max(0.0, episode.budget - remaining)
+
+    def charge(self, key: str, seconds: float) -> None:
+        """Count ``seconds`` an earlier attempt of this episode spent against its deadline.
+
+        A replacement attempt that continues a checkpoint has only what is left of the episode's budget.
+        """
+        self._episodes[key].charge(seconds)
 
     def finishing(self, key: str) -> None:
         """The episode's protocol is over and its owner is releasing what it created.

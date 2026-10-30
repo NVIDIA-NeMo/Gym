@@ -186,7 +186,7 @@ class Harness:
     async def save(self, directory: Path, checkpoint_id="c1") -> list[AgentSessionRecord]:
         await self.prepare(checkpoint_id)
         await self.controller.commit(CommitRequest(**control(checkpoint_id), checkpoint_dir=str(directory)))
-        return await self.participant.export(None)
+        return await self.participant.export(None, checkpoint_id="c")
 
     async def restore(self, directory: Path, attempt=0, checkpoint_id="c1") -> None:
         await self.controller.restore(
@@ -300,7 +300,7 @@ async def test_failed_verification_during_checkpoint_can_restart_after_restore(h
             await asyncio.sleep(0)
     assert not run.done(), "the failed replay step must stay parked until resume"
     await first.controller.commit(CommitRequest(**control(), checkpoint_dir=str(tmp_path)))
-    records = await first.participant.export(None)
+    records = await first.participant.export(None, checkpoint_id="c")
     assert records[0].episode is None
     assert records[0].session == {"model_completed": False}
 
@@ -372,7 +372,7 @@ async def test_unsupported_resource_keeps_restart_fallback(harnesses):
     await asyncio.wait_for(first.model_started.wait(), 2)
     await first.prepare()
     assert first.participant.readiness().restarts == ["rollout"]
-    assert await first.participant.export(None) == []
+    assert await first.participant.export(None, checkpoint_id="c") == []
     first.model_release.set()
     await first.controller.resume(CheckpointRequest(**control()))
     assert (await asyncio.wait_for(run, 2)).reward == 1.0

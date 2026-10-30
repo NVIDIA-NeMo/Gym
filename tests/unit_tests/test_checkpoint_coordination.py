@@ -491,3 +491,35 @@ async def test_a_fan_out_encodes_its_body_once_and_sends_every_participant_the_s
     assert len(sent) == len(participants.members) and len(encoded) == 1
     assert all("json" not in kwargs and kwargs["data"] is sent[0]["data"] for kwargs in sent)
     assert all(kwargs["headers"]["Content-Type"] == "application/json" for kwargs in sent)
+
+
+async def test_release_reaches_every_participant_and_returns_failures_instead_of_raising() -> None:
+    client, recorders, _ = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    released: dict[str, frozenset[str]] = {}
+    for name, recorder in recorders.items():
+
+        async def record(kept: frozenset[str], name: str = name) -> None:
+            if name == "res":
+                raise RuntimeError("snapshot service unavailable")
+            released[name] = kept
+
+        recorder.release = record
+
+    failures = await coordination.release(participants, "c2", ["c2", "c1", "c2"], deadline_ts=deadline())
+
+    # Every participant was asked at once, and the one that failed is named without stopping the others.
+    assert released == {name: frozenset({"c1", "c2"}) for name in ("agent", "policy", "env")}
+    assert list(failures) == ["res"] and "snapshot service unavailable" in failures["res"]
+
+
+async def test_release_is_refused_while_a_checkpoint_is_open() -> None:
+    client, recorders, _ = deployment(*FULL)
+    participants = await coordination.discover(client, auth_token=TOKEN)
+    await coordination.prepare(participants, "c2", deadline_ts=deadline())
+
+    failures = await coordination.release(participants, "c1", ["c1"], deadline_ts=deadline())
+    await coordination.resume(participants, "c2", deadline_ts=deadline())
+
+    assert set(failures) == set(recorders)
+    assert all("checkpoint_invalid_phase" in failure for failure in failures.values())

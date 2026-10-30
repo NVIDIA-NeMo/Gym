@@ -114,7 +114,7 @@ async def test_a_member_that_has_not_recorded_its_reward_gets_it_back_after_a_re
     server, participant = seeded(config, judge=AsyncMock(side_effect=member_0_wins))
     outcomes = await finish_cohort(server)
     assert outcomes[0].reward != outcomes[1].reward
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     assert [record.session_id for record in records] == [SESSIONS[1]]
     await server.aclose()
 
@@ -137,12 +137,12 @@ async def test_a_restored_cohort_survives_another_checkpoint_before_its_members_
     assert outcomes[0].reward != outcomes[1].reward
     for index in recorded_before_checkpoint:
         participant.ended(SESSIONS[index])
-    checkpoint_a = await participant.export(None)
+    checkpoint_a = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     restored, restored_participant = await restore(config, checkpoint_a)
     # Checkpoint B lands before the open members replay their verification.
-    checkpoint_b = await restored_participant.export(None)
+    checkpoint_b = await restored_participant.export(None, checkpoint_id="c")
     assert [record.state for record in checkpoint_b] == [record.state for record in checkpoint_a]
     await restored.aclose()
 
@@ -160,7 +160,7 @@ async def test_a_member_that_has_not_recorded_its_judge_failure_gets_it_back_aft
     server, participant = seeded(config, judge=AsyncMock(side_effect=JudgeError("judge is down")))
     outcomes = await finish_cohort(server)
     assert all(isinstance(outcome, JudgeError) for outcome in outcomes)
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     assert records[0].state["judge_failure"] == str(outcomes[1])
     await server.aclose()
 
@@ -183,7 +183,7 @@ async def test_outcomes_are_held_while_a_checkpoint_is_open(config, judge_fails)
 
     # The judge ran, but no member has its outcome, and the export holds none.
     assert not any(task.done() for task in members)
-    assert [record.state for record in await participant.export(None)] == [{}, {}]
+    assert [record.state for record in await participant.export(None, checkpoint_id="c")] == [{}, {}]
 
     await participant.open_admission()
     outcomes = await asyncio.wait_for(asyncio.gather(*members, return_exceptions=True), timeout=0.5)
@@ -199,7 +199,7 @@ async def test_a_session_whose_cohort_has_no_outcome_yet_exports_nothing(config)
     waiting = asyncio.create_task(verify_as(server, SESSIONS[0], member(0)))
     await until(lambda: server._session_members)
 
-    assert [record.state for record in await participant.export(None)] == [{}, {}]
+    assert [record.state for record in await participant.export(None, checkpoint_id="c")] == [{}, {}]
     waiting.cancel()
     await asyncio.gather(waiting, return_exceptions=True)
     await server.aclose()
@@ -210,7 +210,7 @@ async def test_a_restored_cohort_nothing_continues_from_is_dropped(config, how):
     """The rollout starts over from its input under the same group attempt; a leftover cohort would refuse it."""
     server, participant = seeded(config)
     await finish_cohort(server)
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     restored, restored_participant = await restore(config, records)
@@ -244,7 +244,7 @@ async def test_a_restored_cohort_stays_once_a_member_has_replayed(config):
         participant.seeded(session_id, episode_id)
     await asyncio.gather(*(verify_as(server, sessions[index], member(index)) for index in range(3)))
     participant.ended("s0")
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     restored, restored_participant = await restore(config3, records)
@@ -265,7 +265,7 @@ async def test_a_restored_cohort_stays_once_a_member_has_replayed(config):
 async def test_a_restore_that_names_a_cohort_inconsistently_installs_nothing(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
     records[1] = records[1].model_copy(update={"state": {**records[1].state, "group_attempt": 1}})
 
@@ -281,7 +281,7 @@ async def test_a_restore_that_names_a_cohort_inconsistently_installs_nothing(con
 async def test_a_restore_whose_sessions_disagree_on_a_member_installs_nothing(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index)) for index in range(2)))
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
     # A second session claims member 1 with another response.
     impostor = records[1].model_copy(
@@ -300,7 +300,7 @@ async def test_a_restore_refuses_digests_saved_under_another_scheme(config):
     """A digest from another serialization would refuse every exact replay; refuse the saved state instead."""
     server, participant = seeded(config)
     await finish_cohort(server)
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     assert records[0].state["response_digest_scheme"] == genrm.RESPONSE_DIGEST_SCHEME
     await server.aclose()
     records[0] = records[0].model_copy(
@@ -318,7 +318,7 @@ async def test_a_restored_cohort_refuses_an_older_attempt_of_its_group(config):
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[index], member(index, attempt=1)) for index in range(2)))
     participant.ended(SESSIONS[0])
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     await server.aclose()
 
     restored, _ = await restore(config, records)
@@ -390,7 +390,7 @@ async def test_pruning_keeps_an_outcome_an_open_session_still_needs(config, prun
         participant.ended(f"{group}0")
         if pruned_by == "age":
             await asyncio.sleep(0.02)
-    records = await participant.export(None)
+    records = await participant.export(None, checkpoint_id="c")
     assert sorted(record.session_id for record in records) == ["a1", "b1"]
     assert all(record.state for record in records)
     await server.aclose()
