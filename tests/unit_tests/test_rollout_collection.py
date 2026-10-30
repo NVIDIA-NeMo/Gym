@@ -92,6 +92,7 @@ from nemo_gym.rollout_collection import (
     NG_OMITTED_ROLLOUT_KEY,
     NG_PERF_KEY,
     NG_RESULT_TYPE_KEY,
+    NG_TASK_ID_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
     PROVENANCE_KEYS,
@@ -12598,3 +12599,96 @@ class TestRunExamplesMaterializedTasks:
         assert post.await_args.kwargs["server_name"] == "my_environment"
         assert completed.row[NG_ENVIRONMENT_SERVER_KEY] == "my_environment"
         assert AGENT_REF_KEY_NAME not in completed.row
+
+    async def test_episode_records_resolve_a_result_to_the_stored_record(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        self._install(monkeypatch, self._reply(result={"reward": 1.0, MASK_SAMPLE_KEY: False}))
+
+        row, record = await next(
+            RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True)
+        )
+
+        assert record == {
+            "reward": 1.0,
+            MASK_SAMPLE_KEY: False,
+            NG_TASK_ID_KEY: {"taskset": "my_taskset", "task_id": "task-1"},
+            NG_DIGEST_KEY: "sha256:task",
+        }
+        assert row[AGENT_REF_KEY_NAME] == {"name": "my_agent"}
+
+    async def test_episode_records_mask_a_handled_failure_at_reward_zero(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        failure = {"failure_reason": "agent unavailable", "terminal": False, "stage": "agent"}
+        self._install(monkeypatch, self._reply(failure=failure))
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True)
+        )
+
+        assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+        assert record["_ng_failure_message"] == "agent unavailable"
+        assert record["_ng_failure_stage"] == "agent"
+        assert record[NG_TERMINAL_KEY] is False
+        assert record[NG_DIGEST_KEY] == "sha256:task"
+        assert record["reward"] == 0.0
+        assert record[MASK_SAMPLE_KEY] is True
+
+    async def test_episode_records_keep_a_gym_built_result_unmasked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A row the dispatch budget never started keeps Gym's drained result, named by its inputs as gym eval run
+        # stores it; it is not an Environment Server failure, so it is not scored or masked here.
+        post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples(
+                [self._materialized_row()], dispatch_budget_s=0.0, episode_records=True
+            )
+        )
+
+        post.assert_not_awaited()
+        assert record[NG_DISPATCH_DRAINED_KEY] is True
+        assert record[NG_FAILURE_CLASS_KEY] == CANCELLED
+        assert record[NG_DIGEST_KEY] == "sha256:task"
+        assert "reward" not in record and MASK_SAMPLE_KEY not in record
+
+    async def test_episode_records_leave_a_flat_row_unchanged(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        reply = {"reward": 1.0, "response": {"id": "r"}}
+        install_fake_server_client(monkeypatch, AsyncMock(return_value=FakeResponse(200, reply)))
+
+        _, result = await next(RolloutCollectionHelper().run_examples([failing_row()], episode_records=True))
+
+        assert result == reply
+
+    async def test_episode_records_apply_to_drained_outcomes(self) -> None:
+        gate = asyncio.Event()
+        started = []
+        failure = {"failure_reason": "sandbox lost", "terminal": False}
+
+        async def rollout() -> _CompletedRollout:
+            started.append(True)
+            await gate.wait()
+            return _CompletedRollout(
+                row=self._materialized_row(), result=self._reply(failure=failure), rollout_latency_ms=None
+            )
+
+        internal = nemo_gym.rollout_collection._EagerCompletionIterator(iter([rollout()]), total=1)
+        completions = nemo_gym.rollout_collection._RowResultIterator(internal, episode_records=True)
+        waiter = asyncio.ensure_future(next(completions))
+        try:
+            while not started:
+                await asyncio.sleep(0)
+            gate.set()
+            await asyncio.sleep(0)  # The rollout has finished; the waiter has not claimed it.
+            [drained] = await completions.aclose_and_drain()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+
+            _, record = await drained
+
+            assert record[NG_FAILURE_CLASS_KEY] == ENVIRONMENT_SERVER_FAILURE_CLASS
+            assert record["reward"] == 0.0
+            assert record[MASK_SAMPLE_KEY] is True
+        finally:
+            await completions.aclose()
+            await asyncio.gather(waiter, return_exceptions=True)

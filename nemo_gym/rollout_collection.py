@@ -582,6 +582,38 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     return record
 
 
+def _stored_episode_record(row: Mapping[str, Any], result: Dict[str, Any]) -> Dict[str, Any]:
+    """The record ``gym eval run`` stores for a materialized row's ``/run`` result.
+
+    The row went out as an episode request, so an Environment Server reply is a ``BaseEpisodeResponse`` and
+    becomes ``_episode_record``; a result Gym built itself (a drained row, a routed ``/run`` failure) is kept.
+    Result or failure, the record names the inputs it ran: the row's ``task_data`` provenance stamps (task and
+    dataset digests) are added where the record does not set them.
+    """
+    if _is_episode_response(result):
+        result = _episode_record(result)
+    for key, value in _task_data_provenance(row).items():
+        result.setdefault(key, value)
+    return result
+
+
+def _caller_episode_record(row: Mapping[str, Any], result: Any) -> Any:
+    """The result ``run_examples(..., episode_records=True)`` hands back for one row.
+
+    For a materialized row it is the record ``gym eval run`` stores (``_stored_episode_record``). A handled
+    Environment Server failure also gets ``reward`` 0.0 and ``mask_sample`` True, the fields of a masked verify
+    response (see ``lost_session_verification``), so a trainer that reads them drops the episode instead of
+    scoring it. A flat row's result is returned unchanged.
+    """
+    if _materialized_taskset(row) is None or not isinstance(result, dict):
+        return result
+    record = _stored_episode_record(row, result)
+    if record.get(NG_FAILURE_CLASS_KEY) == ENVIRONMENT_SERVER_FAILURE_CLASS:
+        record["reward"] = 0.0
+        record[MASK_SAMPLE_KEY] = True
+    return record
+
+
 @dataclass(frozen=True)
 class _CompletedRollout:
     """A finished ``/run`` dispatch, with timing carried alongside (not inside) the raw result."""
@@ -2794,11 +2826,13 @@ class _RowResultIterator:
     """What ``run_examples`` returns: ``(row, result)`` awaitables in completion order.
 
     A thin map over the internal completion iterator that keeps its ``aclose()`` reachable, so a
-    direct caller can stop collecting and cancel the rollouts still in flight.
+    direct caller can stop collecting and cancel the rollouts still in flight. With ``episode_records``,
+    every outcome it hands back, awaited or drained, carries ``_caller_episode_record``'s view of the result.
     """
 
-    def __init__(self, completions: Iterator[Future]):
+    def __init__(self, completions: Iterator[Future], *, episode_records: bool = False):
         self._completions = completions
+        self._episode_records = episode_records
         self._closed = False
 
     def __iter__(self):
@@ -2809,10 +2843,13 @@ class _RowResultIterator:
             raise StopIteration
         return self._without_metadata(next(self._completions))
 
-    @staticmethod
-    async def _without_metadata(future: Future) -> Tuple[Dict, Dict]:
-        completed = await future
+    def _caller_result(self, completed: _CompletedRollout) -> Tuple[Dict, Dict]:
+        if self._episode_records:
+            return completed.row, _caller_episode_record(completed.row, completed.result)
         return completed.row, completed.result
+
+    async def _without_metadata(self, future: Future) -> Tuple[Dict, Dict]:
+        return self._caller_result(await future)
 
     async def aclose(self) -> None:
         """Cancel unfinished rollouts and await the end of their client tasks in this process.
@@ -2864,8 +2901,7 @@ class _RowResultIterator:
                 outcome.set_exception(error)
                 outcome.exception()
             else:
-                result = task.result()
-                outcome.set_result((result.row, result.result))
+                outcome.set_result(self._caller_result(task.result()))
             outcomes.append(outcome)
         return outcomes
 
@@ -3776,12 +3812,7 @@ class RolloutCollectionHelper(BaseModel):
                 completed = await future
                 row, result, rollout_latency_ms = completed.row, completed.result, completed.rollout_latency_ms
                 if _materialized_taskset(row) is not None:
-                    if _is_episode_response(result):
-                        # The row went out as an episode request, so the reply is a BaseEpisodeResponse.
-                        result = _episode_record(result)
-                    # Result or failure, the record names the inputs it ran (task and dataset digests).
-                    for key, value in _task_data_provenance(row).items():
-                        result.setdefault(key, value)
+                    result = _stored_episode_record(row, result)
                 if completed.elapsed_s is not None:
                     # Read by the timeouts section of the run health summary. Not `elapsed_seconds`,
                     # which resume reads to order dispatch.
@@ -4911,6 +4942,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
+        episode_records: bool = False,
     ) -> _RowResultIterator:  # pragma: no cover
         """
         We provide this function as a lower level interface for running rollout collection.
@@ -4924,7 +4956,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         already names an Environment Server; a taskset without a route raises before any row is dispatched. The row
         is also stamped with the ``agent_ref`` of the agent that Environment Server binds, so it names the agent it
         ran on (``gym eval run`` leaves the records it stores for these rows unattributed). Its ``/run`` reply is the
-        Environment Server's ``BaseEpisodeResponse``.
+        Environment Server's ``BaseEpisodeResponse``; ``episode_records`` below flattens it.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
         that ends every rollout still in flight. It defaults off because those rollouts then leave
@@ -4971,7 +5003,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         Rows start in the order given, once the returned iterator is first consumed.
 
         A row that ran resolves to exactly the ``(row, result)`` pair Gym's own `/run` endpoint
-        returned — no Gym-private fields are added to ``result``. A row that produced no `/run`
+        returned — no Gym-private fields are added to ``result`` unless ``episode_records`` (below) asks for a
+        materialized row's stored record. A row that produced no `/run`
         result resolves to a Gym-built ``result`` carrying Gym-private fields instead: a row drained
         by the dispatch budget gets ``_ng_failure_class="cancelled"`` with the ``_ng_dispatch_drained``
         and ``_ng_no_persist`` markers, and a failed `/run` under ``route_failures_to_sidecar`` gets a
@@ -4980,6 +5013,13 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``retry_requests=False`` disables automatic HTTP replay of a mutating `/run`.
         Connections that were never established can still be retried safely.
         It does not convert failures to successful result rows.
+
+        ``episode_records=True`` resolves each materialized row's result to the flat record ``gym eval run`` stores
+        for it instead: a ``BaseEpisodeResponse`` becomes the result's own fields (or the ``_ng_failure_*`` fields of
+        a handled failure) plus ``_ng_task_id`` and the row's ``task_data`` provenance (``_ng_digest``,
+        ``_ng_dataset_digest``). A handled Environment Server failure also gets ``reward`` 0.0 and ``mask_sample``
+        True, so a trainer masks the episode instead of scoring it. Flat rows' results are unaffected. It applies to
+        every outcome the iterator hands back, including those from ``aclose_and_drain()``.
         """
 
         return _RowResultIterator(
@@ -4995,7 +5035,8 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 latency_tracker=latency_tracker,
                 stamp_materialized_agent_refs=True,
                 **({"retry_requests": False} if not retry_requests else {}),
-            )
+            ),
+            episode_records=episode_records,
         )
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
