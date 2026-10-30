@@ -1,0 +1,24 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/terminal_bench_2_1/configs/terminal_bench_2_1_benchmark.yaml
+  - responses_api_agents/nooa_agent/configs/nooa_sandboxed.yaml
+  - environment_servers/single_agent_turn/configs/single_agent_turn.yaml
+
+environment_routing_mode: taskset
+environment_server_routes:
+  terminal-bench-2.1: experiment
+
+experiment:
+  _inherit_from: single_agent_turn
+  environment_servers:
+    single_agent_turn:
+      # Bounds seed, agent, verify, and close together; the worker ceiling is 21,600s (6h).
+      default_episode_timeout_seconds: 30000
+      cleanup_timeout_seconds: 180
+      resources_server:
+        type: resources_servers
+        name: benchmark
+      agent_server:
+        type: responses_api_agents
+        name: agent
