@@ -96,7 +96,7 @@ class _Server(BaseEnvironmentServerWithTools[_Request, _Response]):
     agent: ClassVar[Agent | None] = None
     toolset: ClassVar[Callable[[_Counter], Any]] = TypedToolset
 
-    async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+    async def run_episode(self, request: _Request, cleanup: CleanupContext) -> _Response:
         counter = _Counter()
         served = await self.serve_tools(request, type(self).toolset(counter), cleanup)
         if type(self).agent is not None:
@@ -333,3 +333,105 @@ def test_several_workers_are_refused_while_calls_reach_any_worker() -> None:
 
     with pytest.raises(ValueError, match="needs num_workers=1"):
         refuse_unsupported_num_workers(server)
+
+
+class _Sandbox:
+    """A resource whose release takes a moment, as stopping a remote sandbox does."""
+
+    def __init__(self) -> None:
+        self.stops_started = 0
+        self.stopped = False
+
+    async def stop(self) -> None:
+        self.stops_started += 1
+        await asyncio.sleep(0.05)
+        self.stopped = True
+
+
+def _sandbox_server(*, hold: bool) -> tuple[_Server, _Sandbox, asyncio.Event]:
+    """A server whose episode registers a sandbox, then returns or, with ``hold``, runs until cancelled."""
+    sandbox, started = _Sandbox(), asyncio.Event()
+
+    async def run_episode(self: _Server, request: _Request, cleanup: CleanupContext) -> _Response:
+        cleanup.register_cleanup("sandbox", sandbox.stop)
+        started.set()
+        if hold:
+            await asyncio.Event().wait()
+        return _Response(episode_id=request.episode_id, task_id=request.task.task_id, result="done")
+
+    server, _ = _server()
+    type(server).run_episode = run_episode
+    return server, sandbox, started
+
+
+def test_shutdown_finishes_the_cleanups_of_a_running_episode() -> None:
+    async def scenario() -> _Sandbox:
+        server, sandbox, started = _sandbox_server(hold=True)
+        app = server.setup_webserver()
+        episode = asyncio.create_task(server.run_request(_request()))
+        await started.wait()
+
+        async with app.router.lifespan_context(app):
+            pass
+        assert sandbox.stopped
+
+        episode.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await episode
+        return sandbox
+
+    sandbox = asyncio.run(scenario())
+
+    assert sandbox.stops_started == 1
+
+
+def test_shutdown_finishes_a_cleanup_that_a_second_cancellation_interrupted() -> None:
+    """Shutdown cancels a running /run and does not wait for it; the event loop's teardown cancels it again."""
+
+    async def scenario() -> _Sandbox:
+        server, sandbox, started = _sandbox_server(hold=True)
+        episode = asyncio.create_task(server.run_request(_request()))
+        await started.wait()
+
+        episode.cancel()
+        await asyncio.sleep(0.01)
+        assert sandbox.stops_started == 1 and not sandbox.stopped
+        episode.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await episode
+        assert not sandbox.stopped
+
+        await server.finish_running_cleanups()
+        return sandbox
+
+    sandbox = asyncio.run(scenario())
+
+    assert sandbox.stopped and sandbox.stops_started == 2
+
+
+def test_an_episode_that_finished_is_not_cleaned_up_again_at_shutdown() -> None:
+    async def scenario() -> _Sandbox:
+        server, sandbox, _ = _sandbox_server(hold=False)
+        await server.run_request(_request())
+        await server.finish_running_cleanups()
+        return sandbox
+
+    sandbox = asyncio.run(scenario())
+
+    assert sandbox.stopped and sandbox.stops_started == 1
+
+
+def test_a_subclass_implements_run_episode_not_run() -> None:
+    class _OnlyRun(BaseEnvironmentServerWithTools[_Request, _Response]):
+        request_model = _Request
+        response_model = _Response
+
+        async def run(self, request: _Request, cleanup: CleanupContext) -> _Response:
+            raise AssertionError("not reached")
+
+        async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
+            return AggregateMetrics()
+
+    config = _server()[0].config
+    with pytest.raises(TypeError, match="run_episode"):
+        _OnlyRun(config=config, server_client=MagicMock(spec=ServerClient))
