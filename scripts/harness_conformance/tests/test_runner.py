@@ -75,6 +75,9 @@ def test_launch_uses_local_endpoints_and_isolated_workspaces(harness, use_agent_
     agent = config["probe_agent"]["responses_api_agents"][f"{harness}_agent"]
     assert agent["model_server"] == {"type": "responses_api_models", "name": "policy_model"}
     assert config["model_call_capture_dir"] == str(tmp_path / "capture")
+    if harness == "openclaw":
+        assert agent["openclaw_version"] == "2026.6.11"
+        assert agent["timeout"] == 12
     environment_type = "single_agent_turn_legacy" if use_agent_sessions else "legacy_agent"
     assert set(config["probe_environment"]["environment_servers"]) == {environment_type}
     if use_agent_sessions:
@@ -293,11 +296,13 @@ def test_probe_retains_configured_assistant_message_identity(tmp_path, scenario_
 
 
 @pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure", "usage_omitted", "retry_429", "retry_500"])
-def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name):
+@pytest.mark.parametrize("tool_name", ["bash", "exec"])
+def test_live_chat_endpoint_executes_script_and_captures_every_attempt(tmp_path, scenario_name, tool_name):
     scenario = SCENARIO[scenario_name]
     probe = Probe(scenario, tmp_path)
     messages = [{"role": "user", "content": "Run checks"}]
-    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    tool = {**TOOL, "function": {**TOOL["function"], "name": tool_name}}
+    body = {"model": "conformance-model", "messages": messages, "tools": [tool]}
     with TestClient(probe.model_app()) as client:
         for status in scenario.http_errors:
             response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)

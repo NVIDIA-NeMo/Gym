@@ -187,8 +187,15 @@ Per-session OpenClaw state/config, prompt, transcript, and supervisor output are
 `/tmp/nemo-gym-openclaw-sessions/`. OpenClaw reads the generated config directly without onboarding
 or creating bootstrap files in the task repository. Task HOME, XDG directories, PATH and
 dependencies are preserved for tools and verification.
-The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel/plugin
-execution and required external HTTP/MCP tools are unsupported. OpenClaw's internal `gateway`
+The sandbox adapter enables `read`, `write`, `edit`, `exec`, and `process`; subagent/channel
+execution, user plugins, and required external HTTP/MCP tools are unsupported.
+A bundled `nemo-gym` provider plugin preserves tool-call IDs and reasoning when replaying
+Gym model responses. OpenClaw's generic custom-provider policy otherwise strips punctuation
+from IDs, breaking tool-result identity. The adapter requires the plugin's per-session
+readiness receipt before accepting a response. This detects a missing hook after execution;
+it does not prevent earlier model or tool calls. The provider's `x-session-id` header also
+joins rejected HTTP attempts and retries, which have no response ID, to the invocation at close.
+OpenClaw's internal `gateway`
 exec host refers to the embedded CLI process inside the borrowed sandbox.
 
 Sandbox request support is deliberately explicit:
@@ -221,8 +228,12 @@ Sandbox request support is deliberately explicit:
   same configured-system, request-instructions, input-system order.
 
 Successful and limit-truncated Responses retain reasoning, tool calls/results, and final or partial text.
-Runtime, provider, and upstream model failures raise an error before verification, with transcript
-evidence and failed status retained in the observations returned by close.
+Terminal upstream model errors return HTTP 200 with a failed Responses object, the original
+error, partial output, usage, and `ng_agent_outcome` cause/status metadata. EnvironmentServer
+applies its configured grading/retry policy; the default verifies 400/413/422 and retries
+429/5xx and transport failures. Unclassified runtime failures remain retryable failures.
+Setup, missing plugin readiness, and uncertain cleanup still raise before verification.
+Close retains transcript evidence for failed activations.
 Usage sums observed assistant model calls, including cache reads/writes and failed final calls.
 Transcript rewrites retaining the same response ID and message count once; synthetic CLI summary
 messages carrying cumulative usage do not count again or override the model's terminal status.
@@ -232,8 +243,10 @@ Auxiliary model calls, such as compaction, are absent from the transcript. A cov
 reported because interrupted compaction need not leave an event. Totals therefore need not equal
 all backend calls. Missing per-call usage and
 unavailable reasoning-token details are also reported as observation gaps; the full branch history is retained.
-An explicit wall or model-output limit returns partial output as `incomplete`; upstream/model errors
-raise HTTP 502 even when a useful patch exists. Do not infer rollout success from reward alone. Close returns the captured observations,
+An explicit wall or model-output limit returns partial output as `incomplete`. Session callers
+that previously expected HTTP 502 for model failures must inspect `response.status` and
+`response.error` instead. The no-session local CLI and compatibility `/run` retain their behavior.
+Do not infer rollout success from reward alone. Close returns the captured observations,
 including salvaged transcript evidence after cancellation.
 
 The supervisor stops live harness-group processes. On timeout or close it also kills, within
@@ -282,3 +295,38 @@ It creates a sandbox, runs there, and destroys it on close; the default workdir 
 never triggers a replacement or host execution. With neither access nor a usable
 provider, setup fails. Verifiers that inspect task files must keep using a
 Resources-owned sandbox, since agent-owned sandboxes are gone before verification.
+
+## Conformance checks
+
+Run adapter tests in their own environment, including compatibility `/run`, concurrent signed-cookie
+isolation, borrowed-sandbox ownership, timeout/cancellation cleanup, close replay, and rollout/token
+capture routing:
+
+```bash
+gym env test +entrypoint=responses_api_agents/openclaw_agent +should_validate_data=true
+```
+
+On Linux, run the real pinned CLI against all eight scripted model/tool/error scenarios:
+
+```bash
+python -m scripts.harness_conformance.ci install --harness openclaw
+python scripts/run_harness_conformance.py --harness openclaw --output results/openclaw-conformance
+```
+
+Use a fresh output directory. Session setup installs OpenClaw 2026.6.11 and Node 22.19.0 in
+its local sandbox; no model credentials or host OpenClaw installation are required.
+The registry also selects OpenClaw in the shared conformance CI matrix.
+See the [runner guide](../../scripts/harness_conformance/README.md) for reports and rerun flags.
+These probes use an agent-owned local sandbox and retained-output verification; borrowed sandbox
+and real process cleanup are covered separately by the adapter tests. To enable the optional
+real CLI termination test after the probe installer has run:
+
+```bash
+export GYM_TEST_OPENCLAW_ENTRYPOINT=/tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11/openclaw/node_modules/openclaw/openclaw.mjs
+export GYM_TEST_OPENCLAW_NODE=/tmp/nemo-gym-openclaw-node-22.19.0-2026.6.11/node/bin/node
+gym env test +entrypoint=responses_api_agents/openclaw_agent +should_validate_data=true
+```
+
+A passing token-capture routing test proves the generated URL includes the capture route;
+it does not establish training token-ID/logprob fidelity. Validate each real model/sandbox
+pairing separately and inspect its agent response, verifier result, health, and cleanup evidence.
