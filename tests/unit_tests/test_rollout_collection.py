@@ -6030,7 +6030,7 @@ class TestRolloutCollection:
 
             async def freeze(self, rollout_id):
                 return TokenCaptureSnapshot(
-                    rollout_id=rollout_id,
+                    capture_key=rollout_id,
                     entries=(),
                     incomplete=False,
                     snapshot_id="snapshot",

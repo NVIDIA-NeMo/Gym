@@ -1560,17 +1560,19 @@ async def _fail_uncommitted_external_call(context: CaptureContext | None) -> Non
         logger.error(
             "Cannot poison uncommitted call %s for rollout %s: the lineage resolver is not a CaptureLedger.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
         return
     try:
         # A disconnected caller must not cancel the write before it reaches the ledger.
-        await asyncio.shield(ledger.record_failure(context.rollout_id, context.model_call_id, UNCOMMITTED_CALL_REASON))
+        await asyncio.shield(
+            ledger.record_failure(context.capture_key, context.model_call_id, UNCOMMITTED_CALL_REASON)
+        )
     except Exception:
         logger.exception(
             "Could not poison uncommitted call %s for rollout %s.",
             context.model_call_id,
-            context.rollout_id,
+            context.capture_key,
         )
 
 
@@ -1755,7 +1757,7 @@ class _CaptureMiddleware:
         capture_context = None
         if capture_wanted:
             capture_context = CaptureContext(
-                rollout_id=rollout_id,
+                capture_key=rollout_id,
                 model_call_id=model_call_id,
                 token_sink=token_sink,
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
