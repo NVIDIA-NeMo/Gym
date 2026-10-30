@@ -19,6 +19,7 @@ import stat
 import subprocess
 import threading
 import time
+import typing
 import zipfile
 from collections.abc import Callable
 from pathlib import Path
@@ -53,9 +54,11 @@ from resources_servers.officeenv.app import (
     SANDBOX_SURFACES,
     SEARCH_TOOLS,
     STAT_SCRIPT,
+    TOOL_SETS,
     OfficeEnvResourcesServer,
     OfficeEnvResourcesServerConfig,
     OfficeEnvSandboxConfig,
+    ToolSet,
     _path_part,
     api_credentials,
     content_description,
@@ -622,6 +625,8 @@ def test_a_sandbox_without_the_internet_reaches_only_this_server_and_the_model_s
     monkeypatch.setattr(officeenv_app, "get_global_config_dict", lambda: OPENSANDBOX_NAMED)
     with mcp_client(make_server(sandbox_config={**IMAGE, "block_internet": True})) as client:
         assert client.post("/seed_session", json=seed_body()).status_code == 200
+    guide = sandboxes.started[0].spec.files["/workspace/README.md"]
+    assert guide.endswith("The sandbox has no internet access, so nothing else can be installed.\n")
     policy = sandboxes.started[0].spec.provider_options["network_policy"]
     # this server (MCP and the file API) and the policy model; the judge on loopback is no sandbox's to reach
     assert policy == {
@@ -656,6 +661,78 @@ def test_blocking_the_internet_needs_opensandbox_a_reachable_server_and_one_poli
         OfficeEnvSandboxConfig(block_internet=True, provider_options={"network_policy": {"defaultAction": "deny"}})
     with pytest.raises(ValueError, match="host_relay"):
         OfficeEnvSandboxConfig(block_internet=True, host_relay="host.lima.internal")
+
+
+# Images and what a row needs.
+
+DOCUMENTS_IMAGE = {"image": "officeenv-sandbox:documents", "provides": ["documents", "office"]}
+
+
+def needing(needs: object, *, session_id: str = "rs-1", rollout_id: str = "r1") -> dict:
+    body = seed_body(session_id=session_id, rollout_id=rollout_id)
+    body["task_data"]["sandbox_needs"] = needs
+    return body
+
+
+def test_a_row_gets_the_first_image_with_what_it_needs_and_the_guide_names_its_tools(sandboxes) -> None:
+    server = make_server(sandbox_config={**IMAGE, "images": [DOCUMENTS_IMAGE]})
+    with mcp_client(server) as client:
+        for body in (
+            seed_body(),
+            needing(["documents"], session_id="rs-2", rollout_id="r2"),
+            needing([], session_id="rs-3", rollout_id="r3"),
+        ):
+            assert client.post("/seed_session", json=body).status_code == 200
+    plain, documents, nothing_more = sandboxes.started
+    assert [sandbox.spec.image for sandbox in sandboxes.started] == [
+        "officeenv-sandbox:pilot",
+        "officeenv-sandbox:documents",
+        "officeenv-sandbox:pilot",
+    ]
+    assert "Installed here" not in plain.spec.files["/workspace/README.md"]
+    guide = documents.spec.files["/workspace/README.md"]
+    assert (
+        "\nInstalled here:\n\n- bash, curl and Python 3.12 with pandas and openpyxl\n- python-docx, python-pptx, pypdf, "
+        "pdfplumber and reportlab for Python, and Poppler's pdftotext, pdfinfo and pdftoppm\n- LibreOffice without a "
+        "display, which converts documents (soffice --headless --convert-to pdf <file>, or docx, xlsx, pptx)"
+    ) in guide
+    assert guide.endswith("formulas as it converts it\n") and "internet" not in guide
+    assert not ENVIRONMENT_NAMES.search(guide)
+    assert set(typing.get_args(ToolSet)) == set(TOOL_SETS)
+
+
+def test_the_configured_image_serves_the_rows_that_need_what_it_provides(sandboxes) -> None:
+    with mcp_client(make_server(sandbox_config=DOCUMENTS_IMAGE)) as client:
+        assert client.post("/seed_session", json=needing(["office", "documents"])).status_code == 200
+    assert sandboxes.started[0].spec.image == "officeenv-sandbox:documents"
+
+
+def test_a_row_no_image_serves_is_refused_before_its_world_is_built(sandboxes) -> None:
+    server = make_server()
+    with mcp_client(server) as client:
+        for needs, message in [
+            (["office"], "No configured sandbox image provides office (sandbox_config.provides and"),
+            (["documents", "scanner"], "sandbox_needs names scanner; a sandbox can provide documents, office"),
+            ("documents", "sandbox_needs lists what the task needs in its sandbox: some of documents, office"),
+        ]:
+            refused = client.post("/seed_session", json=needing(needs))
+            assert refused.status_code == 400, refused.text
+            error = refused.json()["detail"]["error"]
+            assert error["code"] == "unsupported_needs" and error["message"].startswith(message), error
+    assert sandboxes.started == [] and not server._episodes and len(server.service.store) == 0
+    with mcp_client(make_server(sandbox_config={})) as client:
+        with pytest.raises(ValueError, match="Set sandbox_config.image"):
+            client.post("/seed_session", json=seed_body())
+
+
+def test_the_guide_says_a_sandbox_without_the_internet_installs_nothing_else() -> None:
+    guide = workspace_guide(8192, ("gdrive",), offline=True)
+    assert guide.endswith(
+        "\nInstalled here:\n\n- bash, curl and Python 3.12 with pandas and openpyxl\n\n"
+        "The sandbox has no internet access, so nothing else can be installed.\n"
+    )
+    with_tools = workspace_guide(8192, ("gdrive",), tools=("office",), offline=True)
+    assert "- LibreOffice without a display" in with_tools and with_tools.endswith("nothing else can be installed.\n")
 
 
 # The file API.
@@ -2488,6 +2565,29 @@ def test_prepared_rows_seed_as_sandboxed_episodes_on_their_surface(sandboxes, su
             episode = server._episodes[f"rs-{index}"]
             guide = sandboxes.started[-1].spec.files["/workspace/README.md"]
             assert guide == workspace_guide(8192, episode.apps, surface=surface)
+
+
+def test_a_task_that_needs_document_tools_keeps_that_in_its_row(sandboxes, tmp_path) -> None:
+    """prepare_rows.py copies an example's sandbox_needs to its row, whose episode gets an image that has them."""
+    prepare_rows = load_prepare_rows()
+    (row,) = prepare_rows.rows()[:1]
+    task = {"prompt": "Write the memo.", "spec": row["officeenv"], "sandbox_needs": ["documents"]}
+    (tmp_path / "memo.json").write_text(json.dumps(task), encoding="utf-8")
+    (needing_documents,) = prepare_rows.rows(folder=tmp_path)
+    assert needing_documents["sandbox_needs"] == ["documents"]
+    assert not any("sandbox_needs" in each for each in prepare_rows.rows())  # OfficeEnv's examples need no more
+    seed = ResourcesSeedSessionRequest(
+        resources_session_id="rs-1",
+        episode_id=EpisodeId(rollout_id="r1"),
+        task_id=TaskId(taskset="oe", task_id=row["task_id"]),
+        task_data={key: value for key, value in needing_documents.items() if key != "responses_create_params"},
+    ).model_dump(mode="json")
+    with mcp_client(make_server()) as client:
+        refused = client.post("/seed_session", json=seed)
+        assert refused.status_code == 400 and refused.json()["detail"]["error"]["code"] == "unsupported_needs"
+    with mcp_client(make_server(sandbox_config={**IMAGE, "images": [DOCUMENTS_IMAGE]})) as client:
+        assert client.post("/seed_session", json=seed).status_code == 200
+    assert [sandbox.spec.image for sandbox in sandboxes.started] == ["officeenv-sandbox:documents"]
 
 
 def test_each_harness_config_binds_its_harness_to_the_shared_episodes() -> None:

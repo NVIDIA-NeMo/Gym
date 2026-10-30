@@ -1,0 +1,27 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# An episode sandbox with document tools, for rows that need them (sandbox_needs: documents, office): python-docx,
+# python-pptx, pypdf, pdfplumber and reportlab, Poppler's command line tools (pdftotext, pdfinfo, pdftoppm), and
+# LibreOffice without a display, for conversions and formula recalculation, with the DejaVu fonts and the Liberation
+# fonts (metric-compatible with Arial, Times New Roman and Courier New). It is built on an episode image that already
+# has the shell, Python with pandas and openpyxl, and curl (BASE: sandbox/Dockerfile's image by default, or a training
+# image with a harness staged in it), so one image serves a training mix:
+#
+#   docker build -t officeenv-sandbox:pilot resources_servers/officeenv/sandbox
+#   docker build -f resources_servers/officeenv/sandbox/Dockerfile.documents \
+#     -t officeenv-sandbox:documents resources_servers/officeenv/sandbox
+#
+# Serve it with sandbox_config.provides: [documents, office] (README, "Images and what a row needs"). A sandbox without
+# the internet installs nothing else.
+ARG BASE=officeenv-sandbox:pilot
+FROM ${BASE}
+
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends \
+        poppler-utils \
+        libreoffice-writer-nogui libreoffice-calc-nogui libreoffice-impress-nogui \
+        fonts-dejavu-core fonts-liberation \
+    && rm -rf /var/lib/apt/lists/*
+RUN python3 -m pip install --no-cache-dir --root-user-action=ignore \
+        python-docx==1.2.0 python-pptx==1.0.2 pypdf==6.21.4 pdfplumber==0.11.10 reportlab==5.1.0

@@ -152,8 +152,10 @@ tools over MCP as above; `configs/officeenv_sandbox_codex.yaml` (Codex CLI) and
 no MCP tools. Each episode also:
 
 1. borrows a sandbox: the seed starts one from `sandbox_config.image` (built from
-   `sandbox/Dockerfile`) with Gym's sandbox provider named by `sandbox_provider`, and lends it to
-   the harness as `SandboxAccess`. Seeding the episode again lends the same sandbox;
+   `sandbox/Dockerfile`), or from another configured image when the row needs tools that one
+   lacks (see Images and what a row needs), with Gym's sandbox provider named by
+   `sandbox_provider`, and lends it to the harness as `SandboxAccess`. Seeding the episode again
+   lends the same sandbox;
    verification stops it (or `/close_session`, when verification did not), and so does shutting
    the server down;
 2. moves file content between the workspace and the file apps (Google Drive, Box, SharePoint,
@@ -212,6 +214,52 @@ no MCP tools. Each episode also:
    grades the world as for any row: a process the harness left running in the background can act
    until verification starts, but not while the world is graded. A failed stop is logged and
    grading goes on; `/close_session` stops the sandbox then.
+
+### Images and what a row needs
+
+A row may say what its task needs in the sandbox beyond the shell, curl and Python 3.12 with
+pandas and openpyxl, as `sandbox_needs` (`TOOL_SETS`): `documents` is python-docx, python-pptx,
+pypdf, pdfplumber and reportlab, and Poppler's `pdftotext`, `pdfinfo` and `pdftoppm`; `office` is
+LibreOffice without a display, which converts documents (`soffice --headless --convert-to pdf`,
+or `docx`, `xlsx`, `pptx`) and recalculates a workbook's formulas as it converts it.
+`sandbox_config.provides` says what `sandbox_config.image` has, and `sandbox_config.images` lists
+more images with what each provides. A row's episode gets the first image that provides all it
+needs, `image` first, and a row that no configured image serves is refused at seed, before its
+world is built (400 `unsupported_needs`). The workspace's `README.md` lists what the episode's
+image has, and with `block_internet` says that nothing else can be installed.
+`sandbox/prepare_rows.py` copies an example task's `sandbox_needs` to its row.
+
+`sandbox/Dockerfile.documents` adds both to an episode image, with pinned Python packages and
+LibreOffice 7.4 and Poppler 22.12 from Debian 12. It builds on `sandbox/Dockerfile`'s image by
+default, or on another with `--build-arg BASE=<image>`, such as a training image with a harness
+staged in it:
+
+```bash
+docker build -t officeenv-sandbox:pilot resources_servers/officeenv/sandbox
+docker build -f resources_servers/officeenv/sandbox/Dockerfile.documents \
+  -t officeenv-sandbox:documents resources_servers/officeenv/sandbox
+```
+
+Serve it to every row:
+
+```yaml
+sandbox_config:
+  image: officeenv-sandbox:documents
+  provides: [documents, office]
+```
+
+or only to the rows that need it, since it is about 700 MB larger:
+
+```yaml
+sandbox_config:
+  image: officeenv-sandbox:pilot
+  images:
+    - image: officeenv-sandbox:documents
+      provides: [documents, office]
+```
+
+A cell whose sandboxes have no internet pulls the image from a registry, pinned by digest: its
+tools cannot be installed at sandbox start, as the OpenSandbox config installs pandas and openpyxl.
 
 ### Tools, commands or endpoints
 

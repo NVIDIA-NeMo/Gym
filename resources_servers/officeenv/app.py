@@ -50,6 +50,12 @@ shell and curl runs it; or ``api_search`` and ``api_fetch`` over MCP, which find
 harness calls with curl at ``/v1/<app>/<op>``. The file API, the content kept out of the
 conversation and the workspace guide serve every surface.
 
+A row may say what its task needs in the sandbox beyond the shell, curl and Python with pandas and
+openpyxl (``sandbox_needs``: ``documents``, ``office``, ``TOOL_SETS``). Its episode gets the first
+configured image that provides them all (``sandbox_config.image`` and ``provides``, then
+``sandbox_config.images``), whose tools the workspace guide names; a row no configured image serves
+is refused before its world is built (400 ``unsupported_needs``).
+
 What a sandbox reads of this server names a company's API, never the environment behind it or Gym:
 the variables, routes, guide, answers and session cookie (``get_session_cookie_name``), and with the
 config's ``mcp_server_name`` and ``mcp_bearer_token`` the MCP endpoint too. A sandbox can reach this
@@ -89,7 +95,7 @@ from dataclasses import dataclass, field, replace
 from functools import cache
 from pathlib import Path
 from secrets import token_urlsafe
-from typing import TYPE_CHECKING, Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar, Literal
 from urllib.parse import quote
 
 from fastapi import FastAPI, HTTPException, Request, Response
@@ -155,11 +161,46 @@ class LengthPenaltyConfig(BaseModel):
 # The most bytes of a text file a sandboxed episode's Drive answer carries inline (sandbox_config.inline_file_bytes)
 DEFAULT_INLINE_FILE_BYTES = 8192
 
+# What an episode image may have besides the shell, curl and Python 3.12 with pandas and openpyxl (sandbox/Dockerfile),
+# by the names sandbox_config.provides and a row's sandbox_needs use, as the workspace guide names it to the model
+# (sandbox/Dockerfile.documents installs both).
+ToolSet = Literal["documents", "office"]
+TOOL_SETS: dict[str, str] = {
+    "documents": "python-docx, python-pptx, pypdf, pdfplumber and reportlab for Python, and Poppler's pdftotext, "
+    "pdfinfo and pdftoppm",
+    "office": "LibreOffice without a display, which converts documents (soffice --headless --convert-to pdf <file>, "
+    "or docx, xlsx, pptx) and recalculates a workbook's formulas as it converts it",
+}
+INSTALLED = "bash, curl and Python 3.12 with pandas and openpyxl"
+NEEDS_KEY = "sandbox_needs"  # the row's list of TOOL_SETS its task needs in its sandbox
+
+
+class SandboxImage(BaseModel):
+    """An episode image and what it has besides the shell, curl and Python with pandas and openpyxl (TOOL_SETS)."""
+
+    image: str = Field(description="The image's reference, as the sandbox provider pulls it")
+    provides: list[ToolSet] = Field(
+        default_factory=list,
+        description="The tool sets the image has (TOOL_SETS), which a row's sandbox_needs are matched against",
+    )
+
 
 class OfficeEnvSandboxConfig(SandboxConfig):
     """The sandbox lent to each Environment Server episode when ``sandbox_provider`` is set."""
 
     image: str | None = Field(default=None, description="OCI image, e.g. one built from sandbox/Dockerfile")
+    provides: list[ToolSet] = Field(
+        default_factory=list,
+        description="What `image` has besides the shell, curl and Python with pandas and openpyxl: documents "
+        "(python-docx, python-pptx, pypdf, pdfplumber, reportlab and Poppler's tools) and office (LibreOffice without "
+        "a display); sandbox/Dockerfile.documents adds both to an image",
+    )
+    images: list[SandboxImage] = Field(
+        default_factory=list,
+        description="More images and what each provides, for rows whose sandbox_needs `image` does not provide: such "
+        "a row's episode gets the first of these that provides them all, and a row none provides is refused "
+        "(400 unsupported_needs)",
+    )
     workdir: str = "/workspace"
     host_relay: str | None = Field(
         default=None,
@@ -195,6 +236,11 @@ class OfficeEnvSandboxConfig(SandboxConfig):
         if self.block_internet and self.host_relay:
             raise ValueError("block_internet is OpenSandbox's egress policy; host_relay serves a workstation's Docker")
         return self
+
+    def image_for(self, needs: list[str]) -> SandboxImage | None:
+        """The first configured image that provides all of ``needs``, ``image`` before ``images``; None if none does."""
+        first = [SandboxImage(image=self.image, provides=self.provides)] if self.image else []
+        return next((each for each in first + self.images if set(needs) <= set(each.provides)), None)
 
 
 class OfficeEnvResourcesServerConfig(BaseResourcesServerConfig):
@@ -472,12 +518,16 @@ def workspace_guide(
     surface: str = "tools",
     prefix: str = "",
     workdir: str = "/workspace",
+    tools: tuple[str, ...] = (),
+    offline: bool = False,
 ) -> str:
     """The workspace's README.md for an episode that connects ``apps``: how its apps are reached (``surface``, and
     ``prefix``, how the harness names this server's MCP tools), how files move between the workspace and its file apps
     (those of ``apps`` in FILE_APPS, all of them for an episode that connects none), where downloads land when file
     content stays out of the conversation (``content_limit``, see ContentInWorkspace; None: it does not), and then,
-    for an episode that connects Gmail, how its attachments move too."""
+    for an episode that connects Gmail, how its attachments move too. Last, for an image with more than the shell,
+    curl and Python (``tools``, TOOL_SETS' names) or a sandbox without the internet (``offline``), what is installed,
+    and whether nothing else can be."""
     intro = SURFACE_GUIDES[surface].format(apps=", ".join(apps), prefix=prefix)
     names = [app for app in FILE_APPS if app in apps] or list(FILE_APPS)
     shown = [FILE_APPS[app] for app in names]
@@ -494,7 +544,13 @@ def workspace_guide(
         if "gmail" in apps:
             get = GET_ATTACHMENT[surface].format(prefix=prefix)
             files += "\n" + MAIL_GUIDE.format(get=get, workdir=workdir, limit=content_limit)
-    return f"# Company apps\n\n{intro}\n\n{CREDENTIALS_GUIDE}\n\n{files}"
+    guide = f"# Company apps\n\n{intro}\n\n{CREDENTIALS_GUIDE}\n\n{files}"
+    if tools or offline:
+        installed = "\n".join(f"- {text}" for text in (INSTALLED, *(TOOL_SETS[name] for name in tools)))
+        guide += f"\nInstalled here:\n\n{installed}\n"
+        if offline:
+            guide += "\nThe sandbox has no internet access, so nothing else can be installed.\n"
+    return guide
 
 
 # The file apps' ops that answer a file's content, and those that take content to store. In a sandboxed episode the
@@ -1625,23 +1681,46 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             command_tool=tools[0] if surface == "cli" else None,
         )
 
+    def _sandbox_image(self, row: Mapping[str, Any]) -> SandboxImage:
+        """The image a sandboxed row's episode gets: the first configured one that provides all its sandbox_needs
+        (TOOL_SETS). A row that names what no sandbox has, or what no configured image provides, is refused before
+        its world is built."""
+        config = self.config.sandbox_config
+        if not config.image and not config.images:
+            raise ValueError("Set sandbox_config.image to the episode sandbox image (see sandbox/Dockerfile)")
+        needs = row.get(NEEDS_KEY) or []
+        known = ", ".join(TOOL_SETS)
+        if not isinstance(needs, list) or not all(isinstance(need, str) for need in needs):
+            message = f"{NEEDS_KEY} lists what the task needs in its sandbox: some of {known}"
+        elif unknown := sorted(set(needs) - set(TOOL_SETS)):
+            message = f"{NEEDS_KEY} names {', '.join(unknown)}; a sandbox can provide {known}"
+        elif (image := config.image_for(needs)) is not None:
+            return image
+        else:
+            message = (
+                f"No configured sandbox image provides {', '.join(sorted(set(needs)))} (sandbox_config.provides and "
+                "sandbox_config.images; sandbox/Dockerfile.documents builds one)"
+            )
+        raise HTTPException(status_code=400, detail={"error": {"code": "unsupported_needs", "message": message}})
+
     async def _seed_sandboxed_episode(
         self, request: Request, body: ResourcesSeedSessionRequest
     ) -> ResourcesSeedSessionResponse:
-        """Seed an Environment Server episode and lend it a sandbox. Seeding the same ID for the same
-        episode again lends the same sandbox; a sandbox that fails to start leaves no world behind, so
-        the seed can be retried. Once shutdown has begun, a seed starts no sandbox (503)."""
+        """Seed an Environment Server episode and lend it a sandbox, from the image its row needs. Seeding the
+        same ID for the same episode again lends the same sandbox; a sandbox that fails to start leaves no
+        world behind, so the seed can be retried. Once shutdown has begun, a seed starts no sandbox (503)."""
         session_id = body.resources_session_id
         async with self._locks.setdefault(session_id, asyncio.Lock()):
             if self._shutting_down:  # shutdown stops the sandboxes it finds, and would not find this one
                 raise HTTPException(status_code=503, detail="The server is shutting down")
             new = session_id not in self._episodes
+            image = self._sandbox_image(body.task_data)
             self._seed_episode(request, body, sandboxed=True)
             episode = self._episodes[session_id]
             if new:
                 try:
                     self._keep_content_in_workspace(session_id, episode)
-                    await self._lend_sandbox(session_id, episode, task_id=body.task_id.task_id)
+                    await self._lend_sandbox(session_id, episode, image, task_id=body.task_id.task_id)
                 except BaseException:
                     del self._episodes[session_id]
                     self._discard(session_id)
@@ -1668,12 +1747,10 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             world=session.world,
         )
 
-    async def _lend_sandbox(self, session_id: str, episode: _Episode, *, task_id: str) -> None:
-        """Start the episode's sandbox with the workspace guide, for a `cli` episode its apps' commands, and the
-        episode's API (its URL and token) in its environment and at CREDENTIALS_PATH."""
+    async def _lend_sandbox(self, session_id: str, episode: _Episode, image: SandboxImage, *, task_id: str) -> None:
+        """Start the episode's sandbox from ``image`` with the workspace guide, for a `cli` episode its apps'
+        commands, and the episode's API (its URL and token) in its environment and at CREDENTIALS_PATH."""
         config = self.config.sandbox_config
-        if not config.image:
-            raise ValueError("Set sandbox_config.image to the episode sandbox image (see sandbox/Dockerfile)")
         named_configs = get_global_config_dict()
         token = token_urlsafe(32)
         files_api_url = self.config.files_api_url or f"http://{self.config.host}:{self.config.port}"
@@ -1683,6 +1760,8 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             surface=episode.surface,
             prefix=config.mcp_tool_prefix,
             workdir=self._workdir(),
+            tools=tuple(image.provides),
+            offline=config.block_internet,
         )
         files = {self._guide_path(): guide, CREDENTIALS_PATH: api_credentials(files_api_url.rstrip("/"), token)}
         if episode.surface == "cli":
@@ -1691,7 +1770,7 @@ class OfficeEnvResourcesServer(SimpleResourcesServer):
             files[RELAY_PATH] = RELAY_SOURCE
         spec = config.spec(
             self.config.sandbox_provider,
-            image=config.image,
+            image=image.image,
             workdir=config.workdir,
             metadata={"officeenv-task": task_id[:63]},
             files=files,

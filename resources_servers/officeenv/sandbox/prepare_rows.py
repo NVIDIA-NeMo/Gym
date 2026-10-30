@@ -16,7 +16,9 @@ data/sandbox_pilot_<exposure>_prepare.jsonl unless an output is given. The syste
 naming MCP tools as the harness lists them: ``--tool-prefix company_`` (the default) for Pi, which
 lists configs/officeenv_sandbox.yaml's MCP endpoint as ``company``, ``mcp__company__`` for Codex. It
 names the company's API the way the sandbox does (app.py's API_URL_ENV, API_TOKEN_ENV and
-GUIDE_NAME), never the environment.
+GUIDE_NAME), never the environment. A task that needs more than the shell, curl and Python in its
+sandbox (its example's ``sandbox_needs``: documents, office) keeps that in its row, for the server
+to give its episode an image that has them.
 """
 
 import argparse
@@ -72,9 +74,10 @@ def default_output(exposure: str) -> Path:
     return DATA / ("sandbox_pilot.jsonl" if exposure == "tools" else f"sandbox_pilot_{exposure}_prepare.jsonl")
 
 
-def rows(exposure: str = "tools", tool_prefix: str = TOOL_PREFIX) -> list[dict]:
+def rows(exposure: str = "tools", tool_prefix: str = TOOL_PREFIX, folder=None) -> list[dict]:
+    """A row per example task in ``folder`` (OfficeEnv's sandbox examples by default)."""
     out = []
-    folder = resources.files("officeenv.examples") / "sandbox"
+    folder = folder or resources.files("officeenv.examples") / "sandbox"
     for entry in sorted(folder.iterdir(), key=lambda e: e.name):
         if not entry.name.endswith(".json"):
             continue
@@ -82,19 +85,20 @@ def rows(exposure: str = "tools", tool_prefix: str = TOOL_PREFIX) -> list[dict]:
         spec = task["spec"]
         if spec.get("exposure", {}).get("mode", "tools") != exposure:
             spec["exposure"] = {**spec.get("exposure", {}), "mode": exposure}
-        out.append(
-            {
-                "responses_create_params": {
-                    "input": [
-                        {"role": "system", "content": system_prompt(exposure, tool_prefix)},
-                        {"role": "user", "content": task["prompt"]},
-                    ]
-                },
-                "officeenv": spec,
-                "officeenv_version": officeenv_version,
-                "task_id": spec["task_id"],
-            }
-        )
+        row = {
+            "responses_create_params": {
+                "input": [
+                    {"role": "system", "content": system_prompt(exposure, tool_prefix)},
+                    {"role": "user", "content": task["prompt"]},
+                ]
+            },
+            "officeenv": spec,
+            "officeenv_version": officeenv_version,
+            "task_id": spec["task_id"],
+        }
+        if task.get("sandbox_needs"):
+            row["sandbox_needs"] = task["sandbox_needs"]
+        out.append(row)
     return out
 
 
