@@ -14,6 +14,11 @@ from .registry import HARNESSES
 
 def validate_row(row: dict) -> None:
     """Validate Gym-owned check metadata before inserting it into Markdown."""
+    tiers = row.get("tier_verdicts", {})
+    if not isinstance(tiers, dict) or any(
+        key not in ("P0", "P1", "P2") or value not in ("fulfilled", "not_fulfilled") for key, value in tiers.items()
+    ):
+        raise ValueError("invalid tier verdicts in documentation results")
     for scenario in row["scenarios"]:
         if scenario["verdict"] not in ("fulfilled", "not_fulfilled"):
             raise ValueError("invalid scenario verdict in documentation results")
@@ -36,7 +41,9 @@ def render_table(report: dict) -> str:
         raise ValueError("table requires a full Gym commit SHA")
     statuses = report.get("statuses", {})
     rows = report["harnesses"]
-    lines = [BEGIN, "", "| Harness | P0 | Passing scenarios |", "| --- | --- | --- |"]
+    for row in rows.values():
+        validate_row(row)
+    lines = [BEGIN, "", "| Harness | P0 | Passing scenarios (all priorities) | P1 |", "| --- | --- | --- | --- |"]
     for harness in HARNESSES:
         row = rows.get(harness)
         status = statuses.get(harness)
@@ -50,9 +57,9 @@ def render_table(report: dict) -> str:
         label = {"passed": "Passed", "failed": "Failed", "unavailable": "Unavailable", "not_run": "Not measured"}[
             status
         ]
-        lines.append(f"| `{harness}` | {label} | {count} |")
-    for row in rows.values():
-        validate_row(row)
+        p1 = (row or {}).get("tier_verdicts", {}).get("P1")
+        p1_label = {"fulfilled": "Passed", "not_fulfilled": "Failed", None: "Not measured"}[p1]
+        lines.append(f"| `{harness}` | {label} | {count} | {p1_label} |")
     if rows:
         matrices = render_matrices(rows).replace("# Harness checks by scenario\n", "", 1)
         for harness in rows:

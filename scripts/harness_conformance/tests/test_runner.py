@@ -14,9 +14,9 @@ import psutil
 import pytest
 from fastapi.testclient import TestClient
 from scripts.harness_conformance.episode import HARNESSES, _config, _supports_agent_sessions
-from scripts.harness_conformance.provider import Probe
+from scripts.harness_conformance.provider import SUMMARY_PROMPTS, Probe, is_compaction_request
 from scripts.harness_conformance.runner import _fingerprint, inspect_episode, main, run_process, run_suite
-from scripts.harness_conformance.scenarios import SCENARIOS
+from scripts.harness_conformance.scenarios import SCENARIOS, Scenario
 
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.harness_capabilities.cli import json_rows
@@ -26,6 +26,8 @@ from tests.unit_tests.harness_capabilities.synthetic import evidence_and_witness
 
 
 SCENARIO = {s.name: s for s in SCENARIOS}
+# The fixture is tested independently of its later catalog/CI registration.
+SCENARIO["context_compaction"] = Scenario("context_compaction", "Compact shell history", tier="P1", compaction=True)
 TOOL = {
     "type": "function",
     "function": {
@@ -362,6 +364,74 @@ def test_a_harness_that_finishes_on_a_tool_gets_a_finish_call(tmp_path):
     assert json.loads(call["function"]["arguments"]) == {"reason": "CONFORMANCE_DONE", "paths": []}
     assert probe.finished and not probe.violations
     assert probe.finish_call["id"] == call["id"]
+
+
+@pytest.mark.parametrize("compaction", [True, False])
+def test_compaction_probe_keeps_summary_separate_from_policy_replies(tmp_path, compaction):
+    scenario = dataclasses.replace(SCENARIO["context_compaction"], compaction=compaction, tool_steps=2)
+    probe = Probe(scenario, tmp_path)
+    messages = [{"role": "user", "content": "Run checks"}]
+    body = {"model": "conformance-model", "messages": messages, "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        for index in range(2):
+            response = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+            assert response.status_code == 200
+            message = response.json()["choices"][0]["message"]
+            call = message["tool_calls"][0]
+            execution = subprocess.run(
+                json.loads(call["function"]["arguments"])["command"],
+                shell=True,
+                capture_output=True,
+                text=True,
+                check=True,
+            )
+            messages.extend([message, {"role": "tool", "tool_call_id": call["id"], "content": execution.stdout}])
+            if compaction and index == 0:
+                helper = client.post(
+                    "/ng-rollout/0-0/v1/chat/completions",
+                    json={**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]},
+                ).json()
+                assert helper["choices"][0]["message"]["content"] == probe.compaction_summary
+                assert helper["usage"]["total_tokens"] == 511
+                assert not probe.finished and len(probe.tool_calls) == 1
+                messages.append(helper["choices"][0]["message"])
+        final = client.post("/ng-rollout/0-0/v1/chat/completions", json=body)
+    assert final.json()["choices"][0]["message"]["content"] == "CONFORMANCE_DONE"
+    assert probe.finished and not probe.violations
+    assert all(t["executed"] and t["result_seen"] for t in probe.tool_calls)
+    witness = json.loads((tmp_path / "witness.json").read_text())
+    assert len(witness["attempts"]) == 3 + int(compaction)
+    assert len(witness["compaction"]["response_ids"]) == int(compaction)
+    assert sum(a["response"]["usage"]["total_tokens"] for a in witness["attempts"]) == (27738 if compaction else 81027)
+
+
+@pytest.mark.parametrize("prompt", SUMMARY_PROMPTS)
+@pytest.mark.parametrize("tools", [[], [TOOL]])
+def test_summary_recognition_requires_an_explicit_last_user_instruction(prompt, tools):
+    body = {"messages": [{"role": "user", "content": [{"type": "text", "text": prompt}]}], "tools": tools}
+    assert is_compaction_request(body)
+    body["messages"].append({"role": "tool", "content": prompt})
+    assert not is_compaction_request(body)
+    assert not is_compaction_request({"messages": [{"role": "user", "content": "Run checks"}], "tools": []})
+
+
+def test_summary_does_not_waive_policy_tool_result_requirement(tmp_path):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path)
+    body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}], "tools": [TOOL]}
+    with TestClient(probe.model_app()) as client:
+        assert client.post("/v1/chat/completions", json=body).status_code == 200
+        helper = {**body, "messages": [{"role": "user", "content": SUMMARY_PROMPTS[0]}]}
+        assert client.post("/v1/chat/completions", json=helper).status_code == 200
+        assert client.post("/v1/chat/completions", json=body).status_code == 409
+    assert len(probe.compaction_response_ids) == 1
+
+
+def test_compaction_probe_rejects_unexpected_summary_request(tmp_path):
+    probe = Probe(SCENARIO["context_compaction"], tmp_path)
+    with TestClient(probe.model_app()) as client:
+        response = client.post("/v1/chat/completions", json={"model": "conformance-model", "messages": []})
+    assert response.status_code == 409
+    assert probe.violations and not probe.compaction_response_ids
 
 
 def test_a_finish_tool_with_unfillable_arguments_falls_back_to_a_text_answer(tmp_path):
@@ -745,6 +815,49 @@ def test_checker_error_does_not_prevent_remaining_episodes(tmp_path, monkeypatch
     assert summary["harnesses"]["pi"]["evidence"]["TE-1"] == {"required": 2, "observed": 0, "passed": 0}
 
 
+@pytest.mark.parametrize(
+    "failed_scenario,gate_tier,expected_code",
+    [("context_compaction", "P0", 0), ("context_compaction", "P1", 2), ("tool_success", "P0", 2)],
+)
+def test_checker_error_preserves_independent_ci_measurements(
+    tmp_path, monkeypatch, failed_scenario, gate_tier, expected_code
+):
+    from scripts.harness_conformance import ci_table, runner
+
+    scenarios = tuple(s for s in SCENARIOS if s.name != "context_compaction") + (SCENARIO["context_compaction"],)
+    monkeypatch.setattr(runner, "SCENARIOS", scenarios)
+    monkeypatch.setattr(ci_table, "SCENARIOS", scenarios)
+    monkeypatch.setattr(runner, "run_process", lambda *args, **kwargs: {"returncode": 0, "timed_out": False})
+
+    def inspect(scenario, directory, execution):
+        if scenario.name == failed_scenario:
+            raise ValueError("truncated rollout")
+        return {
+            "scenario": scenario.name,
+            "tier": scenario.tier,
+            "exercised": True,
+            "verdict": "fulfilled",
+            "checks": [],
+            "evidence": {},
+        }
+
+    monkeypatch.setattr(runner, "inspect_episode", inspect)
+    artifacts = tmp_path / "artifacts"
+    probes = artifacts / "pi" / "probes"
+    summary, code = run_suite(harnesses=["pi"], scenarios=scenarios, output=probes, timeout=1, gate_tier=gate_tier)
+    assert code == expected_code
+    result = next(s for s in summary["harnesses"]["pi"]["scenarios"] if s["scenario"] == failed_scenario)
+    assert result["checks"] == [] and result["checker_error"] == "ValueError"
+    commit = "a" * 40
+    (probes / "ci-result.json").write_text(
+        json.dumps({"harness": "pi", "sha": commit, "status": "passed" if code == 0 else "unavailable"})
+    )
+    output = tmp_path / "table.mdx"
+    ci_table.render_ci(artifacts=artifacts, commit=commit, output=output, run_url="https://example.com/run")
+    expected = f"Passed | {len(scenarios) - 1}/{len(scenarios)} | Failed" if code == 0 else "Unavailable | —"
+    assert f"`pi` | {expected}" in output.read_text()
+
+
 def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatch):
     from scripts.harness_conformance import runner
 
@@ -756,6 +869,50 @@ def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatc
     with pytest.raises(KeyboardInterrupt):
         run_suite(harnesses=["pi"], scenarios=SCENARIOS[:1], output=output, timeout=1)
     assert not (output / "conformance_summary.json").exists()
+
+
+@pytest.mark.parametrize("gate_tier", ["P0", "P1"])
+def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained_episode, monkeypatch, gate_tier):
+    from scripts.harness_conformance import runner
+
+    source, _ = retained_episode
+    files = {
+        name: (source / name).read_bytes() for name in ("rollouts.jsonl", "witness.json", "capture/0-0.capture.jsonl")
+    }
+    launched = []
+
+    def run(command, *, directory, timeout):
+        launched.append((directory.parent.name, directory.name))
+        for name, content in files.items():
+            destination = directory / name
+            destination.parent.mkdir(exist_ok=True)
+            destination.write_bytes(content)
+        return {"returncode": 0, "timed_out": False}
+
+    monkeypatch.setattr(runner, "run_process", run)
+    # Valid existing evidence deliberately lacks a compaction event/witness.
+    scenarios = (
+        SCENARIO["verifier_failure"],
+        dataclasses.replace(SCENARIO["context_compaction"], expected_reward=0.0, tool_steps=2),
+    )
+    summary, code = run_suite(
+        harnesses=list(HARNESSES), scenarios=scenarios, output=source / "run", timeout=1, gate_tier=gate_tier
+    )
+    assert set(launched) == {(h, s.name) for h in HARNESSES for s in scenarios}
+    assert code == (0 if gate_tier == "P0" else 1)
+    for row in summary["harnesses"].values():
+        assert row["tier_verdicts"] == {"P0": "fulfilled", "P1": "not_fulfilled"}
+        result = row["scenarios"][1]
+        assert result["p0_verdict"] == "fulfilled" and result["verdict"] == "not_fulfilled"
+        assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"
+
+
+def test_compaction_only_run_cannot_pass_an_empty_p0_gate(tmp_path):
+    with pytest.raises(ValueError, match="--gate-tier P1"):
+        run_suite(
+            harnesses=["opencode"], scenarios=(SCENARIO["context_compaction"],), output=tmp_path / "run", timeout=1
+        )
+    assert not (tmp_path / "run").exists()
 
 
 @pytest.mark.parametrize(
