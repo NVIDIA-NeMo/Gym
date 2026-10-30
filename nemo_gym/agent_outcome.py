@@ -9,7 +9,7 @@ from typing import TYPE_CHECKING, Annotated
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
 from nemo_gym.base_environment_server import is_retryable_dependency_status
-from nemo_gym.failure_kinds import (
+from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
     FAILURE_KINDS,
@@ -19,7 +19,7 @@ from nemo_gym.failure_kinds import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core.responses_api_types import NeMoGymResponse
 
 
 AGENT_OUTCOME_METADATA_KEY = "ng_agent_outcome"

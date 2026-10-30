@@ -342,6 +342,18 @@ async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, mo
         await env.stop()
 
 
+async def test_failed_stop_is_retried_and_a_successful_one_is_not(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    await env.start()
+    box.stop.side_effect = [RuntimeError("delete failed"), None]
+    with pytest.raises(RuntimeError, match="delete failed"):
+        await env.stop()
+    assert not env.closed
+    await env.stop()
+    await env.stop()
+    assert box.stop.await_count == 2 and env.closed
+
+
 async def test_readiness_success_and_failure(tmp_path, monkeypatch):
     env, box, _, _ = make_environment(
         tmp_path,

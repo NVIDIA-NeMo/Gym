@@ -20,7 +20,7 @@ from nemo_gym.base_resources_server import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.failure_kinds import VERIFIER_ERROR
+from nemo_gym.core import VERIFIER_ERROR
 from resources_servers.frontiermath.grading import GradeResult
 
 

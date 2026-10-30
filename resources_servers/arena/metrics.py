@@ -138,8 +138,11 @@ class ArenaMetrics:
                     incomplete_reason == "max_output_tokens" or (incomplete_reason is None and reasoning_only)
                 ):
                     if incomplete_reason == "max_output_tokens":
-                        # Context-window rejections have no usage because generation never started.
-                        if (rollout.get("response") or {}).get("usage") is None:
+                        response_record = rollout.get("response") or {}
+                        # vllm_model marks a context-window rejection in metadata and reports zero usage;
+                        # rollouts saved before that marker existed show the rejection as missing usage.
+                        marked = (response_record.get("metadata") or {}).get("nemo_gym_context_window_exceeded")
+                        if marked == "true" or (marked is None and response_record.get("usage") is None):
                             context_window_exceeded_rollouts += 1
                         else:
                             max_token_reached_rollouts += 1

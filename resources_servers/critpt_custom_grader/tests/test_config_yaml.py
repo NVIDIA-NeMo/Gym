@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader.execution import ExecutionPolicy
 
