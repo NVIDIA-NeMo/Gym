@@ -32,6 +32,7 @@ from pytest import MonkeyPatch
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.server_runtime import (
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
@@ -223,7 +224,10 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
-    assert response.json()["mask_sample"] is False
+    assert response.json()["mask_sample"] is True
+    assert response.json()["failure_kind"] == "verifier_error"
+    assert response.json()["verification_attempts"] == 3
+    assert response.json()["model_patch"] == request_body()["patch"]
     assert response.json()["reward"] == 0.0
     assert "sandbox unavailable" in response.json()["error"]
 
@@ -247,7 +251,7 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
         ),
     ],
 )
-def test_verify_keeps_failures_unmasked_and_reports_error(
+def test_verify_masks_only_inconclusive_results_and_reports_error(
     monkeypatch: MonkeyPatch,
     test_output: str,
     extraction_error: str | None,
@@ -275,10 +279,111 @@ def test_verify_keeps_failures_unmasked_and_reports_error(
     response = client_with_task_sandbox(server).post("/verify", json=request_body())
     assert response.status_code == 200
     assert response.json()["reward"] == 0.0
-    assert response.json()["mask_sample"] is False
+    assert response.json()["mask_sample"] is not completed
+    assert response.json()["failure_kind"] == (None if completed else "verifier_error")
     assert response.json()["evaluation_completed"] is completed
     assert response.json()["error"] == expected_error
     assert response.json()["model_patch"] == (None if extraction_error else "agent patch")
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "diff_exec,download,masked",
+    [
+        pytest.param(AsyncMock(side_effect=ConnectionError("exec status lost")), AsyncMock(), True, id="exec-raises"),
+        pytest.param(
+            AsyncMock(return_value=SimpleNamespace(return_code=-1, stdout="", stderr="", error_type="timeout")),
+            AsyncMock(),
+            True,
+            id="exec-error-type",
+        ),
+        pytest.param(
+            AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="", stderr="")),
+            AsyncMock(side_effect=ConnectionError("download lost")),
+            True,
+            id="download-raises",
+        ),
+        pytest.param(
+            AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0)),
+            AsyncMock(),
+            True,
+            id="downloaded-file-missing",
+        ),
+        pytest.param(
+            AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0)),
+            AsyncMock(side_effect=lambda remote, local: local.mkdir()),
+            True,
+            id="downloaded-file-unreadable",
+        ),
+        pytest.param(
+            AsyncMock(return_value=SimpleNamespace(return_code=128, stdout="", stderr="fatal: bad revision")),
+            AsyncMock(),
+            False,
+            id="git-exit-code",
+        ),
+    ],
+)
+async def test_verify_masks_a_patch_capture_that_lost_the_patch(
+    monkeypatch: MonkeyPatch, diff_exec: AsyncMock, download: AsyncMock, masked: bool
+) -> None:
+    """A capture the sandbox never completed says nothing about the agent's patch; a git failure the agent can cause is graded."""
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+
+    async def exec_command(command: str, **_: object) -> SimpleNamespace:
+        if "diff" in command:
+            return await diff_exec(command)
+        return SimpleNamespace(return_code=0, stdout="", stderr="")
+
+    server._session_id_to_sandbox["session"] = SimpleNamespace(exec=exec_command, download=download, stop=AsyncMock())
+    verification = AsyncMock(
+        return_value=VerificationResult(
+            completed=True, resolved=False, patch_applied=True, test_results={"tests": []}, test_output="failed"
+        )
+    )
+    monkeypatch.setattr("resources_servers.swebench_pro.app.run_verification", verification)
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+
+    response = await server.verify(
+        SimpleNamespace(session={SESSION_ID_KEY: "session"}),
+        SWEBenchProVerifyRequest.model_validate(request_body()),
+    )
+
+    assert response.reward == 0.0
+    assert response.model_patch is None
+    assert response.error.startswith("Failed to extract model patch: ")
+    assert "session" not in server._session_id_to_sandbox
+    if masked:
+        assert (response.mask_sample, response.failure_kind, response.evaluation_completed) == (
+            True,
+            SESSION_LOST,
+            False,
+        )
+        assert response.failure_reason == response.error
+        verification.assert_not_awaited()
+    else:
+        assert (response.mask_sample, response.failure_kind, response.evaluation_completed) == (False, None, True)
+        verification.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_extract_model_patch_keeps_a_read_patch_when_local_cleanup_fails(monkeypatch: MonkeyPatch) -> None:
+    """Once the patch bytes are read, failing to delete the local copy must not turn them into a lost capture."""
+    server = make_server(golden=False)
+    server._session_id_to_sandbox["session"] = SimpleNamespace(
+        exec=AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0)),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("agent patch")),
+        stop=AsyncMock(),
+    )
+
+    def unlink_fails(*args: object, **kwargs: object) -> None:
+        raise OSError("device busy")
+
+    monkeypatch.setattr("os.unlink", unlink_fails)
+    patch = await server._extract_model_patch("session", "abc123")
+    monkeypatch.undo()
+
+    assert patch == "agent patch"
+    assert "session" not in server._session_id_to_sandbox
 
 
 def test_schema_rejects_missing_evaluator_asset() -> None:
@@ -649,8 +754,9 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        # Completion diagnostics do not change whether SWE Pro includes the sample in scoring.
-        assert result["mask_sample"] is False
+        # An unavailable verdict cannot contribute a measured model score.
+        assert result["mask_sample"] is not completed
+        assert result["failure_kind"] == (None if completed else "verifier_error")
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
         assert result["model_patch"] == "agent patch"
@@ -686,6 +792,7 @@ async def test_repeated_verify_of_a_typed_session_is_masked_after_task_sandbox_i
     )
     task_sandbox = SimpleNamespace(
         exec=AsyncMock(return_value=SimpleNamespace(return_code=0, stdout="agent patch", stderr="")),
+        download=AsyncMock(side_effect=lambda remote, local: local.write_text("agent patch")),
         stop=AsyncMock(),
     )
     verification_sandbox = SimpleNamespace(stop=AsyncMock())
@@ -1354,3 +1461,55 @@ def test_close_session_accepts_cookie_and_typed_bodies_over_http() -> None:
     assert typed_close.status_code == 200
     assert typed_close.json()["resources_session_id"] == "session"
     assert malformed_close.status_code == 422
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("failure_phase", ["read", "cleanup"])
+async def test_patch_capture_with_filesystem_permission_error(
+    monkeypatch: MonkeyPatch, tmp_path: Path, failure_phase: str
+) -> None:
+    """An unreadable patch is unknown; failure to delete already-read bytes cannot erase them."""
+    from tempfile import TemporaryDirectory
+
+    from resources_servers.swebench_pro.app import PatchCaptureLostError
+
+    server = make_server(golden=False)
+    downloaded = []
+
+    async def download(remote: str, local: Path) -> None:
+        local.write_text("agent patch")
+        downloaded.append(local)
+        if failure_phase == "read":
+            local.chmod(0)
+            with pytest.raises(PermissionError):
+                local.read_bytes()
+        else:
+            # The temporary directory remains readable, but its parent forbids unlinking it.
+            tmp_path.chmod(0o500)
+            sentinel = tmp_path / "sentinel"
+            with pytest.raises(PermissionError):
+                sentinel.write_text("must fail")
+
+    monkeypatch.setattr(
+        "resources_servers.swebench_pro.app.TemporaryDirectory",
+        lambda **kwargs: TemporaryDirectory(dir=tmp_path, **kwargs),
+    )
+    server._session_id_to_sandbox["session"] = SimpleNamespace(
+        exec=AsyncMock(return_value=SandboxExecResult(stdout="", stderr="", return_code=0)),
+        download=download,
+        stop=AsyncMock(),
+    )
+    try:
+        if failure_phase == "read":
+            with pytest.raises(PatchCaptureLostError) as failure:
+                await server._extract_model_patch("session", "abc123")
+            assert isinstance(failure.value.__cause__, PermissionError)
+        else:
+            assert await server._extract_model_patch("session", "abc123") == "agent patch"
+            assert downloaded[0].parent.exists()  # The actual directory removal was denied.
+    finally:
+        tmp_path.chmod(0o700)
+        for local in downloaded:
+            if local.exists():
+                local.chmod(0o600)
+    assert "session" not in server._session_id_to_sandbox

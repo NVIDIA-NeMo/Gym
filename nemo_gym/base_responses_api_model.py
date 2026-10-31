@@ -662,6 +662,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
+                # No header is sent yet, so the selected failure travels with the reply as for an HTTP error.
+                headers=FailureHeader.encode(failure_report_for(exc)),
             )
 
     async def _responses_keepalive_events(
