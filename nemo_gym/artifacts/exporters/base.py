@@ -231,6 +231,7 @@ class BaseExporter(Exporter):
         # The backend run id reported during a post-run export. `export()` writes it to the marker once the whole
         # run has been sent.
         self._pending_run_id: Optional[str] = None
+        self._delivery_failed = False
 
     @classmethod
     def from_global_config(cls, global_config_dict: DictConfig) -> "BaseExporter":
@@ -332,10 +333,14 @@ class BaseExporter(Exporter):
         of the run first, so that nothing more reaches it even when closing fails."""
         self.teardown()
 
+    def finalize_live(self, artifacts: RunArtifacts, version: dict[str, str | None]) -> None:
+        """Optionally certify an explicitly completed live activation; teardown alone never certifies it."""
+
     def _guard(self, what: str, fn, *args) -> None:
         try:
             fn(*args)
         except Exception as e:
+            self._delivery_failed = True
             logger.warning(f"Exporter {self.name} failed to log {what}; continuing: {e}", exc_info=True)
 
     def _run_id_fpath(self) -> Optional[Path]:

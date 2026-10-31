@@ -286,7 +286,14 @@ def evaluate_record(
         policy_calls_observed=turn_call_scope_complete and turn_bindings.complete,
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
-        responses=_response_population(turn_call_scope_complete, turn_bindings),
+        responses=_response_population(
+            turn_call_scope_complete
+            and model_calls_observed
+            and not _trajectory_has_any_gap(
+                trajectory or {}, frozenset({"model_call_capture_pending", "model_call_capture_no_records"})
+            ),
+            turn_bindings,
+        ),
         model_call_errors=len(failed),
         upstream_recovery_observations=_observed_upstream_recovery(calls),
         model_call_errors_usage_unknown=sum(

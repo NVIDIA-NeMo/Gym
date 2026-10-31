@@ -43,10 +43,13 @@ from nemo_gym.orchestration.executors.otel import (
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTING_UNKNOWN_PREFIX,
+    ALLOCATION_ACCOUNTING_MARKER,
     BOUNDED_BUDGET_MARKER,
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
     RESUBMIT_ENV,
+    RESUBMIT_LOCK_NAME,
     SCHEDULER_CAUSE_MARKER,
     _walltime_to_seconds,
 )
@@ -207,7 +210,7 @@ _VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
 
 # Held by `gym eval resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
-_RESUBMIT_LOCK = ".gym_resubmit.lock"
+_RESUBMIT_LOCK = RESUBMIT_LOCK_NAME
 
 
 def _validate_benchmark_names(benchmarks: list[str]) -> None:
@@ -518,7 +521,13 @@ class SlurmExecutor(BaseExecutor):
                         # report success to two concurrent callers.
                         f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
                         f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
-                        f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+                        "_gym_submit_started=0; _gym_submit_confirmed=0",
+                        "_gym_release_resubmit_lock() { "
+                        'if [[ "$_gym_submit_started" == 1 && "$_gym_submit_confirmed" != 1 ]]; then '
+                        f"printf '%s\\n' {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' Resubmit acknowledgement was not confirmed.')} "
+                        "> .gym_chain_incomplete || return; fi; "
+                        f"rm -f {_RESUBMIT_LOCK}; }}",
+                        "trap _gym_release_resubmit_lock EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
@@ -529,6 +538,14 @@ class SlurmExecutor(BaseExecutor):
                         f"&& ! grep -qxF -- {shlex.quote(SCHEDULER_CAUSE_MARKER)} job.sh; then "
                         'fail "job.sh in $PWD predates scheduler-cause retry admission, so its chain would retry '
                         'FAILED, OUT_OF_MEMORY and DEADLINE jobs; stage a new job script"; fi',
+                        f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
+                        f"&& ! grep -qxF -- {shlex.quote(ALLOCATION_ACCOUNTING_MARKER)} job.sh; then "
+                        'fail "job.sh predates durable allocation accounting; stage a new compatible script"; fi',
+                        f"if grep -q -- {shlex.quote('^' + ACCOUNTING_UNKNOWN_PREFIX)} .gym_chain_incomplete 2>/dev/null; then "
+                        'fail "allocation accounting is unknown; reconcile every allocation before resubmission"; fi',
+                        'for claim in .gym_followup_queued.*; do [ -e "$claim" ] || continue; '
+                        'claimed=$(cat "$claim") || fail "follow-up claim unreadable"; '
+                        '[[ "$claimed" =~ ^[0-9]+$ ]] || fail "follow-up submission identity unknown"; done',
                         # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
                         # `gym eval run` on a line of its own (see `render_gym_cmd`).
                         "if [ -s artifacts/rollouts.jsonl ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "
@@ -559,7 +576,15 @@ class SlurmExecutor(BaseExecutor):
                         ),
                         *budget_update,
                         f"export {RESUBMIT_ENV}=1",
+                        "_gym_submit_started=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
+                        # Same accepted job-ID grammar as _parse_sbatch_results, evaluated while the lock is held.
+                        "if [[ $rc == 0 ]] && python3 -c "
+                        + shlex.quote(
+                            "import re,sys; words=sys.argv[1].split(); "
+                            f"sys.exit(0 if words and re.fullmatch({_JOB_ID_RE.pattern!r}, words[-1]) else 1)"
+                        )
+                        + ' "$out"; then _gym_submit_confirmed=1; fi',
                     ]
                 )
             )

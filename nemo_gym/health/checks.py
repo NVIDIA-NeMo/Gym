@@ -500,8 +500,14 @@ def _response_has_usable_output(response: Any) -> bool:
         return False
     if _nonempty(response.get("output_text")):
         return True
-    for item in response.get("output") or []:
-        if not isinstance(item, dict) or item.get("type") == "reasoning":
+    output = response.get("output")
+    for item in output if isinstance(output, list) else []:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("type"), str)
+            or not item["type"].strip()
+            or item["type"] == "reasoning"
+        ):
             continue
         # Any other output item is a tool call of some kind.
         if item.get("type") != "message" or _nonempty(item.get("content")):
@@ -514,7 +520,8 @@ def _response_has_usable_output(response: Any) -> bool:
             block.get("type") == "tool_use" or (block.get("type") == "text" and _nonempty(block.get("text")))
         ):
             return True
-    for choice in response.get("choices") or []:
+    choices = response.get("choices")
+    for choice in choices if isinstance(choices, list) else []:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}

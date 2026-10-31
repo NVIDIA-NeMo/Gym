@@ -300,18 +300,17 @@ def test_a_requeued_job_does_not_queue_a_second_follow_up(tmp_path, prev_state):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.parametrize("claim", ["file", "directory"])
-def test_a_claim_left_by_an_interrupted_submission_is_replaced(tmp_path, claim):
-    """The shell died between taking the claim and sbatch answering: no follow-up exists, so queue one."""
+def test_a_claim_left_by_an_interrupted_submission_stops_without_an_observed_job(tmp_path, claim):
+    """No queue entry cannot distinguish a failed submit from a successor that already ran."""
     marker = tmp_path / ".gym_followup_queued.200"
     marker.mkdir() if claim == "directory" else marker.touch()  # a directory is #4840's marker format
 
     requeued = _run_prologue(tmp_path, ResumeConfig(), None)
 
-    assert "REACHED_WORK" in requeued.stdout
-    assert "submission interrupted" in requeued.stdout
-    assert len(_sbatch_calls(tmp_path)) == 1
-    assert "--dependency=afternotok:200" in _sbatch_calls(tmp_path)[0]
-    assert marker.read_text() == "999\n"
+    assert requeued.returncode == 1 and "REACHED_WORK" not in requeued.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert marker.exists()
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -346,7 +345,8 @@ def test_a_follow_up_pending_on_another_job_does_not_count(tmp_path):
 
     _run_prologue(tmp_path, ResumeConfig(), None)
 
-    assert len(_sbatch_calls(tmp_path)) == 1
+    assert _sbatch_calls(tmp_path) == []
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -355,7 +355,7 @@ def test_a_claim_is_kept_when_squeue_fails(tmp_path):
 
     requeued = _run_prologue(tmp_path, ResumeConfig(), None, squeue_fails=True)
 
-    assert "REACHED_WORK" in requeued.stdout
+    assert requeued.returncode == 1 and "REACHED_WORK" not in requeued.stdout
     assert "squeue failed" in requeued.stdout
     assert _sbatch_calls(tmp_path) == []
 
@@ -374,13 +374,13 @@ def test_each_resumed_segment_still_queues_its_own_follow_up(tmp_path):
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_a_requeue_retries_a_follow_up_that_failed_to_submit(tmp_path):
+def test_failed_submission_uncertainty_survives_a_later_invocation(tmp_path):
     failed = _run_prologue(tmp_path, ResumeConfig(), None, sbatch_fails=True)
     requeued = _run_prologue(tmp_path, ResumeConfig(), None)
 
     assert "Failed to submit auto-resume follow-up" in failed.stdout
-    assert "Auto-resume follow-up queued: 999" in requeued.stdout
-    assert len(_sbatch_calls(tmp_path)) == 2
+    assert requeued.returncode == 1 and "REACHED_WORK" not in requeued.stdout
+    assert len(_sbatch_calls(tmp_path)) == 1
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -437,10 +437,9 @@ def test_a_dependent_job_of_another_run_is_not_this_runs_follow_up(tmp_path, cla
 
     requeued = _run_prologue(tmp_path, ResumeConfig(), None)
 
-    assert "REACHED_WORK" in requeued.stdout
-    assert len(_sbatch_calls(tmp_path)) == 1
-    assert "--dependency=afternotok:200" in _sbatch_calls(tmp_path)[0]
-    assert marker.read_text() == "999\n"
+    assert requeued.returncode == 1 and "REACHED_WORK" not in requeued.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert marker.exists()
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -455,8 +454,12 @@ def test_a_follow_up_pending_in_this_job_dir_queues_none(tmp_path, claim):
 
     requeued = _run_prologue(tmp_path, ResumeConfig(), None)
 
-    assert "REACHED_WORK" in requeued.stdout
-    assert "already queued: 999" in requeued.stdout
+    if claim == "directory":
+        assert requeued.returncode == 1 and "REACHED_WORK" not in requeued.stdout
+    else:
+        assert "REACHED_WORK" in requeued.stdout
+        assert "already queued: 999" in requeued.stdout
+        assert marker.read_text() == "999\n"
     assert _sbatch_calls(tmp_path) == []
 
 
@@ -491,7 +494,8 @@ def test_a_symlink_to_another_dir_does_not_count(tmp_path):
 
     _run_prologue(job_dir, ResumeConfig(), None)
 
-    assert len(_sbatch_calls(job_dir)) == 1
+    assert _sbatch_calls(job_dir) == []
+    assert (job_dir / INCOMPLETE_MARKER_NAME).read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -506,12 +510,12 @@ def test_a_follow_up_pending_in_a_hidden_partition_is_found(tmp_path):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_follow_up_whose_sbatch_reply_was_lost_is_not_queued_again(tmp_path):
-    """sbatch failed after creating the job: the claim stays, and the requeue finds the job pending."""
+    """A lost reply remains unknown even when a later invocation sees some pending job."""
     failed = _run_prologue(tmp_path, ResumeConfig(), None, sbatch_loses_reply=True)
     requeued = _run_prologue(tmp_path, ResumeConfig(), None)
 
     assert "Failed to submit auto-resume follow-up" in failed.stdout
-    assert "already queued: 999" in requeued.stdout
+    assert requeued.returncode == 1 and "REACHED_WORK" not in requeued.stdout
     assert len(_sbatch_calls(tmp_path)) == 1
 
 
@@ -700,7 +704,7 @@ def test_a_failure_without_scheduler_infrastructure_cause_stops_and_keeps_its_el
     assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "642"
     assert (tmp_path / ".gym_infra_retries").read_text() == "1\n"
     assert state in (tmp_path / ".gym_chain_incomplete").read_text()
-    assert not (tmp_path / ".gym_job_chain").exists()
+    assert (tmp_path / ".gym_job_chain").read_text() == "200\n"
     if saved_output:
         assert (tmp_path / "rollouts.jsonl").read_text() == '{"reward": 0.0}\n'
 
@@ -709,3 +713,120 @@ def test_the_prologue_carries_the_scheduler_cause_capability():
     from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
 
     assert SCHEDULER_CAUSE_MARKER in render_resume_prologue(ResumeConfig(max_retries=1)).splitlines()
+
+
+@pytest.mark.parametrize("manual_reset", [False, True])
+def test_lost_reply_and_guard_stopped_follower_cannot_reopen_unknown_budget(tmp_path, manual_reset):
+    resume = ResumeConfig(max_retries=3, max_walltime="01:00:00")
+    first = _run_prologue(tmp_path, resume, None, job_id="100", sbatch_loses_reply=True)
+    follower = _run_prologue(tmp_path, resume, "", job_id="999", prev_job_id="100")
+    assert first.returncode == 0 and "REACHED_WORK" in first.stdout
+    assert follower.returncode == 1 and "REACHED_WORK" not in follower.stdout
+    (tmp_path / ".gym_accumulated_walltime").write_text("123\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    before = {name: (tmp_path / name).read_bytes() for name in (".gym_accumulated_walltime", ".gym_infra_retries")}
+    later = _run_prologue(tmp_path, resume, None, job_id="200", manual_resubmit=manual_reset)
+    assert later.returncode == 1 and "REACHED_WORK" not in later.stdout
+    assert (tmp_path / ".gym_job_chain").read_text().split() == ["100", "999", "200"]
+    assert all((tmp_path / name).read_bytes() == value for name, value in before.items())
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
+    assert len(_sbatch_calls(tmp_path)) == 1
+
+
+def test_unavailable_accounting_records_the_guard_stopped_allocation(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(), "", job_id="200")
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert (tmp_path / ".gym_job_chain").read_text() == "200\n"
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
+
+
+def test_multiple_observed_successors_are_not_reduced_to_the_first(tmp_path):
+    (tmp_path / ".gym_followup_queued.200").touch()
+    (tmp_path / "pending").write_text(
+        f"998|afternotok:200(unfulfilled)|{tmp_path}\n999|afternotok:200(unfulfilled)|{tmp_path}\n"
+    )
+    result = _run_prologue(tmp_path, ResumeConfig(), None)
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+
+
+def test_manual_follower_without_predecessor_cannot_claim_a_fresh_chain(tmp_path):
+    _run_prologue(tmp_path, ResumeConfig(), None, job_id="100")
+    result = _run_prologue(tmp_path, ResumeConfig(), None, job_id="200")
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert (tmp_path / ".gym_job_chain").read_text().split() == ["100", "200"]
+
+
+def test_collector_preserves_unknown_budget_even_with_apparently_complete_counters(tmp_path):
+    import json
+
+    from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence, decide_from_collected
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n"
+    )
+    (artifacts / "rollouts.jsonl").write_text("")
+    (tmp_path / ".gym_accumulated_walltime").write_text("60\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text("GYM_ACCOUNTING_UNKNOWN: prior follower unobserved\n")
+    raw = subprocess.check_output([sys.executable, "-c", COLLECT_SCRIPT, str(tmp_path)], text=True)
+    collected = CollectedEvidence.model_validate_json(raw)
+    assert collected.walltime_used_s == 60 and collected.infra_retries_used == 1
+    assert collected.walltime_state == collected.infra_retries_state == "unknown"
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
+    assert decision.action.value == "stop"
+
+
+@pytest.mark.parametrize("name", [".gym_accumulated_walltime", ".gym_infra_retries"])
+def test_manual_reset_cannot_erase_malformed_spent_counters(tmp_path, name):
+    (tmp_path / name).write_text("unknown\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), None, manual_resubmit=True)
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    assert (tmp_path / name).read_text() == "unknown\n"
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
+
+
+@pytest.mark.parametrize("mutation", [None, "create", "change", "remove"])
+def test_collector_binds_dynamic_followup_claim_set_and_contents(tmp_path, mutation):
+    import json
+
+    from nemo_gym.orchestration.recovery import COLLECT_SCRIPT, CollectedEvidence
+
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0}) + "\n"
+    )
+    (artifacts / "rollouts.jsonl").write_text("")
+    (tmp_path / ".gym_accumulated_walltime").write_text("60\n")
+    (tmp_path / ".gym_infra_retries").write_text("1\n")
+    claim = tmp_path / ".gym_followup_queued.100"
+    if mutation != "create":
+        claim.write_text("999\n")
+    prefix = ""
+    if mutation is not None:
+        operation = (
+            f"os.unlink({str(claim)!r})"
+            if mutation == "remove"
+            else f"_original_open({str(claim)!r}, 'w').write('998\\n')"
+        )
+        prefix = (
+            "import builtins,os\n_original_open=builtins.open\n_changed=False\n"
+            "def open(path, *args, **kwargs):\n"
+            "    global _changed\n"
+            "    if not _changed and str(path).endswith('/rollouts.jsonl') and 'source_snapshot' in globals():\n"
+            "        _changed=True\n"
+            f"        {operation}\n"
+            "    return _original_open(path,*args,**kwargs)\n"
+        )
+    raw = subprocess.check_output([sys.executable, "-c", prefix + COLLECT_SCRIPT, str(tmp_path)], text=True)
+    collected = CollectedEvidence.model_validate_json(raw)
+    assert collected.infra_retries_used == 1 and collected.walltime_used_s == 60
+    if mutation is None:
+        assert collected.infra_retries_state == collected.walltime_state == "ok"
+        assert collected.source_digests is not None
+    else:
+        assert collected.infra_retries_state == collected.walltime_state == "unknown"
+        assert collected.source_digests is None

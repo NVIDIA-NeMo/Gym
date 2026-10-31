@@ -678,6 +678,45 @@ def e2e_rollout_collection():  # pragma: no cover
         mark_run_failed()
         raise
 
+    _finalize_live_exporters(output_fpath)
+
+
+def _finalize_live_exporters(output: Path) -> None:
+    """Verify final persisted coverage and health before certifying an active live exporter."""
+    from nemo_gym.artifacts.exporters import get_exporters, run_failed
+    from nemo_gym.artifacts.exporters.base import _artifact_version
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.rollout_health import _health_artifact_digests, _report_sources
+    from nemo_gym.rollout_recovery import run_lock
+    from nemo_gym.rollout_store import RolloutStore
+
+    exporters = get_exporters()
+    if not exporters or run_failed():
+        return
+    try:
+        with run_lock(output):
+            artifacts = RunArtifacts(output)
+            version = _artifact_version(artifacts)
+            store = RolloutStore.read(output, import_legacy=False)
+            if store is None or store.coverage().get("complete") is not True:
+                return
+            health = output.parent / QUALITY_SUMMARY_FILENAME
+            health_bytes = health.read_bytes()
+            summary = json.loads(health_bytes)
+            if summary["run"].get("rollouts") != _report_sources([output], output.parent):
+                return
+            if summary["run"]["provenance"].get("rollout_artifact_digests") != _health_artifact_digests([output]):
+                return
+            if any(version[key] is None for key in version):
+                return
+            for exporter in exporters:
+                if health.read_bytes() != health_bytes or _artifact_version(artifacts) != version:
+                    raise RuntimeError("Final run artifacts changed before live finalization.")
+                exporter.finalize_live(artifacts, version)
+    except Exception as exc:
+        # Tracking failure never changes scores or requests another model attempt.
+        logging.getLogger(__name__).warning("Live tracking completion remains unverified: %s", exc, exc_info=True)
+
 
 _terminated = False
 
@@ -809,6 +848,7 @@ def collect_rollouts():  # pragma: no cover
     finally:
         shutdown_telemetry()
     _exit_if_terminated()
+    _finalize_live_exporters(Path(config.output_jsonl_fpath))
 
 
 @exit_cleanly_on_config_error

@@ -3454,3 +3454,72 @@ def test_raw_responses_stream_capture_preserves_response_population(
     result = run_health_checks(saved, output_dir=tmp_path / "report", workers=1)
     assert len(result.rollouts[0].responses["selected"]) == expected_selected
     assert len(result.rollouts[0].responses["faulted"]) == expected_faulted
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "model_calls_unavailable",
+        "model_call_capture_incomplete",
+        "model_call_capture_records_unreadable",
+        "model_call_capture_unreadable",
+        "model_call_capture_pending",
+        "model_call_capture_no_records",
+    ],
+)
+def test_response_population_rejects_explicit_capture_gaps(tmp_path: Path, gap: str) -> None:
+    record = _record(0, 0)
+    record["reward"] = 0.0
+    record["ng_trajectory"]["gaps"] = [{"code": gap}]
+    path = _write_fixture(tmp_path, [(record, [_call()])])
+    before = path.read_bytes()
+
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+
+    assert result.rollouts[0].responses is None
+    assert json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]["unknown"] == 1
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"output": 1},
+        {"choices": 1},
+        {"output": [{}]},
+        {"output": [{"type": None}]},
+        {"output": [{"type": 7}]},
+        {"output": [{"type": ""}]},
+        {"output": [{"type": "   "}]},
+    ],
+)
+def test_response_population_faults_malformed_raw_output(tmp_path: Path, response: dict) -> None:
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response)])])
+    before = path.read_bytes()
+
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": ["c1"]}
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]
+    assert stats["selected"] == 1 and stats["faulted"] == 1 and stats["unknown"] == 0
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"output_text": "ordinary answer"},
+        {"output": [{"type": "function_call", "name": "get_weather", "arguments": "{}"}]},
+        {"output": [{"type": "custom_tool_call", "name": "custom", "input": "value"}]},
+        {"output": [{"type": "web_search_call", "status": "completed"}]},
+        {"choices": [{"message": {"content": None, "refusal": "Cannot help with this request"}}]},
+    ],
+)
+def test_response_population_keeps_supported_actionable_output(tmp_path: Path, response: dict) -> None:
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response)])])
+    before = path.read_bytes()
+
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": []}
+    assert path.read_bytes() == before

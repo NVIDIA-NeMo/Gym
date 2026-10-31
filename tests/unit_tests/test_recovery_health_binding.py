@@ -472,3 +472,61 @@ def test_binding_requires_exact_keys_types_and_current_digests(tmp_path, mutatio
     c = collect(a)
     _, task = evaluate(c)
     assert c.quality["source_matches"] is False and task["status"] == "FAILED"
+
+
+@pytest.mark.parametrize(
+    "broken",
+    [
+        {"run": []},
+        {"run": {"artifacts": "invalid"}},
+        {"run": {"stats": [1]}},
+        {"run": {"stats": {"model_call_errors": "invalid"}}},
+    ],
+)
+def test_malformed_optional_quality_does_not_erase_saved_score(tmp_path, broken):
+    a, _ = setup(tmp_path)
+    write_json(a / "quality_summary.json", broken)
+    c = collect(a)
+    before = snapshot(a)
+    d, task = evaluate(c)
+    assert c.quality is None
+    assert d.action.value == "noop" and d.counts == {"scored": 2}
+    assert task["status"] == "FAILED" and task["score"] == 0.0
+    assert snapshot(a) == before
+
+
+@pytest.mark.parametrize(
+    "identity_fields,task_id",
+    [
+        ({"task_id": "dataset-task"}, "dataset-task"),
+        ({"problem_id": "dataset-problem"}, "dataset-problem"),
+        ({"instance_id": "dataset-instance"}, "dataset-instance"),
+        ({"task_id": 17}, "17"),
+        ({"task_id": "first", "problem_id": "second", "instance_id": "third"}, "first"),
+        ({"trajectory_identity": {"task_id": "bound-task", "rollout_id": "0-0"}, "task_id": "fallback"}, "bound-task"),
+    ],
+)
+@pytest.mark.parametrize("tamper", [None, "trajectory", "turn"])
+def test_legacy_task_identity_is_bound_to_saved_input(tmp_path, identity_fields, task_id, tamper):
+    a, rows = setup(tmp_path, n=1)
+    inputs = [json.loads(line) for line in (a / "rollouts_materialized_inputs.jsonl").read_text().splitlines()]
+    inputs[0].update(identity_fields)
+    (a / "rollouts_materialized_inputs.jsonl").write_text(json.dumps(inputs[0]) + "\n")
+    rows[0]["ng_trajectory"]["task_id"] = task_id
+    rows[0]["ng_trajectory"]["turns"][0]["task_id"] = task_id
+    if tamper == "trajectory":
+        rows[0]["ng_trajectory"]["task_id"] = "unrelated"
+    if tamper == "turn":
+        rows[0]["ng_trajectory"]["turns"][0]["task_id"] = "unrelated"
+    save_rows(a, rows)
+    run_health_checks(a / "rollouts.jsonl", workers=1)
+    c = collect(a)
+    before = snapshot(a)
+    d, task = evaluate(c)
+    assert d.action.value == "noop" and d.counts == {"scored": 1}
+    assert task["score"] == 0.0
+    if tamper is None:
+        assert trial_health(d, c)[0] is True and task["status"] == "SUCCESS"
+    else:
+        assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
+    assert snapshot(a) == before

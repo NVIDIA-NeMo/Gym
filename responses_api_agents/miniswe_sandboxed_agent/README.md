@@ -107,8 +107,10 @@ Missing aggregate usage stays unknown. Submission is separate from verifier succ
 
 Removing the custom wrapper has these limits:
 
-- Native mini-SWE records tool completion timestamps, but no start times or
-  durations. Gym emits `tool_timing_unavailable` gaps rather than estimating them.
+- Gym’s native Bash execution wrapper records observed start/end timestamps and
+  monotonic durations for supported tool executions. Older or incomplete native
+  records can still lack those facts; Gym preserves `tool_timing_unavailable`
+  gaps rather than estimating missing timings.
 - Submission exits before a final tool observation is saved. The decision and
   native submission text remain available; that tool's execution observation is
   incomplete, with no output or error evidence. This known mini-SWE gap fails
