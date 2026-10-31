@@ -24,6 +24,7 @@ from nemo_gym.config.global_config import MODEL_CALL_CAPTURE_DIR_KEY_NAME, OBSER
 from nemo_gym.gitlab_utils import gitlab_storage_extras
 from nemo_gym.orchestration.api import (
     RUNTIME_ENV_PREFIX,
+    BaseModelServiceConfig,
     BenchmarkRunConfig,
     NodePool,
     RayServiceConfig,
@@ -38,14 +39,19 @@ from nemo_gym.orchestration.api import (
 )
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_HEALTH_PORT,
+    COLLECTOR_HOST_VAR,
     COLLECTOR_SERVICE_NAME,
     FINAL_SCRAPE_GRACE_SECONDS,
     GYM_TELEMETRY_EXTRA,
+    LOCALHOST,
     SHUTDOWN_WAIT_SECONDS,
     collector_config_path,
     driver_telemetry_env,
+    env_host,
     gym_telemetry_active,
+    node_host_var,
     otel_active,
+    render_collector_config,
     vllm_traces_env,
     vllm_traces_flag,
 )
@@ -692,19 +698,119 @@ def _with_vllm_traces(
     (plain, multi-node Ray, data-parallel head, Ray Serve replicas, prefill/decode tiers) carries
     them without knowing about tracing. A service's explicit env wins over the defaults here.
 
-    vLLM exports to `localhost`, so only a service whose single API server runs on the collector's
-    node is traced. A service answering on another node, or on several nodes, is left alone rather
-    than pointed at a collector it cannot reach.
+    A service whose single API server runs on the collector's node exports to `localhost`; one on
+    another node exports to the collector's node, whose hostname the script exports as
+    `GYM_OTEL_COLLECTOR_HOST` (see `_render_otel_hosts`). A service answering on several nodes is
+    left alone: its command builders do not place the flag on every server. So is a Ray Serve
+    service on another node: the gateway splits `--extra-args` into an argv without a shell, so the
+    variable would reach vLLM unexpanded.
     """
     if not (otel_active(config) and config.otel.vllm_traces and isinstance(service, VllmServiceConfig)):
         return service
     total_nodes, _ = _node_totals(compute)
-    collector_node = driver_node if driver_node is not None else 0
-    if _vllm_api_node(service, compute, driver_node, total_nodes) != collector_node:
+    api_node = _vllm_api_node(service, compute, driver_node, total_nodes)
+    if api_node is None:
         return service
-    extra_args = f"{service.extra_args} {vllm_traces_flag()}".strip()
+    if api_node == _collector_node(driver_node):
+        host = LOCALHOST
+    else:
+        gpus_per_node_values = [p.gpus_per_node for p in compute.node_pools.values() if p.gpus_per_node is not None]
+        if effective_ray_serve(service, _service_nodes(service, compute, total_nodes), gpus_per_node_values):
+            return service
+        host = f"${COLLECTOR_HOST_VAR}"
+    extra_args = f"{service.extra_args} {vllm_traces_flag(host)}".strip()
     env = {**vllm_traces_env(config.otel.component, name), **service.env}
     return service.model_copy(update={"extra_args": extra_args, "env": env})
+
+
+def _collector_node(driver_node: int | None) -> int:
+    """The allocation node the collector runs on: beside the driver (see `_render_collector_service`)."""
+    return driver_node if driver_node is not None else 0
+
+
+def _service_api_nodes(
+    service: BaseModelServiceConfig,
+    compute: SlurmComputeConfig,
+    driver_node: int | None,
+    total_nodes: int,
+) -> list[int] | None:
+    """The allocation nodes whose API servers, and so `/metrics`, this model service answers on.
+
+    None when they cannot be placed from the config (Ray Serve replicas behind a gateway).
+    """
+    if isinstance(service, VllmServiceConfig):
+        if isinstance(service, (VllmNodeServiceConfig, VllmPDTierConfig)) and service.server_per_node:
+            start, count = _pool_offsets(compute)[service.node_pool]
+            return list(range(start, start + count))
+        node = _vllm_api_node(service, compute, driver_node, total_nodes)
+        return None if node is None else [node]
+    # The vllm_pd router answers on its pool's first node, or beside the driver (see _service_nodelist).
+    if service.node_pool is not None:
+        return [_pool_offsets(compute)[service.node_pool][0]]
+    return [_collector_node(driver_node)]
+
+
+def _scrape_host(node: int, driver_node: int | None) -> str:
+    """How the collector reaches `node`: itself on `localhost`, any other by the hostname the script exports."""
+    return LOCALHOST if node == _collector_node(driver_node) else env_host(node_host_var(node))
+
+
+def _scrape_hosts(config: SubmitConfig, compute: SlurmComputeConfig, driver_node: int | None) -> dict[str, list[str]]:
+    """Where the collector scrapes each model service's `/metrics`.
+
+    A service whose servers cannot be placed keeps `localhost`: the Ray Serve gateway on the
+    collector's node answers there, and its replicas go unscraped.
+    """
+    total_nodes, _ = _node_totals(compute)
+    hosts: dict[str, list[str]] = {}
+    for name, service in config.deployed_services.items():
+        if not isinstance(service, BaseModelServiceConfig):
+            continue
+        nodes = _service_api_nodes(service, compute, driver_node, total_nodes)
+        hosts[name] = [LOCALHOST] if nodes is None else [_scrape_host(node, driver_node) for node in nodes]
+    return hosts
+
+
+def _collector_driver_node(config: SubmitConfig, compute: SlurmComputeConfig) -> int | None:
+    """The driver node as `build_sbatch_script` places it: None in a single-node job."""
+    total_nodes, _ = _node_totals(compute)
+    return _driver_node(config, compute) if total_nodes > 1 else None
+
+
+def render_job_collector_config(
+    config: SubmitConfig, compute: SlurmComputeConfig, benchmark_name: str, remote_bench_dir: Path
+) -> str:
+    """The collector config for one benchmark job, with every scrape aimed at the node that serves it."""
+    # A compute without node pools is one node.
+    total_nodes = max(_node_totals(compute)[0], 1)
+    driver_node = _collector_driver_node(config, compute)
+    return render_collector_config(
+        config,
+        benchmark_name,
+        remote_bench_dir,
+        scrape_hosts=_scrape_hosts(config, compute, driver_node),
+        node_hosts=[_scrape_host(node, driver_node) for node in range(total_nodes)],
+    )
+
+
+# The first line `_render_otel_hosts` writes. A job.sh without it predates the hostname exports, so a
+# collector config refreshed for it must not refer to them (see `SlurmExecutor.resubmit`).
+NODE_HOST_EXPORTS_MARKER = f'export {node_host_var(0)}="'
+
+
+def _render_otel_hosts(config: SubmitConfig, total_nodes: int, driver_node: int | None) -> str:
+    """Export the hostnames the collector config and traced services refer to, in a multi-node job.
+
+    `GYM_OTEL_NODE_<i>` is allocation node i, which the collector config names as `${env:...}` in
+    its scrape targets; `GYM_OTEL_COLLECTOR_HOST` is the node the collector runs on, which a vLLM
+    service on another node exports its traces to. Needs the `gym_nodes` array `_render_pool_nodes`
+    declares for every multi-node job.
+    """
+    if not (otel_active(config) and total_nodes > 1):
+        return ""
+    lines = [f'export {node_host_var(node)}="${{gym_nodes[{node}]}}"' for node in range(total_nodes)]
+    lines.append(f'export {COLLECTOR_HOST_VAR}="${{gym_nodes[{_collector_node(driver_node)}]}}"')
+    return "\n".join(lines)
 
 
 def _render_collector_service(
@@ -713,9 +819,10 @@ def _render_collector_service(
     """The collector's srun step. Started before the model services so the scrape covers their
     startup.
 
-    Runs on exactly one node, the batch host. That is the first node of the allocation, which is
-    also where the Ray prelude puts the head of a multi-node vLLM service and where the driver runs,
-    so `localhost:<port>` reaches the API server and the OTLP endpoints from the same node. In a
+    Runs on exactly one node, beside the driver: the first node of the allocation, or the policy's
+    pool head when the policy is pinned. The policy's API server and the OTLP endpoints are on
+    `localhost` from there; the config reaches servers on other nodes through the hostnames
+    `_render_otel_hosts` exports, which the step inherits from the batch script's environment. In a
     container the job directory is mounted for the config and the local `otel/*.jsonl` output; on
     the node it is simply there, so no mounts or workdir are passed.
     """
@@ -1016,6 +1123,7 @@ def build_sbatch_script(
             else "",
             _render_pool_nodes(config, compute, is_multi_node),
             _render_ray_head_addresses(config, compute),
+            _render_otel_hosts(config, total_nodes, _collector_driver_node(config, compute)),
         )
         if block
     )
@@ -1024,7 +1132,7 @@ def build_sbatch_script(
     observed = otel_active(config)
     instrumented = gym_telemetry_active(config)
 
-    driver_node = _driver_node(config, compute) if is_multi_node else None
+    driver_node = _collector_driver_node(config, compute)
     service_commands = "\n\n".join(
         (
             [_render_collector_service(config, remote_bench_dir, is_multi_node=is_multi_node, driver_node=driver_node)]

@@ -40,7 +40,11 @@ from nemo_gym.orchestration.executors.otel import (
     validate_gym_telemetry,
 )
 from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import (
+    NODE_HOST_EXPORTS_MARKER,
+    build_sbatch_script,
+    render_job_collector_config,
+)
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
@@ -247,11 +251,7 @@ class SlurmExecutor(BaseExecutor):
             # collector config, inside the lock and after refusing any active job in its dir.
             collector_update = []
             if otel_active(config):
-                collector_yaml = render_collector_config(config, benchmark, job_dir)
-                collector_path = shlex.quote(str(collector_config_path(job_dir)))
-                collector_update = [
-                    f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
-                ]
+                collector_update = self._collector_update(config, benchmark, job_dir)
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
             # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
@@ -294,6 +294,32 @@ class SlurmExecutor(BaseExecutor):
             job = job.model_copy(update={"job_id": job_id, "error": None})
             self.persist_record(record.with_benchmark(job), conn.write_text)
         return job
+
+    @staticmethod
+    def _collector_update(config: SubmitConfig, benchmark: str, job_dir: Path) -> list[str]:
+        """Shell lines that refresh the benchmark's collector config, run inside the job dir.
+
+        The queued job.sh is the one submit wrote. One written before the script exported the
+        allocation's hostnames defines none of the `${env:...}` hosts a multi-node config refers
+        to, so such a job keeps scraping `localhost` only, as it did when it was submitted.
+        """
+        compute = next(iter(config.compute.values()))
+        placed = render_job_collector_config(config, compute, benchmark, job_dir)
+        unplaced = render_collector_config(config, benchmark, job_dir)
+        path = shlex.quote(str(collector_config_path(job_dir)))
+
+        def write(collector_yaml: str) -> str:
+            return f"printf %s {shlex.quote(collector_yaml)} > {path} || fail 'cannot update collector config'"
+
+        if placed == unplaced:
+            return [write(placed)]
+        return [
+            f"if grep -qF -- {shlex.quote(NODE_HOST_EXPORTS_MARKER)} job.sh; then",
+            write(placed),
+            "else",
+            write(unplaced),
+            "fi",
+        ]
 
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
@@ -352,7 +378,7 @@ class SlurmExecutor(BaseExecutor):
                 print(f"\n{'=' * 60}")
                 print(f"[dry-run] {COLLECTOR_DIR}/{COLLECTOR_CONFIG_NAME} for benchmark: {name}")
                 print(f"{'=' * 60}")
-                print(render_collector_config(config, name, remote_run_dir / name))
+                print(render_job_collector_config(config, compute, name, remote_run_dir / name))
 
     def _stage(self, config: SubmitConfig, compute: SlurmComputeConfig, remote_run_dir: Path, staging: Path) -> Path:
         # rsync -a copies these modes to the cluster. The temp dir is created 0700, which would
@@ -370,6 +396,6 @@ class SlurmExecutor(BaseExecutor):
             if otel_active(config):
                 (bench_dir / COLLECTOR_DIR).mkdir()
                 (bench_dir / COLLECTOR_DIR / COLLECTOR_CONFIG_NAME).write_text(
-                    render_collector_config(config, name, remote_run_dir / name)
+                    render_job_collector_config(config, compute, name, remote_run_dir / name)
                 )
         return staging
