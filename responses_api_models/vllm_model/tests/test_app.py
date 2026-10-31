@@ -875,6 +875,38 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient, global_config_dict=global_config),
         )
 
+    @mark.parametrize("with_text", [False, True], ids=["refusal-only", "refusal-and-text"])
+    def test_chat_reasoning_parser_preserves_refusal_history(self, monkeypatch: MonkeyPatch, with_text: bool) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = True
+        server.config.reasoning_field = "both"
+        upstream = AsyncMock(return_value=self._served_completion("A safe alternative."))
+        monkeypatch.setattr(server._clients[0].__class__, "create_chat_completion", upstream)
+        content = [{"type": "refusal", "refusal": "I cannot help with that."}]
+        expected_content = deepcopy(content)
+        if with_text:
+            content.append({"type": "text", "text": "<think>Offer another option.</think>Try this instead."})
+            expected_content.append({"type": "text", "text": "Try this instead."})
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/chat/completions",
+            json={
+                "messages": [
+                    {"role": "user", "content": "Can you help with this request?"},
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": "Suggest a safe alternative."},
+                ]
+            },
+        )
+
+        assert response.status_code == 200
+        assert response.json()["choices"][0]["message"]["content"] == "A safe alternative."
+        upstream.assert_awaited_once()
+        expected_assistant = {"role": "assistant", "content": expected_content}
+        if with_text:
+            expected_assistant.update(reasoning="Offer another option.", reasoning_content="Offer another option.")
+        assert upstream.await_args.kwargs["messages"][1] == expected_assistant
+
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 

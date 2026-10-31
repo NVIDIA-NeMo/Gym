@@ -1167,6 +1167,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 elif isinstance(content, list):
                     reasoning_content = None
                     for content_item_dict in content:
+                        if content_item_dict["type"] != "text":
+                            continue
                         reasoning_matches, remaining_content = self._converter._extract_reasoning_from_content(
                             content_item_dict["text"]
                         )
