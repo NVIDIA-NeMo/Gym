@@ -7,6 +7,7 @@ from typing import Any, Literal
 from uuid import uuid4
 from warnings import warn
 
+from aiohttp import ClientConnectorError
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
@@ -282,7 +283,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     action = self._timeout_action(action)
                 elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
                     # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
-                    action = OutcomeAction.FAIL
+                    action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
             if action == OutcomeAction.COUNT_AS_ZERO:
                 # Explicit policy completion is not a verifier execution.
                 report = FailureReport.model_validate(agent_response.model_extra["failure_report"])
@@ -608,9 +609,38 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 return None
         return rebuild_failure(report)
 
+    @staticmethod
+    def _model_request_not_sent(response: NeMoGymResponse) -> bool:
+        """A selected connector failure is safe only if every attempt of that operation never connected."""
+        report = FailureReport.model_validate(response.model_extra["failure_report"])
+        selected = report.events[report.failure_id]
+        if (
+            selected.boundary != FailureBoundary.MODEL
+            or selected.operation != "model_request"
+            or not selected.operation_id
+            or not selected.attempt_id
+        ):
+            return False
+        observed = [
+            event
+            for event in report.events.values()
+            if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
+        ]
+        if any(not event.operation_id or not event.attempt_id for event in observed):
+            return False
+        attempts = [event for event in observed if event.operation_id == selected.operation_id]
+        connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+        return len({event.attempt_id for event in attempts}) == len(attempts) and all(
+            event.request_upload_complete is False
+            and event.foreign_error is not None
+            and event.foreign_error.exception_type == connector_type
+            for event in attempts
+        )
+
     def _timeout_action(self, fallback: OutcomeAction) -> OutcomeAction:
         """Keep the migrated agent's explicit timeout rule unless the environment overrides policy."""
-        if self.config.agent_outcome_policy.model_fields_set:
+        policy = self.config.agent_outcome_policy
+        if MODEL_POLICY_RESPONSE_TIMEOUT in policy.by_failure_kind or "default_action" in policy.model_fields_set:
             return fallback
         agent = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
         rules = (agent.get("outcome_policy") or {}).get("by_failure_kind") or {}

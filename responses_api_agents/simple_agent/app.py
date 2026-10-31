@@ -79,7 +79,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR, MODEL_POLICY_RESPONSE_TIMEOUT
 from nemo_gym.exception_inspection import explicit_causes
-from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
@@ -611,7 +611,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         raise
                     # The session reply is checkpointed. Keep its selected cause in that reply, not
                     # only in request-local observations, whose selected ID is deliberately absent.
-                    report = report_for_current_request(failure or error)
+                    log = RequestFailureLog.current()
+                    report = (
+                        log.reply_report(failure or error) if log else report_for_current_request(failure or error)
+                    )
                     forwarded = FailureHeader.decode(error.headers)
                     if forwarded is not None:
                         report = report.merged(forwarded)

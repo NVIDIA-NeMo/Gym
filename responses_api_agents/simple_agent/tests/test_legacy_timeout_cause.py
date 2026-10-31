@@ -20,8 +20,8 @@ from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServerConfig,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import BaseServerConfig
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.rollout_store import RolloutStore
 from resources_servers.equivalence_llm_judge.app import LLMJudgeResourcesServer, LLMJudgeResourcesServerConfig
@@ -39,6 +39,7 @@ from tests.unit_tests.test_agent_environment_collection_failures import _serve
         for mode in (
             "503",
             "503_retried",
+            "503_agent_retried",
             "timeout",
             "disconnect",
             "connect",
@@ -177,7 +178,7 @@ async def test_policy_failure_survives_vllm_agent_environment_store(
                     entrypoint="",
                     name="agent",
                     final_on_model_timeout=mode != "timeout_retry",
-                    max_model_retries=0,
+                    max_model_retries=1 if mode == "503_agent_retried" else 0,
                     model_server={"name": "model", "type": "responses_api_models"},
                     resources_server={"name": "resources", "type": "resources_servers"},
                 ),
@@ -284,8 +285,11 @@ async def test_policy_failure_survives_vllm_agent_environment_store(
             elif mode in {"disconnect", "connect"}:
                 assert saved.get("_ng_failure_counts_as_zero") is not True
                 assert "reward" not in saved and len(hits) == (1 if mode == "disconnect" else 0)
-                assert store.pending() == []
+                assert len(store.pending()) == (1 if mode == "connect" else 0)
                 assert any(event.request_upload_complete is (mode == "disconnect") for event in report.events.values())
+                coverage = json.loads(out.with_name("rollouts_coverage.json").read_text())
+                assert coverage["attempts"] == (2 if mode == "connect" else 1)
+                assert coverage["max_rollout_attempts"] == 3
             elif mode in {"timeout_retry", "timeout_env_fail"}:
                 assert saved.get("_ng_failure_kind") == "model_policy_response_timeout"
                 assert saved.get("_ng_failure_counts_as_zero") is not True and "reward" not in saved
@@ -303,11 +307,11 @@ async def test_policy_failure_survives_vllm_agent_environment_store(
             else:
                 assert saved.get("_ng_failure_id") is not None, proof
                 assert saved.get("_ng_failure_kind") == "model_request_error", proof
-                assert len(hits) == (4 if mode == "503_retried" else 2)
-                if mode == "503_retried":
+                assert len(hits) == (4 if mode in {"503_retried", "503_agent_retried"} else 2)
+                if mode in {"503_retried", "503_agent_retried"}:
                     attempts = [event for event in report.events.values() if event.operation == "model_request"]
                     assert len(attempts) == 2 and len({event.attempt_id for event in attempts}) == 2
-                    assert len({event.operation_id for event in attempts}) == 1
+                    assert len({event.operation_id for event in attempts}) == (2 if mode == "503_agent_retried" else 1)
                     assert all(event.http_status == 503 for event in attempts)
         finally:
             for srv, task, _ in reversed(servers):
