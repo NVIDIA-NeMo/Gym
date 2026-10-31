@@ -1580,6 +1580,9 @@ class RunTimingReport:
             self._timed_out += 1
 
     def table(self) -> str:
+        if self._total == 0:
+            return "Run timing summary: no rollouts to dispatch."
+
         elapsed = time.monotonic() - self._t0
         started = len(self._start_offsets)
         all_started = started >= self._total
