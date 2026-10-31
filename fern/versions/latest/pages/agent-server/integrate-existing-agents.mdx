@@ -59,6 +59,30 @@ The Docker provider needs a local Docker daemon. Configure the Gym host and netw
 
 Agent-owned sandboxes inherit provider metadata defaults, then `sandbox_config.metadata`, with Gym's agent/session/rollout labels taking precedence. The agent stops its sandbox on close or failed setup. If neither Resources sandbox access nor `sandbox_provider` is available, seed fails with a configuration error.
 
+### Pi and OpenCode prompt and tool controls
+
+Both `pi_agent` and `opencode_agent` accept `system_prompt_mode: append|replace`,
+defaulting to `append`. Replacement uses the harness's custom system prompt for
+the combined configured system prompt, request instructions and input system
+instructions. It keeps the user's task separate. Append mode retains each
+adapter's existing behavior. These controls apply to local calls and sandbox
+sessions; OpenCode continuations retain their established instructions.
+The harness may still add environment context, such as the date or working directory.
+OpenCode replacement selects its `build` agent, overriding a different default
+agent. Remove `--agent` selectors from `extra_args` in replacement mode; use
+append mode to retain custom agent selection.
+Replacement prompt text is passed literally, including `{env:...}` and `{file:...}`
+sequences. Other OpenCode configuration keeps its native substitution behavior.
+
+Pi's `enable_tools` defaults to `true`. Setting it to `false` disables Pi's
+built-in tools through `--no-builtin-tools`; separately configured MCP tools and
+session grants remain available and retain their validation. For a run with no
+tools, also omit MCP configuration and grants. OpenCode continues to select its
+tools through `opencode_config.tools`, for example `{"*": false}`.
+
+Record prompt replacement and tool selection as evaluation treatments: they can
+change results relative to the harness's default coding behavior.
+
 ## Run an integrated agent on a benchmark
 
 An experiment is a few composable YAML files: the model and provider, the benchmark, the agent, and the Environment Server that binds them. To change the agent or the benchmark, replace one file; the others stay as they are.
