@@ -47,7 +47,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.trajectory import AgentObservationBundle
-from nemo_gym.typed_exceptions import rebuild_failure
+from nemo_gym.typed_exceptions import agent_route_failure, failure_report_for, rebuild_failure
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
@@ -509,6 +509,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         else "infrastructure_error",
                         detail=f"{type(exc).__name__}: {exc}",
                     )
+                    if not isinstance(exc, TimeoutError):
+                        failure = agent_route_failure(
+                            exc, operation="harness.run", stage="agent" if agent_started else "seed"
+                        )
+                        failure.__cause__ = exc
+                        FailureReportRow.merged_into(extra, failure_report_for(failure))
                 finally:
                     if harness is not None and not agent_started:
                         try:
@@ -684,6 +690,10 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                 reason="timeout" if isinstance(exc, TimeoutError) else "infrastructure_error",
                 detail=f"{type(exc).__name__}: {exc}",
             )
+            if not isinstance(exc, TimeoutError):
+                failure = agent_route_failure(exc, operation="harness.run")
+                failure.__cause__ = exc
+                FailureReportRow.merged_into(result.harness_metadata, failure_report_for(failure))
         finally:
             if state is not None and self._sessions.get(key) is state:
                 self._sessions.pop(key, None)
