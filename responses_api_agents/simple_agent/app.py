@@ -42,6 +42,7 @@ from nemo_gym.agent_outcome import (
     AgentOutcome,
     OutcomeAction,
     OutcomePolicyConfig,
+    confirmed_policy_response_timeout,
     failure_outcome_policy,
 )
 from nemo_gym.base_responses_api_agent import (
@@ -80,7 +81,6 @@ from nemo_gym.core.failure_kinds import AGENT_RUN_ERROR, MODEL_POLICY_RESPONSE_T
 from nemo_gym.exception_inspection import explicit_causes
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow, report_for_current_request
 from nemo_gym.health.timeouts import TimeoutEvent
-from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     SESSION_OWNER_HEADER,
@@ -318,36 +318,7 @@ def _policy_request_timed_out(error: ClientResponseError) -> bool:
     omitted, is not a known request timeout.
     """
     report = FailureHeader.decode(error.headers)
-    if report is None or report.omitted or report.failure_id is None:
-        return False
-    final = report.events.get(report.failure_id)
-    if (
-        final is None
-        or final.boundary != FailureBoundary.MODEL
-        or final.operation != "model_request"
-        or not final.operation_id
-        or not final.attempt_id
-    ):
-        return False
-    observed = [
-        event
-        for event in report.events.values()
-        if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
-    ]
-    # An unidentified attempt cannot be proven to belong to an earlier operation instead of the final one.
-    if any(not event.operation_id or not event.attempt_id for event in observed):
-        return False
-    attempts = [event for event in observed if event.operation_id == final.operation_id]
-    return (
-        bool(attempts)
-        and len({event.attempt_id for event in attempts}) == len(attempts)
-        and all(
-            event.attempt_id
-            and event.request_upload_complete is True
-            and event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
-            for event in attempts
-        )
-    )
+    return confirmed_policy_response_timeout(report)
 
 
 def _policy_timeout_failure(error: ClientResponseError) -> NgFailureEvent | None:
@@ -622,23 +593,34 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 except ClientResponseError as error:
                     if _selected_model_body_failure(error) or _selected_failure_unknown(error):
                         raise  # The reply's report travels on unchanged; it is not another session chance.
+                    failure = None
+                    if _policy_request_timed_out(error):
+                        report = FailureHeader.decode(error.headers)
+                        final = report.events[report.failure_id]
+                        failure = NgFailureEvent(
+                            boundary=FailureBoundary.AGENT,
+                            failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
+                            failure_reason="Policy model request timed out on every attempt",
+                            operation=POLICY_TIMEOUT_OPERATION,
+                            operation_id=final.operation_id,
+                        )
+                        failure.__cause__ = error
                     if not in_session:
-                        if _policy_request_timed_out(error):
-                            report = FailureHeader.decode(error.headers)
-                            final = report.events[report.failure_id]
-                            raise NgFailureEvent(
-                                boundary=FailureBoundary.AGENT,
-                                failure_kind=MODEL_POLICY_RESPONSE_TIMEOUT,
-                                failure_reason="Policy model request timed out on every attempt",
-                                operation=POLICY_TIMEOUT_OPERATION,
-                                operation_id=final.operation_id,
-                            ) from error
+                        if failure is not None:
+                            raise failure from error
                         raise
+                    # The session reply is checkpointed. Keep its selected cause in that reply, not
+                    # only in request-local observations, whose selected ID is deliberately absent.
+                    report = report_for_current_request(failure or error)
+                    forwarded = FailureHeader.decode(error.headers)
+                    if forwarded is not None:
+                        report = report.merged(forwarded)
+                    reported_kind = MODEL_POLICY_RESPONSE_TIMEOUT if failure is not None else MODEL_REQUEST_ERROR
                     # Return the cause and partial work; the Environment Server owns grading and retry policy.
                     content = getattr(error, "response_content", b"")
                     detail = content.decode(errors="replace") if isinstance(content, bytes) else str(content)
                     invocation_status = "failed"
-                    invocation_error_type = MODEL_REQUEST_ERROR
+                    invocation_error_type = reported_kind
                     model_response = NeMoGymResponse(
                         id=f"resp_{uuid4().hex}",
                         created_at=time(),
@@ -646,6 +628,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         object="response",
                         output=[],
                         status="failed",
+                        failure_report=report.model_dump(mode="json"),
                         error={
                             "code": "server_error",
                             "message": f"Model HTTP {error.status}: {detail or error.message}",
@@ -656,7 +639,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                         metadata={
                             **(body.metadata or {}),
                             AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
-                                failure_kind=MODEL_REQUEST_ERROR, status_code=error.status
+                                failure_kind=reported_kind,
+                                status_code=error.status if reported_kind == MODEL_REQUEST_ERROR else None,
                             ).model_dump_json(),
                         },
                     )
