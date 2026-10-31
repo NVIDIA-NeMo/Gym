@@ -1013,7 +1013,7 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     from nemo_gym.core import rollout_context
     from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
     from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.server_utils import BaseServerConfig
     from nemo_gym.typed_exceptions import NgFailureEvent
 
@@ -1134,7 +1134,7 @@ def test_episode_infrastructure_refusal_keeps_the_harness_failure_as_its_cause(r
     """The 503 stays; a harness-reported failure is its cause, and an unreported one is not invented."""
     from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
     from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
     failure = NgFailureEvent(

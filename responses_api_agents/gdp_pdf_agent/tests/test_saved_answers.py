@@ -2,11 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 """Real adapter routes and durable collection with a scripted model; no inference or sandbox provider."""
 
+import asyncio
+import hashlib
 import json
 import sqlite3
+from pathlib import Path
 from unittest.mock import AsyncMock
 
 import pytest
+import uvicorn
 from aiohttp import ClientSession
 from fastapi import FastAPI, Request
 from omegaconf import OmegaConf
@@ -14,13 +18,13 @@ from omegaconf import OmegaConf
 import nemo_gym.client.http_client as http_client
 import nemo_gym.rollout_collection as collection
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
-from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import BaseServerConfig
-from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.client import ServerClient
+from nemo_gym.config import BaseServerConfig
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.rollout_recovery import has_saved_generation
 from nemo_gym.rollout_store import RolloutStore
-from nemo_gym.server_runtime.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -28,12 +32,87 @@ from nemo_gym.server_runtime.base_resources_server import (
 )
 from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.bird_sql.app import BirdSqlResourcesServer, BirdSqlResourcesServerConfig
-from resources_servers.deepswe.app import DeepSWEResourcesServer, DeepSWESeedSessionRequest, VerifierResult
-from resources_servers.deepswe.tests.conftest import task_assets
-from resources_servers.deepswe.tests.test_app import _config as deepswe_config
+from resources_servers.deepswe.app import (
+    DeepSWEResourcesServer,
+    DeepSWEResourcesServerConfig,
+    DeepSWESeedSessionRequest,
+    VerifierResult,
+)
+from resources_servers.false_statement_judge.app import FalseStatementJudgeConfig, FalseStatementJudgeServer
 from responses_api_agents.gdp_pdf_agent.app import GdpPdfAgent, GdpPdfAgentConfig
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
-from tests.unit_tests.test_agent_environment_collection_failures import MODEL_REPLY, _serve
+
+
+MODEL_REPLY = {
+    "id": "scripted-response",
+    "object": "response",
+    "created_at": 0,
+    "model": "scripted",
+    "status": "completed",
+    "output": [],
+    "parallel_tool_calls": False,
+    "tool_choice": "auto",
+    "tools": [],
+}
+
+
+async def _serve(app):
+    server = uvicorn.Server(uvicorn.Config(app, host="127.0.0.1", port=0, lifespan="off", log_level="warning"))
+    task = asyncio.create_task(server.serve())
+    async with asyncio.timeout(5):
+        while not server.started:
+            await asyncio.sleep(0.01)
+    return server, task, server.servers[0].sockets[0].getsockname()[1]
+
+
+def _task_assets(tmp_path: Path) -> Path:
+    task_id = "example-task"
+    task_dir = tmp_path / "tasks" / task_id
+    for directory in (task_dir / "tests", task_dir / "solution"):
+        directory.mkdir(parents=True)
+
+    (task_dir / "task.toml").write_text(
+        """schema_version = "1.3"
+[task]
+name = "datacurve/example-task"
+description = ""
+authors = []
+keywords = []
+[metadata]
+task_id = "example-task"
+repository_url = "https://github.com/example/repo"
+base_commit_hash = "0123456789abcdef0123456789abcdef01234567"  # pragma: allowlist secret
+language = "python"
+[verifier]
+network_mode = "no-network"
+environment_mode = "separate"
+timeout_sec = 1800.0
+[verifier.environment]
+cpus = 3
+memory_mb = 12288
+storage_mb = 25600
+[[verifier.collect]]
+command = "cd /app && mkdir -p /logs/artifacts && git config --global --add safe.directory /app && git diff --binary 0123456789abcdef0123456789abcdef01234567 HEAD > /logs/artifacts/model.patch"
+timeout_sec = 300.0
+[agent]
+network_mode = "no-network"
+timeout_sec = 5400.0
+[environment]
+docker_image = "public.example/project/example-task:v1.1"
+cpus = 2
+memory_mb = 8192
+storage_mb = 20480
+""",
+        encoding="utf-8",
+    )
+    (task_dir / "instruction.md").write_text("Implement the feature and commit it.\n", encoding="utf-8")
+    (task_dir / "tests" / "test.sh").write_text("#!/bin/bash\n", encoding="utf-8")
+    (task_dir / "tests" / "test.patch").write_text("", encoding="utf-8")
+    (task_dir / "tests" / "grader.py").write_text("", encoding="utf-8")
+    (task_dir / "tests" / "config.json").write_text("{}\n", encoding="utf-8")
+    (task_dir / "solution" / "solution.patch").write_text("golden patch\n", encoding="utf-8")
+
+    return task_dir.parent
 
 
 class _UnavailableVerifier(SimpleResourcesServer):
@@ -54,6 +133,8 @@ class _UnavailableVerifier(SimpleResourcesServer):
         "bird_corrupt",
         "bird_wrong",
         "bird_correct",
+        "broken_missing",
+        "broken_zero",
         "gdp",
         "deep_verifier",
         "deep_no_patch",
@@ -134,6 +215,24 @@ async def test_adapter_failure_keeps_saved_answer_and_resume_never_regenerates(t
                         row["gt_sql"] = "SELECT * FROM missing"
                     else:
                         sqlite3.connect(database).close()
+            elif case.startswith("broken"):
+                resource = FalseStatementJudgeServer(
+                    config=FalseStatementJudgeConfig(
+                        host="127.0.0.1",
+                        port=0,
+                        entrypoint="",
+                        name="resources",
+                        judge_model_server={"name": "judge", "type": "responses_api_models"},
+                        judge_responses_create_params={"input": []},
+                    ),
+                    server_client=client(),
+                )
+                monkeypatch.setattr(
+                    resource,
+                    "_call_judge",
+                    AsyncMock(return_value="<points>0</points>" if case == "broken_zero" else "unusable verdict"),
+                )
+                row.update(problem="False claim", original_problem="Original claim")
             elif case == "gdp":
                 resource = _UnavailableVerifier(
                     config=BaseResourcesServerConfig(host="127.0.0.1", port=0, entrypoint="", name="resources"),
@@ -155,8 +254,17 @@ async def test_adapter_failure_keeps_saved_answer_and_resume_never_regenerates(t
                     "strip_images_from_output": False,
                 }
             else:
-                assets = task_assets.__wrapped__(tmp_path)
-                cfg = deepswe_config(assets, golden=False)
+                assets = _task_assets(tmp_path)
+                cfg = DeepSWEResourcesServerConfig(
+                    host="127.0.0.1",
+                    port=0,
+                    entrypoint="",
+                    name="resources",
+                    tasks_dir=assets,
+                    expected_task_count=1,
+                    sandbox_provider="scripted",
+                    sandbox_config={},
+                )
                 cfg.logs_dir = tmp_path / "logs"
                 cfg.include_model_patch_in_response = case != "deep_no_patch"
                 resource = DeepSWEResourcesServer(config=cfg, server_client=client())
@@ -241,7 +349,7 @@ async def test_adapter_failure_keeps_saved_answer_and_resume_never_regenerates(t
             await collect(cfg)
             assert len(hits) == 1
             store = RolloutStore.read(out)
-            if case in {"bird_correct", "bird_wrong"}:
+            if case in {"bird_correct", "bird_wrong", "broken_zero"}:
                 [saved] = store.selected("success")
                 assert saved["reward"] == (1 if case == "bird_correct" else 0)
                 assert not list(store.failures())
@@ -258,12 +366,20 @@ async def test_adapter_failure_keeps_saved_answer_and_resume_never_regenerates(t
                 assert retained["id"] == answer["id"]
                 assert has_saved_generation(saved)
                 coverage = json.loads(out.with_name("rollouts_coverage.json").read_text())
-                assert coverage["measured"] == 0 and coverage["masked"] == 1
+                assert coverage["measured"] == 0
+                assert coverage["masked"] == (0 if case == "broken_missing" else 1)
                 assert coverage["final_zeros"] == 0
                 report = FailureReportRow.report(saved)
                 assert report.events
                 kinds = {event.failure_kind for event in report.events.values()}
-                assert ("session_lost" if case == "deep_missing" else "verifier_error") in kinds
+                expected_kind = (
+                    "session_lost"
+                    if case == "deep_missing"
+                    else "judge_failed"
+                    if case == "broken_missing"
+                    else "verifier_error"
+                )
+                assert expected_kind in kinds
                 if case == "gdp":
                     assert any(
                         e.failure_kind == "agent_route_failed" and e.cause_id in report.events
@@ -276,10 +392,33 @@ async def test_adapter_failure_keeps_saved_answer_and_resume_never_regenerates(t
                     )
                     if case == "deep_missing":
                         resource._run_verifier.assert_not_awaited()
+            retained = (
+                saved.get("response") or saved.get("_ng_failure_response") or saved.get("_ng_failure_partial_response")
+            )
+            canonical = NeMoGymResponse.model_validate(retained).model_dump(mode="json")
+            expected = NeMoGymResponse.model_validate(answer).model_dump(mode="json")
+            assert canonical == expected
+            answer_hash = hashlib.sha256(json.dumps(canonical, sort_keys=True).encode()).hexdigest()
             before = out.read_bytes() if out.exists() else b""
             await collect(cfg.model_copy(update={"resume_from_cache": True}))
             assert len(hits) == 1
             assert (out.read_bytes() if out.exists() else b"") == before
+            (tmp_path / "saved-answer-proof.json").write_text(
+                json.dumps(
+                    {
+                        "case": case,
+                        "model_calls_before_resume": 1,
+                        "model_calls_after_resume": len(hits),
+                        "canonical_response_sha256": answer_hash,
+                        "response_unchanged": True,
+                        "rows_byte_unchanged_on_resume": True,
+                        "mask_sample": saved.get("mask_sample"),
+                        "reward": saved.get("reward"),
+                        "failure_kind": saved.get("failure_kind"),
+                        "has_saved_generation": has_saved_generation(saved),
+                    }
+                )
+            )
         finally:
             for server, task, _ in reversed(servers):
                 server.should_exit = True

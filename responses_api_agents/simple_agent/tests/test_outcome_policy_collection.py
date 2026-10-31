@@ -147,7 +147,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
     from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
     from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
     from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, SimpleAgentRunRequest
 

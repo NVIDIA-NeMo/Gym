@@ -47,6 +47,7 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     DirectHTTPToolAccess,
+    FailureBoundary,
     FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
@@ -63,7 +64,6 @@ from nemo_gym.server_runtime import (
     seed_verify_step_type,
 )
 from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,

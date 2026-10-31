@@ -35,8 +35,7 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nemo_gym.agent_utils.sandbox_observation import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
-from nemo_gym.core.episode import current_verifier_invocation_id
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId, current_verifier_invocation_id
 from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -54,6 +53,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    FailureBoundary,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -64,7 +64,6 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
