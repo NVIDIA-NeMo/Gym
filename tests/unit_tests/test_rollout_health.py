@@ -3193,3 +3193,33 @@ class TestFailureGroupsAreNamedByRetry:
 
         _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
         assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        None,
+        {"selected": 1600, "faulted": 36, "unknown": 0, "duplicated": 0},
+        {"selected": 0, "faulted": 0, "unknown": 2, "duplicated": 1},
+    ],
+)
+def test_console_distinguishes_rollout_checks_from_response_population(responses, tmp_path):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    summary = {"run": {"verdicts": {"healthy": 1599, "unhealthy": 1, "unobserved": 0}, "stats": {}}}
+    if responses is not None:
+        summary["run"]["stats"]["responses"] = responses
+    original = deepcopy(summary)
+    report = health.format_health_report(
+        SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
+    )
+    assert "Rollout checks: 1600 checked, 1599 passed, 1 flagged, 0 unobserved" in report
+    assert "Rollout health:" not in report
+    if responses is None:
+        assert "Model responses:" not in report
+    else:
+        assert f"Model responses: {responses['faulted']}/{responses['selected']} faulted" in report
+        assert f"{responses['unknown']} rollout scopes unobserved" in report
+        assert f"{responses['duplicated']} duplicate call IDs" in report
+    assert summary == original
