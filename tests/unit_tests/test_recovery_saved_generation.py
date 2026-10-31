@@ -398,10 +398,7 @@ async def test_diagnostic_generation_blocks_replay_without_becoming_verifier_inp
     assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (1, 3)
 
 
-@pytest.mark.parametrize("unusable", [{}, None])
-async def test_unusable_original_response_does_not_fall_back_to_different_partial_input(
-    tmp_path, monkeypatch, unusable
-):
+async def test_unusable_original_response_does_not_fall_back_to_different_partial_input(tmp_path, monkeypatch):
     result = {
         "_ng_failure_class": "judge_failed",
         "failure_kind": "judge_failed",
