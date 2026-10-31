@@ -125,7 +125,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
     import httpx
     from omegaconf import OmegaConf
 
-    from environment_servers.single_agent_turn.tests.test_app import _environment_server, _request, _Response
+    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()
     if empty_output:
