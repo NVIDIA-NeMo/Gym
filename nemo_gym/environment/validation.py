@@ -21,7 +21,6 @@ from pydantic import BaseModel, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
@@ -41,6 +40,7 @@ from nemo_gym.environment.manifest import (
     resolve_manifest_config_path,
 )
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 
 
 class EnvironmentValidationError(ConfigError):

@@ -34,11 +34,6 @@ from fastapi import Request
 from openai.types.responses import ResponseInputTextParam
 from pydantic import ConfigDict, Field, FilePath
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -62,15 +57,6 @@ from nemo_gym.core import (
     NeMoGymSummary,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
-    AgentInvocation,
-    AgentObservationBundle,
-    ContextCompactionObservation,
-    ObservationGap,
-    SandboxObservation,
-    ToolCallObservation,
-    TrajectoryRecord,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -85,6 +71,20 @@ from nemo_gym.sandbox.agent_tools import (
     sandbox_server_url,
     seed_mcp_servers,
     verify_agent_response,
+)
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+)
+from nemo_gym.trajectory import (
+    AgentInvocation,
+    AgentObservationBundle,
+    ContextCompactionObservation,
+    ObservationGap,
+    SandboxObservation,
+    ToolCallObservation,
+    TrajectoryRecord,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.opencode_agent.observability import (

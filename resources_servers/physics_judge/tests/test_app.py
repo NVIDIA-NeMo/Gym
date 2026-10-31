@@ -36,7 +36,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.judge import JudgeError
+from nemo_gym.verification import JudgeError
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,

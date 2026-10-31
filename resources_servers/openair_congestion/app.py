@@ -44,9 +44,9 @@ from jsonschema import Draft202012Validator
 from jsonschema.exceptions import ValidationError as JSONSchemaValidationError
 from pydantic import Field, PrivateAttr, ValidationInfo, field_validator
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseFunctionToolCall
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.gymnasium import GymnasiumServer
 
 # Load the backend layer before the colocated domain imports so an incomplete

@@ -37,7 +37,6 @@ from pydantic import ConfigDict, Field, PrivateAttr
 
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -63,11 +62,6 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
-    AgentEpisode,
-    AgentObservationBundle,
-    ObservationGap,
-)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -75,7 +69,13 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.server_utils import get_global_config_dict
+from nemo_gym.trajectory import (
+    AgentEpisode,
+    AgentObservationBundle,
+    ObservationGap,
+)
 from responses_api_agents.openclaw_agent.observability import (
     OPENCLAW_OBSERVATION_SOURCE,
     OpenClawSessionTree,

@@ -29,16 +29,16 @@ response and expected answer and compute `SequenceMatcher.ratio()` in
 from difflib import SequenceMatcher
 from typing import Any, Dict, List, Union
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import (
+    compute_pass_majority_metrics,
+    compute_subset_metrics,
+    highest_k_metrics,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
-)
-from nemo_gym.reward_profile import (
-    compute_pass_majority_metrics,
-    compute_subset_metrics,
-    highest_k_metrics,
 )
 
 

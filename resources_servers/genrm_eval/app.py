@@ -10,7 +10,7 @@ import json_repair
 import tiktoken
 from pydantic import BaseModel, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

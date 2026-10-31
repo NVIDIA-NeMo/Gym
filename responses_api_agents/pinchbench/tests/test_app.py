@@ -25,8 +25,8 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
-from nemo_gym.rollout_observability import AgentInvocation, ToolCallObservation
 from nemo_gym.sandbox import SandboxExecResult
+from nemo_gym.trajectory import AgentInvocation, ToolCallObservation
 from responses_api_agents.pinchbench.app import (
     NG_FAILURE_CLASS_KEY,
     NG_NO_PERSIST_KEY,

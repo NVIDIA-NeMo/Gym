@@ -32,7 +32,6 @@ from openai.types.completion_usage import CompletionTokensDetails, CompletionUsa
 from openai.types.shared import ReasoningEffort
 from pydantic import Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
-from nemo_gym._checkpoint.model import note_generation_backend, note_generation_request
 from nemo_gym.base_responses_api_model import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
     PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
@@ -59,6 +58,7 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
+from nemo_gym.models import note_generation_backend, note_generation_request
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.responses_converter import (
     VLLMConverter,

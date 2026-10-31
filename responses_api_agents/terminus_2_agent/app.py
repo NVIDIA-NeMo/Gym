@@ -38,7 +38,6 @@ from harbor.environments.base import ExecResult
 from harbor.models.agent.context import AgentContext
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
@@ -52,6 +51,7 @@ from nemo_gym.core import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from responses_api_agents.terminus_2_agent.llm import NemoGymLLM
 from responses_api_agents.terminus_2_agent.output import trajectory_to_responses
 

@@ -37,7 +37,6 @@ from pydantic import ConfigDict, Field, PrivateAttr, field_validator, model_vali
 from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -64,7 +63,6 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -73,9 +71,10 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
+from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse, MCPToolAccess
 from nemo_gym.server_utils import get_global_config_dict
 from nemo_gym.skills import stage_skills
-from nemo_gym.tool_access import MCPToolAccess
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, ToolCallObservation
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
     parse_codex_observations,
@@ -756,6 +755,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             or AgentObservationBundle(source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]),
         )
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, CodexSandboxSession) else None
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
@@ -1303,6 +1305,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             },
         )
 
+        response = self.report_rollout_stop(response, state.session)
         if graded_error:
             # Unclassified, so the Environment Server's outcome policy verifies it, as the setting asks.
             return response

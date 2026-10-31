@@ -49,12 +49,14 @@ policy_model:
       extra_body: {}
 
 # Judge outages go to the failures sidecar, not the score; above this share of expected rollouts the run's
-# health check reports it unhealthy (the score is still published).
+# health check reports it unhealthy (the score is still published). An outage counts as final once its retries
+# are used up, so both limits are set.
 health_check_max_not_final_failure_fraction: 0.01
+health_check_max_final_failure_fraction: 0.01
 
 lmarena_v2_benchmark_environment_server:
   _inherit_from: lmarena_v2_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: lmarena_v2_benchmark_agent

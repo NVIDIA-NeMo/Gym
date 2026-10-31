@@ -311,7 +311,7 @@ def test_cancellation_metrics_use_bounded_routes_and_response_start_phases(colle
 
     from nemo_gym import server_utils
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
@@ -410,7 +410,7 @@ def test_cancellation_route_labels_follow_server_prefix_rules(
 
     from nemo_gym import server_utils
     from nemo_gym.base_responses_api_model import _CaptureMiddleware
-    from nemo_gym.rollout_correlation import RolloutContextMiddleware
+    from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 
     monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG", False)
 
@@ -657,11 +657,11 @@ class TestDriverMetrics:
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollout_store import _record_output_write
 
         async def run():
             async with observer.observe_event_loop("driver"):
-                _record_output_write(time.perf_counter(), b"x" * 999)
+                _record_output_write(time.perf_counter(), b"x" * 999 + b"\n")
                 return collected()
 
         exported = asyncio.run(run())
@@ -672,7 +672,7 @@ class TestDriverMetrics:
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollout_store import _record_output_write
 
         assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")

@@ -458,7 +458,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     recovery call before the aborted summarization, which a rebuild from the captured calls counts as a decision.
     """
     from nemo_gym.rollout_collection import _episode_record
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
+    from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
 
     execution.mode.value = mode
     turn, close = execution.session_run()
@@ -597,7 +597,7 @@ async def test_turn_cut_off_inside_reasoning_still_exports_to_atif(execution, mo
     """A policy cut off at max_output_tokens inside <think> leaves a reasoning-only output in the
     trajectory (the harness compacts and goes on); the harbor environment server's ATIF export must
     accept that shape and grade the episode, not mask it (review fix)."""
-    from nemo_gym.atif_export import transcript_to_atif
+    from nemo_gym.trajectory import transcript_to_atif
 
     inner = openai_utils.request
     seen = {"calls": 0}

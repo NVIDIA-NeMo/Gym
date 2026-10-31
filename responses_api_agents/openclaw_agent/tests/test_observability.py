@@ -6,7 +6,7 @@ from pathlib import Path
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput, NeMoGymResponseFunctionToolCall
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,

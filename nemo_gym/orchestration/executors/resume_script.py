@@ -35,7 +35,7 @@ _JOB_SCRIPT_NAME = "job.sh"
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
 RETRY_FILE_NAME = ".gym_infra_retries"
-# Written when the chain stops before the run finished (the walltime cap, or a cancel), so a reader of the
+# Written when the chain stops before the run finished (no eligible retries, walltime cap, or cancel), so a reader of the
 # job dir, not only of sacct, sees that rollouts are missing. A chain that continues removes it.
 INCOMPLETE_MARKER_NAME = ".gym_chain_incomplete"
 # Set to 1 in the environment of a job queued by `gym eval resubmit`.
@@ -73,6 +73,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         [[ -n "$_prev_state" ]] && break
         sleep 10
     done
+    _prev_exit=$(sacct -j $_prev_slurm_job_id -P -n -o ExitCode | head -n 1)
     _prev_elapsed=$(sacct -j $_prev_slurm_job_id -P -n -o ElapsedRaw | head -n 1)
     _prev_elapsed=${{_prev_elapsed:-0}}
     _gym_accumulated=$(cat "$_walltime_file" 2>/dev/null || echo 0)
@@ -87,6 +88,13 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         exit 0
     elif [[ $_prev_state == CANCELLED* ]]; then
         _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; resubmit to continue."
+    elif [[ $_prev_state == 'FAILED' && $_prev_exit == '76:0' ]]; then
+        _gym_stop_incomplete "Previous evaluation is incomplete with no eligible retries. Stopping chain; inspect its artifacts."
+    elif [[ $_prev_state == 'FAILED' && $_prev_exit == '75:0' ]]; then
+        # The collector uses exit 1 if no new outcome was saved, so repeated
+        # empty invocations take the bounded infrastructure-retry branch below.
+        echo "Previous evaluation made progress and has retryable unfinished work. Resuming..."
+{max_walltime_check}
     elif [[ $_prev_state == 'TIMEOUT' || $_prev_state == 'PREEMPTED' || $_prev_state == 'NODE_FAIL' ]]; then
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Resuming..."
 {max_walltime_check}
@@ -95,8 +103,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _retries=$((_retries + 1))
         echo $_retries > "$_retry_file"
         if [[ $_retries -gt {max_retries} ]]; then
-            echo "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
-            exit 1
+            _gym_stop_incomplete "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
         fi
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Infra retry $_retries/{max_retries}..."
     fi
