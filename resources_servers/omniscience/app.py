@@ -54,8 +54,9 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    observe_llm_judge_grading,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import JudgeError, call_judge, record_parsed_judge_verdict
 
 
 # ---------------------------------------------------------------------------
@@ -117,11 +118,13 @@ def parse_judge_grade(judge_text: str) -> str:
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C", "D"):
+        record_parsed_judge_verdict()
         return cleaned
 
     last_line = cleaned.rsplit("\n", 1)[-1].strip()
     for letter in ("A", "B", "C", "D"):
         if last_line == letter:
+            record_parsed_judge_verdict()
             return letter
 
     for letter in ("A", "B", "C", "D"):
@@ -300,46 +303,49 @@ class OmniscienceServer(SimpleResourcesServer):
             generation=generation,
         )
 
-        judge_text = await self._call_judge(judge_prompt)
-        if not judge_text:
-            raise JudgeError("empty judge response")
+        async def grade() -> OmniscienceVerifyResponse:
+            judge_text = await self._call_judge(judge_prompt)
+            if not judge_text:
+                raise JudgeError("empty judge response")
 
-        grade = parse_judge_grade(judge_text)
+            grade = parse_judge_grade(judge_text)
 
-        if grade == "A":
-            verdict = "correct"
-            reward = 1.0
-        elif grade == "C":
-            verdict = "partial"
-            reward = 0.0
-        elif grade == "D":
-            verdict = "not_attempted"
-            reward = 0.0
-        else:
-            verdict = "incorrect"
-            reward = 0.0
+            if grade == "A":
+                verdict = "correct"
+                reward = 1.0
+            elif grade == "C":
+                verdict = "partial"
+                reward = 0.0
+            elif grade == "D":
+                verdict = "not_attempted"
+                reward = 0.0
+            else:
+                verdict = "incorrect"
+                reward = 0.0
 
-        is_correct = 1.0 if verdict == "correct" else 0.0
-        is_incorrect = 1.0 if verdict == "incorrect" else 0.0
-        is_partial = 1.0 if verdict == "partial" else 0.0
-        is_not_attempted = 1.0 if verdict == "not_attempted" else 0.0
-        omniscience_index = is_correct - is_incorrect
-        is_hallucination = is_incorrect
+            is_correct = 1.0 if verdict == "correct" else 0.0
+            is_incorrect = 1.0 if verdict == "incorrect" else 0.0
+            is_partial = 1.0 if verdict == "partial" else 0.0
+            is_not_attempted = 1.0 if verdict == "not_attempted" else 0.0
+            omniscience_index = is_correct - is_incorrect
+            is_hallucination = is_incorrect
 
-        return OmniscienceVerifyResponse(
-            **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
-            reward=reward,
-            extracted_answer=generation,
-            expected_answer=expected_answer,
-            verdict=verdict,
-            judge_output=judge_text,
-            is_correct=is_correct,
-            is_incorrect=is_incorrect,
-            is_partial=is_partial,
-            is_not_attempted=is_not_attempted,
-            omniscience_index=omniscience_index,
-            is_hallucination=is_hallucination,
-        )
+            return OmniscienceVerifyResponse(
+                **body.model_dump(exclude={"expected_answer", "extracted_answer"}),
+                reward=reward,
+                extracted_answer=generation,
+                expected_answer=expected_answer,
+                verdict=verdict,
+                judge_output=judge_text,
+                is_correct=is_correct,
+                is_incorrect=is_incorrect,
+                is_partial=is_partial,
+                is_not_attempted=is_not_attempted,
+                omniscience_index=omniscience_index,
+                is_hallucination=is_hallucination,
+            )
+
+        return await observe_llm_judge_grading(grade)
 
 
 if __name__ == "__main__":
