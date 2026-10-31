@@ -1,0 +1,38 @@
+{
+  "dataset_path": "/path/to/ai4bharat_datasets/indic-gpqa/train.parquet",
+  "canonical_gpqa_path": "/path/to/gpqa_diamond.csv",
+  "reference_task_dir": "/path/to/lm_evaluation_harness/custom_configs/pre_train/gpqa/gpqa_diamond",
+  "sampler_path": "/path/to/site-packages/lm_eval/api/samplers.py",
+  "slurm": {
+    "account": "your-account",
+    "partition": "batch",
+    "constraint": "H100",
+    "time": "02:00:00"
+  },
+  "models": {
+    "super3_base": {
+      "name": "nvidia/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16",
+      "path": "/path/to/NVIDIA-Nemotron-3-Super-120B-A12B-Base-BF16",
+      "gpus": 8,
+      "memory_gb": 512
+    },
+    "lightning35_base": {
+      "name": "nvidia/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16",
+      "path": "/path/to/NVIDIA-Nemotron-3.5-Lightning-30B-A3B-Base-BF16",
+      "gpus": 2,
+      "memory_gb": 192
+    },
+    "indic_cpt": {
+      "name": "Indic CPT Nemotron 3 best checkpoint",
+      "path": "/path/to/indic-cpt-checkpoint",
+      "gpus": 2,
+      "memory_gb": 192
+    },
+    "super35_rc": {
+      "name": "N3.5 120B base release candidate",
+      "path": "/path/to/N3.5-120B-base-release-candidate",
+      "gpus": 8,
+      "memory_gb": 512
+    }
+  }
+}
