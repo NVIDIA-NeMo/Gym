@@ -92,6 +92,9 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     if isinstance(record, Mapping) and record.get("source") == "collector":
         if record.get("delivery") == "possibly_delivered" and not not_sent:
             return True
+    if row.get("_ng_failure_events_omitted"):
+        # Missing causal evidence cannot authorize another agent execution.
+        return True
     events = row.get("_ng_failure_events")
     selected = row.get("_ng_failure_id")
     if "_ng_failure_id" not in row:
@@ -117,6 +120,13 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
         ):
             # The provider sent successful headers, but the model operation failed
             # before its body was usable. Running the agent again could regenerate.
+            return True
+        if (
+            event.get("boundary") == "environment"
+            and event.get("failure_kind") == "environment_server_failed"
+            and event.get("operation") == "episode.deadline"
+        ):
+            # The relay stopped waiting; the agent may already have generated an answer.
             return True
         cause = event.get("cause_id")
         if cause is None:

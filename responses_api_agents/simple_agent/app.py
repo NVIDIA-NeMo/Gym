@@ -261,6 +261,54 @@ class SimpleAgentConfig(BaseResponsesAPIAgentConfig):
 POLICY_TIMEOUT_OPERATION = "agent.policy_request"
 
 
+def _selected_model_body_failure(error: ClientResponseError) -> bool:
+    """Whether the reply's selected failure chain holds a model request that failed after successful headers.
+
+    The provider may have generated that answer, so neither a resend nor a session reply may give the model another
+    chance. An omitted, missing or cyclic chain is not proof of one; it keeps its existing handling.
+    """
+    report = FailureHeader.decode(error.headers)
+    if report is None:
+        return False
+    current, seen = report.failure_id, set()
+    while current is not None and current not in seen:
+        seen.add(current)
+        event = report.events.get(current)
+        if event is None:
+            return False
+        if (
+            event.boundary == FailureBoundary.MODEL
+            and event.failure_kind == MODEL_REQUEST_ERROR
+            and event.operation == "model_request"
+            and event.http_status is not None
+            and 200 <= event.http_status < 300
+        ):
+            return True
+        current = event.cause_id
+    return False
+
+
+def _selected_failure_unknown(error: ClientResponseError) -> bool:
+    """Whether the reply carries a failure report whose selected failure cannot be read.
+
+    An omitted or invalid report, or a selected chain with a missing or repeated event, may hide a model body
+    failure, so it gives no resend and no session reply either. A reply without a report, or with only recovered
+    observations and no selected failure, keeps its existing handling.
+    """
+    report = FailureHeader.decode(error.headers)
+    if report is None:
+        return False
+    if report.omitted:
+        return True
+    current, seen = report.failure_id, set()
+    while current is not None:
+        if current in seen or current not in report.events:
+            return True
+        seen.add(current)
+        current = report.events[current].cause_id
+    return False
+
+
 def _policy_request_timed_out(error: ClientResponseError) -> bool:
     """Whether the policy model server's failed reply shows that its final model call timed out on every attempt.
 
@@ -552,6 +600,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                                 retry == self.config.max_model_retries
                                 or not is_retryable_dependency_status(error.status)
                                 or _policy_request_timed_out(error)
+                                or _selected_model_body_failure(error)
+                                or _selected_failure_unknown(error)
                             ):
                                 raise
                             LOG.warning(
@@ -570,6 +620,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 try:
                     model_response_json, model_server_cookies = await self._call_policy(activation, call_model)
                 except ClientResponseError as error:
+                    if _selected_model_body_failure(error) or _selected_failure_unknown(error):
+                        raise  # The reply's report travels on unchanged; it is not another session chance.
                     if not in_session:
                         if _policy_request_timed_out(error):
                             report = FailureHeader.decode(error.headers)

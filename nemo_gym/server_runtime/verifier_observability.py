@@ -216,7 +216,12 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
                 else:
                     logger.exception("Verification failed.")
                     result = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
-                result.headers.update(FailureHeader.encode(failure_report_for(failure)))
+                # The returned reply replaces the raised error, so it carries the error's selected failure and causes.
+                report = failure_report_for(failure)
+                inner = FailureHeader.decode(result.headers)
+                if inner is not None:
+                    report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
+                result.headers.update(FailureHeader.encode(report))
             else:
                 _finish(invocation, result)
             finally:

@@ -47,30 +47,31 @@ killed`) also records a completed `reward: 0.0` without starting a verifier, wit
 the agent's own command and one by the per-process OOM killer look the same, and
 either ends the attempt.
 
-A verifier that runs but times out, or that leaves no reward file, an empty one
-or one that cannot be parsed, scores `reward: 0.0` and counts in the pass-rate
-denominator. This is how Terminal-Bench scores it: Harbor never retries these
-outcomes and counts a trial without a reward as 0. The response keeps
-`evaluation_completed: false`, names the exception in `failure_reason`, and sets
-`failure_kind: verifier_error`. Only the verifier's own budget makes a timeout: a
-provider call that times out within it, or a sandbox that reports no command
-outcome, keeps the infrastructure-error handling. So does a trial whose agent
-ended on an infrastructure failure, whatever its verifier did next, because
-Harbor decides a retry from the trial's first exception.
+A completed verifier command that leaves no reward file, an empty one, or one
+that cannot be parsed scores zero under the Terminal-Bench contract. Ordinary
+completed zero rewards remain scored. A client deadline or a sandbox result
+without a confirmed command outcome is inconclusive: neither proves that the
+submitted code exhausted the verifier's execution budget.
 
-The verifier command runs under the per-command limit
-`environment.default_exec_timeout_s`, and that limit must be at least the task's
-verifier budget (`[verifier].timeout_sec`, or its entry in
-`environment.verifier_timeout_overrides`). A shorter limit could end the
-verifier inside its budget, and the sandbox reports no evidence of that, so the
-missing reward would read as the task's own zero. The server therefore refuses
-to start when an override is longer than the limit, and refuses a task whose
-package budget is longer, when it loads and before any sandbox starts or the
-agent runs. The failure is `ExecLimitConfigurationError`, an infrastructure
-failure marked terminal so that a resume does not retry it, and its message
-names both values. Neither value is changed: raise the limit to fix it. An
-equal limit is supported, because the verifier's budget starts before the
-command is submitted and so expires first.
+Preparation, test execution, reward retrieval and optional log transfer share the
+original total task verifier deadline. Each command receives only the remaining
+allowance; no phase starts a fresh budget. Infrastructure failures do not become
+protocol zeros. A confirmed completed command's
+successfully retrieved authoritative reward survives failures while collecting
+optional logs or cleaning up local staging; those failures remain in
+`verifier_diagnostics`. No verifier command is repeated.
+
+The current sandbox result does not separately attest a native execution timeout
+versus a cancelled or lost status wait. Those ambiguous outcomes therefore remain
+ungraded. Environment-session results use the existing mask and failure fields;
+legacy post-answer verifier failures use the same ungraded outcome. Earlier agent
+infrastructure failures retain their legacy failure metadata. Saved answers are preserved,
+and unsupported TB4 reverification does not authorize another agent attempt.
+
+The existing configuration preflight still requires
+`environment.default_exec_timeout_s` to cover the effective task verifier budget.
+A deterministic incompatible configuration is rejected before task execution;
+other sandbox setup failures retain their existing retry behavior.
 
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts

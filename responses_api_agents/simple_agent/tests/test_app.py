@@ -3524,3 +3524,101 @@ async def test_exhausted_model_retries_preserve_partial_work_without_repeating_t
         assert response.usage.total_tokens == 28
     else:
         assert response.usage is None
+
+
+def _body_failure_report(http_status: int) -> FailureReport:
+    attempt = FailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="Model response body read failed",
+        operation="model_request",
+        operation_id="op",
+        attempt_id="op-1",
+        http_status=http_status,
+    )
+    return _policy_report([attempt], ended_on=attempt)
+
+
+@pytest.mark.parametrize("in_session", [True, False])
+async def test_a_selected_model_body_failure_gets_no_resend_and_no_session_reply(
+    in_session: bool, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    report = _body_failure_report(200)
+    client.post = AsyncMock(side_effect=[_failed_reply(report), _message_response("ok")])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    with pytest.raises(ClientResponseError) as caught:
+        await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+            model_url_path="/ng-rollout/rollout/v1/responses",
+            in_session=in_session,
+            collect_trajectory=True,
+        )
+    assert client.post.await_count == 1, "the provider may have generated an answer; it is not asked again"
+    assert FailureHeader.decode(caught.value.headers).failure_id == report.failure_id
+
+
+@pytest.mark.parametrize(
+    "header",
+    [
+        pytest.param(FailureHeader.encode(_body_failure_report(503)), id="pre-answer-503"),
+        pytest.param(
+            FailureHeader.encode(
+                _body_failure_report(503).merged(FailureReport(events=_body_failure_report(200).events))
+            ),
+            id="unselected-recovered-200-body-event-beside-a-selected-503",
+        ),
+        pytest.param(
+            FailureHeader.encode(FailureReport(events=_body_failure_report(200).events)),
+            id="only-recovered-observations",
+        ),
+        pytest.param({}, id="no-report"),
+    ],
+)
+async def test_other_model_failures_keep_their_retry_and_session_handling(
+    header: dict, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    failed = _failed_reply(FailureReport())
+    failed.raise_for_status.side_effect.headers = header
+    client.post = AsyncMock(side_effect=[failed, _message_response("ok")])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    response, _, _, _ = await server._create_episode(
+        NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+        model_url_path="/ng-rollout/rollout/v1/responses",
+        in_session=True,
+        collect_trajectory=True,
+    )
+    assert client.post.await_count == 2
+    assert response.output[-1].content[0].text == "Done."
+
+
+@pytest.mark.parametrize("in_session", [True, False])
+@pytest.mark.parametrize(
+    "value",
+    [
+        pytest.param('{"failure_id": "a", "events": {"a": {"cause_id": "a"}}}', id="invalid"),
+        pytest.param('{"omitted": true}', id="omitted"),
+        pytest.param("not json", id="malformed"),
+    ],
+)
+async def test_an_unreadable_selected_failure_gets_no_resend_and_no_session_reply(
+    value: str, in_session: bool, monkeypatch: MonkeyPatch
+) -> None:
+    server, client = _make_agent(True)
+    failed = _failed_reply(FailureReport())
+    failed.raise_for_status.side_effect.headers = {FailureHeader.NAME: value}
+    client.post = AsyncMock(side_effect=[failed, _message_response("ok")])
+    monkeypatch.setattr("responses_api_agents.simple_agent.app.asyncio.sleep", AsyncMock())
+
+    with pytest.raises(ClientResponseError) as caught:
+        await server._create_episode(
+            NeMoGymResponseCreateParamsNonStreaming(input="hello"),
+            model_url_path="/ng-rollout/rollout/v1/responses",
+            in_session=in_session,
+            collect_trajectory=True,
+        )
+    assert client.post.await_count == 1
+    assert caught.value.headers[FailureHeader.NAME] == value, "the original report travels on unchanged"

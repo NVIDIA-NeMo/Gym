@@ -24,6 +24,7 @@ from nemo_gym.core import (
     EpisodeId,
     maybe_rollout_id_from_run_body,
 )
+from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.server_runtime import (
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
@@ -118,6 +119,9 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
                 failure[NG_VERIFIER_INVOCATIONS_KEY] = [
                     invocation.model_dump(mode="json") for invocation in response.failure.verifier_invocations
                 ]
+            # The flat reply keeps the typed reply's events, omission flag and selected failure.
+            if response.failure_report is not None:
+                FailureReportRow.merged_into(failure, response.failure_report)
             return failure
         if response.result is None:
             raise ValueError("Successful episode response has no result")
@@ -125,6 +129,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         if result.get(NG_AGENT_OBSERVATIONS_KEY) is None:
             result.pop(NG_AGENT_OBSERVATIONS_KEY, None)
         result["agent_ref"] = agent_ref
+        if response.failure_report is not None:
+            FailureReportRow.merged_into(result, response.failure_report)
         return result
 
 

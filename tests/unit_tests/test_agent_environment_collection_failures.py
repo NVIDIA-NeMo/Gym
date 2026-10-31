@@ -66,6 +66,13 @@ async def _collect(monkeypatch, statuses: list[int]):
     async def model(request):
         model_hits.append(request.path)
         status = statuses[min(len(model_hits) - 1, len(statuses) - 1)]
+        if status == "truncated":
+            # Successful headers, then the provider closes before the announced body is complete.
+            response = web.StreamResponse(headers={"Content-Type": "application/json", "Content-Length": "1000"})
+            await response.prepare(request)
+            await response.write(b'{"id":')
+            request.transport.close()
+            return response
         if status != 200:
             return web.json_response({"error": "busy"}, status=status)
         return web.json_response(MODEL_REPLY)
@@ -170,3 +177,31 @@ async def test_an_exhausted_model_call_reaches_the_row_through_agent_and_environ
     # The explicit chain ends at the final attempt's own ModelFailure; the earlier attempt stays a sibling.
     assert chain[-1] == observed[-1].event.event_id and observed[0].event.event_id not in chain
     assert sum(1 for e in events.values() if e.get("boundary") == "model") == len(observed) == 2
+
+
+async def test_a_provider_body_failure_after_200_headers_reaches_the_row_and_blocks_another_agent_run(
+    monkeypatch,
+) -> None:
+    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+
+    row, model_hits, observed = await _collect(monkeypatch, ["truncated"])
+
+    assert row[NG_FAILURE_CLASS_KEY] and "reward" not in row
+    assert len(model_hits) == 1, "a delivered body failure is not sent again"
+    events = row[FailureReportRow.EVENTS]
+    chain, current = [], row["_ng_failure_id"]
+    while current is not None:
+        chain.append(current)
+        current = events[current].get("cause_id")
+    final = events[chain[-1]]
+    assert chain[-1] == observed[-1].event.event_id, "the selected chain ends at the observed model attempt"
+    assert final["boundary"] == "model" and final["http_status"] == 200
+    assert has_unclassified_execution_failure(row), "resume must not run the agent again"
+
+
+async def test_a_recovered_503_then_success_stays_a_success_row_that_resume_keeps(monkeypatch) -> None:
+    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+
+    row, model_hits, _ = await _collect(monkeypatch, [503, 200])
+    assert row["reward"] == 1.0 and len(model_hits) == 2
+    assert not has_unclassified_execution_failure(row)
