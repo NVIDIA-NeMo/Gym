@@ -426,7 +426,12 @@ async def test_a_verify_failure_returned_as_500_keeps_its_selected_failure_and_c
     (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
     assert invocation["status"] == "failed" and invocation["failure_kind"] == VERIFIER_ERROR
     report = FailureHeader.decode(response.headers)
-    assert report is not None and report.failure_id == resources.event_id
+    assert report is not None and report.failure_id in report.events
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id == resources.event_id
     assert report.events[resources.event_id].cause_id == model.event_id
     assert list(report.events).count(model.event_id) == 1
 
@@ -447,7 +452,14 @@ async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report
         response = await observe_verifier(caused, enabled=True)()
     assert response.status_code == 503 and json.loads(response.body)["detail"] == "busy"
     report = FailureHeader.decode(response.headers)
-    assert report.failure_id == resources.event_id and model.event_id in report.events
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert report is not None and report.failure_id in report.events
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id == resources.event_id
+    assert report.events[resources.event_id].cause_id == model.event_id
 
     existing = FailureReport(failure_id=None, events={}, omitted=True)
 
@@ -461,7 +473,7 @@ async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report
 
 
 @pytest.mark.asyncio
-async def test_a_plain_verify_error_gets_no_invented_failure_report():
+async def test_a_plain_verify_error_records_only_its_observed_verify_failure():
     from nemo_gym.failure_transport import FailureHeader
 
     async def verify():
@@ -470,7 +482,14 @@ async def test_a_plain_verify_error_gets_no_invented_failure_report():
     with rollout_context("plain"):
         response = await observe_verifier(verify, enabled=True)()
     assert response.status_code == 500
-    assert FailureHeader.decode(response.headers) is None
+    report = FailureHeader.decode(response.headers)
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert report is not None and len(report.events) == 1
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id is None and selected.exception_type == "RuntimeError"
 
 
 _VERIFY_BODY = {
@@ -519,6 +538,11 @@ def test_the_registered_verify_route_keeps_a_raised_failure_and_its_cause(tmp_pa
     (invocation,) = response.json()["ng_verifier_invocations"]
     assert invocation["status"] == "failed"
     report = FailureHeader.decode(response.headers)
-    assert report is not None and report.failure_id == resources.event_id
+    assert report is not None and report.failure_id in report.events
+    selected = report.events[report.failure_id]
+    assert selected.boundary == FailureBoundary.RESOURCES_SERVER
+    assert selected.failure_kind == VERIFIER_ERROR and selected.operation == "verify"
+    assert selected.operation_id == invocation["invocation_id"]
+    assert selected.cause_id == resources.event_id
     assert report.events[resources.event_id].cause_id == model.event_id
     assert list(report.events).count(model.event_id) == 1

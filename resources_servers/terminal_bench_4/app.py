@@ -595,7 +595,9 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_kind=(
                 VERIFIER_ERROR
                 if verifier_failure or ungraded_verifier
-                else _selected_failure_kind(extra) if failure else None
+                else _selected_failure_kind(extra)
+                if failure
+                else None
             ),
             mask_sample=bool(failure) and (not legacy or ungraded_verifier),
             artifacts={"trial": str(session.directory)},
