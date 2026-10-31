@@ -1,0 +1,33 @@
+connect_four:
+  resources_servers:
+    connect_four:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      domain: games
+      verified: false
+      description: Connect Four against a scripted opponent. Reward +1 win, 0 draw, -1 loss or illegal move.
+      value: Multi-step planning game with a tunable-strength opponent
+connect_four_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: connect_four
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 21
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/connect_four/data/example.jsonl
+        license: Apache 2.0
+
+connect_four_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: connect_four_gymnasium_agent
