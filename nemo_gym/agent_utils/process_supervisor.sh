@@ -29,10 +29,18 @@
 # spent paused does not count against the deadline. A pause requested before the launch holds the
 # launch until it is continued. A stop requested while paused continues the processes first, so the
 # harness receives TERM and can save its state. The receipt, written when the harness ends, answers
-# any pause the supervisor never acknowledged.
+# any pause the supervisor never acknowledged. Every acknowledgement also names the pause mode and the
+# supervisor's identity, PID.START (its /proc start time), which marks the processes it launched, and
+# records "wall" (epoch seconds) and "uptime" (seconds since boot, from /proc/uptime) at the moment it
+# was written.
+#
+# With --pause-mode hold, for a sandbox whose snapshot keeps its processes, a pause sends no signal: the
+# harness keeps running, the supervisor acknowledges at once and stops counting the deadline until the
+# continue, which sends nothing either. The checkpoint holds the harness's model calls instead.
 #
 # usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
-#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH] -- COMMAND...
+#        [--pause-file PATH --paused PATH --continue-file PATH --continued PATH [--pause-mode stop|hold]]
+#        -- COMMAND...
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
 set +o errexit +o nounset +o pipefail
@@ -191,6 +199,9 @@ reached_alive() {
 
 stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 
+# How a pause treats the processes it reaches: stop sends STOP and CONT, hold sends nothing (see the header).
+pause_mode=stop
+
 write_receipt() {
     printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s, "stopped": %s}' \
         "$1" "$return_code" "$2" "$timed_out" "$requested_stop" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
@@ -208,7 +219,17 @@ request_seq() {
 
 # Write acknowledgement $1 for request $2 atomically.
 acknowledge() {
-    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s}' "$2" "$3" "$4" "$5" >"$1.tmp" && mv -f "$1.tmp" "$1"
+    local named=null wall uptime=null
+    [[ -n ${identity-} ]] && named="\"$identity\""
+    # The wall clock (epoch seconds) and uptime (seconds since boot) when the acknowledgement is written. A restore
+    # that keeps the processes but sets the wall clock to the host's can set it back to wall + (uptime now - uptime),
+    # as if the sandbox had not been stopped: uptime does not count the time a snapshot spent stopped.
+    wall=${EPOCHREALTIME-}
+    wall=${wall/,/.}
+    [[ -n $wall ]] || printf -v wall '%(%s)T' -1
+    read -r uptime _ </proc/uptime 2>/dev/null || uptime=null
+    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s, "wall": %s, "uptime": %s}' \
+        "$2" "$3" "$4" "$5" "$pause_mode" "$named" "$wall" "${uptime:-null}" >"$1.tmp" && mv -f "$1.tmp" "$1"
 }
 
 # Record in paused[PID]=START every process a pause reaches: what a stop would reach now, and
@@ -256,6 +277,10 @@ paused_settled() {
 pause() {
     local limit error=null pid list=
     paused=()
+    if [[ $pause_mode == hold ]]; then
+        acknowledge "$paused_ack" "$1" true "" null
+        return
+    fi
     if [[ -n ${harness-} ]]; then
         pause_scan
         [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
@@ -282,6 +307,10 @@ pause() {
 # Continue request $1: continue every process the pause stopped and acknowledge.
 resume_paused() {
     local limit error=null
+    if [[ $pause_mode == hold ]]; then
+        acknowledge "$continued_ack" "$1" true "" null
+        return
+    fi
     now
     limit=$((NOW + pause_wait))
     signal_paused CONT
@@ -336,6 +365,10 @@ while (($#)) && [[ $1 != -- ]]; do
     --paused) paused_ack=$2 ;;
     --continue-file) continue_file=$2 ;;
     --continued) continued_ack=$2 ;;
+    --pause-mode)
+        [[ $2 == stop || $2 == hold ]] || { echo "--pause-mode must be stop or hold" >&2; exit 2; }
+        pause_mode=$2
+        ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2

@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from shlex import quote
 from time import monotonic
-from typing import Literal, TypedDict, cast
+from typing import Literal, NotRequired, TypedDict, cast
 
 from pydantic import TypeAdapter
 
@@ -26,6 +26,7 @@ from nemo_gym.agent_utils.supervisor_client import (
     CleanupReceipt,
     HarnessTerminationError,
     PauseAcknowledgement,
+    PauseMode,
     SupervisorRequestOutcome,
     check_stdlib_runner,
     remove_session_directory,
@@ -115,12 +116,18 @@ class HarnessPauseResult:
     ``confirmed``: every process the supervisor reached is paused (or running again), or no launch had started,
     and the launch will honour the request when it starts. ``finished``: the harness had already ended; its cleanup
     receipt answers instead. ``unconfirmed``: the supervisor did not confirm in time or reported ``error``.
-    ``pids`` are the processes a pause stopped.
+    ``pids`` are the processes a pause stopped. ``identity`` is the answering supervisor's ``PID.START`` and
+    ``mode`` its pause mode, when it reported them. ``wall`` and ``uptime`` are the sandbox's wall clock (epoch
+    seconds) and uptime (seconds since boot) when it answered.
     """
 
     status: Literal["confirmed", "finished", "unconfirmed"]
     pids: tuple[int, ...] = ()
     error: str | None = None
+    identity: str | None = None
+    mode: PauseMode | None = None
+    wall: float | None = None
+    uptime: float | None = None
 
     @property
     def confirmed(self) -> bool:
@@ -128,11 +135,21 @@ class HarnessPauseResult:
 
 
 class SandboxSessionCheckpoint(TypedDict):
-    """What ``SandboxSession.reattach`` needs to rebind a session to a sandbox restored from a snapshot."""
+    """What ``SandboxSession.reattach`` needs to rebind a session to a sandbox restored from a snapshot.
+
+    ``pause_seq`` and ``supervisor_identity`` are there while the launch's supervisor holds a confirmed pause: on a
+    sandbox whose snapshot keeps its processes, that launch can still be running after the restore.
+    """
 
     session_root: str
     session_dir: str
     launch_started: bool
+    pause_seq: NotRequired[int]
+    supervisor_identity: NotRequired[str]
+    # The sandbox's wall clock and uptime when that pause was confirmed, for a restore that sets the wall clock back
+    # to where the snapshot left it.
+    pause_wall: NotRequired[float]
+    pause_uptime: NotRequired[float]
 
 
 _CHECKPOINT_STATE = TypeAdapter(SandboxSessionCheckpoint)
@@ -151,6 +168,10 @@ def _pause_result(
         status="confirmed" if acknowledgement["confirmed"] else "unconfirmed",
         pids=tuple(acknowledgement["pids"]),
         error=acknowledgement["error"],
+        identity=acknowledgement.get("identity"),
+        mode=acknowledgement.get("mode"),
+        wall=acknowledgement.get("wall"),
+        uptime=acknowledgement.get("uptime"),
     )
 
 
@@ -186,11 +207,13 @@ class SandboxSession[Artifacts]:
     HTTP request binding and activation retries belong to the agent session layer.
 
     A ``pausable`` session's supervisor also pauses and continues the harness in place for a
-    checkpoint (``pause_harness`` and ``continue_harness``): every process it reaches, and every
-    process carrying its marker, is stopped with SIGSTOP and continued with SIGCONT, and time spent
-    paused does not count against the harness timeout. Directories under ``session_root`` survive a
-    snapshot of a borrowed sandbox; ``checkpoint_state`` and ``reattach`` rebind a session to the
-    sandbox a restore forks from that snapshot.
+    checkpoint (``pause_harness`` and ``continue_harness``), and time spent paused does not count
+    against the harness timeout. In ``pause_mode`` ``stop``, every process it reaches, and every
+    process carrying its marker, is stopped with SIGSTOP and continued with SIGCONT. In ``hold``, for
+    a sandbox whose snapshot keeps its processes, nothing is signalled: the harness keeps running
+    while the checkpoint holds its model calls. Directories under ``session_root`` survive a snapshot
+    of a borrowed sandbox; ``checkpoint_state`` and ``reattach`` rebind a session to the sandbox a
+    restore forks from that snapshot.
     """
 
     sandbox: AsyncSandbox
@@ -199,6 +222,7 @@ class SandboxSession[Artifacts]:
     harness: str
     owns_sandbox: bool = False
     pausable: bool = False
+    pause_mode: PauseMode = "stop"
     launch_started: bool = field(default=False, init=False)
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
@@ -217,6 +241,11 @@ class SandboxSession[Artifacts]:
     _pause_seq: int = field(default=0, init=False)
     _continue_seq: int = field(default=0, init=False)
     _continued_seq: int = field(default=0, init=False)
+    # The supervisor that confirmed pause ``_held_seq``, as ``PID.START``.
+    _held_identity: str | None = field(default=None, init=False)
+    _held_seq: int = field(default=0, init=False)
+    # The sandbox's wall clock and uptime when that supervisor confirmed pause ``_held_seq``.
+    _held_clocks: tuple[float, float] | None = field(default=None, init=False)
     # Holds the provider's polls of the launch's command while the harness is paused, so a sandbox being snapshotted
     # is not asked about it; released before anything else runs a command in the sandbox.
     _parked_polls: ExitStack | None = field(default=None, init=False, repr=False)
@@ -228,11 +257,17 @@ class SandboxSession[Artifacts]:
 
     def checkpoint_state(self) -> SandboxSessionCheckpoint:
         """Where this session's files are, for ``reattach`` after a restore; JSON-serializable."""
-        return {
+        state: SandboxSessionCheckpoint = {
             "session_root": self.session_root,
             "session_dir": self.session_dir,
             "launch_started": self.launch_started,
         }
+        if self.launch_started and self._held_identity is not None and self._continued_seq < self._held_seq:
+            state["pause_seq"] = self._held_seq
+            state["supervisor_identity"] = self._held_identity
+            if self._held_clocks is not None:
+                state["pause_wall"], state["pause_uptime"] = self._held_clocks
+        return state
 
     @classmethod
     def reattach(
@@ -244,13 +279,16 @@ class SandboxSession[Artifacts]:
         harness: str,
         owns_sandbox: bool = False,
         pausable: bool = False,
+        pause_mode: PauseMode = "stop",
     ) -> "SandboxSession[Artifacts]":
         """Rebind a session from ``checkpoint_state`` to ``sandbox``, restored from a snapshot of the original.
 
-        A snapshot keeps files, not processes: no launch recorded in ``state`` still runs in ``sandbox``, so the
-        reattached session has none. Rearm it with ``begin_activation`` and a fresh launch directory under
-        ``session_root`` before the next ``execute``; ``state["launch_started"]`` says whether the harness had
-        already started, for an adapter that resumes the harness's saved conversation.
+        The reattached session has no launch of its own. What a snapshot kept depends on the provider. When it
+        kept files only, no launch recorded in ``state`` still runs in ``sandbox``: rearm the session with
+        ``begin_activation`` and a fresh launch directory under ``session_root`` before the next ``execute``;
+        ``state["launch_started"]`` says whether the harness had already started, for an adapter that resumes
+        the harness's saved conversation. When it kept the processes too, a launch whose supervisor held a
+        confirmed pause (``state["pause_seq"]``) may still run in ``sandbox``.
         """
         state = _CHECKPOINT_STATE.validate_python(state, strict=True)
         session = cls(
@@ -260,6 +298,7 @@ class SandboxSession[Artifacts]:
             harness=harness,
             owns_sandbox=owns_sandbox,
             pausable=pausable,
+            pause_mode=pause_mode,
         )
         if state["session_root"] != state["session_dir"]:
             session._session_root = state["session_root"]
@@ -352,6 +391,7 @@ class SandboxSession[Artifacts]:
                 cleanup_timeout=cleanup_timeout,
                 stdlib_runner=command.stdlib_runner,
                 pausable=self.pausable,
+                pause_mode=self.pause_mode,
             )
             self.launch_started = True
             self._exec_task = asyncio.create_task(
@@ -416,7 +456,9 @@ class SandboxSession[Artifacts]:
         self._collect = None
         self._capture_attempted = False
         # The next launch has a fresh supervisor: nothing paused carries over.
-        self._pause_seq = self._continue_seq = self._continued_seq = 0
+        self._pause_seq = self._continue_seq = self._continued_seq = self._held_seq = 0
+        self._held_identity = None
+        self._held_clocks = None
         self._release_parked_polls()
 
     async def pause_harness(self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT) -> HarnessPauseResult:
@@ -435,6 +477,11 @@ class SandboxSession[Artifacts]:
             self.sandbox, session_dir=self.session_dir, workdir=self.workdir, seq=self._pause_seq, timeout=timeout
         )
         result = _pause_result(outcome, acknowledgement)
+        if result.confirmed and result.identity is not None:
+            self._held_seq, self._held_identity = self._pause_seq, result.identity
+            self._held_clocks = None
+            if result.wall is not None and result.uptime is not None:
+                self._held_clocks = (result.wall, result.uptime)
         if result.confirmed and self.launch_started and self._parked_polls is None:
             # A no-op scope on providers that do not poll command status.
             self._parked_polls = ExitStack()
