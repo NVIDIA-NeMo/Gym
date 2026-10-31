@@ -17,14 +17,16 @@ browsecomp_benchmark_resources_server:
       entrypoint: app.py
       domain: agent
       debug: false
-      # Search/browse backend. Override per-run with
+      # Search/browse backend: "ydc", "tavily" or "exa". Override per-run with
       # ++...browsecomp_advanced_harness.search_provider=tavily (+ tavily_api_key=[...]).
+      # ++...browsecomp_advanced_harness.search_provider=ydc (+ ydc_api_key=[...]) or
       search_provider: exa
-      # Results per query. 10 is the Exa reference value; the Tavily path uses 5.
+      # Results per query. 10 is the ydc and Exa reference value; the Tavily path uses 5.
       max_results: 10
       # Supplied per-run as a sharded key list so concurrent runs do not collide
       # on provider rate limits. Null here; the launcher injects the real shard.
       exa_api_key: ${oc.select:exa_api_key,null}
+      ydc_api_key: ${oc.select:ydc_api_key,null}
       # terminal mode: search/browse write pages to a per-session disk workspace
       # and the read-only bash_command tool is exposed for the model to grep/read them.
       workspace: per_session

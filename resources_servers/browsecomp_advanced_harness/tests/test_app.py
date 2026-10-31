@@ -50,6 +50,7 @@ class TestApp:
             port=8080,
             entrypoint="",
             name="",
+            search_provider="tavily",
             tavily_api_key="test_api_key",  # pragma: allowlist secret
             exclude_domains_file_path=_DUMMY_EXCLUDE_DOMAINS_FILE,
             judge_model_server=ModelServerRef(type="responses_api_models", name="judge"),
