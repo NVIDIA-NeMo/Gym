@@ -121,6 +121,13 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
             # The provider sent successful headers, but the model operation failed
             # before its body was usable. Running the agent again could regenerate.
             return True
+        if (
+            event.get("boundary") == "environment"
+            and event.get("failure_kind") == "environment_server_failed"
+            and event.get("operation") == "episode.deadline"
+        ):
+            # The relay stopped waiting; the agent may already have generated an answer.
+            return True
         cause = event.get("cause_id")
         if cause is None:
             return event.get("failure_kind") == "agent_route_failed" or (

@@ -19,6 +19,7 @@ from typing_extensions import Self
 
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AgentServerRef, AggregateMetrics, AggregateMetricsRequest
+from nemo_gym.failure_transport import FailureReportRow, reply_failure_report
 from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
@@ -26,6 +27,7 @@ from nemo_gym.server_runtime import (
     BaseEpisodeResponse,
     CleanupContext,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -130,11 +132,20 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
                     cookies=request.cookies,
                 )
                 body = await upstream.read()
-        except TimeoutError:
+        except TimeoutError as error:
             if not deadline.expired():
                 raise
+            failure = NgFailureEvent(
+                boundary="environment",
+                failure_kind="environment_server_failed",
+                failure_reason="Episode timed out",
+                operation="episode.deadline",
+            )
+            failure.__cause__ = error
+            report = reply_failure_report(failure)
             return JSONResponse(
                 {
+                    **FailureReportRow.fields(report),
                     "_ng_failure_class": "environment_server_failed",
                     "_ng_failure_terminal": False,
                     "_ng_failure_message": "Episode timed out",

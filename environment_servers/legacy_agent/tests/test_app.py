@@ -150,7 +150,7 @@ def _slow_server(delay: float, **limits: float) -> tuple[LegacyAgentEnvironmentS
     return LegacyAgentEnvironmentServer(config=_config(**limits), server_client=client), client
 
 
-def test_an_episode_past_its_deadline_ends_as_a_retryable_environment_failure() -> None:
+def test_an_episode_past_its_deadline_retains_ambiguous_agent_completion() -> None:
     server, client = _slow_server(delay=30, default_episode_timeout_seconds=0.2)
 
     started = time.monotonic()
@@ -160,7 +160,13 @@ def test_an_episode_past_its_deadline_ends_as_a_retryable_environment_failure() 
     assert 0.2 <= elapsed < 5
     assert response.status_code == 200
     # The shape and classification single_agent_turn_legacy gives an episode its deadline ended.
-    assert response.json() == {
+    payload = response.json()
+    selected = payload.pop("_ng_failure_id")
+    events = payload.pop("_ng_failure_events")
+    assert events[selected]["operation"] == "episode.deadline"
+    assert events[selected]["boundary"] == "environment"
+    assert events[selected]["foreign_error"]["exception_type"].endswith("TimeoutError")
+    assert payload == {
         "_ng_failure_class": "environment_server_failed",
         "_ng_failure_terminal": False,
         "_ng_failure_message": "Episode timed out",
@@ -229,3 +235,26 @@ def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.M
     namespace = runpy.run_path(str(Path(__file__).parents[1] / "app.py"), run_name="legacy_agent.worker_test")
 
     assert namespace["app"] is worker_app
+
+
+async def test_deadline_includes_response_body_read() -> None:
+    class SlowBody(_Upstream):
+        async def read(self) -> bytes:
+            await asyncio.sleep(1)
+            return self.body
+
+    client = _Client(
+        head_server_config=BaseServerConfig(host="head", port=1),
+        global_config_dict=OmegaConf.create({}),
+        calls=[],
+        responses=[SlowBody(b'{"reward": 1.0}')],
+    )
+    server = LegacyAgentEnvironmentServer(config=_config(default_episode_timeout_seconds=0.01), server_client=client)
+    request = SimpleNamespace(body=AsyncMock(return_value=b"{}"), headers={}, cookies={})
+    response = await server.run_legacy(request)
+    payload = orjson.loads(response.body)
+    event = payload["_ng_failure_events"][payload["_ng_failure_id"]]
+    assert event["operation"] == "episode.deadline"
+    assert "reward" not in payload
+    assert len(client.calls) == 1
+    assert server.config.default_episode_timeout_seconds == 0.01

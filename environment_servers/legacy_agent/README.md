@@ -16,3 +16,5 @@ my_benchmark_environment_server:
         type: responses_api_agents
         name: my_benchmark_simple_agent
 ```
+
+A configured episode deadline stops the relay from waiting; it does not prove that the agent stopped before generating an answer. Its recorded deadline failure therefore blocks automatic agent replay. Completed replies remain unchanged.
