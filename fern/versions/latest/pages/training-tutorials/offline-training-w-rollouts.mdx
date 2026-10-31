@@ -52,11 +52,11 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
 {
   "messages": [
     {"role": "user", "content": "What's the weather in Paris?"},
-    {"role": "assistant", "tool_calls": [{"function": {"name": "get_weather", "arguments": "{\"city\": \"Paris\"}"}}]},
-    {"role": "tool", "content": "Temperature: 22°C, sunny"},
+    {"role": "assistant", "content": "", "tool_calls": [{"id": "call_1", "type": "function", "function": {"name": "get_weather", "arguments": {"city": "Paris"}}}]},
+    {"role": "tool", "tool_call_id": "call_1", "content": "Temperature: 22°C, sunny"},
     {"role": "assistant", "content": "The weather in Paris is 22°C and sunny."}
   ],
-  "quality_score": 0.95
+  "reward": 1.0
 }
 ```
 
@@ -74,7 +74,7 @@ This tutorial is **experimental** and may contain bugs. Proceed with caution.
   "rejected": [
     {"role": "assistant", "content": "The answer is x = 3"}
   ],
-  "quality_difference": 0.7
+  "reward_margin": 1.0
 }
 ```
 
@@ -84,9 +84,11 @@ The offline training pipeline follows this logical flow:
 
 1. Collect rollouts
    - **SFT data**: Use consistent generation (low temperature, single rollout per task)
-   - **DPO data**: Use diverse generation (higher temperature, 2 rollouts per task for comparison)
-2. Filter for quality - Remove poor rollouts before processing
+   - **DPO data**: Use diverse generation (higher temperature, `--num-repeats 2` or more so each task has rollouts to compare)
+2. Filter for quality - Remove masked and low-reward rollouts before building SFT data. DPO pairs need the low-reward rollouts as the rejected side, so build them from all unmasked rollouts.
 3. Format for training - Convert to SFT or DPO format based on your goals
+
+Each line of a rollouts file from `gym eval run` holds the task (`responses_create_params`), the model's turns as Responses API items (`response.output`), the verifier's `reward`, and the task and repeat indices `_ng_task_index` and `_ng_rollout_index`. A verifier sets `mask_sample: true` when the environment, not the model, failed a sample; its reward is not a valid training signal. The filtering and DPO snippets skip rows with no model turns in `response.output`, such as the results of an environment server that records its own result type (`nemo_user_sim`, for example). Harness agents that run their own tools, such as OpenCode, Pi, or Harbor, record the tool calls but not the tool definitions, so their rows have no `tools`.
 
 ## Step 1: Quality Filtering and Curation
 
@@ -95,33 +97,34 @@ Always filter your rollouts first before formatting them for training. Here are 
 ### Automatic Filtering
 
 ```python
-def filter_rollouts(input_file: str, output_file: str, filters: Dict):
-    """Apply automatic quality filters to rollouts."""
-    with open(input_file) as f, open(output_file, 'w') as out:
-        kept = 0
-        total = 0
-        
+import json
+
+
+def filter_rollouts(
+    input_file: str, output_file: str, min_reward: float = 0.5, max_output_items: int | None = None
+) -> None:
+    """Keep unmasked rollouts that scored at least min_reward."""
+    kept = total = 0
+    with open(input_file) as f, open(output_file, "w") as out:
         for line in f:
             rollout = json.loads(line)
             total += 1
-            
-            # Apply filters
-            if (rollout.get('reward', 0) >= filters.get('min_reward', 0.5) and
-                rollout.get('success', False) and
-                len(rollout.get('response', {}).get('output', [])) >= filters.get('min_turns', 2) and
-                len(rollout.get('response', {}).get('output', [])) <= filters.get('max_turns', 20)):
-                
-                out.write(line)
-                kept += 1
-        
-        print(f"Kept {kept}/{total} rollouts ({kept/total*100:.1f}%)")
+            if rollout.get("mask_sample"):
+                continue  # the environment failed this sample, so its reward is not meaningful
+            if rollout.get("reward", 0.0) < min_reward:
+                continue
+            output = rollout.get("response", {}).get("output")
+            if not isinstance(output, list) or not output or not all(isinstance(item, dict) for item in output):
+                continue  # no flat Responses items, such as aviary_agent's per-step transitions
+            # Opt in to a length cap: tool calls add several items, so successful agent rollouts can run long.
+            if max_output_items is not None and len(output) > max_output_items:
+                continue
+            out.write(line)
+            kept += 1
+    print(f"Kept {kept}/{total} rollouts")
 
-# Apply filters first
-filter_rollouts('raw_rollouts.jsonl', 'filtered_rollouts.jsonl', {
-    'min_reward': 0.7,
-    'min_turns': 3,
-    'max_turns': 15
-})
+
+filter_rollouts("results/rollouts.jsonl", "filtered_rollouts.jsonl", min_reward=0.7)
 ```
 
 ### Manual Curation (Optional)
@@ -129,10 +132,12 @@ filter_rollouts('raw_rollouts.jsonl', 'filtered_rollouts.jsonl', {
 For critical applications, sample and manually review:
 
 ```python
-def sample_for_review(input_file: str, sample_size: int = 50):
+import json
+import random
+
+
+def sample_for_review(input_file: str) -> None:
     """Sample rollouts for manual review."""
-    import random
-    
     with open(input_file) as f:
         rollouts = [json.loads(line) for line in f]
     
@@ -161,78 +166,141 @@ After you have filtered, high-quality rollouts, format them for your chosen trai
 
 ### SFT Data Processing
 
-Transform filtered rollouts into conversation format:
+Rollouts store the conversation as Responses API items: the prompt in `responses_create_params.input` and the model's turns in `response.output`. Training libraries expect Chat Completions messages, so convert both with NeMo Gym's `ResponsesConverter`, the same converter its model servers use. It turns `function_call` items into assistant `tool_calls`, `function_call_output` items into `tool` messages, and `reasoning` items into `<think>` blocks in the assistant content. Filter out items whose `type` is `reasoning` first if you don't want to train on them. The task's `instructions`, when set, become the leading system message. `to_chat` then parses each tool call's `arguments` from a JSON string into a dict, because the Hugging Face chat templates that TRL and NeMo RL apply expect one.
+
+Some Responses fields have no Chat Completions equivalent, and the converter raises `NotImplementedError` on them. `to_chat` drops the two that rollouts commonly carry, a message's `phase` and a reasoning item's `encrypted_content`; any other, such as an image in a tool output, still raises. Readable reasoning `content` becomes the `<think>` text when present; otherwise the snippet uses the reasoning `summary`.
+
+The helper normalizes text messages for chat templates: it maps `developer` to `system`, joins text-only content parts, and supplies empty content on tool-call turns. Invalid or non-object tool arguments become `{}`, matching vLLM's chat-template preprocessing. This is a text-training policy, not a lossless export; inspect it against your trainer's template before training. The snippets skip missing prompts and nested transition outputs rather than inventing the task or flattening separate steps.
+
+Run these snippets in the NeMo Gym environment, in one Python session:
 
 ```python
 import json
-from typing import List, Dict
 
-def process_sft_data(filtered_rollout_file: str, output_file: str):
-    """Convert filtered rollouts to SFT training format."""
-    with open(filtered_rollout_file) as f, open(output_file, 'w') as out:
+from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.responses_converter import ResponsesConverter
+
+converter = ResponsesConverter(return_token_id_information=False)
+
+
+def chat_representable(item: dict) -> dict:
+    """Drop the Responses-only fields that Chat Completions messages cannot hold."""
+    item = {key: value for key, value in item.items() if key != "phase"}
+    if item.get("type") == "reasoning":
+        if item.get("content"):
+            item["summary"] = [{"type": "summary_text", "text": part["text"]} for part in item["content"]]
+        item.pop("content", None)
+        item.pop("encrypted_content", None)
+    return item
+
+
+def to_chat(items: list, tools: list | None = None, instructions: str | None = None) -> dict:
+    """Convert Responses API items (and tools and instructions) to Chat Completions messages (and tools)."""
+    chat = converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[chat_representable(item) for item in items], tools=tools or [], instructions=instructions
+        )
+    ).model_dump(exclude_none=True)
+    for message in chat["messages"]:
+        if message["role"] == "developer":
+            message["role"] = "system"
+        content = message.get("content") or ""
+        if isinstance(content, list) and all(part["type"] == "text" for part in content):
+            content = "\n".join(part["text"] for part in content)
+        message["content"] = content
+        for call in message.get("tool_calls", []):
+            try:
+                arguments = json.loads(call["function"]["arguments"] or "{}")
+            except json.JSONDecodeError:
+                arguments = {}
+            call["function"]["arguments"] = arguments if isinstance(arguments, dict) else {}
+    return chat
+
+
+def prompt_items(rollout: dict) -> list:
+    prompt = rollout["responses_create_params"]["input"]
+    return [{"role": "user", "content": prompt}] if isinstance(prompt, str) else prompt
+
+
+def process_sft_data(filtered_rollout_file: str, output_file: str) -> None:
+    """Write each rollout as one chat transcript: the prompt followed by the model's turns."""
+    with open(filtered_rollout_file) as f, open(output_file, "w") as out:
         for line in f:
             rollout = json.loads(line)
-            sft_example = {
-                "messages": rollout['response']['output'],
-                "reward": rollout['reward'],
-                "task_type": rollout.get('metadata', {}).get('task_type', 'general')
-            }
-            out.write(json.dumps(sft_example) + '\n')
+            task = rollout["responses_create_params"]
+            chat = to_chat(
+                prompt_items(rollout) + rollout["response"]["output"],
+                task.get("tools"),
+                task.get("instructions"),
+            )
+            messages = chat["messages"]
+            while messages and messages[-1]["role"] != "assistant":
+                messages.pop()  # end on the model's last turn, as NeMo RL's SFT loader requires
+            if not any(message["role"] == "user" for message in messages):
+                continue  # the agent did not record its task prompt
+            example = {"messages": messages, "reward": rollout["reward"]}
+            if chat.get("tools"):
+                example["tools"] = chat["tools"]
+            out.write(json.dumps(example) + "\n")
 
-# Process filtered rollouts (no additional filtering needed)
-process_sft_data('filtered_rollouts.jsonl', 'sft_data.jsonl')
+
+process_sft_data("filtered_rollouts.jsonl", "sft_data.jsonl")
 ```
 
 ### DPO Data Processing
 
-Create preference pairs from filtered rollouts (requires 2 rollouts per task):
+Pair each task's highest- and lowest-reward rollouts. Rollouts of the same task share `_ng_task_index`, so collect with `--num-repeats 2` or more. Build pairs from one run's unfiltered rollouts file: low-reward rollouts are needed as the rejected side, and every run numbers its tasks from 0. Some environments also add a random starting state to each rollout's prompt (blackjack deals a new hand), so the snippet pairs only rollouts that saw the same prompt. This snippet reuses `to_chat` and `prompt_items` from the SFT snippet:
 
 ```python
-def create_dpo_pairs(filtered_rollout_file: str, output_file: str):
-    """Create preference pairs from pairs of filtered rollouts."""
-    
-    # Group rollouts by task
-    task_groups = {}
-    with open(filtered_rollout_file) as f:
+from collections import defaultdict
+
+
+def create_dpo_pairs(rollout_file: str, output_file: str, min_margin: float = 0.1) -> None:
+    """Pair the best and worst unmasked rollouts of each task prompt when their rewards differ enough."""
+    by_prompt = defaultdict(list)
+    with open(rollout_file) as f:
         for line in f:
             rollout = json.loads(line)
-            task_id = rollout.get('task_id') or hash(json.dumps(rollout['responses_create_params']['input']))
-            
-            if task_id not in task_groups:
-                task_groups[task_id] = []
-            task_groups[task_id].append(rollout)
-    
-    # Create preference pairs from pairs of rollouts
-    pairs = []
-    for task_rollouts in task_groups.values():
-        if len(task_rollouts) == 2:  # DPO works with pairs
-            rollout_1, rollout_2 = task_rollouts
-            
-            # Determine which is better based on reward
-            if rollout_1['reward'] > rollout_2['reward']:
-                chosen, rejected = rollout_1, rollout_2
-            else:
-                chosen, rejected = rollout_2, rollout_1
-            
-            # Only create pair if there's meaningful difference
-            quality_diff = chosen['reward'] - rejected['reward']
-            if quality_diff >= 0.1:  # Minimum difference threshold
-                pairs.append({
-                    "prompt": chosen['responses_create_params']['input'],
-                    "chosen": chosen['response']['output'],
-                    "rejected": rejected['response']['output'],
-                    "quality_difference": quality_diff
-                })
-    
-    # Save preference pairs
-    with open(output_file, 'w') as out:
-        for pair in pairs:
-            out.write(json.dumps(pair) + '\n')
-    
-    print(f"Created {len(pairs)} preference pairs")
+            if rollout.get("mask_sample"):
+                continue
+            output = rollout.get("response", {}).get("output")
+            if not isinstance(output, list) or not output or not all(isinstance(item, dict) for item in output):
+                continue
+            task = rollout["responses_create_params"]
+            prompt_key = json.dumps([task["input"], task.get("instructions"), task.get("tools")], sort_keys=True)
+            by_prompt[(rollout["_ng_task_index"], prompt_key)].append(rollout)
 
-# Create DPO pairs from filtered rollouts
-create_dpo_pairs('filtered_rollouts.jsonl', 'dpo_pairs.jsonl')
+    pairs = 0
+    with open(output_file, "w") as out:
+        for rollouts in by_prompt.values():
+            chosen = max(rollouts, key=lambda r: r["reward"])
+            rejected = min(rollouts, key=lambda r: r["reward"])
+            margin = round(chosen["reward"] - rejected["reward"], 6)  # so 0.3 - 0.2 counts as 0.1
+            if len(rollouts) < 2 or margin < min_margin:
+                continue
+            task = chosen["responses_create_params"]
+            prompt = to_chat(prompt_items(chosen), task.get("tools"), task.get("instructions"))
+            if not any(message["role"] == "user" for message in prompt["messages"]):
+                continue  # DPO needs a recorded prompt separate from each completion
+            pair = {
+                "prompt": prompt["messages"],
+                "chosen": to_chat(chosen["response"]["output"])["messages"],
+                "rejected": to_chat(rejected["response"]["output"])["messages"],
+                "reward_margin": margin,
+            }
+            for side in (pair["chosen"], pair["rejected"]):
+                while side and side[-1]["role"] != "assistant":
+                    side.pop()  # end on the model's last turn, as in the SFT snippet
+            if not pair["chosen"] or not pair["rejected"]:
+                continue
+            if prompt.get("tools"):
+                pair["tools"] = prompt["tools"]
+            out.write(json.dumps(pair) + "\n")
+            pairs += 1
+    print(f"Created {pairs} preference pairs from {len(by_prompt)} task prompts")
+
+
+create_dpo_pairs("results/rollouts.jsonl", "dpo_pairs.jsonl")
 ```
 
 ## Training Integration
@@ -246,7 +314,7 @@ SFT data follows the conversation format used by most training libraries:
 {"messages": [{"role": "user", "content": "..."}, {"role": "assistant", "content": "..."}]}
 ```
 
-DPO data follows the preference pair format:
+DPO data follows TRL's conversational preference format (NeMo RL's DPO expects `context` and ranked `completions` instead):
 ```json
 {"prompt": ["..."], "chosen": ["..."], "rejected": ["..."]}
 ```
@@ -280,39 +348,34 @@ Compare key metrics like average reward, success rate, and task-specific perform
 ### 1. Data Quality Over Quantity
 
 ```python
-# Prefer high-quality filtered data over large noisy datasets
-filter_criteria = {
-    'min_reward': 0.8,        # High threshold for SFT
-    'min_success_rate': 0.9,
-    'require_tool_usage': True  # Domain-specific requirements
-}
+# Prefer a smaller set of high-reward rollouts over a large noisy one
+filter_rollouts("results/rollouts.jsonl", "filtered_rollouts.jsonl", min_reward=0.8)
 ```
 
 ### 2. Balanced Datasets
 
+Run this on rollouts before formatting them; each rollout's `agent_ref` names the environment's agent that produced it:
+
 ```python
-# Ensure diverse task representation
-def balance_dataset(input_file: str, output_file: str, max_per_category: int = 100):
-    task_counts = {}
-    balanced_data = []
-    
-    with open(input_file) as f:
+import json
+from collections import Counter
+
+
+def balance_dataset(input_file: str, output_file: str, max_per_environment: int = 100) -> None:
+    """Cap how many rollouts each environment contributes."""
+    counts = Counter()
+    with open(input_file) as f, open(output_file, "w") as out:
         for line in f:
-            data = json.loads(line)
-            task_type = data.get('metadata', {}).get('task_type', 'general')
-            
-            if task_counts.get(task_type, 0) < max_per_category:
-                balanced_data.append(data)
-                task_counts[task_type] = task_counts.get(task_type, 0) + 1
-    
-    with open(output_file, 'w') as out:
-        for data in balanced_data:
-            out.write(json.dumps(data) + '\n')
+            rollout = json.loads(line)
+            environment = (rollout.get("agent_ref") or {}).get("name", "unknown")
+            if counts[environment] < max_per_environment:
+                out.write(line)
+                counts[environment] += 1
 ```
 
 ### 3. Iterative Improvement
 
-```bash
+```text
 # Iteration cycle
 1. Generate rollouts with current agent
 2. Filter and prepare training data  
