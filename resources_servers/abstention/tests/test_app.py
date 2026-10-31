@@ -15,7 +15,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
-from pytest import approx, fixture
+from pytest import approx, fixture, mark
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -126,6 +126,36 @@ class TestParseJudgeGrade:
 
     def test_c_in_multiline(self) -> None:
         assert parse_judge_grade("reasoning\nmore reasoning\nC") == "C"
+
+    @mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Answer: B", "B"),
+            ("Answer: C", "C"),
+            ("C: NOT_ATTEMPTED", "C"),
+            ("B: INCORRECT", "B"),
+            ("A: CORRECT", "A"),
+            ("Grade: C", "C"),
+            ("**C**", "C"),
+            ('"B"', "B"),
+            ("[C]", "C"),
+            ("The grade is C based on analysis", "C"),
+            ("C. Again, C.", "C"),
+            ("Unable to grade: API unavailable", "B"),
+            ("ABC", "B"),
+            ("A1", "B"),
+            ("grade_A", "B"),
+            ("éA", "B"),
+            ("A or C", "B"),
+            ("C, not A", "B"),
+            ("A: CORRECT, B: INCORRECT, C: NOT_ATTEMPTED", "B"),
+            ("A or B?\nC\n", "C"),
+            ("", "B"),
+            ("   ", "B"),
+        ],
+    )
+    def test_grade_tokens(self, text: str, expected: str) -> None:
+        assert parse_judge_grade(text) == expected
 
 
 class TestExtractTextFromResponse:
@@ -250,6 +280,44 @@ class TestAbstentionServer:
         assert result.is_incorrect == approx(0.0)
         assert result.judge_output is None
         assert result.extracted_answer == "[IDK]"
+
+    @mark.parametrize(
+        ("judge_text", "reward", "verdict", "index"),
+        [
+            ("Answer: B", 0.0, "incorrect", -1.0),
+            ("Answer: C", 0.5, "abstain", 0.0),
+            ("C: NOT_ATTEMPTED", 0.5, "abstain", 0.0),
+            ("B: INCORRECT", 0.0, "incorrect", -1.0),
+            ("A: CORRECT", 1.0, "correct", 1.0),
+            ("Unable to grade: API unavailable", 0.0, "incorrect", -1.0),
+            ("A or C", 0.0, "incorrect", -1.0),
+            ("A or B?\nC", 0.5, "abstain", 0.0),
+        ],
+    )
+    async def test_verify_grade_tokens(
+        self, config: AbstentionConfig, judge_text: str, reward: float, verdict: str, index: float
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = AbstentionServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        response_mock.read = AsyncMock(return_value=orjson.dumps(self._make_judge_response(judge_text)))
+        server_mock.post = AsyncMock(return_value=response_mock)
+        request = AbstentionVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("The answer is Paris."),
+            question="What is the capital of France?",
+            answer="Paris",
+        )
+
+        result = await server.verify(request)
+
+        assert result.reward == approx(reward)
+        assert result.verdict == verdict
+        assert result.omniscience_index == approx(index)
+        assert result.is_correct == float(verdict == "correct")
+        assert result.is_incorrect == float(verdict == "incorrect")
+        assert result.is_abstain == float(verdict == "abstain")
+        assert result.judge_output == judge_text
 
     async def test_verify_correct_answer(self, config: AbstentionConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)
