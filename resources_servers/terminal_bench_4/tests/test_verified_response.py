@@ -45,8 +45,9 @@ def test_a_missing_reward_carries_the_exception_type(tmp_path):
         AgentTermination(reason="completed"),
     )
 
-    assert verified["_ng_failure_class"] == "infrastructure_error"
-    assert verified["_ng_failure_type"] == "SandboxTimeoutException"
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == "SandboxTimeoutException"
+    assert "_ng_failure_class" not in verified
 
 
 def _diagnostic(subphase, exception_type):
@@ -55,7 +56,7 @@ def _diagnostic(subphase, exception_type):
 
 @pytest.mark.parametrize(
     "exception_type",
-    ["VerifierTimeoutError", "RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"],
+    ["RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"],
 )
 @pytest.mark.parametrize(
     "agent_exit,reason",
@@ -104,7 +105,9 @@ def test_an_agent_infrastructure_failure_stays_one_whatever_its_verifier_did(tmp
     assert verified["failure_kind"] is None
 
 
-@pytest.mark.parametrize("exception_type", ["TimeoutError", "RuntimeError"])
+@pytest.mark.parametrize(
+    "exception_type", ["TimeoutError", "RuntimeError", "VerifierTimeoutError", "VerifierStatusUnknownError"]
+)
 def test_a_verifier_that_failed_on_infrastructure_is_not_scored(tmp_path, exception_type):
     """What run_verifier raises when a provider call times out within its budget (TimeoutError) or the sandbox
     reports no command outcome (RuntimeError)."""
@@ -115,9 +118,10 @@ def test_a_verifier_that_failed_on_infrastructure_is_not_scored(tmp_path, except
         [_diagnostic("verifier_execution", exception_type)],
     )
 
-    assert verified["_ng_failure_class"] == "infrastructure_error"
-    assert verified["_ng_failure_type"] == exception_type
-    assert verified["failure_kind"] is None
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == exception_type
+    assert "_ng_failure_class" not in verified
+    assert verified["failure_kind"] == "verifier_error"
 
 
 def test_a_verifier_that_did_not_start_stays_an_infrastructure_failure(tmp_path):
@@ -128,15 +132,17 @@ def test_a_verifier_that_did_not_start_stays_an_infrastructure_failure(tmp_path)
         [_diagnostic("verifier_setup", "VerifierStartTimeoutError")],
     )
 
-    assert verified["_ng_failure_class"] == "infrastructure_error"
-    assert verified["_ng_failure_type"] == "VerifierStartTimeoutError"
-    assert verified["failure_kind"] is None
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == "VerifierStartTimeoutError"
+    assert "_ng_failure_class" not in verified
+    assert verified["failure_kind"] == "verifier_error"
 
 
 def test_a_missing_reward_without_exception_info_names_the_missing_reward(tmp_path):
     verified = _verified(tmp_path, {}, AgentTermination(reason="completed"))
 
-    assert verified["_ng_failure_type"] == "MissingOfficialReward"
+    assert verified["mask_sample"] is True
+    assert verified["failure_reason"] == "MissingOfficialReward"
 
 
 def test_a_free_text_infrastructure_detail_is_not_a_type(tmp_path):

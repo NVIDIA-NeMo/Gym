@@ -96,7 +96,7 @@ def atomic_json(path, value):
 # Verifier outcomes that Terminal-Bench never retries and counts as a 0: Harbor excludes them from retries and counts a
 # trial without a reward as 0. They are scored zeros here too, so the task stays in the pass-rate denominator.
 _ZERO_SCORED_VERIFIER_FAILURES = frozenset(
-    {"VerifierTimeoutError", "RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"}
+    {"RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"}
 )
 
 
@@ -373,8 +373,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         key = session.resources_request.resources_session_id
         await self._prepare_session(session)
         if session.seed_response.termination is not None:
-            # Provisioning failed and was cleaned up; the episode may be retried.
-            session.resources_error = (503, f"Task sandbox setup failed: {session.termination.detail}")
+            # Invalid execution limits are deterministic; preserve other setup retry behavior.
+            invalid_limits = (session.result.get("exception_info") or {}).get(
+                "exception_type"
+            ) == ExecLimitConfigurationError.__name__
+            session.resources_error = (
+                422 if invalid_limits else 503,
+                f"Task sandbox setup failed: {session.termination.detail}",
+            )
             self._remember_close(key, session)
             return
         with rollout_context(session.request.capture_rollout_id):
@@ -560,6 +566,15 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 failure_type = failure
         elif session.termination.reason == "infrastructure_error" and not result.get("sandbox_resource_limit"):
             failure = session.termination.detail or "Agent infrastructure failure"
+        legacy = getattr(session, "resources_request", None) is None
+        ungraded_verifier = bool(failure) and not completed and session.termination.reason != "infrastructure_error"
+        legacy_failure = {}
+        if legacy and failure and not ungraded_verifier:
+            legacy_failure["_ng_failure_class"] = "infrastructure_error"
+            if failure_type:
+                legacy_failure["_ng_failure_type"] = failure_type
+            if failure_type == ExecLimitConfigurationError.__name__:
+                legacy_failure[NG_TERMINAL_KEY] = True
         return SandboxedVerifyResponse(
             **(
                 session.verify_body.model_dump(
@@ -576,15 +591,14 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             termination=session.termination,
             infrastructure_error=failure,
             failure_reason=failure or verifier_failure,
-            failure_kind=VERIFIER_ERROR if verifier_failure else None,
+            failure_kind=VERIFIER_ERROR if verifier_failure or ungraded_verifier else None,
+            mask_sample=bool(failure) and (not legacy or ungraded_verifier),
             artifacts={"trial": str(session.directory)},
             timings={
                 key: result.get(key) for key in ("environment_setup", "agent_setup", "agent_execution", "verifier")
             },
-            **({"_ng_failure_class": "infrastructure_error"} if failure else {}),
-            **({"_ng_failure_type": failure_type} if failure_type else {}),
-            # A retry would fail the same way: only a configuration change can fix it.
-            **({NG_TERMINAL_KEY: True} if failure_type == ExecLimitConfigurationError.__name__ else {}),
+            verifier_diagnostics=list(session.diagnostics),
+            **legacy_failure,
         )
 
     def _session(self, request, session_id):

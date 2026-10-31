@@ -8,10 +8,17 @@ import json
 import math
 import shlex
 from pathlib import Path, PurePosixPath
+from tempfile import TemporaryDirectory
 
 from resources_servers.terminal_bench_4.models import VerifierTestCounts
 from resources_servers.terminal_bench_4.task import resolve_env
-from resources_servers.terminal_bench_4.transfers import download_dir, prepare_directory, upload_dir, upload_file
+from resources_servers.terminal_bench_4.transfers import (
+    download_dir,
+    download_file,
+    prepare_directory,
+    upload_dir,
+    upload_file,
+)
 
 
 class RewardFileNotFoundError(FileNotFoundError):
@@ -123,12 +130,68 @@ async def restore(environment, artifacts_dir):
             await upload_file(environment.main, host, target)
 
 
+class VerifierStatusUnknownError(RuntimeError):
+    """The verifier's native command outcome or authoritative reward was not observed."""
+
+
 def _require_command_outcome(result, step):
-    """A sandbox that reports no command outcome (``error_type`` set) failed the verifier, so the reward files it
-    left say nothing about the task. Test doubles without ``error_type`` ran the command."""
     error_type = getattr(result, "error_type", None)
-    if error_type:
-        raise RuntimeError(f"Verifier {step} failed in the sandbox: {error_type}: {result.stderr}")
+    code = getattr(result, "return_code", None)
+    if error_type or type(code) is not int or code < 0:
+        raise VerifierStatusUnknownError(
+            f"Verifier {step} has no confirmed command outcome ({error_type}, {code}): {result.stderr or ''}"
+        )
+
+
+def _record_verifier_error(diagnostics, operation, error):
+    causes, seen = [], set()
+    cause = error
+    while cause is not None and id(cause) not in seen and len(causes) < 8:
+        seen.add(id(cause))
+        detail = {"exception_type": type(cause).__name__, "message": str(cause)[:2000]}
+        for name in ("event_id", "operation_id", "attempt_id", "cause_id", "operation", "stage"):
+            value = getattr(cause, name, None)
+            if isinstance(value, str):
+                detail[name] = value
+        causes.append(detail)
+        cause = cause.__cause__
+    diagnostics.append(
+        {"operation": operation, "exception_type": type(error).__name__, "error": str(error)[:2000], "causes": causes}
+    )
+
+
+async def _download_reward(environment, logs, remaining, diagnostics):
+    # Fetch the grade separately: a later optional log/cleanup failure must not erase it.
+    result = await environment.exec(
+        "if [ -f /logs/verifier/reward.json ]; then printf reward.json; "
+        "elif [ -f /logs/verifier/reward.txt ]; then printf reward.txt; else printf missing; fi",
+        timeout_sec=remaining(),
+        user="root",
+    )
+    _require_command_outcome(result, "reward lookup")
+    if result.return_code != 0:
+        raise VerifierStatusUnknownError("Verifier reward lookup failed")
+    name = (result.stdout or "").strip()
+    if name == "missing":
+        raise RewardFileNotFoundError("Completed verifier produced no official reward")
+    if name not in ("reward.json", "reward.txt"):
+        raise VerifierStatusUnknownError("Verifier reward lookup returned an unknown result")
+    temporary = TemporaryDirectory(prefix=".tb4-reward-", dir=logs)
+    rewards = None
+    try:
+        directory = Path(temporary.name)
+        await download_file(environment.main, f"/logs/verifier/{name}", directory / name)
+        rewards = parse_reward(directory)
+        try:
+            (directory / name).replace(logs / name)
+        except OSError as error:
+            _record_verifier_error(diagnostics, "verifier_reward_local_artifact", error)
+        return rewards
+    finally:
+        try:
+            temporary.cleanup()
+        except OSError as error:
+            _record_verifier_error(diagnostics, "verifier_reward_local_cleanup", error)
 
 
 async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
@@ -136,34 +199,52 @@ async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
     timeout_sec = settings.timeout_sec if timeout_sec is None else timeout_sec
     logs = Path(directory) / "verifier"
     logs.mkdir(parents=True, exist_ok=True)
+    phase, rewards = "preparation", None
+    # Preparation, execution and transfers share the original task verifier allowance.
+    deadline = asyncio.get_running_loop().time() + timeout_sec
 
-    async def execute():
-        _require_command_outcome(await environment.exec("chmod +x /tests/test.sh", user="root"), "preparation")
-        result = await environment.exec(
-            "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
-            env=resolve_env(settings.env),
-            user=settings.user,
-        )
-        diagnostics.append({"operation": "verifier_command", "return_code": result.return_code})
-        _require_command_outcome(result, "execution")
-        await download_dir(environment.main, "/logs/verifier", logs)
-        rewards = parse_reward(logs)
-        counts = parse_test_counts(logs, diagnostics)
-        return {"rewards": rewards, **counts.model_dump(exclude_none=True)}
+    def remaining():
+        value = deadline - asyncio.get_running_loop().time()
+        if value <= 0:
+            raise TimeoutError("The total verifier deadline has expired")
+        return value
 
-    # Only the verifier's own budget makes a VerifierTimeoutError. A provider call that times out within it is an
-    # infrastructure failure and propagates as raised.
-    deadline = asyncio.timeout(timeout_sec)
     try:
-        async with deadline:
-            return await execute()
-    except TimeoutError as exc:
-        if not deadline.expired():
+        async with asyncio.timeout_at(deadline):
+            result = await environment.exec("chmod +x /tests/test.sh", user="root", timeout_sec=remaining())
+            _require_command_outcome(result, "preparation")
+            if result.return_code != 0:
+                raise VerifierStatusUnknownError("Verifier preparation command failed")
+            phase = "execution"
+            result = await environment.exec(
+                "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
+                env=resolve_env(settings.env),
+                user=settings.user,
+                timeout_sec=remaining(),
+            )
+            diagnostics.append(
+                {
+                    "operation": "verifier_command",
+                    "return_code": result.return_code,
+                    "error_type": getattr(result, "error_type", None),
+                }
+            )
+            # A provider timeout can also mean cancelled status polling. Neither it nor rc124 proves a native deadline.
+            _require_command_outcome(result, "execution")
+            phase = "reward_transfer"
+            rewards = await _download_reward(environment, logs, remaining, diagnostics)
+            phase = "artifact_transfer"
+            await download_dir(
+                environment.main, "/logs/verifier", logs, exclude=["reward.json", "reward.txt"], deadline=deadline
+            )
+    except Exception as error:
+        _record_verifier_error(diagnostics, f"verifier_{phase}", error)
+        if rewards is None:
+            if isinstance(error, TimeoutError):
+                raise VerifierStatusUnknownError(
+                    f"Verifier {phase} timed out without a confirmed native deadline outcome"
+                ) from error
             raise
-        # Preserve diagnostics on timeout without turning partial reward files
-        # into a completed evaluation (the reference aborts this verifier).
-        try:
-            await download_dir(environment.main, "/logs/verifier", logs)
-        except Exception as download_exc:
-            diagnostics.append({"operation": "verifier_logs", "error": str(download_exc)})
-        raise VerifierTimeoutError(f"Verifier execution timed out after {timeout_sec} seconds") from exc
+        # A confirmed completed command and independently retrieved reward remain authoritative.
+    counts = parse_test_counts(logs, diagnostics)
+    return {"rewards": rewards, **counts.model_dump(exclude_none=True)}
