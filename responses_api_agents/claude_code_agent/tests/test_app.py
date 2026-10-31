@@ -404,6 +404,30 @@ class TestObservability:
 
 
 class TestRunClaudeCode:
+    @pytest.mark.parametrize(
+        ("result", "returncode", "status"),
+        [
+            ({"subtype": "success"}, 0, "completed"),
+            ({"subtype": "error_during_execution", "is_error": True}, 0, "failed"),
+            ({"subtype": "success"}, 7, "failed"),
+            ({"subtype": "error_max_turns", "is_error": True}, 0, "incomplete"),
+            ({}, 0, "incomplete"),
+        ],
+    )
+    def test_response_preserves_cli_outcome(self, tmp_path: Path, result: dict, returncode: int, status: str) -> None:
+        agent = _make_agent()
+        proc = MagicMock()
+        proc.returncode = returncode
+        stdout = _event("result", **result) if result else ""
+        proc.communicate = AsyncMock(return_value=(stdout.encode(), b""))
+        with (
+            patch("responses_api_agents.claude_code_agent.app.Path.home", return_value=tmp_path),
+            patch("responses_api_agents.claude_code_agent.app.asyncio.create_subprocess_exec", return_value=proc),
+        ):
+            response = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="hello")))
+
+        assert response.status == status
+
     def test_wires_command_env_and_cleans_up(self, tmp_path: Path) -> None:
         agent = _make_agent(mcp_config="/path/to/mcp.json")
         captured: dict = {}
@@ -1150,6 +1174,7 @@ class TestCaptureFriendlyTranscript:
         )
         agent.server_client.global_config_dict = {"token_id_capture": {"enabled": capture}}
         items, meta = parse_stream_json(self._events(), fold_thinking=not capture)
+        meta["status"] = "completed"
         body = NeMoGymResponseCreateParamsNonStreaming(input="fix it")
         with patch.object(agent, "_run_claude_code", AsyncMock(return_value=(items, "m", meta))):
             response = asyncio.run(agent._create_response(body))
@@ -1189,6 +1214,7 @@ class TestCaptureFriendlyTranscript:
         assert [item.type for item in response.output] == (["reasoning", "message"] if capture else ["message"])
         assert (response.id == "resp_served123") is capture
         assert metadata["status"] == ("incomplete" if timeout else "completed")
+        assert response.status == metadata["status"]
         if timeout:
             assert metadata["error_type"] == "timeout"
 
@@ -1322,7 +1348,7 @@ class TestCaptureFriendlyTranscript:
 async def test_unseeded_responses_do_not_pick_up_configured_skills(monkeypatch):
     agent = _make_agent()
     agent.server_client.global_config_dict = {"skills": {"path": "must-not-be-staged"}}
-    run = AsyncMock(return_value=([], "model", {}))
+    run = AsyncMock(return_value=([], "model", {"status": "completed"}))
     monkeypatch.setattr(ClaudeCodeAgent, "_run_claude_code", run)
     request = Request({"type": "http", "path_params": {}})
     await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Question"))
