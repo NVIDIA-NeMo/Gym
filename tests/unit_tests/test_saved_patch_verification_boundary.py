@@ -26,7 +26,7 @@ from nemo_gym.rollout_reverification import InputRolloutPair, _build_verify_payl
     [
         ("judge_failed", "saved patch", 0),
         ("judge_failed", "", 0),
-        ("judge_failed", None, 1),
+        ("judge_failed", None, 0),
         ("agent_run_error", None, 1),
     ],
 )
