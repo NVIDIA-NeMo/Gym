@@ -1,0 +1,60 @@
+mcp_atlas:
+  resources_servers:
+    mcp_atlas:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: MCP-Atlas multi-step tool use against real MCP servers, scored by LLM-judged claim coverage
+      value: Evaluate tool discovery and multi-step tool use over 36 MCP servers
+      # One of the two: a SIF of ghcr.io/scaleapi/mcp-atlas:1.2.7 (one sandbox per rollout, see README.md),
+      # or the URL of an agent-environment that is already running (development only).
+      sandbox_image: ${oc.select:mcp_atlas_sandbox_image,''}
+      sandbox_base_url: ${oc.select:mcp_atlas_sandbox_url,''}
+      sandbox_max_concurrency: 32
+      sandbox_startup_timeout_s: 600
+      tool_call_timeout_s: 60
+      max_tool_calls: 100
+      pass_threshold: 0.75
+      mask_service_errors: true
+      judge_model_server:
+        type: responses_api_models
+        name: mcp_atlas_judge_model
+
+# Judge: Gemini 3.1 Pro (the upstream score_claims.py default), temperature 0, one call per claim.
+# Any OpenAI-compatible chat endpoint serving that model works; set the three keys to point elsewhere.
+mcp_atlas_judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${oc.select:mcp_atlas_judge_base_url,https://generativelanguage.googleapis.com/v1beta/openai}
+      model: ${oc.select:mcp_atlas_judge_model_name,gemini-3.1-pro-preview}
+      api_key: ${oc.select:mcp_atlas_judge_api_key,null}
+      return_token_id_information: false
+      uses_reasoning_parser: false
+
+mcp_atlas_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: mcp_atlas
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # Upstream harness limit on model turns; the resources server enforces the 100 tool calls.
+      max_steps: 256
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mcp_atlas/data/example.jsonl
+        num_repeats: 1
+        license: Creative Commons Attribution 4.0 International
+
+mcp_atlas_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mcp_atlas_simple_agent
