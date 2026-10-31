@@ -148,6 +148,12 @@ A `resource_requests` entry above the sandbox's limit is clamped to the limit wi
 declares no `resources` is held to the SDK's default limits (1 CPU, 2048 MiB), since those are what the
 server applies.
 
+When a create attempt times out or the caller cancels it, the provider finds the sandbox the attempt
+left behind by the attempt's metadata key, deletes it and cancels the create request. If it finds none
+(the server had not recorded the sandbox yet, or the lookup failed), it lets the request finish and
+deletes the sandbox the server's answer names. `aclose()` waits up to `operations.close_timeout_s` for
+those requests.
+
 Run an agent with the provider config by passing it alongside the agent and model configs:
 
 ```bash
