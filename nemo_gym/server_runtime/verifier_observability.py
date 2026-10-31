@@ -32,6 +32,7 @@ from nemo_gym.trajectory.trajectory_record import (
     VerifierInvocation,
     grading_result_binding,
 )
+from nemo_gym.verification.judge import JudgeGrading, _judge_grading
 
 
 logger = logging.getLogger(__name__)
@@ -87,6 +88,42 @@ def observe_programmatic_grading(calculate: Callable[[], T]) -> T:
         # Observation must not turn a successfully calculated grade into a verifier failure.
         operation.result_binding_sha256 = None
     operation.outcome = "completed" if operation.result_binding_sha256 is not None else "unknown"
+    return result
+
+
+async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]]) -> T:
+    """Execute a reviewed async LLM-judge grading once and record its actual result in the active invocation.
+
+    The judge replies parsed by ``call_judge`` during ``calculate`` become the operation's dependencies. It completes
+    only when every judge reply was identified, at least one was, the call site marked every reply with
+    ``record_parsed_judge_verdict`` and the result binds; otherwise it stays unknown. Errors propagate unchanged.
+    """
+    invocation = _active_verifier.get()
+    operation = GradingOperationObservation(operation_id=f"grade-{uuid4().hex}", kind="llm_judge", dependencies=[])
+    if invocation is not None:
+        if invocation.grading_operations is None:
+            invocation.grading_operations = []
+        invocation.grading_operations.append(operation)
+    grading = JudgeGrading()
+    token = _judge_grading.set(grading)
+    try:
+        result = await calculate()
+    except BaseException:
+        operation.outcome = "failed"
+        raise
+    finally:
+        _judge_grading.reset(token)
+        operation.dependencies = list(grading.dependencies)
+    try:
+        operation.result_binding_sha256 = grading_result_binding(result)
+    except Exception:
+        operation.result_binding_sha256 = None
+    complete = (
+        bool(grading.dependencies)
+        and len(grading.parsed_dependencies) == len(grading.dependencies)
+        and not grading.unidentified_calls
+    )
+    operation.outcome = "completed" if complete and operation.result_binding_sha256 is not None else "unknown"
     return result
 
 

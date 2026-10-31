@@ -180,10 +180,14 @@ class AgentInvocation(ObservationModel):
 
 
 class GradingOperationObservation(ObservationModel):
-    """A source-reviewed programmatic calculation actually executed inside a verifier invocation."""
+    """A source-reviewed grading calculation actually executed inside a verifier invocation.
+
+    ``llm_judge`` grades from judge calls made through ``call_judge``; its dependencies are those calls' model and
+    response ids, and it completes only when the reviewed call site marked an explicitly parsed verdict.
+    """
 
     operation_id: str = Field(min_length=1)
-    kind: Literal["programmatic_calculation"] = "programmatic_calculation"
+    kind: Literal["programmatic_calculation", "llm_judge"] = "programmatic_calculation"
     outcome: Literal["completed", "failed", "unknown"] = "unknown"
     result_binding_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
     dependencies: list[ModelCallRef] | None = None

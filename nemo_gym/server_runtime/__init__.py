@@ -91,6 +91,7 @@ if TYPE_CHECKING:
         ToolAccess,
     )
     from nemo_gym.server_runtime.verifier_observability import (
+        observe_llm_judge_grading,
         observe_programmatic_grading,
         observe_verifier,
         observe_verifier_sandbox,
@@ -152,6 +153,7 @@ _PUBLIC_API = {
     "is_retryable_dependency_error": "base_environment_server",
     "is_retryable_dependency_status": "base_environment_server",
     "lost_session_verification": "base_resources_server",
+    "observe_llm_judge_grading": "verifier_observability",
     "observe_programmatic_grading": "verifier_observability",
     "observe_verifier_sandbox": "verifier_observability",
     "observe_verifier": "verifier_observability",

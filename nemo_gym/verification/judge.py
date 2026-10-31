@@ -41,6 +41,8 @@ exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
 
 import functools
 import re
+from contextvars import ContextVar
+from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
 from fastapi.encoders import jsonable_encoder
@@ -49,6 +51,7 @@ from pydantic import BaseModel
 
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
@@ -56,7 +59,31 @@ from nemo_gym.core.failure_kinds import (
 from nemo_gym.exception_inspection import bounded_text
 from nemo_gym.failure_transport import FailureReportRow, observe_failure, report_for_current_request
 from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
+from nemo_gym.trajectory.trajectory_record import ModelCallRef
 from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+
+
+@dataclass
+class JudgeGrading:
+    """Judge facts of one reviewed LLM-judge grading execution; set only by ``observe_llm_judge_grading``."""
+
+    dependencies: list[ModelCallRef] = field(default_factory=list)
+    unidentified_calls: int = 0
+    parsed_dependencies: set[int] = field(default_factory=set)
+
+
+_judge_grading: ContextVar[JudgeGrading | None] = ContextVar("judge_grading", default=None)
+
+
+def record_parsed_judge_verdict() -> None:
+    """Mark that the reviewed call site took its explicitly parsed-verdict branch for the active judge grading.
+
+    Call it only where the grade comes from a valid judge verdict; fallback, no-verdict and caught-error branches
+    must not call it, so their grading stays unknown.
+    """
+    grading = _judge_grading.get()
+    if grading is not None and grading.dependencies:
+        grading.parsed_dependencies.add(len(grading.dependencies) - 1)
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -162,7 +189,17 @@ async def call_judge(
             **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
         )
         await raise_for_status(http_response)
-        return response_model.model_validate(await get_response_json(http_response))
+        parsed = response_model.model_validate(await get_response_json(http_response))
+        grading = _judge_grading.get()
+        if grading is not None:
+            # Only a received, parsed reply is a dependency; failed calls stay failure observations.
+            response_id = getattr(parsed, "id", None)
+            if isinstance(response_id, str) and response_id:
+                model_ref = ModelServerRef(type="responses_api_models", name=server_name)
+                grading.dependencies.append(ModelCallRef(model_ref=model_ref, response_id=response_id))
+            else:
+                grading.unidentified_calls += 1
+        return parsed
 
     return await reraise_judge_errors(_call())
 

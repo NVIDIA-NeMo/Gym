@@ -32,6 +32,7 @@ if TYPE_CHECKING:
         call_judge,
         judge_failsafe,
         normalize_math_judge_verdict,
+        record_parsed_judge_verdict,
         reraise_judge_errors,
     )
     from nemo_gym.verification.sandbox_verification import (
@@ -52,6 +53,7 @@ _PUBLIC_API = {
     "SandboxVerificationError": "sandbox_verification",
     "VerifierFixture": "verifier_fixture",
     "call_judge": "judge",
+    "record_parsed_judge_verdict": "judge",
     "exercise_verifier_fixture": "verifier_fixture",
     "judge_failsafe": "judge",
     "normalize_math_judge_verdict": "judge",
