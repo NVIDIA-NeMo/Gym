@@ -264,7 +264,7 @@ def test_remote_connection_preserves_unsupported_reader_stop(tmp_path, slurm_bin
     monkeypatch.setattr(slurm, "get_connection", lambda hostname: RemoteTransport())
     result = recover(*_handle(job))
     assert result.decision.action.value == "stop" and result.dispatched is None
-    assert "authoritative local Store reader" in result.decision.reason
+    assert "authoritative Store reader" in result.decision.reason
     assert not (slurm_bin / "env").exists()
 
 

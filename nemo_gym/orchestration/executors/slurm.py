@@ -49,6 +49,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     SCHEDULER_CAUSE_MARKER,
     _walltime_to_seconds,
 )
+from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -69,6 +70,91 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
+
+
+# Executed only inside the saved pinned install. The projection contains no saved answer text.
+_REMOTE_MANAGED_READER = r"""
+import json, subprocess, sys
+from pathlib import Path
+import nemo_gym.orchestration.recovery as recovery
+job, expected_ref = Path(sys.argv[1]), sys.argv[2]
+raw = json.load(sys.stdin)
+root = Path.cwd().resolve()
+def check_source():
+    if not Path(recovery.__file__).resolve().is_relative_to(root / "nemo_gym"):
+        raise ValueError("reader import is outside its pinned checkout")
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != expected_ref:
+        raise ValueError("reader checkout does not match the saved immutable ref")
+    if subprocess.check_output(["git", "status", "--porcelain"], text=True).strip():
+        raise ValueError("reader checkout changed")
+def identity():
+    stat = job.stat()
+    return [str(job.resolve()), stat.st_dev, stat.st_ino]
+check_source()
+if not job.is_absolute() or raw.get("source_job_identity") != identity():
+    raise ValueError("reader job path does not match the collected directory")
+collected = recovery.CollectedEvidence.model_validate(raw)
+selected = recovery.select_managed_evidence(collected, job)
+check_source()
+if raw.get("source_job_identity") != identity():
+    raise ValueError("reader job directory changed")
+print("__GYM_MANAGED:" + selected.model_dump_json())
+"""
+
+
+def _remote_managed_evidence(
+    conn: Connection, collected: CollectedEvidence, job_dir: Path, config: SubmitConfig
+) -> CollectedEvidence:
+    """Use the saved pinned install over the existing transport; never import Gym into plain host Python."""
+    if not job_dir.is_absolute() or collected.source_job_identity is None:
+        return collected.model_copy(
+            update={"managed_reader_error": "remote Store collection has no directory identity"}
+        )
+    install = config.driver.gym_install
+    if install is None or re.fullmatch(r"[0-9a-fA-F]{40}", install.ref) is None:
+        return collected.model_copy(
+            update={"managed_reader_error": "remote Store reader requires a saved immutable Gym ref"}
+        )
+    command = (
+        f"python -c {shlex.quote(_REMOTE_MANAGED_READER)} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
+    )
+    entrypoint = render_driver_entrypoint(
+        repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True
+    )
+    try:
+        # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
+        # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
+        # bootstrap stdin. No service, prepare script or scheduler is invoked.
+        output = conn.run(
+            [
+                "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+                f"timeout --kill-after=10s 300s {entrypoint} 3<<'GYM_MANAGED_INPUT'\n"
+                + collected.model_dump_json()
+                + "\nGYM_MANAGED_INPUT",
+            ]
+        )
+        lines = [
+            line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
+        ]
+        if len(lines) != 1:
+            raise ValueError("remote Store reader returned no unique projection")
+        selected = CollectedEvidence.model_validate_json(lines[0])
+        if selected.source_job_identity is not None and selected.source_job_identity != collected.source_job_identity:
+            raise ValueError("remote Store reader changed job identity")
+        if selected.source_digests != collected.source_digests:
+            raise ValueError("remote Store reader changed the collection snapshot")
+        # Selection may only replace selected outcomes and attach authoritative attempt facts.
+        allowed = {"results", "failures", "managed_selection", "managed_reader_error", "source_job_identity"}
+        if selected.model_dump(exclude=allowed) != collected.model_dump(exclude=allowed):
+            raise ValueError("remote Store reader changed collection evidence")
+        return selected.model_copy(update={"source_job_identity": collected.source_job_identity})
+    except (RuntimeError, OSError, ValueError) as error:
+        return collected.model_copy(
+            update={
+                "managed_selection": None,
+                "managed_reader_error": f"remote Store reader unavailable: {type(error).__name__}",
+            }
+        )
 
 
 # Each sbatch reports its own result on a line that names its benchmark, so a
@@ -282,8 +368,31 @@ class SlurmExecutor(BaseExecutor):
             collected = CollectedEvidence.model_validate_json(
                 conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
             )
-            if isinstance(conn, LocalConnection) and collected.managed_store:
-                collected = select_managed_evidence(collected, job_dir)
+            if collected.managed_store:
+                if isinstance(conn, LocalConnection):
+                    collected = select_managed_evidence(collected, job_dir)
+                else:
+                    collected = _remote_managed_evidence(conn, collected, job_dir, config)
+                    try:
+                        if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
+                            raise ValueError("saved submission config changed during remote selection")
+                    except (RuntimeError, OSError, ValueError):
+                        collected = collected.model_copy(
+                            update={
+                                "managed_selection": None,
+                                "managed_reader_error": "saved submission config changed or could not be rechecked",
+                            }
+                        )
+                    if collected.managed_selection is None:
+                        return decide_from_collected(
+                            collected,
+                            max_infra_retries=resume.max_retries,
+                            max_walltime_s=_walltime_to_seconds(resume.max_walltime)
+                            if resume.max_walltime is not None
+                            else None,
+                            live_job=None,
+                            outcome_policy=outcome_policy,
+                        ), collected
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
             if resume.max_walltime is not None and collected.job_chain and str(job_dir) not in workdirs:
                 try:

@@ -201,6 +201,7 @@ def render_driver_entrypoint(
     command: str | None = None,
     *,
     extras: tuple[str, ...] = (),
+    cleanup: bool = False,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -233,6 +234,7 @@ def render_driver_entrypoint(
             # the directory is already on PATH, and the file only does this export anyway.
             'export PATH="$HOME/.local/bin:$PATH"',
             'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+            *(["trap " + shlex.quote('rm -rf -- "$GYM_SRC"') + " EXIT"] if cleanup else []),
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
             # the container's PATH, sidestepping uv's own project-aware Python selection - `uv

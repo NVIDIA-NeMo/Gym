@@ -614,6 +614,13 @@ def decide_recovery(
 COLLECT_SCRIPT = r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
+def job_identity():
+    try:
+        stat = os.stat(d)
+        return [os.path.realpath(d), stat.st_dev, stat.st_ino]
+    except OSError:
+        return None
+initial_job_identity = job_identity()
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
@@ -824,6 +831,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
 if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
     quality["source_matches"] = False
 collected["source_digests"] = source_snapshot if source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files} else None
+collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 print(json.dumps(collected))
 """
 
@@ -845,6 +853,7 @@ class CollectedEvidence(BaseModel):
     mlflow: dict[str, Any] | None = None
     managed_store: bool = False
     source_digests: dict[str, str | None] | None = None
+    source_job_identity: tuple[str, int, int] | None = None
     managed_selection: list[ManagedRecoveryFact] | None = None
     managed_reader_error: str | None = None
 
@@ -1002,7 +1011,7 @@ def decide_from_collected(
             action=RecoveryAction.STOP,
             reason=(
                 "the run was written by a rollout store (an attempt manifest, an attempt journal or run-tagged rows); "
-                "an authoritative local Store reader is unavailable or could not verify these artifacts; recovery stops"
+                "an authoritative Store reader is unavailable or could not verify these artifacts; recovery stops"
                 + (f": {collected.managed_reader_error}" if collected.managed_reader_error else "")
             ),
             expected=len(known),
