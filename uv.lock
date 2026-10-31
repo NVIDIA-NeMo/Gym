@@ -958,6 +958,21 @@ nvtx = [
 ]
 
 [[package]]
+name = "cwsandbox"
+version = "1.19.3"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "cryptography" },
+    { name = "googleapis-common-protos" },
+    { name = "grpcio" },
+    { name = "protobuf" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/9d/7b/f73ccc333e92cf123a163ca83dba8210856a06882d352c8f4d9d0368672f/cwsandbox-1.19.3.tar.gz", hash = "sha256:8761cc652498f82593d7189d6881f230881e87e678c2c674b563d2cd3fb637d4", size = 668867, upload-time = "2026-10-19T18:55:58.429Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/a4/bb/82af79525e5aa30b00614e6ca1905209d8df7203d692cd047fa27843748a/cwsandbox-1.19.3-py3-none-any.whl", hash = "sha256:9a859104fdde952acc5f69c754a27906f121f1ac7c9c324b3ba20839b0d1fcc0", size = 260610, upload-time = "2026-10-19T18:55:56.332Z" },
+]
+
+[[package]]
 name = "cycler"
 version = "0.12.1"
 source = { registry = "https://pypi.org/simple" }
@@ -2798,6 +2813,9 @@ all = [
     { name = "tenacity" },
     { name = "wandb" },
 ]
+cwsandbox = [
+    { name = "cwsandbox" },
+]
 dev = [
     { name = "coverage" },
     { name = "defusedxml" },
@@ -2860,6 +2878,7 @@ requires-dist = [
     { name = "anyio", specifier = ">=4.15.1" },
     { name = "boto3", marker = "extra == 'sandbox'", specifier = ">=1.34" },
     { name = "coverage", extras = ["toml"], marker = "extra == 'dev'" },
+    { name = "cwsandbox", marker = "extra == 'cwsandbox'", specifier = ">=1.19.1,<2" },
     { name = "datasets" },
     { name = "daytona", marker = "extra == 'sandbox'", specifier = ">=0.179.0" },
     { name = "defusedxml", marker = "extra == 'dev'", specifier = ">=0.7.1" },
@@ -2917,7 +2936,7 @@ requires-dist = [
     { name = "wandb", marker = "extra == 'wandb'", specifier = ">=0.30.0" },
     { name = "yappi", specifier = ">=1.7.6" },
 ]
-provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "openshell", "telemetry", "dev"]
+provides-extras = ["all", "ray", "mlflow", "wandb", "vllm", "sandbox", "cwsandbox", "openshell", "telemetry", "dev"]
 
 [package.metadata.requires-dev]
 codec = [

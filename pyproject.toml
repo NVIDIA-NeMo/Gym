@@ -349,6 +349,12 @@ sandbox = [
     "boto3>=1.34",
 ]
 
+# CoreWeave is opt-in; installing it is only needed on the Harbor agent host.
+cwsandbox = [
+    # License: Apache-2.0 https://github.com/coreweave/cwsandbox-client/blob/main/LICENSE
+    "cwsandbox>=1.19.1,<2",
+]
+
 # Keep OpenShell opt-in so its platform-specific SDK wheel cannot block installs for other providers.
 openshell = [
     # OpenShell SDK: used by the OpenShell sandbox provider for gateway create/exec/delete over gRPC.
@@ -509,6 +515,7 @@ exclude-dependencies = [
     # of unbabel-comet; wmt_translation does not import fasttext at runtime.
     "fasttext-wheel",
     # cryptography must remain available: MCP 2 imports it at startup via pyjwt[crypto].
+    # CoreWeave also requires it for direct data-plane mTLS.
     # Exclude unwanted dependencies from mlflow
     "alembic",
     "blinker",

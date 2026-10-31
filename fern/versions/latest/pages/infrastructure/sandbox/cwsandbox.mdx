@@ -1,0 +1,205 @@
+---
+title: "CoreWeave Sandbox Provider"
+description: "Run isolated workloads with the CoreWeave provider through the Gym sandbox API."
+position: 10
+---
+
+# CoreWeave Sandbox Provider
+
+The `cwsandbox` provider runs prebuilt OCI images through the
+[CoreWeave Python SDK](https://github.com/coreweave/cwsandbox-client). Use it with
+any agent, environment, or harness that accepts a Gym sandbox provider. It supports
+execution, file transfer, reconnection, HTTPS endpoints, network policies, mounted
+volumes, and filesystem snapshots.
+
+## Install and Configure
+
+Install the optional SDK in the process that manages sandboxes:
+
+```bash
+uv pip install -e '.[cwsandbox]'
+```
+
+For an isolated Gym server, include `cwsandbox` in that server's `nemo-gym` extras.
+The Harbor agent requirements already include it.
+
+Set `CWSANDBOX_API_KEY` to an authorized CoreWeave Sandbox key. Optionally set
+`CWSANDBOX_BASE_URL` for a deployment-specific endpoint. The reusable config at
+`nemo_gym/sandbox/providers/cwsandbox/configs/cwsandbox.yaml` reads these through
+Hydra. Include it with agent/model configs that reference its `sandbox` block.
+Absent explicit connection credentials, the provider uses the SDK's authentication.
+
+## Use the Sandbox API
+
+```python
+import asyncio
+from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
+
+async def main():
+    async with AsyncSandbox(
+        {"cwsandbox": {}},
+        SandboxSpec(image="ubuntu:24.04", ttl_s=300),
+    ) as sandbox:
+        await sandbox.start()
+        result = await sandbox.exec("printf hello", timeout_s=30)
+        assert result.return_code == 0
+        assert result.stdout == "hello"
+
+asyncio.run(main())
+```
+
+Images must be pullable and contain `bash`. Containers start as root so harnesses
+can create their working directories. A requested non-root user needs `su` in the
+image; numeric UIDs also need `getent`. The SDK keepalive replaces the image's
+entrypoint unless `SandboxSpec.entrypoint` is supplied.
+
+CPU and memory requests default to their limits. Set
+`SandboxSpec.provider_options.resource_requests` with `cpu` and/or `memory_mib` to
+reduce scheduling requests. Requests cannot exceed supplied limits. Use provider
+`create.runner_ids` for placement on selected runners.
+
+Disk quotas cannot be enforced by this SDK API. Requests produce a warning; set
+`create.strict_resources: true` to reject them. GPU resource requests are forwarded
+to CoreWeave; the calling harness must also support GPU workloads.
+
+`SandboxSpec.ttl_s` bounds server lifetime and `ready_timeout_s` bounds startup.
+Command `timeout_s` is separate from both. Provider defaults are a six-hour lifetime,
+900-second startup budget, and 1800-second command timeout. Failed or cancelled
+startup reclaims allocated sandboxes. Stopping a sandbox terminates and deletes it.
+
+## Reconnect to a Running Sandbox
+
+The owner can serialize a sandbox and another process can reconnect using its own
+CoreWeave credentials:
+
+```python
+from nemo_gym.sandbox import AsyncSandbox, create_provider
+
+# owner is an already-started AsyncSandbox.
+descriptor = await owner.serialize()
+borrower = await AsyncSandbox.connect(
+    descriptor, provider=create_provider({"cwsandbox": {}})
+)
+try:
+    result = await borrower.exec("pwd")
+finally:
+    await borrower.disconnect()
+```
+
+Descriptors include the sandbox ID, working directory, and declared ports. They do
+not contain API keys or HTTPS share tokens. `disconnect()` closes the borrower's
+client channels; the owner remains responsible for stopping the sandbox. Calling
+`stop()` on either handle deletes the sandbox. CoreWeave does not provide lease
+scopes, so `serialize(scope=...)` does not restrict a borrower's operations.
+
+## HTTPS Endpoints
+
+Declare ports with `SandboxSpec.ports`. Each port gets a public HTTPS endpoint
+protected by a sandbox-scoped share token. Start an application listening on
+`0.0.0.0` at that port, then call:
+
+```python
+route = await sandbox.endpoint(8080)
+# Use route.endpoint and route.headers with your HTTP client.
+```
+
+The provider never forwards the CoreWeave API key to an application endpoint.
+An assigned URL does not mean the application is ready; check your application's
+health route before sending work.
+
+For custom services, put SDK `Service` mappings in `provider_options.services`.
+Each service must refer to a declared port. For example, an explicitly open endpoint:
+
+```python
+spec = SandboxSpec(
+    image="python:3.13-slim",
+    entrypoint=["python", "-m", "http.server", "8080"],
+    ports=[8080],
+    provider_options={
+        "services": [{
+            "port": 8080,
+            "visibility": "public",
+            "endpoint": {"kind": "https", "auth": "open"},
+        }],
+    },
+)
+```
+
+CoreWeave returns share tokens only to the creating handle. A reconnected client
+cannot retrieve one through `from_id`; share the owner's resolved `SandboxEndpoint`
+separately if the borrower needs HTTP access. Endpoints without HTTPS routing are
+not exposed through `sandbox.endpoint()`.
+
+## Network Policies
+
+Set `provider_options.network_policy` using SDK `NetworkOptions` fields. For example,
+allow HTTPS only to a named destination:
+
+```python
+spec = SandboxSpec(
+    image="python:3.13-slim",
+    provider_options={
+        "network_policy": {
+            "egress": [{"dns_name": "pypi.org", "ports": [443]}],
+        },
+    },
+)
+```
+
+Explicit rules are allow-only over default-deny. Empty rules retain the runner's
+policy defaults. `deny_egress: true` denies all egress and cannot be combined with
+egress rules. The existing `provider_options.deny_egress` shortcut remains supported;
+it must not conflict with `network_policy.deny_egress`. Ingress rules apply to
+services with custom visibility.
+
+## Mounts and Snapshots
+
+Pass SDK volume mappings through `provider_options.volumes`. A scratch mount:
+
+```python
+spec = SandboxSpec(
+    image="ubuntu:24.04",
+    provider_options={
+        "volumes": [{"name": "workspace", "mount_path": "/workspace", "size": "1Gi"}],
+    },
+)
+```
+
+To mount an existing registered volume, include `volume_id`, `name`, and
+`mount_path`; optional `sub_path` and `read_only` select a directory and access mode.
+These are CoreWeave-managed mounts, not host bind mounts. The deployment must support
+the requested volume type.
+
+For snapshot capture, create a sandbox with
+`provider_options.file_system_snapshot: {mount_path: /workspace, size: 1Gi}`.
+The provider-specific API exposes `await provider.snapshot(handle)` after
+`handle = await provider.create(spec)`. It waits for the snapshot to be ready and
+returns its ID. Restore into a new sandbox by adding `file_system_snapshot_id`
+to that same options mapping.
+
+Snapshot storage must be enabled for the organization. Snapshots outlive sandbox
+deletion; remove a snapshot explicitly with `await provider.delete_snapshot(id)`.
+Gym does not yet expose a provider-neutral snapshot API.
+
+## Harbor Example
+
+Harbor uses this provider through the existing `NemoGymSandboxEnvironment`. Compose
+`responses_api_agents/harbor_agent/configs/harbor_agent_cwsandbox.yaml`, the reusable
+provider config, and a model config. Set `TERMINAL_BENCH_2_1_TASKS_DIR` to a local
+Terminal-Bench 2.1 checkout's `tasks/` directory.
+
+Tasks need a prebuilt `environment.docker_image`; directory transfer also needs
+`tar` inside the image. Harbor stop always deletes the sandbox, including when it
+passes `delete=False`.
+
+The generic Harbor adapter does not advertise GPU support or enforce task-level
+`allow_internet=false`. Such offline tasks are rejected by default. The existing
+explicit opt-out runs them without an isolation guarantee; setting a provider network
+policy alone does not change Harbor validation.
+
+## Limits
+
+Dockerfile builds, Docker Compose, sidecar containers, shared-volume orchestration,
+and native PTY sessions are not implemented. Filesystem snapshots and registered
+volumes depend on organization and runner capabilities. Harnesses can impose
+additional limits on the provider features they expose.
