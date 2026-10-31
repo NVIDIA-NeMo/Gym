@@ -696,7 +696,14 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
-    from nemo_gym.orchestration.submit import recover, resubmit
+    from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
+
+    inspect_only = getattr(args, "inspect", False)
+    record_path = getattr(args, "record", None)
+    if inspect_only and not getattr(args, "recover", False):
+        args._parser.error("--inspect requires --recover")
+    if record_path is not None and not inspect_only:
+        args._parser.error("--record requires --inspect")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -723,9 +730,16 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         ) and not getattr(args, "recover", False):
             args._parser.error("--score-key and --max-unhealthy-fraction need --recover")
         if getattr(args, "recover", False):
-            outcome = recover(
+            operation = inspect_recovery if inspect_only else recover
+            extra = {}
+            record_digest = None
+            if record_path is not None:
+                original_record, record_digest = load_original_submission_record(record_path)
+                extra["original_record"] = original_record
+            outcome = operation(
                 args.gym_job_id,
                 args.benchmark,
+                **extra,
                 score_key=score_key,
                 score_agent=getattr(args, "score_agent", None),
                 score_environment=getattr(args, "score_environment", None),
@@ -735,12 +749,31 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 mlflow_status=getattr(args, "mlflow_status", None),
                 mlflow_run_id=getattr(args, "mlflow_run_id", None),
             )
-            print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
-            if not outcome.ok:
+            if record_digest is not None:
+                payload = outcome.model_dump(mode="json", exclude={"decision": {"evidence"}})
+                payload["original_record_sha256"] = record_digest
+                print(json.dumps(payload))
+            else:
+                print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
+            requested_gate = any(
+                getattr(args, name, None) is not None
+                for name in (
+                    "score_key",
+                    "score_agent",
+                    "score_environment",
+                    "max_unhealthy_fraction",
+                    "max_response_failure_fraction",
+                    "max_trial_failure_fraction",
+                    "mlflow_status",
+                    "mlflow_run_id",
+                )
+            )
+            gate_failed = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
+            if not outcome.ok or gate_failed:
                 sys.exit(1)
             return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)
-    except (ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
@@ -1694,6 +1727,21 @@ COMMANDS = {
                     action="store_true",
                     help="Decide from the run's persisted evidence first: do nothing when it is complete, re-judge "
                     "saved answers when only judge failures remain, queue only within the stored retry budget.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--inspect",
+                    action="store_true",
+                    help="With --recover: inspect saved evidence and the gate without dispatching any action.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--record",
+                    type=Path,
+                    metavar="PATH",
+                    help="With --inspect: read an original submission record without updating the local index.",
                 ),
             ),
             Flag(

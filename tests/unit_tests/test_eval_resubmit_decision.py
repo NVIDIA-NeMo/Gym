@@ -633,7 +633,7 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
         ],
         capsys,
     )
-    assert code == 0 and out["dispatched"] is None and fake_executor.calls == ["decide"]
+    assert code == 1 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["status"] == "FAILED" and out["gate_task"]["score"] == 0.5
     assert out["gate_task"]["errors"] == [HEALTH_UNKNOWN]
     assert out["gate_task"]["warnings"][0].startswith("per-rollout health not judged against the configured criterion")
@@ -815,7 +815,7 @@ def test_cli_passes_the_observed_mlflow_status(tmp_path, fake_executor, capsys) 
         ],
         capsys,
     )
-    assert code == 0 and out["mlflow"]["observed_status"] == "FAILED" and out["gate_task"]["status"] == "FAILED"
+    assert code == 1 and out["mlflow"]["observed_status"] == "FAILED" and out["gate_task"]["status"] == "FAILED"
 
 
 @pytest.mark.parametrize(
@@ -1417,7 +1417,7 @@ def test_cli_recover_reads_a_score_path_into_the_aggregate_list(tmp_path, fake_e
         ],
         capsys,
     )
-    assert code == 0 and out["dispatched"] is None and fake_executor.calls == ["decide"]
+    assert code == 1 and out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert out["gate_task"]["score"] == score and out["gate_task"]["status"] == "FAILED"
     if score is None:
         assert "score unavailable: no requested metric was read" in out["gate_task"]["errors"]
@@ -1428,7 +1428,7 @@ def test_cli_recover_still_reads_a_string_key_path(tmp_path, fake_executor, caps
     code, out = run_cli(
         ["eval", "resubmit", "gym-job-k", "bench", "--recover", "--score-key", '["agent", "mean/reward"]'], capsys
     )
-    assert code == 0 and out["gate_task"]["score"] == 0.75 and fake_executor.calls == ["decide"]
+    assert code == 1 and out["gate_task"]["score"] == 0.75 and fake_executor.calls == ["decide"]
 
 
 @pytest.mark.parametrize("score_key", ["[true, 0]", '[-1, "agent_metrics"]', "[0.5]", "[]", '{"a": 0}'])
@@ -1618,7 +1618,7 @@ def test_review_cli_selects_stable_aggregate_identity(tmp_path, fake_executor, c
         ],
         capsys,
     )
-    assert code == 0 and out["gate_task"]["score"] == expected
+    assert code == 1 and out["gate_task"]["score"] == expected
     assert out["dispatched"] is None and fake_executor.calls == ["decide"]
     assert path.read_bytes() == before
 
@@ -2399,3 +2399,131 @@ def test_output_only_response_is_not_the_typed_producer_contract(tmp_path):
     assert decision.action == RecoveryAction.STOP
     assert decision.identities["unknown"] == [(0, 0)]
     assert {path.name: path.read_bytes() for path in (job / "artifacts").iterdir()} == before
+
+
+@pytest.mark.parametrize("kind", ["missing", "judge", "settled"])
+def test_inspect_recovery_reads_once_and_never_dispatches(tmp_path, fake_executor, kind):
+    rows = (
+        []
+        if kind == "missing"
+        else [
+            ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER, reward=0.0)
+            if kind == "judge"
+            else ident(0, reward=0.0)
+        ]
+    )
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=rows, failures=[])
+    before = {str(p): p.read_bytes() for p in fake_executor.job_dir.rglob("*") if p.is_file()}
+    outcome = submit.inspect_recovery("gym-job-inspection", "bench")
+    assert outcome.decision.action == {"missing": "resubmit", "judge": "reverify", "settled": "noop"}[kind]
+    assert outcome.dispatched is None and fake_executor.calls == ["decide"]
+    assert outcome.gate_task["status"] != "SUCCESS"
+    assert before == {str(p): p.read_bytes() for p in fake_executor.job_dir.rglob("*") if p.is_file()}
+
+
+def test_original_record_reader_preserves_bytes_and_checks_submission_identity(tmp_path, fake_executor):
+    from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
+
+    record = SubmissionRecord(
+        gym_job_id="gym-job-original",
+        gym_version="test",
+        submitted_by="test",
+        submitted_at="2026-10-31T00:00:00Z",
+        run_dir=str(tmp_path),
+        cluster="test",
+        executor="fake",
+        benchmarks=[BenchmarkJob(benchmark="bench", job_dir=str(tmp_path / "bench"), job_id="1")],
+    )
+    path = tmp_path / "gym-job.json"
+    path.write_text(record.model_dump_json())
+    before = path.read_bytes()
+    loaded, digest = submit.load_original_submission_record(path)
+    assert loaded == record and digest == hashlib.sha256(before).hexdigest()
+    with pytest.raises(ValueError, match="another submission"):
+        submit.inspect_recovery("wrong-submission", "bench", original_record=loaded)
+    assert fake_executor.calls == [] and path.read_bytes() == before
+
+
+@pytest.mark.parametrize("score_key", [[], {}, [True], [-1], [0.5]])
+def test_inspection_rejects_invalid_score_paths_before_collection(fake_executor, score_key):
+    with pytest.raises(ValueError, match="score_key"):
+        submit.inspect_recovery("gym-job-invalid", "bench", score_key=score_key)
+    assert fake_executor.calls == []
+
+
+@pytest.mark.parametrize("kind", ["missing", "judge", "settled"])
+def test_cli_inspection_never_dispatches_even_when_recovery_would(tmp_path, fake_executor, capsys, kind):
+    rows = (
+        []
+        if kind == "missing"
+        else [
+            ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER, reward=0.0)
+            if kind == "judge"
+            else ident(0, reward=0.0)
+        ]
+    )
+    fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=rows, failures=[])
+    before = {str(p): p.read_bytes() for p in fake_executor.job_dir.rglob("*") if p.is_file()}
+    code, out = run_cli(
+        ["eval", "resubmit", "gym-job-inspect", "bench", "--recover", "--inspect", "--max-unhealthy-fraction", "0.02"],
+        capsys,
+    )
+    assert code == 1 and out["gate_task"]["status"] != "SUCCESS"
+    assert out["decision"]["action"] == {"missing": "resubmit", "judge": "reverify", "settled": "noop"}[kind]
+    assert out["dispatched"] is None and fake_executor.calls == ["decide"]
+    assert before == {str(p): p.read_bytes() for p in fake_executor.job_dir.rglob("*") if p.is_file()}
+
+
+@pytest.mark.parametrize("flags", [["--inspect"], ["--recover", "--record", "missing.json"]])
+def test_cli_inspection_modes_require_safe_combinations(fake_executor, monkeypatch, flags):
+    from nemo_gym.cli.main import main
+
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "resubmit", "job", "bench", *flags])
+    with pytest.raises(SystemExit) as error:
+        main()
+    assert error.value.code == 2 and fake_executor.calls == []
+
+
+def test_cli_inspection_reads_an_original_record_without_local_index(tmp_path, fake_executor, monkeypatch, capsys):
+    import hashlib
+
+    from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
+
+    job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=0.0)], failures=[])
+    fake_executor.job_dir = job
+    record = SubmissionRecord(
+        gym_job_id="gym-job-original",
+        gym_version="test",
+        submitted_by="test",
+        submitted_at="2026-10-31T00:00:00Z",
+        run_dir=str(tmp_path),
+        cluster="test",
+        executor="fake",
+        benchmarks=[BenchmarkJob(benchmark="bench", job_dir=str(job), job_id="1")],
+    )
+    source = tmp_path / "original.json"
+    source.write_text(record.model_dump_json())
+    before = source.read_bytes()
+
+    def no_index(*args):
+        raise AssertionError("original-record inspection must not read the local index")
+
+    monkeypatch.setattr(submit, "load_submission_record", no_index)
+    code, out = run_cli(
+        [
+            "eval",
+            "resubmit",
+            record.gym_job_id,
+            "bench",
+            "--recover",
+            "--inspect",
+            "--record",
+            str(source),
+            "--max-unhealthy-fraction",
+            "0.02",
+        ],
+        capsys,
+    )
+    assert code == 1 and out["decision"]["action"] == "noop" and out["dispatched"] is None
+    assert out["original_record_sha256"] == hashlib.sha256(before).hexdigest()
+    assert fake_executor.calls == ["decide"] and source.read_bytes() == before
