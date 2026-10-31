@@ -1,0 +1,57 @@
+mm_browsecomp_resources_server:
+  resources_servers:
+    mm_browsecomp:
+      allowed_agents: [browsecomp_agent]
+      entrypoint: app.py
+      domain: agent
+      debug: false
+      search_provider: exa
+      max_results: 10
+      exa_api_key: ${oc.select:exa_api_key,null}
+      exclude_domains_file_path: ${exclude_domains_file_path}
+      # Page images that browse lists for view_image.
+      exa_browse_image_links: 20
+      workspace: per_session
+      use_judge: true
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+      verified: false
+      description: Multimodal web research with search, browse and an image viewer; judged on the answer and a checklist.
+      value: Measure multimodal agentic search capability
+
+judge_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${search_judge_model_base_url}
+      api_key: ${search_judge_model_api_key}
+      model: ${search_judge_model_name}
+      return_token_id_information: false
+      uses_reasoning_parser: true
+
+mm_browsecomp_agent:
+  responses_api_agents:
+    browsecomp_agent:
+      entrypoint: app.py
+      tool_images: true
+      resources_server:
+        type: resources_servers
+        name: mm_browsecomp_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/mm_browsecomp/data/example.jsonl
+
+mm_browsecomp_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: mm_browsecomp_agent

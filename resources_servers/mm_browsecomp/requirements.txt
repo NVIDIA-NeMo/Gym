@@ -1,0 +1,6 @@
+-e nemo-gym[dev] @ ../../
+# The search harness this server extends (browsecomp_advanced_harness/requirements.txt).
+tavily-python==0.7.21
+-e ../browsecomp_advanced_harness/pocketshell[pcre]
+# view_image decodes and downsizes web images.
+pillow
