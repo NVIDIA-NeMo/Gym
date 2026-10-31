@@ -15,11 +15,14 @@
 
 import os
 import warnings
+from math import sqrt
 from pathlib import Path
+from statistics import mean, variance
 from typing import Any, Dict, List, Optional
 
 import orjson
 import pytest
+from scipy.stats import t
 
 import nemo_gym.rollout_collection as collection
 from nemo_gym.comparison.diff import (
@@ -553,7 +556,8 @@ class TestMetricRows:
             warnings.simplefilter("error")
             compare_runs(baseline, [candidate])
 
-    def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
+    @pytest.mark.parametrize("confidence_level", [0.90, 0.95, 0.99])
+    def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path, confidence_level):
         baseline_values = [0.0, 0.1, 0.2]
         candidate_values = [0.1, 0.5, 0.9, 1.3]
         baseline = _load(
@@ -578,10 +582,17 @@ class TestMetricRows:
             role="candidate",
         )
 
-        (row,) = build_metric_rows(baseline, [candidate])
+        (row,) = build_metric_rows(baseline, [candidate], confidence_level=confidence_level)
+        baseline_variance = variance(baseline_values) / len(baseline_values)
+        candidate_variance = variance(candidate_values) / len(candidate_values)
+        delta_variance = baseline_variance + candidate_variance
+        degrees_of_freedom = delta_variance**2 / (
+            baseline_variance**2 / (len(baseline_values) - 1) + candidate_variance**2 / (len(candidate_values) - 1)
+        )
+        margin = t.ppf((1 + confidence_level) / 2, degrees_of_freedom) * sqrt(delta_variance)
         assert row.candidates[0].delta == pytest.approx(0.6)
-        assert row.candidates[0].delta_ci_low < row.candidates[0].delta < row.candidates[0].delta_ci_high
-        assert (row.candidates[0].delta_ci_low + row.candidates[0].delta_ci_high) / 2 == pytest.approx(0.6)
+        assert row.candidates[0].delta_ci_low == pytest.approx(0.6 - margin)
+        assert row.candidates[0].delta_ci_high == pytest.approx(0.6 + margin)
 
     def test_benchmark_defined_repeat_metric_gets_a_delta_interval(self, tmp_path):
         baseline = _load(
@@ -994,6 +1005,14 @@ class TestComparisonConfig:
         config = ComparisonConfig.model_validate(self._config())
         assert config.report_format == "both"
         assert config.output_dirpath is None
+        assert config.confidence_level == 0.95
+
+    @pytest.mark.parametrize(
+        "confidence_level", [-0.1, 0.0, 1.0, 1.1, float("nan"), float("inf"), -float("inf"), True, False]
+    )
+    def test_invalid_confidence_levels_are_rejected(self, confidence_level):
+        with pytest.raises(ValueError, match="confidence_level"):
+            ComparisonConfig.model_validate(self._config(confidence_level=confidence_level))
 
     def test_multiple_candidates_are_rejected_for_now(self):
         payload = self._config(candidate_rollouts_jsonl_fpaths=["b/r.jsonl", "c/r.jsonl"])
@@ -1047,6 +1066,34 @@ class TestCliFlagTranslation:
         )
         assert config.baseline_rollouts_jsonl_fpath == "runs/a/rollouts.jsonl"
         assert config.candidate_rollouts_jsonl_fpaths == ["runs/b/rollouts.jsonl"]
+        assert config.confidence_level == 0.95
+
+    @pytest.mark.parametrize("confidence_level", [0.90, 0.99])
+    def test_confidence_level_round_trips_through_hydra(self, confidence_level):
+        config = self._config(
+            [
+                "eval",
+                "compare",
+                "--baseline",
+                "a.jsonl",
+                "--candidates",
+                "b.jsonl",
+                "--confidence-level",
+                str(confidence_level),
+            ]
+        )
+        assert config.confidence_level == confidence_level
+
+    def test_help_displays_the_confidence_option_and_default(self, capsys):
+        from nemo_gym.cli.main import build_parser
+
+        with pytest.raises(SystemExit) as exit_info:
+            build_parser().parse_args(["eval", "compare", "--help"])
+        assert exit_info.value.code == 0
+        output = capsys.readouterr().out
+        assert "--confidence-level" in output
+        assert "(default: 0.95)." in output
+        assert "95%" in output
 
     @pytest.mark.parametrize(
         "path",
@@ -1162,12 +1209,76 @@ class TestEndToEnd:
     def test_result_carries_both_sides_and_the_flip(self, tmp_path):
         _, result = self._result(tmp_path)
         assert result.schema_version == "1"
+        assert result.confidence_level == 0.95
         assert result.baseline.label == "run_a" and result.candidates[0].label == "run_b"
         comparison = result.comparisons[0]
         key_row = next(row for row in comparison.metrics if row.is_key_metric)
         assert key_row.metric == "pass@1[avg-of-2]/accuracy"
         assert key_row.candidates[0].delta == pytest.approx(-50.0)
         assert comparison.flips[0].pass_to_fail_count == 1
+
+    @pytest.mark.parametrize(
+        "confidence_level, label", [(0.90, "90%"), (0.99, "99%"), (0.995, "99.5%"), (0.9999999, "99.99999%")]
+    )
+    def test_confidence_level_reaches_statistics_and_reports(self, tmp_path, confidence_level, label):
+        rollouts = []
+        for name, values, stored_ci in (
+            ("baseline", [0.70, 0.80], (0.69, 0.81)),
+            ("candidate", [0.20, 0.30], (0.19, 0.31)),
+        ):
+            rollouts.append(
+                _write_run(
+                    tmp_path,
+                    name,
+                    [
+                        _entry(
+                            agent_metrics={
+                                "mean/reward": mean(values),
+                                "mean_across_repeats/mean/reward": mean(values),
+                                "ci_low_95_across_repeats/mean/reward": stored_ci[0],
+                                "ci_high_95_across_repeats/mean/reward": stored_ci[1],
+                                "pass@1/accuracy": 100 * mean(values),
+                            },
+                            key_metrics={"mean/reward": mean(values)},
+                            repeat_level_metrics=[{"mean/reward": value} for value in values],
+                        )
+                    ],
+                )
+            )
+        config = ComparisonConfig.model_validate(
+            {
+                "baseline_rollouts_jsonl_fpath": str(rollouts[0]),
+                "candidate_rollouts_jsonl_fpaths": [str(rollouts[1])],
+                "confidence_level": confidence_level,
+            }
+        )
+        result = build_comparison_result(config, "gym eval compare ...")
+        assert result.confidence_level == confidence_level
+        row = next(row for row in result.comparisons[0].metrics if row.metric == "mean/reward")
+        # Two observations per arm give df=2 and SE=sqrt(0.005), independently of the stored CIs.
+        margin = t.ppf((1 + confidence_level) / 2, 2) * sqrt(0.005)
+        assert row.candidates[0].delta_ci_low == pytest.approx(-0.5 - margin)
+        assert row.candidates[0].delta_ci_high == pytest.approx(-0.5 + margin)
+        assert (row.baseline.ci_low, row.baseline.ci_high) == (0.69, 0.81)
+        assert (row.candidates[0].ci_low, row.candidates[0].ci_high) == (0.19, 0.31)
+
+        written = write_reports(result, tmp_path / "reports", "both")
+        payload = orjson.loads(next(path for path in written if path.suffix == ".json").read_bytes())
+        assert payload["confidence_level"] == confidence_level
+        json_row = next(row for row in payload["comparisons"][0]["metrics"] if row["metric"] == "mean/reward")
+        assert json_row["candidates"][0]["delta_ci_low"] == pytest.approx(-0.5 - margin)
+        markdown = next(path for path in written if path.suffix == ".md").read_text()
+        # The key-metric and expandable other-metric table must use the same selected confidence.
+        assert markdown.count(f"| {label} CI for Δ (cand − base) |") == 2
+        assert f"two-sided independent-sample {label} Welch t-interval" in markdown
+        assert "| Baseline 95% CI |" in markdown
+        assert "| Candidate 95% CI |" in markdown
+        assert "| 95% CI for Δ (cand − base) |" not in markdown
+        (table,) = render_key_metrics_tables(result)
+        columns = {column.header: list(column.cells) for column in table.columns}
+        assert f"{label} CI for Δ (cand − base)" in columns
+        assert columns["Baseline 95% CI"] == ["[0.6900, 0.8100]"]
+        assert columns["Candidate 95% CI"] == ["[0.1900, 0.3100]"]
 
     def test_output_dir_defaults_to_the_candidate_directory(self, tmp_path):
         config, _ = self._result(tmp_path)
