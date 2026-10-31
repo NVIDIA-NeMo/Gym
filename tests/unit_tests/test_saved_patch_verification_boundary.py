@@ -74,3 +74,21 @@ def test_text_judge_failure_keeps_existing_reverify_payload():
         },
     )
     assert _build_verify_payload(pair) == {"question": "q", "response": {"output": []}}
+
+
+@pytest.mark.parametrize("patch", ["saved patch", ""])
+def test_typed_ungraded_patch_cannot_fall_back_to_reference_patch(patch):
+    pair = InputRolloutPair(
+        input={"patch": "reference patch"},
+        rollout={
+            "failure_kind": "verifier_error",
+            "evaluation_completed": False,
+            "mask_sample": True,
+            "model_patch": patch,
+            "response": {"output": []},
+        },
+    )
+    with pytest.raises(ConfigError, match="saved model_patch replay is unsupported"):
+        _build_verify_payload(pair)
+    assert pair.rollout["model_patch"] == patch
+    assert pair.input["patch"] == "reference patch"

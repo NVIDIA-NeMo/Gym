@@ -19,6 +19,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.rollout_collection import _episode_record
 from resources_servers.swebench_pro import app as swe
 from resources_servers.swebench_pro.tests.test_app import client_with_task_sandbox, make_server, request_body
 
@@ -46,11 +47,18 @@ def test_failed_verifier_allocation_preserves_ungraded_patch(monkeypatch, golden
     assert row["evaluation_completed"] is False
     assert row["mask_sample"] is True
     assert row["failure_kind"] == "verifier_error"
-    assert row["_ng_failure_class"] == "judge_failed"
-    assert row["_ng_failure_judge_error"] == "Verification failed: allocation unavailable"
+    # The native episode path rejects collector-owned markers; the same actual HTTP result must remain persistable.
+    projected = _episode_record({"task_id": {"taskset": "swe", "task_id": "saved-patch"}, "result": row})
+    assert projected["model_patch"] == saved_patch
+    assert projected["mask_sample"] is True
+    assert projected["verification_attempts"] == retries + 1
+    assert projected["failure_kind"] == "verifier_error"
+    assert "_ng_failure_class" not in row
+    assert "_ng_failure_judge_error" not in row
+    assert row["failure_reason"] == "Verification failed: allocation unavailable"
     assert "_ng_failure_terminal" not in row
     (observation,) = row["ng_verifier_invocations"]
-    assert observation["status"] == "failed"
+    assert observation["status"] == "incomplete"
     assert observation["failure_kind"] == "verifier_error"
     assert observation["invocation_id"].startswith("verify-")
 
