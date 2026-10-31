@@ -17,6 +17,7 @@ import os
 import platform
 import re
 import shlex
+import signal
 import sys
 from os import environ
 from pathlib import Path
@@ -410,12 +411,22 @@ def run_command(
 
     redirect_stdout = stdout if stdout_target is None else stdout_target
     redirect_stderr = stderr if stderr_target is None else stderr_target
-    return Popen(
-        command,
-        executable="/bin/bash",
-        shell=True,
-        env=custom_env,
-        stdout=redirect_stdout,
-        stderr=redirect_stderr,
-        start_new_session=start_new_session,
+    # Ray actor threads can block SIGINT. A managed server must receive shutdown
+    # signals independently; fork/exec inherits the calling thread's signal mask.
+    # Restore that thread immediately, and avoid unsafe preexec_fn in a threaded host.
+    previous_mask = (
+        signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGINT, signal.SIGTERM}) if start_new_session else None
     )
+    try:
+        return Popen(
+            command,
+            executable="/bin/bash",
+            shell=True,
+            env=custom_env,
+            stdout=redirect_stdout,
+            stderr=redirect_stderr,
+            start_new_session=start_new_session,
+        )
+    finally:
+        if previous_mask is not None:
+            signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)

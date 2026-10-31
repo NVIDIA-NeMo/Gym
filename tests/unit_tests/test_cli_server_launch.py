@@ -35,7 +35,10 @@ from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV
 from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
 
 
-def test_shutdown_reaches_logged_server_and_waits_for_cleanup(tmp_path: Path) -> None:
+@pytest.mark.parametrize("blocked_signals", [False, True])
+def test_shutdown_reaches_logged_server_and_waits_for_cleanup(
+    tmp_path: Path, monkeypatch, blocked_signals: bool
+) -> None:
     """A shell/tee wrapper must not orphan the server before its lifespan finishes."""
     ready, stopped = tmp_path / "ready", tmp_path / "stopped"
     script = tmp_path / "server.py"
@@ -50,12 +53,21 @@ def test_shutdown_reaches_logged_server_and_waits_for_cleanup(tmp_path: Path) ->
     config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
         NEMO_GYM_LOG_DIR_KEY_NAME: str(tmp_path / "logs")
     }
-    process = run_command(
-        shlex.join([sys.executable, str(script)]),
-        tmp_path,
-        global_config_dict=config,
-        start_new_session=True,
+    monkeypatch.setattr("nemo_gym.cli.env._GRACEFUL_SHUTDOWN_TIMEOUT_SEC", 3)
+    original_mask = signal.pthread_sigmask(
+        signal.SIG_BLOCK, {signal.SIGINT, signal.SIGTERM} if blocked_signals else []
     )
+    try:
+        launch_mask = signal.pthread_sigmask(signal.SIG_BLOCK, [])
+        process = run_command(
+            shlex.join([sys.executable, str(script)]),
+            tmp_path,
+            global_config_dict=config,
+            start_new_session=True,
+        )
+        assert signal.pthread_sigmask(signal.SIG_BLOCK, []) == launch_mask
+    finally:
+        signal.pthread_sigmask(signal.SIG_SETMASK, original_mask)
     runner = RunHelper()
     runner._processes = {"server": process}
     runner._head_server = None
