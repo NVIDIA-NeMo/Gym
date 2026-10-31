@@ -199,7 +199,7 @@ async def test_unconfirmed_probe_termination_fails_close(probe_env, tmp_path):
 
 
 async def test_final_negative_probe_receipt_releases_unconfirmed(probe_env, tmp_path):
-    from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+    from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
 
     agent, runtime, pid_dir, workdir = probe_env
     owner, state, release = await borrowed_state(tmp_path, runtime, workdir)
@@ -213,13 +213,18 @@ async def test_final_negative_probe_receipt_releases_unconfirmed(probe_env, tmp_
     )
     probe.launch_started = True
     receipt = {"cleanup_confirmed": False, "return_code": None, "timed_out": False, "error": "group survived"}
-    probe.termination_error = HarnessTerminationError(harness="OpenClaw MCP probe", receipt=receipt)
+    probe.termination_error = harness_termination_failure(harness="OpenClaw MCP probe", receipt=receipt)
+    original_failure = probe.termination_error
+    original_failure.__cause__ = RuntimeError("supervisor reported a surviving process group")
+    original_record = original_failure.to_record()
     state.probe = probe
     try:
         await state.close(timeout=5)
         # Released for Resources teardown, as the agent run's session does, but never reported as cleaned up.
         assert release["calls"] == 1 and state.session.closed and not state.session.cleanup_confirmed
         assert state.probe is None
+        assert state.session.termination_error is original_failure
+        assert state.session.termination_error.to_record() == original_record
     finally:
         await owner.stop()
 
@@ -372,3 +377,30 @@ async def test_probe_that_fails_before_openclaw_starts_reports_why(probe_env, tm
         assert detail.endswith(": executable not found"), detail
     finally:
         await owner.stop()
+
+
+@pytest.mark.parametrize("kind", ["unknown", "model", "other_harness"])
+async def test_probe_failure_outside_final_termination_is_preserved(kind):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    error = RuntimeError("cleanup evidence is not available")
+    if kind != "unknown":
+        error = NgFailureEvent(
+            boundary="model" if kind == "model" else "harness",
+            failure_kind="model_transport_error",
+            failure_reason="not a final harness termination receipt",
+        )
+    probe = SimpleNamespace(cleanup_confirmed=False, stop_harness=AsyncMock(side_effect=error))
+    session = SimpleNamespace(termination_error=None)
+    state = OpenClawSandboxSession(request=MagicMock(), session=session, runtime="unused", probe=probe)
+
+    with pytest.raises(type(error)) as raised:
+        await state._stop_probe(timeout=1)
+
+    assert raised.value is error
+    assert state.probe is probe
+    assert session.termination_error is None
+    probe.stop_harness.assert_awaited_once_with(timeout=1)
