@@ -8,7 +8,7 @@ import httpx
 import pytest
 from fastapi import Request
 
-from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.client.server_client import SESSION_ID_KEY, ServerClient
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.typed_exceptions import NgFailureEvent
 
