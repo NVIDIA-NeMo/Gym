@@ -35,7 +35,7 @@ from __future__ import annotations
 
 import warnings
 
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 from nemo_gym.token_id_capture.consumer import trajectories_from_source
 from nemo_gym.token_id_capture.protocols import TokenSource
 from nemo_gym.token_id_capture.records import apply_capture_incomplete_verdict
@@ -95,7 +95,8 @@ async def finalize_rollout_token_capture(
     It replaces ``response.output``.
     It preserves the reward and all other harness and verifier output, with one exception:
     when the rebuilt response is ``incomplete`` because the delivered chain's terminal call
-    was cut (``length`` or ``content_filter``) and the harness reported ``completed`` or no
+    was cut (``length`` or ``content_filter``), or because the engine refused the request
+    that continued it for the context window, and the harness reported ``completed`` or no
     status, the harness response takes that ``status`` and ``incomplete_details``, so a
     reader of the record sees why the delivered chain stopped. A harness that reported
     ``incomplete`` or ``failed`` itself keeps its own verdict. ``apply_capture_incomplete_verdict``

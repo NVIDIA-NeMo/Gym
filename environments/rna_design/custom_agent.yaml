@@ -1,0 +1,27 @@
+rna_design_agent:
+  responses_api_agents:
+    rna_design_agent:
+      entrypoint: app.py
+      domain: agent
+      description: "RNA inverse folding: the model designs sequences with gRNAde, EternaFold and the suite's scorers."
+      value: Improve RNA design with tool use.
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      arm: agent
+      worker_python: ${oc.env:RNA_WORKER_PYTHON,null}
+      max_tokens: 8192
+      rollout_timeout_s: 3600
+      max_concurrent_rollouts: 8
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/rna_design/data/example.jsonl
+
+rna_design_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: rna_design_agent

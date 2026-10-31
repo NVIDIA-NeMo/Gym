@@ -21,15 +21,14 @@ from aiohttp import ClientResponseError
 from fastapi import HTTPException
 from starlette.responses import Response
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.conversational_tool_use_simulation.app import (
     NG_FAILURE_CLASS_KEY,
     TRANSIENT_FAILURE_CLASS,
@@ -1160,3 +1159,62 @@ async def test_run_does_not_convert_non_retryable_4xx_to_transient_failure() -> 
         )
 
     assert exc_info.value.status == 400
+
+
+def usage(input_tokens: int, cached: int | None, output_tokens: int, reasoning: int | None) -> dict:
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": cached},
+        "output_tokens": output_tokens,
+        "output_tokens_details": {"reasoning_tokens": reasoning},
+        "total_tokens": input_tokens + output_tokens,
+    }
+
+
+@pytest.mark.parametrize(
+    ("second_usage", "expected"),
+    [
+        (usage(200, 80, 20, 6), usage(300, 120, 30, 10)),
+        # A call whose provider reported no details makes the summed details unknown, not 0.
+        (usage(200, None, 20, None), usage(300, None, 30, None)),
+    ],
+)
+async def test_responses_sums_policy_usage_and_details_across_calls(second_usage: dict, expected: dict) -> None:
+    agent = make_agent()
+    policy_calls = iter(
+        [
+            response_payload([function_call("call_1", "lookup", "{}")]) | {"usage": usage(100, 40, 10, 4)},
+            response_payload([assistant_message("msg_1", "Done.")]) | {"usage": second_usage},
+        ]
+    )
+
+    async def route_post(**kwargs):
+        if kwargs["server_name"] == "policy_model":
+            return JsonResponseStub(next(policy_calls))
+        if kwargs["url_path"] == "/record_agent_outputs":
+            return JsonResponseStub({"should_continue": True})
+        if kwargs["url_path"] == "/next_user_message":
+            # The user simulator runs in the resources server; its tokens are not the policy's.
+            return JsonResponseStub({"message": "", "should_continue": False})
+        return JsonResponseStub({"output": {"status": "ok"}, "schema_valid": True, "should_continue": True})
+
+    agent.server_client.post = AsyncMock(side_effect=route_post)
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            NeMoGymEasyInputMessage(role="system", content=POLICY),
+            NeMoGymEasyInputMessage(role="user", content="I need help."),
+        ],
+        tools=[
+            {
+                "type": "function",
+                "name": "lookup",
+                "description": "Look up state.",
+                "parameters": {"type": "object", "properties": {}},
+                "strict": True,
+            }
+        ],
+    )
+
+    model_response = await agent.responses(RequestStub(), Response(), body)
+
+    assert model_response.usage.model_dump(mode="json") == expected

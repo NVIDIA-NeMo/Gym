@@ -38,6 +38,7 @@ instead of being dropped quietly.
 import asyncio
 import logging
 import math
+import os
 import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field, fields
@@ -47,12 +48,13 @@ from typing import Any, Awaitable, Callable, TypeVar
 
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
+    SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
     SandboxSpec,
     SandboxStatus,
 )
-from nemo_gym.sandbox.providers.e2b._sdk import require_e2b_sdk
+from nemo_gym.sandbox.providers.e2b._sdk import E2B_SDK_CONSTRAINT, require_e2b_sdk
 
 
 LOGGER = logging.getLogger(__name__)
@@ -63,6 +65,9 @@ T = TypeVar("T")
 # as ``name:v1`` and template IDs, but those must be explicit because ``:`` and
 # other punctuation overlap with OCI image syntax in ``SandboxSpec.image``.
 _DIRECT_TEMPLATE_RE = re.compile(r"^[A-Za-z0-9_-]+$")
+
+# How a deployment publishes sandbox ports. See ``E2BProvider.endpoint``.
+_PORT_ROUTING_MODES = ("auto", "hostname", "gateway")
 
 # Passed straight through to the SDK (``ApiParams``) on every call.
 _API_PARAM_KEYS = (
@@ -76,6 +81,9 @@ _API_PARAM_KEYS = (
     "api_headers",
     "proxy",
 )
+
+# ``create.network`` keys -> REST API field names.
+_NETWORK_API_KEYS = {"allow_out": "allowOut", "deny_out": "denyOut"}
 
 
 class E2BCreateError(SandboxCreateError):
@@ -148,9 +156,22 @@ class E2BConnectionConfig:
     api_headers: dict[str, str] | None = None
     proxy: str | None = None
     request_timeout_s: float | None = None
+    # How ``endpoint()`` publishes a sandbox port. "auto" resolves to "gateway"
+    # when a sandbox URL is configured and "hostname" otherwise, mirroring the
+    # SDK's own rule for whether one origin fronts every sandbox.
+    port_routing: str = "auto"
+    # Scheme for "hostname" routing. None mirrors the SDK (http in debug mode,
+    # https otherwise); set it for a deployment that serves wildcard DNS over
+    # plain HTTP. Ignored by "gateway" routing, which takes the scheme from the
+    # gateway URL itself.
+    port_scheme: str | None = None
 
     def __post_init__(self) -> None:
         _validate_optional_number("connection.request_timeout_s", self.request_timeout_s, positive=False)
+        if self.port_routing not in _PORT_ROUTING_MODES:
+            raise ValueError(f"connection.port_routing must be one of {', '.join(_PORT_ROUTING_MODES)}")
+        if self.port_scheme is not None and self.port_scheme not in {"http", "https"}:
+            raise ValueError("connection.port_scheme must be 'http' or 'https'")
 
 
 @dataclass(frozen=True)
@@ -168,6 +189,14 @@ class E2BCreateConfig:
     timeout_s: float | None = 3600.0
     allow_internet_access: bool = True
     secure: bool = True
+    # Outbound traffic rules, passed as the SDK's ``network`` option:
+    # ``allow_out``/``deny_out`` lists of CIDRs, IPs or hostnames. ``deny_out:
+    # [0.0.0.0/0]`` with an ``allow_out`` list permits only the listed hosts.
+    network: dict[str, list[str]] | None = None
+    # Deployment-specific create parameters, sent as the API's
+    # ``customExtensionParams`` (AgentEnv). The SDK cannot send this field, so
+    # setting it creates sandboxes through ``POST /sandboxes`` directly.
+    custom_extension_params: dict[str, Any] | None = None
     # Raise instead of warning when a spec requests resources E2B cannot apply
     # per sandbox (they are fixed when the template is built).
     strict_resources: bool = False
@@ -183,6 +212,19 @@ class E2BCreateConfig:
             if not isinstance(template, str) or not template.strip():
                 raise ValueError("create.template_map values must be non-empty template strings")
         _validate_optional_number("create.timeout_s", self.timeout_s, positive=True)
+        if self.network is not None:
+            if not isinstance(self.network, Mapping):
+                raise TypeError("create.network must be a mapping")
+            unknown = set(self.network) - set(_NETWORK_API_KEYS)
+            if unknown:
+                raise ValueError(
+                    f"Unknown create.network keys: {', '.join(sorted(unknown))}. Expected: allow_out, deny_out"
+                )
+            for key, rules in self.network.items():
+                if not isinstance(rules, (list, tuple)) or not all(isinstance(rule, str) for rule in rules):
+                    raise ValueError(f"create.network.{key} must be a list of strings")
+        if self.custom_extension_params is not None and not isinstance(self.custom_extension_params, Mapping):
+            raise TypeError("create.custom_extension_params must be a mapping")
 
 
 @dataclass(frozen=True)
@@ -427,16 +469,60 @@ class E2BProvider:
             kwargs["envs"] = {str(k): str(v) for k, v in spec.env.items()}
         if spec.metadata:
             kwargs["metadata"] = {str(k): str(v) for k, v in spec.metadata.items()}
+        if self._create.network:
+            kwargs["network"] = {key: list(rules) for key, rules in self._create.network.items()}
 
         e2b = _require_e2b_sdk()
         try:
             # Creating a sandbox is not idempotent. Retrying an ambiguous
             # transport failure can leak the first, billable sandbox.
-            sandbox = await e2b.AsyncSandbox.create(**kwargs)
+            if self._create.custom_extension_params is None:
+                sandbox = await e2b.AsyncSandbox.create(**kwargs)
+            else:
+                sandbox = await self._create_with_extension_params(e2b, kwargs)
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+
+    async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
+        """Create through ``POST /sandboxes``, adding ``customExtensionParams``.
+
+        The POST goes through the SDK's own API client, so it gets the URL, auth
+        headers, proxy, timeout and HTTP transport of ``AsyncSandbox.create``,
+        and like it is never replayed. ``AsyncSandbox.connect`` then attaches;
+        it also returns the envd access token a secure sandbox needs.
+        """
+        config = e2b.ConnectionConfig(**{**self._api_params(), "request_timeout": kwargs.get("request_timeout")})
+        body: dict[str, Any] = {
+            "templateID": kwargs["template"],
+            "timeout": kwargs["timeout"],
+            "secure": kwargs["secure"],
+            "allow_internet_access": kwargs["allow_internet_access"],
+            "envVars": kwargs.get("envs", {}),
+            "metadata": kwargs.get("metadata", {}),
+            "customExtensionParams": self._create.custom_extension_params,
+        }
+        if "network" in kwargs:
+            body["network"] = {_NETWORK_API_KEYS[key]: rules for key, rules in kwargs["network"].items()}
+        client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
+        response = await client.post("/sandboxes", json=body)
+        if response.status_code >= 300:
+            raise E2BCreateError(f"POST /sandboxes returned HTTP {response.status_code}: {response.text[:500]}")
+        sandbox_id = response.json()["sandboxID"]
+        try:
+            # Pass the create timeout: connect otherwise applies the SDK default.
+            return await self._with_retries(
+                lambda: e2b.AsyncSandbox.connect(sandbox_id, timeout=kwargs["timeout"], **self._api_params()),
+                operation="connect",
+            )
+        except BaseException:
+            # The caller gets no handle to close this sandbox, so stop it here.
+            try:
+                await e2b.AsyncSandbox.kill(sandbox_id, **self._api_params())
+            except Exception as kill_exc:  # noqa: BLE001 - best effort; the sandbox TTL is the backstop
+                LOGGER.warning("Could not kill e2b sandbox %s after a failed connect: %s", sandbox_id, kill_exc)
+            raise
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for attaching to this sandbox from another process."""
@@ -455,6 +541,63 @@ class E2BProvider:
             operation="connect",
         )
         return SandboxHandle(sandbox_id=str(sandbox.sandbox_id), provider_name=self.name, raw=sandbox)
+
+    async def endpoint(self, handle: SandboxHandle, port: int) -> SandboxEndpoint:
+        """Resolve a declared service port to a caller-reachable endpoint.
+
+        E2B deployments publish sandbox ports in one of two shapes, and the
+        endpoint differs accordingly:
+
+        ``hostname``
+            One DNS name per port, ``{port}-{sandbox_id}.{domain}``. The caller
+            dials it directly, so no headers are needed.
+        ``gateway``
+            A single origin fronts every sandbox and every port, and the proxy
+            picks the target from request headers. A self-hosted deployment
+            without wildcard DNS for sandbox subdomains uses this, and points
+            ``sandbox_url`` at that origin. The SDK mints ``X-Access-Token``
+            and ``E2b-Sandbox-Id`` per sandbox and sets ``E2b-Sandbox-Port`` to
+            envd's own port, so the target port must be re-pointed here.
+
+        ``auto`` selects ``gateway`` exactly when a sandbox URL is configured,
+        which is the same signal the SDK uses to decide that one origin serves
+        every sandbox.
+
+        The returned headers are the caller's to send verbatim. ``X-Access-Token``
+        is minted per sandbox and is not the deployment's API key.
+        """
+        if isinstance(port, bool) or not isinstance(port, int):
+            raise ValueError(f"Invalid sandbox TCP port: {port!r}")
+        if port < 1 or port > 65535:
+            raise ValueError(f"Sandbox TCP port must be between 1 and 65535, got {port}")
+
+        sandbox = self._sandbox(handle)
+        connection_config = getattr(sandbox, "connection_config", None)
+        if connection_config is None:
+            raise RuntimeError(f"Sandbox {handle.sandbox_id} exposes no e2b connection config")
+
+        mode = self._connection.port_routing
+        if mode == "auto":
+            # Mirror ConnectionConfig's own resolution order rather than reading
+            # its private attribute: an explicit config value, else the SDK env var.
+            configured_sandbox_url = self._connection.sandbox_url or os.environ.get("E2B_SANDBOX_URL")
+            mode = "gateway" if configured_sandbox_url else "hostname"
+
+        if mode == "hostname":
+            scheme = self._connection.port_scheme or ("http" if connection_config.debug else "https")
+            return SandboxEndpoint(endpoint=f"{scheme}://{sandbox.get_host(port)}")
+
+        base_url = connection_config.get_sandbox_url(sandbox.sandbox_id, sandbox.sandbox_domain)
+        try:
+            headers = dict(connection_config.sandbox_headers)
+        except AttributeError as exc:
+            raise RuntimeError(
+                "Gateway port routing needs ConnectionConfig.sandbox_headers, which this "
+                f"e2b SDK does not expose. Install '{E2B_SDK_CONSTRAINT}', "
+                "or set connection.port_routing to 'hostname'."
+            ) from exc
+        headers["E2b-Sandbox-Port"] = str(port)
+        return SandboxEndpoint(endpoint=base_url, headers=headers)
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()

@@ -19,7 +19,8 @@ import orjson
 import pytest
 from pytest import fixture
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -28,7 +29,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.terminus_judge.app import (
     FailureCode,
     TerminusJudgeResourcesServer,

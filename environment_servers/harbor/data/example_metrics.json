@@ -1,0 +1,10 @@
+{
+  "Number of examples": 5,
+  "Mean reward": 0.2,
+  "Masked examples": 0,
+  "Model": "Qwen2.5-0.5B-Instruct Q4_K_M",
+  "Model revision": "9217f5db79a29953eb74d5343926648285ec7e67",
+  "Harness": "single-command smoke harness (not Hermes)",
+  "Runtime": "llama.cpp b10936, CPU; Enroot, ubuntu:24.04",
+  "Scope": "Real model commands, sandbox setup/transfers/verifier/cleanup. In-process sandbox handoff; provider TTL expiration not tested."
+}

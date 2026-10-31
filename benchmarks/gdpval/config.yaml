@@ -190,7 +190,7 @@ gdpval_resources_server:
       # identity, still stable per task).
       judge_sampling_seed: ${oc.env:JUDGE_SAMPLING_SEED,null}
       tavily_api_key: ${oc.env:TAVILY_API_KEY}
-      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR,output/gdpval/deliverables}
+      persist_deliverables_dir: ${oc.env:PERSIST_DELIVERABLES_DIR}
       # Names a top-level provider block such as nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml.
       sandbox_provider: sandbox
       sandbox_config:

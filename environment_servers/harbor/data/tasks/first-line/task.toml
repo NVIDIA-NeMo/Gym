@@ -1,0 +1,13 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+schema_version = "1.4"
+
+[environment]
+docker_image = "ubuntu:24.04"
+workdir = "/app"
+
+[agent]
+timeout_sec = 60
+
+[verifier]
+timeout_sec = 30

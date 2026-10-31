@@ -24,7 +24,7 @@ from nemo_gym.base_responses_api_model import (
     Body,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -50,9 +50,16 @@ class AzureOpenAIModelServer(SimpleResponsesAPIModel):
             api_key=self.config.openai_api_key,
             api_version=self.config.default_query.get("api-version"),
         )
-        self._converter = VLLMConverter(return_token_id_information=False)
+        self._converter = VLLMConverter(
+            return_token_id_information=False,
+            custom_tool_strategy=self.config.custom_tool_strategy,
+        )
         self._semaphore: Semaphore = Semaphore(self.config.num_concurrent_requests)
         return super().model_post_init(context)
+
+    def _mints_response_ids(self) -> bool:
+        # responses() builds each response from a chat completion.
+        return True
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

@@ -37,8 +37,15 @@ collapse to a single call (same shape as `simple_agent`).
 
 The returned `NeMoGymResponse.output` contains every assistant
 output-message item across all turns (concatenated in order). The
-`speed_bench` resources server only reads `response.usage.output_tokens`
-to record per-task token counts.
+`speed_bench` resources server reads `response.usage.output_tokens`
+to record per-task token counts. Each turn's raw provider metrics are retained
+in order in `response.metrics.requests`; a missing metrics object is retained
+as `null`. This preserves vLLM's `speculative_decoding` summary or detailed
+arrays without mixing them with the final turn's metrics. The response also
+includes `generation_started_at`, `generation_finished_at`, and
+`generation_duration` in `metrics` for benchmark timing. The resource server
+computes each turn's acceptance metrics first, then averages requests equally.
+Histograms are normalized per request before averaging.
 
 ## Configuration
 

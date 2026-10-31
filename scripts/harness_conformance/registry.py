@@ -4,9 +4,11 @@
 """Local probe adapters, importable by CI before Gym dependencies are installed."""
 
 HARNESSES = {
+    "simple": "SimpleAgent",
     "opencode": "OpenCodeAgent",
     "pi": "PiAgent",
     "codex": "CodexAgent",
     "hermes": "HermesAgent",
+    "kilocode": "KiloCodeAgent",
     "stirrup": "StirrupAgentWrapper",
 }

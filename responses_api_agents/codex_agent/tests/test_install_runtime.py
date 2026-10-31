@@ -14,7 +14,7 @@ from responses_api_agents.codex_agent.app import _sandbox_prepare_command
 
 
 INSTALLER = Path(__file__).parents[1] / "install_codex_runtime.sh"
-pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Native Codex requires Linux")
+pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Codex in the task sandbox requires Linux")
 
 
 @pytest.fixture

@@ -1,0 +1,7 @@
+-e nemo-gym[dev] @ ../../
+pyyaml
+pandas
+numpy
+scipy
+arnie
+huggingface_hub

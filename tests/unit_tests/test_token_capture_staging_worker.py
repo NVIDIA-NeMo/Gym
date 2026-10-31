@@ -31,6 +31,7 @@ from nemo_gym.token_id_capture.staging import (
     compute_chain_hash,
     hash_token_ids,
 )
+from nemo_gym.token_id_capture.staging import records as staging_records
 from nemo_gym.token_id_capture.staging.capture import (
     CaptureError,
     CaptureHost,
@@ -97,7 +98,7 @@ class _IncompleteSink:
 
 def _root(model_call_id: str = "c1") -> CaptureAdmission:
     return CaptureAdmission(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id=model_call_id,
         mode="text",
     )
@@ -109,7 +110,7 @@ _PARENT_CHAIN_HASH = compute_chain_hash(None, [10, 11, 12])
 
 def _child() -> CaptureAdmission:
     return CaptureAdmission(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c2",
         parent_call_id="c1",
         prev_len=3,
@@ -122,7 +123,7 @@ def _child() -> CaptureAdmission:
 def _chained_child() -> CaptureAdmission:
     """The externally staged encoding of ``_child``: prefix lives behind a staging chain."""
     return CaptureAdmission(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         model_call_id="c2",
         parent_call_id="c1",
         prev_len=3,
@@ -147,9 +148,13 @@ def _capture(
     return capture, actual_sink
 
 
-def test_root_stages_exact_full_delta_before_returning_coords() -> None:
+def test_root_stages_exact_full_delta_before_returning_coords(monkeypatch: pytest.MonkeyPatch) -> None:
     capture, sink = _capture()
     call = capture.begin_call(_root())
+    # Frameworks written before the rename read the capture key as ``rollout_id``.
+    monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
+    with pytest.warns(FutureWarning, match="`rollout_id` is deprecated"):
+        assert call.rollout_id == call.capture_key
 
     coords = capture.complete_call(
         call,
@@ -247,7 +252,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
         generated_logprobs=[-0.25],
     )
     admission = CaptureAdmission(
-        rollout_id="rollout-1-a1",
+        capture_key="rollout-1-a1",
         model_call_id="c2",
         mode="text",
         generation_cut=GenerationCutContinuation(
@@ -275,7 +280,7 @@ def test_generation_cut_resume_preserves_old_generation_masks_and_logprobs() -> 
     )
 
     assert coords.disposition == "staged"
-    assert sink.records[-1].rollout_id == "rollout-1-a1"
+    assert sink.records[-1].capture_key == "rollout-1-a1"
     assert sink.records[-1].model_call_id == "c2"
     assert sink.records[-1].token_ids_delta == [10, 11, 12, 13]
     assert sink.records[-1].token_mask_delta == [0.0, 0.0, 1.0, 1.0]
@@ -295,7 +300,7 @@ def test_generation_cut_resume_rejects_a_prefix_from_newer_weights() -> None:
         generated_logprobs=[-0.25],
     )
     admission = CaptureAdmission(
-        rollout_id="rollout-1-a1",
+        capture_key="rollout-1-a1",
         model_call_id="c2",
         mode="text",
         generation_cut=GenerationCutContinuation(
@@ -726,6 +731,11 @@ def test_vllm_text_call_has_no_extras() -> None:
     assert VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}]}) is None
 
 
+def test_vllm_extras_do_not_adopt_unimplemented_predecessor_routes() -> None:
+    payload = {"choices": [{"message": {"routed_experts": [[[1]]], "predecessor_tail_route": [2]}}]}
+    assert VLLMCaptureAdapter().extract_extras(payload) == {"routed_experts": [[[1]]]}
+
+
 def test_vllm_rejects_malformed_media_spans() -> None:
     with pytest.raises(ValueError):
         VLLMCaptureAdapter().extract_extras({"choices": [{"message": {}}], "media_spans": "bad"})
@@ -908,7 +918,7 @@ def test_generation_cut_resume_rejects_a_prefix_built_on_other_parent_tokens() -
 
     def child(rollout_id: str, parent_tokens: list[int], continuation=None) -> CaptureAdmission:
         return CaptureAdmission(
-            rollout_id=rollout_id,
+            capture_key=rollout_id,
             model_call_id="c1",
             parent_call_id="p",
             prev_len=len(parent_tokens),

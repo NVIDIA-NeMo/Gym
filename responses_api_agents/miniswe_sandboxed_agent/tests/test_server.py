@@ -3,14 +3,15 @@
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from fastapi import HTTPException
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.rollout_collection import _trajectory_identity
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import (
     TerminalBench4Config,
@@ -63,6 +64,7 @@ async def fixture(tmp_path, monkeypatch):
     )
     request = SimpleNamespace(session={SESSION_ID_KEY: "owner"}, cookies={"session": "incoming"})
     task = SimpleNamespace(
+        name=body.task_name,
         config=TaskSettings.model_validate(
             {
                 "environment": {"docker_image": "agent"},
@@ -157,7 +159,7 @@ async def fixture(tmp_path, monkeypatch):
     monkeypatch.setattr(lifecycle, "collect", AsyncMock(side_effect=lambda *a: events.append("collect")))
     monkeypatch.setattr(lifecycle, "restore", AsyncMock(side_effect=lambda *a: events.append("restore")))
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         events.append("grade")
         return {"rewards": {"reward": 0.75}}
 
@@ -273,7 +275,7 @@ async def test_disconnected_http_caller_does_not_interrupt_episode(fixture, monk
     monkeypatch.setattr(module, "MiniSWEHarness", harness)
     if stage == "grade":
 
-        async def grade(*args):
+        async def grade(*args, **kwargs):
             await block()
             return {"rewards": {"reward": 0}}
 
@@ -342,12 +344,46 @@ async def test_agent_outcomes_still_collect_and_grade(fixture, monkeypatch, reas
     assert all(env.closed for env in f.envs)
 
 
+@pytest.mark.parametrize("reason", ["killed", "completed"])
+async def test_collection_past_the_deadline_keeps_a_kill(fixture, monkeypatch, reason):
+    """Slow artifact collection after the process ended makes any other outcome a verified timeout, but cannot turn
+    a kill into one."""
+    f = fixture
+    offset = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: time.monotonic() + offset[0])
+    original = module.MiniSWEHarness
+
+    def harness(**kw):
+        h = original(**kw)
+
+        async def execute(budget):
+            offset[0] += budget
+            outcome = HarnessOutcome(reason=reason, exit_code=-9 if reason == "killed" else None)
+            return module.empty_response(kw["params"], "model"), outcome, {}
+
+        h.execute.side_effect = execute
+        return h
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    result = await f.agent.run(f.request, f.body)
+    assert result.evaluation_completed and not result.infrastructure_error
+    if reason == "killed":
+        assert result.termination["reason"] == "killed"
+        assert result.reward == 0.0
+        f.grade.assert_not_awaited()
+    else:
+        assert result.termination["reason"] == "timeout"
+        assert result.reward == 0.75
+        f.grade.assert_awaited_once()
+    assert all(env.closed for env in f.envs)
+
+
 @pytest.mark.parametrize("stage", ["setup", "execute", "grade"])
 async def test_shutdown_cancels_worker_before_collection_and_cleans_up(fixture, monkeypatch, stage):
     f = fixture
     entered = asyncio.Event()
 
-    async def block(*args):
+    async def block(*args, **kwargs):
         entered.set()
         try:
             await asyncio.Event().wait()
@@ -822,7 +858,7 @@ async def test_verify_takes_over_before_seed_deadline(fixture):
     deadline = session.agent_deadline
     entered, release = asyncio.Event(), asyncio.Event()
 
-    async def grade(*args):
+    async def grade(*args, **kwargs):
         entered.set()
         await release.wait()
         return {"rewards": {"reward": 0.75}}

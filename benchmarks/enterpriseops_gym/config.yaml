@@ -1,0 +1,65 @@
+# EnterpriseOps-Gym: ServiceNow's enterprise-workflow tasks in oracle tool mode, run with the Stirrup agent as
+# Artificial Analysis runs EnterpriseOps-Gym-AA (100-turn cap, 3 repeats). See README.md.
+#
+#   gym eval prepare --benchmark enterpriseops_gym
+#   gym eval run --benchmark enterpriseops_gym --model-type openai_model --split benchmark --output <rollouts.jsonl> ...
+
+# The agent runs in a task sandbox and calls the model and resources servers from there.
+use_absolute_ip: true
+
+config_paths:
+  - nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml
+  - resources_servers/enterpriseops_gym/configs/enterpriseops_gym.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# Each task runs as one episode of the environment server below.
+environment_server_routes:
+  enterpriseops_gym: enterpriseops_gym_environment_server
+
+enterpriseops_gym_resources_server:
+  resources_servers:
+    enterpriseops_gym:
+      datasets:
+        - name: enterpriseops_gym
+          type: benchmark
+          jsonl_fpath: benchmarks/enterpriseops_gym/data/enterpriseops_gym_benchmark.jsonl
+          prepare_script: benchmarks/enterpriseops_gym/prepare.py
+          taskset: enterpriseops_gym
+          num_repeats: 3
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: resources_servers/enterpriseops_gym/data/example.jsonl
+          taskset: enterpriseops_gym
+          license: Apache 2.0
+
+enterpriseops_gym_stirrup_agent:
+  responses_api_agents:
+    stirrup_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      agent_max_turns: 100
+      # The task's tools are the only tools: no shell.
+      code_exec: false
+      concurrency: 64
+      # Artificial Analysis samples reasoning models at 0.6 unless the model's lab recommends otherwise; override it
+      # with the lab's value, e.g. ++enterpriseops_gym_stirrup_agent.responses_api_agents.stirrup_agent.temperature=1.0
+      temperature: 0.6
+      sandbox_runner_timeout_seconds: 5400
+
+enterpriseops_gym_environment_server:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: enterpriseops_gym_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: enterpriseops_gym_stirrup_agent
+      resources_tool_transports: [direct_http]
+      default_episode_timeout_seconds: 7200
+      max_concurrent_episodes: 64
+      queue_timeout_seconds: 86400

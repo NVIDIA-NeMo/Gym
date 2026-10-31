@@ -64,7 +64,7 @@ If `health_check` is not set, it defaults to `/health` on `port`. If it is set w
 
 ### type: vllm_pd
 
-Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [how-to](/orchestration/how-to/prefill-decode-disaggregation).
+Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [Prefill/Decode Disaggregation how-to](/orchestration/how-to/prefill-decode-disaggregation).
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -148,7 +148,7 @@ The driver runs the benchmarks against the services.
 | Field | Default | Description |
 | --- | --- | --- |
 | `container` | `python:3.12` | Image the driver runs in. |
-| `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. |
+| `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. The install includes the `ray` extra, which `gym` needs to start a server that declares `ray_enabled = True`. |
 | `policy_model` | `null` | Name of a service to use as the policy model. See [Policy wiring](#policy-wiring). |
 | `policy_host` | `localhost` | Host used in the injected `policy_base_url`. Use an address routable from elsewhere when an agent runs remotely, for example `${oc.env:HEAD_NODE_IP}`, which is resolved when the driver runs. |
 | `policy_model_type` | `openai_model` | The `responses_api_models` asset passed to `gym eval run` as `--model-type`. Set it to `""` to pass none, for a benchmark whose own config already declares a complete policy model. |
@@ -206,7 +206,7 @@ Asking for `resumable` on an executor that does not support it is an error rathe
 
 ## otel
 
-The OpenTelemetry collector that runs beside every benchmark job. It is **enabled by default**, and an enabled collector requires `endpoint`, `service_name`, and the token variable (`token_env`, default `OTEL_TOKEN`) to be set in the submitting shell. Set `enabled: false` to opt out. All fields, and what is exported, are described in [Collector for Submitted Jobs](/observability/eval-submit-collector).
+The OpenTelemetry collector that runs beside every benchmark job. It is **enabled by default**, and always writes local JSONL dumps while enabled. Set `remote_export: false` for local-only collection. Remote export requires `endpoint`, `service_name`, and a token in the submitting shell (`token_env`, default `OTEL_TOKEN`); if the token is missing or empty, Gym warns and sets `remote_export: false`. Set `enabled: false` to opt out. All fields, and what is exported, are described in [Collector for Submitted Jobs](/observability/eval-submit-collector).
 
 ## Cross-field validation
 

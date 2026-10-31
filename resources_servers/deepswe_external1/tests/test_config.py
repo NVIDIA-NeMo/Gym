@@ -8,7 +8,7 @@ from pathlib import Path
 
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import RolloutCollectionHelper
 from nemo_gym.train_data_utils import TrainDataProcessor
 

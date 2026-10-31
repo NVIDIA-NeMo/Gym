@@ -70,13 +70,9 @@ from typing import AbstractSet, Any, Awaitable, Callable, Dict, List, Mapping, O
 
 import orjson
 
-from nemo_gym.base_responses_api_model import (
-    clear_model_call_captures_for_rollouts,
-    merge_model_call_capture_into_record,
-    model_call_capture_dirs_from_config,
-)
-from nemo_gym.failure_kinds import AGENT_TIMEOUT
-from nemo_gym.global_config import (
+from nemo_gym.artifacts import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_ID_KEY_NAME,
@@ -84,16 +80,25 @@ from nemo_gym.global_config import (
     TASK_INDEX_KEY_NAME,
     TASK_SOURCE_KEY_NAME,
 )
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
-from nemo_gym.path_utils import failures_path_for, materialized_path_for
+from nemo_gym.core import (
+    AGENT_TIMEOUT,
+    SESSION_EXPIRED,
+    SESSION_LOST,
+    NeMoGymResponse,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+)
+from nemo_gym.observability.model_calls import (
+    clear_model_call_captures_for_rollouts,
+    merge_model_call_capture_into_record,
+    model_call_capture_dirs_from_config,
+)
 from nemo_gym.rollout_collection import (
     _NO_RESULT_FAILURE_CLASSES,
     _RUN_FAILURE_ERRORS,
+    AGENT_REQUEST_FAILED_FAILURE_CLASS,
     ENVIRONMENT_SERVER_FAILURE_CLASS,
-    NG_DISPATCH_DRAINED_KEY,
     NG_ENVIRONMENT_SERVER_KEY,
-    NG_FAILURE_CLASS_KEY,
-    NG_NO_PERSIST_KEY,
     NG_RESULT_TYPE_KEY,
     NG_TERMINAL_KEY,
     NG_TRAJECTORY_KEY,
@@ -106,9 +111,23 @@ from nemo_gym.rollout_collection import (
     _record_rollout_outcome,
     get_max_rollout_attempts,
     is_terminal_failure,
+    load_resubmit_offset,
     observed_elapsed,
+    record_resubmit_offset,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.rollout_records import (
+    coverage_path_for,
+)
+from nemo_gym.rollout_records import (
+    journal_path_for as rollout_attempts_path_for,
+)
+from nemo_gym.rollout_recovery import manifest_path_for
+from nemo_gym.utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resubmit_offset_path_for,
+)
 from resources_servers.gdpval.multistage_elo import (
     PartialStagePolicy,
     PerReferenceTotals,
@@ -172,6 +191,8 @@ class StageResume:
     reuse_cached_keys: Mapping[int, AbstractSet[Tuple[Any, Any]]] = field(default_factory=dict)
     # Number of sidecar attempts already consumed, keyed stage/task/rollout.
     attempts_by_stage: Mapping[int, Mapping[Tuple[Any, Any], int]] = field(default_factory=dict)
+    # The same counted from the last resubmit offset on: what the attempt cap compares against.
+    budget_by_stage: Mapping[int, Mapping[Tuple[Any, Any], int]] = field(default_factory=dict)
     # Latest persisted failure per stage/task/rollout.  An explicit partial-stage
     # policy may accept an already-recorded timeout without dispatching it again.
     latest_failures_by_stage: Mapping[int, Mapping[Tuple[Any, Any], Dict[str, Any]]] = field(default_factory=dict)
@@ -192,6 +213,7 @@ class StageResume:
             "elapsed_by_stage",
             "reuse_cached_keys",
             "attempts_by_stage",
+            "budget_by_stage",
             "latest_failures_by_stage",
             "latest_attempt_dispositions_by_stage",
         ):
@@ -199,7 +221,13 @@ class StageResume:
             setattr(self, name, {stage: value for stage, value in values.items() if stage <= index})
 
 
+_REFERENCE_MISSING_FAILURE_CLASS = "reference_missing"
 _TRANSPORT_INELIGIBLE_FAILURE_CLASS = "transport_ineligible"
+
+# Terminal failures that a resume judges again from the persisted deliverable, without running the policy: the
+# reference tree or the judge panel's limits may have been repaired between launches. A missing evaluated
+# deliverable (``eval_missing``) has nothing to judge, so it stays closed.
+_REVERIFIABLE_FAILURE_CLASSES = frozenset({_REFERENCE_MISSING_FAILURE_CLASS, _TRANSPORT_INELIGIBLE_FAILURE_CLASS})
 
 # Stamped on every row of a stage accepted by its partial-completion policy, so
 # aggregation can tell an accepted partial final stage from a degraded one.
@@ -947,6 +975,13 @@ def tag_results(
             tid = row_task_id(row)
             if tid is not None:
                 out["task_id"] = tid
+        if out.get("failure_kind") in (SESSION_LOST, SESSION_EXPIRED) and out.get(NG_FAILURE_CLASS_KEY) is None:
+            # The resources server no longer held the session, so this masked sample holds no measurement. Keep
+            # treating it as the terminal verification failure it used to be, not as a judged success.
+            out[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_SERVER_FAILURE_CLASS
+            out[NG_TERMINAL_KEY] = True
+            out["_ng_failure_stage"] = "verification"
+            out["_ng_failure_message"] = out.get("failure_reason") or out["failure_kind"]
         tagged.append(out)
     return tagged
 
@@ -1255,6 +1290,7 @@ async def run_multistage_stages(
         inprocess_attempts: Dict[Tuple[Any, Any], int] = {}
         if retry_inprocess and pairs and resume is not None:
             startup_attempts = resume.attempts_by_stage.get(index, {})
+            startup_budget = resume.budget_by_stage.get(index, {})
             # Sticky for the whole stage: once a key is known to have a reusable
             # deliverable on disk it stays reusable, even if a later attempt comes
             # back stamped on the rollout path without the flag.
@@ -1267,7 +1303,7 @@ async def run_multistage_stages(
                         continue
                     key = (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME])
                     attempts_used = startup_attempts.get(key, 0) + 1 + inprocess_attempts.get(key, 0)
-                    if attempts_used >= max_attempts:
+                    if startup_budget.get(key, 0) + 1 + inprocess_attempts.get(key, 0) >= max_attempts:
                         continue
                     source = pending_by_key.get(key)
                     if source is None:
@@ -1470,7 +1506,7 @@ async def run_multistage_stages(
         # resume. A retryable failure or drained row leaves the stage open unless
         # an explicit partial-completion policy accepts its evidence.
         returned_keys: set[Tuple[Any, Any]] = set()
-        prior_attempts = resume.attempts_by_stage.get(index, {}) if resume is not None else {}
+        prior_attempts = resume.budget_by_stage.get(index, {}) if resume is not None else {}
         for result in new_tagged:
             key = (result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME])
             resolved = _is_success_row(result) or is_terminal_failure(result)
@@ -1549,6 +1585,22 @@ async def run_multistage_stages(
             "stage_index": index,
             "num_tasks": len(task_ids),
             "num_rollouts": len(stage_rows),
+            # Only an accepted partial-stage policy can waive unresolved rows.
+            # Terminal/exhausted rows are already absent from unresolved_keys.
+            # A collector request outage can recover on a later allocation too;
+            # keep the in-process retry and partial-waiver policies unchanged.
+            "num_retryable": 0
+            if partial_outcome is not None
+            else sum(
+                _stage_key(row) in unresolved_keys
+                and (
+                    row.get(NG_NO_PERSIST_KEY)
+                    or _is_retryable_failure(row)
+                    or row.get(NG_FAILURE_CLASS_KEY) == AGENT_REQUEST_FAILED_FAILURE_CLASS
+                )
+                for row in new_tagged
+            )
+            + len(unresolved_keys - {_stage_key(row) for row in new_tagged}),
             "num_reused": num_reused,
             "reference_ids": list(reference_ids),
             "eval_elo": stage_elo,
@@ -1609,8 +1661,9 @@ def _require_final_stage_rows(
     Only a coverage rejection is terminal here. When the stage loop stopped with
     rows still retryable, a resume picks them up and the run is expected to
     continue in a later process; that path only logs how to continue, and the
-    run exits normally without a ``comparison/eval_elo``. Likewise a final stage
-    with *some* rows is not fatal: aggregation reports its per-stage fit and
+    completion check after aggregation fails a ``require_complete`` run so its
+    chain resumes it. Likewise a final stage with *some* rows is not fatal:
+    aggregation reports its per-stage fit and
     marks it degraded, with no headline ``comparison/eval_elo`` unless every
     expected final-stage row is present.
     """
@@ -1776,6 +1829,7 @@ def _resume_complete_stage(
         "num_tasks": len(task_ids),
         # Cached results can be incomplete even when the stage was marked complete.
         "num_rollouts": expected_stage_row_count,
+        "num_retryable": 0,
         "num_reused": 0,
         "reference_ids": reference_ids,
         "eval_elo": stage_elo,
@@ -1787,7 +1841,7 @@ def _resume_complete_stage(
         summary.update(
             partial=True,
             num_rollouts=expected_stage_row_count,
-            num_successful=len(cached_rows),
+            num_successful=len(included_keys),
             success_fraction=outcome.get("success_fraction"),
             num_omitted=len(_recorded_key_set(outcome, "omitted_keys")),
         )
@@ -1867,6 +1921,8 @@ def write_rollouts(all_results: Sequence[Mapping[str, Any]], output_fpath: str |
             os.chmod(temp_path, prior_mode)
         os.replace(temp_path, output_fpath)
         temp_path = None
+        # The rows written here are this run's, not the merged ones an aggregation's shard list names.
+        aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
     finally:
         if temp_path is not None:
             temp_path.unlink(missing_ok=True)
@@ -2034,6 +2090,9 @@ def _prune_downstream_files(output_fpath: str | Path, restart_stage: int) -> Non
                 out.flush()
                 os.fsync(out.fileno())
         _atomic_filter_jsonl(path, keep)
+        if dropped:
+            # The rows left are not the merged ones an aggregation's shard list names.
+            aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
 
 
 def load_persisted_rows(output_fpath: str | Path) -> Dict[int, List[Dict[str, Any]]]:
@@ -2068,7 +2127,8 @@ def load_gated_keys(
     Mirrors ``_load_from_cache`` with the stage dimension added: a stage-row is
     gated if it is a success (main jsonl), a terminal sidecar failure
     (``_ng_failure_terminal``), or has hit ``get_max_rollout_attempts`` attempts
-    in the sidecar. Everything else is re-dispatched.
+    in the sidecar. Everything else is re-dispatched, and so are the terminal
+    failures in ``_REVERIFIABLE_FAILURE_CLASSES``.
     """
     gated: Dict[int, set[Tuple[Any, Any]]] = {
         index: {(r.get(TASK_INDEX_KEY_NAME), r.get(ROLLOUT_INDEX_KEY_NAME)) for r in rows}
@@ -2080,10 +2140,11 @@ def load_gated_keys(
         return gated
 
     max_attempts = get_max_rollout_attempts()
+    resubmit_offset = load_resubmit_offset(output_fpath)
     attempts: Dict[Tuple[int, Any, Any], int] = {}
     terminal: set[Tuple[int, Any, Any]] = set()
     with failures_fpath.open("rb") as handle:
-        for line in handle:
+        for line_index, line in enumerate(handle):
             line = line.strip()
             if not line:
                 continue
@@ -2091,8 +2152,8 @@ def load_gated_keys(
             if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
-            attempts[key] = attempts.get(key, 0) + 1
-            if is_terminal_failure(fr):
+            attempts[key] = attempts.get(key, 0) + (line_index >= resubmit_offset)
+            if is_terminal_failure(fr) and fr.get(NG_FAILURE_CLASS_KEY) not in _REVERIFIABLE_FAILURE_CLASSES:
                 terminal.add(key)
 
     for key in attempts:
@@ -2127,16 +2188,21 @@ def load_failure_timings(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, 
     return elapsed_by_stage
 
 
-def load_failure_attempts(output_fpath: str | Path) -> Dict[int, Dict[Tuple[Any, Any], int]]:
-    """Load prior sidecar attempt counts per stage/task/rollout key."""
+def load_failure_attempts(
+    output_fpath: str | Path, *, since_resubmit: bool = False
+) -> Dict[int, Dict[Tuple[Any, Any], int]]:
+    """Load prior sidecar attempt counts per stage/task/rollout key; only those since the last resubmit if asked."""
     attempts_by_stage: Dict[int, Dict[Tuple[Any, Any], int]] = {}
     failures_fpath = failures_path_for(Path(output_fpath))
     if not failures_fpath.exists():
         return attempts_by_stage
 
+    first_line = load_resubmit_offset(output_fpath) if since_resubmit else 0
     with failures_fpath.open("rb") as handle:
-        for line in handle:
+        for line_index, line in enumerate(handle):
             line = line.strip()
+            if line_index < first_line:
+                continue
             if not line:
                 continue
             row = orjson.loads(line)
@@ -2250,14 +2316,18 @@ def route_stage_rows(output_fpath: str | Path, rows: Sequence[Mapping[str, Any]]
     output_fpath = Path(output_fpath)
     output_fpath.parent.mkdir(parents=True, exist_ok=True)
     failures_fpath = failures_path_for(output_fpath)
+    sources_dropped = False
     with output_fpath.open("ab") as main_handle, failures_fpath.open("ab") as fail_handle:
         for row in rows:
             if row.get(NG_NO_PERSIST_KEY):
                 continue
-            if row.get(NG_FAILURE_CLASS_KEY) is not None:
-                fail_handle.write(orjson.dumps(row) + b"\n")
-            else:
-                main_handle.write(orjson.dumps(row) + b"\n")
+            serialized = orjson.dumps(row) + b"\n"
+            if not sources_dropped:
+                # The rows this run writes are not the merged ones an aggregation's shard list names. Dropped only
+                # once both files are open and a row is ready, so a run that cannot write keeps the list.
+                aggregation_sources_path_for(output_fpath).unlink(missing_ok=True)
+                sources_dropped = True
+            (fail_handle if row.get(NG_FAILURE_CLASS_KEY) is not None else main_handle).write(serialized)
         main_handle.flush()
         fail_handle.flush()
         os.fsync(main_handle.fileno())
@@ -2306,6 +2376,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
     elapsed_by_stage = load_failure_timings(output_fpath)
     reuse_cached_keys = load_reuse_cached_keys(output_fpath)
     attempts_by_stage = load_failure_attempts(output_fpath)
+    budget_by_stage = load_failure_attempts(output_fpath, since_resubmit=True)
     latest_failures_by_stage = load_latest_failures(output_fpath)
     latest_attempt_dispositions_by_stage = load_latest_attempt_dispositions(journal_fpath)
     # Older multistage runs wrote a completion marker even when a retryable
@@ -2336,6 +2407,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         elapsed_by_stage = load_failure_timings(output_fpath)
         reuse_cached_keys = load_reuse_cached_keys(output_fpath)
         attempts_by_stage = load_failure_attempts(output_fpath)
+        budget_by_stage = load_failure_attempts(output_fpath, since_resubmit=True)
         latest_failures_by_stage = load_latest_failures(output_fpath)
         latest_attempt_dispositions_by_stage = load_latest_attempt_dispositions(journal_fpath)
 
@@ -2409,6 +2481,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         elapsed_by_stage=elapsed_by_stage,
         reuse_cached_keys=reuse_cached_keys,
         attempts_by_stage=attempts_by_stage,
+        budget_by_stage=budget_by_stage,
         latest_failures_by_stage=latest_failures_by_stage,
         latest_attempt_dispositions_by_stage=latest_attempt_dispositions_by_stage,
     )
@@ -2564,7 +2637,10 @@ async def run_e2e_multistage(
             completed = await future
             # A failure while verifying comes after the rollout, so a retry judges the persisted deliverable;
             # without one, /verify answers 404 and the policy runs again.
-            if completed.result.get("_ng_failure_stage") == "verification":
+            if (
+                completed.result.get("_ng_failure_stage") == "verification"
+                or completed.result.get(NG_FAILURE_CLASS_KEY) in _REVERIFIABLE_FAILURE_CLASSES
+            ):
                 completed.result["reuse_cached_deliverable"] = True
             if completed.environment_server is not None:
                 completed.result[NG_ENVIRONMENT_SERVER_KEY] = completed.environment_server
@@ -2574,7 +2650,10 @@ async def run_e2e_multistage(
             results.append((completed.row, completed.result))
         return results
 
+    outcomes_recorded = 0
+
     async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+        nonlocal outcomes_recorded
         semaphore = None
         if semaphore_size:
             from asyncio import Semaphore
@@ -2600,6 +2679,17 @@ async def run_e2e_multistage(
         results.extend((row, result) for row, result in judged if result is not None)
         # No deliverable was persisted for these rows, so the policy runs, as old Stirrup did.
         results.extend(await dispatch([row for row, result in judged if result is None], semaphore))
+        outcomes_recorded += sum(
+            not result.get(NG_NO_PERSIST_KEY)
+            and (
+                bool(result.get(NG_TERMINAL_KEY))
+                or (
+                    result.get(NG_FAILURE_CLASS_KEY) != "kill_shaped"
+                    and result.get("_ng_failure_stage") != "admission"
+                )
+            )
+            for _, result in results
+        )
         return results
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
@@ -2670,8 +2760,17 @@ Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}
 Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
     )
+    # A stage accepted by its partial-completion policy is complete at its accepted size; every other stage
+    # owes all planned rollouts, so a stop with retryable or undispatched rows still fails the run.
+    expected = sum(
+        stage["num_successful"] if stage.get("partial") else stage["num_rollouts"] for stage in stage_summaries
+    )
+    # Accepted omissions are already excluded from expected; crediting them again could hide another stage's gaps.
     rollout_collection_config.check_completion(
-        expected=sum(stage["num_rollouts"] for stage in stage_summaries), results=all_results
+        expected=expected,
+        results=all_results,
+        retryable=any(stage["num_retryable"] > 0 for stage in stage_summaries),
+        made_progress=outcomes_recorded > 0,
     )
     return aggregate_metrics_fpath
 
@@ -2685,7 +2784,7 @@ def _prepare_resume(
     and rows incrementally, giving a later resume state to read. Prior state is
     reused only when ``resume_from_cache`` is set and both the rollouts file and a
     fingerprint-matching journal exist; every other case renames the prior
-    rollouts, failure sidecar, journal and aggregate metrics to
+    rollouts, failure sidecar, journals, manifest, materialized inputs, coverage and aggregate metrics to
     ``<name>.stale.<ns>`` and starts fresh (with the reason logged).
     """
     import sys
@@ -2708,8 +2807,16 @@ def _prepare_resume(
         for stale in (
             output_fpath,
             failures_path_for(output_fpath),
+            resubmit_offset_path_for(output_fpath),
             journal_fpath,
             aggregate_metrics_path_for(output_fpath),
+            # A previous single-pass run owns these additional companions.
+            # Preserve them together so they cannot claim the new stage output.
+            manifest_path_for(output_fpath),
+            rollout_attempts_path_for(output_fpath),
+            materialized_path_for(output_fpath),
+            coverage_path_for(output_fpath),
+            aggregation_sources_path_for(output_fpath),
         ):
             if stale.exists():
                 quarantined = stale.with_name(stale.name + stale_suffix)
@@ -2717,6 +2824,8 @@ def _prepare_resume(
                 print(f"[multistage-elo] quarantined stale state: {quarantined}", file=sys.stderr, flush=True)
     else:
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
+        if getattr(rollout_collection_config, "resubmit", False):
+            record_resubmit_offset(output_fpath)
     return build_file_resume(output_fpath, journal_fpath, fingerprint)
 
 

@@ -30,4 +30,6 @@ fi
 
 export PATH="$DEPS_DIR/bin:$PATH"
 npm install -g --prefix "$DEPS_DIR" "cline@${CLINE_VERSION}"
-"$DEPS_DIR/bin/cline" --version
+# Without the opt-out, even `--version` ends by spawning a detached `npm update -g cline` against
+# $DEPS_DIR, which would unpin the bundle the sandbox mounts.
+CLINE_NO_AUTO_UPDATE=1 "$DEPS_DIR/bin/cline" --version
