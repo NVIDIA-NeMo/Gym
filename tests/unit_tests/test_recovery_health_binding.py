@@ -6,6 +6,7 @@ import hashlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
@@ -531,3 +532,27 @@ def test_legacy_task_identity_is_bound_to_saved_input(tmp_path, identity_fields,
     else:
         assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
     assert snapshot(a) == before
+
+
+@pytest.mark.parametrize(
+    "counters,expected",
+    [
+        ({}, None),
+        ({"recovered_attempt_errors": "1", "recovered_operations": 0}, None),
+        ({"recovered_attempt_errors": 0, "recovered_operations": True}, None),
+        ({"recovered_attempt_errors": -1, "recovered_operations": 0}, None),
+        (False, None),
+        ({"recovered_attempt_errors": 0, "recovered_operations": 0}, True),
+        ({"recovered_attempt_errors": 2, "recovered_operations": 1}, None),
+    ],
+)
+def test_recovery_counters_preserve_bounded_mcqa_gate(counters, expected):
+    collected = CollectedEvidence.model_validate_json(
+        (Path(__file__).parent / "fixtures/cpu-mcqa-trial-operations.json").read_text()
+    )
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert trial_health(decision, collected)[0] is True
+    collected.quality["observed_upstream_recovery"] = counters
+    assert trial_health(decision, collected)[0] is expected
+    assert collected.quality["observed_upstream_recovery"] == counters
+    assert decision.action.value == "noop"

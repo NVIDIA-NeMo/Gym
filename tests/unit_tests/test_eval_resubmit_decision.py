@@ -27,6 +27,7 @@ from pathlib import Path
 
 import pytest
 
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.orchestration import submit
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.recovery import (
@@ -60,7 +61,26 @@ HEALTH_UNKNOWN = _StartsWith(
 
 
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
-SAVED_ANSWER = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "B"}]}]}
+
+# Use the response serialized by the actual typed producer/verifier contract, not an output-only placeholder.
+SAVED_ANSWER = NeMoGymResponse(
+    id="response-saved",
+    object="response",
+    created_at=0,
+    model="synthetic",
+    output=[
+        {
+            "id": "message-saved",
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "B", "annotations": []}],
+        }
+    ],
+    parallel_tool_calls=False,
+    tool_choice="auto",
+    tools=[],
+).model_dump(mode="json")
 
 
 def ident(task: int, **extra) -> dict:
@@ -131,7 +151,7 @@ def test_collector_reads_identity_and_cause_fields_only_and_honours_the_resubmit
         chain=["101", "102"],
     )
     got = collect(job)
-    assert got.results == [{"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0}]
+    assert got.results == [{"_ng_task_index": 0, "_ng_rollout_index": 0, "reward": 1.0, "response": {}}]
     assert "secret answer" not in got.model_dump_json() and "prompt" not in got.model_dump_json()
     assert got.resubmit_offset == 1 and [f["_line"] for f in got.failures] == [0, 1]
     assert got.failures[1]["_ng_attempt_index"] == 1
@@ -1952,8 +1972,13 @@ def test_review_collector_keeps_saved_answer_presence_not_bytes(tmp_path):
         tmp_path / "job", n=2, results=[], failures=[_judge_failure(0, response=SAVED_ANSWER), _judge_failure(1)]
     )
     got = collect(job)
-    assert [r["_ng_collected_saved_answer"] for r in got.failures] == [True, False]
-    assert all("response" not in r for r in got.failures)
+    from nemo_gym.orchestration.recovery import _saved_answer
+
+    assert [_saved_answer(row) for row in got.failures] == [True, False]
+    assert got.failures[0]["response"]["id"] == SAVED_ANSWER["id"]
+    assert "content" not in got.failures[0]["response"]["output"][0]
+    assert "response" not in got.failures[1]
+    assert '"text"' not in got.model_dump_json()
 
 
 def test_review_retry_policy_cannot_exceed_spent_attempts(tmp_path):
@@ -2141,7 +2166,10 @@ def test_projected_judge_answer_keeps_its_supported_reverification_path(tmp_path
     collected = collect(job)
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
     assert decision.action == (RecoveryAction.REVERIFY if saved else RecoveryAction.STOP)
-    assert collected.failures[0]["_ng_collected_saved_answer"] is saved
+    from nemo_gym.orchestration.recovery import _saved_answer
+
+    assert _saved_answer(collected.failures[0]) is saved
+    assert '"text"' not in collected.model_dump_json()
 
 
 def test_projected_explicit_final_model_zero_stays_settled(tmp_path):
@@ -2357,3 +2385,17 @@ def test_an_unrouted_dispatch_error_keeps_other_evidence_in_charge(tmp_path, fak
     assert decision.identities.get("unknown") is None
     (evidence,) = decision.evidence
     assert evidence.attempts == 1 and evidence.failure_kind == "provider_unavailable"
+
+
+def test_output_only_response_is_not_the_typed_producer_contract(tmp_path):
+    from pydantic import ValidationError
+
+    output_only = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "synthetic"}]}]}
+    with pytest.raises(ValidationError):
+        NeMoGymResponse.model_validate(output_only)
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[_judge_failure(0, response=output_only)])
+    before = {path.name: path.read_bytes() for path in (job / "artifacts").iterdir()}
+    decision = _decide(job)
+    assert decision.action == RecoveryAction.STOP
+    assert decision.identities["unknown"] == [(0, 0)]
+    assert {path.name: path.read_bytes() for path in (job / "artifacts").iterdir()} == before
