@@ -295,6 +295,53 @@ jobs:
           if-no-files-found: warn
           retention-days: 7
 
+  nvidia_inference_e2e_tests:
+    name: nvidia-inference-e2e
+    needs: [classify_changes, unit_tests]
+    # Nightly only: exercises the live NVIDIA Inference API (hosted, no GPU).
+    # Run nightly, or on-demand via workflow_dispatch. Not part of the
+    # Nemo_CICD_Test gate; failures still reach the alerts channel through
+    # notify-failure.
+    if: >-
+      ${{
+        always() && !cancelled() &&
+        needs.classify_changes.outputs.is_nightly == 'true' &&
+        needs.classify_changes.result == 'success' &&
+        (needs.unit_tests.result == 'success' || needs.unit_tests.result == 'skipped')
+      }}
+    timeout-minutes: 20
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+
+      - name: Install uv
+        run: |
+          UV_VERSION="$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)"
+          if [[ ! "$UV_VERSION" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]]; then
+            echo "Could not read a valid UV_VERSION from docker/Dockerfile: $UV_VERSION" >&2
+            exit 1
+          fi
+          curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+      - name: Run NVIDIA Inference API E2E
+        env:
+          E2E_DIR: ${{ runner.temp }}/nemo-gym-nvidia-inference-e2e
+          E2E_MODEL: openai/openai/gpt-5-mini
+          E2E_PROVIDER_CONFIG: responses_api_models/inference_provider/configs/nvidia.yaml
+          MODEL_API_KEY: ${{ secrets.NVIDIA_INFERENCE_API_KEY }}
+        run: bash tests/e2e/run_inference_provider_e2e.sh
+
+      - name: Upload NVIDIA Inference API E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: nvidia-inference-e2e-results-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/nemo-gym-nvidia-inference-e2e/results
+          if-no-files-found: warn
+          retention-days: 7
+
   Nemo_CICD_Test:
     needs: [pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests]
     if: always() && !cancelled()
@@ -377,7 +424,7 @@ jobs:
   notify-failure:
     name: Notify test failure
     runs-on: ubuntu-latest
-    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, Nemo_CICD_Test]
+    needs: [ephemeral-runner-routing, pre-flight, classify_changes, unit_tests, container_build, gpu_e2e_tests, provider_e2e_tests, nvidia_inference_e2e_tests, Nemo_CICD_Test]
     environment: main
     permissions: {}
     # Use the event directly: setup outputs are empty when setup fails.
