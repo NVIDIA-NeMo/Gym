@@ -73,7 +73,7 @@ If `health_check` is not set, it defaults to `/health` on `port`. If it is set w
 
 #### type: vllm_pd
 
-Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. Set `driver.policy_model` to `X`. The router's `container` must provide `vllm-router`. See the [Prefill/Decode Disaggregation how-to](/orchestration/how-to/prefill-decode-disaggregation).
+Prefill/decode disaggregated vLLM: two vLLM tiers behind a `vllm-router`. A single `vllm_pd` entry named `X` deploys three services: `X-prefill`, `X-decode`, and the router `X`. The router `X` is the model service the policy binds to. The router's `container` must provide `vllm-router`. See the [Prefill/Decode Disaggregation how-to](/orchestration/how-to/prefill-decode-disaggregation).
 
 | Field | Default | Description |
 | --- | --- | --- |
@@ -101,7 +101,7 @@ A Ray cluster. The head starts on the driver's node and every other node of the 
 | `num_cpus`, `num_gpus` | `null` | Passed to `ray start`. |
 | `extra_args` | `""` | Raw flags appended to `ray start` on every node. Head-only flags (`--port`, `--redis-shard-ports`, `--include-dashboard`) are dropped for workers. |
 
-A ray service is not a model service: it cannot be `driver.policy_model` for URL injection, and it has no default health check. The head's address is exported to the job as `GYM_RAY_ADDRESS_<SERVICE>` (service name upper-cased, non-alphanumerics replaced by `_`).
+A ray service is not a model service: it cannot be the policy model, and it has no default health check. The head's address is exported to the job as `GYM_RAY_ADDRESS_<SERVICE>` (service name upper-cased, non-alphanumerics replaced by `_`).
 
 ### Declarative services
 
@@ -173,22 +173,36 @@ The driver runs the benchmarks against the services.
 | --- | --- | --- |
 | `container` | `python:3.12` | Image the driver runs in. |
 | `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. The install includes the `ray` extra, which `gym` needs to start a server that declares `ray_enabled = True`. |
-| `policy_model` | `null` | Name of a service to use as the policy model. See [Policy wiring](#policy-wiring). |
-| `policy_host` | `localhost` | Host used in the injected `policy_base_url`. Use an address routable from elsewhere when an agent runs remotely, for example `${oc.env:HEAD_NODE_IP}`, which is resolved when the driver runs. |
-| `policy_model_type` | `openai_model` | The `responses_api_models` asset passed to `gym eval run` as `--model-type`. Set it to `""` to pass none, for a benchmark whose own config already declares a complete policy model. |
 | `benchmarks` | required | Mapping from benchmark name to its [run config](#benchmarks). |
 | `env` | `{}` | Environment for the driver. See [env values](#env-values). |
 | `mounts` | `[]` | Extra bind mounts for the driver. The benchmark's own job directory is always mounted at the same path. |
 
 ### Policy wiring
 
-When `policy_model` names a `vllm` or `vllm_pd` service, each benchmark's `run` config receives:
+In Gym the policy is the server named `policy_model`, so it is wired like any other server, with a [service reference](#service-references) in the benchmark's `run`:
 
-- `policy_base_url`: `http://<policy_host>:<service port>/v1`
+```yaml
+run:
+  policy_model:
+    responses_api_models:
+      openai_model: service:policy
+```
+
+- **Implicit:** when `run` has no `policy_model` and `services` holds exactly one model service (`vllm` or `vllm_pd`; declarative and `ray` services do not count), submit adds `openai_model: service:<that service>` for you (`vllm_model` when the service runs `server_per_node`, since that policy has one URL per node). Several model services without an explicit `policy_model` fail validation, naming them.
+- **Explicit:** write the reference yourself to choose among several services, to use a declarative service (a hosted endpoint) as the policy, or to use a server type other than `openai_model`.
+- **Opt out:** a benchmark whose own config already declares a complete policy writes `policy_model: {}`. Nothing is added or passed.
+- **`--model-type`:** submit passes `--model-type <type>` to `gym eval run` when the `policy_model` node holds a `service:` reference, where `<type>` is the key the reference sits under (`openai_model` for the implicit binding). Otherwise it passes none.
+- **Remote agents:** the reference resolves a deployed service to the host the driver reaches it on. When an agent runs remotely and needs a routable address, write the node's fields yourself, for example `openai_base_url: http://${oc.env:HEAD_NODE_IP}:8000/v1`, which is resolved when the driver runs.
+
+When a policy is bound, each benchmark's `run` config also receives these variables, for configs that use them outside the policy node. A value you already set is kept.
+
+- `policy_base_url`: the service's URL (`http://localhost:<port>/v1` for a deployed service, which the driver runs beside)
 - `policy_model_name`: the service's `served_model_name`, or its `model`
 - `policy_api_key`: a dummy value (vLLM does not require authentication)
 
-If a benchmark's `run` already sets any of these keys, validation fails: remove one or the other. `policy_model` must name an existing service.
+A `command` benchmark cannot hold a reference (`command` and `run` are exclusive). It gets the same three values as `NEMO_GYM_POLICY_BASE_URL`, `NEMO_GYM_POLICY_MODEL_NAME` and `NEMO_GYM_POLICY_API_KEY` from the implicit binding, and none when several model services leave the choice open.
+
+`driver.policy_model`, `driver.policy_host` and `driver.policy_model_type` were removed. See [Policy wiring fields were removed](/orchestration/troubleshooting#policy-wiring-fields-were-removed) for the migration.
 
 ### Service references
 
@@ -226,7 +240,7 @@ Limits:
 - A service name used in a reference must not contain `.`, which separates the name from the field.
 - The exported host variable upper-cases the service name and replaces non-alphanumerics with `_`. Referencing two pinned services whose names differ only in such characters (`a-b` and `a_b`) is rejected, because they would share one variable.
 - A `ray` service cannot be referenced because it does not serve a model.
-- References do not replace `policy_model`; see [Policy wiring](#policy-wiring).
+- The policy is itself a reference, bound implicitly when there is one model service; see [Policy wiring](#policy-wiring).
 
 See the [how-to](/orchestration/how-to/wiring-services).
 

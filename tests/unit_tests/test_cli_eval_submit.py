@@ -367,7 +367,7 @@ class TestEvalSubmitConfigFileErrors:
                 {
                     "services": {"svc": SERVICE},
                     "compute": COMPUTE,
-                    "driver": {**DRIVER, "policy_model": "nope"},
+                    "driver": {**DRIVER, "policy_model": "svc"},
                     "job": JOB,
                 }
             )
@@ -376,7 +376,7 @@ class TestEvalSubmitConfigFileErrors:
         with pytest.raises(ConfigError, match="is invalid") as exc_info:
             _eval_submit.__wrapped__(_args(config_path), overrides=[])
 
-        assert "driver.policy_model 'nope' does not match any service (svc)" in str(exc_info.value)
+        assert "driver.policy_model was removed" in str(exc_info.value)
 
 
 class TestEvalSubmitConfigGroupComposition:

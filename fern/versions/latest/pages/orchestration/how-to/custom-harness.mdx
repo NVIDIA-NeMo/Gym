@@ -8,7 +8,6 @@ Some benchmarks do not run through Gym's rollout collection: the harness may pro
 
 ```yaml
 driver:
-  policy_model: policy
   gym_install:
     ref: main
   mounts:
@@ -30,9 +29,9 @@ driver:
 | Variable | Value |
 | --- | --- |
 | `NEMO_GYM_BENCH_DIR` | The benchmark's directory in the run directory, an absolute path. Write results under `$NEMO_GYM_BENCH_DIR/artifacts` so they sit beside the logs. |
-| `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `driver.policy_model` is set. |
-| `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `driver.policy_model` is set. |
-| `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `driver.policy_model` is set. |
+| `NEMO_GYM_POLICY_BASE_URL` | The policy's OpenAI-compatible base URL. Set when `services` has a single model service. |
+| `NEMO_GYM_POLICY_MODEL_NAME` | The served model name. Set when `services` has a single model service. |
+| `NEMO_GYM_POLICY_API_KEY` | The API key to present. Set when `services` has a single model service. |
 
 The driver clones Gym into a fresh temporary checkout when `gym_install` is set, so a script that sits next to your submit config is not copied there. Put the harness on a shared cluster path, mount it with `driver.mounts`, and call it by absolute path, as `/harness/run_my_harness.py` above.
 

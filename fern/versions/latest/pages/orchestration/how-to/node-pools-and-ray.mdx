@@ -41,12 +41,15 @@ services:
     node_pool: judge
 
 driver:
-  policy_model: policy
   benchmarks:
     my-benchmark:
       run:
         config_paths:
           - path/to/config.yaml
+        # `services` has two model services, so name the policy.
+        policy_model:
+          responses_api_models:
+            openai_model: service:policy
 ```
 
 What this does:
@@ -57,7 +60,7 @@ What this does:
 
 <Note>
 
-`driver.policy_model` is the only service whose address submit injects into the benchmark's `run` config. For other services, such as the judge here, put the address in the benchmark's own configuration. When a pool is used, the job script exports `GYM_POOL_<POOL>_NODES` (for example `GYM_POOL_JUDGE_NODES`) as a comma-separated list of that pool's hostnames, and a `runtime:` value in `driver.env` (`JUDGE_HOST: runtime:GYM_POOL_JUDGE_NODES`) passes it to the driver.
+Submit injects only the policy's address into `run` by itself. Reach another service, such as the judge here, with a [service reference](/orchestration/configuration#service-references), for example `service:judge.url`. When a pool is used, the job script exports `GYM_POOL_<POOL>_NODES` (for example `GYM_POOL_JUDGE_NODES`) as a comma-separated list of that pool's hostnames, and a `runtime:` value in `driver.env` (`JUDGE_HOST: runtime:GYM_POOL_JUDGE_NODES`) passes it to the driver.
 
 </Note>
 
