@@ -33,13 +33,16 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.verification import JudgeError, judge_failsafe
+from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.verification import judge as judge_module
+from nemo_gym.verification import judge_failsafe
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.beam.app import (
     ABILITIES,
     BEAMResourcesServer,
     BEAMResourcesServerConfig,
     BEAMVerifyRequest,
+    _gather_or_cancel,
     build_rubric_prompt,
     event_ordering_score,
     parse_judge_score,
@@ -111,7 +114,7 @@ def _mock_judge(
 ) -> List[Dict[str, Any]]:
     """Route /v1/responses to ``judge(messages)``; the first calls get ``statuses`` (e.g. 500) instead.
 
-    Patches the HTTP helpers ``nemo_gym.verification.judge.call_judge`` uses, so failures surface as ``JudgeError``.
+    Patches the HTTP helpers ``nemo_gym.verification.judge.call_judge`` uses, so failures surface as judge failures (``is_judge_failure``).
     """
     calls: List[Dict[str, Any]] = []
     pending = list(statuses)
@@ -287,8 +290,9 @@ def test_request_rejects_bad_metadata(ability: str, rubric: Any) -> None:
 def test_verify_judge_failure_raises_judge_error(monkeypatch) -> None:
     server = _server()
     _mock_judge(server, _score_reply(1.0), monkeypatch, statuses=[500])
-    with pytest.raises(JudgeError, match="HTTP 500"):
+    with pytest.raises(NgFailureEvent, match="HTTP 500") as failure:
         asyncio.run(server.verify(_request("March 29")))
+    assert is_judge_failure(failure.value)
 
 
 def test_judge_failure_is_masked_by_judge_failsafe(monkeypatch) -> None:
@@ -327,8 +331,9 @@ def test_judge_failure_cancels_sibling_calls(monkeypatch) -> None:
     monkeypatch.setattr(judge_module, "raise_for_status", fake_raise_for_status)
     monkeypatch.setattr(judge_module, "get_response_json", fake_get_response_json)
     start = time.monotonic()
-    with pytest.raises(JudgeError):
+    with pytest.raises(NgFailureEvent) as failure:
         asyncio.run(server.verify(_request("x", ability="summarization", rubric=["slow 1", "fail", "slow 2"])))
+    assert is_judge_failure(failure.value)
     assert time.monotonic() - start < 1.0
     assert finished == []
 
@@ -579,3 +584,63 @@ def test_compute_metrics_runs_keyed_by_rollout_index() -> None:
     assert m["pass@1[avg-of-2]/overall"] == approx((0.5 + 1.0) / 2)
     assert m["pass@2/overall"] == approx(1.0)
     assert m["pass@1[avg-of-2]/overall/std_dev_across_runs"] == approx(0.35355339, abs=1e-6)
+
+
+async def test_task_group_keeps_unrelated_canonical_failures():
+    """A failure that is not a judge failure leaves the task group as itself, not as a judge failure."""
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    unrelated = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
+    )
+
+    async def fail(error):
+        raise error
+
+    with pytest.raises(ExceptionGroup) as caught:
+        await _gather_or_cancel([fail(unrelated)])
+    assert caught.value.exceptions == (unrelated,)
+
+
+async def test_task_group_keeps_a_judge_failures_own_cause_and_cancels_siblings():
+    """The first judge failure leaves the task group with its own cause, and its siblings are cancelled."""
+    import asyncio
+
+    from nemo_gym.core import JUDGE_FAILED
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import failure_report_for
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model failed"
+    )
+    judge = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER, failure_kind=JUDGE_FAILED, failure_reason="judge failed"
+    )
+    sibling_cancelled = asyncio.Event()
+
+    async def fail():
+        raise judge from model
+
+    async def sibling():
+        try:
+            await asyncio.sleep(30)
+        except asyncio.CancelledError:
+            sibling_cancelled.set()
+            raise
+
+    with pytest.raises(NgFailureEvent) as caught:
+        await _gather_or_cancel([sibling(), fail()])
+
+    assert caught.value is judge and caught.value.__cause__ is model
+    assert caught.value.__suppress_context__  # the TaskGroup's own exception group is not chained in
+    assert sibling_cancelled.is_set()
+    report = failure_report_for(caught.value)
+    assert report.failure_id == judge.event_id and model.event_id in report.events
+
+
+async def test_task_group_returns_results_in_order():
+    async def value(v):
+        return v
+
+    assert await _gather_or_cancel([value(1), value(2)]) == [1, 2]

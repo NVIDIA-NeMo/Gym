@@ -37,7 +37,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.terminus_judge.schemas import TERMINUS_1_SCHEMA, TERMINUS_2_SCHEMA
 
 
@@ -489,8 +490,12 @@ class TerminusJudgeResourcesServer(SimpleResourcesServer):
                 reward = 1.0
                 failure_reason = FailureCode.NONE
 
-        except JudgeError:
-            raise
+        except JUDGE_FAILURES as error:
+            if is_judge_failure(error):
+                raise
+            else:
+                failure_reason = FailureCode.UNKNOWN_ERROR
+                logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(error).__name__} {error}")
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             logger.error(f"terminus_judge verify | uuid={body.uuid} unknown error: {type(e).__name__} {e}")

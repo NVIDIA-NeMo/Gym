@@ -580,6 +580,29 @@ class TestImportSurface:
             assert module in surface
         assert "text_file_equals" in surface["nemo_gym.verifiers.files"]
 
+    def test_failure_surface_records_the_intentional_canonical_exception_migration(self) -> None:
+        """Package moves preserve names; the separate failure API migration deliberately retires concrete types.
+
+        Keep its replacement in the snapshot so compatibility checks cannot silently discard the canonical API.
+        The v1 EpisodeFailure data envelope is retained; only its old raised-error wrapper and type variable go away.
+        """
+        from nemo_gym.typed_exceptions import NgFailureEvent
+
+        retired = {
+            "nemo_gym.agent_utils.sandbox_session": ("HarnessTerminationError",),
+            "nemo_gym.agent_utils.supervisor_client": ("HarnessTerminationError",),
+            "nemo_gym.base_environment_server": ("HandledEpisodeError", "EpisodeFailureT"),
+        }
+        for module, old_names in retired.items():
+            current = importlib.import_module(module)
+            assert "NgFailureEvent" in self.surface[module]
+            assert current.NgFailureEvent is NgFailureEvent
+            for name in old_names:
+                assert name not in self.surface[module]
+                assert not hasattr(current, name)
+        assert "NgFailureEvent" in self.surface["nemo_gym.typed_exceptions"]
+        assert "FailureReportRow" in self.surface["nemo_gym.failure_transport"]
+
     def test_every_recorded_name_still_resolves_at_its_old_path(self) -> None:
         missing = []
         for module, names in self.surface.items():

@@ -17,12 +17,14 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.failure_assertions import raises_agent_failure
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 
@@ -502,8 +504,9 @@ async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as failure:
         await task
+    assert is_harness_termination_failure(failure.value)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert session_id not in active_sessions(agent)
     sandbox.disconnect.assert_awaited_once()
@@ -1437,7 +1440,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
         TestClient(agent.setup_webserver()) as client,
     ):
-        with pytest.raises(RuntimeError) as error:
+        with raises_agent_failure(RuntimeError) as error:
             client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
@@ -1463,7 +1466,7 @@ def test_failed_connection_closes_provider_without_publishing_session(setup):
         TestClient(agent.setup_webserver()) as client,
     ):
         factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
-        with pytest.raises(RuntimeError, match="borrow failed"):
+        with raises_agent_failure(RuntimeError, match="borrow failed"):
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         factory.assert_not_called()
         sandbox.stop.assert_not_awaited()

@@ -122,7 +122,12 @@ def test_public_response_schema_keeps_the_explicit_failure_fields() -> None:
             "http_status",
             "exception_type",
         },
-        "EpisodeFailure": {"failure_reason", "terminal", "failure_kind", "stage"},
+        "EpisodeFailure": {
+            "failure_reason",
+            "terminal",
+            "failure_kind",
+            "stage",
+        },
         "EpisodeId": {"rollout_id", "attempt"},
     }, "Changing version-1 saved fields requires reviewing the RolloutFailureRecord schema_version bump policy"
     assert failure["additionalProperties"] is False

@@ -348,17 +348,32 @@ judge_response = await call_judge(
 )
 ```
 
-Any failure in that call — transport, timeout, 401, 500, malformed body — raises `JudgeError`. Every `/verify` is wrapped by `judge_failsafe`, which turns a `JudgeError` into a row that is:
+Any failure in that call — transport, timeout, 401, 500, malformed body — raises an `NgFailureEvent` with boundary `resources_server` and kind `judge_failed`. Standalone parsers may still raise `JudgeError`. Every `/verify` is wrapped by `judge_failsafe`, which recognizes both forms and turns a judge failure into a row that is:
 
 - written to `<output>_failures.jsonl` instead of `output.jsonl`
 - excluded from the aggregate, which is computed only over the rows in `output.jsonl`
 - retried on resume
 
+Custom handlers must catch both forms. This replaces catching only `JudgeError` around judge calls; that exception remains supported for parser-declared failures. The tuple also includes other Gym failures, so preserve the selector and re-raise unrelated events:
+
+```python
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
+
+try:
+    judge_response = await call_judge(...)
+except JUDGE_FAILURES as error:
+    if not is_judge_failure(error):
+        raise
+    # Apply this verifier's existing judge-failure handling, or re-raise
+    # for judge_failsafe to preserve the diagnostic evidence.
+    raise
+```
+
 Wrap the **call**, not the scoring around it: `reraise_judge_errors` relabels every exception it sees, so covering a whole `verify()` would file ordinary bugs as judge failures.
 
 | Outcome | What to do |
 |---|---|
-| Call failed (transport, timeout, HTTP error) | `call_judge` raises `JudgeError` for you |
+| Call failed (transport, timeout, HTTP error) | `call_judge` raises a resources-server `judge_failed` event for you |
 | Call `call_judge` can't express (external SDK, own timeout) | wrap it in `reraise_judge_errors` |
 | Judge answered, verdict unparseable | a real score — map it to `reward_if_unclear` |
 | Judge answered with nothing | your call; `raise JudgeError(...)` if an empty verdict is meaningless |

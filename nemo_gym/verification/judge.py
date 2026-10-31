@@ -17,12 +17,12 @@
 A failed judge call is a distinct outcome, not a wrong answer. Resources servers
 issue judge calls through ``call_judge``, or wrap a bespoke call in
 ``reraise_judge_errors``; ``judge_failsafe`` wraps every verify endpoint so a
-JudgeError becomes a row tagged ``_ng_failure_class="judge_failed"``, which
+judge failure becomes a row tagged ``_ng_failure_class="judge_failed"``, which
 rollout_collection routes to ``<output>_failures.jsonl`` — excluded from the
 aggregate metrics and from the file-based re-aggregation (``gym eval
 aggregate``), and retryable on resume.
 
-Boundary: a failed *call* (transport/timeout/auth/HTTP) → JudgeError → sidecar; a
+Boundary: a failed *call* (transport/timeout/auth/HTTP) → ``judge_failed`` event → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser
 score it, don't raise), unless the benchmark explicitly treats an invalid judge
 verdict as an unusable grade. FrontierScience Research uses that exception for
@@ -47,6 +47,13 @@ from pydantic import BaseModel
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
+from nemo_gym.core.failure_kinds import (
+    JUDGE_FAILED,
+)
+from nemo_gym.exception_inspection import bounded_text
+from nemo_gym.failure_transport import FailureReportRow, observe_failure, report_for_current_request
+from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
+from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
 
 
 ResponseT = TypeVar("ResponseT", bound=BaseModel)
@@ -62,17 +69,67 @@ def normalize_math_judge_verdict(text: str) -> str:
 
 
 class JudgeError(Exception):
-    """A judge call failed; judge_failsafe routes the row to the failures sidecar."""
+    """A parser-declared judge failure; judge_failsafe routes the row to the failures sidecar."""
+
+
+def judge_call_failed(message: str, *, operation: str, sdk_error: SdkErrorDetails | None = None) -> NgFailureEvent:
+    """The resources server boundary's ``judge_failed``; what was observed stays on the explicit cause."""
+    return NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind=JUDGE_FAILED,
+        failure_reason=bounded_text(message, 2000),
+        operation=operation,
+        stage="verification",
+        foreign_error=sdk_error,
+        message_args=(message,),
+    )
+
+
+def is_judge_failure(error: BaseException) -> bool:
+    """Whether ``error`` is a judge failure: the ``JudgeError`` a parser raises, or a ``judge_failed`` event."""
+    return isinstance(error, JudgeError) or (
+        isinstance(error, NgFailureEvent)
+        and error.boundary == FailureBoundary.RESOURCES_SERVER
+        and error.failure_kind == JUDGE_FAILED
+    )
+
+
+JUDGE_FAILURES = (JudgeError, NgFailureEvent)
+"""Types to catch around a judge call; narrow with ``is_judge_failure`` where other Gym failures can occur."""
+
+
+def _judge_error(error: Exception) -> JudgeError | NgFailureEvent:
+    """The judge failure for a failed judge call; the caller raises it ``from error``.
+
+    A call that failed over HTTP, could not connect or timed out is a typed ``judge_failed``. The kind is not
+    derived from the error's status: a policy that needs the status reads it on the cause.
+    """
+    message = f"{type(error).__name__}: {error}"
+    return judge_call_failed(
+        message,
+        operation="judge.request",
+        sdk_error=None if isinstance(error, NgFailureEvent) else sdk_error_details(error),
+    )
 
 
 async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
-    """Await a judge call; re-raise any exception as JudgeError (recorded verbatim)."""
+    """Await a judge call; preserve judge failures and wrap other errors as ``judge_failed`` events.
+
+    Custom handlers catch ``JUDGE_FAILURES`` and select with ``is_judge_failure``;
+    an ``except JudgeError`` handler alone catches only standalone parser failures.
+    """
     try:
         return await coro
-    except JudgeError:
-        raise
     except Exception as e:
-        raise JudgeError(f"{type(e).__name__}: {e}") from e
+        failure = e if is_judge_failure(e) else _judge_error(e)
+        if failure is not e:
+            failure.__cause__ = e  # set before recording, so the observation carries the cause chain
+        # Recorded before the caller decides: a retry that then succeeds keeps it as an observation.
+        if isinstance(failure, NgFailureEvent):
+            observe_failure(failure)
+        if failure is e:
+            raise
+        raise failure from e
 
 
 async def call_judge(
@@ -83,7 +140,7 @@ async def call_judge(
     json: Any,
     response_model: Type[ResponseT],
 ) -> ResponseT:
-    """POST to a judge model server and parse the reply; raise JudgeError on failure.
+    """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
     ``url_path`` is the judge's API surface (``/v1/responses`` or
     ``/v1/chat/completions``), paired with the matching ``response_model``. The
@@ -108,7 +165,7 @@ async def call_judge(
 
 
 def judge_failsafe(verify_fn: Callable) -> Callable:
-    """Wrap verify() so a JudgeError returns a sidecar-routed row (reward 0.0, the
+    """Wrap verify() so a judge failure returns a sidecar-routed row (reward 0.0, the
     routing keys, the request's ``response`` carried) instead of propagating.
     functools.wraps keeps verify's signature so FastAPI injects the same params
     (``body``, and ``request`` for servers that take it); ``*args, **kwargs`` pass
@@ -118,7 +175,9 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
     async def wrapper(*args, **kwargs):
         try:
             return await verify_fn(*args, **kwargs)
-        except JudgeError as e:
+        except JUDGE_FAILURES as e:
+            if not is_judge_failure(e):
+                raise
             body = kwargs.get("body") or next(
                 (a for a in (*kwargs.values(), *args) if hasattr(a, "model_dump") and hasattr(a, "response")),
                 None,
@@ -131,7 +190,8 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
             data |= {
                 "reward": 0.0,
                 "mask_sample": True,
-                "failure_kind": "judge_failed",
+                # The judge owns this boundary; more specific diagnostics stay on the explicit cause.
+                "failure_kind": JUDGE_FAILED,
                 "failure_reason": error,
                 # Keep older NeMo RL consumers working during top-level field migration.
                 "instance_config": {
@@ -141,6 +201,12 @@ def judge_failsafe(verify_fn: Callable) -> Callable:
                 "_ng_failure_class": "judge_failed",
                 "_ng_failure_judge_error": error,
             }
+            # Legacy/parser JudgeErrors also need a judge-owned event, rather than borrowing an inner kind.
+            failure = e
+            if not (isinstance(e, NgFailureEvent) and e.failure_kind == JUDGE_FAILED):
+                failure = judge_call_failed(error, operation="judge.verify")
+                failure.__cause__ = e
+            data |= FailureReportRow.fields(report_for_current_request(failure))
             return JSONResponse(content=jsonable_encoder(data))
 
     return wrapper

@@ -15,6 +15,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.transfer import TRANSFER_USER
 from nemo_gym.tasks.harbor.publish import answer_write_command
+from nemo_gym.testing.failure_assertions import raises_agent_failure
 from responses_api_agents.harbor_oracle_agent import app as module
 from responses_api_agents.harbor_oracle_agent.app import OracleAgent, OracleAgentConfig
 
@@ -405,7 +406,8 @@ def test_a_lost_sandbox_on_the_answer_write_is_not_scored(monkeypatch):
     agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
-    with pytest.raises(module.SandboxUnavailableError, match="could not write answer.md in /app"):
+    # The agent route reports the lost sandbox as its typed failure, caused by the original error.
+    with raises_agent_failure(module.SandboxUnavailableError, match="could not write answer.md in /app"):
         client.post("/v1/responses", json=RESPONSES_BODY)
 
 
@@ -427,7 +429,7 @@ def test_a_lost_sandbox_answering_the_answer_probe_or_read_is_not_scored(monkeyp
     agent, _, _ = make_agent(monkeypatch, sandbox=sandbox)
     client = TestClient(agent.setup_webserver())
     assert client.post("/v1/agent_sessions", json=seed_body()).status_code == 200
-    with pytest.raises(module.SandboxUnavailableError, match=message):
+    with raises_agent_failure(module.SandboxUnavailableError, match=message):
         client.post("/v1/responses", json=RESPONSES_BODY)
     assert sandbox.files == {}
 

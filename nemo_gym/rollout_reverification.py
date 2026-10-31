@@ -55,6 +55,7 @@ from nemo_gym.config.global_config import (
     rollout_run_labels,
 )
 from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -770,7 +771,13 @@ def _run_verification_payloads(
                         flush=True,
                     )
                 raise
-            return row, await get_response_json(res)
+            result = await get_response_json(res)
+            # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
+            # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
+            report = FailureHeader.decode(getattr(res, "headers", None))
+            if report is not None:
+                result = FailureReportRow.merged_into(result, report)
+            return row, result
 
     return tqdm.as_completed(
         map(_post_subroutine, payloads),

@@ -20,15 +20,23 @@ from typing_extensions import Self
 from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.core.episode import EpisodeId, rollout_context
-from nemo_gym.core.failure_kinds import FailureStage
+from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, FailureStage
+from nemo_gym.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import ControlError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
-from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
+from nemo_gym.server_runtime.episode_types import (
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    EpisodeFailure,
+    FailureBoundary,
+    FailureReport,
+)
 from nemo_gym.server_utils import SimpleServer
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
 
 LOGGER = logging.getLogger(__name__)
@@ -37,7 +45,6 @@ _ENVIRONMENT_CHECKPOINT_MODES = ("restart_only", "exported")
 
 EpisodeRequestT = TypeVar("EpisodeRequestT", bound=BaseEpisodeRequest[Any])
 EpisodeResponseT = TypeVar("EpisodeResponseT", bound=BaseEpisodeResponse[Any])
-EpisodeFailureT = TypeVar("EpisodeFailureT", bound=EpisodeFailure)
 CleanupCallback = Callable[[], Awaitable[None]]
 
 
@@ -111,6 +118,7 @@ class CleanupContext:
     episode_id: EpisodeId
     cleanup_timeout_seconds: float
     _cleanups: list[_CleanupEntry] = field(default_factory=list)
+    failure_report: FailureReport = field(default_factory=FailureReport)
 
     def register_cleanup(self, name: str, callback: CleanupCallback) -> CleanupHandle:
         entry = _CleanupEntry(name=name, callback=callback)
@@ -122,19 +130,59 @@ class CleanupContext:
             try:
                 async with asyncio.timeout(self.cleanup_timeout_seconds):
                     await entry.close()
-            except TimeoutError:
+            except TimeoutError as error:
+                self._observe_failure(entry, error)
                 # The owner's expiry or reaping takes over; the earlier-registered callbacks still run.
                 LOGGER.error(f"Episode cleanup timed out: {entry.name} episode_id={self.episode_id}")
-            except Exception:
+            except Exception as error:
+                self._observe_failure(entry, error)
                 LOGGER.exception(f"Episode cleanup failed: {entry.name}")
 
+    def _observe_failure(self, entry: _CleanupEntry, error: Exception) -> None:
+        observed = NgFailureEvent(
+            boundary=FailureBoundary.ENVIRONMENT,
+            failure_kind=SESSION_RELEASE_FAILED,
+            failure_reason=f"Episode cleanup failed: {entry.name}"[:2000],
+            stage="cleanup",
+            operation="episode.cleanup",
+        )
+        observed.__cause__ = error
+        # Cleanup is an observation, never a replacement for the episode's result or primary failure.
+        self.failure_report = self.failure_report.merged(failure_report_for(observed))
 
-class HandledEpisodeError(Exception):
-    """Carry a failure that belongs in the episode response."""
 
-    def __init__(self, failure: EpisodeFailure) -> None:
-        super().__init__(failure.failure_reason)
-        self.failure = failure
+def handled_episode_failure(
+    *,
+    terminal: bool,
+    evidence: dict[str, object] | None = None,
+    failure_kind: str | None = None,
+    **event_fields: Any,
+) -> NgFailureEvent:
+    """The environment's handled episode failure: one ``NgFailureEvent`` with the local policy kept apart.
+
+    ``terminal`` and ``evidence`` are runtime outcome data for the response adapter, never event fields; the
+    adapter builds the protocol's ``EpisodeFailure`` after cleanup. ``failure_kind`` is the outcome's kind and
+    may stay unset; the event then records the registered ``episode_failed``.
+    """
+    boundary = event_fields.pop("boundary", FailureBoundary.ENVIRONMENT)
+    if FailureBoundary(boundary) is not FailureBoundary.ENVIRONMENT:
+        raise ValueError("a handled episode failure is an environment failure")
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.ENVIRONMENT, failure_kind=failure_kind or EPISODE_FAILED, **event_fields
+    )
+    failure.episode_terminal = terminal
+    failure.episode_evidence = evidence if evidence is not None else {}
+    failure.episode_failure_kind = failure_kind
+    return failure
+
+
+def is_handled_episode_failure(error: BaseException) -> bool:
+    """Whether ``error`` is an environment failure built by ``handled_episode_failure``."""
+    return (
+        isinstance(error, NgFailureEvent)
+        and error.boundary == FailureBoundary.ENVIRONMENT
+        and hasattr(error, "episode_terminal")
+    )
 
 
 # Request Timeout, Too Early and Too Many Requests clear on a later attempt.
@@ -157,6 +205,8 @@ def is_retryable_dependency_error(error: BaseException) -> bool:
     connection and a timeout are transient. Any other error, such as a reply that fails validation, would fail the
     same way again.
     """
+    if isinstance(error, NgFailureEvent) and error.http_error is not None:
+        error = error.http_error
     if isinstance(error, ClientResponseError):
         return is_retryable_dependency_status(error.status)
     # A dropped connection mid-body raises ClientPayloadError, which is transient like a refused connection.
@@ -166,31 +216,36 @@ def is_retryable_dependency_error(error: BaseException) -> bool:
 def dependency_failure(
     error: BaseException,
     *,
-    failure_model: type[EpisodeFailureT],
     stage: FailureStage,
     terminal: bool | None = None,
     name_error_type: bool = False,
     **fields: Any,
-) -> HandledEpisodeError:
+) -> NgFailureEvent:
     """Turn a failed call to another server into the episode's failure.
 
     ``failure_reason`` keeps the dependency's own explanation from its response body
     (see ``format_exception_with_response_body``), prefixed with the error's class name when ``name_error_type`` is set,
     and bounded to the failure's 2000 characters. ``terminal`` defaults to
     ``not is_retryable_dependency_error(error)``; pass it only where the stage decides on its own.
-    ``fields`` fill the failure model's own fields, such as a partial response.
+    ``fields`` retain partial evidence for the response adapter, such as a partial response.
     """
-    failure_reason = format_exception_with_response_body(error)
-    if name_error_type:
-        failure_reason = f"{type(error).__name__}: {failure_reason}"
-    return HandledEpisodeError(
-        failure_model(
-            stage=stage,
-            failure_reason=failure_reason[:2000],
-            terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
-            **fields,
-        )
+    description_error = (
+        error.http_error if isinstance(error, NgFailureEvent) and error.http_error is not None else error
     )
+    failure_reason = format_exception_with_response_body(description_error)
+    if name_error_type:
+        failure_reason = f"{type(description_error).__name__}: {failure_reason}"
+    handled = handled_episode_failure(
+        boundary=FailureBoundary.ENVIRONMENT,
+        stage=stage,
+        operation="episode",
+        failure_reason=failure_reason[:2000],
+        terminal=not is_retryable_dependency_error(error) if terminal is None else terminal,
+        evidence=fields,
+    )
+    # The dependency's error is this failure's explicit cause, whether or not the caller writes ``from``.
+    handled.__cause__ = error
+    return handled
 
 
 class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeResponseT]):
@@ -252,7 +307,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                     self._admission.acquire(),
                     timeout=self.config.queue_timeout_seconds,
                 )
-            except TimeoutError:
+            except TimeoutError as error:
                 return self.failure_response(
                     request,
                     EpisodeFailure(
@@ -260,6 +315,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                         terminal=False,
                         stage="admission",
                     ),
+                    report=reply_failure_report(error),
                 )
             acquired = True
 
@@ -268,6 +324,7 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
             cleanup_timeout_seconds=float(self.config.cleanup_timeout_seconds),
         )
         response: EpisodeResponseT
+        handled: NgFailureEvent | None = None
         cancelled: asyncio.CancelledError | None = None
         # Set once this request owns its episode's checkpoint state.
         # A begin refused as a duplicate or a retired attempt owns nothing,
@@ -301,14 +358,18 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
                                 failure_reason="Episode timed out",
                                 terminal=False,
                             ),
+                            report=reply_failure_report(error),
                         )
                     else:
                         response = self._unhandled_failure_response(request, error)
                 except ControlError:
                     # A checkpoint refused this episode before it started; the caller retries it later.
                     raise
-                except HandledEpisodeError as error:
-                    response = self.failure_response(request, error.failure)
+                except NgFailureEvent as error:
+                    if not is_handled_episode_failure(error):
+                        response = self._unhandled_failure_response(request, error)
+                    else:
+                        handled = error
                 except asyncio.CancelledError as error:
                     cancelled = error
                 except Exception as error:
@@ -331,7 +392,13 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
 
         if cancelled is not None:
             raise cancelled
+        if handled is not None:
+            response = self.failure_response(request, handled)
         response = self.response_model.model_validate(response)
+        if cleanup.failure_report.events:
+            response = response.model_copy(
+                update={"failure_report": (response.failure_report or FailureReport()).merged(cleanup.failure_report)}
+            )
         self.validate_response_identity(request, response)
         return response
 
@@ -409,22 +476,41 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
     def _unhandled_failure_response(self, request: EpisodeRequestT, error: Exception) -> EpisodeResponseT:
         LOGGER.exception(f"Unhandled environment server error: episode_id={request.episode_id}")
         failure_reason = f"Unhandled environment server error: {type(error).__name__}: {error}"
-        return self.failure_response(
-            request,
-            EpisodeFailure(
-                failure_reason=failure_reason[:2000],
-                terminal=True,
-            ),
+        reported = handled_episode_failure(
+            boundary=FailureBoundary.ENVIRONMENT,
+            failure_reason=failure_reason[:2000],
+            operation="episode",
+            terminal=True,
         )
+        reported.__cause__ = error
+        return self.failure_response(request, reported)
 
-    def failure_response(self, request: EpisodeRequestT, failure: EpisodeFailure) -> EpisodeResponseT:
-        return self.response_model.model_validate(
-            {
-                "episode_id": request.episode_id,
-                "task_id": request.task.task_id,
-                "failure": failure.model_dump(mode="json"),
+    def failure_response(
+        self,
+        request: EpisodeRequestT,
+        failure: EpisodeFailure | NgFailureEvent,
+        *,
+        report: FailureReport | None = None,
+    ) -> EpisodeResponseT:
+        """Adapt runtime event, local policy and evidence to the protocol's wire failure model.
+
+        The failure's ``FailureReport`` goes in the reply's ``failure_report``, beside the failure.
+        """
+        if is_handled_episode_failure(failure):
+            report = report_for_current_request(failure)
+            fields = failure.episode_evidence | {
+                "failure_reason": failure.failure_reason,
+                "failure_kind": failure.episode_failure_kind,
+                "stage": failure.stage,
+                "terminal": failure.episode_terminal,
             }
-        )
+        else:
+            # A protocol may still return a wire failure directly instead of raising a runtime failure.
+            fields = failure.model_dump(mode="json")
+        reply = {"episode_id": request.episode_id, "task_id": request.task.task_id, "failure": fields}
+        if report is not None and (report.events or report.omitted):
+            reply["failure_report"] = report.model_dump(mode="json")
+        return self.response_model.model_validate(reply)
 
     @staticmethod
     def validate_response_identity(request: EpisodeRequestT, response: EpisodeResponseT) -> None:

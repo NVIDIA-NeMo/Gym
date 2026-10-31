@@ -16,7 +16,9 @@ from nemo_gym.server_runtime.episode_types import EpisodeFailure
 class RolloutFailureRecord(BaseModel):
     """Associate one observed failure with a run and an episode attempt.
 
-    ``source`` identifies who reported the failure. ``delivery`` describes the
+    ``source`` identifies who reported the failure, not where it happened: ``collector`` is rollout collection
+    recording what it observed, and the failure's own events carry the causal ``FailureBoundary`` (a collector
+    record can name a model, agent or ``collection`` boundary). ``delivery`` describes the
     collector's evidence about delivery to the Environment Server: ``not_sent``
     requires evidence that the request was not sent, ``possibly_delivered`` covers
     an uncertain outcome, and ``delivered`` means delivery was established. It

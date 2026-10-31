@@ -48,6 +48,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.browsecomp_advanced_harness.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
 
@@ -1580,7 +1581,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             )
             try:
                 judge_response, text = await self._call_judge(judge_create_params)
-            except JudgeError as e:
+            except JUDGE_FAILURES as e:
+                if not is_judge_failure(e):
+                    raise
                 last_error = str(e)
                 sleep_s = _judge_backoff_s(attempt)
                 print(

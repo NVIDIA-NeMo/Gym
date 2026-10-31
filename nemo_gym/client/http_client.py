@@ -18,6 +18,7 @@ import asyncio
 import atexit
 import socket
 import time
+from collections.abc import Callable
 from traceback import print_exc
 from typing import Any, NamedTuple, Optional, Type, Union, Unpack
 
@@ -31,6 +32,7 @@ from aiohttp import (
     ClientTimeout,
     DummyCookieJar,
     ServerDisconnectedError,
+    UploadTracker,
 )
 from aiohttp.client import _RequestOptions
 from multidict import CIMultiDict
@@ -45,6 +47,7 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode import (
     current_rollout_id,
 )
+from nemo_gym.failure_transport import FailureHeader, observe_reply
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, safe_set_span_attributes
 from nemo_gym.telemetry.connection_pool import (
     QueueTimedTCPConnector,
@@ -57,6 +60,7 @@ from nemo_gym.telemetry.connection_pool import (
 from nemo_gym.telemetry.observer import request_counts
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
+from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.utils.server_process import (
     get_nemo_gym_fastapi_num_workers,
     is_nemo_gym_fastapi_worker,
@@ -362,10 +366,14 @@ async def request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
+
+    The private transport-failure observer runs before retry decisions and must not raise. It is not
+    forwarded to aiohttp; cancellation bypasses it.
 
     This is the only place Gym talks to another server, so it is also the only place
     trace context has to be injected: every agent -> model and agent -> resources hop goes
@@ -405,7 +413,7 @@ async def request(
     send = _traced_request if traced else _request_with_retries
     counts = request_counts()
     if counts is None:
-        return await send(
+        response = await send(
             method,
             url,
             _internal=_internal,
@@ -414,13 +422,18 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             **kwargs,
         )
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations,
+        # whether or not traces are exported.
+        observe_reply(getattr(response, "headers", None))
+        return response
     # With metrics exporting, count calls until this helper returns or raises, including eligible body reads.
     counts.outbound_in_flight += 1
     try:
-        return await send(
+        response = await send(
             method,
             url,
             _internal=_internal,
@@ -429,9 +442,14 @@ async def request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             **kwargs,
         )
+        # A Gym server's reply may forward failures it recovered from; they join this request's observations,
+        # whether or not traces are exported.
+        observe_reply(getattr(response, "headers", None))
+        return response
     finally:
         counts.outbound_in_flight -= 1
 
@@ -445,6 +463,7 @@ async def _traced_request(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -489,6 +508,7 @@ async def _traced_request(
             _server_name=_server_name,
             _control=_control,
             _resend_after_disconnect=_resend_after_disconnect,
+            _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
             **kwargs,
         )
@@ -527,6 +547,8 @@ def format_exception_with_response_body(error: BaseException) -> str:
     such as an agent's ``AgentSeedRejectedError`` detail, is in the body that ``raise_for_status`` keeps on
     ``response_content``.
     """
+    if isinstance(error, NgFailureEvent) and error.http_error is not None:
+        error = error.http_error
     content = getattr(error, "response_content", None) if isinstance(error, ClientResponseError) else None
     if not content:
         return str(error)
@@ -547,6 +569,18 @@ def _format_upstream_error_log(server_name: str, error: ClientResponseError) -> 
     )
 
 
+def _request_upload_complete(upload: UploadTracker | None) -> bool | None:
+    """Whether the one observed HTTP attempt finished sending its body, including EOF.
+
+    Pending/cancelled state or an unobserved aiohttp resend is unknown; it cannot qualify a response timeout.
+    """
+    if upload is None or upload.attempts != 1 or not upload.upload_complete.done():
+        return None
+    if upload.upload_complete.cancelled():
+        return None
+    return upload.upload_complete.exception() is None
+
+
 async def _request_with_retries(
     method: str,
     url: str,
@@ -556,6 +590,7 @@ async def _request_with_retries(
     _max_num_tries: Optional[int] = None,
     _control: bool = False,
     _resend_after_disconnect: bool = True,
+    _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
@@ -570,8 +605,13 @@ async def _request_with_retries(
         while True:
             if _max_num_tries is not None:
                 explicit_tries += 1
+            # A tracker belongs to exactly one request. Do not reuse a completed upload across retries.
+            upload = UploadTracker() if _on_transport_failure is not None else None
+            attempt_kwargs = dict(kwargs)
+            if upload is not None:
+                attempt_kwargs["upload_tracker"] = upload
             try:
-                response = await client.request(method=method, url=url, **kwargs)
+                response = await client.request(method=method, url=url, **attempt_kwargs)
                 if (
                     _read_body
                     and _resend_after_disconnect
@@ -583,7 +623,9 @@ async def _request_with_retries(
                     # reply goes back unread, so the caller's own read raises the original error, with its status.
                     await response.read()
                 return response
-            except ServerDisconnectedError:
+            except ServerDisconnectedError as error:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect:
                     raise
                 global _NUM_SERVER_DISCONNECTED_ERROR
@@ -604,6 +646,8 @@ async def _request_with_retries(
 
                 await asyncio.sleep(0.5)
             except ClientOSError as error:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(error, _request_upload_complete(upload))
                 if not _resend_after_disconnect and not isinstance(error, ClientConnectorError):
                     raise
                 global _NUM_CLIENT_OS_ERROR
@@ -623,6 +667,8 @@ async def _request_with_retries(
 
                 await asyncio.sleep(0.5)
             except Exception as e:
+                if _on_transport_failure is not None:
+                    _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
                 if not _resend_after_disconnect:
@@ -686,7 +732,30 @@ Response content: {content}""")
             e.history = ()
             e.headers = CIMultiDict(e.headers) if e.headers is not None else None
             e.args = (e.request_info, e.history)
+            # A Gym server's own failure, rebuilt from its header, is the explicit cause of this HTTP error, so the
+            # caller's failure chain reaches the remote failure with its id, kind and reason.
+            remote = rebuild_failure(FailureHeader.decode(e.headers))
+            if remote is not None:
+                raise e from remote
             raise e
+
+
+async def raise_boundary_failure(response: ClientResponse, content: bytes | None = None) -> None:
+    """Raise a valid remote ``NgFailureEvent`` with its original IDs and explicit causes.
+
+    ``error.http_error`` retains this hop's status, body and request information. Without a final remote
+    failure, raise the original ``ClientResponseError``. Call ``raise_for_status`` where callers require
+    that HTTP exception type even for typed replies, such as a model client's retry/routing logic.
+    """
+    try:
+        await raise_for_status(response, content)
+    except ClientResponseError as http_error:
+        remote = http_error.__cause__
+        if not isinstance(remote, NgFailureEvent):
+            raise
+        http_error.__cause__ = None
+        remote.http_error = http_error
+        raise remote
 
 
 async def get_response_json(response: ClientResponse) -> Any:

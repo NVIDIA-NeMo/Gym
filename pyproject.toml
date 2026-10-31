@@ -880,7 +880,7 @@ layers = [
     # models/
     "nemo_gym.models._checkpoint : nemo_gym.models._checkpoint_workers : nemo_gym.anthropic_converter : nemo_gym.anthropic_utils : nemo_gym.base_responses_api_model : nemo_gym.chat_streaming : nemo_gym.openai_utils : nemo_gym.responses_converter : nemo_gym.responses_streaming : nemo_gym.token_id_capture",
     # server_runtime/
-    "nemo_gym.server_runtime : nemo_gym.server_utils",
+    "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.verifier_observability : nemo_gym.server_utils",
     # artifacts/
     "nemo_gym.artifacts",
     # metrics/
@@ -896,9 +896,9 @@ layers = [
     # telemetry/
     "nemo_gym.telemetry",
     # core/
-    "nemo_gym.core",
+    "nemo_gym.core : nemo_gym.failure_transport : nemo_gym.server_runtime.episode_types : nemo_gym.typed_exceptions",
     # utils/
-    "nemo_gym.utils",
+    "nemo_gym.utils : nemo_gym.exception_inspection",
     # config/
     "nemo_gym.config",
 ]

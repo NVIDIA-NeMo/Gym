@@ -59,6 +59,7 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import JudgeError
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.genrm_compare.utils import (
     GenRMOutputParseError,
     aggregate_scores,
@@ -816,10 +817,18 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 )
             )
             raise
-        except JudgeError as error:
-            await self._fail_verify_cohort(
-                cohort, str(error), expected_phase="evaluating", failure_kind="judge", hold_for_checkpoint=True
-            )
+        except JUDGE_FAILURES as error:
+            if is_judge_failure(error):
+                await self._fail_verify_cohort(
+                    cohort, str(error), expected_phase="evaluating", failure_kind="judge", hold_for_checkpoint=True
+                )
+            else:
+                logger.exception("GenRM cohort evaluation failed for %s", prompt_key)
+                await self._fail_verify_cohort(
+                    cohort,
+                    f"GenRM cohort evaluation failed: {type(error).__name__}: {str(error)[:1000]}",
+                    expected_phase="evaluating",
+                )
         except TimeoutError:
             await self._fail_verify_cohort(
                 cohort,
@@ -1442,7 +1451,9 @@ class GenRMCompareResourcesServer(SimpleResourcesServer):
                 principle=body.principle,
                 expected_rubric_ids=body.expected_rubric_ids,
             )
-        except JudgeError as error:
+        except JUDGE_FAILURES as error:
+            if not is_judge_failure(error):
+                raise
             raise HTTPException(status_code=503, detail=str(error)) from error
         detailed_results = [
             {

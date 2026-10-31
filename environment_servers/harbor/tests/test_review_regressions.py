@@ -685,3 +685,25 @@ def test_task_data_requires_digest_and_accepts_materialized_row(tmp_path, monkey
     assert DIGEST_KEY in TaskData.model_json_schema()["required"]
     with pytest.raises(ValidationError):
         TaskData.model_validate({})
+
+
+async def test_pull_failure_keeps_its_provider_cause_when_cleanup_fails(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.sandbox.providers.base import SandboxCreateError
+
+    server, task, _, _ = make_server(tmp_path, monkeypatch, image_pull_retries=1)
+    provider_error = RuntimeError("registry unavailable")
+    pull_error = SandboxCreateError("ErrImagePull")
+    pull_error.__cause__ = provider_error
+    sandbox = type("Sandbox", (), {"stop": AsyncMock(side_effect=RuntimeError("cleanup unavailable"))})()
+
+    async def start(_):
+        raise pull_error
+
+    with pytest.raises(SandboxCreateError) as caught:
+        await server._start_with_pull_retries(task, key="owned", what="sandbox", make=lambda: sandbox, start=start)
+    assert caught.value is pull_error
+    assert caught.value.__cause__ is provider_error
+    assert server._sandboxes["owned"] is sandbox
+    sandbox.stop.assert_awaited_once()

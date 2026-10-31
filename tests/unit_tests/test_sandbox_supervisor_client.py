@@ -23,7 +23,6 @@ from nemo_gym.agent_utils.supervisor_client import (
     SUPERVISOR_FILE,
     SUPERVISOR_PID_FILE,
     SUPERVISOR_SCRIPT,
-    HarnessTerminationError,
     exec_timeout,
     parse_cleanup_receipt,
     stop_and_confirm_cleanup,
@@ -32,6 +31,7 @@ from nemo_gym.agent_utils.supervisor_client import (
 )
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 class LocalSandbox:
@@ -309,7 +309,7 @@ async def test_terminal_negative_receipt_preserves_failure_without_signalling_a_
     receipt = {"cleanup_confirmed": False, "return_code": None, "timed_out": False, "error": "launch failed"}
     (session_dir / CLEANUP_RECEIPT_FILE).write_text(json.dumps(receipt))
     sandbox.exec = AsyncMock(side_effect=AssertionError("must not signal a possibly reused PID"))
-    with pytest.raises(HarnessTerminationError, match="launch failed") as failure:
+    with pytest.raises(NgFailureEvent, match="launch failed") as failure:
         await stop_and_confirm_cleanup(
             sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
         )
@@ -330,7 +330,7 @@ async def test_stop_surfaces_terminal_negative_receipt_created_after_initial_che
         return SandboxExecResult("", "", 0)
 
     sandbox.exec = AsyncMock(side_effect=stop)
-    with pytest.raises(HarnessTerminationError, match="descendants remain") as failure:
+    with pytest.raises(NgFailureEvent, match="descendants remain") as failure:
         await stop_and_confirm_cleanup(
             sandbox, session_dir=str(session_dir), workdir=str(session_dir.parent), timeout=1, harness="test"
         )

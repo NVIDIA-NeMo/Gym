@@ -42,6 +42,74 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
+def has_saved_generation(row: Mapping[str, Any]) -> bool:
+    """Recognize retained response data, including a serialized response with empty output.
+
+    A diagnostic error object or an empty mapping is not generation. A typed response
+    has its producer identity and output list even when no assistant text was emitted.
+    """
+    for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
+        answer = row.get(key)
+        if not isinstance(answer, Mapping):
+            continue
+        output = answer.get("output")
+        if not isinstance(output, list):
+            continue
+        if (
+            answer.get("object") == "response"
+            and isinstance(answer.get("id"), str)
+            and answer["id"]
+            and (output or (answer.get("error") is None and answer.get("status") != "failed"))
+        ):
+            return True
+        if answer.get("status") == "completed" and any(
+            isinstance(item, Mapping) and item.get("type") == "message" and item.get("role") == "assistant"
+            for item in output
+        ):
+            return True
+    return False
+
+
+def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
+    """A selected route failure names no owned cause that permits running the agent again."""
+    if row.get("_ng_failure_class") in {"judge_failed", "judge_invalid"}:
+        return True  # Verification recovery may reuse an answer; it never reruns the agent.
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    not_sent = isinstance(record, Mapping) and (
+        record.get("delivery") == "not_sent" or isinstance(failure, Mapping) and failure.get("stage") == "admission"
+    )
+    if row.get("_ng_unrouted_run_error") is True and not not_sent:
+        # An aborted collection retains this attempt as diagnostic history, not a replacement outcome.
+        return True
+    if isinstance(record, Mapping) and record.get("source") == "collector":
+        if record.get("delivery") == "possibly_delivered" and not not_sent:
+            return True
+    events = row.get("_ng_failure_events")
+    selected = row.get("_ng_failure_id")
+    if "_ng_failure_id" not in row:
+        return False  # Legacy producer fields remain usable without a selected event report.
+    if not isinstance(events, Mapping) or not isinstance(selected, str) or not selected:
+        return True
+    seen = set()
+    while selected is not None:
+        if not isinstance(selected, str):
+            return True
+        event = events.get(selected)
+        if not isinstance(event, Mapping) or selected in seen:
+            # Store resume and legacy collection also use this gate, before the recovery reader runs.
+            return True
+        seen.add(selected)
+        cause = event.get("cause_id")
+        if cause is None:
+            return event.get("failure_kind") == "agent_route_failed" or (
+                event.get("failure_kind") == "collection_dispatch_failed"
+                and row.get("_ng_failure_class") == "agent_run_error"
+            )
+        selected = cause
+    return False
+
+
 logger = logging.getLogger(__name__)
 
 

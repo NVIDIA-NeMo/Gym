@@ -18,7 +18,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.client import get_response_json, raise_boundary_failure, rollout_path_prefix
 from nemo_gym.config import (
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -37,13 +37,11 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServerConfig,
     CleanupContext,
     DirectHTTPToolAccess,
-    HandledEpisodeError,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
-    SingleAgentTurnFailure,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
@@ -53,6 +51,8 @@ from nemo_gym.server_runtime import (
     seed_restarts,
     seed_verify_step_type,
 )
+from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.trajectory import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,
@@ -61,6 +61,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     VerifierInvocation,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -145,7 +146,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             url_path="/aggregate_metrics",
             json=body,
         )
-        await raise_for_status(response)
+        await raise_boundary_failure(response)
         return AggregateMetrics.model_validate(await get_response_json(response))
 
     async def run(
@@ -212,7 +213,9 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             try:
                 async with self.checkpoint_step(request, "replay"):
                     agent_response = await self._invoke_agent(request, handles)
-            except HandledEpisodeError as failure:
+            except NgFailureEvent as failure:
+                if not is_handled_episode_failure(failure):
+                    raise
                 # The agent's evidence of the failed turn arrives with its session close.
                 # The close runs after the failed step, which parks until resume while a checkpoint is open.
                 try:
@@ -220,8 +223,8 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception:
                     pass  # Final unwind retries the close and logs its failure.
                 if closed_agent:
-                    failure.failure.agent_observations = closed_agent[-1].agent_observations
-                    failure.failure.trajectory = closed_agent[-1].trajectory
+                    failure.episode_evidence["agent_observations"] = closed_agent[-1].agent_observations
+                    failure.episode_evidence["trajectory"] = closed_agent[-1].trajectory
                 raise
             stage = "close_agent"
 
@@ -246,7 +249,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 except Exception as error:
                     raise dependency_failure(
                         error,
-                        failure_model=SingleAgentTurnFailure,
                         stage="cleanup",
                         partial_response=agent_response,
                     ) from error
@@ -331,7 +333,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     task_data=task_input.task_data,
                 ).model_dump(mode="json"),
             )
-            await raise_for_status(seed_http_response)
+            await raise_boundary_failure(seed_http_response)
             handles.resources_cookies = _cookies(seed_http_response)
             handles.resources_verify_step_type = seed_verify_step_type(seed_http_response.headers)
             if seed_restarts(seed_http_response.headers):
@@ -344,7 +346,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="seed",
             ) from error
         return seed
@@ -412,7 +413,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                     sandbox_access=seed.sandbox_access,
                 ).model_dump(mode="json"),
             )
-            await raise_for_status(agent_create_http_response)
+            await raise_boundary_failure(agent_create_http_response)
             agent_session = AgentSeedSessionResponse.model_validate(
                 await get_response_json(agent_create_http_response)
             )
@@ -424,7 +425,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
 
@@ -439,7 +439,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # A restore before its reply invokes it again, and the agent gives the reply it already gave.
                 headers={AGENT_ACTIVATION_HEADER: "1"},
             )
-            await raise_for_status(agent_http_response)
+            await raise_boundary_failure(agent_http_response)
             response_cookies = _cookies(agent_http_response)
             if response_cookies:
                 handles.agent_cookies = response_cookies
@@ -447,7 +447,6 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="agent",
             ) from error
 
@@ -463,7 +462,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ).model_dump(mode="json"),
             cookies=handles.agent_cookies,
         )
-        await raise_for_status(close_http_response)
+        await raise_boundary_failure(close_http_response)
         close = AgentCloseSessionResponse.model_validate(await get_response_json(close_http_response))
         if close.agent_session_id != handles.agent_session_id:
             raise ValueError("Agent close returned a different agent_session_id")
@@ -484,7 +483,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             ).model_dump(mode="json"),
             cookies=handles.resources_cookies,
         )
-        await raise_for_status(close_response)
+        await raise_boundary_failure(close_response)
 
     async def _verify(
         self,
@@ -514,14 +513,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                         VerifierInvocation.model_validate(value) for value in payload[NG_VERIFIER_INVOCATIONS_KEY]
                     ]
             except (ValueError, TypeError):
-                await raise_for_status(verify_http_response, content=await verify_http_response.read())
+                await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
                 raise
-            await raise_for_status(verify_http_response, content=await verify_http_response.read())
+            await raise_boundary_failure(verify_http_response, content=await verify_http_response.read())
             return SingleAgentTurnResult.model_validate(payload)
         except Exception as error:
             raise dependency_failure(
                 error,
-                failure_model=SingleAgentTurnFailure,
                 stage="verification",
                 partial_response=agent_response,
                 agent_observations=observations,
@@ -580,19 +578,21 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         agent_observations: Any = None,
         trajectory: Any = None,
         verifier_invocations: list[VerifierInvocation] | None = None,
-    ) -> HandledEpisodeError:
+    ) -> NgFailureEvent:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
-        return HandledEpisodeError(
-            SingleAgentTurnFailure(
-                stage=stage,
-                failure_reason=failure_reason[:2000],
-                terminal=terminal,
-                partial_response=partial_response,
-                agent_observations=agent_observations,
-                trajectory=trajectory,
-                verifier_invocations=verifier_invocations,
-            )
+        return handled_episode_failure(
+            boundary=FailureBoundary.ENVIRONMENT,
+            stage=stage,
+            operation="episode",
+            failure_reason=failure_reason[:2000],
+            terminal=terminal,
+            evidence={
+                "partial_response": partial_response,
+                "agent_observations": agent_observations,
+                "trajectory": trajectory,
+                "verifier_invocations": verifier_invocations,
+            },
         )
 
 
