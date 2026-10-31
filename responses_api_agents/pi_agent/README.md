@@ -218,6 +218,9 @@ detail, not a separate endpoint or a setup step users must run.
 - `workspace_root`: where per-request HOMEs are created and deleted
 - `thinking`: passed to `--thinking` (off, minimal, low, medium, high, xhigh)
 - `system_prompt`: appended via `--append-system-prompt`
+- `plain_system_prompt`: leave out of Pi's default system prompt the block pointing at Pi's documentation, whose
+  paths name the runtime's folder, and the line with the machine's date, for tasks whose prompt sets their own time
+  (default off)
 - `timeout`: seconds for the `pi` run
 - `extra_args`: extra Pi flags for local compatibility calls
 - `models_config`: provider configuration for local compatibility calls

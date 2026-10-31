@@ -569,6 +569,18 @@ async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     sandbox.stop.assert_not_awaited()
 
 
+@pytest.mark.parametrize("plain", [False, True])
+async def test_sandbox_plain_system_prompt_loads_its_extension_only_when_on(setup, plain: bool):
+    agent, sandbox = setup
+    agent.config.plain_system_prompt = plain
+    request, session_id, task = await activate(agent, sandbox)
+    assert (await task).status == "completed"
+    extension = f"{sandbox.directory}/plain-prompt.mjs"
+    assert (extension in staged(sandbox)["command"]) is plain
+    assert (extension in sandbox.files) is plain
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
 @pytest.mark.parametrize("enable_tools", [True, False])
 async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools):
     agent, sandbox = setup

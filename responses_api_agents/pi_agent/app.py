@@ -636,6 +636,15 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     system_prompt: Optional[str] = None
     system_prompt_mode: Literal["append", "replace"] = "append"
     enable_tools: bool = True
+    plain_system_prompt: bool = Field(
+        default=False,
+        description=(
+            "Leave out of Pi's system prompt the block that points at Pi's documentation, whose paths name the "
+            "runtime's folder, and the line with the machine's date, for tasks whose prompt sets their own time. The "
+            "rest of Pi's default prompt stays; under system_prompt_mode replace, which drops that block, only the "
+            "date goes."
+        ),
+    )
     timeout: int = Field(default=900, gt=0)
     bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
@@ -923,6 +932,12 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.session.sandbox.upload(
             Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
+        plain_prompt_extension = []
+        if self.config.plain_system_prompt:
+            await state.session.sandbox.upload(
+                Path(__file__).with_name("plain-prompt.mjs"), f"{state.session.session_dir}/plain-prompt.mjs"
+            )
+            plain_prompt_extension = ["--extension", f"{state.session.session_dir}/plain-prompt.mjs"]
         mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
         mcp_extension = []
         mcp_env = {}
@@ -956,6 +971,7 @@ class PiAgent(SimpleResponsesAPIAgent):
             ),
             "--extension",
             f"{state.session.session_dir}/outcome.mjs",
+            *plain_prompt_extension,
             *mcp_extension,
             "--no-skills",
             "--no-prompt-templates",
@@ -1301,6 +1317,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             cmd += ["--extension", str(Path(__file__).with_name("bash-timeout.mjs"))]
         if self.config.output_token_policy == "remaining_context":
             cmd += ["--extension", str(Path(__file__).with_name("remaining-context.mjs"))]
+        if self.config.plain_system_prompt:
+            cmd += ["--extension", str(Path(__file__).with_name("plain-prompt.mjs"))]
         if self.config.mcp_servers:
             mcp_path = home / "mcp-servers.json"
             with open(mcp_path, "w", opener=lambda path, flags: os.open(path, flags, 0o600)) as stream:
