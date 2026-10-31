@@ -778,6 +778,27 @@ def test_raw_reward_mode_preserves_partial_osworld_score(monkeypatch) -> None:
     assert result.finished is True
 
 
+@pytest.mark.parametrize(
+    ("score", "answer", "expected_reward"),
+    [(1.0, "```DONE```", 1.0), (0.4, "```DONE```", -1.0), (0.0, "```FAIL```", 0.0)],
+)
+def test_signed_v1_reward_mode_penalizes_false_done(monkeypatch, score, answer, expected_reward) -> None:
+    _patch_client_for_fake_runtime(monkeypatch)
+    monkeypatch.setattr(FakeEnv, "evaluate", lambda _self: score)
+
+    result = osworld_client.run_osworld_task(
+        {"id": "signed-score", "instruction": "Finish the task."},
+        model_fn=lambda _system, _instruction, _history: answer,
+        env_class_path="fake.FakeEnv",
+        sleep_after_execution=0,
+        task_timeout=10,
+        reward_mode="signed_v1",
+    )
+
+    assert result.score == score
+    assert result.reward == expected_reward
+
+
 def test_evaluator_failure_remains_runtime_ineligible(monkeypatch) -> None:
     _patch_client_for_fake_runtime(monkeypatch)
 

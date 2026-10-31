@@ -33,7 +33,8 @@ semantics. `responses_create_params` supplies per-rollout sampling overrides.
 
 A completed response includes:
 
-- Gym `reward`, using binary or raw OSWorld reward according to `reward_mode`;
+- Gym `reward`, using `binary` (default), `raw`, or the opt-in `signed_v1`
+  mapping described below;
 - `runtime_eligible` plus `runtime_admission_reason` and policy identity;
   `mask_sample` remains the backward-compatible inverse carrier for
   infrastructure, timeout, and evaluator failures;
@@ -62,6 +63,17 @@ prompts may rewrite any earlier token or media position. Parser retries are
 also separate model calls and are not collapsed into the environment step.
 NeMo-RL can therefore reconstruct prefix-contiguous physical traces while one
 logical rollout retains one reward and advantage.
+
+When training-token capture owns the token arrays, the agent may not receive
+exact token evidence itself. In that case, `response.output` preserves one
+assistant message per served model call, including the original thinking text
+and parser retries. Calls without a response or with empty served content
+(such as a local context-overflow refusal) contribute no captured generation
+and are skipped. `terminal_response_id` identifies the last emitted call by
+the Chat completion ID the model server actually served. This lets the
+trainer join returned history to capture records without matching against
+parser-normalized actions. Capture-disabled responses and the existing exact
+per-call evidence path keep their previous behavior.
 
 Training manifests should supply a model-independent caller-owned identity:
 
@@ -104,6 +116,38 @@ Sandbox path, OSWorld still owns `DesktopEnv`, setup, controllers, actions,
 and evaluators; Gym Sandbox owns only the VM container lifecycle, dynamic
 service endpoints, status, and cleanup.
 
+### Generated-task evaluators and reward modes
+
+Generated tasks can carry a `taskgen_plugins` block with schema
+`taskgen-plugins/1`: getter/metric names, Python source under
+`modules.getters` and `modules.metrics`, and a SHA-256 digest of those modules.
+`taskgen_plugins.register_task_plugins()` validates the block and registers
+the declared functions before `DesktopEnv.reset()` resolves them. It refuses
+to replace built-in OSWorld functions or reuse a registered name with a
+different digest. Tasks without this block are unchanged. The remote Resources
+Server path rejects these plugins because it cannot register their functions
+in the evaluator process.
+
+Plugin source executes as Python in the agent's evaluator process. Only use
+trusted task datasets; the digest checks content consistency, not authorship
+or sandbox isolation. This mechanism does not rewrite canonical OSWorld task
+setup or evaluator definitions.
+
+`reward_mode` maps the evaluator score and the agent's terminal action:
+
+| Mode | Reward |
+| --- | --- |
+| `binary` (default) | 1 when the evaluator score reaches 1.0; otherwise 0 |
+| `raw` | The evaluator score, including partial credit |
+| `signed_v1` (opt-in) | 1 on evaluator success; -1 for `DONE` without success; otherwise 0 |
+
+An infeasible task whose evaluator awards success for `FAIL` still earns 1.
+Infrastructure admission remains separate from reward mapping. `signed_v1`
+does not penalize reaching the step limit without `DONE`, so it can encourage
+continuing to the horizon; it is not a new benchmark default. Aggregate metrics
+continue to use the evaluator's raw score and binary success, independently
+of the selected training reward mapping.
+
 ## Runtime components
 
 | File | Responsibility |
@@ -118,8 +162,30 @@ service endpoints, status, and cleanup.
 | `action_parser.py` | Gym pyautogui/control-action parsing and validation |
 | `proxy.py` | Explicit proxy-task configuration validation and non-secret provenance |
 | `runtime_dependencies.py` | Version/import readiness check and explicit-install remediation for excluded packages |
+| `taskgen_plugins.py` | Validate and register trusted generated-task evaluator functions without replacing OSWorld built-ins |
+| `reward_modes.py` | Map evaluator score and terminal action to the configured training reward |
 | `sandbox_desktop_env.py` | Scoped `DesktopEnv` compatibility wiring for the Gym Sandbox backend |
 | `sandbox_provider.py` | OSWorld provider contract backed by Gym Sandbox lifecycle and endpoints |
+
+### Shared Gym foundations
+
+The following foundations are already merged into Gym `main`:
+
+| Change | Contract used here |
+| --- | --- |
+| [#3591](https://github.com/NVIDIA-NeMo/Gym/pull/3591) | Isolated component runtimes, setup configuration, and rollout identity |
+| [#4128](https://github.com/NVIDIA-NeMo/Gym/pull/4128) | Shared training-token capture, lineage, and external-staging contracts |
+| [#4822](https://github.com/NVIDIA-NeMo/Gym/pull/4822) | Docker-create reconciliation and E2B service endpoints/worker transport |
+
+The taskgen, reward-mode, and served-history changes in
+[#4896](https://github.com/NVIDIA-NeMo/Gym/pull/4896) use these merged
+foundations; no additional stacked PR is needed for that scope.
+[#3368](https://github.com/NVIDIA-NeMo/Gym/pull/3368) is the separate optional
+simple-agent compaction migration, not OSWorld's `history_policy` implementation.
+[#4823](https://github.com/NVIDIA-NeMo/Gym/pull/4823) separately fixes shared
+HTTP-client shutdown and wildcard-host dialing. Neither change is bundled
+into #4896 or a prerequisite for merging its OSWorld-only changes. Workloads
+that need those separate capabilities should track their PRs explicitly.
 
 ### OSWorld source dependency
 
@@ -331,7 +397,7 @@ Runner and model behavior:
 
 Evaluation and operations:
 
-- `reward_mode` is `binary` or `raw`; aggregate metrics always report both
+- `reward_mode` is `binary`, `raw`, or opt-in `signed_v1`; aggregate metrics always report both
   binary success and raw OSWorld reward rates over the measured, unmasked
   subset, following Gym's shared aggregation policy. Normal evaluated failures
   with reward zero stay in that subset. Report `coverage/measured_rollouts`,
