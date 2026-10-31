@@ -1469,27 +1469,37 @@ async def test_patch_capture_with_filesystem_permission_error(
     monkeypatch: MonkeyPatch, tmp_path: Path, failure_phase: str
 ) -> None:
     """An unreadable patch is unknown; failure to delete already-read bytes cannot erase them."""
+    import os
     from tempfile import TemporaryDirectory
 
     from resources_servers.swebench_pro.app import PatchCaptureLostError
 
     server = make_server(golden=False)
     downloaded = []
+    denied = []
+    read_bytes = Path.read_bytes
+    unlink = os.unlink
 
     async def download(remote: str, local: Path) -> None:
         local.write_text("agent patch")
         downloaded.append(local)
-        if failure_phase == "read":
-            local.chmod(0)
-            with pytest.raises(PermissionError):
-                local.read_bytes()
-        else:
-            # The temporary directory remains readable, but its parent forbids unlinking it.
-            tmp_path.chmod(0o500)
-            sentinel = tmp_path / "sentinel"
-            with pytest.raises(PermissionError):
-                sentinel.write_text("must fail")
 
+    def read_patch(path: Path) -> bytes:
+        if failure_phase == "read" and path in downloaded:
+            denied.append(path)
+            raise PermissionError("patch read denied")
+        return read_bytes(path)
+
+    def unlink_patch(path, *args, **kwargs) -> None:
+        # shutil may unlink relative to a directory fd. Deny the downloaded file at either boundary,
+        # even when CI runs as root, while exercising TemporaryDirectory's real cleanup handling.
+        if failure_phase == "cleanup" and downloaded and Path(path).name == downloaded[0].name:
+            denied.append(path)
+            raise PermissionError("patch cleanup denied")
+        return unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_bytes", read_patch)
+    monkeypatch.setattr(os, "unlink", unlink_patch)
     monkeypatch.setattr(
         "resources_servers.swebench_pro.app.TemporaryDirectory",
         lambda **kwargs: TemporaryDirectory(dir=tmp_path, **kwargs),
@@ -1499,17 +1509,12 @@ async def test_patch_capture_with_filesystem_permission_error(
         download=download,
         stop=AsyncMock(),
     )
-    try:
-        if failure_phase == "read":
-            with pytest.raises(PatchCaptureLostError) as failure:
-                await server._extract_model_patch("session", "abc123")
-            assert isinstance(failure.value.__cause__, PermissionError)
-        else:
-            assert await server._extract_model_patch("session", "abc123") == "agent patch"
-            assert downloaded[0].parent.exists()  # The actual directory removal was denied.
-    finally:
-        tmp_path.chmod(0o700)
-        for local in downloaded:
-            if local.exists():
-                local.chmod(0o600)
+    if failure_phase == "read":
+        with pytest.raises(PatchCaptureLostError) as failure:
+            await server._extract_model_patch("session", "abc123")
+        assert isinstance(failure.value.__cause__, PermissionError)
+    else:
+        assert await server._extract_model_patch("session", "abc123") == "agent patch"
+        assert downloaded[0].exists()
+    assert denied
     assert "session" not in server._session_id_to_sandbox
