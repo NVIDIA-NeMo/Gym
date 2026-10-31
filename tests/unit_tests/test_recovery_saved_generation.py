@@ -213,3 +213,31 @@ async def test_confirmed_preanswer_provider_failure_keeps_its_budget(tmp_path, m
     assert decision.evidence[0].failure_id == "allocation-failure"
     assert store.coverage()["counted_failures"] == 1
     assert "diagnostic only" not in json.dumps(projected.model_dump())
+
+
+async def test_current_unrouted_diagnostic_blocks_projected_older_retryable_outcome(tmp_path, monkeypatch):
+    from nemo_gym.omitted_rollouts import omitted_rollout_record
+    from tests.unit_tests.test_rollout_recovery import known_pre_answer_provider_failure
+
+    before, reader, _ = await persist_producer_result(tmp_path, monkeypatch, known_pre_answer_provider_failure())
+    assert before.action.value == "resubmit"
+    output = tmp_path / "artifacts" / "rollouts.jsonl"
+    [original] = reader.selected("failure")
+    with RolloutStore.start_or_resume(output, lambda: ([], reader.manifest), resume=True) as store:
+        store.record_unstarted(
+            omitted_rollout_record(original | {"_ng_failure_class": "agent_run_error"})
+            | {"_ng_unrouted_run_error": True}
+        )
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    selected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), tmp_path)
+    assert selected.managed_reader_error is None
+    decision = decide_from_collected(selected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.action.value == "stop"
+    assert decision.evidence[0].attempts == 1
+    assert RolloutStore.read(output).selected("failure") == [original]
+    assert RolloutStore.read(output).pending() == []
