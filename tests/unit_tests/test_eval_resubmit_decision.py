@@ -2456,7 +2456,8 @@ def test_inspection_rejects_invalid_score_paths_before_collection(fake_executor,
 
 
 @pytest.mark.parametrize("kind", ["missing", "judge", "settled"])
-def test_cli_inspection_never_dispatches_even_when_recovery_would(tmp_path, fake_executor, capsys, kind):
+@pytest.mark.parametrize("gate_flags", [[], ["--max-unhealthy-fraction", "0.02"]])
+def test_cli_inspection_never_dispatches_even_when_recovery_would(tmp_path, fake_executor, capsys, kind, gate_flags):
     rows = (
         []
         if kind == "missing"
@@ -2469,7 +2470,7 @@ def test_cli_inspection_never_dispatches_even_when_recovery_would(tmp_path, fake
     fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=rows, failures=[])
     before = {str(p): p.read_bytes() for p in fake_executor.job_dir.rglob("*") if p.is_file()}
     code, out = run_cli(
-        ["eval", "resubmit", "gym-job-inspect", "bench", "--recover", "--inspect", "--max-unhealthy-fraction", "0.02"],
+        ["eval", "resubmit", "gym-job-inspect", "bench", "--recover", "--inspect", *gate_flags],
         capsys,
     )
     assert code == 1 and out["gate_task"]["status"] != "SUCCESS"

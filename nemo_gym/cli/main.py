@@ -755,7 +755,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 print(json.dumps(payload))
             else:
                 print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
-            requested_gate = any(
+            requested_gate = inspect_only or any(
                 getattr(args, name, None) is not None
                 for name in (
                     "score_key",
