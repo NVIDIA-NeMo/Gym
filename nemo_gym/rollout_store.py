@@ -19,8 +19,11 @@ collection and reporting. Results and sidecars contain outcomes; the manifest ow
 execution numbers. There is no dispatch journal or second outcome commit.
 """
 
+import hashlib
 import logging
 import os
+import time
+import uuid
 from collections import Counter
 from collections.abc import Callable
 from contextlib import ExitStack
@@ -33,21 +36,28 @@ from pydantic import ValidationError
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
 from nemo_gym.rollout_records import (
+    REJUDGE_OPERATION_ID_KEY,
+    REJUDGED_FAILURE_ID_KEY,
+    REJUDGED_OBSERVATIONS_KEY,
     RUN_ID_KEY,
     RolloutRecord,
     RolloutRecords,
     _indexed_records,
     coverage_path_for,
     is_interruption_failure,
+    is_rejudgment_failure_of,
+    is_rejudgment_of,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
     prepare_append,
     read_records,
+    rejudgment_admission_closed_by,
     resolve_rollout_owner,
     resolve_rollout_path,
 )
 from nemo_gym.rollout_recovery import (
+    PendingRejudge,
     RunManifest,
     _get_max_rollout_attempts,
     atomic_write_json,
@@ -291,6 +301,143 @@ class RolloutStore:
         if not path.exists():
             state.retry_terminal_timeouts = retry_terminal_timeouts
         return cls(output, state, read_only=True)
+
+    @classmethod
+    def open_for_rejudgment(cls, output: Path) -> "RolloutStore":
+        """Load a managed run so judge-only re-judgments can settle its judge failures; the caller holds run_lock."""
+        store = cls.read(output, import_legacy=False)
+        if store is None or store.manifest.legacy_import:
+            raise ConfigError(f"{output} is not a manifest-backed run; re-judge it into a separate output instead.")
+        return cls(store.output, store._state)
+
+    def unresolved_rejudgments(self) -> list[str]:
+        """Identities with an admitted re-judgment whose outcome is not saved: whether its judge ran is unknown."""
+        return sorted(set(self.manifest.pending_rejudge) & self._state.unresolved_dispatches)
+
+    def _write_pending(self, pending: dict) -> None:
+        manifest = self.manifest.model_copy(update={"pending_rejudge": pending})
+        manifest.write(manifest_path_for(self.output))
+        self.manifest = self._state.manifest = manifest
+
+    def admit_rejudgment(self, failure: dict) -> PendingRejudge:
+        """Durably admit a judge-only re-judgment of the selected judge failure before its judge call.
+
+        The caller holds run_lock. Only the manifest changes: the failure stays selected with its debit, and no model
+        attempt is reserved.
+        """
+        key = self._state._key(failure)
+        current = self._state.payloads.get(key)
+        if current is None or self._state.latest.get(key[0]) != key[1] or current.record.read() != failure:
+            raise ConfigError(f"Rollout attempt {key!r}: the bound judge failure is no longer the selected outcome.")
+        if key[0] in self.manifest.pending_rejudge:
+            raise ConfigError(f"Rollout {key[0]!r} already has an admitted re-judgment whose outcome is unknown.")
+        cap = self.manifest.max_rollout_attempts
+        if cap is None or self._state.failure_count(key[0]) >= cap:
+            raise ConfigError(f"Rollout {key[0]!r} has no saved failure attempt left for a re-judgment.")
+        pending = PendingRejudge(
+            operation_id=uuid.uuid4().hex,
+            predecessor_failure_id=failure["_ng_failure_id"],
+            predecessor_sha256=hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest(),
+            admitted_at=time.time(),
+        )
+        self._write_pending(self.manifest.pending_rejudge | {key[0]: pending})
+        return pending
+
+    def close_rejudgment(self, identity: str, operation_id: str) -> None:
+        """Close an admission once the selected outcome carries its operation id (the outcome is already fsynced)."""
+        pending = self.manifest.pending_rejudge.get(identity)
+        latest = self._state.payloads.get((identity, self._state.latest.get(identity)))
+        if pending is None or pending.operation_id != operation_id:
+            raise ConfigError(f"Rollout {identity!r} has no admitted re-judgment {operation_id!r}.")
+        outcome = latest.record.read() if latest is not None else {}
+        if not rejudgment_admission_closed_by(pending, outcome, identity, failures_path_for(self.output)):
+            raise ConfigError(
+                f"Rollout {identity!r}: no saved outcome matches admitted re-judgment {operation_id!r} "
+                "(operation, predecessor id or hash, identity, attempt or admission time differ)."
+            )
+        self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
+        self._state.unresolved_dispatches.discard(identity)
+
+    def check_rejudgment(self, failure: dict, result: dict) -> dict | None:
+        """Return the row that would settle ``failure`` (None when already saved); raise when it cannot settle it."""
+        key = self._state._key(failure)
+        current = self._state.payloads.get(key)
+        if current is None or self._state.latest.get(key[0]) != key[1]:
+            raise ConfigError(f"Rollout attempt {key!r} is not the selected outcome of this run.")
+        for name in (RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME, REJUDGED_FAILURE_ID_KEY):
+            expected = failure.get("_ng_failure_id") if name == REJUDGED_FAILURE_ID_KEY else failure.get(name)
+            if result.get(name) != expected:
+                raise ConfigError(
+                    f"Rollout attempt {key!r}: re-judged result has {name}={result.get(name)!r}, not {expected!r}."
+                )
+        settled = result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
+        if "ng_trajectory" in failure:
+            from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, VerifierInvocation
+
+            # The complete predecessor remains authoritative in the nested observations above.
+            # The selected view retains policy lineage but must describe the newly observed verifier.
+            try:
+                prior = TrajectoryRecord.model_validate(failure["ng_trajectory"])
+                actual = [
+                    VerifierInvocation.model_validate(item) for item in result.get("ng_verifier_invocations", [])
+                ]
+                ids = [item.invocation_id for item in actual]
+                old_ids = {item.invocation_id for item in prior.verifier_invocations}
+                if not actual or len(ids) != len(set(ids)) or old_ids.intersection(ids):
+                    raise ValueError("missing or reused verifier invocation")
+                if not result.get("_ng_failure_class") and any(item.status != "completed" for item in actual):
+                    raise ValueError("successful rejudge lacks completed verifier evidence")
+                prior_judge_calls = {
+                    ref.model_call_id for item in prior.verifier_invocations for ref in item.model_calls
+                }
+                selected = prior.model_dump(mode="json")
+                selected["verifier_invocations"] = [item.model_dump(mode="json") for item in actual]
+                selected["model_calls"] = [
+                    call for call in selected["model_calls"] if call.get("model_call_id") not in prior_judge_calls
+                ]
+                settled["ng_trajectory"] = TrajectoryRecord.model_validate(selected).model_dump(mode="json")
+                settled["_ng_rejudge_verifier_invocation_ids"] = ids
+            except (TypeError, ValueError) as error:
+                raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
+        saved = current.record.read()
+        if saved == settled:
+            return None  # already saved: no new write, judge call or attempt
+        pending = self.manifest.pending_rejudge.get(key[0])
+        if (
+            pending is None
+            or result.get(REJUDGE_OPERATION_ID_KEY) != pending.operation_id
+            or result.get("_ng_rejudge_admitted_at") != pending.admitted_at
+            or pending.predecessor_failure_id != failure.get("_ng_failure_id")
+            or hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest()
+            != pending.predecessor_sha256
+        ):
+            raise ConfigError(f"Rollout attempt {key!r}: no matching admitted re-judgment for this result.")
+        cap = self.manifest.max_rollout_attempts
+        if cap is None or self._state.failure_count(key[0]) >= cap:
+            raise ConfigError(f"Rollout attempt {key!r}: the saved failure cap does not admit another re-judgment.")
+        if (
+            saved != failure
+            or logical_rollout_id(settled) != key[0]
+            or not (is_rejudgment_of(failure, settled) or is_rejudgment_failure_of(failure, settled))
+        ):
+            raise ConfigError(
+                f"Rollout attempt {key!r}: the re-judged result does not settle the saved judge failure "
+                "(stale failure, other identity, changed answer, or no scored result)."
+            )
+        return settled
+
+    def record_rejudgment(self, failure: dict, result: dict) -> bool:
+        """Settle the selected judge failure ``failure`` with its re-judged ``result`` for the same attempt.
+
+        The result keeps the failure's run, rollout and attempt identity and its saved answer, so no model attempt is
+        added and the failure stays in the sidecar with its debit. Returns False when that settlement is already saved.
+        """
+        self._require_open()
+        settled = self.check_rejudgment(failure, result)
+        if settled is None:
+            return False
+        self.record_outcome(settled, sync=True)
+        return True
 
     def __enter__(self) -> "RolloutStore":
         if self._read_only or self._files is not None:

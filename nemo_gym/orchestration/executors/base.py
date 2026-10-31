@@ -19,9 +19,17 @@ from pathlib import Path
 from typing import ClassVar
 
 import yaml
+from pydantic import BaseModel
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
+from nemo_gym.orchestration.jobs import (
+    MANIFEST_NAME,
+    RESOLVED_CONFIG_NAME,
+    BenchmarkJob,
+    SubmissionEnvironment,
+    SubmissionRecord,
+    SubmissionTelemetry,
+)
 from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
     RecoveryAction,
@@ -107,6 +115,41 @@ class BaseExecutor(ABC):
         Persists the updated record before returning. An executor that cannot do this raises
         `UnsupportedOperationError`.
         """
+
+    @staticmethod
+    def submission_environment(
+        config: SubmitConfig, *, required_env: list[str], forwarded_env: list[str]
+    ) -> SubmissionEnvironment:
+        """Capture known names and resolved controls without inspecting environment values.
+
+        Executors pass the names their actual transport required/forwarded. Host references
+        are already retained by config validation, including nested service configurations.
+        """
+        required = set(required_env)
+
+        def host_inputs(model: BaseModel) -> None:
+            required.update(
+                reference.removeprefix("host:") for reference in getattr(model, "_host_env_refs", {}).values()
+            )
+            for name in type(model).model_fields:
+                if name == "env":
+                    continue  # Never enumerate resolved literal/credential values.
+                child = getattr(model, name)
+                if isinstance(child, BaseModel):
+                    host_inputs(child)
+                elif isinstance(child, dict):
+                    for value in child.values():
+                        if isinstance(value, BaseModel):
+                            host_inputs(value)
+
+        host_inputs(config)
+        return SubmissionEnvironment(
+            required_env=sorted(required),
+            forwarded_env=forwarded_env,
+            telemetry=SubmissionTelemetry(
+                enabled=config.otel.enabled, token_env=config.otel.token_env, remote_export=config.otel.remote_export
+            ),
+        )
 
     def persist(
         self,

@@ -18,6 +18,8 @@ Results and failure sidecars are the source of truth. Execution numbers are
 reserved in the run manifest; no dispatch or outcome event journal is written.
 """
 
+import hashlib
+import math
 import os
 import warnings
 from collections import Counter
@@ -50,6 +52,12 @@ from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_fo
 
 
 RUN_ID_KEY = "_ng_run_id"
+# Names the saved judge failure a judge-only re-judgment settles; the result keeps that failure's attempt identity.
+REJUDGED_FAILURE_ID_KEY = "_ng_rejudged_failure_id"
+# The pending_rejudge operation an outcome closes.
+REJUDGE_OPERATION_ID_KEY = "_ng_rejudge_operation_id"
+# The settled judge failure's own observations, kept on the selected result.
+REJUDGED_OBSERVATIONS_KEY = "_ng_rejudged_failure_observations"
 
 
 def journal_path_for(output: Path) -> Path:
@@ -264,6 +272,59 @@ def _holds_saved_answer(row: dict) -> bool:
     return has_saved_generation(row)
 
 
+def rejudgment_admission_closed_by(pending, outcome: dict, identity: str, failures_path: Path) -> bool:
+    """Whether outcome is the saved result of admission pending: operation, predecessor id and row hash, identity,
+    attempt and admission time all match. Cold readers and the close use this one check."""
+    if (
+        outcome.get(REJUDGE_OPERATION_ID_KEY) != pending.operation_id
+        or outcome.get(REJUDGED_FAILURE_ID_KEY) != pending.predecessor_failure_id
+        or outcome.get("_ng_rejudge_admitted_at") != pending.admitted_at
+    ):
+        return False
+    for _, row in _indexed_records(failures_path):
+        if row.get("_ng_failure_id") == pending.predecessor_failure_id:
+            return (
+                logical_rollout_id(row) == identity
+                and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == outcome.get(ATTEMPT_INDEX_KEY_NAME, 0)
+                and hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+                == pending.predecessor_sha256
+            )
+    return False
+
+
+def is_rejudgment_of(failure: dict, result: dict) -> bool:
+    """Whether ``result`` re-scores the saved answer of judge failure ``failure`` without a new model attempt."""
+    return (
+        failure.get("_ng_failure_class") == "judge_failed"
+        and _holds_saved_answer(failure)
+        and failure.get("_ng_failure_id") is not None
+        and result.get("_ng_failure_class") is None
+        and type(result.get("reward")) in (int, float)
+        and math.isfinite(result["reward"])
+        and result.get("evaluation_completed") is not False
+        and not result.get("mask_sample")
+        and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
+        and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
+        and result.get(REJUDGED_FAILURE_ID_KEY) == failure["_ng_failure_id"]
+        and result.get("response") == failure.get("response")
+    )
+
+
+def is_rejudgment_failure_of(failure: dict, row: dict) -> bool:
+    """Whether ``row`` records that re-judging the saved answer of judge failure ``failure`` failed again."""
+    return (
+        failure.get("_ng_failure_class") == "judge_failed"
+        and _holds_saved_answer(failure)
+        and failure.get("_ng_failure_id") is not None
+        and row.get("_ng_failure_class") == "judge_failed"
+        and row.get("_ng_failure_id") not in (None, failure["_ng_failure_id"])
+        and row.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
+        and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
+        and row.get(REJUDGED_FAILURE_ID_KEY) == failure["_ng_failure_id"]
+        and row.get("response") == failure.get("response")
+    )
+
+
 def _has_eligible_interruption_cause(row: dict) -> bool:
     """Whether the saved interruption names a cause resume may act on: a request never sent or refused at admission."""
     failure = row.get("_ng_failure_record")
@@ -337,12 +398,28 @@ class RolloutRecords:
         if not legacy and key[1] >= self.manifest.next_attempt.get(key[0], 0):
             raise ConfigError(f"Saved outcome {key!r} has no reserved attempt in the run manifest.")
         previous = self.payloads.get(key)
-        if previous is not None and previous.record.read() != row:
-            raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
+        if previous is not None:
+            saved = previous.record.read()
+            if saved != row and not (
+                is_rejudgment_of(saved, row) or is_rejudgment_of(row, saved) or is_rejudgment_failure_of(saved, row)
+            ):
+                raise ConfigError(f"Conflicting outcomes for rollout attempt {key!r}.")
         return key
 
     def _payload(self, row: dict, record: RolloutRecord, *, legacy: bool = False, count_failure: bool = True) -> None:
         key = self.check_outcome(row, legacy=legacy)
+        previous = self.payloads.get(key)
+        if previous is not None and previous.failure_class is None and row.get("_ng_failure_class") is not None:
+            # The judge failure that a re-judgment of the same attempt already settled: its debit stays and the
+            # settled result stays selected.
+            if count_failure and not row.get("_ng_failure_terminal"):
+                self.attempt_counts[key[0]] += 1
+            self.replay_blocked.add(key[0])
+            return
+        if previous is not None and count_failure and is_rejudgment_failure_of(previous.record.read(), row):
+            # A failed re-judgment spends the same failure budget as the judge failure it re-judged; the model
+            # attempt and its reservation stay as they were.
+            self.attempt_counts[key[0]] += 1
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
         interruption = is_interruption_failure(row)
         if (
@@ -455,6 +532,13 @@ class RolloutRecords:
                     if path == failures_path_for(output)
                     else not resubmitted,
                 )
+        for identity, pending in manifest.pending_rejudge.items():
+            latest = state.payloads.get((identity, state.latest.get(identity)))
+            if latest is None or not rejudgment_admission_closed_by(
+                pending, latest.record.read(), identity, failures_path_for(output)
+            ):
+                # Admitted for re-judgment but no outcome saved: whether the judge ran is unknown.
+                state.unresolved_dispatches.add(identity)
         return state
 
     def disposition(self, identity: str) -> str:
