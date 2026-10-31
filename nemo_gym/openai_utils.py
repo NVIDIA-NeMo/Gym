@@ -32,7 +32,7 @@ from typing import (
     Optional,
 )
 
-from aiohttp import ClientTimeout, ConnectionTimeoutError
+from aiohttp import ClientError, ClientTimeout, ConnectionTimeoutError
 from pydantic import (
     BaseModel,
     Field,
@@ -447,6 +447,23 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     raise error from failed
                 raise
 
+            # The body is consumed by the public API method after headers arrive. Keep
+            # that read attached to this attempt, without replaying a delivered request.
+            def observe_body_failure(error: Exception, response=response, attempt=tries) -> NgFailureEvent:
+                failure = getattr(response, "_ng_attempt_failure", None)
+                if failure is None:
+                    failure = _model_attempt_failure(
+                        "Model response body read failed",
+                        operation_id=operation_id,
+                        attempt_id=f"{operation_id}-{attempt}",
+                        http_status=response.status,
+                        foreign_error=sdk_error_details(error),
+                    )
+                    response._ng_attempt_failure = failure
+                    observe_failure(failure)
+                return failure
+
+            response._ng_observe_body_failure = observe_body_failure
             if response.status in (401, 403):
                 failure = observe_http_failure(response)
                 content = await response.content.read()
@@ -544,12 +561,21 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
 
         await _raise_exhausted(response, None, getattr(response, "_ng_attempt_failure", None))
 
+    async def _read_response_json(self, response: ClientResponse) -> Dict[str, Any]:
+        try:
+            return await get_response_json(response)
+        except (ClientError, TimeoutError) as error:
+            observer = getattr(response, "_ng_observe_body_failure", None)
+            if observer is not None:
+                raise error from observer(error)
+            raise
+
     async def create_models(self):
         request_kwargs = dict(url=f"{self.base_url}/models")
         response = await self._request(method="GET", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
         request_kwargs = dict(
@@ -561,7 +587,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_completion(self, **kwargs):
         request_kwargs = dict(
@@ -571,7 +597,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_response(self, **kwargs):
         request_kwargs = dict(
@@ -581,7 +607,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
@@ -592,7 +618,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_embeddings(self, **kwargs):
         """POST ``{base_url}/embeddings`` with ``kwargs`` as the JSON body and return the parsed response dict."""
@@ -603,7 +629,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

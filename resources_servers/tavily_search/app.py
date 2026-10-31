@@ -41,7 +41,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import call_judge
 from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.tavily_search.judge_prompt import JUDGE_PROMPT_TEMPLATE
 
@@ -574,7 +574,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             metrics=self._session_id_to_metrics[request.session[SESSION_ID_KEY]],
         )
         if judge_error is not None:
-            raise JudgeError(judge_error)
+            raise judge_error
         return response
 
     ###### UTILITY FUNCTIONS ######
@@ -646,7 +646,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
     async def _verify_answer_with_judge(
         self, question: str, ground_truth: str, response: str
-    ) -> tuple[JudgeEvaluation, Optional[str]]:
+    ) -> tuple[JudgeEvaluation, Optional[Exception]]:
         async def _get_judge_response(
             question: str, ground_truth: str, response: str
         ) -> tuple[NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponse]:
@@ -693,7 +693,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         except JUDGE_FAILURES as e:
             if not is_judge_failure(e):
                 raise
-            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), str(e)
+            return JudgeEvaluation(reasoning="", extracted_final_answer="", reward=0.0), e
         judge_evaluation = _grade_sample(judge_create_params, judge_response)
         return judge_evaluation, None
 

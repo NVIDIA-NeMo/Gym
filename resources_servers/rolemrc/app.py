@@ -761,11 +761,14 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         aspect_scores: Dict[str, int] = {}
         bad: List[str] = []
         errors: List[str] = []
+        causes: List[Exception] = []
         text: Optional[str] = None
         for aspect_name, prompt in prompts:
             text, error = await self._call_judge(aspect_name, prompt)
             if error is not None:
                 errors.append(f"{aspect_name} ({error})")
+                if isinstance(error, Exception):
+                    causes.append(error)
                 aspect_scores[aspect_name] = 0
                 bad.append(aspect_name)
                 continue
@@ -797,7 +800,10 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         )
         # A judge call error is a judge failure, not a low score from averaging unscored aspects as 0.
         if errors:
-            raise JudgeError(f"judge call failed for aspect(s): {'; '.join(errors)}")
+            failure = JudgeError(f"judge call failed for aspect(s): {'; '.join(errors)}")
+            if causes:
+                raise failure from causes[0]
+            raise failure
         return result
 
     def _judge_payload(self, prompt: str) -> Dict[str, Any]:
@@ -817,10 +823,10 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
         payload = params.model_dump(exclude_unset=True, mode="json")
         return {k: v for k, v in payload.items() if v is not None}
 
-    async def _call_judge(self, aspect_name: str, prompt: str) -> Tuple[Optional[str], Optional[str]]:
+    async def _call_judge(self, aspect_name: str, prompt: str) -> Tuple[Optional[str], Optional[str | Exception]]:
         """One judge call for a single aspect.
 
-        Returns ``(text, error)``; exactly one is set. The error string is
+        Returns ``(text, error)``; exactly one is set. The error is
         propagated to the caller rather than only logged, so a judge outage says
         *why* in the row's failure record instead of just naming the aspect.
         """
@@ -841,7 +847,7 @@ class RoleMRCResourcesServer(SimpleResourcesServer):
             if not is_judge_failure(exc):
                 raise
             LOG.warning("RoleMRC judge[%s] call failed: %s", aspect_name, exc, exc_info=True)
-            return None, str(exc)
+            return None, exc
         if isinstance(judge_response, NeMoGymChatCompletion):
             choices = judge_response.choices or []
             raw = (choices[0].message.content if choices else None) or ""

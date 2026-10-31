@@ -5953,7 +5953,7 @@ class RolloutAggregationHelper(BaseModel):
             row[NG_FAILURE_CLASS_KEY]
             for history in histories
             for row in history.failures()
-            if not _matches_failure_class(row, config.count_failure_classes_as_zero)
+            if not _counts_as_zero(row, wanted)
         )
         components = [history.coverage() for history in histories]
         inventory_known = not legacy_paths

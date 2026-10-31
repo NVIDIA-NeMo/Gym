@@ -542,3 +542,149 @@ async def test_a_replay_through_the_checkpoint_control_plane_gets_the_recorded_o
     assert outcome(response) == recorded
     server._run_single_comparison.assert_not_awaited()
     await server.aclose()
+
+
+@pytest.mark.parametrize("owner", ["task", "server"])
+async def test_owner_cancellation_preserves_already_observed_cohort_events(config, owner):
+    from nemo_gym.failure_transport import RequestFailureLog, observe_failure
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    entered = asyncio.Event()
+    events = []
+
+    async def judging(*args, **kwargs):
+        event = NgFailureEvent(
+            boundary="model",
+            failure_kind="provider_unavailable",
+            failure_reason="synthetic recovered judge event",
+            operation="model_request",
+        )
+        events.append(event.event_id)
+        observe_failure(event)
+        entered.set()
+        await asyncio.Event().wait()
+
+    server, _ = seeded(config, judge=AsyncMock(side_effect=judging))
+
+    async def observed(index):
+        with RequestFailureLog.capture() as log:
+            try:
+                value = await verify_as(server, SESSIONS[index], member(index))
+                return value, log.reply_report(None)
+            except Exception as error:
+                return error, log.reply_report(error)
+
+    tasks = [asyncio.create_task(observed(i)) for i in range(2)]
+    await entered.wait()
+    cohort = next(iter(server._verify_cohorts.values()))
+    if owner == "task":
+        cohort.evaluation_task.cancel()
+    else:
+        await server.aclose()
+    results = await asyncio.wait_for(asyncio.gather(*tasks), 1)
+    assert events
+    assert all(isinstance(value, Exception) for value, _ in results)
+    for _, report in results:
+        assert set(events) <= set(report.events)
+        assert report.failure_id is None  # Cancellation does not turn an earlier recovered failure into its cause.
+    await server.aclose()
+
+
+@pytest.mark.parametrize("fails", [False, True])
+async def test_finished_cohort_checkpoint_preserves_exact_report_without_rejudging(config, fails):
+    from nemo_gym.failure_transport import RequestFailureLog, observe_failure
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    events = []
+
+    async def judging(*args, **kwargs):
+        event = NgFailureEvent(
+            boundary="model",
+            failure_kind="provider_unavailable",
+            failure_reason="synthetic judge event",
+            operation="model_request",
+        )
+        events.append(event.event_id)
+        observe_failure(event)
+        if fails:
+            raise JudgeError("judge is down") from event
+        return comparison_result()
+
+    server, participant = seeded(config, judge=AsyncMock(side_effect=judging))
+
+    async def observed(target, index):
+        with RequestFailureLog.capture() as log:
+            try:
+                value = await verify_as(target, SESSIONS[index], member(index))
+                return value, log.reply_report(None)
+            except JudgeError as error:
+                return error, log.reply_report(error)
+
+    results = await asyncio.gather(*(observed(server, i) for i in range(2)))
+    for _, report in results:
+        assert set(events) <= set(report.events)
+        assert (report.failure_id in events) if fails else report.failure_id is None
+    participant.ended(SESSIONS[0])
+    records = await participant.export(None)
+    saved = records[0].state["failure_report"]
+    assert set(events) <= set(saved["events"])
+    await server.aclose()
+    restored, _ = await restore(config, records)
+    replay, report = await observed(restored, 1)
+    assert report.model_dump(mode="json") == results[1][1].model_dump(mode="json")
+    if fails:
+        assert isinstance(replay, JudgeError)
+    else:
+        assert replay.reward == results[1][0].reward
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
+async def test_old_checkpoint_has_explicitly_missing_observation_coverage(config):
+    from nemo_gym.failure_transport import RequestFailureLog
+
+    server, participant = seeded(config)
+    await finish_cohort(server)
+    records = await participant.export(None)
+    records[0].state.pop("failure_report")
+    await server.aclose()
+    restored, _ = await restore(config, records)
+    with RequestFailureLog.capture() as log:
+        replayed = await verify_as(restored, SESSIONS[1], member(1))
+        assert replayed.reward == 3
+        assert log.reply_report(None).omitted is True
+    restored._run_single_comparison.assert_not_awaited()
+    await restored.aclose()
+
+
+async def test_restore_rejects_inconsistent_reports_before_installing_any_member(config):
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    server, participant = seeded(config)
+    await asyncio.gather(*(verify_as(server, SESSIONS[i], member(i)) for i in range(2)))
+    records = await participant.export(None)
+    await server.aclose()
+    event = NgFailureEvent(boundary="model", failure_kind="provider_unavailable", failure_reason="synthetic")
+    report = failure_report_for(event).model_copy(update={"failure_id": None}).model_dump(mode="json")
+    records[0].state["failure_report"] = report
+    restored, _ = participant_server(config)
+    with pytest.raises(ValueError, match="different failure report"):
+        await restored.restore_session_states({record.session_id: record.state for record in records})
+    assert restored._verify_cohorts == {} and restored._session_members == {}
+    await restored.aclose()
+
+
+async def test_completed_checkpoint_cannot_select_a_failure(config):
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    server, participant = seeded(config)
+    await finish_cohort(server)
+    record = (await participant.export(None))[0]
+    await server.aclose()
+    event = NgFailureEvent(boundary="model", failure_kind="provider_unavailable", failure_reason="synthetic")
+    record.state["failure_report"] = failure_report_for(event).model_dump(mode="json")
+    restored, _ = participant_server(config)
+    with pytest.raises(ValueError, match="completed GenRM member cannot select"):
+        await restored.restore_session_states({record.session_id: record.state})
+    assert restored._verify_cohorts == {}
+    await restored.aclose()
