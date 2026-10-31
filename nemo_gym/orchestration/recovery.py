@@ -879,6 +879,55 @@ def _managed_source_digest(path: Path) -> str | None:
     return digest.hexdigest()
 
 
+def _managed_trial_metadata(
+    artifacts: Path, source_digests: dict, quality: dict | None, results: list[dict], store: object
+) -> tuple[list[dict], bool | None]:
+    """Session trial metadata from the bound saved config and the Store's own inputs, after Store selection.
+
+    Returns the results with ``materialized_task_id`` on each session row and the effective checkpoint setting, or
+    the results unchanged and ``None`` when any fact is missing. Self-contained: the remote Store reader runs this
+    source inside the saved install, on that install's Store, materialization and checkpoint APIs.
+    """
+    import hashlib
+
+    # A config that differs from the collection snapshot is a changed source: raise, never report it as unknown.
+    expected = source_digests["rollouts_resolved_config.yaml"]
+    try:
+        config_bytes = (artifacts / "rollouts_resolved_config.yaml").read_bytes()
+    except FileNotFoundError:
+        config_bytes = None
+    if (None if config_bytes is None else hashlib.sha256(config_bytes).hexdigest()) != expected:
+        raise ValueError("resolved config changed after collection")
+    if config_bytes is None:
+        return results, None
+    try:
+        import yaml
+
+        from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+        from nemo_gym.task_materialization import materialize_task
+
+        try:
+            config = yaml.safe_load(config_bytes)
+        except yaml.YAMLError as error:
+            raise ValueError("resolved config is not YAML") from error
+        if not isinstance(config, dict):
+            raise ValueError("resolved config is not a mapping")
+        checkpoint_enabled = checkpoint_settings(config) is not None
+        servers = ((quality or {}).get("provenance") or {}).get("servers", {})
+        bound_results = []
+        for result, original in zip(results, store.inputs_for(results), strict=True):
+            projected = dict(result)
+            if result.get("_ng_result_type") == "single_agent_turn_legacy":
+                agent = servers[result["agent_ref"]["name"]]
+                taskset = original.get("_ng_task_source", agent["resources_server"])
+                task = materialize_task(original, taskset=taskset)
+                projected["materialized_task_id"] = task["task_id"]["task_id"]
+            bound_results.append(projected)
+        return bound_results, checkpoint_enabled
+    except (ImportError, AttributeError, OSError, ValueError, KeyError, TypeError):
+        return results, None
+
+
 def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:
     """Read locally accessible Store history in this installed Gym process; never copy its selection rules.
 
@@ -890,8 +939,6 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
     try:
         from contextlib import redirect_stdout
         from io import StringIO
-
-        import yaml
 
         from nemo_gym.rollout_records import logical_rollout_id
         from nemo_gym.rollout_store import RolloutStore
@@ -960,32 +1007,9 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             [row for row in failures if row.get("_line") in selected["rollouts_failures.jsonl"]]
         ) != len(selected["rollouts_failures.jsonl"]):
             raise ValueError("selected outcomes are absent from the collected projection")
-        # Read only existing, snapshotted runtime inputs. Missing facts never establish trial coverage.
-        checkpoint_enabled = None
-        try:
-            from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
-            from nemo_gym.task_materialization import materialize_task
-
-            config_bytes = (artifacts / "rollouts_resolved_config.yaml").read_bytes()
-            if hashlib.sha256(config_bytes).hexdigest() != collected.source_digests["rollouts_resolved_config.yaml"]:
-                raise ValueError("resolved config changed before parsing")
-            config = yaml.safe_load(config_bytes)
-            if not isinstance(config, dict):
-                raise ValueError("resolved config is not a mapping")
-            checkpoint_enabled = checkpoint_settings(config) is not None
-            servers = ((collected.quality or {}).get("provenance") or {}).get("servers", {})
-            bound_results = []
-            for result, original in zip(results, store.inputs_for(results), strict=True):
-                projected = dict(result)
-                if result.get("_ng_result_type") == "single_agent_turn_legacy":
-                    agent = servers[result["agent_ref"]["name"]]
-                    taskset = original.get("_ng_task_source", agent["resources_server"])
-                    task = materialize_task(original, taskset=taskset)
-                    projected["materialized_task_id"] = task["task_id"]["task_id"]
-                bound_results.append(projected)
-            results = bound_results
-        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
-            checkpoint_enabled = None
+        results, checkpoint_enabled = _managed_trial_metadata(
+            artifacts, collected.source_digests, collected.quality, results, store
+        )
         if collected.source_digests != snapshot():
             raise ValueError("managed source changed during authoritative selection")
         return collected.model_copy(

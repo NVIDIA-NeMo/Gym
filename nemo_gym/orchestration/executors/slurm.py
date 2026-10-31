@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import getpass
+import inspect
 import json
 import math
 import os
@@ -66,6 +67,7 @@ from nemo_gym.orchestration.recovery import (
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcomePolicyConfig,
+    _managed_trial_metadata,
     accounted_chain_walltime,
     decide_from_collected,
     select_managed_evidence,
@@ -95,11 +97,38 @@ if not job.is_absolute() or raw.get("source_job_identity") != identity():
     raise ValueError("reader job path does not match the collected directory")
 collected = recovery.CollectedEvidence.model_validate(raw)
 selected = recovery.select_managed_evidence(collected, job)
+projection = json.loads(selected.model_dump_json())
+# The saved install may predate these facts: derive them with the caller's helper on the install's own APIs.
+projection["checkpoint_enabled"] = None
+if selected.managed_selection is not None and selected.managed_reader_error is None:
+    artifacts = job / "artifacts"
+    def snapshot():
+        return {name: recovery._managed_source_digest(artifacts / name) for name in collected.source_digests}
+    # A changed source stops the reader; only a missing optional API leaves the metadata unknown.
+    if snapshot() != collected.source_digests:
+        raise ValueError("managed source changed after Store selection")
+    try:
+        from nemo_gym.rollout_store import RolloutStore
+    except ImportError:
+        RolloutStore = None
+    if RolloutStore is not None:
+        store = RolloutStore.read(artifacts / "rollouts.jsonl", import_legacy=False)
+        projection["results"], projection["checkpoint_enabled"] = _managed_trial_metadata(
+            artifacts, collected.source_digests, collected.quality, projection["results"], store
+        )
+    if snapshot() != collected.source_digests:
+        raise ValueError("managed source changed while reading trial metadata")
 check_source()
 if raw.get("source_job_identity") != identity():
     raise ValueError("reader job directory changed")
-print("__GYM_MANAGED:" + selected.model_dump_json())
+print("__GYM_MANAGED:" + json.dumps(projection))
 """
+
+
+def _remote_managed_reader_script() -> str:
+    """The reader with the caller's metadata helper defined after its imports, sent as one script."""
+    head, body = _REMOTE_MANAGED_READER.split("job, expected_ref", 1)
+    return head + inspect.getsource(_managed_trial_metadata) + "job, expected_ref" + body
 
 
 def _remote_managed_evidence(
@@ -115,13 +144,11 @@ def _remote_managed_evidence(
         return collected.model_copy(
             update={"managed_reader_error": "remote Store reader requires a saved immutable Gym ref"}
         )
-    command = (
-        f"python -c {shlex.quote(_REMOTE_MANAGED_READER)} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
-    )
-    entrypoint = render_driver_entrypoint(
-        repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True
-    )
     try:
+        command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
+        entrypoint = render_driver_entrypoint(
+            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True
+        )
         # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
         # bootstrap stdin. No service, prepare script or scheduler is invoked.
@@ -144,7 +171,14 @@ def _remote_managed_evidence(
         if selected.source_digests != collected.source_digests:
             raise ValueError("remote Store reader changed the collection snapshot")
         # Selection may only replace selected outcomes and attach authoritative attempt facts.
-        allowed = {"results", "failures", "managed_selection", "managed_reader_error", "source_job_identity"}
+        allowed = {
+            "results",
+            "failures",
+            "managed_selection",
+            "managed_reader_error",
+            "source_job_identity",
+            "checkpoint_enabled",
+        }
         if selected.model_dump(exclude=allowed) != collected.model_dump(exclude=allowed):
             raise ValueError("remote Store reader changed collection evidence")
         return selected.model_copy(update={"source_job_identity": collected.source_job_identity})
