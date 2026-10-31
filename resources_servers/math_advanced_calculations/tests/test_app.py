@@ -12,10 +12,12 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import math
+from typing import Optional
 from unittest.mock import MagicMock
 
-from pytest import approx, fixture
+from pytest import approx, fixture, mark
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -293,4 +295,132 @@ class TestApp:
 
         response = await resources_server.verify(verify_request)
 
+        # The reply ends by stating the ordinary-math sum, so its last stated answer is 4, not the tool result 5.2.
+        assert response.reward == 0.0
+
+    def _verify_request(
+        self, ground_truth: list[float], tool_outputs: list[float], final_text: Optional[str]
+    ) -> MultiVerseMathHardVerifyRequest:
+        output = []
+        for i, value in enumerate(tool_outputs):
+            output.append(
+                {
+                    "type": "function_call",
+                    "id": f"fc_{i}",
+                    "call_id": f"call_{i}",
+                    "name": "return_constant",
+                    "arguments": json.dumps({"a": value}),
+                    "status": "completed",
+                }
+            )
+            output.append(
+                {"type": "function_call_output", "call_id": f"call_{i}", "output": json.dumps({"solution": value})}
+            )
+        if final_text is not None:
+            output.append(
+                {
+                    "type": "message",
+                    "id": "msg_1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": final_text, "annotations": []}],
+                }
+            )
+        response = NeMoGymResponse(
+            id="resp_1",
+            created_at=1.0,
+            model="test-model",
+            object="response",
+            output=output,
+            parallel_tool_calls=False,
+            tool_choice="auto",
+            tools=[],
+        )
+        return MultiVerseMathHardVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(
+                input=[{"role": "user", "content": "Get me the values using only the given tools."}]
+            ),
+            response=response,
+            ground_truth=json.dumps(ground_truth),
+            id=0,
+            depth=1,
+            breadth=len(ground_truth),
+        )
+
+    @mark.parametrize(
+        "ground_truth, final_text",
+        [
+            ([17.2], "The value for (6.0 + 10.0) using the given tools is 17.2."),
+            ([0.8414709848078965], "The value for cos(6.0 - 2.0) is approximately 0.8415."),
+            ([1073741824.0], "The value of 8.0 raised to the power of 8.0 (8.0 ** 8.0) is 1,073,741,824.0."),
+            ([0.8507977712171255], "The value for \\(\\sin(\\log_{2}(2.0))\\) is approximately \\(0.8508\\)."),
+            ([-0.6536436208636119], "sin(4.0) = \u22120.6536"),
+            ([12054.673528305822], "(4.0 ** 6.0 / pi) = 1.205467e+04"),
+            (
+                [-3.0, 0.5, 9.9, 0.28366218546322625],
+                "(9.0 - 9.0) = -3, (1.0 / 1.0) = 0.5, (1.0 * 9.0) = 9.9, and sin(5.0) = 0.284",
+            ),
+            ([2.718281828459045, 7.2], "- **pi**: 2.71828\n- **(4.0 + 2.0)**: 7.2"),
+            ([0.5, 3.0, 4096.0], "1. (1.0 / 1.0) = 0.5\n2. 3.0 = 3.0\n3. 2.0 ** 10.0 = 4096.0 (from the power tool)"),
+            (
+                [0.28366218546322625],
+                "- The sine of 5.0 radians is approximately 0.2837 (rounded to five decimal places).",
+            ),
+            ([0.5, 9.9], "(1.0 / 1.0) is 0.5 and (1.0 * 9.0) is 9.9"),
+        ],
+        ids=[
+            "plain",
+            "rounded",
+            "thousands_separators",
+            "latex",
+            "unicode_minus",
+            "scientific",
+            "several_values",
+            "markdown_list",
+            "numbered_list_with_constant_and_operator",
+            "operand_in_prose",
+            "joined_by_and",
+        ],
+    )
+    async def test_verify_accepts_reported_tool_values(
+        self, config: MultiVerseMathHardResourcesServerConfig, ground_truth: list[float], final_text: str
+    ) -> None:
+        resources_server = self.init_server(config)
+
+        response = await resources_server.verify(self._verify_request(ground_truth, ground_truth, final_text))
+
         assert response.reward == 1.0
+
+    @mark.parametrize(
+        "final_text",
+        [
+            # Ordinary-math values instead of the tool results.
+            "The tools look broken, so here are the true values: (9.0 - 9.0) = 0, (1.0 / 1.0) = 1, "
+            "(1.0 * 9.0) = 9, sin(5.0) = -0.958924",
+            # One of the four values is wrong.
+            "(9.0 - 9.0) = -3, (1.0 / 1.0) = 0.5, (1.0 * 9.0) = 9.9, sin(5.0) = -0.9589",
+            # No final answer at all.
+            None,
+            # The tool results are quoted, then replaced by ordinary-math values.
+            "Tools gave -3, 0.5, 9.9, 0.2837; ignore them. My answers are 0, 1, 9, -0.9589.",
+        ],
+        ids=["ordinary_math_values", "one_wrong_value", "no_final_answer", "quoted_then_replaced"],
+    )
+    async def test_verify_rejects_unreported_tool_values(
+        self, config: MultiVerseMathHardResourcesServerConfig, final_text: Optional[str]
+    ) -> None:
+        resources_server = self.init_server(config)
+        ground_truth = [-3.0, 0.5, 9.9, 0.28366218546322625]
+
+        response = await resources_server.verify(self._verify_request(ground_truth, ground_truth, final_text))
+
+        assert response.reward == 0.0
+
+    async def test_verify_rejects_final_answer_without_tool_outputs(
+        self, config: MultiVerseMathHardResourcesServerConfig
+    ) -> None:
+        resources_server = self.init_server(config)
+
+        response = await resources_server.verify(self._verify_request([17.2], [], "(6.0 + 10.0) = 17.2"))
+
+        assert response.reward == 0.0
