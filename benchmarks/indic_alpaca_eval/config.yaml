@@ -1,0 +1,28 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/alpaca_pointwise_judge/configs/alpaca_pointwise_judge.yaml
+
+indic_alpaca_eval_resources_server:
+  _inherit_from: alpaca_pointwise_judge
+
+indic_alpaca_eval_simple_agent:
+  _inherit_from: alpaca_pointwise_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_alpaca_eval_resources_server
+      datasets:
+      - name: indic_alpaca_eval
+        type: benchmark
+        jsonl_fpath: benchmarks/indic_alpaca_eval/data/indic_alpaca_eval_benchmark.jsonl
+        prepare_script: benchmarks/indic_alpaca_eval/prepare.py
+        num_repeats: 1
+        license: CC-BY-NC-4.0
+
+indic_alpaca_eval_environment_server:
+  _inherit_from: alpaca_pointwise_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_alpaca_eval_simple_agent
