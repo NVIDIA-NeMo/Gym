@@ -255,6 +255,28 @@ def _plain(value: Any) -> Any:
     return value
 
 
+class _BackendStreamingResponse(StreamingResponse):
+    """A keepalive stream that owns the backend call its body waits for.
+
+    The body's own cleanup runs only once iteration starts. A client that disconnects after the
+    handler returns but before the first chunk would otherwise leave the call generating.
+    """
+
+    def __init__(self, content: AsyncIterator[str | bytes], *, backend: "asyncio.Task[Any]") -> None:
+        super().__init__(
+            content, media_type="text/event-stream", headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"}
+        )
+        self.backend = backend
+
+    async def __call__(self, scope: Any, receive: Any, send: Any) -> None:
+        try:
+            await super().__call__(scope, receive, send)
+        finally:
+            if not self.backend.done():
+                self.backend.cancel()
+            await asyncio.gather(self.backend, return_exceptions=True)
+
+
 def _orjson_dispatch_response(content: Any) -> Any:
     """Serialize a completed non-streaming model response with orjson.
 
@@ -629,10 +651,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             raise
         if done:
             return await self._stream_buffered_responses(request, pending, ns_map)
-        return StreamingResponse(
-            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        return _BackendStreamingResponse(
+            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id), backend=pending
         )
 
     async def _stream_buffered_responses(
@@ -839,11 +859,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                     pending.cancel()
                 await asyncio.gather(pending, return_exceptions=True)
 
-        return StreamingResponse(
-            events(),
-            media_type="text/event-stream",
-            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
-        )
+        return _BackendStreamingResponse(events(), backend=pending)
 
     async def _invoke_chat_completions(
         self, request: Request, params: NeMoGymChatCompletionCreateParamsNonStreaming

@@ -534,9 +534,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
         if self.is_responses_native:
+            # stream_keepalive_s is also refused by setup_webserver, but only after a local engine has started.
             for option in (
                 "forward_unvalidated_reasoning_effort",
                 "inline_tool_output_images",
+                "stream_keepalive_s",
             ):
                 if getattr(self, option):
                     raise ValueError(
@@ -546,6 +548,11 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             raise ValueError(
                 "forward_unvalidated_reasoning_effort requires use_completions_api=false: /v1/completions has no "
                 "reasoning_effort, so the effort would be dropped"
+            )
+        if self.inline_tool_output_images and self.use_completions_api:
+            raise ValueError(
+                "inline_tool_output_images requires use_completions_api=false: /v1/completions takes text-only "
+                "messages, so every inlined image would be refused"
             )
         return self
 

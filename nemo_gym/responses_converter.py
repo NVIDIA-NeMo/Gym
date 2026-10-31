@@ -603,7 +603,9 @@ class ResponsesConverter(BaseModel):
             content = [
                 {"type": "text", "text": part["text"]}
                 if part["type"] == "input_text"
-                else self._tool_output_image_to_chat(part)
+                else self._tool_output_image_to_chat(
+                    part, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                )
                 for part in output
             ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
@@ -619,9 +621,16 @@ class ResponsesConverter(BaseModel):
         )
         state.messages.append(converted)
 
-    def _tool_output_image_to_chat(self, part: dict) -> dict:
+    def _tool_output_image_to_chat(self, part: dict, *, drop_unrepresentable_request_fields: bool) -> dict:
         """What the chat tool message carries for an ``input_image`` part of a tool call output."""
         if not self.inline_tool_output_images:
+            return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+        image_url = part.get("image_url")
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url")
+        if not image_url and drop_unrepresentable_request_fields:
+            # A file_id or an empty URL has nothing to inline. Dropping keeps its place as the placeholder;
+            # raising would fail every later turn too, since the whole transcript is converted each turn.
             return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
         if part.get("detail") == "original":
             # Chat has no "original" detail (full resolution). The Codex CLI sends it when the model

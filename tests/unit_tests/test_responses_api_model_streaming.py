@@ -1210,6 +1210,12 @@ class _SlowFailingModel(_EchoModel):
         raise RuntimeError("backend exploded late")
 
 
+class _SlowHTTPExceptionModel(_EchoModel):
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        await asyncio.sleep(_SLOW_CALL_S)
+        raise HTTPException(status_code=429, detail="rate limited")
+
+
 def _upstream_error(status: int, message: str, body: bytes) -> ClientResponseError:
     request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions?api-key=secret-value")
     error = ClientResponseError(request_info, (), status=status, message=message)
@@ -1443,6 +1449,107 @@ class TestResponsesStreamKeepalive:
             resp = client.post("/v1/responses", json=self.STREAM_BODY)
         assert resp.status_code == 429
         assert resp.content == error.response_content
+
+    @pytest.mark.parametrize(
+        ("path", "backend", "body"),
+        [
+            ("/v1/responses", "_invoke_responses", STREAM_BODY),
+            ("/v1/chat/completions", "_invoke_chat_completions", {"stream": True, "messages": []}),
+        ],
+    )
+    async def test_disconnect_before_the_first_chunk_cancels_the_backend(
+        self, monkeypatch, path, backend, body
+    ) -> None:
+        # Through the real cancellation middleware: the client leaves after the handler returned the
+        # keepalive stream but before its body started, so the body's own cleanup never runs.
+        monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", _KEEPALIVE_S)
+        client, server = _keepalive_client(_EchoModel)
+        server.setup_cancellation_middleware(client.app)
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoModel, backend, blocked)
+        incoming: asyncio.Queue[dict] = asyncio.Queue()
+        await incoming.put({"type": "http.request", "body": json.dumps(body).encode(), "more_body": False})
+        response_started = asyncio.Event()
+
+        async def send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                response_started.set()
+                await asyncio.Event().wait()  # The client is gone before any body chunk arrives.
+
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0"},
+            "http_version": "1.1",
+            "method": "POST",
+            "scheme": "http",
+            "path": path,
+            "raw_path": path.encode(),
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"content-type", b"application/json")],
+            "client": ("127.0.0.1", 50000),
+            "server": ("testserver", 80),
+        }
+        call = asyncio.create_task(client.app(scope, incoming.get, send))
+        await asyncio.wait_for(response_started.wait(), 5)
+        assert started.is_set() and not cancelled.is_set()
+        await incoming.put({"type": "http.disconnect"})
+        await asyncio.wait_for(call, 5)
+        await asyncio.wait_for(cancelled.wait(), 5)
+
+    @staticmethod
+    def _blocked_backend(monkeypatch) -> tuple[asyncio.Event, asyncio.Event]:
+        started, cancelled = asyncio.Event(), asyncio.Event()
+
+        async def blocked(*args, **kwargs):
+            started.set()
+            try:
+                await asyncio.Event().wait()
+            finally:
+                cancelled.set()
+
+        monkeypatch.setattr(_EchoModel, "_invoke_responses", blocked)
+        return started, cancelled
+
+    async def test_cancel_during_the_first_interval_cancels_the_backend(self, monkeypatch) -> None:
+        _, server = _keepalive_client(_EchoModel, keepalive_s=30.0)
+        started, cancelled = self._blocked_backend(monkeypatch)
+        dispatch = asyncio.create_task(server.responses_dispatch(MagicMock(), dict(self.STREAM_BODY)))
+        await asyncio.wait_for(started.wait(), 5)
+        dispatch.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await dispatch
+        assert cancelled.is_set()
+
+    async def test_closing_the_stream_after_keepalives_cancels_the_backend(self, monkeypatch) -> None:
+        _, server = _keepalive_client(_EchoModel)
+        started, cancelled = self._blocked_backend(monkeypatch)
+        response = await server.responses_dispatch(MagicMock(), dict(self.STREAM_BODY))
+        assert "response.created" in await anext(response.body_iterator)
+        assert started.is_set()
+        await response.body_iterator.aclose()
+        assert cancelled.is_set()
+
+    def test_http_exception_after_keepalives_ends_with_response_failed(self) -> None:
+        client, _ = _keepalive_client(_SlowHTTPExceptionModel)
+        resp = client.post("/v1/responses", json=self.STREAM_BODY)
+
+        assert resp.status_code == 200
+        events = _sse_payloads(resp.text)
+        assert [event["type"] for event in events[:2]] == ["response.created", "response.in_progress"]
+        assert [event["type"] for event in events].count("response.failed") == 1
+        failed = events[-1]
+        assert failed["type"] == "response.failed"
+        assert failed["response"]["error"] == {"code": "server_error", "message": "HTTP 429: rate limited"}
+        assert {event["response"]["id"] for event in events} == {events[0]["response"]["id"]}
 
 
 class TestUnionItemTypesThroughDispatch:

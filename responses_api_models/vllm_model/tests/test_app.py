@@ -8082,9 +8082,9 @@ class TestCodexRequests:
 
     def test_keepalive_streams_are_refused_on_the_native_responses_path(self) -> None:
         # vLLM issues the native path's response ids, which a keepalive stream cannot announce in advance.
-        server, _ = self._server(is_responses_native=True, stream_keepalive_s=0.02)
-        with raises(ValueError, match="stream_keepalive_s"):
-            server.setup_webserver()
+        # The config refuses it when it loads, before a local engine starts, not only in setup_webserver.
+        with raises(ValueError, match="stream_keepalive_s applies to the Chat Completions conversion"):
+            self._server(is_responses_native=True, stream_keepalive_s=0.02)
 
     def test_non_streaming_request_forwards_the_effort_too(self) -> None:
         server, client = self._server(forward_unvalidated_reasoning_effort=True)
@@ -8328,6 +8328,9 @@ class TestCodexRequests:
     def test_inline_tool_output_images_needs_the_chat_path(self) -> None:
         with raises(ValueError, match="requires is_responses_native=false"):
             self._server(inline_tool_output_images=True, is_responses_native=True)
+        # /v1/completions takes text-only messages, so every inlined image would be refused.
+        with raises(ValueError, match="requires use_completions_api=false"):
+            self._server(inline_tool_output_images=True, use_completions_api=True)
 
     @mark.parametrize(
         ("overrides", "content"),
@@ -8374,6 +8377,43 @@ class TestCodexRequests:
         terminal = self._events(response.text)[-1]
         assert terminal["type"] == "response.failed"
         assert "input_image" in terminal["response"]["error"]["message"]
+        client.create_chat_completion.assert_not_awaited()
+
+    URLLESS_IMAGES = [
+        {"type": "input_image", "file_id": "file-1", "detail": "auto"},
+        {"type": "input_image", "image_url": "", "detail": "auto"},
+    ]
+
+    @mark.parametrize("image", URLLESS_IMAGES, ids=["file_id", "empty_url"])
+    def test_inlining_keeps_the_placeholder_for_an_image_without_a_url(self, image: dict[str, Any]) -> None:
+        server, client = self._server(**self.CODEX_FIELDS, inline_tool_output_images=True)
+        client.create_chat_completion = AsyncMock(
+            return_value=self._completion({"role": "assistant", "content": "done", "reasoning": "r"})
+        )
+        output = {**self.VIEW_IMAGE_OUTPUT, "output": [image]}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json=self._codex_body([self.USER, self.VIEW_IMAGE_CALL, output])
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.completed"
+        assert client.create_chat_completion.await_args.kwargs["messages"][-1]["content"] == [
+            {"type": "text", "text": "[image omitted from tool output]"}
+        ]
+
+    @mark.parametrize("image", URLLESS_IMAGES, ids=["file_id", "empty_url"])
+    def test_inlining_an_image_without_a_url_fails_without_dropping(self, image: dict[str, Any]) -> None:
+        server, client = self._server(inline_tool_output_images=True)
+        client.create_chat_completion = AsyncMock()
+        output = {**self.VIEW_IMAGE_OUTPUT, "output": [image]}
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses", json={"stream": True, "input": [self.USER, self.VIEW_IMAGE_CALL, output]}
+        )
+
+        assert response.status_code == 200
+        assert self._events(response.text)[-1]["type"] == "response.failed"
         client.create_chat_completion.assert_not_awaited()
 
 
