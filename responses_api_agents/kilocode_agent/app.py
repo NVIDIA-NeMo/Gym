@@ -325,11 +325,11 @@ class KiloCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # keeps whatever it declares. They are config fields rather than `kilo_config` keys because the
     # config merge is struct-mode, so a config using `_inherit_from` cannot add keys under `models`.
     #
-    # `context_window` is what kilo measures a session against. It only drives auto-compaction when
-    # `kilo_config` also sets `compaction.threshold_percent`; 0 disables that accounting entirely.
+    # `context_window` drives usage-based compaction. Setting `kilo_config.compaction.threshold_percent`
+    # also enables Kilo's outgoing-request preflight check, before contacting the model server.
     context_window: int = 32768
-    # `max_output_tokens` is the per-request output budget; kilo asks the model server for
-    # min(this, its own OUTPUT_TOKEN_MAX of 32000), so values above 32000 have no effect.
+    # Set Kilo's output ceiling as well as its model metadata so its default 32000 cap does not
+    # silently truncate a larger configured per-request output budget.
     #
     # Setting it too high fails silently, which is why the default is conservative. Kilo's system
     # prompt and tool definitions run to ~10k tokens, and vLLM rejects prompt + max_tokens >
@@ -670,6 +670,8 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
         if api_key:
             env["OPENAI_API_KEY"] = api_key
         env.update({k: v for k, v in self.config.env.items() if v})
+        if self.config.model_server:
+            env["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = str(self.config.max_output_tokens)
         return env
 
     def _build_command(self, project_dir: Path, prompt: str) -> list[str]:
@@ -868,6 +870,7 @@ class KiloCodeAgent(SimpleResponsesAPIAgent):
                 stage_activation=lambda: state.stage_activation(
                     command=command,
                     config=json.dumps(config),
+                    output_token_max=self.config.max_output_tokens if self.config.model_server else None,
                 ),
                 collect=state.collect_artifacts,
                 timeout=self.config.timeout,

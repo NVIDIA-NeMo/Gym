@@ -23,6 +23,39 @@ TASK_DIRECTORIES = ("HOME", "XDG_DATA_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME"
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
+def test_background_services_belong_to_task_sandbox(tmp_path: Path) -> None:
+    shutil.copyfile(PLUGIN, tmp_path / PLUGIN.name)
+    (tmp_path / "task-env.json").write_text(json.dumps({key: f"/task/{key}" for key in TASK_DIRECTORIES}))
+    (tmp_path / "input.json").write_text("{}")
+    probe = """
+import { TaskEnvironment } from "./task_environment.mjs";
+const hooks = await TaskEnvironment();
+const cases = [
+  ["background_process", {action: "start", command: "python server.py"}],
+  ["background_process", {action: "start", command: "python server.py", inherit: true}],
+  ["background_process", {action: "start", command: "python server.py", persistent: false}],
+  ["background_process", {action: "stop", id: "service"}],
+  ["bash", {command: "echo hello"}],
+];
+for (const [tool, args] of cases) await hooks["tool.execute.before"]({tool}, {args});
+console.log(JSON.stringify(cases));
+"""
+    result = subprocess.run(
+        [shutil.which("node"), "--input-type=module", "-e", probe],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=30,
+        check=True,
+    )
+    cases = json.loads(result.stdout)
+    for _, args in cases[:3]:
+        assert args == {"action": "start", "command": "python server.py", "persistent": True}
+    assert cases[3][1] == {"action": "stop", "id": "service"}
+    assert cases[4][1] == {"command": "echo hello"}
+
+
+@pytest.mark.skipif(shutil.which("node") is None, reason="Node.js is required for the Kilo plugin")
 @pytest.mark.parametrize("custom_xdg", [False, True])
 async def test_shell_environment_keeps_task_files_after_session_close(tmp_path: Path, custom_xdg: bool) -> None:
     session, workdir, home = tmp_path / "session", tmp_path / "task", tmp_path / "task-home"
