@@ -68,24 +68,33 @@ Compare its value with the queue-duration histogram count to calculate the queue
 Rollout outcomes
 ----------------
 ``gym.rollout.completed_total`` (counter): one per rollout attempt the collection driver finished
-handling, recorded after it wrote the attempt or decided to omit it. An attempt is one dispatch of
+handling, recorded after the recovery store accepts the saved outcome. An attempt is one dispatch of
 one row in one collection run; a retry on a later resume run is another attempt, and an HTTP-level
 re-send of ``/run`` inside one dispatch is not. Only ``run_from_config`` (``gym eval run`` with
 serving) records it: ``--no-serve`` initialises no telemetry, and ``run_examples`` callers,
 reverification and the GDPVal multistage driver do not call the recorder.
 
-``nemo.gym.rollout.outcome`` is ``scored`` (main output, masked and forced-zero results included),
-``failed`` (failures sidecar) or ``omitted`` (no-persist, e.g. kill-shaped). Rows drained by the
-dispatch budget never ran and are not counted, unlike the progress metrics, whose ``dropped``
-groups ``failed`` with an ``omitted`` that includes drained rows. A failed ``/run`` is a ``failed``
-attempt with class ``agent_request_failed`` only with ``route_failures_to_sidecar`` on; otherwise
-it aborts the run and is not counted. Coverage comes from the output files, not this counter.
+``nemo.gym.rollout.outcome`` is ``scored`` (main output, including masked, forced-zero and supported
+unscored completions), ``failed`` (saved failures, including kill-shaped) or ``omitted`` (saved
+intentional omissions, including terminal skips and bare no-persist replies). The historical
+``scored`` label does not guarantee a measured reward. Rows drained by the dispatch budget never
+ran and are not counted. Reused cached results do not increment the counter. Request errors count
+only when failure routing saves them: an unavailable server uses class agent_request_failed,
+while an agent that ran and failed uses agent_run_error (including HTTP 500). Otherwise the
+request error aborts collection and is not counted. Coverage comes from the output files.
 
-Attributes are bounded: ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
+Attributes include ``nemo.gym.rollout.dispatch.name`` (the environment server, or the agent
 when rows name no environment server) and, on attempts that carry a failure class,
 ``nemo.gym.failure_class``, ``nemo.gym.failure_kind`` (registered or ``<server>:<kind>``
 namespaced, any other value recorded as ``unregistered``) and ``nemo.gym.failure_type`` (exception
-class name). Free-text reasons are never attributes.
+class name). Labels come from the dispatch's original routing fields, before persistence maps
+kinds to sidecar classes. Older legacy producers retain their routing class and exception type;
+these two attributes remain producer-controlled, as on main, and must use stable category names.
+A missing producer kind adds no kind label, even when the saved record uses a class as its fallback.
+Native failures and the legacy Environment Server adapter route by the shared kind, bucketed when
+it also supplies the class. The adapter previously used environment_server_failed without a kind
+label; it now labels failures like native episodes. Free-text kinds and reasons are never promoted
+to class labels, but arbitrary strings supplied directly as legacy class/type fields are retained.
 
 Rollout rewards
 ---------------

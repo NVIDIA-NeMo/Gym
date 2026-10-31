@@ -950,6 +950,11 @@ class TestIsJudgeFailure:
     def test_true_only_for_judge_failed_class(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
 
+    def test_preserved_producer_judge_class_is_recoverable(self) -> None:
+        row = {NG_FAILURE_CLASS_KEY: "judge_timeout", "_ng_failure_legacy_class": "judge_failed"}
+        assert _is_judge_failure(row)
+        assert _recovery_rollout_predicate()({**row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+
     def test_false_for_other_failure_classes(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
 

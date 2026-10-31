@@ -20,6 +20,7 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
     EpisodeId,
     maybe_rollout_id_from_run_body,
 )
@@ -100,7 +101,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
-                "_ng_failure_class": "environment_server_failed",
+                "_ng_failure_class": response.failure.failure_kind or ENVIRONMENT_SERVER_FAILED,
+                "_ng_failure_kind": response.failure.failure_kind,
                 "_ng_failure_terminal": response.failure.terminal,
                 "_ng_failure_message": response.failure.failure_reason,
                 "_ng_failure_stage": response.failure.stage,

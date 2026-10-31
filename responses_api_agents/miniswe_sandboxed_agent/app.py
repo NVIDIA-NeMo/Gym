@@ -494,7 +494,9 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
                         deadline = monotonic() + self._agent_timeout_sec(state, body)
                         agent_started = True
                         response, termination, extra = await harness.execute(max(0, deadline - monotonic()))
-                        if monotonic() >= deadline:
+                        # A kill is read from an exit code the sandbox returned before the deadline; only collecting
+                        # its artifacts afterwards can cross it.
+                        if monotonic() >= deadline and termination.reason != "killed":
                             termination.reason = "timeout"
                 except asyncio.CancelledError:
                     termination = HarnessOutcome(reason="cancelled")
@@ -556,8 +558,8 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
     def _episode_turn_response(state: MiniSWESession, result: AgentExecutionResult) -> NeMoGymResponse:
         """The environment server sees one response; carry the harness outcome in its metadata.
 
-        "completed", "nonzero_exit" and an execution "timeout" are the agent's own result and are
-        verified. An "infrastructure_error", a cancelled run, or a "timeout" before the agent started (the
+        "completed", "nonzero_exit", "killed" and an execution "timeout" are the agent's own result and
+        are verified. An "infrastructure_error", a cancelled run, or a "timeout" before the agent started (the
         setup budget ran out installing the harness, so the sandbox is untouched) is not the agent's doing
         and is refused with a 503 so the episode is recorded as a masked failure instead of an unmasked
         zero. A repeated request for the same turn replays the same answer.
