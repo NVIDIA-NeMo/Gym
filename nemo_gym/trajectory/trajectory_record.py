@@ -5,6 +5,9 @@
 
 from __future__ import annotations
 
+import hashlib
+import json
+import math
 from collections import Counter, defaultdict
 from collections.abc import Iterable
 from dataclasses import dataclass
@@ -176,6 +179,62 @@ class AgentInvocation(ObservationModel):
         return result
 
 
+class GradingOperationObservation(ObservationModel):
+    """A source-reviewed programmatic calculation actually executed inside a verifier invocation."""
+
+    operation_id: str = Field(min_length=1)
+    kind: Literal["programmatic_calculation"] = "programmatic_calculation"
+    outcome: Literal["completed", "failed", "unknown"] = "unknown"
+    result_binding_sha256: str | None = Field(default=None, pattern=r"^[0-9a-f]{64}$")
+    dependencies: list[ModelCallRef] | None = None
+
+
+def grading_result_binding(result: object) -> str | None:
+    """Bind the actual graded response and numeric reward/components, without exporting their payload."""
+    if isinstance(result, BaseModel):
+        result = result.model_dump(mode="json")
+    if not isinstance(result, dict) or not isinstance(result.get("response"), dict):
+        return None
+    response = result["response"]
+    if not isinstance(response.get("id"), str) or not response["id"] or not isinstance(response.get("output"), list):
+        return None
+    reward = result.get("reward")
+    if type(reward) not in (int, float) or (isinstance(reward, float) and not math.isfinite(reward)):
+        return None
+    value = {"response": response, "reward": reward}
+    if "reward_components" in result:
+        components = result["reward_components"]
+        if not isinstance(components, dict) or not all(
+            isinstance(key, str)
+            and type(number) in (int, float)
+            and (not isinstance(number, float) or math.isfinite(number))
+            for key, number in components.items()
+        ):
+            return None
+        value["reward_components"] = components
+
+    def canonical(item):
+        if item is None or type(item) in (str, bool, int):
+            return item
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("nonfinite grading input")
+            return int(item) if item.is_integer() else item
+        if isinstance(item, list):
+            return [canonical(child) for child in item]
+        if isinstance(item, dict) and all(isinstance(key, str) for key in item):
+            return {key: canonical(child) for key, child in item.items()}
+        raise ValueError("non-JSON grading input")
+
+    try:
+        payload = json.dumps(
+            canonical(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False
+        )
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return None
+
+
 class VerifierInvocation(ObservationModel):
     """One verify() execution, its outcome, and all model attempts made while grading.
 
@@ -188,6 +247,10 @@ class VerifierInvocation(ObservationModel):
     status: Literal["completed", "failed", "incomplete", "unknown"] = "unknown"
     failure_kind: Optional[str] = None
     model_calls: list[ModelCallRef] = Field(default_factory=list)
+    grading_operations: list[GradingOperationObservation] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
 
     @field_validator("failure_kind")
     @classmethod

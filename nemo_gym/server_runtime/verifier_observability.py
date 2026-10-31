@@ -6,9 +6,11 @@
 from __future__ import annotations
 
 import functools
+import inspect
 import json
 import logging
 from collections.abc import Awaitable, Callable, Mapping
+from contextvars import ContextVar
 from typing import ParamSpec, TypeVar
 from uuid import uuid4
 
@@ -22,12 +24,51 @@ from nemo_gym.core.episode import (
     verifier_invocation_context,
 )
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
-from nemo_gym.trajectory.trajectory_record import NG_VERIFIER_INVOCATIONS_KEY, ModelCallRef, VerifierInvocation
+from nemo_gym.trajectory.trajectory_record import (
+    NG_VERIFIER_INVOCATIONS_KEY,
+    GradingOperationObservation,
+    ModelCallRef,
+    VerifierInvocation,
+    grading_result_binding,
+)
 
 
 logger = logging.getLogger(__name__)
 P = ParamSpec("P")
 T = TypeVar("T")
+
+
+_active_verifier: ContextVar[VerifierInvocation | None] = ContextVar("active_verifier_grading", default=None)
+
+
+def observe_programmatic_grading(calculate: Callable[[], T]) -> T:
+    """Execute a reviewed synchronous scorer once and record its actual result in the active invocation.
+
+    This is an explicit call-site contract for pure calculations, not a purity detector for arbitrary callbacks.
+    Judge/SDK/sandbox paths must not use it to label a returned result as programmatic.
+    """
+    if inspect.iscoroutinefunction(calculate):
+        raise TypeError("programmatic grading must be synchronous")
+    invocation = _active_verifier.get()
+    operation = GradingOperationObservation(operation_id=f"grade-{uuid4().hex}", dependencies=[])
+    if invocation is not None:
+        if invocation.grading_operations is None:
+            invocation.grading_operations = []
+        invocation.grading_operations.append(operation)
+    try:
+        result = calculate()
+        if inspect.isawaitable(result):
+            raise TypeError("programmatic grading returned an awaitable")
+    except BaseException:
+        operation.outcome = "failed"
+        raise
+    try:
+        operation.result_binding_sha256 = grading_result_binding(result)
+    except Exception:
+        # Observation must not turn a successfully calculated grade into a verifier failure.
+        operation.result_binding_sha256 = None
+    operation.outcome = "completed" if operation.result_binding_sha256 is not None else "unknown"
+    return result
 
 
 def merge_verifier_call_observation(
@@ -89,6 +130,7 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
             return await verify_fn(*args, **kwargs)
         invocation = VerifierInvocation(invocation_id=f"verify-{uuid4().hex}")
         with verifier_invocation_context(invocation.invocation_id):
+            token = _active_verifier.set(invocation)
             try:
                 result = await verify_fn(*args, **kwargs)
             except Exception as error:
@@ -103,6 +145,8 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
                     result = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
             else:
                 _finish(invocation, result)
+            finally:
+                _active_verifier.reset(token)
 
         evidence = [invocation.model_dump(mode="json")]
         if isinstance(result, Response):
