@@ -215,14 +215,15 @@ def snapshot(a):
     return {p.name: hashlib.sha256(p.read_bytes()).hexdigest() for p in a.iterdir() if p.is_file()}
 
 
-def test_ordinary_default_id_reward_zero_stays_healthy(tmp_path):
+def test_legacy_ordinary_zero_keeps_score_but_unobserved_grading_is_unknown(tmp_path):
     a, _ = setup(tmp_path)
     c = collect(a)
     before = snapshot(a)
     d, task = evaluate(c)
     assert d.expected == 2 and d.counts == {"scored": 2}
-    assert response_health(d, c.quality)[0] is True and trial_health(d, c)[0] is True
-    assert task["status"] == "SUCCESS" and task["score"] == 0.0
+    assert response_health(d, c.quality)[0] is True and trial_health(d, c)[0] is None
+    assert task["status"] == "FAILED" and task["score"] == 0.0
+    assert d.action.value == "noop"  # Unknown grading coverage never requests another generation.
     assert snapshot(a) == before
 
 
@@ -262,7 +263,7 @@ def test_valid_explicit_id_survives_collection(tmp_path):
     print("EXPLICIT", json.dumps({"trial": trial_health(d, c), "status": task["status"]}))
     assert [r.get("_ng_rollout_id") for r in c.results] == [r["_ng_rollout_id"] for r in rows]
     assert d.expected == 2 and d.counts == {"scored": 2}
-    assert trial_health(d, c)[0] is True and task["status"] == "SUCCESS"
+    assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
 
 
 @pytest.mark.parametrize("sources", [None, [], ["other.jsonl"], ["rollouts.jsonl", "rollouts.jsonl"]])
@@ -442,8 +443,10 @@ def test_persisted_response_denominator_and_strict_boundary(tmp_path, n, accept)
     assert d.expected == n and d.counts == {"scored": n} and d.action.value == "noop"
     assert c.quality["responses"]["selected"] == n and c.quality["responses"]["faulted"] == 1
     assert response_health(d, c.quality)[0] is accept
-    assert trial_health(d, c)[0] is True
-    assert (task["status"] == "SUCCESS") is accept
+    # This historical fixture has no grading operation. Response threshold is still exact above;
+    # absence of grading evidence now leaves the full gate nonaccepting even below that threshold.
+    assert trial_health(d, c)[0] is None
+    assert task["status"] == "FAILED"
     assert (a / "rollouts.jsonl").read_bytes() == before
 
 
@@ -527,10 +530,10 @@ def test_legacy_task_identity_is_bound_to_saved_input(tmp_path, identity_fields,
     d, task = evaluate(c)
     assert d.action.value == "noop" and d.counts == {"scored": 1}
     assert task["score"] == 0.0
-    if tamper is None:
-        assert trial_health(d, c)[0] is True and task["status"] == "SUCCESS"
-    else:
-        assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
+    assert c.materialized[0]["_ng_collected_task_id"] == task_id
+    # Legacy grading absence remains unknown independently of identity; current bound producer
+    # identity mismatches have positive/negative controls in test_tool_trial_coverage.
+    assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
     assert snapshot(a) == before
 
 
@@ -546,9 +549,9 @@ def test_legacy_task_identity_is_bound_to_saved_input(tmp_path, identity_fields,
         ({"recovered_attempt_errors": 2, "recovered_operations": 1}, None),
     ],
 )
-def test_recovery_counters_preserve_bounded_mcqa_gate(counters, expected):
+def test_recovery_counters_preserve_observed_mcqa_gate(counters, expected):
     collected = CollectedEvidence.model_validate_json(
-        (Path(__file__).parent / "fixtures/cpu-mcqa-trial-operations.json").read_text()
+        (Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json").read_text()
     )
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert trial_health(decision, collected)[0] is True

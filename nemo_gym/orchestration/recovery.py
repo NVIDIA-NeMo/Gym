@@ -680,6 +680,57 @@ def trial_metadata(value):
             "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id")}
                        if isinstance(event, dict) else None for event_id, event in report["events"].items()}}
     return result
+import hashlib
+def grading_result_binding(result):
+    # Bind saved grading input before metadata projection.
+    if not isinstance(result, dict) or not isinstance(result.get("response"), dict):
+        return None
+    response = result["response"]
+    if not isinstance(response.get("id"), str) or not response["id"] or not isinstance(response.get("output"), list):
+        return None
+    reward = result.get("reward")
+    if type(reward) not in (int, float) or (isinstance(reward, float) and not math.isfinite(reward)):
+        return None
+    value = {"response": response, "reward": reward}
+    if "reward_components" in result:
+        components = result["reward_components"]
+        if not isinstance(components, dict) or not all(
+            isinstance(key, str) and type(number) in (int, float)
+            and (not isinstance(number, float) or math.isfinite(number))
+            for key, number in components.items()
+        ):
+            return None
+        value["reward_components"] = components
+
+    def canonical(item):
+        if item is None or type(item) in (str, bool, int):
+            return item
+        if type(item) is float:
+            if not math.isfinite(item):
+                raise ValueError("nonfinite grading input")
+            return int(item) if item.is_integer() else item
+        if isinstance(item, list):
+            return [canonical(child) for child in item]
+        if isinstance(item, dict) and all(isinstance(key, str) for key in item):
+            return {key: canonical(child) for key, child in item.items()}
+        raise ValueError("non-JSON grading input")
+
+    try:
+        payload = json.dumps(canonical(value), sort_keys=True, separators=(",", ":"), ensure_ascii=False, allow_nan=False)
+        return hashlib.sha256(payload.encode("utf-8")).hexdigest()
+    except (TypeError, ValueError, UnicodeError, RecursionError):
+        return None
+def trial_grading(value):
+    if not isinstance(value, list):
+        return None
+    return [({k: item.get(k) for k in ("operation_id", "kind", "outcome", "result_binding_sha256")}
+             | {"dependencies": trial_refs(item.get("dependencies"))}) if isinstance(item, dict) else None
+            for item in value]
+def trial_items(value, key, fields):
+    if not isinstance(value, dict) or not isinstance(value.get(key), list):
+        return None
+    return [{k: item[k] for k in fields if k in item} if isinstance(item, dict) else None
+            for item in value[key]]
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -703,6 +754,10 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if name == "rollouts.jsonl":
+                binding = grading_result_binding(r)
+                if binding is not None:
+                    selected["_ng_collected_grading_binding"] = binding
             record = r.get("_ng_failure_record")
             if isinstance(record, dict):
                 failure = record.get("failure")
@@ -735,13 +790,17 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and isinstance(trajectory, dict):
                 selected["ng_trial_observations"] = {
                     "task_id": trajectory.get("task_id"), "rollout_id": trajectory.get("rollout_id"),
-                    "invocations": [({k: item.get(k) for k in ("invocation_id", "status", "in_session", "verification_skipped")} | {"model_calls": trial_refs(item.get("model_calls"))})
+                    "invocations": [({k: item.get(k) for k in ("invocation_id", "status", "in_session", "verification_skipped", "error_type", "parent_invocation_id", "stop_reason")} | {"model_calls": trial_refs(item.get("model_calls"))})
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
-                    "verifier_invocations": [{k: item.get(k) for k in ("invocation_id", "status", "failure_kind")}
+                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations"))})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
-                    "model_calls": [{"model_call_id": item.get("model_call_id"), "response_metadata": trial_metadata(item.get("response_metadata"))}
+                    "model_calls": [{"model_call_id": item.get("model_call_id"), "response_metadata": trial_metadata(item.get("response_metadata")),
+                                     "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
+                                     "input_items": trial_items(item.get("request"), "input", ("type", "call_id"))}
                                     if isinstance(item, dict) else None for item in trajectory.get("model_calls")] if isinstance(trajectory.get("model_calls"), list) else None,
-                    "turns": [({k: item.get(k) for k in ("invocation_id", "task_id", "rollout_id")} | {"model_calls": trial_refs(item.get("model_calls"))}) if isinstance(item, dict) else None for item in trajectory.get("turns")] if isinstance(trajectory.get("turns"), list) else None,
+                    "turns": [({k: item.get(k) for k in ("invocation_id", "task_id", "rollout_id", "turn_no", "step_count")} | {"model_calls": trial_refs(item.get("model_calls"))}) if isinstance(item, dict) else None for item in trajectory.get("turns")] if isinstance(trajectory.get("turns"), list) else None,
+                    "tool_calls": [{k: item.get(k) for k in ("invocation_id", "tool_call_id", "tool_name", "status", "error_type")}
+                                   if isinstance(item, dict) else None for item in trajectory.get("tool_calls")] if isinstance(trajectory.get("tool_calls"), list) else None,
                     "tool_call_count": len(trajectory["tool_calls"]) if isinstance(trajectory.get("tool_calls"), list) else None,
                     "gaps": [{"code": gap.get("code")} if isinstance(gap, dict) else None for gap in trajectory.get("gaps")] if isinstance(trajectory.get("gaps"), list) else None,
                 }
@@ -1700,11 +1759,11 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
     )
 
 
-def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> bool:
-    """Derive coverage for the observed one-turn SimpleAgent/MCQA path; no producer completeness assertion.
+def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> bool:
+    """Join observed model/tool operations and the outer verifier invocation for every expected trial.
 
-    Every expected trial must have the actual invocation, selected raw response and verifier outcome. Other
-    adapters, tool execution, checkpointed sessions, omitted events and incomplete references remain unsupported/unknown.
+    A source-reviewed programmatic grading operation must bind the saved response and score. Empty captured
+    model calls alone never establish grading coverage; old or uninstrumented verifiers remain unknown.
     """
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
@@ -1719,156 +1778,228 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
     expected = set(decision.identities.get(IdentityState.SCORED.value, []))
     if rows is None or len(rows) != decision.expected or {_identity(row) for row in rows} != expected:
         return False
-    provenance = (collected.quality or {}).get("provenance") or {}
-    if not isinstance(provenance, dict):
+    provenance = collected.quality.get("provenance")
+    if not isinstance(provenance, dict) or provenance.get("resolved_config") != "read":
         return False
-    servers = provenance.get("servers") or {}
-    if provenance.get("resolved_config") != "read" or not isinstance(servers, dict):
+    servers = provenance.get("servers")
+    if not isinstance(servers, dict):
         return False
     input_task_ids = {_identity(item): item.get("_ng_collected_task_id") for item in collected.materialized or []}
-    call_ids, response_ids, operation_ids, verifier_ids = set(), set(), set(), set()
-    for row in rows:
-        try:
+    populations = (set(), set(), set(), set(), set())
+    grading_ids = set()
+
+    def nonempty(value):
+        return isinstance(value, str) and bool(value.strip())
+
+    def matches(ref, call):
+        meta = call["response_metadata"]
+        return (
+            isinstance(ref, dict)
+            and (
+                ref.get("model_call_id") == call["model_call_id"]
+                if ref.get("model_call_id")
+                else ref.get("model_ref") == meta["model_ref"] and ref.get("response_id") == meta["response_id"]
+            )
+            and (ref.get("model_ref") is None or ref["model_ref"] == meta["model_ref"])
+            and (ref.get("response_id") is None or ref["response_id"] == meta["response_id"])
+        )
+
+    try:
+        for row in rows:
             agent = servers[row["agent_ref"]["name"]]
             resource = servers[agent["resources_server"]]
             environment = servers[row["_ng_environment_server"]]
-            session = environment.get("implementation") == "single_agent_turn_legacy"
             if (
                 agent.get("kind") != "responses_api_agents"
                 or resource.get("kind") != "resources_servers"
                 or environment.get("kind") != "environment_servers"
-                or agent.get("implementation") != "simple_agent"
-                or resource.get("implementation") != "mcqa"
-                or environment.get("implementation") not in {"legacy_agent", "single_agent_turn_legacy"}
                 or row.get("_ng_result_type") != environment.get("implementation")
-                or (session and (collected.checkpoint_enabled is not False or collected.managed_selection is None))
                 or row.get(FAILURE_CLASS) is not None
                 or row.get("failure_kind") is not None
                 or row.get(FAILURE_ID) is not None
                 or row.get("_ng_failure_events_omitted", False) is not False
+                or not isinstance(row.get(FAILURE_EVENTS, {}), dict)
+                or row.get(FAILURE_EVENTS, {})
             ):
                 return False
-            row_events = row.get(FAILURE_EVENTS, {})
-            if not isinstance(row_events, dict):
+            observed = row["ng_trial_observations"]
+            invocations, verifiers = observed["invocations"], observed["verifier_invocations"]
+            calls, turns, tools = observed["model_calls"], observed["turns"], observed["tool_calls"]
+            if (
+                not all(isinstance(items, list) for items in (invocations, verifiers, calls, turns, tools))
+                or len(invocations) != 1
+                or len(verifiers) != 1
+                or not calls
+                or len(turns) != len(calls)
+                or type(observed["tool_call_count"]) is not int
+                or observed["tool_call_count"] != len(tools)
+                or not isinstance(observed["gaps"], list)
+                or any(gap.get("code") != "resolution_unavailable" for gap in observed["gaps"])
+            ):
                 return False
-            t = row["ng_trial_observations"]
+            invocation, verifier = invocations[0], verifiers[0]
+            session = invocation["in_session"]
             task_id = row.get("materialized_task_id") if session else input_task_ids.get(_identity(row))
             if (
-                not isinstance(task_id, str)
-                or not task_id
-                or t["task_id"] != task_id
-                or t["rollout_id"] != maybe_rollout_id_from_run_body(row)
-                or type(t["tool_call_count"]) is not int
-                or t["tool_call_count"] != 0
-                or not isinstance(t["gaps"], list)
-                or any(g.get("code") != "resolution_unavailable" for g in t["gaps"])
-                or len(t["invocations"]) != 1
-                or len(t["verifier_invocations"]) != 1
-                or len(t["model_calls"]) != 1
-                or len(t["turns"]) != 1
-            ):
-                return False
-            invocation, verifier, call = t["invocations"][0], t["verifier_invocations"][0], t["model_calls"][0]
-            if (
-                invocation["status"] != "completed"
-                or invocation["in_session"] is not session
-                or (invocation["verification_skipped"] is not (None if session else False))
+                type(session) is not bool
+                or (session and (collected.checkpoint_enabled is not False or collected.managed_selection is None))
+                or not nonempty(task_id)
+                or observed["task_id"] != task_id
+                or observed["rollout_id"] != maybe_rollout_id_from_run_body(row)
+                or not nonempty(invocation["invocation_id"])
+                or invocation["status"] != "completed"
+                or invocation.get("parent_invocation_id") is not None
+                or invocation.get("error_type") is not None
+                or invocation.get("stop_reason") is not None
+                or invocation["verification_skipped"] is not (None if session else False)
                 or (session and invocation["invocation_id"] != "root")
                 or verifier["status"] != "completed"
                 or verifier["failure_kind"] is not None
+                or verifier["model_calls"] != []
+                or not nonempty(verifier["invocation_id"])
+                or verifier["invocation_id"] in populations[3]
+                or len(invocation["model_calls"]) != len(calls)
             ):
                 return False
-            turn = t["turns"][0]
+            grading = verifier.get("grading_operations")
+            if not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
+                return False
+            grade = grading[0]
+            binding = row.get("_ng_collected_grading_binding")
             if (
-                not isinstance(invocation.get("invocation_id"), str)
-                or not invocation["invocation_id"].strip()
-                or turn.get("invocation_id") != invocation["invocation_id"]
-                or turn.get("task_id") != t["task_id"]
-                or turn.get("rollout_id") != t["rollout_id"]
+                grade.get("kind") != "programmatic_calculation"
+                or grade.get("outcome") != "completed"
+                or grade.get("dependencies") != []
+                or not nonempty(grade.get("operation_id"))
+                or grade["operation_id"] in grading_ids
+                or not isinstance(binding, str)
+                or len(binding) != 64
+                or grade.get("result_binding_sha256") != binding
             ):
                 return False
-            meta = call["response_metadata"]
-            if (
-                type(meta["status_code"]) is not int
-                or not 200 <= meta["status_code"] < 300
-                or meta.get("error_category") is not None
-                or meta.get("response_status") != "completed"
-            ):
-                return False
-            for references in (invocation["model_calls"], t["turns"][0]["model_calls"]):
-                if not isinstance(references, list) or len(references) != 1:
+            grading_ids.add(grade["operation_id"])
+            populations[3].add(verifier["invocation_id"])
+            ordered = []
+            for number, turn in enumerate(turns, 1):
+                if (
+                    turn["invocation_id"] != invocation["invocation_id"]
+                    or turn["task_id"] != task_id
+                    or turn["rollout_id"] != observed["rollout_id"]
+                    or type(turn["turn_no"]) is not int
+                    or turn["turn_no"] != number
+                    or not isinstance(turn["model_calls"], list)
+                    or len(turn["model_calls"]) != 1
+                ):
                     return False
-                ref = references[0]
-                if ref.get("model_call_id"):
+                joined = [call for call in calls if matches(turn["model_calls"][0], call)]
+                if len(joined) != 1 or not matches(invocation["model_calls"][number - 1], joined[0]):
+                    return False
+                ordered.append(joined[0])
+            requested = {}
+            tool_by_id = {tool["tool_call_id"]: tool for tool in tools}
+            if len(tool_by_id) != len(tools):
+                return False
+            for number, (call, turn) in enumerate(zip(ordered, turns), 1):
+                meta = call["response_metadata"]
+                operations, report = meta["model_operations"], meta["failure_report"]
+                if (
+                    type(meta["status_code"]) is not int
+                    or not 200 <= meta["status_code"] < 300
+                    or meta.get("error_category") is not None
+                    or meta.get("response_status") != "completed"
+                    or len(operations) != 1
+                    or not isinstance(report["events"], dict)
+                    or report["events"]
+                    or report["omitted"] is not False
+                    or report["failure_id"] is not None
+                ):
+                    return False
+                operation = operations[0]
+                if (
+                    operation["outcome"] != "completed"
+                    or operation["failure_id"] is not None
+                    or type(operation["http_attempts"]) is not int
+                    or operation["http_attempts"] != 1
+                    or type(operation["transport_failures"]) is not int
+                    or operation["transport_failures"] != 0
+                    or not all(
+                        nonempty(value)
+                        for value in (
+                            call["model_call_id"],
+                            meta["model_ref"]["type"],
+                            meta["model_ref"]["name"],
+                            meta["response_id"],
+                            operation["operation_id"],
+                            operation["final_attempt_id"],
+                        )
+                    )
+                ):
+                    return False
+                if operation["final_attempt_id"] in populations[4]:
+                    return False
+                populations[4].add(operation["final_attempt_id"])
+                values = (
+                    call["model_call_id"],
+                    (meta["model_ref"]["type"], meta["model_ref"]["name"], meta["response_id"]),
+                    operation["operation_id"],
+                )
+                if any(value in seen for value, seen in zip(values, populations)):
+                    return False
+                for value, seen in zip(values, populations):
+                    seen.add(value)
+                inputs, outputs = call["input_items"], call["output_items"]
+                if not isinstance(inputs, list) or not isinstance(outputs, list) or not outputs:
+                    return False
+                # This proof joins client-executed function tools. Hosted/computer/custom operations
+                # need their own runtime evidence; an assistant message beside them does not certify them.
+                if any(item.get("type") not in {"message", "reasoning", "function_call"} for item in outputs) or any(
+                    item.get("type") not in {None, "message", "reasoning", "function_call", "function_call_output"}
+                    for item in inputs
+                ):
+                    return False
+                consumed = [item["call_id"] for item in inputs if item.get("type") == "function_call_output"]
+                if len(consumed) != len(set(consumed)) or set(consumed) != set(requested):
+                    return False
+                emitted = [item for item in outputs if item.get("type") == "function_call"]
+                for item in emitted:
+                    tool_id, name = item["call_id"], item["name"]
+                    if not nonempty(tool_id) or not nonempty(name) or tool_id in requested:
+                        return False
+                    tool = tool_by_id.get(tool_id)
                     if (
-                        ref["model_call_id"] != call["model_call_id"]
-                        or (ref.get("model_ref") is not None and ref["model_ref"] != meta["model_ref"])
-                        or (ref.get("response_id") is not None and ref["response_id"] != meta["response_id"])
+                        tool is None
+                        or tool["invocation_id"] != invocation["invocation_id"]
+                        or tool["tool_name"] != name
+                        or tool["status"] != "completed"
+                        or tool["error_type"] is not None
                     ):
                         return False
-                elif ref.get("model_ref") != meta["model_ref"] or ref.get("response_id") != meta["response_id"]:
+                    requested[tool_id] = name
+                # step_count is producer-specific (before/after a tool execution); the explicit tool
+                # request/execution/result joins above establish coverage without reinterpreting that counter.
+                if type(turn["step_count"]) is not int or turn["step_count"] < 0:
                     return False
-            operations = meta["model_operations"]
-            if len(operations) != 1:
-                return False
-            operation = operations[0]
-            report = meta["failure_report"]
-            events = report["events"]
+                if number == len(ordered):
+                    if emitted or not any(
+                        item.get("type") == "message"
+                        and item.get("role") == "assistant"
+                        and item.get("status") == "completed"
+                        for item in outputs
+                    ):
+                        return False
+                elif not emitted:
+                    return False
+            saved_response = row.get("response")
             if (
-                operation["outcome"] != "completed"
-                or operation["failure_id"] is not None
-                or not operation["final_attempt_id"]
-                or type(operation["http_attempts"]) is not int
-                or operation["http_attempts"] != len(events) + 1
-                or type(operation["transport_failures"]) is not int
-                or operation["transport_failures"] != 0
-                or report["omitted"] is not False
-                or report["failure_id"] is not None
+                set(requested) != set(tool_by_id)
+                or not isinstance(saved_response, dict)
+                or saved_response.get("id") != ordered[-1]["response_metadata"]["response_id"]
+                or saved_response.get("status") != "completed"
+                or saved_response.get("error") is not None
             ):
                 return False
-            attempt_ids = {e["attempt_id"] for e in events.values()}
-            if (
-                len(attempt_ids) != len(events)
-                or operation["final_attempt_id"] in attempt_ids
-                or any(
-                    not isinstance(event_id, str)
-                    or not event_id.strip()
-                    or not isinstance(e.get("attempt_id"), str)
-                    or not e["attempt_id"].strip()
-                    or e.get("boundary") != "model"
-                    or e.get("operation") != "model_request"
-                    or e.get("operation_id") != operation["operation_id"]
-                    or e.get("event_id") != event_id
-                    for event_id, e in events.items()
-                )
-            ):
-                return False
-            if not all(
-                isinstance(value, str) and value.strip()
-                for value in (
-                    call["model_call_id"],
-                    meta["model_ref"]["type"],
-                    meta["model_ref"]["name"],
-                    meta["response_id"],
-                    operation["operation_id"],
-                    operation["final_attempt_id"],
-                    verifier["invocation_id"],
-                )
-            ):
-                return False
-            # Observed recovered failures do not define an agreed trial-health denominator.
-            # Whole-row events also cover resources/agent/relay failures outside the raw model report.
-            if events or row_events:
-                return False
-            response_key = (meta["model_ref"]["type"], meta["model_ref"]["name"], meta["response_id"])
-            values = (call["model_call_id"], response_key, operation["operation_id"], verifier["invocation_id"])
-            populations = (call_ids, response_ids, operation_ids, verifier_ids)
-            if any(not value or value in seen for value, seen in zip(values, populations)):
-                return False
-            for value, seen in zip(values, populations):
-                seen.add(value)
-        except (KeyError, TypeError, ValueError, AttributeError):
-            return False
+    except (KeyError, TypeError, ValueError, AttributeError):
+        return False
     return True
 
 
@@ -1882,7 +2013,7 @@ def trial_health(
     materialized inventory. A run that is not complete has unaccounted trials, so the gate is not evaluated. Other
     terminal trial failures (a judge, verifier or harness error scored as a zero in the main output) carry no failure
     record and cannot be ruled out, so their count is a lower bound. At or above the limit it fails; below it the
-    gate remains unknown unless actual per-identity operation outcomes cover the supported one-turn MCQA path.
+    gate remains unknown unless actual per-identity operation outcomes cover the observed model/tool and programmatic grading path.
     """
     if not decision.complete or decision.expected <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})"
@@ -1906,10 +2037,10 @@ def trial_health(
             None,
             "trial: recovered attempt/operation failures are observed; their trial-health treatment is not defined",
         )
-    if _bounded_mcqa_trial_operations(decision, collected):
+    if _observed_trial_operations(decision, collected):
         return (
             True,
-            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); actual one-turn SimpleAgent/MCQA operation outcomes cover every identity and repeat",
+            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); actual model/tool and bound programmatic grading operations cover every identity and repeat",
         )
     return None, (
         f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "

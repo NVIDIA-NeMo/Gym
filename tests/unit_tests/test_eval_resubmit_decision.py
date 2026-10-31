@@ -2046,7 +2046,7 @@ def test_mcqa_trial_operations_with_unsupported_provenance_are_unproven_not_rais
     collected = recovery.CollectedEvidence(
         materialized=[row], results=[row], failures=[], quality={"source_matches": True, "provenance": provenance}
     )
-    assert recovery._bounded_mcqa_trial_operations(decision, collected) is False
+    assert recovery._observed_trial_operations(decision, collected) is False
 
 
 @pytest.mark.parametrize(
