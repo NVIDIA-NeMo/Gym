@@ -3660,3 +3660,65 @@ def test_console_distinguishes_rollout_checks_from_response_population(responses
         assert f"{responses['unknown']} rollout scopes unobserved" in report
         assert f"{responses['duplicated']} duplicate call IDs" in report
     assert summary == original
+
+
+@pytest.mark.parametrize("mode", ["enabled", "disabled", "missing", "relative"])
+def test_health_capture_configuration_is_optional_and_does_not_create_files(tmp_path, mode):
+    capture = tmp_path / "capture"
+    config = {"observability_enabled": mode != "disabled"}
+    if mode == "enabled":
+        config["model_call_capture_dir"] = str(capture)
+    elif mode == "relative":
+        config["model_call_capture_dir"] = "relative-capture"
+    before = list(tmp_path.iterdir())
+    assert health.capture_dirs_for_health(config) == ([capture] if mode == "enabled" else [])
+    assert list(tmp_path.iterdir()) == before
+
+
+@pytest.mark.parametrize("error_type", [health.JournalHealthUnavailable, OSError])
+def test_provisional_health_failure_preserves_saved_evidence(tmp_path, monkeypatch, capsys, caplog, error_type):
+    from types import SimpleNamespace
+
+    output = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    report = tmp_path / "quality_summary.json"
+    report.write_text("saved summary")
+    before = (output.read_bytes(), report.read_bytes())
+    config = SimpleNamespace(run_health_limits=health.RunHealthLimits(), health_check_ignored_checks=())
+    calls = []
+
+    def unavailable(*args, **kwargs):
+        calls.append(args)
+        raise error_type("saved history unavailable")
+
+    monkeypatch.setattr(health, "write_provisional_summary", unavailable)
+    health._health_check_collected_rollouts(output, config, {(0, 0)}, terminated=True)
+    assert len(calls) == 1
+    assert (output.read_bytes(), report.read_bytes()) == before
+    if error_type is health.JournalHealthUnavailable:
+        assert "Rollout health checks skipped" in capsys.readouterr().out
+    else:
+        assert "Writing the provisional quality summary failed" in caplog.text
+
+
+def test_collected_health_before_output_exists_does_not_create_reports(tmp_path):
+    health._health_check_collected_rollouts(tmp_path / "missing.jsonl", None)
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_unavailable_journal_health_preserves_saved_evidence(tmp_path, monkeypatch, capsys):
+    from types import SimpleNamespace
+
+    output = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    before = output.read_bytes()
+    config = SimpleNamespace(
+        run_health_limits=health.RunHealthLimits(), health_check_ignored_checks=(), health_check_workers=1
+    )
+
+    def unavailable(*args, **kwargs):
+        raise health.JournalHealthUnavailable("selected projection required")
+
+    monkeypatch.setattr(health, "run_health_checks", unavailable)
+    health._health_check_collected_rollouts(output, config)
+    assert "Rollout health checks skipped: selected projection required" in capsys.readouterr().out
+    assert output.read_bytes() == before
+    assert not (tmp_path / "quality_summary.json").exists()

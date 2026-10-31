@@ -16,10 +16,55 @@ import hashlib
 import json
 import math
 import os
+import re
 from typing import Any, Iterable
 
 
 _PRIMITIVE_TYPES = (bool, int, float, str, type(None))
+
+
+# MLflow's metric, parameter and tag key limit; checked against the optional SDK in its exporter tests.
+_MLFLOW_KEY_LENGTH_LIMIT = 250
+
+
+_INVALID_KEY_CHARS = re.compile(r"[^/\w.\- :]")
+_LEADING_DOTS = re.compile(r"^\.+")
+# Stands in for the elided middle of an over-long name; must itself be an accepted character.
+_ELISION_MARKER = "___"
+
+
+def _normalize_key_path(key: str) -> str:
+    """Neutralize only the path segments MLflow rejects, leaving the rest of the name intact.
+
+    MLflow requires an already-normalized relative path, so it rejects empty segments (from
+    leading, doubled or trailing slashes) and the traversal forms `.` and `..`.
+    """
+    segments = [segment for segment in key.split("/") if segment]
+    # An all-dot segment is a traversal segment; same length keeps neighbouring names distinct.
+    segments = ["_" * len(segment) if set(segment) == {"."} else segment for segment in segments]
+    # A surviving name may still open with dots ("...x"), which MLflow also reads as traversal.
+    return _LEADING_DOTS.sub(lambda match: "_" * len(match.group()), "/".join(segments))
+
+
+def _elide_key(key: str, limit: int = _MLFLOW_KEY_LENGTH_LIMIT) -> str:
+    """Cut an over-long name in the middle, keeping both ends.
+
+    Gym names carry their identity at the edges — benchmark and agent in the prefix, the statistic
+    in the suffix (`gpqa.../simple_agent/mean/reward`) — so the middle is what can be spared.
+    """
+    if len(key) <= limit:
+        return key
+    kept = limit - len(_ELISION_MARKER)
+    # Bias the head, which carries the benchmark and agent names.
+    head, tail = kept - kept // 2, kept // 2
+    return key[:head] + _ELISION_MARKER + (key[-tail:] if tail else "")
+
+
+def _canonical_mlflow_key(key: str, *, limit: int = _MLFLOW_KEY_LENGTH_LIMIT) -> str | None:
+    """The backend key shared by health preflight and MLflow delivery, without importing the optional SDK."""
+    sanitized = _normalize_key_path(_INVALID_KEY_CHARS.sub("_", key.replace("@", "_at_")))
+    sanitized = _normalize_key_path(_elide_key(sanitized, limit))
+    return sanitized or None
 
 
 def health_source_artifacts(artifacts, version: dict[str, Any]) -> dict[str, Any]:
@@ -110,6 +155,6 @@ def flatten_aggregate_metrics(
                 if isinstance(v, _PRIMITIVE_TYPES)
             }
         )
-    if health_metrics.keys() & metrics.keys():
+    if {_canonical_mlflow_key(key) for key in health_metrics} & {_canonical_mlflow_key(key) for key in metrics}:
         raise ValueError("Run health metric names collide with scientific metric names.")
     return {**metrics, **health_metrics}

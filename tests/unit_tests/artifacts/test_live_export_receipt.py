@@ -859,3 +859,81 @@ def test_live_health_delivery_cannot_certify_a_changed_summary(live, monkeypatch
     changed[0].pop("_ng_run_health_metrics")
     assert changed == scientific
     assert client.metrics["agent/mean/reward"] == 0.5
+
+
+@pytest.mark.parametrize("path", ["live", "postrun"])
+@pytest.mark.parametrize(
+    "scientific_key,canonical_key",
+    [
+        ("trial//passed", "health/trial/passed"),
+        ("/trial/passed", "health/trial/passed"),
+        ("trial/passed/", "health/trial/passed"),
+        ("grading?recovery/known", "health/grading_recovery/known"),
+        ("upstream?recovery/known", "health/upstream_recovery/known"),
+    ],
+)
+def test_canonical_health_collision_refuses_before_any_mutation(
+    live, monkeypatch, path, scientific_key, canonical_key
+):
+    from nemo_gym.cli import eval as cli
+
+    artifacts, exporter, client = live
+    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    entries[0]["agent_ref"]["name"] = "health"
+    entries[0]["agent_metrics"] = {scientific_key: 123}
+    artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(entries))
+    exporter.export_metrics({f"health/{scientific_key}": 123})
+    assert client.metrics[canonical_key] == 123
+    protected = [
+        artifacts.rollouts_jsonl_fpath,
+        artifacts.aggregate_metrics_json_fpath,
+        artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json",
+    ]
+    before = {str(p): p.read_bytes() for p in protected}
+    backend = (dict(client.metrics), dict(client.tags), dict(client.artifacts), client.status)
+
+    if path == "live":
+        _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    else:
+        config = OmegaConf.create(OmegaConf.to_container(exporter.global_config_dict))
+        config.update({"exporter": "mlflow", "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath)})
+        monkeypatch.setattr(cli, "get_global_config_dict", lambda **kwargs: config)
+        with pytest.raises(ValueError, match="collide"):
+            cli.export_run()
+
+    assert client.metrics[canonical_key] == 123
+    assert backend == (client.metrics, client.tags, client.artifacts, client.status)
+    assert before == {str(p): p.read_bytes() for p in protected}
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+@pytest.mark.parametrize("path", ["live", "postrun"])
+@pytest.mark.parametrize("scientific_key", ["score//value", "trial/./passed"])
+def test_noncolliding_sanitized_scientific_metric_still_exports(live, monkeypatch, path, scientific_key):
+    from nemo_gym.cli import eval as cli
+
+    artifacts, exporter, client = live
+    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    entries[0]["agent_ref"]["name"] = "health"
+    entries[0]["agent_metrics"] = {scientific_key: 123}
+    artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(entries))
+    rows = artifacts.rollouts_jsonl_fpath.read_bytes()
+    exporter.export_metrics({f"health/{scientific_key}": 123})
+    canonical_key = module._sanitize_key(f"health/{scientific_key}")
+
+    if path == "live":
+        _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    else:
+        config = OmegaConf.create(OmegaConf.to_container(exporter.global_config_dict))
+        config.update({"exporter": "mlflow", "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath)})
+        monkeypatch.setattr(cli, "get_global_config_dict", lambda **kwargs: config)
+        cli.export_run()
+
+    assert client.metrics[canonical_key] == 123
+    assert client.metrics["health/trial/passed"] == 0
+    assert client.status == "FINISHED"
+    assert artifacts.export_done_fpath("mlflow").exists()
+    assert artifacts.rollouts_jsonl_fpath.read_bytes() == rows
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == entries

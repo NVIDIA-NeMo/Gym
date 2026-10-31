@@ -15,7 +15,6 @@
 import hashlib
 import json
 import logging
-import re
 import tempfile
 from collections import Counter
 from itertools import batched
@@ -38,7 +37,26 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.artifacts.exporters import run_failed
 from nemo_gym.artifacts.exporters.base import BaseExporter, _artifact_version, _live_run_id, _write_marker_atomically
-from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
+from nemo_gym.artifacts.exporters.metrics import (
+    _ELISION_MARKER as _ELISION_MARKER,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _INVALID_KEY_CHARS as _INVALID_KEY_CHARS,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _LEADING_DOTS as _LEADING_DOTS,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _canonical_mlflow_key,
+    flatten_aggregate_metrics,
+    health_source_artifacts,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _elide_key as _elide_key,
+)
+from nemo_gym.artifacts.exporters.metrics import (
+    _normalize_key_path as _normalize_key_path,
+)
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import MLFlowConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -59,39 +77,6 @@ def _flatten_config(value: Any, prefix: str = "") -> Iterator[tuple[str, Any]]:
         yield prefix, value
 
 
-_INVALID_KEY_CHARS = re.compile(r"[^/\w.\- :]")
-_LEADING_DOTS = re.compile(r"^\.+")
-# Stands in for the elided middle of an over-long name; must itself be an accepted character.
-_ELISION_MARKER = "___"
-
-
-def _normalize_key_path(key: str) -> str:
-    """Neutralize only the path segments MLflow rejects, leaving the rest of the name intact.
-
-    MLflow requires an already-normalized relative path, so it rejects empty segments (from
-    leading, doubled or trailing slashes) and the traversal forms `.` and `..`.
-    """
-    segments = [segment for segment in key.split("/") if segment]
-    # An all-dot segment is a traversal segment; same length keeps neighbouring names distinct.
-    segments = ["_" * len(segment) if set(segment) == {"."} else segment for segment in segments]
-    # A surviving name may still open with dots ("...x"), which MLflow also reads as traversal.
-    return _LEADING_DOTS.sub(lambda match: "_" * len(match.group()), "/".join(segments))
-
-
-def _elide_key(key: str, limit: int = MAX_ENTITY_KEY_LENGTH) -> str:
-    """Cut an over-long name in the middle, keeping both ends.
-
-    Gym names carry their identity at the edges — benchmark and agent in the prefix, the statistic
-    in the suffix (`gpqa.../simple_agent/mean/reward`) — so the middle is what can be spared.
-    """
-    if len(key) <= limit:
-        return key
-    kept = limit - len(_ELISION_MARKER)
-    # Bias the head, which carries the benchmark and agent names.
-    head, tail = kept - kept // 2, kept // 2
-    return key[:head] + _ELISION_MARKER + (key[-tail:] if tail else "")
-
-
 def _sanitize_key(key: str) -> Optional[str]:
     """Map a metric/param/tag name onto what MLflow accepts: character set, path shape, length.
 
@@ -99,11 +84,7 @@ def _sanitize_key(key: str) -> Optional[str]:
     made only of separators, leaving nothing to sanitize into. Dropping that one entry is
     deliberate: MLflow rejects an entire `log_batch` when any single name is invalid.
     """
-    # `@` is spelled out rather than blanked to `_`, so `pass@1` stays readable as `pass_at_1`.
-    sanitized = _normalize_key_path(_INVALID_KEY_CHARS.sub("_", key.replace("@", "_at_")))
-    # Length is enforced last because `_at_` lengthens a name. Re-normalize: splicing two ends
-    # together can reintroduce a path shape MLflow rejects.
-    sanitized = _normalize_key_path(_elide_key(sanitized))
+    sanitized = _canonical_mlflow_key(key, limit=MAX_ENTITY_KEY_LENGTH)
     if not sanitized:
         logger.warning(f"Dropping entry {key!r}: nothing is left of the name once sanitized.")
         return None
