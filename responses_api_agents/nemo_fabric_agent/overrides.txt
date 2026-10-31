@@ -3,3 +3,5 @@ openai==2.44.0
 # root nemo-gym pin (>=2.15.1, CVE mitigation). Force the version the root
 # project resolves to elsewhere in the repo.
 pyjwt==2.15.1
+# hermes-agent pins pillow==12.2.0 exactly, while openhands-sdk 1.50.0 needs >=12.3.0.
+pillow==12.3.0
