@@ -875,6 +875,74 @@ class TestApp:
             server_client=MagicMock(spec=ServerClient, global_config_dict=global_config),
         )
 
+    @mark.parametrize("native", [False, True])
+    @mark.parametrize("request_budget", ["missing", None, 32])
+    @mark.parametrize("default_budget", [None, 64])
+    @mark.parametrize("pinned_budget", [None, 8])
+    def test_response_token_default_preserves_explicit_requests_and_sampling_pins(
+        self,
+        monkeypatch: MonkeyPatch,
+        native: bool,
+        request_budget: str | int | None,
+        default_budget: int | None,
+        pinned_budget: int | None,
+    ) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.is_responses_native = native
+        server.config.default_response_max_output_tokens = default_budget
+        field = "max_output_tokens" if native else "max_tokens"
+        if pinned_budget is not None:
+            server.config.sampling_overrides = {field: pinned_budget}
+        upstream = MagicMock(spec=NeMoGymAsyncOpenAI)
+        upstream.create_response = AsyncMock(
+            return_value=NeMoGymResponse(
+                id="resp_test",
+                created_at=FIXED_TIME,
+                model="dummy_model",
+                object="response",
+                output=[],
+                parallel_tool_calls=True,
+                tool_choice="auto",
+                tools=[],
+            ).model_dump()
+        )
+        upstream.create_chat_completion = AsyncMock(
+            return_value=NeMoGymChatCompletion(
+                id="chat_test",
+                created=FIXED_TIME,
+                model="dummy_model",
+                object="chat.completion",
+                choices=[
+                    NeMoGymChoice(
+                        index=0,
+                        finish_reason="stop",
+                        message=NeMoGymChatCompletionMessage(role="assistant", content="hello"),
+                    )
+                ],
+            ).model_dump()
+        )
+        server._clients = [upstream]
+        payload = {"input": "hello"}
+        if request_budget != "missing":
+            payload["max_output_tokens"] = request_budget
+        response = TestClient(server.setup_webserver()).post("/v1/responses", json=payload)
+        assert response.status_code == 200, response.text
+        call = upstream.create_response if native else upstream.create_chat_completion
+        call.assert_awaited_once()
+        expected = request_budget if isinstance(request_budget, int) else default_budget
+        if pinned_budget is not None:
+            expected = pinned_budget
+        assert call.await_args.kwargs.get(field) == expected
+
+    def test_response_token_default_does_not_change_direct_chat_requests(self, monkeypatch: MonkeyPatch) -> None:
+        server = self._setup_server(monkeypatch)
+        server.config.default_response_max_output_tokens = 64
+        body = {"messages": [{"role": "user", "content": "hello"}]}
+        request = MagicMock(cookies={})
+        processed = server._preprocess_chat_completion_create_params(request, body)
+        assert "max_tokens" not in processed
+        assert "max_output_tokens" not in processed
+
     async def test_sanity(self, monkeypatch: MonkeyPatch) -> None:
         assert not self._setup_server(monkeypatch).config.propagate_context_overflow_errors
 

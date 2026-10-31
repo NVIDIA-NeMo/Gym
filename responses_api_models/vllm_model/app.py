@@ -459,6 +459,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # is always dropped. Opt in deliberately and re-baseline with a same-config run.
     forward_request_chat_template_kwargs: bool = False
 
+    # Fill an omitted Responses generation budget; explicit requests and sampling pins still win.
+    # This setting does not apply to direct Chat Completions requests.
+    default_response_max_output_tokens: Optional[int] = None
+
     # When True, if the last input message is an assistant message, forward it to vLLM as a
     # prefix to continue (continue_final_message=True, add_generation_prompt=False) instead of
     # starting a fresh assistant turn. Off by default so default model-server behavior is
@@ -900,6 +904,9 @@ class VLLMModel(SimpleResponsesAPIModel):
         if self.config.is_responses_native:
             return await self._responses_native(request, body)
 
+        if self.config.default_response_max_output_tokens is not None and body.max_output_tokens is None:
+            body = body.model_copy(update={"max_output_tokens": self.config.default_response_max_output_tokens})
+
         # Response Create Params -> Chat Completion Create Params
         chat_completion_create_params = self._responses_to_chat_request(body, request)
         body.model = self.config.model
@@ -952,6 +959,8 @@ class VLLMModel(SimpleResponsesAPIModel):
 
         body_dict = body.model_dump(exclude_unset=True)
         body_dict["model"] = self.config.model
+        if self.config.default_response_max_output_tokens is not None and body_dict.get("max_output_tokens") is None:
+            body_dict["max_output_tokens"] = self.config.default_response_max_output_tokens
         if self.config.chat_template_kwargs:
             body_dict["chat_template_kwargs"] = deepcopy(self.config.chat_template_kwargs)
         if self.config.extra_body:
