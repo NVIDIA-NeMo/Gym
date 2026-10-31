@@ -891,6 +891,8 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
         from contextlib import redirect_stdout
         from io import StringIO
 
+        import yaml
+
         from nemo_gym.rollout_records import logical_rollout_id
         from nemo_gym.rollout_store import RolloutStore
 
@@ -961,8 +963,6 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
         # Read only existing, snapshotted runtime inputs. Missing facts never establish trial coverage.
         checkpoint_enabled = None
         try:
-            import yaml
-
             from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
             from nemo_gym.task_materialization import materialize_task
 
