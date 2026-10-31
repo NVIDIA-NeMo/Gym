@@ -156,7 +156,7 @@ def test_large_history_retains_offsets_instead_of_trajectories(prepared_run, reo
                 store.record_dispatch(row)
                 payload = row | {"response": {"output_text": blob + str(attempt)}, "reward": 0.0}
                 if attempt % 2:
-                    payload["_ng_failure_class"] = "judge_failed"
+                    payload["_ng_failure_class"] = "provider_unavailable"
                 store.record_outcome(payload)
 
     if reopen:
@@ -796,7 +796,10 @@ async def test_judge_only_reads_selected_source_into_separate_output(
         failed = second | {"_ng_failure_class": "judge_failed", answer_key: {"answer": "saved answer"}}
         store.record_outcome(failed)
         if superseded:
-            retry = store.pending(3)[0]
+            # Construct an explicitly superseding historical verification attempt; normal resume stays blocked.
+            assert second not in store.pending(3)
+            retry = dict(second)
+            store.allocate_attempt(retry)
             store.record_dispatch(retry)
             store.record_outcome(retry | {"_ng_failure_class": "judge_failed", "response": {"answer": "new answer"}})
     before = snapshot(output)
@@ -1261,8 +1264,8 @@ def test_a_delivered_verification_failure_with_its_answer_is_not_regenerated(pre
         store.record_outcome(result)
     reloaded = RolloutStore.read(output)
     pending = {logical_rollout_id(r) for r in reloaded.pending()}
-    # The saved answer is kept for reverification; only a failure before any answer runs the rollout again.
-    assert (logical_rollout_id(row) in pending) is (not saved_answer)
+    # A judge failure never reruns the agent: a missing saved answer is unsupported, not retryable.
+    assert logical_rollout_id(row) not in pending
     [saved] = [r for r in reloaded.failures() if logical_rollout_id(r) == logical_rollout_id(row)]
     assert (saved.get("response") == answer) is saved_answer
     assert reloaded.coverage()["counted_failures"] == 1
@@ -1282,7 +1285,7 @@ def test_a_reservation_without_outcome_never_regenerates_an_earlier_saved_answer
         store.record_dispatch(row | {"_ng_attempt_index": 1})  # reserved, then the run ended before any outcome
     reloaded = RolloutStore.read(output)
     pending = {logical_rollout_id(r) for r in reloaded.pending()}
-    assert (logical_rollout_id(row) in pending) is (not answered)
+    assert logical_rollout_id(row) not in pending
     assert reloaded.coverage()["counted_failures"] == 1
 
 
@@ -1340,3 +1343,35 @@ def test_missing_reservation_preserves_prior_replay_gate_and_explicit_budget_res
     assert reloaded.coverage()["missing"] == 1
     assert reloaded.coverage()["counted_failures"] == (0 if resubmit else charged_failures)
     assert (sidecar.read_bytes() if sidecar.exists() else None) == saved_history
+
+
+@pytest.mark.parametrize("new_attempt", [False, True])
+def test_current_unrouted_dispatch_gates_admission_without_replacing_history(prepared_run, new_attempt):
+    from nemo_gym.omitted_rollouts import omitted_rollout_record
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        original = row | {"_ng_failure_class": "provider_unavailable", "reward": 0.0}
+        store.record_outcome(original)
+        diagnostic = row
+        if new_attempt:
+            diagnostic = row | {"_ng_attempt_index": 1}
+            store.record_dispatch(diagnostic)
+        store.record_unstarted(
+            omitted_rollout_record(diagnostic | {"_ng_failure_class": "agent_run_error"})
+            | {"_ng_unrouted_run_error": True}
+        )
+    reader = RolloutStore.read(output)
+    assert not any(item["_ng_task_index"] == 0 for item in reader.pending(3))
+    assert reader.coverage()["counted_failures"] == 1
+    assert list(read_records(failures_path_for(output)))[0] == original
+    # A genuinely newer valid outcome supersedes that diagnostic; no historical blocker leaks forward.
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        later = row | {"_ng_attempt_index": 2 if new_attempt else 1}
+        store.record_dispatch(later)
+        store.record_outcome(later | {"_ng_failure_class": "provider_unavailable", "reward": 0.0})
+    reader = RolloutStore.read(output)
+    assert any(item["_ng_task_index"] == 0 for item in reader.pending(3))
+    assert reader.coverage()["counted_failures"] == 2

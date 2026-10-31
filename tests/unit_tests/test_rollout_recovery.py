@@ -921,6 +921,24 @@ async def test_reported_kill_shaped_failures_stop_without_spending_budget(runner
     assert str(collection.failures_path_for(output)) in printed
 
 
+def known_pre_answer_provider_failure():
+    """The environment reports a provider allocation failure before any answer exists."""
+    return {
+        "_ng_failure_class": "agent_request_failed",
+        "failure_kind": "agent_request_failed",
+        "_ng_failure_id": "allocation-failure",
+        "_ng_failure_events": {
+            "allocation-failure": {
+                "event_id": "allocation-failure",
+                "boundary": "provider",
+                "failure_kind": "provider_unavailable",
+                "operation": "provider.create",
+                "failure_reason": "Controlled provider allocation unavailable",
+            }
+        },
+    }
+
+
 @pytest.mark.parametrize("count_failures_as_zero", [False, True])
 async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     runner_config, monkeypatch, count_failures_as_zero
@@ -942,7 +960,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
         identity = logical_rollout_id(row)
         assert history.manifest.next_attempt[identity] == row.get("_ng_attempt_index", 0) + 1
         if row["task"] == 1 and row.get("_ng_attempt_index", 0) == 0:
-            raise http_error(503)
+            # A bare gateway 503 cannot prove execution never began.
+            return FakeResponse(200, known_pre_answer_provider_failure())
         if row["task"] == 2:
             return FakeResponse(
                 200,
@@ -1393,7 +1412,7 @@ async def test_no_serve_resume_uses_running_server_identity(runner_config, monke
     async def post(**kwargs):
         row = kwargs["json"]
         if phase == "A" and row["task"] == 1:
-            raise TimeoutError("No saved outcome")
+            return FakeResponse(200, known_pre_answer_provider_failure())
         return FakeResponse(200, {"reward": 1.0, "response": {}, "model_used": phase})
 
     client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
@@ -1603,7 +1622,14 @@ async def test_incomplete_capture_policy_preserves_recovery_accounting(
     if judge_failed:
         assert "reward" not in saved
         assert list(read_records(output)) == []
-        assert len(history.pending(3)) == 1
+        assert history.pending(3) == []
+        runner_config.resume_from_cache = True
+        client.post.reset_mock()
+        try:
+            await RolloutCollectionHelper().run_from_config(runner_config)
+        except RuntimeError:
+            pass
+        assert client.post.await_count == 0
     else:
         assert saved["reward"] == 1.0
         runner_config.resume_from_cache = True
@@ -1668,7 +1694,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
         latest = older_failure | {"_ng_attempt_index": 2}
         writer.record_dispatch(latest)
         if latest_outcome in {"failure", "suppressed_retry"}:
-            writer.record_outcome(latest | {"_ng_failure_class": "judge_failed"})
+            writer.record_outcome(latest | {"_ng_failure_class": "provider_unavailable"})
         elif latest_outcome == "omitted":
             writer.record_omission(latest, "No reusable answer")
     assert success["reward"] == 1.0
@@ -1689,7 +1715,7 @@ async def test_batch_status_uses_current_journal_attempts(tmp_path, monkeypatch,
         post.reset_mock()
     else:
         await RolloutCollectionHelper().run_from_config(resumed)
-    expected_failures = {"judge_failed": 1} if latest_outcome == "failure" else {}
+    expected_failures = {"provider_unavailable": 1} if latest_outcome == "failure" else {}
     status = json.loads((tmp_path / "batch_status.json").read_text())["members"]["my_agent"]
     assert status["completed_rollout_count"] == 0
     assert status["remaining_rollout_count"] == 1
@@ -1754,11 +1780,7 @@ async def test_interruption_failures_do_not_spend_budget_or_create_retry_progres
         unknown_kill = kind in ("kill_shaped", "kill_shaped_with_kind")
         # An interruption with no recorded eligible cause stops automatic recovery: nothing stays retryable.
         expected_exit = (
-            (76 if invocation == 2 else 75)
-            if kind == "judge_failed"
-            else 76
-            if unknown_kill
-            else (75 if mixed_success and invocation == 0 else 1)
+            76 if kind == "judge_failed" else 76 if unknown_kill else (75 if mixed_success and invocation == 0 else 1)
         )
         with pytest.raises(IncompleteEvaluationError) as error:
             await RolloutCollectionHelper().run_from_config(runner_config)
@@ -1767,11 +1789,9 @@ async def test_interruption_failures_do_not_spend_budget_or_create_retry_progres
             _check_saved_completion(output)
         assert saved_error.value.exit_code == expected_exit
         reader = RolloutStore.read(output)
-        counted = (3 - int(mixed_success)) * (invocation + 1) if kind == "judge_failed" else 0
+        counted = (3 - int(mixed_success)) if kind == "judge_failed" else 0
         assert reader.coverage()["counted_failures"] == counted
-        assert len(reader.pending(3)) == (
-            0 if unknown_kill or (kind == "judge_failed" and invocation == 2) else 3 - int(mixed_success)
-        )
+        assert len(reader.pending(3)) == (0 if unknown_kill or kind == "judge_failed" else 3 - int(mixed_success))
         assert all("reward" not in row for row in reader.failures())
         runner_config.resume_from_cache = True
 

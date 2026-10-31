@@ -4,6 +4,7 @@
 import asyncio
 import json
 
+import aiohttp
 import httpx
 import pytest
 from aiohttp import ClientSession, ClientTimeout, TraceConfig
@@ -19,8 +20,9 @@ from nemo_gym.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollout_store import RolloutStore
 
 
+@pytest.mark.parametrize("routed", [False, True])
 @pytest.mark.parametrize("lost_response", ["disconnect", "timeout"])
-async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, monkeypatch, lost_response):
+async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, monkeypatch, lost_response, routed):
     environment, dependencies = _environment_server()
     dependencies.responses.extend(list(dependencies.responses))
     requests, results = [], []
@@ -74,20 +76,30 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
         monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
         source = tmp_path / "input.jsonl"
         source.write_text(_request().task.model_dump_json() + "\n")
-        output = tmp_path / "rollouts.jsonl"
+        (tmp_path / "artifacts").mkdir()
+        output = tmp_path / "artifacts" / "rollouts.jsonl"
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(source),
             output_jsonl_fpath=str(output),
             environment_server_routes={"test:source": "environment"},
-            route_failures_to_sidecar=True,
+            route_failures_to_sidecar=routed,
             require_complete=False,
             disable_aggregation=True,
             disable_health_check=True,
         )
         async with tcp, ClientSession(timeout=ClientTimeout(total=0.08)) as session:
             monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
-            with pytest.raises(IncompleteEvaluationError, match="None of the 1 dispatched"):
+            expected_error = IncompleteEvaluationError if routed else (aiohttp.ClientError, asyncio.TimeoutError)
+            with pytest.raises(expected_error):
                 await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=5)
+            # A second normal collection invocation must not regenerate the completed but lost episode.
+            try:
+                await asyncio.wait_for(
+                    RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True})),
+                    timeout=5,
+                )
+            except IncompleteEvaluationError:
+                pass
             await asyncio.sleep(0.16)
 
     agent_calls = [call for call in dependencies.calls if call[1].endswith("/v1/responses")]
@@ -97,7 +109,9 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
     store = RolloutStore.read(output)
     assert store.coverage()["measured"] == 0
     assert store.coverage()["attempts"] == 1
+    assert store.manifest.next_attempt["0-0"] == 1
     assert store.coverage()["max_rollout_attempts"] == 3
+    assert store.pending() == []
     failures = [json.loads(line) for line in output.with_name("rollouts_failures.jsonl").read_text().splitlines()]
     assert len(failures) == 1
     assert failures[0]["_ng_failure_type"] == (
@@ -114,7 +128,8 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
     assert failures[0].get("_ng_failure_terminal") is not True
 
 
-async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, monkeypatch):
+@pytest.mark.parametrize("routed", [False, True])
+async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, monkeypatch, routed):
     listener = await asyncio.start_server(lambda *_: None, "127.0.0.1", 0)
     port = listener.sockets[0].getsockname()[1]
     listener.close()
@@ -126,12 +141,13 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
     source = tmp_path / "input.jsonl"
     source.write_text(_request().task.model_dump_json() + "\n")
-    output = tmp_path / "rollouts.jsonl"
+    (tmp_path / "artifacts").mkdir()
+    output = tmp_path / "artifacts" / "rollouts.jsonl"
     config = RolloutCollectionConfig(
         input_jsonl_fpath=str(source),
         output_jsonl_fpath=str(output),
         environment_server_routes={"test:source": "environment"},
-        route_failures_to_sidecar=True,
+        route_failures_to_sidecar=routed,
         require_complete=False,
         disable_aggregation=True,
         disable_health_check=True,
@@ -145,13 +161,16 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     trace.on_connection_create_start.append(on_connect)
     async with ClientSession(trace_configs=[trace]) as session:
         monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
-        with pytest.raises(IncompleteEvaluationError, match="None of the 1 dispatched"):
+        with pytest.raises(IncompleteEvaluationError if routed else aiohttp.ClientConnectorError):
             await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=2)
     assert len(connections) == 1
     failure = json.loads(output.with_name("rollouts_failures.jsonl").read_text())
     assert failure["_ng_failure_type"] == "ClientConnectorError"
-    # Preserve the existing conservative transport projection; no eligibility is inferred.
-    assert failure["_ng_failure_record"]["delivery"] == "possibly_delivered"
+    assert failure["_ng_failure_record"]["delivery"] == "not_sent"
     assert failure["_ng_failure_record"]["episode_id"]["attempt"] == 0
     assert failure.get("_ng_failure_counts_as_zero") is not True
     assert RolloutStore.read(output).coverage()["attempts"] == 1
+    assert RolloutStore.read(output).manifest.next_attempt["0-0"] == 1
+    assert len(RolloutStore.read(output).pending()) == 1
+    # One transport attempt was reserved, but a proven not-sent interruption spends no model/failure attempt.
+    assert RolloutStore.read(output).coverage()["counted_failures"] == 0
