@@ -1894,8 +1894,13 @@ def trial_health(
     if rate >= limit:
         return False, f"trial: {counts} is not below {_percent(limit)}{detail}"
     recovery = (collected.quality or {}).get("observed_upstream_recovery") if collected else None
+    if recovery is not None and (
+        not isinstance(recovery, dict)
+        or any(_count(recovery.get(key)) is None for key in ("recovered_attempt_errors", "recovered_operations"))
+    ):
+        return None, "trial: recovered attempt/operation counters are malformed or incomplete"
     if isinstance(recovery, dict) and any(
-        (_count(recovery.get(key)) or 0) > 0 for key in ("recovered_attempt_errors", "recovered_operations")
+        recovery[key] > 0 for key in ("recovered_attempt_errors", "recovered_operations")
     ):
         return (
             None,
