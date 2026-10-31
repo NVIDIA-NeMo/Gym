@@ -19,6 +19,7 @@ import platform
 import re
 import shlex
 import sys
+import tomllib
 from os import environ
 from pathlib import Path
 from subprocess import Popen
@@ -27,8 +28,10 @@ from typing import IO, Any, Mapping
 
 from omegaconf import DictConfig
 from packaging.specifiers import InvalidSpecifier, SpecifierSet
+from packaging.utils import canonicalize_name
 from packaging.version import InvalidVersion, Version
 
+import nemo_gym
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
 from nemo_gym.config.global_config import (
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
@@ -119,21 +122,26 @@ def _get_nemo_gym_install_flags() -> str:
     return flags
 
 
-# A requirements line that installs Gym from the checkout root, e.g. `-e nemo-gym[dev,sandbox] @ ../../`.
-_LOCAL_NEMO_GYM_REQUIREMENT_RE = re.compile(
-    r"^\s*(?:-e\s+)?nemo[-_]gym\s*(?:\[(?P<extras>[^\]]*)\])?\s*@\s*\.\./\.\./?\s*(?:#.*)?$"
+# A requirements line that installs Gym in any form: `-e nemo-gym[dev,sandbox] @ ../../` in a server of a Gym checkout,
+# `-e nemo-gym[dev] @ ../../../Gym` in an external repository developed against one, or a pin such as `nemo-gym==0.7.0`.
+# A server outside a Gym checkout gets Gym from its parent installation instead. The ERE is the same pattern for grep.
+# Package names compare case-insensitively with runs of `-`, `_` and `.` equal (`NeMo-Gym`, `nemo.gym`), so grep runs
+# with `-i`.
+_NEMO_GYM_REQUIREMENT_ERE = r"^[[:space:]]*(-e[[:space:]]+)?nemo[-_.]+gym([^A-Za-z0-9_.-]|$)"
+_NEMO_GYM_REQUIREMENT_RE = re.compile(
+    r"^\s*(?:-e\s+)?nemo[-_.]+gym(?![A-Za-z0-9_.-])\s*(?:\[(?P<extras>[^\]]*)\])?", re.IGNORECASE
 )
 
 
 def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
-    """The extras a server requests on its local Gym requirement, formatted as `[a,b]`, or "" for none.
+    """The extras a server requests on its Gym requirement lines, formatted as `[a,b]`, or "" for none.
 
-    Installs from PyPI replace the server's `nemo-gym[...] @ ../../` line with a `nemo-gym` requirement, so
-    its extras must be carried over or their dependencies are never installed.
+    A server outside a Gym checkout gets Gym from its parent installation instead of its own `nemo-gym[...]` line, so
+    the line's extras must be carried over or their dependencies are never installed.
     """
     extras: list[str] = []
     for line in requirements_fpath.read_text().splitlines():
-        match = _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
+        match = _NEMO_GYM_REQUIREMENT_RE.match(line)
         if match is None or not match.group("extras"):
             continue
         for extra in match.group("extras").split(","):
@@ -143,20 +151,29 @@ def _local_nemo_gym_extras(requirements_fpath: Path) -> str:
     return f"[{','.join(extras)}]" if extras else ""
 
 
-def _get_nemo_gym_version_spec(is_editable_install: bool) -> str:
+def _is_gym_checkout(root: Path) -> bool:
+    """Whether ``root`` is a NeMo Gym source checkout, not just any project with a ``pyproject.toml``.
+
+    A server directory two levels below a Gym checkout installs Gym from that checkout. An external
+    repository that keeps its own servers in ``resources_servers/<name>`` has a ``pyproject.toml`` of its
+    own and gets Gym from the parent installation instead.
+    """
+    try:
+        with open(root / "pyproject.toml", "rb") as f:
+            project = tomllib.load(f).get("project")
+    except (OSError, UnicodeDecodeError, tomllib.TOMLDecodeError):
+        return False
+    name = project.get("name") if isinstance(project, dict) else None
+    return isinstance(name, str) and canonicalize_name(name) == "nemo-gym"
+
+
+def _get_nemo_gym_version_spec() -> str:
     """
     Detect nemo-gym version from parent venv and return version specifier.
-
-    Args:
-        is_editable_install: Whether nemo-gym is installed in editable mode in parent venv
 
     Returns:
         Version specifier string (e.g., "==0.2.1rc0") or empty string
     """
-    # Don't pin version for editable installs (development mode)
-    if is_editable_install:
-        return ""
-
     try:
         parent_version = importlib.metadata.version("nemo-gym")
         # Pin to exact version for consistency between parent and sub-venvs
@@ -281,7 +298,14 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # into sibling server venvs through process-wide UV_* variables.
     server_uv_flags = f"{uv_config_flag}{parent_override_flag}"
 
-    is_editable_install = (dir_path.resolve() / "../../pyproject.toml").exists()
+    server_in_gym_checkout = _is_gym_checkout(dir_path.resolve().parent.parent)
+    # A server outside a Gym checkout, such as one in an external repository, while Gym itself is an editable
+    # checkout: the server venv gets that checkout, so local Gym edits reach it and no unpublished version is pinned.
+    parent_gym_checkout = not server_in_gym_checkout and nemo_gym._is_editable_install
+    # A built-in server shipped in a wheel install: its `../..` paths point into site-packages, at files a wheel does
+    # not ship. Anything else here, including an external repository nested inside an editable Gym checkout, is a
+    # repository of its own whose `../..` is itself.
+    bundled_in_wheel = not nemo_gym._is_editable_install and dir_path.resolve().is_relative_to(PARENT_DIR.resolve())
 
     try:
         has_pyproject_toml = (dir_path / "pyproject.toml").exists()
@@ -291,30 +315,44 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
-            if is_editable_install:
+            if server_in_gym_checkout:
                 install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}'-e .' {head_server_dep_args}"""
             else:
-                # install nemo-gym from pypi instead of relative path in pyproject.toml
-                # with support for pre-releases, custom indexes, and version pinning
-                install_flags = _get_nemo_gym_install_flags()
-                version_spec = _get_nemo_gym_version_spec(is_editable_install)
+                if parent_gym_checkout:
+                    gym_install = shlex.quote(f"-e {PARENT_DIR}")
+                else:
+                    # install nemo-gym from pypi instead of relative path in pyproject.toml
+                    # with support for pre-releases, custom indexes, and version pinning
+                    gym_install = f"{_get_nemo_gym_install_flags()}nemo-gym{_get_nemo_gym_version_spec()}"
+                # Only Gym's own source is replaced; the server's other sources, such as a local helper, still apply.
+                no_sources = "--no-sources " if bundled_in_wheel else "--no-sources-package nemo-gym "
                 install_cmd = (
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{gym_install} && """
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{no_sources}'-e .' {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
             override_flag = "--override overrides.txt " if has_overrides_txt else ""
-            if is_editable_install:
+            if server_in_gym_checkout:
                 install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{override_flag}-r requirements.txt {head_server_dep_args}"""
             else:
-                # install nemo-gym from pypi instead of relative path in requirements.txt
-                # with support for pre-releases, custom indexes, and version pinning
-                install_flags = _get_nemo_gym_install_flags()
-                version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 extras = _local_nemo_gym_extras(dir_path / "requirements.txt")
+                # Only the server's Gym requirements are replaced; other lines, such as `-e ../..` installing the
+                # server's own repository, stay. A built-in server in a wheel install drops every `../..` line.
+                if bundled_in_wheel:
+                    other_requirements = "grep -v -F '../..' requirements.txt"
+                else:
+                    other_requirements = f"grep -v -i -E {shlex.quote(_NEMO_GYM_REQUIREMENT_ERE)} requirements.txt"
+                if parent_gym_checkout:
+                    gym_requirement = shlex.quote(f"-e {PARENT_DIR}{extras}")
+                    install_flags = ""
+                else:
+                    # install nemo-gym from pypi instead of relative path in requirements.txt
+                    # with support for pre-releases, custom indexes, and version pinning
+                    gym_requirement = f"'nemo-gym{extras}{_get_nemo_gym_version_spec()}'"
+                    install_flags = _get_nemo_gym_install_flags()
                 install_cmd = (
-                    f"""(echo 'nemo-gym{extras}{version_spec}' && grep -v -F '../..' requirements.txt) | """
+                    f"""(echo {gym_requirement} && {other_requirements}) | """
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}{override_flag}-r /dev/stdin {head_server_dep_args}"""
                 )
         else:

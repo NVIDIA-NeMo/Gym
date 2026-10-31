@@ -16,6 +16,7 @@ import importlib.metadata
 import os
 import select
 import shlex
+import shutil
 import signal
 import subprocess
 import sys
@@ -30,9 +31,11 @@ import nemo_gym.cli.setup_command
 import nemo_gym.utils.venv_setup
 from nemo_gym import PARENT_DIR
 from nemo_gym.cli.setup_command import (
-    _LOCAL_NEMO_GYM_REQUIREMENT_RE,
+    _NEMO_GYM_REQUIREMENT_ERE,
+    _NEMO_GYM_REQUIREMENT_RE,
     _get_nemo_gym_install_flags,
     _get_nemo_gym_version_spec,
+    _is_gym_checkout,
     _local_nemo_gym_extras,
     _python_request_admits,
     get_venv_path,
@@ -42,6 +45,10 @@ from nemo_gym.cli.setup_command import (
 from nemo_gym.config.global_config import UV_VENV_DIR_KEY_NAME
 from nemo_gym.utils.venv_setup import SETUP_COMPLETE_MARKER, setup_environment
 from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
+
+
+# The filter for a server outside the install root: only its Gym requirement lines are replaced.
+_OUTSIDE_FILTER = shlex.quote(_NEMO_GYM_REQUIREMENT_ERE)
 
 
 class TestCLISetupCommandSetupEnvCommand:
@@ -72,7 +79,7 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir = tmp_path / "first_level" / "second_level"
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
-        (tmp_path / "pyproject.toml").write_text("")
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "nemo-gym"\n')
 
         return server_dir.absolute()
 
@@ -391,6 +398,7 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("pytest\n")
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
         monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
         monkeypatch.delenv("UV_INDEX_URL", raising=False)
         monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
@@ -402,7 +410,7 @@ class TestCLISetupCommandSetupEnvCommand:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -F '../..' requirements.txt) | uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r /dev/stdin openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && (echo 'nemo-gym=={version}' && grep -v -i -E {_OUTSIDE_FILTER} requirements.txt) | uv pip install -c <(printf '%s\\n' 'ray==test ray version') -r /dev/stdin openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command)
         actual_command = self._installation_command(actual_command)
         assert expected_command == actual_command
@@ -414,6 +422,7 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "pyproject.toml").write_text("")
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
         monkeypatch.delenv("NEMO_GYM_ALLOW_PRERELEASE", raising=False)
         monkeypatch.delenv("UV_INDEX_URL", raising=False)
         monkeypatch.delenv("UV_EXTRA_INDEX_URL", raising=False)
@@ -425,7 +434,7 @@ class TestCLISetupCommandSetupEnvCommand:
                 global_config_dict=self._debug_global_config_dict(tmp_path),
                 prefix="my server name",
             )
-        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') nemo-gym=={version} && uv pip install -c <(printf '%s\\n' 'ray==test ray version') --no-sources '-e .' openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
+        expected_command = f"cd {server_dir} && uv venv --seed --allow-existing --python 'test python version' {server_dir}/.venv > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2) && source {server_dir}/.venv/bin/activate && uv pip install -c <(printf '%s\\n' 'ray==test ray version') nemo-gym=={version} && uv pip install -c <(printf '%s\\n' 'ray==test ray version') --no-sources-package nemo-gym '-e .' openai==test openai version > >(sed 's/^/(my server name) /') 2> >(sed 's/^/(my server name) /' >&2)"
         expected_command = self._with_parent_runtime_overrides(expected_command)
         actual_command = self._installation_command(actual_command)
         assert expected_command == actual_command
@@ -434,6 +443,7 @@ class TestCLISetupCommandSetupEnvCommand:
         server_dir = (tmp_path / "first_level" / "second_level").absolute()
         server_dir.mkdir(parents=True)
         (server_dir / "requirements.txt").write_text("-e nemo-gym[dev,sandbox] @ ../../\npytest\n")
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
         for name in ("NEMO_GYM_ALLOW_PRERELEASE", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
             monkeypatch.delenv(name, raising=False)
 
@@ -444,7 +454,7 @@ class TestCLISetupCommandSetupEnvCommand:
                 prefix="my server name",
             )
 
-        assert "(echo 'nemo-gym[dev,sandbox]==0.3.0' && grep -v -F '../..' requirements.txt)" in (
+        assert f"(echo 'nemo-gym[dev,sandbox]==0.3.0' && grep -v -i -E {_OUTSIDE_FILTER} requirements.txt)" in (
             self._installation_command(actual_command)
         )
 
@@ -477,7 +487,7 @@ class TestLocalNemoGymExtras:
             f"{path.relative_to(PARENT_DIR)}: {line.strip()}"
             for path in PARENT_DIR.glob("*/*/requirements.txt")
             for line in path.read_text().splitlines()
-            if "nemo-gym" in line and "../.." in line and not _LOCAL_NEMO_GYM_REQUIREMENT_RE.match(line)
+            if "nemo-gym" in line and "../.." in line and not _NEMO_GYM_REQUIREMENT_RE.match(line)
         ]
 
         assert not unrecognized, "PyPI installs would drop the extras on these lines:\n" + "\n".join(unrecognized)
@@ -913,27 +923,22 @@ class TestGetNemoGymInstallFlags:
 class TestGetNemoGymVersionSpec:
     """Test _get_nemo_gym_version_spec helper function."""
 
-    def test_editable_install_returns_empty(self) -> None:
-        """For editable installs, should return empty string (no version pinning)."""
-        version_spec = _get_nemo_gym_version_spec(is_editable_install=True)
-        assert version_spec == ""
-
     def test_non_editable_detects_version(self) -> None:
         """For non-editable installs, should detect and pin to parent version."""
         with patch("importlib.metadata.version", return_value="0.2.1rc0"):
-            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
+            version_spec = _get_nemo_gym_version_spec()
             assert version_spec == "==0.2.1rc0"
 
     def test_non_editable_stable_version(self) -> None:
         """Should work with stable versions too."""
         with patch("importlib.metadata.version", return_value="0.2.0"):
-            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
+            version_spec = _get_nemo_gym_version_spec()
             assert version_spec == "==0.2.0"
 
     def test_package_not_found_returns_empty(self) -> None:
         """If nemo-gym is not installed, should return empty string gracefully."""
         with patch("importlib.metadata.version", side_effect=importlib.metadata.PackageNotFoundError):
-            version_spec = _get_nemo_gym_version_spec(is_editable_install=False)
+            version_spec = _get_nemo_gym_version_spec()
             assert version_spec == ""
 
 
@@ -986,3 +991,197 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
+
+
+class TestIsGymCheckout:
+    """NVIDIA-NeMo/Gym#4725: an external repository with its own pyproject.toml is not a Gym checkout."""
+
+    @pytest.mark.parametrize(
+        ("pyproject", "expected"),
+        [
+            ('[project]\nname = "nemo-gym"\n', True),
+            ('[project]\nname = "NeMo_Gym"\n', True),
+            ('[project]\nname = "auto-ontology-eval"\n', False),
+            ("", False),
+            ("not = [valid toml", False),
+            ('project = "nemo-gym"\n', False),
+            (b'[project]\nname = "\xff"\n', False),
+            (None, False),
+        ],
+    )
+    def test_only_the_nemo_gym_project_counts(self, tmp_path: Path, pyproject, expected) -> None:
+        if isinstance(pyproject, bytes):
+            (tmp_path / "pyproject.toml").write_bytes(pyproject)
+        elif pyproject is not None:
+            (tmp_path / "pyproject.toml").write_text(pyproject)
+        assert _is_gym_checkout(tmp_path) is expected
+
+    @staticmethod
+    def _install_command(server_dir: Path, tmp_path: Path) -> str:
+        args = shlex.split(
+            setup_env_command(
+                dir_path=server_dir.absolute(),
+                global_config_dict=_TestGlobalConfig._default_global_config_dict_values.fget(None)
+                | {UV_VENV_DIR_KEY_NAME: str(tmp_path)},
+                prefix="my server name",
+            )
+        )
+        return args[args.index("--command") + 1]
+
+    def test_an_external_repository_installs_gym_as_a_package(self, tmp_path: Path, monkeypatch: MonkeyPatch) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("pytest\n")
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+
+        def install_command() -> str:
+            return self._install_command(server_dir, tmp_path)
+
+        assert f"grep -v -i -E {_OUTSIDE_FILTER} requirements.txt" in install_command()
+
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "nemo-gym"\n')
+        assert "grep -v" not in install_command()
+
+    def test_an_external_repository_next_to_an_editable_gym_installs_that_checkout(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        """`gym env init` in an external repository writes `-e nemo-gym[dev] @ <path to the Gym checkout>`. The server
+        venv gets the parent's editable checkout with those extras, and keeps the server's other local requirements."""
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text(
+            "-e nemo-gym[dev] @ ../../../Gym\n-e ../../shared_lib\nnemo-gym==0.7.0\npytest\n"
+        )
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", True)
+
+        command = self._install_command(server_dir, tmp_path)
+        assert "nemo-gym==" not in command
+        requirements_pipe = command[command.index("(echo") : command.index(") | uv pip install") + 1]
+        piped = subprocess.run(
+            ["bash", "-c", requirements_pipe], cwd=server_dir, capture_output=True, text=True, check=False
+        ).stdout.splitlines()
+        assert piped == [f"-e {PARENT_DIR}[dev]", "-e ../../shared_lib", "pytest"]
+
+        (server_dir / "requirements.txt").unlink()
+        (server_dir / "pyproject.toml").write_text('[project]\nname = "my-server"\n')
+        command = self._install_command(server_dir, tmp_path)
+        assert f"{shlex.quote(f'-e {PARENT_DIR}')} && " in command
+        assert "--no-sources-package nemo-gym '-e .'" in command
+        assert "nemo-gym==" not in command
+
+    @staticmethod
+    def _piped_requirements(command: str, server_dir: Path) -> list[str]:
+        pipe = command[command.index("(echo") : command.index(") | uv pip install") + 1]
+        return subprocess.run(["bash", "-c", pipe], cwd=server_dir, capture_output=True, text=True).stdout.splitlines()
+
+    def test_an_external_repository_keeps_its_own_project_and_drops_its_gym_pin(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        """The #4725 repository installs its own project with `-e ../..` and pins `nemo-gym==0.7.0` as a workaround.
+        With Gym installed from the package index, the server venv gets the parent's version and the project."""
+        server_dir = tmp_path / "resources_servers" / "auto_ontology_sql"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("-e ../..\nnemo-gym==0.7.0\npytest\n")
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+        for name in ("NEMO_GYM_ALLOW_PRERELEASE", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
+            monkeypatch.delenv(name, raising=False)
+
+        with patch("importlib.metadata.version", return_value="0.8.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert self._piped_requirements(command, server_dir) == ["nemo-gym==0.8.0", "-e ../..", "pytest"]
+
+    def test_a_built_in_server_in_a_wheel_install_still_drops_every_parent_path(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Under the install root, `../..` is site-packages and points at files a wheel does not ship."""
+        site_packages = tmp_path / "site-packages"
+        server_dir = site_packages / "resources_servers" / "example"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text(
+            "-e nemo-gym @ ../../\n-e ../../benchmarks/automationbench\npytest\n"
+        )
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "PARENT_DIR", site_packages)
+
+        with patch("importlib.metadata.version", return_value="0.8.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert "grep -v -F '../..' requirements.txt" in command
+        assert self._piped_requirements(command, server_dir)[1:] == ["pytest"]
+
+    def test_an_external_repository_nested_in_an_editable_gym_keeps_its_own_project(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Inside an editable Gym checkout, a nested external repository's `../..` is itself, not site-packages."""
+        gym = tmp_path / "Gym"
+        repo = gym / "examples" / "external_repo"
+        server_dir = repo / "resources_servers" / "example"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text("-e ../..\nnemo-gym==0.7.0\npytest\n")
+        (repo / "pyproject.toml").write_text('[project]\nname = "external-repo"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", True)
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "PARENT_DIR", gym)
+
+        command = self._install_command(server_dir, tmp_path)
+        assert self._piped_requirements(command, server_dir) == [f"-e {gym}", "-e ../..", "pytest"]
+
+    def test_equivalent_spellings_of_the_gym_package_are_replaced(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        server_dir = tmp_path / "resources_servers" / "my_server"
+        server_dir.mkdir(parents=True)
+        (server_dir / "requirements.txt").write_text(
+            "NeMo-Gym==0.7.0\nnemo.gym[dev]==0.7.0\nnemo__gym\nnemo-gym-foo==1.0\npytest\n"
+        )
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+        for name in ("NEMO_GYM_ALLOW_PRERELEASE", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL", "UV_INDEX_STRATEGY"):
+            monkeypatch.delenv(name, raising=False)
+
+        with patch("importlib.metadata.version", return_value="0.8.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert self._piped_requirements(command, server_dir) == ["nemo-gym[dev]==0.8.0", "nemo-gym-foo==1.0", "pytest"]
+
+    def test_a_built_in_pyproject_server_in_a_wheel_install_still_ignores_every_source(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        site_packages = tmp_path / "site-packages"
+        server_dir = site_packages / "resources_servers" / "example"
+        server_dir.mkdir(parents=True)
+        (server_dir / "pyproject.toml").write_text('[project]\nname = "example"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+        monkeypatch.setattr(nemo_gym.cli.setup_command, "PARENT_DIR", site_packages)
+
+        with patch("importlib.metadata.version", return_value="0.8.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert "--no-sources '-e .'" in command
+
+    @pytest.mark.skipif(shutil.which("uv") is None, reason="needs uv")
+    def test_an_external_pyproject_server_keeps_its_other_local_sources(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        """Only Gym's source is dropped: a local helper declared in `[tool.uv.sources]` still resolves (offline)."""
+        (tmp_path / "lib").mkdir()
+        (tmp_path / "lib" / "pyproject.toml").write_text('[project]\nname = "my-helper"\nversion = "0.1.0"\n')
+        server_dir = tmp_path / "resources_servers" / "srv"
+        server_dir.mkdir(parents=True)
+        (server_dir / "pyproject.toml").write_text(
+            '[project]\nname = "srv"\nversion = "0.1.0"\ndependencies = ["my-helper"]\n'
+            '[tool.uv.sources]\nmy-helper = { path = "../../lib" }\n'
+        )
+        (tmp_path / "pyproject.toml").write_text('[project]\nname = "auto-ontology-eval"\nversion = "0.1.0"\n')
+        monkeypatch.setattr(nemo_gym, "_is_editable_install", False)
+
+        with patch("importlib.metadata.version", return_value="0.8.0"):
+            command = self._install_command(server_dir, tmp_path)
+        assert "--no-sources-package nemo-gym '-e .'" in command
+        resolved = subprocess.run(
+            ["uv", "pip", "compile", "--offline", "-q", "--no-sources-package", "nemo-gym", "pyproject.toml"],
+            cwd=server_dir,
+            capture_output=True,
+            text=True,
+        )
+        assert resolved.returncode == 0, resolved.stderr
+        assert "../../lib" in resolved.stdout

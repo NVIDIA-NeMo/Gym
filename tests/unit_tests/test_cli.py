@@ -368,6 +368,57 @@ class TestResolveServerDir:
         rel = Path("resources_servers/arc_agi")
         assert _resolve_server_dir(rel) == PARENT_DIR / rel
 
+    def test_refuses_a_local_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # NVIDIA-NeMo/Gym#4725: a local server dir without requirements.txt silently resolved to the installed one.
+        local = tmp_path / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(
+            ConfigError, match=r"contains server code but no requirements.txt or pyproject.toml, so Gym would use"
+        ):
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+
+    def test_a_local_data_copy_without_server_code_still_resolves_to_the_installed_server(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # Data paths such as resources_servers/<env>/data/example.jsonl resolve by name, so a local data copy
+        # beside a built-in server name is legitimate and must not be mistaken for a server.
+        data = tmp_path / "resources_servers" / "arc_agi" / "data"
+        data.mkdir(parents=True)
+        (data / "example.jsonl").write_text("{}\n", encoding="utf-8")
+        # A helper script or package marker beside the data is not a server entrypoint.
+        (data.parent / "__init__.py").write_text("", encoding="utf-8")
+        (data.parent / "prepare_data.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        rel = Path("resources_servers/arc_agi")
+        assert _resolve_server_dir(rel) == PARENT_DIR / rel
+
+    def test_a_local_server_without_install_marker_and_no_installed_one_resolves_locally(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        local = tmp_path / "resources_servers" / "only_here"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.chdir(tmp_path)
+        assert _resolve_server_dir(Path("resources_servers/only_here")) == local
+
+    def test_refuses_a_search_dir_server_without_install_marker_that_an_installed_one_would_replace(
+        self, tmp_path: Path, monkeypatch
+    ) -> None:
+        # --search-dir and NEMO_GYM_EXTRA_ROOTS roots outrank cwd and the install root, so they get the same check.
+        search_dir = tmp_path / "search"
+        local = search_dir / "resources_servers" / "arc_agi"
+        local.mkdir(parents=True)
+        (local / "app.py").write_text("", encoding="utf-8")
+        monkeypatch.setenv(NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, str(search_dir))
+        monkeypatch.chdir(tmp_path)
+        with pytest.raises(ConfigError, match="contains server code") as error:
+            _resolve_server_dir(Path("resources_servers/arc_agi"))
+        assert f"Server directory {local} contains" in str(error.value)
+
     def test_test_config_resolved_dir_path_uses_install_root(self, tmp_path: Path, monkeypatch) -> None:
         monkeypatch.chdir(tmp_path)
         cfg = EnvironmentTestConfig(entrypoint="resources_servers/arc_agi")

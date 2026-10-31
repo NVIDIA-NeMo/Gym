@@ -10370,6 +10370,36 @@ class TestValidateAgentNames:
         with pytest.raises(ValueError, match="exists but is not an agent instance"):
             RolloutCollectionHelper._validate_agent_names(self._rows("math_rs"), cfg)
 
+    def test_agent_type_points_at_its_instances(self) -> None:
+        """NVIDIA-NeMo/Gym#4725: `--agent simple_agent` names the agent type, not the instance."""
+        cfg = OmegaConf.create(
+            {
+                "ontology_simple_agent": {"responses_api_agents": {"simple_agent": {}}},
+                "other_simple_agent": {"responses_api_agents": {"simple_agent": {}}},
+            }
+        )
+        with pytest.raises(ValueError) as error:
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+        message = str(error.value)
+        assert "an agent type, not an instance; use 'ontology_simple_agent', 'other_simple_agent'" in message
+        assert "Agent instances in this run: 'ontology_simple_agent', 'other_simple_agent'" in message
+
+    def test_a_run_without_agent_instances_says_so(self) -> None:
+        cfg = self._cfg(extra={"math_rs": {"resources_servers": {"impl": {}}}})
+        with pytest.raises(ValueError, match="Agent instances in this run: none. "):
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+
+    def test_listed_agent_instances_are_capped_at_ten(self) -> None:
+        cfg = OmegaConf.create(
+            {f"env_{index:02d}_agent": {"responses_api_agents": {"simple_agent": {}}} for index in range(12)}
+        )
+        with pytest.raises(ValueError) as error:
+            RolloutCollectionHelper._validate_agent_names(self._rows("simple_agent"), cfg)
+        message = str(error.value)
+        assert "use 'env_00_agent', " in message and "'env_09_agent' and 2 more)" in message
+        assert "'env_10_agent'" not in message
+        assert "Agent instances in this run: 'env_00_agent', " in message and "'env_09_agent' and 2 more." in message
+
 
 # A merged config shaped like real ones: one RS instance, agents pointing at RSes via the
 # resources_server.name edge, plus a self-contained agent that declares no RS.

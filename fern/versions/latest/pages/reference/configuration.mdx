@@ -102,6 +102,41 @@ gym eval run --benchmark my_bench --model-type vllm_model --search-dir ~/my-plug
 Prefer `NEMO_GYM_EXTRA_ROOTS` when the same plugin roots apply to every command in a shell session; reach for `--search-dir` for a single invocation. If both are set, `--search-dir` takes precedence for that command.
 </Tip>
 
+### Servers in your own repository
+
+A repository that keeps its own servers next to its code, for example `resources_servers/my_env/`, works
+with an installed Gym (`pip install nemo-gym` or `uv add nemo-gym`). Four rules apply:
+
+1. **Each server directory needs an install marker.** Give every server directory a `requirements.txt` or a
+   `pyproject.toml` listing its dependencies. Gym builds each server's virtual environment from it. If a
+   directory with a server entrypoint (`app.py`) but without one has the same name as a built-in server, Gym
+   stops with an error naming both paths rather than silently using the built-in one. A directory without an
+   entrypoint, such as a local copy of a built-in server's `data/`, is not treated as a server.
+2. **Your repository's own `pyproject.toml` is fine.** Gym treats the directory two levels above a server as a
+   Gym source checkout only if its `pyproject.toml` declares the `nemo-gym` project. Otherwise each server
+   venv gets Gym from your environment: your editable Gym checkout if Gym is installed from one, else the
+   version installed in your environment, from the package index. The server's own `nemo-gym` lines, including
+   a version pin, are replaced, keeping their extras; other local paths such as `-e ../..` are kept.
+3. **`--agent` takes the agent instance name**, the top-level key in your config (for example
+   `my_env_simple_agent`), not the agent type under `responses_api_agents` (for example `simple_agent`). An
+   unknown name lists the agent instances in the run.
+4. **Pick a split your configs declare.** `--split benchmark` needs a dataset of type `benchmark` in the loaded
+   configs, which requires a preparation script. A resources server that only ships `validation` data runs with
+   `--split validation`. To run `example` data, start the servers with `gym env start`, then run
+   `gym eval run --no-serve --input <server_dir>/data/example.jsonl`.
+
+```bash
+gym eval run --config resources_servers/<my_env>/configs/<my_env>.yaml \
+    --agent <my_env>_simple_agent --split validation \
+    --model-type openai_model --model <model> --model-url <url> --search-dir .
+```
+
+**External state.** If your resources server reads a database or another service, prepare it before the run:
+provision access and credentials in your environment, load or ingest the data, and build anything derived from
+it. Then check readiness with the server's own check (for example a script that runs one representative query)
+before `gym eval run`. Gym does not provision external state; a resources server that finds it missing should
+fail at startup with a clear message rather than score tasks against an empty store.
+
 ---
 
 ## Server Configuration
