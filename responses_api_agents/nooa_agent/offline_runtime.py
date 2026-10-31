@@ -7,9 +7,11 @@ import asyncio
 import hashlib
 import json
 import os
+import re
 import shutil
 import tarfile
 import tempfile
+from collections.abc import Iterable
 from pathlib import Path
 from uuid import uuid4
 
@@ -22,8 +24,7 @@ from responses_api_agents.nooa_agent.sandbox_runtime import (
 )
 
 
-# Target -> Docker platform. Wheels are built on the PyPA image for the target's C library; a glibc bundle needs
-# glibc >= the builder's (manylinux2014: 2.17), a musl bundle needs musl >= the builder's (musllinux_1_2: 1.2).
+# Target -> Docker platform. Wheels are collected on the PyPA image for the target's C library.
 _TARGETS = {"x86_64/gnu": "amd64", "aarch64/gnu": "arm64", "x86_64/musl": "amd64", "aarch64/musl": "arm64"}
 _BUILDER_IMAGES = {
     "x86_64/gnu": "quay.io/pypa/manylinux2014_x86_64:latest",
@@ -32,6 +33,35 @@ _BUILDER_IMAGES = {
     "aarch64/musl": "quay.io/pypa/musllinux_1_2_aarch64:latest",
 }
 _LIBC_KIND = {"gnu": "glibc", "musl": "musl"}
+# The oldest C library the portable interpreter itself runs on: Astral's builds link glibc 2.17 (manylinux2014) and
+# musl 1.2.3 (verified on Alpine 3.17 task images; the x86_64 musl build is dynamically linked against libc.so).
+_INTERPRETER_LIBC_FLOOR = {"gnu": "2.17", "musl": "1.2.3"}
+_LEGACY_MANYLINUX = {"manylinux1": "2.5", "manylinux2010": "2.12", "manylinux2014": "2.17"}
+_PLATFORM_TAG = re.compile(r"^(manylinux|musllinux)_(\d+)_(\d+)_")
+
+
+def libc_floor(wheels: Iterable[str], *, libc: str, builder_version: str) -> str:
+    """The oldest C library version a bundle's wheels and interpreter run on.
+
+    PyPI wheels declare it in their platform tag (``musllinux_1_2``, ``manylinux_2_28``); a wheel compiled in the
+    builder (a plain ``linux_<arch>`` tag) links the builder's own C library. The builder's version alone would
+    exclude every task image older than the builder, which for musl is most Alpine releases.
+    """
+    kind = "manylinux" if libc == "gnu" else "musllinux"
+    floors = [_INTERPRETER_LIBC_FLOOR[libc]]
+    for wheel in wheels:
+        for platform in Path(wheel).name.removesuffix(".whl").split("-")[-1].split("."):
+            if platform == "any":
+                continue
+            tag = _PLATFORM_TAG.match(platform)
+            legacy = next((v for k, v in _LEGACY_MANYLINUX.items() if platform.startswith(f"{k}_")), None)
+            if tag is not None and tag.group(1) == kind:
+                floors.append(f"{tag.group(2)}.{tag.group(3)}")
+            elif legacy is not None and libc == "gnu":
+                floors.append(legacy)
+            elif tag is None and legacy is None:
+                floors.append(builder_version)
+    return max(floors, key=lambda version: tuple(int(part) for part in version.split(".")))
 
 
 def file_sha256(path: Path) -> str:
@@ -222,13 +252,15 @@ tar -xzf /build/source.tar.gz -C /build/source
         with tarfile.open(bundle / "wheels.tar.gz", "w:gz") as archive:
             for wheel in wheels:
                 archive.add(wheel, arcname=wheel.name)
+        floor = libc_floor((wheel.name for wheel in wheels), libc=libc, builder_version=built_libc[1])
         manifest = {
             "version": 1,
             "target": target,
             "libc": built_libc[0],
-            "libc_version": built_libc[1],
+            "libc_version": floor,
             # Older loaders read the glibc floor from this key; musl bundles never had one.
-            **({"glibc": built_libc[1]} if libc == "gnu" else {}),
+            **({"glibc": floor} if libc == "gnu" else {}),
+            "builder_libc_version": built_libc[1],
             "builder_image": image_id,
             "source_fingerprint": fingerprint,
             "python_version": _PYTHON_VERSION,

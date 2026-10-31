@@ -173,10 +173,13 @@ async def _check_libc(sandbox: AsyncSandbox, libc: str, manifest: dict[str, obje
         fields = (result.stdout or "").strip().split()
         found = fields[1] if len(fields) == 2 and fields[0] == "glibc" else None
     else:
-        # musl prints its version on stderr: "musl libc (x86_64)\nVersion 1.2.5\n..."
+        # musl prints its version on stderr: "musl libc (x86_64)\nVersion 1.2.5\n...". Alpine's snapshot builds
+        # append the git date ("Version 1.2.4_git20230717"); the release they derive from is what matters.
         result = await sandbox.exec("ldd --version", cwd="/", timeout_s=30)
         match = re.search(
-            r"^Version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)$", f"{result.stdout or ''}\n{result.stderr or ''}", re.M
+            r"^Version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[_-]\S*)?$",
+            f"{result.stdout or ''}\n{result.stderr or ''}",
+            re.M,
         )
         found = match.group(1) if match and "musl" in f"{result.stdout or ''}{result.stderr or ''}" else None
     if (
