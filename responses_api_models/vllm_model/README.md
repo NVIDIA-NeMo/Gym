@@ -152,3 +152,17 @@ Once you see that server instances are up, call the server. If you see a model r
 ```bash
 python responses_api_agents/simple_agent/client.py
 ```
+
+
+## HTTP attempt limits
+
+The existing client controls are available as model configuration:
+`max_http_attempts` bounds retryable HTTP-status attempts (default: the shared
+client limit). Set `max_num_tries: 1` when the caller owns retries to disable
+both HTTP-status and inner transport retries. For an explicit single attempt,
+set both to `1`. The existing zero rate-limit wait budget is unchanged, so 429
+and 503 responses do not extend the configured HTTP attempt count.
+
+These settings also apply after endpoint-file rebinding.
+`request_timeout_seconds` bounds each HTTP attempt; it is not an overall
+agent retry budget. Agent-level retries remain separately configured.

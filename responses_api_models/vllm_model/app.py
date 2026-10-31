@@ -60,7 +60,7 @@ from nemo_gym.core import (
 )
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.models import note_generation_backend, note_generation_request
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.openai_utils import MAX_NUM_TRIES, NeMoGymAsyncOpenAI
 from nemo_gym.responses_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
@@ -383,6 +383,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
     propagate_context_overflow_errors: bool = False
+
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    max_num_tries: Optional[Literal[1]] = Field(
+        default=None,
+        description="Set to 1 when the caller owns retries, disabling both transport and HTTP-status retries.",
+    )
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -804,6 +810,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 request_timeout_seconds=self.config.request_timeout_seconds,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
+                max_http_attempts=self.config.max_http_attempts,
+                max_num_tries=self.config.max_num_tries,
             )
             for base_url in self.config.base_url
         ]
@@ -2238,6 +2246,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
+                max_http_attempts=self.config.max_http_attempts,
+                max_num_tries=self.config.max_num_tries,
                 request_timeout_seconds=self.config.request_timeout_seconds,
             )
         ]
