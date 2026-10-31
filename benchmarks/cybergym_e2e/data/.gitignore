@@ -1,0 +1,7 @@
+*.jsonl
+!example.jsonl
+assets/
+# Generated metrics sidecars for the (gitignored) prepared dataset -- recomputed per prepare run,
+# tied to whichever task subset was selected, so never committed.
+*_metrics.json
+*_metrics_conflict.json

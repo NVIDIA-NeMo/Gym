@@ -1,0 +1,31 @@
+name: cybergym_e2e
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: external-agent-loop
+domain: e2e
+description: >-
+  CyberGym-E2E preview (5 tasks): find an OSS-Fuzz vulnerability, write an ASan-crashing PoC, and a
+  patch, scored by a hardened E2B-microVM harness. Not directly comparable to upstream (see README).
+modality: text
+licensing: Apache-2.0
+authors:
+- Julien Veron Vialard
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: null
+agent_server: cybergym_e2e_agent
+model_server: policy_model
+datasets:
+- name: cybergym_e2e
+  type: benchmark
+  jsonl_fpath: benchmarks/cybergym_e2e/data/cybergym_e2e_benchmark.jsonl
+  prepare_script: benchmarks/cybergym_e2e/prepare.py
+  num_repeats: 1
+canonical_split: benchmark
+prompt_source: agent
+lifecycle: active

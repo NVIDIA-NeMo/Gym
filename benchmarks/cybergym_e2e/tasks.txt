@@ -1,0 +1,6 @@
+# Available tasks (project/arvo_id); task_names must be a subset. '#' lines ignored.
+jq/arvo_64574
+harfbuzz/arvo_11033
+c-blosc2/arvo_23717
+openssl/arvo_17715
+yara/arvo_11945

@@ -1,0 +1,2 @@
+# un-ignore template.py (repo-root `temp*` would drop it)
+!harness/template.py

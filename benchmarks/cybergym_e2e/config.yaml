@@ -1,0 +1,23 @@
+# External-agent-loop wiring: agent server + `legacy_agent` (the compatibility env server that forwards
+# the agent's own /run episode -- the scaffold default for this profile). No Gym resources server.
+cybergym_e2e_agent:
+  responses_api_agents:
+    cybergym_e2e_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: cybergym_e2e
+        type: benchmark
+        jsonl_fpath: benchmarks/cybergym_e2e/data/cybergym_e2e_benchmark.jsonl
+        prepare_script: benchmarks/cybergym_e2e/prepare.py
+        num_repeats: 1
+
+cybergym_e2e_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: cybergym_e2e_agent
