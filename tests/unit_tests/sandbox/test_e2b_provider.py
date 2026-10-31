@@ -2163,3 +2163,56 @@ class TestCommandDeadline:
         monkeypatch.setattr(FakeSandbox, "connect", flaky_connect)
         handle = await provider.connect({"sandbox_id": "sbx-9"})
         assert handle.sandbox_id == "sbx-9" and len(calls) == 3
+
+
+async def test_create_waits_until_a_new_sandbox_is_reachable(monkeypatch: pytest.MonkeyPatch) -> None:
+    # AgentENV can report a sandbox created while its gateway still answers 502 "could not be reached".
+    monkeypatch.setattr(e2b_provider, "REACHABLE_RETRY_DELAY_S", 0.0)
+    outcomes = [FakeUnreachable("502: The sandbox could not be reached"), FakeUnreachable("502: unreachable")]
+    original_run = FakeCommands.run
+
+    async def flaky_run(self, **kwargs):
+        if kwargs.get("cmd") == "true" and outcomes:
+            self._sandbox.exec_calls.append(kwargs)
+            raise outcomes.pop(0)
+        return await original_run(self, **kwargs)
+
+    monkeypatch.setattr(FakeCommands, "run", flaky_run)
+    provider = E2BProvider(create={"template": "base", "reachable_timeout_s": 30})
+    handle = await provider.create(_spec(ttl_s=60))
+    assert [call["cmd"] for call in handle.raw.exec_calls] == ["true", "true", "true"]
+    assert not handle.raw.killed
+
+
+async def test_a_sandbox_still_unreachable_at_the_deadline_is_killed(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(e2b_provider, "REACHABLE_RETRY_DELAY_S", 0.0)
+    clock = iter(range(0, 1000, 10))
+    monkeypatch.setattr(e2b_provider, "monotonic", lambda: next(clock))
+
+    async def unreachable(self, **kwargs):
+        self._sandbox.exec_calls.append(kwargs)
+        raise FakeUnreachable("502: The sandbox could not be reached")
+
+    monkeypatch.setattr(FakeCommands, "run", unreachable)
+    provider = E2BProvider(create={"template": "base", "reachable_timeout_s": 25})
+    with pytest.raises(E2BCreateError, match="could not be reached within 25s"):
+        await provider.create(_spec(ttl_s=60))
+    sandbox = FakeSandbox.instances[-1]
+    assert sandbox.killed
+    assert 1 <= len(sandbox.exec_calls) <= 3
+
+
+async def test_only_unreachable_is_waited_out_after_a_create(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def failing(self, **kwargs):
+        raise FakeSdkError("500: envd crashed", status_code=500)
+
+    monkeypatch.setattr(FakeCommands, "run", failing)
+    provider = E2BProvider(create={"template": "base", "reachable_timeout_s": 30})
+    with pytest.raises(E2BCreateError, match="envd crashed"):
+        await provider.create(_spec(ttl_s=60))
+    assert FakeSandbox.instances[-1].killed
+
+
+async def test_without_a_reachable_timeout_create_runs_no_command() -> None:
+    handle = await E2BProvider(create={"template": "base"}).create(_spec(ttl_s=60))
+    assert handle.raw.exec_calls == []

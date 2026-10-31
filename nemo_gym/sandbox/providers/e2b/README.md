@@ -164,6 +164,10 @@ metadata.
 - A kill that finds no sandbox is checked again and repeated if the sandbox still runs.
 - A sandbox the gateway could not reach raises `E2BSandboxUnreachableError` from `exec`, and is
   retried by idempotent operations (connect, close, file transfer, snapshot delete).
+- With `create.reachable_timeout_s` (120 s in `agentenv.yaml`), a create or fork returns only once a
+  no-op command reaches the new sandbox: AgentENV can report a sandbox created while its gateway
+  still answers 502. The no-op is retried on that 502 alone; a sandbox still unreachable at the
+  deadline is killed and the create raises `E2BCreateError`.
 
 ## Snapshots
 

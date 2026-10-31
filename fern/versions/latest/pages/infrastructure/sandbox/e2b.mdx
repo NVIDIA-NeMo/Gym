@@ -362,6 +362,7 @@ it continues the processes it was running, so the provider reports `snapshot_kee
 | --- | --- |
 | `snapshots.send_names: false` (default) | Snapshots are unnamed. E2B files a named snapshot as a team-wide template alias; the checkpointer releases snapshots by id. |
 | `create.lease_s` | Create with this timeout and renew it every third of a lease, so the sandboxes of a process that died end one lease later. |
+| `create.reachable_timeout_s` | After a create, run a no-op command until the gateway reaches the new sandbox (it can answer 502 "could not be reached" at first), for up to this many seconds; a sandbox still unreachable is killed and the create fails. Unset hands the sandbox over at once. |
 | `create.auto_resume: false` | Kill at timeout. Required on AgentENV, which otherwise keeps timed-out sandboxes paused. |
 
 `nemo_gym/sandbox/providers/e2b/configs/agentenv.yaml` is a ready config for an AgentENV cell:

@@ -123,6 +123,12 @@ KILL_RECHECK_DELAY_S = 1.0
 LEASE_RENEW_BATCH = 64
 LEASE_RENEW_TIMEOUT_S = 10.0
 
+# Waiting for a new sandbox to become reachable (``create.reachable_timeout_s``): each no-op probe is cut off after
+# REACHABLE_PROBE_TIMEOUT_S, and a 502 is retried after a delay that doubles up to REACHABLE_RETRY_MAX_DELAY_S.
+REACHABLE_PROBE_TIMEOUT_S = 30.0
+REACHABLE_RETRY_DELAY_S = 1.0
+REACHABLE_RETRY_MAX_DELAY_S = 8.0
+
 
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
@@ -301,6 +307,10 @@ class E2BCreateConfig:
     # third of a lease, up to the sandbox's own lifetime; a process that dies stops renewing, so its sandboxes end
     # one lease later instead of at their full lifetime. None creates with the full lifetime and does not renew.
     lease_s: float | None = field(default=None, kw_only=True)
+    # Seconds to wait, after a create, until the gateway reaches the new sandbox. AgentENV can report a sandbox as
+    # created while its gateway still answers 502 "could not be reached"; the provider then runs a no-op command until
+    # it succeeds, so callers never get a sandbox whose first command fails. None hands the sandbox over at once.
+    reachable_timeout_s: float | None = field(default=None, kw_only=True)
     allow_internet_access: bool = True
     secure: bool = True
     # Outbound traffic rules, passed as the SDK's ``network`` option:
@@ -342,6 +352,7 @@ class E2BCreateConfig:
         if self.auto_resume is not None and not isinstance(self.auto_resume, bool):
             raise ValueError("create.auto_resume must be a boolean or None")
         _validate_optional_number("create.lease_s", self.lease_s, positive=True)
+        _validate_optional_number("create.reachable_timeout_s", self.reachable_timeout_s, positive=True)
 
 
 @dataclass(frozen=True)
@@ -670,6 +681,19 @@ class E2BProvider:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
         self._hold_lease(sandbox, lifetime_s)
+        if self._create.reachable_timeout_s is not None:
+            try:
+                await self._wait_reachable(sandbox, self._create.reachable_timeout_s)
+            except Exception as exc:
+                self._leases.pop(str(sandbox.sandbox_id), None)
+                try:
+                    await sandbox.kill(**self._api_params())
+                except Exception as kill_error:  # noqa: BLE001 - the lease or timeout still ends it
+                    LOGGER.warning("could not kill unreachable e2b sandbox %s: %r", sandbox.sandbox_id, kill_error)
+                raise E2BCreateError(
+                    f"e2b sandbox {sandbox.sandbox_id} from template {template!r} was created but could not be "
+                    f"reached within {self._create.reachable_timeout_s:g}s: {exc}"
+                ) from exc
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
 
     async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
@@ -714,6 +738,33 @@ class E2BProvider:
             except Exception as kill_exc:  # noqa: BLE001 - best effort; the sandbox TTL is the backstop
                 LOGGER.warning("Could not kill e2b sandbox %s after a failed connect: %s", sandbox_id, kill_exc)
             raise
+
+    async def _wait_reachable(self, sandbox: Any, timeout_s: float) -> None:
+        """Run a no-op command until the gateway reaches ``sandbox``; only "could not be reached" is waited out.
+
+        The command does nothing, so running it again is always safe, unlike the caller's own commands.
+        """
+        e2b = _require_e2b_sdk()
+        deadline = monotonic() + timeout_s
+        delay = REACHABLE_RETRY_DELAY_S
+        attempts = 0
+        while True:
+            attempts += 1
+            try:
+                await sandbox.commands.run(
+                    cmd="true",
+                    timeout=REACHABLE_PROBE_TIMEOUT_S,
+                    request_timeout=self._exec_request_timeout(),
+                )
+            except Exception as exc:
+                if not _is_unreachable(exc, e2b) or monotonic() + delay > deadline:
+                    raise
+                await asyncio.sleep(delay)
+                delay = min(delay * 2, REACHABLE_RETRY_MAX_DELAY_S)
+                continue
+            if attempts > 1:
+                LOGGER.info("e2b sandbox %s became reachable after %d attempts", sandbox.sandbox_id, attempts)
+            return
 
     # ------------------------------------------------------------------ lease
 
