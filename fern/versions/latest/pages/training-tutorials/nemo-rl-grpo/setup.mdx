@@ -209,7 +209,7 @@ uv run python -c "import ray; ray.shutdown()"
 
 **Estimated time**: ~5 minutes
 
-The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This runs `gym dataset collate` to download and validate the dataset, and to add an `agent_ref` property to each example that tells NeMo Gym which agent server should handle that example.
+The Workplace Assistant dataset must be downloaded from HuggingFace and prepared for training. This runs `gym dataset collate` to download and validate the dataset, and to stamp each example with a `task_source` field naming the environment that declared it. When NeMo RL sends the examples to NeMo Gym, NeMo Gym resolves each `task_source` to the agent server that handles that example.
 
 Clone and setup the Gym Python environment:
 
