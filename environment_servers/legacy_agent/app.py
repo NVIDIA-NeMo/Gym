@@ -7,11 +7,13 @@
 it relays `/run` to an agent that has not been migrated, so the agent's own contract still applies.
 """
 
+import asyncio
 import warnings
 from collections.abc import Iterable
 from typing import Any
 
 from fastapi import Body, FastAPI, Request, Response
+from fastapi.responses import JSONResponse
 from pydantic import ConfigDict, PositiveFloat, PositiveInt, model_validator
 from typing_extensions import Self
 
@@ -31,7 +33,6 @@ _UNUSED_LIMITS = frozenset(
     {
         "max_concurrent_episodes",
         "queue_timeout_seconds",
-        "default_episode_timeout_seconds",
         "cleanup_timeout_seconds",
     }
 )
@@ -63,11 +64,12 @@ class LegacyAgentEnvironmentServerConfig(BaseEnvironmentServerConfig):
 
     agent_server: AgentServerRef
 
-    # A relay enforces none of these; the agent keeps its own limits. They carry defaults only
-    # because the base declares them, so configs need not repeat values that do nothing.
+    # The episode deadline bounds the relayed `/run` call when set; unset, the agent's own limits are the only
+    # ones. A relay enforces none of the other limits. They carry defaults only because the base declares them,
+    # so configs need not repeat values that do nothing.
     max_concurrent_episodes: PositiveInt | None = None
     queue_timeout_seconds: PositiveFloat | None = None
-    default_episode_timeout_seconds: PositiveFloat = 21600
+    default_episode_timeout_seconds: PositiveFloat | None = None
     cleanup_timeout_seconds: PositiveFloat = 180
 
     @model_validator(mode="after")
@@ -113,16 +115,33 @@ class LegacyAgentEnvironmentServer(BaseEnvironmentServer):
         """Relay one rollout-collection `/run` call to the agent server, and its answer back.
 
         This is an opaque relay that connects unmigrated agent servers to the
-        new environment server infrastructure.
+        new environment server infrastructure. An episode that outlives ``default_episode_timeout_seconds``
+        ends as the same retryable failure ``single_agent_turn_legacy`` returns when its deadline fires.
         """
-        upstream = await self.server_client.post(
-            server_name=self.config.agent_server.name,
-            url_path="/run",
-            data=await request.body(),
-            headers=dict(_relayed_headers(request.headers.items())),
-            cookies=request.cookies,
-        )
-        body = await upstream.read()
+        data = await request.body()
+        deadline = asyncio.timeout(self.config.default_episode_timeout_seconds)
+        try:
+            async with deadline:
+                upstream = await self.server_client.post(
+                    server_name=self.config.agent_server.name,
+                    url_path="/run",
+                    data=data,
+                    headers=dict(_relayed_headers(request.headers.items())),
+                    cookies=request.cookies,
+                )
+                body = await upstream.read()
+        except TimeoutError:
+            if not deadline.expired():
+                raise
+            return JSONResponse(
+                {
+                    "_ng_failure_class": "environment_server_failed",
+                    "_ng_failure_terminal": False,
+                    "_ng_failure_message": "Episode timed out",
+                    "_ng_failure_stage": None,
+                    "agent_ref": {"name": self.config.agent_server.name},
+                }
+            )
         response = Response(content=body, status_code=upstream.status)
         # raw_headers rather than `headers=`, so repeated fields such as Set-Cookie survive.
         response.raw_headers = [
