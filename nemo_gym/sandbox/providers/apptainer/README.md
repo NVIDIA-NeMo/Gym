@@ -93,6 +93,7 @@ apptainer:
     start_timeout_s: 600
     extra_start_args: []
     apply_resource_limits: true
+    private_tmp: false
   probe:
     command: printf apptainer-sandbox-ready
     expected_stdout: apptainer-sandbox-ready
@@ -109,6 +110,13 @@ Settings for starting the instance (`apptainer instance start`).
 | `start_timeout_s` | `600` | Max seconds to wait for `instance start` (`None` = no timeout). |
 | `extra_start_args` | `[]` | Extra raw flags appended to `instance start`. |
 | `apply_resource_limits` | `true` | Add CPU/memory cgroup flags from `SandboxSpec.resources`. |
+| `private_tmp` | `false` | Give each instance its own `/tmp` and `/var/tmp` (`--no-mount tmp` plus binds of `tmp` and `var_tmp` dirs inside the instance's staging dir, mode `1777`) instead of sharing the host directories with every other sandbox on the node. Both are removed with the instance. |
+
+Apptainer's `tmp` mount group covers both `/tmp` and `/var/tmp`
+([mount implementation](https://github.com/apptainer/apptainer/blob/v1.4.0/internal/pkg/runtime/engine/apptainer/container_linux.go#L1968-L1978)),
+so `--no-mount tmp` drops both host binds. `private_tmp: true` therefore binds a
+private directory at each path; nothing in the sandbox falls through to the
+read-only image.
 
 ### `exec` — `ApptainerExecConfig`
 

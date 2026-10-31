@@ -107,6 +107,10 @@ class ApptainerCreateConfig:
     start_timeout_s: float | None = 600
     extra_start_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
+    # Give each instance its own /tmp and /var/tmp (``tmp`` and ``var_tmp`` dirs in its host staging
+    # dir) instead of Apptainer's default binds of the host directories, which are otherwise shared by
+    # every sandbox on the node.
+    private_tmp: bool = False
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
@@ -462,6 +466,16 @@ class ApptainerProvider:
         # build the `apptainer instance start` command line.
         argv: list[str] = [self._binary, "instance", "start"]
         argv += ["--bind", f"{staging_dir}:{mount_point}"]
+        if self._create_config.private_tmp:
+            # Apptainer's ``tmp`` mount group covers both /tmp and /var/tmp, so ``--no-mount tmp`` drops
+            # both host binds; give the instance a private directory for each so neither falls through
+            # to the read-only image.
+            argv += ["--no-mount", "tmp"]
+            for host_name, guest_path in (("tmp", "/tmp"), ("var_tmp", "/var/tmp")):
+                private_tmp_dir = staging_dir / host_name
+                private_tmp_dir.mkdir(exist_ok=True)
+                private_tmp_dir.chmod(0o1777)
+                argv += ["--bind", f"{private_tmp_dir}:{guest_path}"]
         for bind in self._exec_config.default_binds:
             argv += ["--bind", bind]
         for bind in extra_binds:

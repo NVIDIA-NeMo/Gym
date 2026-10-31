@@ -512,6 +512,45 @@ async def test_create_probe_failure_cleans_up(
     assert any("stop" in call["argv"] for call in rec.calls)
 
 
+async def test_create_private_tmp_binds_per_instance_tmp(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        return (0, apptainer_provider.READY_PROBE_EXPECTED, "") if "exec" in argv else (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder, create={"private_tmp": True})
+    await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    start_argv = next(c["argv"] for c in rec.calls if "start" in c["argv"])
+    assert _contains_seq(start_argv, ["--no-mount", "tmp", "--bind", f"{staging / 'tmp'}:/tmp"])
+    # ``--no-mount tmp`` also drops the host /var/tmp bind, so the instance gets a private one too.
+    assert _contains_seq(start_argv, ["--bind", f"{staging / 'var_tmp'}:/var/tmp"])
+    for name in ("tmp", "var_tmp"):
+        assert (staging / name).is_dir()
+        assert (staging / name).stat().st_mode & 0o7777 == 0o1777
+
+
+async def test_create_shares_host_tmp_by_default(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    def responder(argv: list[str]) -> tuple[int, str, str]:
+        return (0, apptainer_provider.READY_PROBE_EXPECTED, "") if "exec" in argv else (0, "", "")
+
+    provider, rec = _make_provider(monkeypatch, responder)
+    await provider.create(SandboxSpec(image="ubuntu:22.04"))
+
+    start_argv = next(c["argv"] for c in rec.calls if "start" in c["argv"])
+    assert "--no-mount" not in start_argv
+    assert not (staging / "tmp").exists()
+    assert not (staging / "var_tmp").exists()
+
+
 # --------------------------------------------------------------------------- #
 # exec
 # --------------------------------------------------------------------------- #
