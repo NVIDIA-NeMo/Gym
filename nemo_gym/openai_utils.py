@@ -461,6 +461,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     )
                     response._ng_attempt_failure = failure
                     observe_failure(failure)
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{attempt}",
+                    failure_id=failure.event_id,
+                )
                 return failure
 
             response._ng_observe_body_failure = observe_body_failure
