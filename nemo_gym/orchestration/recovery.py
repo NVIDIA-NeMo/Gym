@@ -55,6 +55,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
 )
 from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 
 TASK_INDEX = "_ng_task_index"
@@ -611,7 +612,11 @@ def decide_recovery(
 
 # Run on the cluster over the executor's SSH connection: prints ONE JSON object with identity, failure and cause
 # fields only (never answers or prompts), and the job chain's own budget files. argv[1] is the job dir.
-COLLECT_SCRIPT = r"""
+COLLECT_SCRIPT = (
+    "TASK_ID_FIELDS = "
+    + repr(TASK_ID_FIELDS)
+    + "\n"
+    + r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
 def job_identity():
@@ -675,6 +680,14 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if name == "rollouts_materialized_inputs.jsonl":
+                identity = r.get("trajectory_identity")
+                if isinstance(identity, dict) and all(isinstance(identity.get(k), str) and identity[k] for k in ("task_id", "rollout_id")):
+                    task_id = identity["task_id"]
+                else:
+                    task_id = next((r[k] for k in TASK_ID_FIELDS if r.get(k) is not None), r.get("_ng_task_index"))
+                # Only the scalar task identity leaves the host; dataset content stays in the saved input.
+                selected["_ng_collected_task_id"] = str(task_id) if type(task_id) in (str, int) else None
             if r.get("_ng_failure_class") == "judge_failed":
                 selected[SAVED] = isinstance(r.get("response"), dict) and bool(r["response"])
             # Operation evidence only: prompts, answers, conversations and model payloads stay on the run host.
@@ -790,7 +803,8 @@ try:
                "ended_on_failed_model_call": ((run.get("stats") or {}).get("model_call_errors") or {}).get("ended_on_error"),
                "verification_skipped": ((run.get("stats") or {}).get("model_call_errors") or {}).get("verification_skipped"),
                "context_window_exceeded": ((run.get("stats") or {}).get("model_call_errors") or {}).get("context_window_exceeded")}
-except (OSError, ValueError, KeyError, TypeError):
+except (OSError, ValueError, KeyError, TypeError, AttributeError):
+    # Optional diagnostics cannot make the authoritative saved inventory unreadable.
     pass
 score = None
 if len(sys.argv) > 2:
@@ -834,6 +848,7 @@ collected["source_digests"] = source_snapshot if source_snapshot == {name: sha25
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 print(json.dumps(collected))
 """
+)
 
 
 class CollectedEvidence(BaseModel):
@@ -1626,6 +1641,7 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
     servers = provenance.get("servers") or {}
     if provenance.get("resolved_config") != "read" or not isinstance(servers, dict):
         return False
+    input_task_ids = {_identity(item): item.get("_ng_collected_task_id") for item in collected.materialized or []}
     call_ids, response_ids, operation_ids, verifier_ids = set(), set(), set(), set()
     for row in rows:
         try:
@@ -1652,12 +1668,11 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
             if not isinstance(row_events, dict):
                 return False
             t = row["ng_trial_observations"]
+            task_id = row.get("materialized_task_id") if session else input_task_ids.get(_identity(row))
             if (
-                t["task_id"] != (row.get("materialized_task_id") if session else str(row["_ng_task_index"]))
-                or (
-                    session
-                    and (not isinstance(row.get("materialized_task_id"), str) or not row["materialized_task_id"])
-                )
+                not isinstance(task_id, str)
+                or not task_id
+                or t["task_id"] != task_id
                 or t["rollout_id"] != maybe_rollout_id_from_run_body(row)
                 or type(t["tool_call_count"]) is not int
                 or t["tool_call_count"] != 0
