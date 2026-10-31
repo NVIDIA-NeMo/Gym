@@ -99,6 +99,6 @@ def test_valid_wrong_zero_after_allocation_retry_is_still_graded(monkeypatch, te
     assert row["mask_sample"] is False
     assert row["failure_kind"] is None
     assert "_ng_failure_class" not in row
-    assert "verification_attempts" not in row
+    assert row["verification_attempts"] == 2
     assert "_ng_failure_judge_error" not in row
     sandbox.stop.assert_awaited_once()

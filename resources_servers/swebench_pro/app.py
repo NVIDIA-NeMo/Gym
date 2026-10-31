@@ -624,7 +624,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "mask_sample": False,
             "failure_kind": None,
             "failure_reason": None,
-            "verification_attempts": None,
+            "verification_attempts": attempt,
             "evaluation_completed": result.completed and reason is None,
             "eval_timed_out": result.timed_out,
             "resolved": result.resolved,
