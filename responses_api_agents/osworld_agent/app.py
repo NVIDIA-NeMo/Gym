@@ -63,6 +63,7 @@ from responses_api_agents.osworld_agent.agent_contract import (
     resolve_agent_contract,
 )
 from responses_api_agents.osworld_agent.exact_trace import build_exact_trace_envelope
+from responses_api_agents.osworld_agent.observability import build_gym_observability
 from responses_api_agents.osworld_agent.proxy import (
     inspect_proxy_config_file,
     parse_env_bool,
@@ -318,6 +319,7 @@ class OSWorldAgentConfig(BaseResponsesAPIAgentConfig):
     """
 
     model_server: ModelServerRef
+    install_optional_runtime_dependencies: bool = False
     resources_server: Optional[ResourcesServerRef] = None
     concurrency: int = 4
     provider_name: str = "docker"
@@ -717,6 +719,9 @@ def _build_messages_model_fn(
 
     def _call(messages: List[Dict[str, Any]], payload: Dict[str, Any]) -> Any:
         nonlocal call_index
+        # This private payload fact survives exceptions without changing their type.
+        # Unknown SDK/decoding failures must not imply that no completion was received.
+        payload["_nemo_gym_completion_received"] = None
         call_log_context = dict(base_log_context)
         call_log_context.update(_normalize_log_context(payload.get("_osworld_log_context")))
         create_kwargs: Dict[str, Any] = {
@@ -748,7 +753,7 @@ def _build_messages_model_fn(
         )
         model_io_enabled = bool(os.environ.get("OSWORLD_MODEL_IO_LOG", "").strip())
         current_call = 0
-        started_ns = 0
+        started_ns = time.time_ns()
         if model_io_enabled:
             call_index += 1
             current_call = call_index
@@ -756,7 +761,6 @@ def _build_messages_model_fn(
             agent_payload = _jsonable(payload)
             request_json = json.dumps(request_value, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             payload_json = json.dumps(agent_payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-            started_ns = time.time_ns()
             _append_model_io(
                 {
                     **call_log_context,
@@ -780,6 +784,10 @@ def _build_messages_model_fn(
                 request_kwargs["extra_headers"] = context_headers
             resp = client.chat.completions.create(**request_kwargs)
         except Exception as exc:
+            from openai import APIConnectionError, APIStatusError, APITimeoutError  # noqa: PLC0415
+
+            if isinstance(exc, (APIConnectionError, APIStatusError)):
+                payload["_nemo_gym_completion_received"] = False
             if model_io_enabled:
                 finished_ns = time.time_ns()
                 _append_model_io(
@@ -795,11 +803,10 @@ def _build_messages_model_fn(
                         "error": repr(exc),
                     }
                 )
-            from openai import APITimeoutError  # noqa: PLC0415
-
             if isinstance(exc, APITimeoutError):
                 raise OSWorldModelTimeoutError(f"policy model call exceeded {model_timeout_s:g}s") from exc
             raise
+        payload["_nemo_gym_completion_received"] = True
         # The response finished, so its tokens count even if it is rejected below.
         if policy_usage is not None:
             policy_usage.add(resp)
@@ -810,6 +817,11 @@ def _build_messages_model_fn(
                 f"Model response did not finish cleanly: finish_reason={choice.finish_reason!r}"
             )
         structured_response = bool(payload.get("_nemo_gym_return_message"))
+        observation = {
+            "response_id": getattr(resp, "id", None),
+            "started_at": started_ns / 1e9,
+            "usage": _jsonable(getattr(resp, "usage", None)),
+        }
         if not model_io_enabled:
             if finish_reason_error is not None and not structured_response:
                 raise finish_reason_error
@@ -819,6 +831,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                normalized["observation"] = observation
             return normalized
 
         normalization_error = None
@@ -831,6 +844,7 @@ def _build_messages_model_fn(
             )
             if structured_response and isinstance(normalized, dict):
                 normalized["finish_reason"] = choice.finish_reason
+                normalized["observation"] = observation
         except Exception as exc:  # noqa: BLE001 - log raw output before preserving the original error.
             normalization_exc = exc
             normalization_error = {"type": type(exc).__name__, "message": repr(exc)}
@@ -1646,6 +1660,7 @@ class OSWorldAgent(SimpleResponsesAPIAgent):
                 max_trajectory_length=self.config.max_trajectory_length,
                 max_output_tokens=max_tokens,
                 exact_trace_transport_version=self.config.exact_trace_transport_version,
+                model_ref=self.config.model_server,
             )
 
 
@@ -1713,6 +1728,7 @@ def _build_response(
     max_trajectory_length: Optional[int] = None,
     max_output_tokens: Optional[int] = None,
     exact_trace_transport_version: Literal[2, 3] = 2,
+    model_ref: Optional[ModelServerRef] = None,
 ) -> OSWorldVerifyResponse:
     """Pack one run without changing its prompt policy for training consumers."""
 
@@ -1853,6 +1869,18 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    if model_ref is not None:
+        incomplete_call_reasons = {"model_call_evidence_unavailable", "model_call_evidence_invalid"}
+        trace_reasons = trajectory_fields["trajectory_contract"]["exact_trace_admission"]["incomplete_reasons"]
+        trajectory = build_gym_observability(
+            request=body,
+            model_calls=model_calls,
+            model_ref=model_ref,
+            evaluation_completed=runtime_admission["evaluation_completed"],
+            model_call_records_complete=not any(reason in incomplete_call_reasons for reason in trace_reasons),
+        )
+        if trajectory is not None:
+            response_fields["ng_trajectory"] = trajectory
     return OSWorldVerifyResponse(**response_fields)
 
 
@@ -1914,5 +1942,6 @@ def _empty_response(
 if __name__ == "__main__":
     from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
 
-    require_optional_runtime_dependencies()
+    config = OSWorldAgent.load_config_from_global_config()
+    require_optional_runtime_dependencies(install_if_missing=config.install_optional_runtime_dependencies)
     OSWorldAgent.run_webserver()
