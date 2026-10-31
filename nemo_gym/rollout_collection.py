@@ -161,13 +161,14 @@ from nemo_gym.token_id_capture import (
     mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
+from nemo_gym.token_id_capture.config import token_id_capture_config, token_id_capture_enabled_for_agent
 from nemo_gym.token_id_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.token_id_capture.protocols import CaptureLedger
 
 
 logger = logging.getLogger(__name__)
@@ -2293,6 +2294,9 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
     body = getattr(exc, "response_content", None)
     return {
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
+        # A failed episode may have staged a valid partial token history. Trainers
+        # must exclude it rather than learn from an unverified prefix.
+        "instance_config": {"mask_sample": True},
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
         "_ng_failure_http_status": status,
@@ -4632,7 +4636,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
-        route_failures_to_sidecar: bool = False,
+        route_failures_to_sidecar: bool | None = None,
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
@@ -4663,6 +4667,17 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         the order they supplied.
         """
         server_client = self.setup_server_client(head_server_config)
+        if route_failures_to_sidecar is None:
+            route_failures_to_sidecar = server_client.global_config_dict.get("route_failures_to_sidecar", False)
+            if not isinstance(route_failures_to_sidecar, bool):
+                raise ValueError("route_failures_to_sidecar must be a boolean")
+        failure_ledger = None
+        if route_failures_to_sidecar and server_client.global_config_dict.get("token_id_capture", {}).get(
+            "external_staging", False
+        ):
+            failure_ledger = token_id_capture_config(server_client.global_config_dict).build_lineage_store()
+            if not isinstance(failure_ledger, CaptureLedger):
+                raise ValueError("routing externally staged rollout failures requires a shared CaptureLedger")
         if environment_server_name is not None:
             for row in examples:
                 row[NG_ENVIRONMENT_SERVER_KEY] = environment_server_name
@@ -4782,6 +4797,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     # The status comes from the error when it carries one, and from the response
                     # when the body was the part that failed.
                     status = getattr(e, "status", None) or getattr(res, "status", None)
+                    if failure_ledger is not None:
+                        rollout_id = maybe_rollout_id_from_run_body(row)
+                        if rollout_id is None:
+                            raise ValueError(
+                                "cannot record a training rollout failure without a capture identity"
+                            ) from e
+                        # Keep staged-call ownership for cleanup, but invalidate any partial history.
+                        # A loss mask alone does not exclude the row from a trainer's valid-group count.
+                        await failure_ledger.record_failure(rollout_id, "agent-run-failure", "agent_run_failed")
                     return _CompletedRollout(
                         row=row,
                         result=_agent_request_failure_row(e, status),
@@ -4817,7 +4841,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         examples: List[Dict],
         head_server_config: Optional[BaseServerConfig] = None,
         semaphore: Optional[Semaphore] = None,
-        route_failures_to_sidecar: bool = False,
+        route_failures_to_sidecar: bool | None = None,
         environment_server_name: str | None = None,
         *,
         max_resident_tasks: Optional[int] = None,
@@ -4834,8 +4858,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         ``preprocess_examples`` first if you need them.
 
         ``route_failures_to_sidecar`` makes a failed `/run` a failure row instead of an exception
-        that ends every rollout still in flight. It defaults off because those rollouts then leave
-        the score.
+        that ends every rollout still in flight. When omitted, it uses the global configuration
+        value, which defaults off because those rollouts then leave the score. An explicit boolean
+        overrides the configuration. Failure rows carry ``instance_config.mask_sample=True`` so
+        training callers exclude any partial captured history from optimization.
 
         ``max_resident_tasks`` limits admitted tasks and therefore concurrent requests,
         even when ``semaphore`` allows more. Admission starts when the first returned
