@@ -187,7 +187,7 @@ def test_installer_probe_accepts_glibc(tmp_path: Path, arch: str) -> None:
 @pytest.mark.asyncio
 @pytest.mark.skipif(shutil.which("bash") is None, reason="Runtime probe requires bash")
 @pytest.mark.parametrize("arch", ["x86_64", "aarch64"])
-async def test_musl_probe_stops_preparation_before_archive_downloads_or_uploads(
+async def test_musl_probe_without_a_musl_bundle_fails_closed_before_downloads_or_uploads(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     sandbox: AsyncMock,
@@ -195,6 +195,7 @@ async def test_musl_probe_stops_preparation_before_archive_downloads_or_uploads(
     portable_download: AsyncMock,
     arch: str,
 ) -> None:
+    """The probe reports a musl image; a glibc-only bundle configuration must not fall back to the network."""
     installer = Path(sandbox_runtime.__file__).with_name("install_nooa_runtime.sh")
     (source_tree / sandbox_runtime._INSTALLER_PATH).write_bytes(installer.read_bytes())
     package = sandbox_runtime._runtime_archive(source_tree)
@@ -211,11 +212,12 @@ async def test_musl_probe_stops_preparation_before_archive_downloads_or_uploads(
         result = subprocess.run(
             [bash, str(uploaded_probe), "probe"], env=env, capture_output=True, text=True, timeout=5
         )
+        assert result.stdout.strip() == f"{arch}/musl"
         return SandboxExecResult(result.stdout, result.stderr, result.returncode)
 
     sandbox.exec.side_effect = execute
-    with pytest.raises(RuntimeError, match="current NOOA runtime requires glibc; musl task images are unsupported"):
-        await sandbox_runtime.prepare_nooa_runtime(sandbox)
+    with pytest.raises(RuntimeError, match="runtime_wheelhouse_musl"):
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=tmp_path / "glibc-bundle")
     portable_download.assert_not_awaited()
     sandbox.upload.assert_awaited_once()
     assert sandbox.upload.await_args.args[1].endswith(".sh")
@@ -292,8 +294,8 @@ async def test_unhealthy_runtime_stages_verified_archives_and_installs(
         ("x86_64/gnu; rm -rf /", 0),
         ("", 0),
         ("x86_64/gnu", 7),
-        ("x86_64/musl", 0),
-        ("aarch64/musl", 0),
+        ("riscv64/gnu", 0),
+        ("x86_64/uclibc", 0),
     ],
 )
 async def test_probe_rejects_invalid_target_before_downloading(
@@ -489,6 +491,83 @@ async def test_offline_runtime_stages_only_verified_local_artifacts(
     assert command[4] == expected_fingerprint
     assert command[-1] == wheels_sha
     assert python == f"/opt/nemo-gym-nooa/{expected_fingerprint}-x86_64-gnu/python/bin/python3"
+
+
+def musl_wheelhouse(path: Path, gnu_wheelhouse: Path) -> Path:
+    """A musl bundle shaped like the glibc fixture's, with the musl Python digest and a musl manifest."""
+    path.mkdir()
+    (path / "python.tar.gz").write_bytes((gnu_wheelhouse / "python.tar.gz").read_bytes())
+    (path / "wheels.tar.gz").write_bytes((gnu_wheelhouse / "wheels.tar.gz").read_bytes())
+    manifest = json.loads((gnu_wheelhouse / "manifest.json").read_text())
+    manifest.pop("glibc")
+    manifest.update(
+        target="x86_64/musl",
+        libc="musl",
+        libc_version="1.2.3",
+        python_sha256=sandbox_runtime._PYTHON_SHA256["x86_64/musl"],
+    )
+    (path / "manifest.json").write_text(json.dumps(manifest))
+    return path
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["1.2.5", "1.2.3", "1.2.4_git20230717"])
+async def test_offline_runtime_selects_the_musl_bundle_for_a_musl_image(
+    version: str,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sandbox: AsyncMock,
+    wheelhouse: Path,
+    runtime_package: tuple[bytes, str],
+    portable_download: AsyncMock,
+) -> None:
+    monkeypatch.setitem(
+        sandbox_runtime._PYTHON_SHA256,
+        "x86_64/musl",
+        hashlib.sha256((wheelhouse / "python.tar.gz").read_bytes()).hexdigest(),
+    )
+    musl = musl_wheelhouse(tmp_path / "musl-wheelhouse", wheelhouse)
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/musl", "", 0),
+        SandboxExecResult("", f"musl libc (x86_64)\nVersion {version}\nDynamic Program Loader\n", 1),
+        SandboxExecResult("", "", 1),
+        SandboxExecResult("ready", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    python = await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse, musl_wheelhouse_path=musl)
+    portable_download.assert_not_awaited()
+    assert sandbox.exec.await_args_list[1].args[0] == "ldd --version"
+    wheels_sha = json.loads((musl / "manifest.json").read_text())["wheels_sha256"]
+    expected_fingerprint = hashlib.sha256(f"{runtime_package[1]}:{wheels_sha}".encode()).hexdigest()
+    assert python == f"/opt/nemo-gym-nooa/{expected_fingerprint}-x86_64-musl/python/bin/python3"
+    script = sandbox.upload.await_args_list[0].args[1]
+    scratch = script.removesuffix(".sh")
+    assert sandbox.uploaded[f"{scratch}/wheels.tar.gz"] == (musl / "wheels.tar.gz").read_bytes()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "ldd", ["musl libc (x86_64)\nVersion 1.1.24", "musl libc (x86_64)\nVersion 1.2.2_git20220101", "GNU libc 2.31", ""]
+)
+async def test_offline_runtime_rejects_an_old_or_unknown_musl_without_online_fallback(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    sandbox: AsyncMock,
+    wheelhouse: Path,
+    portable_download: AsyncMock,
+    ldd: str,
+) -> None:
+    monkeypatch.setitem(
+        sandbox_runtime._PYTHON_SHA256,
+        "x86_64/musl",
+        hashlib.sha256((wheelhouse / "python.tar.gz").read_bytes()).hexdigest(),
+    )
+    musl = musl_wheelhouse(tmp_path / "musl-wheelhouse", wheelhouse)
+    sandbox.exec.side_effect = [SandboxExecResult("x86_64/musl", "", 0), SandboxExecResult("", ldd, 1)]
+    with pytest.raises(RuntimeError, match="requires musl >= 1.2.3"):
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse, musl_wheelhouse_path=musl)
+    portable_download.assert_not_awaited()
+    sandbox.upload.assert_awaited_once()
 
 
 @pytest.mark.asyncio

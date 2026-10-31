@@ -90,6 +90,8 @@ _INSTALLER_PATH = "responses_api_agents/nooa_agent/install_nooa_runtime.sh"
 _PYTHON_SHA256 = {
     "x86_64/gnu": "9f9ebf776b2d4913fe5a91508ab42e6ce17d266138f76a7782c05fa1c3cba1d1",  # pragma: allowlist secret
     "aarch64/gnu": "4777d7df2edb47b96e53abad5e1b9df1b2a1a9b2f7bdba12b5c0122163b3fed9",  # pragma: allowlist secret
+    "x86_64/musl": "0c3e9eb834452e6442800ab9cabf88616886c4f1d55163a4da675ec3bcb4f27c",  # pragma: allowlist secret
+    "aarch64/musl": "038e5e8ce956a39fed3cb81471258503e3a9d87cb4f8b7c0dc00eb8a5031a8f6",  # pragma: allowlist secret
 }
 _IMPORT_CHECK = (
     "import sys; assert sys.version_info[:3] == (3,13,14); "
@@ -162,17 +164,51 @@ def _python_download_url(target: str) -> str:
     )
 
 
-async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path | None = None) -> str:
+async def _check_libc(sandbox: AsyncSandbox, libc: str, manifest: dict[str, object]) -> None:
+    """Refuse a bundle whose wheels were built for a newer C library than the task image carries."""
+    kind = "glibc" if libc == "gnu" else "musl"
+    required = str(manifest.get("libc_version") or manifest.get("glibc") or "")
+    if libc == "gnu":
+        result = await sandbox.exec("getconf GNU_LIBC_VERSION", cwd="/", timeout_s=30)
+        fields = (result.stdout or "").strip().split()
+        found = fields[1] if len(fields) == 2 and fields[0] == "glibc" else None
+    else:
+        # musl prints its version on stderr: "musl libc (x86_64)\nVersion 1.2.5\n...". Alpine's snapshot builds
+        # append the git date ("Version 1.2.4_git20230717"); the release they derive from is what matters.
+        result = await sandbox.exec("ldd --version", cwd="/", timeout_s=30)
+        match = re.search(
+            r"^Version ([0-9]+\.[0-9]+(?:\.[0-9]+)?)(?:[_-]\S*)?$",
+            f"{result.stdout or ''}\n{result.stderr or ''}",
+            re.M,
+        )
+        found = match.group(1) if match and "musl" in f"{result.stdout or ''}{result.stderr or ''}" else None
+    if (
+        found is None
+        or re.fullmatch(r"[0-9]+\.[0-9]+(?:\.[0-9]+)?", required) is None
+        or tuple(map(int, found.split("."))) < tuple(map(int, required.split(".")))
+    ):
+        raise RuntimeError(
+            f"Offline NOOA runtime requires {kind} >= {required}; got {found or (result.stdout or '').strip().split()}"
+        )
+
+
+async def prepare_nooa_runtime(
+    sandbox: AsyncSandbox, *, wheelhouse_path: Path | None = None, musl_wheelhouse_path: Path | None = None
+) -> str:
     """Stage verified artifacts and return the target's healthy private Python.
 
-    Cold setup requires Linux x86_64/aarch64 with glibc, bash, tar, gzip,
+    Cold setup requires Linux x86_64/aarch64 with glibc or musl, bash, tar, gzip,
     sha256sum, flock, tee, mv with -T support, and writable /opt/nemo-gym-nooa
     and /tmp. No root or system
     package manager is invoked. The controller supplies Python; the sandbox still
-    needs outbound package/build dependency access unless wheelhouse_path selects
-    a source-bound bundle prepared outside the task. Offline setup installs only
-    local wheels, without package indexes, URL requirements or build isolation.
-    A healthy preinstalled or mounted runtime is reused without writing into it.
+    needs outbound package/build dependency access unless a wheelhouse selects
+    a source-bound bundle prepared outside the task: ``wheelhouse_path`` for glibc
+    images, ``musl_wheelhouse_path`` for musl images (Alpine and BusyBox based
+    task images). When a bundle is configured for one C library and the task
+    image carries the other, setup fails rather than installing from the network.
+    Offline setup installs only local wheels, without package indexes, URL
+    requirements or build isolation. A healthy preinstalled or mounted runtime is
+    reused without writing into it.
     """
     root = Path(__file__).resolve().parents[2]
     source, fingerprint = await _runtime_io(_runtime_archive, root)
@@ -194,23 +230,21 @@ async def prepare_nooa_runtime(sandbox: AsyncSandbox, *, wheelhouse_path: Path |
                 )
             arch, libc = target.split("/")
             wheelhouse = None
+            bundles = {"gnu": wheelhouse_path, "musl": musl_wheelhouse_path}
+            if any(bundles.values()) and bundles[libc] is None:
+                setting = "runtime_wheelhouse_musl" if libc == "musl" else "runtime_wheelhouse"
+                raise RuntimeError(
+                    f"Offline NOOA runtime bundle for {target} is not configured ({setting}); the task image uses "
+                    f"{'musl' if libc == 'musl' else 'glibc'} and this agent does not install from the network"
+                )
+            wheelhouse_path = bundles[libc]
             if wheelhouse_path is not None:
                 from responses_api_agents.nooa_agent.offline_runtime import load_runtime_wheelhouse
 
                 wheelhouse = await _runtime_io(
                     load_runtime_wheelhouse, wheelhouse_path, target=target, source_fingerprint=fingerprint
                 )
-                libc_result = await sandbox.exec("getconf GNU_LIBC_VERSION", cwd="/", timeout_s=30)
-                libc_fields = (libc_result.stdout or "").strip().split()
-                required_glibc = str(wheelhouse["glibc"])
-                if (
-                    libc_result.return_code != 0
-                    or len(libc_fields) != 2
-                    or libc_fields[0] != "glibc"
-                    or re.fullmatch(r"[0-9]+\.[0-9]+", libc_fields[1]) is None
-                    or tuple(map(int, libc_fields[1].split("."))) < tuple(map(int, required_glibc.split(".")))
-                ):
-                    raise RuntimeError(f"Offline NOOA runtime requires glibc >= {required_glibc}; got {libc_fields}")
+                await _check_libc(sandbox, libc, wheelhouse)
                 # Dependency resolution can change independently of source; never reuse
                 # a runtime installed from different wheel bytes.
                 fingerprint = hashlib.sha256(f"{fingerprint}:{wheelhouse['wheels_sha256']}".encode()).hexdigest()

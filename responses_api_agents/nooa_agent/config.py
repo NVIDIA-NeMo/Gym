@@ -52,6 +52,13 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Controller-prepared offline runtime bundle; when set, task setup uses no package-network access.",
     )
+    runtime_wheelhouse_musl: Path | None = Field(
+        default=None,
+        description=(
+            "Offline runtime bundle for musl task images (Alpine or BusyBox based), prepared with "
+            "`--target x86_64/musl`; without it a musl task fails at setup when a glibc bundle is configured."
+        ),
+    )
     runtime_wheelhouse_required: bool = Field(
         default=False, description="Require an explicitly prepared offline runtime before starting this agent."
     )
@@ -76,7 +83,7 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
     )
 
-    @field_validator("runtime_wheelhouse")
+    @field_validator("runtime_wheelhouse", "runtime_wheelhouse_musl")
     @classmethod
     def normalize_runtime_wheelhouse(cls, value: Path | None) -> Path | None:
         if value is None:

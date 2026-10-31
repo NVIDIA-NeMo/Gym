@@ -33,6 +33,10 @@ the outer `execute_python` call from nested resource calls.
 
 `nooa.execution_mode: sandboxed` runs the complete NOOA agent in the task sandbox supplied by Resources.
 NOOA stages its own runtime and closes its worker before disconnecting; Resources owns sandbox creation and teardown.
+The staged runtime matches the task image's C library: a glibc bundle (`runtime_wheelhouse`, built with
+`--target x86_64/gnu`) or a musl bundle (`runtime_wheelhouse_musl`, `--target x86_64/musl`) for Alpine and BusyBox
+based images. With a bundle configured for one C library and a task image carrying the other, setup fails instead of
+installing from the network.
 Agent and resource sessions use Gym's existing `single_agent_turn` environment. Agent close returns the evidence and final
 Resources cookies before verification; Resources closes its sandbox afterward.
 
