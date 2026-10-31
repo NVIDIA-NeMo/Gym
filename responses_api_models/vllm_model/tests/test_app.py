@@ -4812,6 +4812,89 @@ class TestReasoningFieldConfig:
             _make_reasoning_history_config()
 
 
+class TestClientReasoningContentHistory:
+    """Chat clients such as Goose replay prior reasoning as `reasoning_content`; vLLM >= 0.16.0 reads `reasoning`."""
+
+    @staticmethod
+    def _preprocess(messages: list[dict[str, Any]], **overrides: Any) -> list[dict[str, Any]]:
+        model = _make_reasoning_history_model(preserve_content=False, **overrides)
+        body = {"model": "caller-model", "messages": deepcopy(messages)}
+        return model._preprocess_chat_completion_create_params(MagicMock(), body)["messages"]
+
+    @mark.parametrize(
+        "reasoning_field,expected",
+        [
+            ("both", {"reasoning": "plan", "reasoning_content": "plan"}),
+            ("reasoning", {"reasoning": "plan"}),
+            ("reasoning_content", {"reasoning_content": "plan"}),
+        ],
+    )
+    def test_maps_reasoning_content_to_configured_keys(
+        self, monkeypatch: MonkeyPatch, reasoning_field: str, expected: dict[str, str]
+    ) -> None:
+        monkeypatch.delenv("NEMO_GYM_REASONING_FIELD", raising=False)
+        messages = [{"role": "assistant", "content": "answer", "reasoning_content": "plan"}]
+        (assistant,) = self._preprocess(messages, reasoning_field=reasoning_field)
+        assert assistant == {"role": "assistant", "content": "answer", **expected}
+
+    def test_existing_reasoning_is_left_alone(self) -> None:
+        messages = [{"role": "assistant", "content": "answer", "reasoning": "own", "reasoning_content": "other"}]
+        assert self._preprocess(messages, reasoning_field="both") == messages
+
+    def test_non_assistant_and_empty_messages_are_untouched(self) -> None:
+        messages = [
+            {"role": "user", "content": "q", "reasoning_content": "not mine"},
+            {"role": "assistant", "content": "answer", "reasoning_content": None},
+            {"role": "assistant", "content": "answer", "reasoning_content": ""},
+        ]
+        assert self._preprocess(messages, reasoning_field="both") == messages
+
+    def test_second_call_prompt_extends_first_call_tokens(self) -> None:
+        """A two-call rollout stitches only if the replayed reasoning reaches a `reasoning`-only chat template."""
+
+        def render(messages: list[dict[str, Any]]) -> list[str]:
+            # Word-level stand-in for a vLLM >= 0.16.0 chat template that renders `reasoning` and ignores
+            # `reasoning_content`.
+            tokens = []
+            for message in messages:
+                tokens.append(f"<{message['role']}>")
+                if message["role"] == "assistant":
+                    tokens += ["<think>", *(message.get("reasoning") or "").split(), "</think>"]
+                tokens += [*message["content"].split(), f"</{message['role']}>"]
+            return tokens + ["<assistant>"]
+
+        prompts = []
+
+        async def complete(**body: Any) -> dict[str, Any]:
+            prompts.append(render(body["messages"]))
+            message = {"role": "assistant", "content": "answer"}
+            choice = {"index": 0, "finish_reason": "stop", "message": message}
+            return {"id": "c", "object": "chat.completion", "created": 0, "model": "m", "choices": [choice]}
+
+        backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+        backend.create_chat_completion = AsyncMock(side_effect=complete)
+        model = VLLMModel(
+            config=_make_reasoning_history_config(reasoning_field="reasoning"),
+            server_client=MagicMock(spec=ServerClient, global_config_dict={}),
+        )
+        model._clients = [backend]
+        # Tokens the backend generated on the first call: the reasoning, then the answer.
+        first_generation = ["<think>", "plan", "it", "</think>", "answer", "</assistant>"]
+        history = [{"role": "user", "content": "question"}]
+        with TestClient(model.setup_webserver()) as client:
+            assert client.post("/v1/chat/completions", json={"messages": history}).status_code == 200
+            # The client replays the first answer Goose-style, with reasoning under `reasoning_content`.
+            history += [
+                {"role": "assistant", "content": "answer", "reasoning_content": "plan it"},
+                {"role": "user", "content": "continue"},
+            ]
+            assert client.post("/v1/chat/completions", json={"messages": history}).status_code == 200
+
+        first_prompt, second_prompt = prompts
+        stitched = first_prompt + first_generation
+        assert second_prompt[: len(stitched)] == stitched
+
+
 # ──────────────────────────────────────────────────────────────────────────────
 # Audio sidechannel splice (metadata.audio_data → user-message content block)
 #

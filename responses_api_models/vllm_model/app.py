@@ -1096,6 +1096,16 @@ class VLLMModel(SimpleResponsesAPIModel):
                 if message_dict.get("role") == "developer":
                     message_dict["role"] = "system"
 
+        # Chat clients (e.g. Goose) replay prior reasoning as `reasoning_content`, which vLLM >= 0.16.0 no longer
+        # renders. Re-emit it under the configured key(s) so the model sees its earlier reasoning.
+        for message_dict in body_dict["messages"]:
+            if (
+                message_dict.get("role") == "assistant"
+                and message_dict.get("reasoning_content")
+                and not message_dict.get("reasoning")
+            ):
+                _set_reasoning(message_dict, message_dict.pop("reasoning_content"), self.config.reasoning_field)
+
         body_dict["model"] = self.config.model
 
         chat_template_kwargs = {}
