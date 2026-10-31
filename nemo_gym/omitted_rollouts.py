@@ -26,6 +26,9 @@ A failed agent ``/run`` that ends the run because ``route_failures_to_sidecar`` 
 ``record_omitted_rollouts`` says: its reply was lost, so the rollout produced no result. That row also carries
 ``_ng_unrouted_run_error``: it is evidence, not a new execution, so readers skip it before they pick the latest
 attempt. An older failure of the rollout still stands, and a later attempt still replaces it.
+
+Rollout collection with a run manifest writes this row only for a row never started: it saves an interrupted
+attempt as a ``kill_shaped`` failure in the run history, so a second row would record the interruption twice.
 """
 
 from typing import Any, Dict, Mapping

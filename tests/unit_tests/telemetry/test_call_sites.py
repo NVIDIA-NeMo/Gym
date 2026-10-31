@@ -660,7 +660,7 @@ def _install_recording_post(monkeypatch):
         sent.append(
             {"span": otel_trace.get_current_span().get_span_context(), "traceparent": headers.get("traceparent")}
         )
-        return FakeResponse(200, {"response": {}})
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha",))
     return sent
@@ -703,6 +703,14 @@ async def test_standalone_run_gives_each_rollout_its_own_trace_linked_to_the_job
     for request in sent:
         dispatch = by_span_id[request["span"].span_id]
         assert request["traceparent"].split("-")[1] == f"{dispatch.context.trace_id:032x}"
+    assert driver_telemetry._OWNED_JOB_SPAN_CONTEXT.get() is None
+
+    # Reusing completed outcomes must not dispatch requests or emit rollout traces again.
+    config = _collection_config(tmp_path, tmp_path / "input.jsonl")
+    config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(config)
+    assert len(sent) == 3
+    assert len([s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]) == 3
     assert driver_telemetry._OWNED_JOB_SPAN_CONTEXT.get() is None
 
 
