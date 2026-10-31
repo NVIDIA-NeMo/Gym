@@ -22542,6 +22542,19 @@ copyright notices and license terms - please see the file ACKNOWLEDGEMENTS.
 
 ---
 
+## JEEBench (MIT)
+
+The scoring rules in `resources_servers/jeebench/scoring.py` and prompt prefixes in
+`benchmarks/indic/jee_bench/prompts/prefixes.yaml` are adapted from
+[dair-iitd/jeebench](https://github.com/dair-iitd/jeebench/tree/a9af8bf354887043bd280a617c8716ef54e7aaec),
+revision `a9af8bf354887043bd280a617c8716ef54e7aaec`.
+Copyright (c) 2023 Data Analytics and Intelligence Research (DAIR) Group, IIT Delhi.
+The original MIT license is preserved in
+[`resources_servers/jeebench/NOTICE`](resources_servers/jeebench/NOTICE).
+NVIDIA's Gym integration, answer extraction, and modifications are licensed under Apache-2.0.
+
+---
+
 ## SPDX Identifiers
 
 Each NVIDIA-authored source file in this project includes an SPDX identifier
