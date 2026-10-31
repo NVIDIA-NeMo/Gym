@@ -767,6 +767,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             completion_json = (
                 completion.model_dump(mode="json") if isinstance(completion, BaseModel) else dict(completion)
             )
+            if not include_usage:
+                # The client gets no usage chunk, so model-call capture would record no token counts.
+                request.state.nemo_gym_stream_usage = completion_json.get("usage")
             return await self._stream_served_response(
                 completion_json,
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
@@ -1905,6 +1908,7 @@ class _CaptureMiddleware:
         ttft_ms = state["ttft_ms"]
         request_bytes = bytes(request_body)
         store, model_server_name = self._store, self._model_server_name
+        stream_usage = request_state.get("nemo_gym_stream_usage")
 
         def _parse_and_record() -> None:
             # Off the event loop: body parse + SSE reassembly is best-effort and fully guarded, so a
@@ -1922,6 +1926,8 @@ class _CaptureMiddleware:
                         response_body["usage"] = request_state["nemo_gym_internal_usage"]
                 except Exception:
                     response_body = None
+            if response_body is not None and stream_usage and not response_body.get("usage"):
+                response_body["usage"] = stream_usage
             error_category = _classify_status(status) if status is not None else None
             if error_category is None:
                 error_category = {

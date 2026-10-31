@@ -33,9 +33,12 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import (
     BaseResponsesAPIModelConfig,
+    CaptureStore,
+    ModelCallCaptureConfig,
     SimpleResponsesAPIModel,
     _parse_sse_events,
     _reconstruct_chat_sse,
+    install_model_call_capture,
 )
 from nemo_gym.chat_streaming import (
     sanitize_streaming_chat_body,
@@ -517,6 +520,42 @@ class TestChatDispatchRoute:
         usage_chunks = [e for e in _events(resp.text) if e.get("usage") is not None]
         assert len(usage_chunks) == 1
         assert usage_chunks[0]["usage"]["total_tokens"] == 10
+
+    @pytest.mark.parametrize("delayed", [False, True])
+    @pytest.mark.parametrize("include_usage", [False, True])
+    def test_capture_records_usage_the_client_did_not_ask_for(
+        self, tmp_path, monkeypatch, include_usage, delayed
+    ) -> None:
+        if delayed:
+            # The answer arrives after the keepalive, so it streams from inside the committed response.
+            monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.01)
+
+            async def slow(*args):
+                await asyncio.sleep(0.05)
+                return _completion(content="hello", usage=_USAGE)
+
+            monkeypatch.setattr(_EchoChatModel, "_invoke_chat_completions", slow)
+        _, server = _client(_EchoChatModel)
+        app = server.setup_webserver()
+        install_model_call_capture(
+            app,
+            ModelCallCaptureConfig(observability_enabled=True, model_call_capture_dir=tmp_path),
+            model_server_name="srv",
+            assistant_message_header=b"x-assistant-message-id",
+        )
+        resp = TestClient(app).post(
+            "/ng-rollout/r1/v1/chat/completions",
+            json={
+                "stream": True,
+                "stream_options": {"include_usage": include_usage},
+                "messages": [{"role": "user", "content": "hello"}],
+            },
+        )
+
+        assert resp.text.startswith(": keep-alive") is delayed
+        assert any(e.get("usage") for e in _events(resp.text)) is include_usage
+        [exchange] = CaptureStore(tmp_path).read("r1")
+        assert exchange["response"]["usage"]["total_tokens"] == _USAGE["total_tokens"]
 
     def test_streaming_request_invalid_params_returns_422(self) -> None:
         client, _ = _client(_EchoChatModel)
