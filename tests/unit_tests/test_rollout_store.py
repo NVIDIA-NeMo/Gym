@@ -1535,3 +1535,49 @@ def test_rejudge_cold_binding_is_shared_and_read_only(prepared_run, mutation):
     assert snapshot(output) == before
     assert cold.manifest.next_attempt == {"0-0": 1}
     assert cold._state.failure_count("0-0") == 1
+
+
+def test_canonical_rejudge_links_new_verifier_and_preserves_history(prepared_run):
+    output, prepare = prepared_run
+    old = {
+        "task_id": "t",
+        "rollout_id": "r",
+        "verifier_invocations": [
+            {"invocation_id": "old-verifier", "status": "failed", "failure_kind": "judge_failure"}
+        ],
+    }
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        failure = row | {
+            "_ng_failure_class": "judge_failed",
+            "_ng_failure_id": "original",
+            "response": {"object": "response", "id": "saved", "status": "completed", "output": []},
+            "ng_trajectory": old,
+        }
+        store.record_outcome(failure)
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failure)
+        result = {k: v for k, v in failure.items() if not k.startswith("_ng_failure") and k != "ng_trajectory"} | {
+            "reward": 0.0,
+            "_ng_rejudged_failure_id": "original",
+            "_ng_rejudge_operation_id": pending.operation_id,
+            "_ng_rejudge_admitted_at": pending.admitted_at,
+        }
+        before = snapshot(output)
+        for invocations in (
+            [],
+            [{"invocation_id": "old-verifier", "status": "completed"}],
+            [{"invocation_id": "new-verifier", "status": "unknown"}],
+        ):
+            with pytest.raises(ConfigError, match="fresh observed verifier"):
+                store.record_rejudgment(failure, result | {"ng_verifier_invocations": invocations})
+            assert snapshot(output) == before
+        result["ng_verifier_invocations"] = [{"invocation_id": "new-verifier", "status": "completed"}]
+        assert store.record_rejudgment(failure, result)
+        assert not store.record_rejudgment(failure, result)
+    (selected,) = RolloutStore.read(output).selected("success")
+    assert selected["_ng_rejudged_failure_observations"]["ng_trajectory"] == old
+    assert selected["_ng_rejudge_verifier_invocation_ids"] == ["new-verifier"]
+    assert [v["invocation_id"] for v in selected["ng_trajectory"]["verifier_invocations"]] == ["new-verifier"]
+    assert selected["response"] == failure["response"] and selected["reward"] == 0.0

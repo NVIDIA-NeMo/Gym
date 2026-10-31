@@ -13,7 +13,9 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import asyncio
+import hashlib
 import json
+import re
 import time
 import warnings
 from asyncio import Future, Semaphore
@@ -197,6 +199,8 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
             "again stays a failure. Only valid together with judge_failed_only=true."
         ),
     )
+    settle_source_snapshot_json: str | None = None
+
     retry_terminal_timeouts: bool = Field(
         default=False,
         description=(
@@ -212,6 +216,10 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
             raise ValueError("`append` is only valid together with `judge_failed_only` (pass --judge-failed-only).")
         if self.settle_into_source and not self.judge_failed_only:
             raise ValueError("`settle_into_source` is only valid together with `judge_failed_only`.")
+        if self.settle_source_snapshot_json is not None:
+            if not self.settle_into_source:
+                raise ValueError("A source snapshot requires settle_into_source.")
+            _parse_settle_source_snapshot(self.settle_source_snapshot_json)
         if self.append and self.overwrite:
             raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
         if self.input_format == "gym":
@@ -1121,6 +1129,47 @@ def _load_reverified_results(
     return results, rows
 
 
+def _parse_settle_source_snapshot(raw: str) -> dict[str, str | None]:
+    try:
+        expected = json.loads(raw)
+    except (TypeError, ValueError) as error:
+        raise ConfigError("Invalid rejudge source snapshot JSON.") from error
+    required = {
+        "rollouts.jsonl",
+        "rollouts_failures.jsonl",
+        "rollouts_manifest.json",
+        "rollouts_materialized_inputs.jsonl",
+        "rollouts_resolved_config.yaml",
+        "rollouts_attempts.jsonl",
+    }
+    if not isinstance(expected, dict) or not required.issubset(expected):
+        raise ConfigError("Incomplete rejudge source snapshot.")
+    if any(
+        not isinstance(name, str)
+        or Path(name).name != name
+        or name in {".", ".."}
+        or (digest is not None and (not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest)))
+        for name, digest in expected.items()
+    ):
+        raise ConfigError("Invalid rejudge source snapshot entry.")
+    if any(expected[name] is None for name in required - {"rollouts_attempts.jsonl"}):
+        raise ConfigError("Required rejudge source artifact was not observed.")
+    return expected
+
+
+def validate_settle_source_snapshot(source: Path, raw: str) -> None:
+    """Recheck the queued artifact snapshot under the caller's existing run lock, before judging."""
+    for name, expected in _parse_settle_source_snapshot(raw).items():
+        path = source.parent / name
+        try:
+            with path.open("rb") as stream:
+                actual = hashlib.file_digest(stream, "sha256").hexdigest()
+        except FileNotFoundError:
+            actual = None
+        if actual != expected:
+            raise ConfigError(f"Rejudge source artifact {name} changed while queued; nothing was judged.")
+
+
 def bind_judge_failures(source: Path) -> Dict[str, Any]:
     """Snapshot the source run's selected judge failures and provenance before any judge call; the caller holds run_lock.
 
@@ -1310,6 +1359,8 @@ class RolloutReverificationHelper(BaseModel):
                 print(_RECOVERY_TWO_SOURCES_WARNING)
                 if config.settle_into_source:
                     settle_lock.enter_context(run_lock(rollouts_jsonl_fpath))
+                    if config.settle_source_snapshot_json is not None:
+                        validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
                     settle_binding = bind_judge_failures(rollouts_jsonl_fpath)
                 reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
                 # Seed the successes and dedup so the re-verification doesn't judge successes again.

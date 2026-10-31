@@ -371,9 +371,34 @@ class RolloutStore:
                     f"Rollout attempt {key!r}: re-judged result has {name}={result.get(name)!r}, not {expected!r}."
                 )
         settled = result | {REJUDGED_OBSERVATIONS_KEY: {k: v for k, v in failure.items() if k != "response"}}
-        if "ng_trajectory" in failure and "ng_trajectory" not in result:
-            # No model call happened: the attempt's canonical trajectory is the predecessor's, carried forward.
-            settled["ng_trajectory"] = failure["ng_trajectory"]
+        if "ng_trajectory" in failure:
+            from nemo_gym.trajectory.trajectory_record import TrajectoryRecord, VerifierInvocation
+
+            # The complete predecessor remains authoritative in the nested observations above.
+            # The selected view retains policy lineage but must describe the newly observed verifier.
+            try:
+                prior = TrajectoryRecord.model_validate(failure["ng_trajectory"])
+                actual = [
+                    VerifierInvocation.model_validate(item) for item in result.get("ng_verifier_invocations", [])
+                ]
+                ids = [item.invocation_id for item in actual]
+                old_ids = {item.invocation_id for item in prior.verifier_invocations}
+                if not actual or len(ids) != len(set(ids)) or old_ids.intersection(ids):
+                    raise ValueError("missing or reused verifier invocation")
+                if not result.get("_ng_failure_class") and any(item.status != "completed" for item in actual):
+                    raise ValueError("successful rejudge lacks completed verifier evidence")
+                prior_judge_calls = {
+                    ref.model_call_id for item in prior.verifier_invocations for ref in item.model_calls
+                }
+                selected = prior.model_dump(mode="json")
+                selected["verifier_invocations"] = [item.model_dump(mode="json") for item in actual]
+                selected["model_calls"] = [
+                    call for call in selected["model_calls"] if call.get("model_call_id") not in prior_judge_calls
+                ]
+                settled["ng_trajectory"] = TrajectoryRecord.model_validate(selected).model_dump(mode="json")
+                settled["_ng_rejudge_verifier_invocation_ids"] = ids
+            except (TypeError, ValueError) as error:
+                raise ConfigError("Canonical rejudge requires fresh observed verifier invocation evidence.") from error
         saved = current.record.read()
         if saved == settled:
             return None  # already saved: no new write, judge call or attempt

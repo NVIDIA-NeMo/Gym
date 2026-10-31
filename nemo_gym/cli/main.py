@@ -1639,6 +1639,12 @@ COMMANDS = {
                 "With --judge-failed-only: append recovered results to an existing --output (never cleared) "
                 "instead of seeding successes into a fresh file.",
             ),
+            _value_flag(
+                "settle-source-snapshot",
+                "settle_source_snapshot_json",
+                "Expected source artifact SHA256 snapshot, checked under the source lock before judging.",
+                quote=True,
+            ),
             _bool_flag(
                 "settle-into-source",
                 "settle_into_source",

@@ -556,6 +556,9 @@ class SlurmExecutor(BaseExecutor):
                 "require_complete",
             ):
                 run.pop(name, None)
+            if evidence.source_digests is None:
+                return stopped("saved source snapshot is unavailable")
+            queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
             nonce = new_gym_job_id(utc_now())
             output = job_dir / "reverification" / nonce / "rollouts.jsonl"
             command = " ".join(
@@ -563,6 +566,8 @@ class SlurmExecutor(BaseExecutor):
                     "gym eval reverify",
                     "--judge-failed-only",
                     "--settle-into-source",
+                    "--settle-source-snapshot",
+                    shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
                     "--rollouts",
                     shlex.quote(str(job_dir / "artifacts/rollouts.jsonl")),
                     "--inputs",
