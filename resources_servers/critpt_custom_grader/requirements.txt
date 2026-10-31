@@ -10,3 +10,9 @@
 # SymPy lets the host test suites exercise the symbolic comparator. Same pin (and uv.lock
 # version) as runtime/requirements.txt; no other scientific or global dependency changes.
 sympy==1.14.0
+
+# Reuse the agent's code_exec request schema and result formatting for the opt-in agentic recipe.
+# Imported lazily so legacy text-only grading does not initialize the agent framework.
+stirrup==0.1.12
+# Match the Stirrup agent environment; overrides.txt handles moviepy's older upper bound.
+Pillow==12.3.0

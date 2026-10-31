@@ -1,0 +1,5 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# Stirrup imports moviepy, whose Pillow<12 metadata conflicts with the supported image library.
+# Match responses_api_agents/stirrup_agent/overrides.txt and Gym's locked Pillow version.
+pillow==12.3.0

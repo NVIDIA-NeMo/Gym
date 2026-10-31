@@ -258,11 +258,12 @@ def test_job_deadline_budget_counts_every_awaited_bound():
         "cleanup_timeout_s": 4.0,
     }
     policy = make_policy(**fields)
-    # Two runs and two comparisons at deadline plus two margins, three creates, the 27 file transfers (uploads, size
-    # probes and downloads) at transfer plus grace, and three stops.
-    expected = 2 * (100 + 30) + 2 * (10 + 30) + 3 * 2 + 27 * (3 + 5) + 3 * 4
-    assert execution._JOB_TRANSFERS == 27
-    assert policy.minimum_job_timeout_s() == expected == 574
+    # Two runs and two comparisons at deadline plus two margins, three creates, the 29 file transfers (uploads, size
+    # probes and downloads, including the semantic helper and optional validator source) at transfer plus grace,
+    # and three stops.
+    expected = 2 * (100 + 30) + 2 * (10 + 30) + 3 * 2 + 29 * (3 + 5) + 3 * 4
+    assert execution._JOB_TRANSFERS == 29
+    assert policy.minimum_job_timeout_s() == expected == 590
     assert policy.effective_job_timeout_s() == expected
     assert make_policy(job_timeout_s=float(expected), **fields).effective_job_timeout_s() == expected
     with pytest.raises(ValidationError):
@@ -394,16 +395,28 @@ async def test_passing_candidate_scores_one_and_cleans_all_domains():
     assert sorted(provider.closed) == sorted(provider.sandboxes) and len(provider.closed) == 3
 
 
-async def test_transfer_budget_matches_the_transfers_a_job_performs():
-    grader, provider = make_grader(happy_script())
+@pytest.mark.parametrize("semantic, comparator_transfers, total_transfers", [(False, 12, 28), (True, 13, 29)])
+async def test_transfer_budget_matches_the_transfers_a_job_performs(semantic, comparator_transfers, total_transfers):
+    task = make_task()
+    registry = {}
+    if semantic:
+        fields = task.model_dump(mode="json")
+        fields["semantic_validator"] = {"id": "synthetic"}
+        task = TaskData.model_validate(fields)
+        registry = {"synthetic": {"source": "def validate(**kwargs):\n    return True\n"}}
+    ScriptedProvider.reset()
+    provider = ScriptedProvider(happy_script())
+    grader = Grader(make_policy(), provider=provider, spec=make_spec(), semantic_validators=registry)
     provider.upload_file = Mock(wraps=provider.upload_file)
     provider.download_file = Mock(wraps=provider.download_file)
-    assert (await grader.grade(make_task(), CANDIDATE)).reward == 1.0
+    assert (await grader.grade(task, CANDIDATE)).reward == 1.0
     per_domain = {domain: result_reads(provider, domain) for domain in DOMAINS}  # the size probes
     for transfer in provider.upload_file.call_args_list + provider.download_file.call_args_list:
         per_domain[provider.sandboxes[transfer.args[0].sandbox_id]["domain"]] += 1
-    assert per_domain == {"reference": 8, "comparator": 11, "candidate": 8}
-    assert sum(per_domain.values()) == execution._JOB_TRANSFERS
+    assert per_domain == {"reference": 8, "comparator": comparator_transfers, "candidate": 8}
+    assert sum(per_domain.values()) == total_transfers
+    # The policy reserves the optional validator-source upload even for an expected-value-only job.
+    assert total_transfers + (0 if semantic else 1) == execution._JOB_TRANSFERS
 
 
 @pytest.mark.parametrize("code", runner.SOURCE_ERROR_CODES)

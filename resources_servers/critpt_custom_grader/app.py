@@ -1,9 +1,9 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Stateless HTTP adapter over the sandbox-API grader.
+"""HTTP adapter over the sandbox-API grader, with optional per-episode execution tools.
 
-Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` read the whole request body, refuse one larger
-than MAX_REQUEST_BYTES, then parse and validate it inside the handler, so a malformed or oversized request answers a
+Standard SimpleResourcesServer routes. ``/verify`` and ``/seed_session`` bound the request body before parsing and
+validate it inside the handler, so a malformed or oversized request answers a
 category-only error and never reaches core's body-logging validation handler. These two handlers never log request
 bodies, validation details, provider exceptions or task sources; the stock typed routes (``/close_session``,
 ``/aggregate_metrics``) keep core's behaviour.
@@ -13,9 +13,9 @@ import json
 import logging
 import re
 from contextlib import asynccontextmanager
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import (
     BaseModel,
@@ -23,11 +23,13 @@ from pydantic import (
     Field,
     PrivateAttr,
     SerializerFunctionWrapHandler,
+    ValidationInfo,
     field_validator,
     model_serializer,
     model_validator,
 )
 
+from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import (
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -50,11 +52,19 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
+    ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
 from nemo_gym.task_data import normalize_task_fields
+from resources_servers.critpt_custom_grader.agentic_tools import (
+    AgenticExecutionConfig,
+    AgenticExecutionSessions,
+    get_code_execution_params,
+)
 from resources_servers.critpt_custom_grader.execution import (
     CLEANUP_STATUSES,
     FAILED_CATEGORIES,
@@ -67,7 +77,19 @@ from resources_servers.critpt_custom_grader.execution import (
     validate_candidate_source,
 )
 from resources_servers.critpt_custom_grader.reference_cache import ReferenceCache
-from resources_servers.critpt_custom_grader.task_data import MAX_TASK_BYTES, TaskData, bounded_json, tolerance_text
+from resources_servers.critpt_custom_grader.submission import (
+    FinishRequest,
+    extract_finish_source,
+    finish_acknowledgement,
+)
+from resources_servers.critpt_custom_grader.task_data import (
+    MAX_TASK_BYTES,
+    SemanticValidatorDefinition,
+    TaskData,
+    bounded_json,
+    tolerance_text,
+    validate_semantic_registry,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -144,8 +166,12 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     sandbox_spec: SandboxSpecConfig = Field(default_factory=SandboxSpecConfig)
     execution: ExecutionPolicy = Field(default_factory=ExecutionPolicy)
     comparison: ComparisonDefaults = Field(default_factory=ComparisonDefaults)
+    semantic_validators: dict[str, SemanticValidatorDefinition] = Field(default_factory=dict)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
+    answer_source: Literal["output_text", "finish_tool"] = "output_text"
+    agentic_execution: AgenticExecutionConfig | None = None
+    agentic_max_response_bytes: int = Field(default=33_554_432, ge=MAX_RESPONSE_BYTES, le=134_217_728, strict=True)
     verified: bool = False
     description: str | None = None
     value: str | None = None
@@ -158,6 +184,11 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     verified_url: str | None = None
     grading_mode: str | None = None
 
+    @field_validator("semantic_validators", mode="before")
+    @classmethod
+    def bounded_semantic_registry(cls, value: object) -> dict[str, SemanticValidatorDefinition]:
+        return validate_semantic_registry(value)
+
     @model_validator(mode="after")
     def consistent_sandbox_bounds(self) -> "CritPtCustomGraderConfig":
         """Refuse to start on a policy that disagrees with the spec, or on bounds that cannot hold one job.
@@ -168,6 +199,8 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
         deadline, so a set ``ttl_s`` (the provider-side backstop) must cover the job deadline plus one cleanup bound;
         a null ``ttl_s`` leaves the lifetime to the provider's default.
         """
+        if self.agentic_execution is not None and self.answer_source != "finish_tool":
+            raise ValueError("agentic_execution requires answer_source: finish_tool")
         if self.execution.workdir != self.sandbox_spec.workdir:
             raise ValueError(
                 f"execution.workdir ({self.execution.workdir!r}) must equal sandbox_spec.workdir "
@@ -196,9 +229,16 @@ class CritPtRunRequest(BaseRunRequest):
 
     @field_validator("responses_create_params")
     @classmethod
-    def public_params(cls, value: dict) -> dict:
+    def public_params(cls, value: dict, info: ValidationInfo) -> dict:
         bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
         NeMoGymResponseCreateParamsNonStreaming.model_validate(value)
+        if (info.context or {}).get("answer_source") == "finish_tool":
+            if any(
+                tool.get("type") != "function" or tool.get("name") not in {"code_exec", "finish"}
+                for tool in value.get("tools") or []
+            ):
+                raise ValueError("unsupported task tool")
+            return value
         if value.get("tools"):
             raise ValueError("tools are not supported")
         if value.get("tool_choice") not in (None, "auto", "none"):
@@ -211,8 +251,8 @@ class CritPtVerifyRequest(CritPtRunRequest, BaseVerifyRequest):
 
     @field_validator("response")
     @classmethod
-    def saved_response(cls, value: dict) -> dict:
-        bounded_json(value, max_bytes=MAX_RESPONSE_BYTES)
+    def saved_response(cls, value: dict, info: ValidationInfo) -> dict:
+        bounded_json(value, max_bytes=(info.context or {}).get("max_response_bytes", MAX_RESPONSE_BYTES))
         NeMoGymResponse.model_validate(value)
         return value
 
@@ -318,9 +358,14 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
     _grader: Any = PrivateAttr(default=None)
     _provider: Any = PrivateAttr(default=None)
     _probe_info: dict = PrivateAttr(default_factory=dict)
+    _agentic_sessions: AgenticExecutionSessions | None = PrivateAttr(default=None)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        if self.config.answer_source == "finish_tool":
+            app.post("/finish")(self.finish)
+            if self.config.agentic_execution is not None:
+                app.post("/code_exec")(self.code_exec)
         parent_lifespan = app.router.lifespan_context
 
         @asynccontextmanager
@@ -337,6 +382,33 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
 
     def _named_configs(self) -> dict | None:
         return get_global_config_dict() if isinstance(self.config.sandbox_provider, str) else None
+
+    def _validation_context(self) -> dict[str, Any]:
+        return {
+            "answer_source": self.config.answer_source,
+            "max_response_bytes": self.config.agentic_max_response_bytes
+            if self.config.answer_source == "finish_tool"
+            else MAX_RESPONSE_BYTES,
+        }
+
+    def _execution_sessions(self) -> AgenticExecutionSessions | None:
+        cfg = self.config.agentic_execution
+        if cfg is None:
+            return None
+        named = get_global_config_dict() if isinstance(cfg.sandbox_provider, str) else None
+        spec = cfg.sandbox_spec
+        values = spec.model_dump()
+        values["metadata"] = {
+            **resolve_provider_metadata(cfg.sandbox_provider, named),
+            **spec.metadata,
+            "nemo_gym_server": (self.config.name or "critpt_custom_grader")[:63],
+        }
+        return AgenticExecutionSessions(
+            cfg,
+            provider_config=resolve_provider_config(cfg.sandbox_provider, named),
+            sandbox_spec=SandboxSpec(**values),
+            close_retry_window_seconds=self.config.session_close_retry_window_seconds,
+        )
 
     def _sandbox_spec(self) -> SandboxSpec:
         cfg = self.config.sandbox_spec
@@ -367,6 +439,10 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         """
         if self._grader is not None:
             return
+        if self._agentic_sessions is not None:
+            # A previous shutdown may have kept unresolved handles. Never replace their cleanup owner.
+            await self._agentic_sessions.shutdown()
+            self._agentic_sessions = None
         provider = self._provider or create_provider(
             resolve_provider_config(self.config.sandbox_provider, self._named_configs())
         )
@@ -391,7 +467,9 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                 default_rtol=self.config.comparison.default_rtol,
                 default_atol=self.config.comparison.default_atol,
                 reference_cache=ReferenceCache(self.config.reference_cache_dir),
+                semantic_validators=self.config.semantic_validators,
             )
+            self._agentic_sessions = self._execution_sessions()
         except BaseException:
             self._provider = None
             await _close_provider(provider)
@@ -405,8 +483,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         """
         grader, provider = self._grader, self._provider
         try:
-            if grader is not None:
-                await grader.shutdown()
+            try:
+                if self._agentic_sessions is not None:
+                    await self._agentic_sessions.shutdown()
+                    self._agentic_sessions = None
+            finally:
+                if grader is not None:
+                    await grader.shutdown()
         finally:
             try:
                 if provider is not None:
@@ -415,11 +498,23 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
                 self._grader = self._provider = None
                 self._probe_info = {}
 
-    @staticmethod
-    async def _read_json(request: Request) -> tuple[dict | None, JSONResponse | None]:
-        body = await request.body()
-        if len(body) > MAX_REQUEST_BYTES:
-            return None, _error("request_limit", 413)
+    async def _read_json(
+        self, request: Request, *, max_bytes: int | None = None
+    ) -> tuple[dict | None, JSONResponse | None]:
+        limit = (
+            max_bytes
+            if max_bytes is not None
+            else (
+                2 * MAX_TASK_BYTES + 2 * self.config.agentic_max_response_bytes
+                if self.config.answer_source == "finish_tool"
+                else MAX_REQUEST_BYTES
+            )
+        )
+        body = bytearray()
+        async for chunk in request.stream():
+            if len(body) + len(chunk) > limit:
+                return None, _error("request_limit", 413)
+            body.extend(chunk)
         try:
             value = json.loads(body.decode("utf-8"))
         except (ValueError, UnicodeError, RecursionError):
@@ -433,10 +528,37 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if error is not None:
             return error
         if "resources_session_id" in value:
-            return ResourcesSeedSessionResponse(resources_session_id=str(value["resources_session_id"]))
+            if self.config.answer_source != "finish_tool":
+                return ResourcesSeedSessionResponse(resources_session_id=str(value["resources_session_id"]))
+            try:
+                seed = ResourcesSeedSessionRequest.model_validate(value)
+            except Exception:
+                return _error("request_invalid", 422)
+            try:
+                fields, conflicts = normalize_task_fields(seed.task_data)
+                if conflicts:
+                    raise ValueError("conflicting task fields")
+                TaskData.model_validate(fields)
+            except Exception:
+                return _error("task_invalid", 422)
+            if self._agentic_sessions is not None:
+                try:
+                    response = await self._agentic_sessions.seed(seed)
+                    request.session[SESSION_ID_KEY] = seed.resources_session_id
+                    return response
+                except HTTPException as exc:
+                    return _error("session_conflict", exc.status_code)
+                except Exception as exc:
+                    logger.warning("execution seed failed (%s)", type(exc).__name__)
+                    return _error("execution_unavailable", 503)
+            if self.config.agentic_execution is not None:
+                return _error("server_not_ready", 503)
+            return ResourcesSeedSessionResponse(resources_session_id=seed.resources_session_id)
+        if self._agentic_sessions is not None or self.config.agentic_execution is not None:
+            return _error("session_identity_required", 422)
         # The request shape (prompt params, tools, tool_choice) first, as /verify does; then the task fields.
         try:
-            body = CritPtRunRequest.model_validate(value)
+            body = CritPtRunRequest.model_validate(value, context=self._validation_context())
         except Exception:
             return _error("request_invalid", 422)
         try:
@@ -444,6 +566,47 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         except Exception:
             return _error("task_invalid", 422)
         return BaseSeedSessionResponse()
+
+    async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
+        """Close by typed identity even when the caller lost its seed cookie."""
+        if self._agentic_sessions is not None:
+            return await self._agentic_sessions.close(body)
+        return await super().close_resources_session(body)
+
+    async def finish(self, request: Request) -> JSONResponse:
+        """Acknowledge the exact submitted answer without evaluating it or reading execution files."""
+        value, error = await self._read_json(request, max_bytes=self.config.agentic_max_response_bytes)
+        try:
+            if error is not None:
+                raise ValueError("invalid finish")
+            body = FinishRequest.model_validate(value)
+            return JSONResponse(finish_acknowledgement(body))
+        except (ValueError, UnicodeError):
+            # Stirrup's remote-tool bridge consumes detail on repairable 400/422 responses.
+            return JSONResponse({"detail": "invalid_finish"}, status_code=422)
+
+    async def code_exec(self, request: Request) -> JSONResponse:
+        """Run a command in this episode's persistent offline execution sandbox."""
+        value, error = await self._read_json(request, max_bytes=MAX_RESPONSE_BYTES)
+        try:
+            if error is not None:
+                raise ValueError("invalid command")
+            params = get_code_execution_params().model_validate(value)
+        except ValueError:
+            return JSONResponse({"detail": "invalid_code_exec"}, status_code=422)
+        if self._agentic_sessions is None:
+            return JSONResponse({"detail": "execution_unavailable"}, status_code=503)
+        session_id = request.session.get(SESSION_ID_KEY)
+        if not isinstance(session_id, str) or not session_id:
+            return JSONResponse({"detail": "session_unavailable"}, status_code=404)
+        try:
+            result = await self._agentic_sessions.execute(session_id, params.cmd)
+            return JSONResponse(result)
+        except HTTPException as exc:
+            return JSONResponse({"detail": "session_unavailable"}, status_code=exc.status_code)
+        except Exception as exc:
+            logger.warning("execution tool failed (%s)", type(exc).__name__)
+            return JSONResponse({"detail": "execution_unavailable"}, status_code=503)
 
     def _response(
         self,
@@ -520,21 +683,33 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if error is not None:
             return error
         try:
-            body = CritPtVerifyRequest.model_validate(value)
+            body = CritPtVerifyRequest.model_validate(value, context=self._validation_context())
         except Exception:
             return _error("request_invalid", 422)
         try:
             task = _task(body)
         except Exception:
             return self._response(body, None, "task_invalid", terminal=True)
-        if (
-            body.response.get("status") == "incomplete"
-            and (body.response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
-            and not body.response.get("error")
-        ):
-            # Exhausting the generation budget is a final model outcome, not a transient failure.
-            return self._response(body, task, "response_truncated", scored=True)
-        source = _source(body.response)
+        if self.config.answer_source == "finish_tool":
+            submission = extract_finish_source(body.response)
+            if submission.source is None:
+                return self._response(
+                    body,
+                    task,
+                    submission.category,
+                    scored=submission.scored,
+                    terminal=submission.category == "submission_invalid",
+                )
+            source = submission.source
+        else:
+            if (
+                body.response.get("status") == "incomplete"
+                and (body.response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+                and not body.response.get("error")
+            ):
+                # Exhausting the generation budget is a final model outcome, not a transient failure.
+                return self._response(body, task, "response_truncated", scored=True)
+            source = _source(body.response)
         if source is None:
             if _needs_regeneration(body.response):
                 return self._response(body, task, "response_incomplete")

@@ -106,6 +106,194 @@ gym eval run --no-serve +agent_name=critpt_custom_grader_simple_agent \
 Provider credentials come from the provider's own config (OpenSandbox: `OPENSANDBOX_DOMAIN`, `OPENSANDBOX_API_KEY`).
 `CRITPT_CUSTOM_GRADER_IMAGE` names the grading image; none is shipped (see [The grading image](#the-grading-image)).
 
+### Agentic code execution
+
+`configs/critpt_custom_grader_agentic.yaml` composes this grader with Gym's Stirrup agent and a persistent Python
+execution sandbox. It includes an original synthetic polynomial task. The default one-response configuration and
+`answer_source: output_text` extraction remain available; the agentic recipe explicitly selects `finish_tool`.
+The synthetic dataset uses Gym's `benchmark` dataset schema so its prompt template and five-repeat setting survive
+dataset registration; it is an integration example, not a CritPt benchmark release.
+
+The recipe uses three kinds of sandbox, all created through Gym's sandbox API:
+
+- Stirrup orchestration can reach the model and resources servers. Its built-in `code_exec` is disabled.
+- The resources server's `/code_exec` runs commands in a separate Linux sandbox with denied network egress. Files
+  persist during one episode; each command starts a fresh shell. No grading task data is uploaded to this sandbox.
+- Verification retains separate reference, candidate and comparison sandboxes. It grades only the submitted
+  `finish.answer`; working files and `finish.derivation` are not inputs to grading. The saved response can be
+  verified again after all generation-session cleanup has completed.
+
+The shipped OpenSandbox policy denies all execution and grading egress. The provider must enforce that policy; a
+prompt instruction alone is insufficient. The execution manager rejects providers and configurations for which it
+cannot establish an offline policy. Orchestration needs network access to Gym and the model, so applying an egress
+ban to the orchestration sandbox would break inference and tool routing.
+
+#### Runtime and model configuration
+
+Build `runtime/agentic/Dockerfile` and publish it where OpenSandbox can pull it. It provides Python 3.13, NumPy,
+SciPy, SymPy and Matplotlib, plus Bash and `timeout`. Packages are installed before the sandbox starts; task commands
+cannot install them from the network. The image records the Python version and complete installed package set in
+`/opt/critpt-agentic-runtime/`. The pinned package versions and resource limits are choices made by this recipe.
+They are not published Artificial Analysis image pins.
+The image leaves the provider's exec daemon running as root so OpenSandbox can switch users. The recipe sets
+`agentic_execution.sandbox_spec.user: agent`, making every model command run as the non-root `agent` account.
+
+```bash
+docker buildx build --platform linux/amd64,linux/arm64 \
+    -t <registry>/<path>/critpt-agentic-execution:<tag> --push \
+    resources_servers/critpt_custom_grader/runtime/agentic
+```
+
+Resolve the image's immutable registry digest and set these three image variables:
+
+```bash
+export CRITPT_CUSTOM_GRADER_IMAGE='<registry>/<path>/grader@sha256:<digest>'
+export CRITPT_AGENTIC_EXECUTION_IMAGE='<registry>/<path>/execution@sha256:<digest>'
+export CRITPT_AGENTIC_ORCHESTRATION_IMAGE='<registry>/<path>/orchestration@sha256:<digest>'
+```
+
+The grading image is the existing `runtime/Dockerfile`. The orchestration image must support the existing
+[Stirrup sandbox setup](../../responses_api_agents/stirrup_agent/README.md); it may be the same scientific image,
+but runs as a separate sandbox with its own network policy. Stirrup installs the version used by the agent server
+during setup. Record that resolved version and the Gym commit with the image digests.
+
+The recipe deliberately requires explicit model settings: `context_window_tokens`, `max_completion_tokens_cap`,
+`enable_thinking`, `temperature` and `top_p`. Supply them under
+`critpt_custom_grader_stirrup_agent.responses_api_agents.stirrup_agent` in a model overlay. Use the served model's
+actual context and output limits, not the defaults of another model. For a nonreasoning model the published AA
+baseline is 16,384 output tokens, subject to model capacity. For a reasoning model use its supported output limit
+and the intended reasoning mode. AA documents temperature 0.6 for reasoning models and 0 for nonreasoning models,
+with model-specific exceptions. The endpoint may require its own reasoning-effort or thinking settings in addition
+to Stirrup's `enable_thinking`; configure those in the model server and retain the resolved request settings.
+With Gym's `vllm_model`, set `forward_request_chat_template_kwargs: true` in the model-server block to honor
+Stirrup's per-request `enable_thinking`. The `openai_model` adapter forwards these template fields to its upstream;
+use an endpoint that accepts them, or a provider adapter that translates them into its supported reasoning controls.
+Validate the resolved request on each model endpoint before collecting results.
+
+Gym sizes each call's output budget from estimated prompt tokens and context capacity, with the configured
+completion buffer, minimum and cap. This is a per-call budget; it does not impose a cumulative episode token limit.
+
+For vLLM endpoints that expose `/tokenize`, set `fit_completion_to_context: true` in the `vllm_model` block to
+measure the fully rendered prompt on the selected backend before generation. To use the full available output
+budget, set Stirrup's `min_completion_tokens` equal to `max_completion_tokens_cap`, using the model's supported
+output capacity. The adapter then sends the smaller of that requested cap and the exact remaining context; a
+smaller per-request output limit still applies. This mode preserves the conversation, reasoning settings and turn
+limit. Tokenization failures, exhausted context and rejected model requests remain errors, rather than empty
+completions that consume turns and become misleading no-answer scores. It requires a vLLM chat-completions
+endpoint; see the [model adapter's configuration](../../responses_api_models/vllm_model/README.md).
+
+Start the synthetic example after supplying a model overlay and the provider connection variables:
+
+```bash
+gym env start \
+    --config resources_servers/critpt_custom_grader/configs/critpt_custom_grader_agentic.yaml \
+    --config /path/to/model-overlay.yaml --model-type openai_model ++use_absolute_ip=true
+# Run from a second terminal while the servers are ready.
+gym eval run --no-serve --agent critpt_custom_grader_stirrup_agent \
+    --input resources_servers/critpt_custom_grader/data/agentic_example.jsonl \
+    --prompt-config resources_servers/critpt_custom_grader/prompts/agentic.yaml \
+    --num-repeats 5 --output results/agentic_example_rollouts.jsonl
+```
+
+The orchestration sandbox must reach the advertised Gym addresses. The recipe starts at eight simultaneous
+episodes and grades each item independently, so no complete-dataset batch barrier is required.
+The synthetic dataset belongs to the resources-server block, where its task schema is validated. Its
+`critpt_custom_grader_synthetic` taskset routes prepared rows to the configured environment server. Change that
+dataset's `prompt_config` when supplying a different prompt through registered dataset preparation.
+
+#### Submission and accounting
+
+The model can call `code_exec(cmd)` and `finish(reason, derivation, answer)`. `finish` is terminal only when the
+resources server accepts it. Verification requires the matching successful tool acknowledgement and its answer
+digest in the saved trajectory. A rejected call, unrelated assistant text or code written during exploration is
+not an accepted submission. Saved trajectories remain verifiable after execution-session cleanup.
+
+There are at most 50 model-response turns. A completed episode that never submits an answer, an empty accepted
+answer, or normal turn-budget exhaustion scores zero. Provider failures and unknown incomplete outcomes remain
+unscorable, as do inconclusive verification failures. Preserve those categories and report incomplete coverage;
+do not silently count infrastructure failures as incorrect answers or regenerate legitimate no-answer outcomes.
+An explicit content-filter outcome with no answer also scores zero; ambiguous API rejections remain unscorable.
+
+Five repeats mean the mean of five independently scored attempts per task (mean pass@1), not credit when any one
+of five attempts succeeds. Keep the repeat count and denominator in the result report. Retry only infrastructure
+failures according to the configured policy, without replacing valid failed attempts.
+
+#### Relationship to the published CritPt v2 method
+
+[Artificial Analysis's methodology](https://artificialanalysis.ai/methodology/intelligence-benchmarking#critpt-v2)
+describes Stirrup, an offline Linux Python 3.13 environment with NumPy/SciPy/SymPy/Matplotlib, up to 50 turns, a
+structured `finish` tool and five repeats. This recipe provides those execution and submission mechanisms with
+local grading. The default system prompt is an original prompt for the synthetic example.
+
+For the authors' one-step code-tools system prompt, supply an external Gym prompt YAML via `--prompt-config` (and
+the dataset's `prompt_config` when running through registered datasets). Use the rendered prompt from the
+[CritPt source at revision bc37a22bedb8744dff8996ccce7f9eedec548915](https://github.com/CritPt-Benchmark/CritPt/tree/bc37a22bedb8744dff8996ccce7f9eedec548915):
+`templates/prompt_template_default.yaml` with the one-step configuration, and the code-tools wording applied by
+`src/critpt/generation/prompts.py`. Keep that system text unchanged. The external user template should describe the
+problem, code template, installed packages, actual execution limits and `finish` fields; the included user template
+provides those operational instructions. Preserve the selected prompt's contents and hash with the run.
+
+Gym's adapter retains partial responses with `finish_reason=length` or `max_tokens` and may continue within the
+50-turn limit. `truncation_recovery: false` disables the thinking-off recovery instruction; it does not terminate
+the episode on those responses. Each such solver response consumes a turn, and a terminal no-answer still scores zero.
+Upstream Stirrup 0.1.12 instead [raises `ContextOverflowError`](https://github.com/ArtificialAnalysis/Stirrup/blob/c7edc996f13e953dff477fd1082e61ca989e871c/src/stirrup/clients/chat_completions_client.py#L174),
+which can [rewind context and retry or end with an error](https://github.com/ArtificialAnalysis/Stirrup/blob/c7edc996f13e953dff477fd1082e61ca989e871c/src/stirrup/core/agent.py#L1152).
+AA specifies zero for terminal no-answer outcomes, including output consumed by reasoning, but does not disclose
+its precise per-call overflow or partial-tool handling. Equivalence of this adapter behavior to AA is unverified.
+
+AA does not publish its exact image digest, package versions, Stirrup revision, full user prompt or all execution
+limits. AA names E2B as its primary provider for agentic benchmarks; this recipe uses Gym's OpenSandbox provider.
+The recipe records its own choices explicitly: a 300-second command deadline, four CPUs, 8 GiB memory,
+50 turns and a bounded session lifetime. Matching the published generation conditions does not establish equality
+with hidden grading behavior. This server uses the supplied task schema and its documented comparison policy;
+it does not call an external grading API.
+
+### Semantic answer validators
+
+Some tasks admit several valid outputs: a protocol can be split into more stages without changing its result, and
+different bases can span the same vector space. An expected-value comparison cannot establish those properties.
+For these tasks, an operator can register a semantic validator in the resources-server configuration:
+
+```yaml
+critpt_custom_grader:
+  resources_servers:
+    critpt_custom_grader:
+      semantic_validators:
+        plane_basis:
+          entrypoint: validate
+          source: |
+            def validate(*, observed, expected, args, kwargs, config):
+                # Synthetic example: any integer basis for the xy-plane in R^3.
+                if type(observed) is not list or len(observed) != 2:
+                    return False
+                if any(type(row) is not list or len(row) != 3 for row in observed):
+                    return False
+                if any(type(value) is not int for row in observed for value in row):
+                    return False
+                a, b = observed
+                return a[2] == b[2] == 0 and a[0] * b[1] - a[1] * b[0] != 0
+```
+
+The task selects the registered identifier with `semantic_validator: {id: plane_basis, config: {}}`. It still supplies
+a reference implementation and value expectations for its cases. Tasks cannot supply validator source, paths,
+entry points or execution limits. Omitting `semantic_validator` preserves the expected-value comparison policy.
+
+The validator receives the decoded observed value, stored expected value, original positional and keyword inputs,
+and its bounded JSON configuration. Input-conversion code is not run in the comparator: symbolic text remains an
+inert codec value, and callables or candidate-defined objects are not deserialized. The validator must return an
+exact Python `bool`. It owns its numerical tolerances and acceptance rules; ordinary comparison tolerances are not
+automatically applied to it. Define any objective target, feasibility boundary and rounding rule explicitly in the
+validator or configuration.
+
+Only the operator's selected source is delivered to the protected comparator sandbox. It runs in a fresh namespace
+for each case, within the existing resource limits and comparison deadlines; module initialization is included in
+that deadline. The same validator first checks the reference outputs. A rejected reference makes the task
+unscorable and prevents candidate execution. After a successful preflight, a candidate rejection scores zero.
+Validator exceptions, non-Boolean returns and timeouts remain unscorable, even if another case rejects the answer.
+Changing validator source, entry point or task configuration invalidates the reference-preflight cache.
+
+These are task-authoring mechanisms, not a supplied implementation of any benchmark's hidden acceptance policy.
+
 ### Startup check
 
 Before it reports ready, the server starts one sandbox from the operator's `sandbox_spec` and checks that commands run
@@ -178,7 +366,7 @@ could not tell such runtimes apart. Daytona also refuses a `snapshot_id` beside 
 E2B, map the image to its template with `create.template_map`.
 
 Network isolation is a provider setting. The sandbox runtime's hard limits must allow an `RLIMIT_FSIZE` of at least
-156,303,360 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
+161,546,240 bytes and an `RLIMIT_NPROC` of at least `execution.max_processes`, which the runner sets on every task
 process; otherwise every run fails as `runner_error: limits` (non-terminal).
 
 ### Configuration

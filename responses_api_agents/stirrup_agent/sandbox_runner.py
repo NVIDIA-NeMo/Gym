@@ -384,6 +384,8 @@ async def run(payload: dict[str, Any], scratch: Path, observer: Observer) -> dic
         async with agent.session(cache_on_interrupt=False) as session:
             try:
                 finish_params, history, _ = await session.run(messages)
+                if finish_params is None:
+                    stop_reason = "max_turns"
             except asyncio.CancelledError:
                 # SIGTERM from the supervisor, at the deadline or on a close: report the turns completed so far.
                 asyncio.current_task().uncancel()

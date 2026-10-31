@@ -381,6 +381,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # Request inline prompt and generation token IDs from compatible vLLM endpoints.
     request_prompt_and_generation_token_ids: bool = False
     propagate_context_overflow_errors: bool = False
+    fit_completion_to_context: bool = Field(
+        default=False,
+        description="Measure the prepared chat prompt with the selected backend's /tokenize endpoint and limit "
+        "completion tokens to its remaining context. Requires count and max_model_len in the tokenizer response. "
+        "Preserves smaller requested output limits and propagates failures instead of returning empty completions.",
+    )
 
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
@@ -533,6 +539,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
 
     @model_validator(mode="after")
     def _validate_chat_conversion_options(self) -> "VLLMModelConfig":
+        if self.fit_completion_to_context and (self.is_responses_native or self.use_completions_api):
+            raise ValueError(
+                "fit_completion_to_context requires is_responses_native=false and use_completions_api=false"
+            )
         if self.is_responses_native:
             for option in (
                 "forward_unvalidated_reasoning_effort",
@@ -672,7 +682,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if refuse is not None:
                 await refuse(context.rollout_id, context.model_call_id)
                 context.refused = True
-        if source_history or self.config.propagate_context_overflow_errors:
+        if source_history or self.config.propagate_context_overflow_errors or self.config.fit_completion_to_context:
             code = _mark_propagated_overflow(error)
             if not source_history:
                 await capture_engine_refusal(code)
@@ -1416,6 +1426,60 @@ class VLLMModel(SimpleResponsesAPIModel):
             return await asyncio.to_thread(self._preprocess_chat_completion_create_params, request, body_dict)
         return self._preprocess_chat_completion_create_params(request, body_dict)
 
+    async def _fit_completion_to_context(self, client: NeMoGymAsyncOpenAI, body: Dict[str, Any]) -> None:
+        """Fit the requested completion to the backend's rendered prompt without changing that prompt."""
+        measurement = await client.create_tokenize(**self._get_context_tokenize_body(body))
+        count = measurement.get("count") if isinstance(measurement, dict) else None
+        window = measurement.get("max_model_len") if isinstance(measurement, dict) else None
+        if type(count) is not int or count < 0 or type(window) is not int or window < 1:
+            raise HTTPException(
+                status_code=502, detail="Tokenizer must return integer count >= 0 and max_model_len > 0"
+            )
+        remaining = window - count
+        if remaining <= 0:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "context_length_exceeded",
+                    "param": "messages",
+                    "message": f"The rendered prompt has {count} tokens and leaves no output space in {window} tokens.",
+                },
+            )
+        key = next(
+            (name for name in ("max_completion_tokens", "max_tokens") if body.get(name) is not None),
+            "max_completion_tokens",
+        )
+        requested = body.get(key)
+        minimum = body.get("min_tokens", 0)
+        if (requested is not None and (type(requested) is not int or requested < 1)) or (
+            type(minimum) is not int or minimum < 0
+        ):
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_output_token_parameter",
+                    "message": "The output limit must be a positive integer and min_tokens a nonnegative integer.",
+                },
+            )
+        fitted = min(requested, remaining) if requested is not None else remaining
+        if minimum > fitted:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "invalid_output_token_parameter",
+                    "param": "min_tokens",
+                    "message": f"min_tokens={minimum} exceeds the available completion budget of {fitted} tokens.",
+                },
+            )
+        body[key] = fitted
+        LOG.debug(
+            "Measured completion budget: prompt=%d context=%d requested=%s fitted=%d",
+            count,
+            window,
+            requested,
+            fitted,
+        )
+
     async def chat_completions(
         self, request: Request, body: NeMoGymChatCompletionCreateParamsNonStreaming = Body()
     ) -> NeMoGymChatCompletion:
@@ -1441,6 +1505,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "content_filter"
                 execution.update(response_source="local", local_response_reason="empty_assistant")
                 return res
+
+        if self.config.fit_completion_to_context:
+            await self._fit_completion_to_context(client, body_dict)
 
         transport_io_enabled = bool(os.environ.get("NEMO_GYM_VLLM_TRANSPORT_LOG", "").strip())
         log_context = _transport_log_context(request)
@@ -1799,6 +1866,39 @@ class VLLMModel(SimpleResponsesAPIModel):
     def _get_tokenize_chat_body(cls, body_dict: Dict[str, Any]) -> Dict[str, Any]:
         """Keep every known prompt-affecting field aligned with generation."""
         return {field: body_dict[field] for field in cls._TOKENIZE_CHAT_FIELDS if field in body_dict}
+
+    @classmethod
+    def _get_context_tokenize_body(cls, body: Dict[str, Any]) -> Dict[str, Any]:
+        """Express chat generation's template options through the tokenizer API's supported kwargs."""
+        unsupported = next(
+            (name for name in ("truncate_prompt_tokens", "response_format") if body.get(name) is not None),
+            None,
+        )
+        if body.get("tools") and body.get("tool_choice") not in (None, "auto"):
+            unsupported = "tool_choice"
+        if unsupported is not None:
+            raise HTTPException(
+                status_code=400,
+                detail={
+                    "code": "unsupported_context_measurement",
+                    "param": unsupported,
+                    "message": f"fit_completion_to_context cannot measure this request's {unsupported} behavior.",
+                },
+            )
+        result = cls._get_tokenize_chat_body(body)
+        template = deepcopy(result.get("chat_template_kwargs") or {})
+        # Chat generation gives these top-level values precedence over template kwargs, whereas
+        # /tokenize only reads them from kwargs. Explicit None/auto values do not replace defaults.
+        for name in ("documents", "reasoning_effort"):
+            value = body.get(name)
+            if value is not None and value != "auto":
+                template[name] = deepcopy(value)
+        effort = body.get("reasoning_effort")
+        if effort is not None and "enable_thinking" not in template:
+            template["enable_thinking"] = effort != "none"
+        if template:
+            result["chat_template_kwargs"] = template
+        return result
 
     def _validate_single_choice_token_request(self, body_dict: Dict[str, Any]) -> None:
         context = current_capture_context()
