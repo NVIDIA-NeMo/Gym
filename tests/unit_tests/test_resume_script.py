@@ -104,6 +104,7 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
 _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
 if [[ "$*" == *State,ElapsedRaw* ]]; then echo "${FAKE_STATE:-}|${FAKE_ELAPSED:-}";
+elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}";
 elif [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAKE_STATE:-}"; fi
 """
 _FAKE_SBATCH = """#!/bin/bash
@@ -148,6 +149,7 @@ def _run_prologue(
     resume: ResumeConfig,
     prev_state: str | None,
     *,
+    exit_code: str = "1:0",
     job_id: str = "200",
     prev_job_id: str = "100",
     sbatch_fails: bool = False,
@@ -182,6 +184,7 @@ def _run_prologue(
         "SLURM_JOB_ID": job_id,
         "FAKE_LOG_DIR": str(tmp_path),
         "FAKE_STATE": prev_state or "",
+        "FAKE_EXIT": exit_code,
         "FAKE_ELAPSED": elapsed,
         "FAKE_TIME_LIMIT": time_limit,
         "FAKE_UPDATE_RESULT": update_result,
@@ -208,6 +211,7 @@ def test_max_retries_allows_exactly_that_many_retries(tmp_path):
     result = _run_prologue(tmp_path, resume, "PREEMPTED")
     assert result.returncode == 1
     assert "REACHED_WORK" not in result.stdout
+    assert "Infra retry limit" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -229,6 +233,28 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
     sbatch_args = (tmp_path / "sbatch_calls").read_text()
     assert "--dependency=afternotok:200" in sbatch_args
     assert "--kill-on-invalid-dep=yes" in sbatch_args
+
+
+@pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
+@pytest.mark.parametrize("max_retries", [0, 3])
+def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, exit_code, continues, max_retries):
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=max_retries), "FAILED", exit_code=exit_code)
+    assert result.returncode == (0 if continues else 1), result.stdout
+    assert ("REACHED_WORK" in result.stdout) is continues
+    assert (tmp_path / "sbatch_calls").exists() is continues
+    assert not (tmp_path / ".gym_infra_retries").exists()
+    incomplete = tmp_path / INCOMPLETE_MARKER_NAME
+    assert incomplete.exists() is not continues
+    if not continues:
+        assert "no eligible retries" in incomplete.read_text()
+
+
+def test_retryable_evaluation_still_obeys_walltime_cap(tmp_path):
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="00:01:00"), "FAILED", exit_code="75:0")
+    assert result.returncode == 1
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / "sbatch_calls").exists()
+    assert "walltime cap" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
 
 
 def _job_dir(tmp_path) -> str:

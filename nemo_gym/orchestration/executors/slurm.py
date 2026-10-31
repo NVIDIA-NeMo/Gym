@@ -29,7 +29,7 @@ import yaml
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.connection import Connection, get_connection
+from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
@@ -67,6 +67,7 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     accounted_chain_walltime,
     decide_from_collected,
+    select_managed_evidence,
 )
 
 
@@ -281,6 +282,8 @@ class SlurmExecutor(BaseExecutor):
             collected = CollectedEvidence.model_validate_json(
                 conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
             )
+            if isinstance(conn, LocalConnection) and collected.managed_store:
+                collected = select_managed_evidence(collected, job_dir)
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
             if resume.max_walltime is not None and collected.job_chain and str(job_dir) not in workdirs:
                 try:

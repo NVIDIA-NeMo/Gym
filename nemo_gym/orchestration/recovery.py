@@ -32,15 +32,19 @@ nothing is left to do, ``reverify`` when only judge failures remain, else ``resu
 as complete while an identity is terminal, missing or unknown.
 """
 
+import hashlib
 import math
+import os
 from collections import Counter
 from collections.abc import Iterable, Mapping
 from enum import StrEnum
+from pathlib import Path
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from nemo_gym.agent_outcome import OutcomeAction, OutcomePolicyConfig, choose_action
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
     MODEL_CONTEXT_LIMIT,
@@ -81,6 +85,16 @@ class RecoveryAction(StrEnum):
     REVERIFY = "reverify"
     RESUBMIT = "resubmit"
     STOP = "stop"
+
+
+class ManagedRecoveryFact(BaseModel):
+    """Read-only facts from the authoritative Store, not a second retry policy."""
+
+    identity: Identity
+    attempts: int = Field(ge=0, strict=True)
+    max_attempts: int = Field(ge=1, strict=True)
+    pending: bool
+    reserved: bool
 
 
 class RecoveryBudget(BaseModel):
@@ -260,6 +274,10 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
 
 def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
+    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+
+    if has_unclassified_execution_failure(row):
+        return True
     chain = _cause_chain(row)
     if chain is None:
         # A legacy row may carry observations without selecting one; they are not its causal failure.
@@ -293,6 +311,7 @@ def decide_recovery(
     default_max_attempts: int = 3,
     resubmit_offset: int = 0,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
+    managed_selection: list[ManagedRecoveryFact] | None = None,
 ) -> RecoveryDecision:
     """Classify every materialized identity and choose the run-level action.
 
@@ -309,6 +328,7 @@ def decide_recovery(
     )
 
     policy = outcome_policy or RecoveryOutcomePolicyConfig()
+    managed = {fact.identity: fact for fact in managed_selection or []}
 
     expected: list[Identity] = []
     invalid_inventory = 0
@@ -421,14 +441,25 @@ def decide_recovery(
                 )
             )
             continue
-        cap = last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts
+        fact = managed.get(identity)
+        cap = (
+            fact.max_attempts
+            if fact
+            else (last.get(MAX_ATTEMPTS) if isinstance(last.get(MAX_ATTEMPTS), int) else default_max_attempts)
+        )
+        spent = fact.attempts if fact else len(rows)
         if last.get(FAILURE_CLASS) == JUDGE_FAILED:
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
             policy_stopped |= state == IdentityState.TERMINAL
         elif last.get(COUNTS_AS_ZERO) is True:
             # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
-            model_kind = kind in {
+            model_cause, _ = _policy_evidence(last)
+            if model_cause is None and fact and not last.get(FAILURE_ID) and not last.get(FAILURE_EVENTS):
+                # Managed native outcomes persist the canonical kind as their sidecar class. Keep explicit
+                # selected causes authoritative; this does not infer a kind for legacy or ambiguous evidence.
+                model_cause = last.get(FAILURE_CLASS)
+            model_kind = model_cause in {
                 MODEL_CONTEXT_LIMIT,
                 MODEL_REQUEST_ERROR,
                 MODEL_TRANSPORT_ERROR,
@@ -457,7 +488,7 @@ def decide_recovery(
             # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
             # has no durable model-operation budget accounting: replay must not silently replenish that budget.
             state = IdentityState.UNKNOWN
-        elif len(rows) < cap:
+        elif spent < cap:
             state = IdentityState.RETRYABLE
         else:
             state = IdentityState.EXHAUSTED
@@ -467,11 +498,22 @@ def decide_recovery(
                 state=state,
                 failure_kind=kind,
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
-                attempts=len(rows),
+                attempts=spent,
                 max_attempts=cap,
                 events=_events(last),
             )
         )
+
+    for item in evidence:
+        fact = managed.get(item.identity)
+        if fact is None:
+            continue
+        item.attempts, item.max_attempts = fact.attempts, fact.max_attempts
+        if item.state == IdentityState.MISSING and (fact.reserved or not fact.pending):
+            # A reservation without an outcome is not proof that work never reached the agent.
+            item.state = IdentityState.UNKNOWN
+        elif item.state == IdentityState.RETRYABLE and not fact.pending:
+            item.state = IdentityState.EXHAUSTED if fact.attempts >= fact.max_attempts else IdentityState.UNKNOWN
 
     by_state: dict[str, list[Identity]] = {}
     for item in evidence:
@@ -621,6 +663,8 @@ def rows(name, skip=0):
                 r["_line"] = i
             if isinstance(r, dict) and r.get("_ng_run_id") is not None:
                 managed_store.append(True)
+            if name == "rollouts.jsonl" and any(managed_store):
+                r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
             if r.get("_ng_failure_class") == "judge_failed":
                 selected[SAVED] = isinstance(r.get("response"), dict) and bool(r["response"])
@@ -662,19 +706,27 @@ except (OSError, ValueError):
     offset = 0
 chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
 def sha256(path):
-    if not os.path.exists(path):
+    try:
+        source = open(path, "rb")
+    except FileNotFoundError:
         return None
     h = hashlib.sha256()
-    with open(path, "rb") as f:
-        for block in iter(lambda: f.read(1 << 20), b""):
+    with source:
+        before = os.fstat(source.fileno())
+        for block in iter(lambda: source.read(1 << 20), b""):
             h.update(block)
+        after = os.fstat(source.fileno())
+    current = os.stat(path)
+    identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    if identity(before) != identity(after) or identity(after) != identity(current):
+        raise RuntimeError("run artifact changed while hashing")
     return h.hexdigest()
 # The live exporter's run id file, and the post-run export receipt checked against the same files as its version.
 RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
                  "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
                  "failures_jsonl_fpath": "rollouts_failures.jsonl",
                  "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl"}
-source_files = (*RECEIPT_FILES.values(), "quality_summary.json")
+source_files = (*RECEIPT_FILES.values(), "quality_summary.json", "rollouts_manifest.json", "rollouts_attempts.jsonl", "rollouts_resubmit_offset", "../.gym_infra_retries", "../.gym_accumulated_walltime", "../.gym_job_chain")
 source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 mlflow = {"live_run_id": None, "receipt": None}
 try:
@@ -768,6 +820,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store)}
 if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
     quality["source_matches"] = False
+collected["source_digests"] = source_snapshot if source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files} else None
 print(json.dumps(collected))
 """
 
@@ -788,6 +841,113 @@ class CollectedEvidence(BaseModel):
     score: float | None = None
     mlflow: dict[str, Any] | None = None
     managed_store: bool = False
+    source_digests: dict[str, str | None] | None = None
+    managed_selection: list[ManagedRecoveryFact] | None = None
+    managed_reader_error: str | None = None
+
+
+def _managed_source_digest(path: Path) -> str | None:
+    """Hash one stable file with bounded memory, using the exporter's existing identity checks."""
+    try:
+        source = path.open("rb")
+    except FileNotFoundError:
+        return None
+    digest = hashlib.sha256()
+    with source:
+        before = os.fstat(source.fileno())
+        for block in iter(lambda: source.read(1 << 20), b""):
+            digest.update(block)
+        after = os.fstat(source.fileno())
+    current = path.stat()
+    identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
+    if identity(before) != identity(after) or identity(after) != identity(current):
+        raise RuntimeError("managed source changed while hashing")
+    return digest.hexdigest()
+
+
+def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:
+    """Read locally accessible Store history in this installed Gym process; never copy its selection rules.
+
+    The plain remote collector remains dependency-free. Call only on the same host as the installed caller,
+    after collection. Both snapshots must include the manifest and journal and remain byte-identical.
+    """
+    if not collected.managed_store:
+        return collected
+    try:
+        from contextlib import redirect_stdout
+        from io import StringIO
+
+        from nemo_gym.rollout_records import logical_rollout_id
+        from nemo_gym.rollout_store import RolloutStore
+
+        artifacts = job_dir / "artifacts"
+        names = (
+            "rollouts.jsonl",
+            "rollouts_failures.jsonl",
+            "rollouts_materialized_inputs.jsonl",
+            "rollouts_resolved_config.yaml",
+            "rollouts_aggregate_metrics.json",
+            "quality_summary.json",
+            "rollouts_manifest.json",
+            "rollouts_attempts.jsonl",
+            "rollouts_resubmit_offset",
+            "../.gym_infra_retries",
+            "../.gym_accumulated_walltime",
+            "../.gym_job_chain",
+        )
+
+        def snapshot():
+            return {name: _managed_source_digest(artifacts / name) for name in names}
+
+        if collected.source_digests is None or collected.source_digests != snapshot():
+            raise ValueError("managed source changed or has no stable collection snapshot")
+        store = RolloutStore.read(artifacts / "rollouts.jsonl", import_legacy=False)
+        if store is None or collected.materialized is None:
+            raise ValueError("managed source has no readable manifest or inventory")
+        if store.manifest.max_rollout_attempts is None:
+            raise ValueError("managed manifest does not preserve its rollout attempt cap")
+        coverage = store.coverage()
+        if len(collected.materialized) != coverage["expected"] or not coverage["identity_verified"]:
+            raise ValueError("managed inventory is ambiguous or its identity is not verified")
+        with redirect_stdout(StringIO()):
+            pending = {logical_rollout_id(row) for row in store.pending()}
+        facts = []
+        for row in collected.materialized:
+            identity = _identity(row)
+            if identity is None:
+                raise ValueError("managed input has no supported task/rollout identity")
+            logical = logical_rollout_id(row)
+            facts.append(
+                ManagedRecoveryFact(
+                    identity=identity,
+                    attempts=store.attempt_count(row),
+                    max_attempts=coverage["max_rollout_attempts"],
+                    pending=logical in pending,
+                    reserved=logical in store.manifest.next_attempt,
+                )
+            )
+        selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
+        for disposition in ("success", "failure", "omitted"):
+            for record in store.selected_records(disposition).values():
+                matches = [name for name in selected if (artifacts / name).resolve() == record.path.resolve()]
+                if len(matches) != 1:
+                    raise ValueError("selected outcome is outside the collected source files")
+                selected[matches[0]].add(record.line_number - 1)
+        results = [row for row in collected.results or [] if row.get("_line") in selected["rollouts.jsonl"]]
+        failures = [
+            row
+            for row in collected.failures
+            if row.get("_line") in selected["rollouts_failures.jsonl"] or row.get("_ng_unrouted_run_error") is True
+        ]
+        if len(results) != len(selected["rollouts.jsonl"]) or len(
+            [row for row in failures if row.get("_line") in selected["rollouts_failures.jsonl"]]
+        ) != len(selected["rollouts_failures.jsonl"]):
+            raise ValueError("selected outcomes are absent from the collected projection")
+        if collected.source_digests != snapshot():
+            raise ValueError("managed source changed during authoritative selection")
+        return collected.model_copy(update={"results": results, "failures": failures, "managed_selection": facts})
+    except (ImportError, OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
+        return collected.model_copy(update={"managed_selection": None, "managed_reader_error": str(error)})
 
 
 def decide_from_collected(
@@ -829,7 +989,7 @@ def decide_from_collected(
         live_job=live_job,
         job_chain=collected.job_chain,
     )
-    if collected.managed_store:
+    if collected.managed_store and collected.managed_selection is None:
         # Selecting from these files here could pick a superseded attempt or lose a reservation, so every known
         # input stays unknown and no saved row is read as its outcome.
         known = sorted({i for i in map(_identity, collected.materialized or []) if i is not None})
@@ -837,7 +997,8 @@ def decide_from_collected(
             action=RecoveryAction.STOP,
             reason=(
                 "the run was written by a rollout store (an attempt manifest, an attempt journal or run-tagged rows); "
-                "this Gym version has no rollout store reader to select its attempts, so recovery stops until one does"
+                "an authoritative local Store reader is unavailable or could not verify these artifacts; recovery stops"
+                + (f": {collected.managed_reader_error}" if collected.managed_reader_error else "")
             ),
             expected=len(known),
             counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
@@ -860,6 +1021,7 @@ def decide_from_collected(
         budget=budget,
         resubmit_offset=collected.resubmit_offset,
         outcome_policy=outcome_policy,
+        managed_selection=collected.managed_selection,
     )
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(

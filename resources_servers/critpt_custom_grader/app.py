@@ -527,6 +527,13 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
             task = _task(body)
         except Exception:
             return self._response(body, None, "task_invalid", terminal=True)
+        if (
+            body.response.get("status") == "incomplete"
+            and (body.response.get("incomplete_details") or {}).get("reason") == "max_output_tokens"
+            and not body.response.get("error")
+        ):
+            # Exhausting the generation budget is a final model outcome, not a transient failure.
+            return self._response(body, task, "response_truncated", scored=True)
         source = _source(body.response)
         if source is None:
             if _needs_regeneration(body.response):

@@ -2,10 +2,12 @@
 # SPDX-License-Identifier: Apache-2.0
 
 from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.app import TerminalBench4ResourcesServer
 from resources_servers.terminal_bench_4.models import AgentTermination, SandboxedVerifyRequest, SandboxedVerifyResponse
 
@@ -216,3 +218,34 @@ def test_partial_credit_is_the_passed_fraction_floored_at_the_official_reward(
     verified = _verified(tmp_path, result, AgentTermination(reason="completed"))
     assert verified["partial_credit"] == partial_credit
     assert verified["reward"] == (verifier_result or {}).get("rewards", {}).get("reward", 0.0)
+
+
+async def test_a_killed_agent_scores_zero_without_its_verifier(tmp_path, monkeypatch):
+    """A self-kill and a per-process OOM kill cannot be told apart once the agent is dead. Either ends the attempt,
+    which counts as a zero in the pass-rate denominator rather than as an infrastructure failure."""
+    for step in ("download_dir", "collect", "run_verifier", "cleanup"):
+        monkeypatch.setattr(lifecycle, step, AsyncMock())
+    termination = AgentTermination(reason="killed", exit_code=9, detail="mini-SWE command exited 9: ")
+    environment = SimpleNamespace(main=object(), closed=False, quiesce_agent=AsyncMock(), stop=AsyncMock())
+    session = SimpleNamespace(
+        termination=termination,
+        environment=environment,
+        result={},
+        diagnostics=[],
+        phase="verifying",
+        subphase=None,
+        persist=lambda: None,
+    )
+
+    await lifecycle.finalize_session(session, grade=True)
+
+    environment.quiesce_agent.assert_not_awaited()
+    lifecycle.collect.assert_not_awaited()
+    lifecycle.run_verifier.assert_not_awaited()
+    lifecycle.cleanup.assert_awaited_once_with(session)
+    assert session.result["verifier_result"] == {"rewards": {"reward": 0.0}, "source": "agent_killed"}
+    assert session.result["exception_info"]["exception_type"] == "NonZeroAgentExitCodeError"
+    verified = _verified(tmp_path, session.result, termination, session.diagnostics)
+    assert (verified["reward"], verified["evaluation_completed"]) == (0.0, True)
+    assert verified["infrastructure_error"] is None and verified["failure_reason"] is None
+    assert "_ng_failure_class" not in verified

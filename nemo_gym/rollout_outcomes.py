@@ -9,13 +9,16 @@ from pydantic import BaseModel, ConfigDict, Field, model_validator
 from typing_extensions import Self
 
 from nemo_gym.core.episode import EpisodeId
+from nemo_gym.core.failure_kinds import AGENT_REQUEST_FAILED, ENVIRONMENT_SERVER_FAILED
 from nemo_gym.server_runtime.episode_types import EpisodeFailure
 
 
-class RolloutFailure(BaseModel):
+class RolloutFailureRecord(BaseModel):
     """Associate one observed failure with a run and an episode attempt.
 
-    ``source`` identifies who reported the failure. ``delivery`` describes the
+    ``source`` identifies who reported the failure, not where it happened: ``collector`` is rollout collection
+    recording what it observed, and the failure's own events carry the causal ``FailureBoundary`` (a collector
+    record can name a model, agent or ``collection`` boundary). ``delivery`` describes the
     collector's evidence about delivery to the Environment Server: ``not_sent``
     requires evidence that the request was not sent, ``possibly_delivered`` covers
     an uncertain outcome, and ``delivered`` means delivery was established. It
@@ -46,9 +49,28 @@ class RolloutFailure(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
     exception_type: str | None = Field(default=None, max_length=2000)
 
+    @property
+    def sidecar_failure_class(self) -> str:
+        """Route unclassified failures without inventing a canonical failure kind."""
+        return self.failure.failure_kind or (
+            ENVIRONMENT_SERVER_FAILED if self.source == "environment" else AGENT_REQUEST_FAILED
+        )
+
     @model_validator(mode="after")
     def validate_delivery(self) -> Self:
         """Require established delivery for failures reported by the environment."""
         if self.source == "environment" and self.delivery != "delivered":
             raise ValueError("An environment-reported failure requires delivery='delivered'")
         return self
+
+
+# The name before the failure-boundary design called this the persistence envelope; kept for existing imports.
+RolloutFailure = RolloutFailureRecord
+
+
+class InvalidRolloutResult(ValueError):
+    """An agent returned a body that cannot represent a completed result."""
+
+
+class StaleRolloutResult(InvalidRolloutResult):
+    """A response from another attempt may be transient after a transport retry."""
