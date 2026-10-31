@@ -301,7 +301,17 @@ def test_saved_answer_and_spent_budget_files_unchanged(tmp_path):
         "_ng_rollout_index": 0,
         "_ng_failure_class": "judge_failed",
         "failure_kind": "judge_failed",
-        "response": {"output_text": "synthetic saved answer must not regenerate"},
+        "response": {
+            "id": "saved",
+            "object": "response",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": "synthetic saved answer must not regenerate"}],
+                }
+            ],
+        },
     }
     (a / "rollouts_failures.jsonl").write_text(json.dumps(failed) + "\n")
     for name, text in {
@@ -320,8 +330,10 @@ def test_saved_answer_and_spent_budget_files_unchanged(tmp_path):
     ]
     before = {str(p): p.read_bytes() for p in protected}
     c = collect(a)
-    assert c.failures[0]["_ng_collected_saved_answer"] is True
-    assert "response" not in c.failures[0]
+    from nemo_gym.rollout_recovery import has_saved_generation
+
+    assert has_saved_generation(c.failures[0])
+    assert "synthetic saved answer must not regenerate" not in json.dumps(c.failures[0])
     assert {str(p): p.read_bytes() for p in protected} == before
 
 

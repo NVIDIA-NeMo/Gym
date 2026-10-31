@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import subprocess
+import sys
 
 import httpx
 import pytest
@@ -74,7 +76,8 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
         monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
         source = tmp_path / "input.jsonl"
         source.write_text(_request().task.model_dump_json() + "\n")
-        output = tmp_path / "rollouts.jsonl"
+        (tmp_path / "artifacts").mkdir()
+        output = tmp_path / "artifacts" / "rollouts.jsonl"
         config = RolloutCollectionConfig(
             input_jsonl_fpath=str(source),
             output_jsonl_fpath=str(output),
@@ -88,6 +91,14 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
             monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
             with pytest.raises(IncompleteEvaluationError, match="None of the 1 dispatched"):
                 await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=5)
+            # A second normal collection invocation must not regenerate the completed but lost episode.
+            try:
+                await asyncio.wait_for(
+                    RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True})),
+                    timeout=5,
+                )
+            except IncompleteEvaluationError:
+                pass
             await asyncio.sleep(0.16)
 
     agent_calls = [call for call in dependencies.calls if call[1].endswith("/v1/responses")]
@@ -98,6 +109,10 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
     assert store.coverage()["measured"] == 0
     assert store.coverage()["attempts"] == 1
     assert store.coverage()["max_rollout_attempts"] == 3
+    assert store.pending() == []
+    decision = decide_persisted(tmp_path)
+    assert decision.action.value == "stop"
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (1, 3)
     failures = [json.loads(line) for line in output.with_name("rollouts_failures.jsonl").read_text().splitlines()]
     assert len(failures) == 1
     assert failures[0]["_ng_failure_type"] == (
@@ -126,7 +141,8 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     monkeypatch.setattr(collection, "setup_server_client_utils", lambda *args, **kwargs: client)
     source = tmp_path / "input.jsonl"
     source.write_text(_request().task.model_dump_json() + "\n")
-    output = tmp_path / "rollouts.jsonl"
+    (tmp_path / "artifacts").mkdir()
+    output = tmp_path / "artifacts" / "rollouts.jsonl"
     config = RolloutCollectionConfig(
         input_jsonl_fpath=str(source),
         output_jsonl_fpath=str(output),
@@ -150,8 +166,30 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     assert len(connections) == 1
     failure = json.loads(output.with_name("rollouts_failures.jsonl").read_text())
     assert failure["_ng_failure_type"] == "ClientConnectorError"
-    # Preserve the existing conservative transport projection; no eligibility is inferred.
-    assert failure["_ng_failure_record"]["delivery"] == "possibly_delivered"
+    assert failure["_ng_failure_record"]["delivery"] == "not_sent"
     assert failure["_ng_failure_record"]["episode_id"]["attempt"] == 0
     assert failure.get("_ng_failure_counts_as_zero") is not True
     assert RolloutStore.read(output).coverage()["attempts"] == 1
+    assert len(RolloutStore.read(output).pending()) == 1
+    decision = decide_persisted(tmp_path)
+    assert decision.action.value == "resubmit"
+    # One transport attempt was reserved, but a proven not-sent interruption spends no model/failure attempt.
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (0, 3)
+    assert RolloutStore.read(output).coverage()["counted_failures"] == 0
+    assert decide_persisted(tmp_path, max_infra_retries=0).action.value == "stop"
+
+
+def decide_persisted(job, max_infra_retries=3):
+    from nemo_gym.orchestration.recovery import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+        decide_from_collected,
+        select_managed_evidence,
+    )
+
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+    )
+    selected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
+    assert selected.managed_reader_error is None
+    return decide_from_collected(selected, max_infra_retries=max_infra_retries, max_walltime_s=None, live_job=False)

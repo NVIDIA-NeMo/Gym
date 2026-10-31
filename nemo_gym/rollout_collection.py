@@ -42,7 +42,7 @@ from uuid import uuid4
 
 import aiohttp
 import orjson
-from aiohttp import ClientError
+from aiohttp import ClientConnectorError, ClientError
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -3700,9 +3700,13 @@ class RolloutCollectionHelper(BaseModel):
         }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+        from nemo_gym.rollout_recovery import has_saved_generation, has_unclassified_execution_failure
 
-        unclassified = {k for k, row in latest_by_key.items() if has_unclassified_execution_failure(row)}
+        unclassified = {
+            k
+            for k, row in latest_by_key.items()
+            if has_unclassified_execution_failure(row) or has_saved_generation(row)
+        }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
@@ -5317,9 +5321,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         failure[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure[NG_TERMINAL_KEY] = True
                     failure_row = failure
+                    failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes else failure
+                    if (
+                        isinstance(failed_outcome, RolloutFailureRecord)
+                        and _max_num_tries == 1
+                        and isinstance(e, ClientConnectorError)
+                    ):
+                        # One failed connection attempt cannot have delivered /run. A final error after retries
+                        # cannot establish this fact about earlier attempts.
+                        failed_outcome = failed_outcome.model_copy(update={"delivery": "not_sent"})
                     return _CompletedRollout(
                         row=row,
-                        result=_failure_outcome(row, failure, stage) if typed_outcomes else failure,
+                        result=failed_outcome,
                         rollout_latency_ms=None,
                         diagnostics=_failure_diagnostics(failure),
                         environment_server=server_name,

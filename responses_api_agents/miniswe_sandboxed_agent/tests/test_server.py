@@ -1167,7 +1167,7 @@ def test_episode_infrastructure_refusal_keeps_the_harness_failure_as_its_cause(r
     ],
 )
 async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
-    fixture, runner_factory, monkeypatch, final, grade
+    fixture, runner_factory, monkeypatch, tmp_path, final, grade
 ):
     """The real MiniSWEHarness.execute result after a failed cleanup, unchanged, through /run, /verify and recovery.
 
@@ -1285,6 +1285,15 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     body = f.body.model_copy(update={"capture_rollout_id": "rollout-1", "capture_model_calls": True})
     with rollout_context(f.agent.rollout_id_from_run(body)):
         result = await f.agent.run(f.request, body)
+    from tests.unit_tests.test_recovery_saved_generation import persist_producer_result
+
+    decision, store, projected = await persist_producer_result(
+        tmp_path / "persisted", monkeypatch, result.model_dump(mode="json")
+    )
+    assert decision.action.value == ("noop" if final == "limits_exceeded" and grade is not None else "stop")
+    assert store.pending() == []
+    # No response text or function arguments cross the remote projection.
+    assert "COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT" not in json.dumps(projected.model_dump())
     row = FailureReportRow.merged_into({"_ng_task_index": 0, "_ng_rollout_index": 0, **result.model_dump(mode="json")})
     (event,) = row[FailureReportRow.EVENTS].values()
     assert (event["boundary"], event["operation"]) == ("harness", "harness.terminate")
@@ -1297,7 +1306,11 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
             assert (row["reward"], row["evaluation_completed"], "_ng_failure_class" in row) == (grade, True, False)
         return
     assert row[FailureReportRow.FAILURE_ID] == event["event_id"]
+    persisted = store.failures()[0]
+    assert persisted[FailureReportRow.FAILURE_ID] == event["event_id"]
+    assert decision.evidence[0].failure_id == event["event_id"]
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (1, 3)
     assert row["_ng_failure_class"] == "infrastructure_error"
     assert _policy_evidence(row) == (HARNESS_TERMINATION_UNCONFIRMED, None)
-    # A response object counts as a saved answer even with no output, so the selected cleanup stops replay.
+    # A serialized response retains the execution evidence even when no output was emitted.
     assert _policy_replay_is_unsupported(row)

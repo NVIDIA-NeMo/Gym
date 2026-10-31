@@ -42,8 +42,44 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
+def has_saved_generation(row: Mapping[str, Any]) -> bool:
+    """Recognize retained response data, including a serialized response with empty output.
+
+    A diagnostic error object or an empty mapping is not generation. A typed response
+    has its producer identity and output list even when no assistant text was emitted.
+    """
+    for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
+        answer = row.get(key)
+        if not isinstance(answer, Mapping):
+            continue
+        output = answer.get("output")
+        if not isinstance(output, list):
+            continue
+        if (
+            answer.get("object") == "response"
+            and isinstance(answer.get("id"), str)
+            and answer["id"]
+            and (output or (answer.get("error") is None and answer.get("status") != "failed"))
+        ):
+            return True
+        if answer.get("status") == "completed" and any(
+            isinstance(item, Mapping) and item.get("type") == "message" and item.get("role") == "assistant"
+            for item in output
+        ):
+            return True
+    return False
+
+
 def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     """A selected route failure names no owned cause that permits running the agent again."""
+    if row.get("_ng_failure_class") in {"judge_failed", "judge_invalid"}:
+        return True  # Verification recovery may reuse an answer; it never reruns the agent.
+    record = row.get("_ng_failure_record")
+    if isinstance(record, Mapping) and record.get("source") == "collector":
+        failure = record.get("failure")
+        admitted = isinstance(failure, Mapping) and failure.get("stage") == "admission"
+        if record.get("delivery") == "possibly_delivered" and not admitted:
+            return True
     events = row.get("_ng_failure_events")
     selected = row.get("_ng_failure_id")
     if "_ng_failure_id" not in row:

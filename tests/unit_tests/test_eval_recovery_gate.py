@@ -83,7 +83,17 @@ def judge_failed(task: int) -> dict:
         mask_sample=True,
         failure_kind="judge_failed",
         _ng_failure_class="judge_failed",
-        response={"output_text": f"saved answer {task}"},
+        response={
+            "id": f"saved-{task}",
+            "object": "response",
+            "output": [
+                {
+                    "type": "message",
+                    "role": "assistant",
+                    "content": [{"type": "output_text", "text": f"saved answer {task}"}],
+                }
+            ],
+        },
     )
 
 
@@ -232,7 +242,7 @@ def test_the_decision_reads_saved_files_without_changing_a_byte(tmp_path: Path) 
     )
     assert d.action == RecoveryAction.STOP
     assert {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in paths.items()} == before
-    assert loaded["results"][1]["response"] == {"output_text": "saved answer 1"}
+    assert loaded["results"][1]["response"] == rows["results"][1]["response"]
 
 
 def _selected_event_failure(*, kind: str, selected: bool) -> dict:
@@ -364,8 +374,28 @@ def test_an_infrastructure_failure_before_any_answer_still_retries_within_its_bu
 @pytest.mark.parametrize(
     "extra,unsupported",
     [
-        ({"response": {"output": [{"type": "message"}]}, "evaluation_completed": True}, True),
-        ({"response": {"output": [{"type": "message"}]}, "evaluation_completed": False}, True),
+        (
+            {
+                "response": {
+                    "id": "saved",
+                    "object": "response",
+                    "output": [{"type": "message", "role": "assistant"}],
+                },
+                "evaluation_completed": True,
+            },
+            True,
+        ),
+        (
+            {
+                "response": {
+                    "id": "saved",
+                    "object": "response",
+                    "output": [{"type": "message", "role": "assistant"}],
+                },
+                "evaluation_completed": False,
+            },
+            True,
+        ),
         ({"_ng_collected_saved_answer": True}, True),
         ({"_ng_collected_saved_answer": False, "response": {"output": []}}, False),
         ({}, False),

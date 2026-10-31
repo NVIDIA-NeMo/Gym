@@ -222,14 +222,16 @@ def _sidecar_action(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig
     return choose_action(failure_kind=kind or "unknown", http_status=status, config=policy)
 
 
-# COLLECT_SCRIPT's presence flag for a judge failure's saved answer (the same name as its SAVED).
+# Compatibility with older metadata-only projections of a judge's saved answer.
 SAVED_ANSWER_KEY = "_ng_collected_saved_answer"
 
 
 def _saved_answer(row: Mapping[str, Any]) -> bool:
     if SAVED_ANSWER_KEY in row:
         return row[SAVED_ANSWER_KEY] is True
-    return isinstance(row.get("response"), dict) and bool(row["response"])
+    from nemo_gym.rollout_recovery import has_saved_generation
+
+    return has_saved_generation(row)
 
 
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
@@ -276,7 +278,7 @@ def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
     from nemo_gym.rollout_recovery import has_unclassified_execution_failure
 
-    if has_unclassified_execution_failure(row):
+    if has_unclassified_execution_failure(row) or _saved_answer(row):
         return True
     chain = _cause_chain(row)
     if chain is None:
@@ -626,8 +628,7 @@ KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_in
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status")
-# Only saved-answer presence leaves the run host.
-SAVED = "_ng_collected_saved_answer"
+# Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.
 managed_store = [os.path.exists(os.path.join(a, n)) for n in ("rollouts_manifest.json", "rollouts_attempts.jsonl")]
@@ -675,8 +676,23 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
-            if r.get("_ng_failure_class") == "judge_failed":
-                selected[SAVED] = isinstance(r.get("response"), dict) and bool(r["response"])
+            record = r.get("_ng_failure_record")
+            if isinstance(record, dict):
+                failure = record.get("failure")
+                selected["_ng_failure_record"] = {"source": record.get("source"), "delivery": record.get("delivery"),
+                    "failure": {"stage": failure.get("stage")} if isinstance(failure, dict) else None}
+            for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
+                answer = r.get(key)
+                if isinstance(answer, dict):
+                    output = answer.get("output")
+                    selected[key] = {k: answer[k] for k in ("object", "id", "status") if k in answer}
+                    if answer.get("error") is not None:
+                        selected[key]["error"] = {}  # Presence only; diagnostic messages stay on the run host.
+                    if isinstance(output, list):
+                        selected[key]["output"] = [
+                            {k: item[k] for k in ("type", "role", "status") if k in item}
+                            if isinstance(item, dict) else None for item in output]
+
             # Operation evidence only: prompts, answers, conversations and model payloads stay on the run host.
             trajectory = r.get("ng_trajectory")
             if name == "rollouts.jsonl" and isinstance(trajectory, dict):

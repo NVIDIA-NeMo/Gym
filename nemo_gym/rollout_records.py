@@ -38,6 +38,7 @@ from nemo_gym.rollout_recovery import (
     RunManifest,
     _digest,
     _get_max_rollout_attempts,
+    has_saved_generation,
     has_unclassified_execution_failure,
     is_terminal_failure,
     load_resubmit_offset,
@@ -259,16 +260,8 @@ def is_interruption_failure(row: dict) -> bool:
 
 
 def _holds_saved_answer(row: dict) -> bool:
-    """Whether a failure row retains a finished answer: a completed response with an assistant message."""
-    return any(
-        isinstance(answer, dict)
-        and answer.get("status") == "completed"
-        and any(
-            isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
-            for item in answer.get("output") or []
-        )
-        for answer in (row.get("response"), row.get("_ng_failure_partial_response"))
-    )
+    """Use the same retained-generation facts as collection and recovery."""
+    return has_saved_generation(row)
 
 
 def _has_eligible_interruption_cause(row: dict) -> bool:
