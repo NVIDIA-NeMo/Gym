@@ -30,6 +30,7 @@ from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     GradingOperationObservation,
     ModelCallRef,
+    SandboxObservation,
     VerifierInvocation,
     grading_result_binding,
 )
@@ -42,6 +43,24 @@ T = TypeVar("T")
 
 
 _active_verifier: ContextVar[VerifierInvocation | None] = ContextVar("active_verifier_grading", default=None)
+
+
+def observe_verifier_sandbox(observation: SandboxObservation | Mapping[str, object]) -> None:
+    """Bind owner-observed sandbox facts to the active verification.
+
+    These facts do not certify remote liveness or dependency-free grading.
+    """
+    invocation = _active_verifier.get()
+    if invocation is None:
+        return
+    try:
+        observed = SandboxObservation.model_validate(observation)
+    except Exception:
+        logger.warning("Malformed sandbox lifecycle observation omitted")
+        return
+    if invocation.sandbox_observations is None:
+        invocation.sandbox_observations = []
+    invocation.sandbox_observations.append(observed)
 
 
 def observe_programmatic_grading(calculate: Callable[[], T]) -> T:

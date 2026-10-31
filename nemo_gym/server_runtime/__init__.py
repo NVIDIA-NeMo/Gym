@@ -90,7 +90,11 @@ if TYPE_CHECKING:
         MCPToolAccess,
         ToolAccess,
     )
-    from nemo_gym.server_runtime.verifier_observability import observe_programmatic_grading, observe_verifier
+    from nemo_gym.server_runtime.verifier_observability import (
+        observe_programmatic_grading,
+        observe_verifier,
+        observe_verifier_sandbox,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -149,6 +153,7 @@ _PUBLIC_API = {
     "is_retryable_dependency_status": "base_environment_server",
     "lost_session_verification": "base_resources_server",
     "observe_programmatic_grading": "verifier_observability",
+    "observe_verifier_sandbox": "verifier_observability",
     "observe_verifier": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
     "seed_restarts": "_checkpoint.steps",

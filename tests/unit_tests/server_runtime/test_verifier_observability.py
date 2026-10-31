@@ -320,3 +320,71 @@ async def test_http_error_retains_status_headers_and_detail():
     payload = json.loads(response.body)
     assert payload["detail"] == "verifier unavailable"
     assert payload["ng_verifier_invocations"][0]["status"] == "failed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reward", [0.0, 1.0])
+async def test_sandbox_lifecycle_facts_bind_to_existing_verifier_without_certifying_grade(reward):
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
+
+    async def verify():
+        observe_verifier_sandbox(
+            {
+                "role": "agent",
+                "sandbox_id": "owner-agent",
+                "teardown_confirmed": True,
+                "cleanup_errors": ["close:TimeoutError"],
+                "observed_client_interval_s": 0.2,
+            }
+        )
+        observe_verifier_sandbox({"role": "invalid"})
+        observe_verifier_sandbox(
+            {
+                "role": "verifier",
+                "sandbox_id": "owner-verifier",
+                "teardown_confirmed": False,
+                "cleanup_errors": ["close:ConnectionError"],
+            }
+        )
+        return {"reward": reward, "evaluation_completed": True, "response": {"id": "saved"}}
+
+    with rollout_context("owner-lifecycle"):
+        result = await observe_verifier(verify, enabled=True)()
+    assert result["reward"] == reward and result["response"] == {"id": "saved"}
+    invocation = result["ng_verifier_invocations"][0]
+    assert invocation["status"] == "completed"
+    assert invocation.get("grading_operations") is None
+    assert [(x["role"], x["sandbox_id"]) for x in invocation["sandbox_observations"]] == [
+        ("agent", "owner-agent"),
+        ("verifier", "owner-verifier"),
+    ]
+    assert invocation["sandbox_observations"][0]["cleanup_errors"] == ["close:TimeoutError"]
+    record = _build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, result)
+    assert record.verifier_invocations[0].model_dump(mode="json") == invocation
+
+
+@pytest.mark.asyncio
+async def test_malformed_sandbox_observation_does_not_replace_original_ungraded_result():
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
+
+    async def verify():
+        observe_verifier_sandbox({"role": "invalid", "observed_client_interval_s": "not-a-time"})
+        return {
+            "reward": 0.0,
+            "evaluation_completed": False,
+            "failure_kind": "verifier_error",
+            "response": {"id": "saved"},
+        }
+
+    with rollout_context("owner-invalid"):
+        result = await observe_verifier(verify, enabled=True)()
+    invocation = result["ng_verifier_invocations"][0]
+    assert result["evaluation_completed"] is False and result["response"] == {"id": "saved"}
+    assert invocation["status"] == "incomplete" and invocation["failure_kind"] == "verifier_error"
+    assert invocation.get("sandbox_observations") is None
+
+
+def test_owner_observation_outside_verification_does_not_create_an_invocation():
+    from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
+
+    assert observe_verifier_sandbox({"role": "invalid"}) is None
