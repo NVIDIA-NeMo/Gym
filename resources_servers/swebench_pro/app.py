@@ -32,6 +32,7 @@ from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.agent_utils.sandbox_observation import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
@@ -216,6 +217,9 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     test_output: str
     error: str | None
     log_dir: str
+    # Lifecycle facts of the sandbox that produced this grade; the agent attaches it as a verifier SandboxObservation.
+    verifier_sandbox_observation: dict[str, Any] | None = None
+    verifier_sandbox_observations: list[dict[str, Any] | None] | None = None
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
@@ -563,6 +567,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
+        verifier_sandbox_observation = None
+        verifier_sandbox_observations = []
         for attempt in range(1, attempts + 1):
             attempt_error: Exception | None = None
             eval_sandbox: AsyncSandbox | None = None
@@ -597,6 +603,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                             await eval_sandbox.stop()
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
+            # Observation is best effort and cannot replace the calculated grade or original error.
+            try:
+                verifier_sandbox_observation = lifecycle_observation(eval_sandbox, role="verifier")
+            except Exception:
+                print("Failed to observe verification sandbox", format_exc(), file=sys.stderr)
+                verifier_sandbox_observation = None
+            verifier_sandbox_observations.append(verifier_sandbox_observation)
 
             reason = inconclusive_reason(result)
             if reason is not None:
@@ -661,6 +674,15 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "test_output": result.test_output,
             "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
+            # Older observation schemas forbid unknown fields; the plural field retains the full facts.
+            "verifier_sandbox_observation": {
+                key: value
+                for key, value in verifier_sandbox_observation.items()
+                if key not in {"observed_client_interval_s", "teardown_confirmed", "cleanup_errors"}
+            }
+            if verifier_sandbox_observation is not None
+            else None,
+            "verifier_sandbox_observations": verifier_sandbox_observations,
         }
         if reason is not None:
             # The saved patch has no conclusive verdict. A collection retry would run the agent again;
