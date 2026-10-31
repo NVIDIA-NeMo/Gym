@@ -8,11 +8,19 @@ model's answer satisfy this criterion? Reply YES or NO." in a single chat
 completion call. Reward is `must_pass / must_total` in [0, 1]. If
 `must_total == 0`, reward defaults to `0.0` and an `error` is set on the
 verify response.
+
+Transient judge failures (timeouts, transport errors, HTTP 408/409/425/429/5xx,
+replies that are not YES/NO) are retried with exponential backoff. An item
+that still fails after the last attempt counts as NO and is reported in
+`JudgeResult.judge_errors`, so the caller can mark the sample as not
+validly measured instead of training on a judge outage.
 """
 
 from __future__ import annotations
 
 import asyncio
+import re
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 import orjson
@@ -29,6 +37,11 @@ _JUDGE_SYSTEM_PROMPT = (
     "explanation."
 )
 
+# Retried besides every 5xx.
+_RETRYABLE_HTTP_STATUSES = frozenset({408, 409, 425, 429})
+_THINK_BLOCK = re.compile(r"^\s*<think>.*?</think>", re.DOTALL)
+_LEADING_VERDICT = re.compile(r"^(YES|NO)\b")
+
 
 class JudgeItem(BaseModel):
     category: str
@@ -41,6 +54,8 @@ class JudgeResult(BaseModel):
     reward: float
     per_item: List[Dict[str, Any]]
     error: Optional[str] = None
+    # Items whose last judge attempt still failed (timeout, HTTP error, unparseable reply).
+    judge_errors: int = 0
 
 
 _MUST_HAVE_VALUES = {"must_have", "must-have", "must have", "must"}
@@ -101,15 +116,89 @@ def build_user_prompt(problem_statement: str, model_answer: str, criterion: str)
 
 
 def parse_yes_no(text: str) -> Optional[bool]:
-    """Return True for YES, False for NO, None if the response is unparseable."""
+    """Return True for YES, False for NO, None if the response is unparseable.
+
+    The verdict is read from the first non-empty line, after dropping a leading
+    `<think>...</think>` block (judges served without a reasoning parser) and
+    markdown emphasis. A line that starts with the verdict word ("YES." or
+    "NO - the answer ...") counts; anything else is unparseable.
+    """
     if not text:
         return None
-    cleaned = text.strip().splitlines()[0].strip().upper().rstrip(".")
-    if cleaned == "YES":
-        return True
-    if cleaned == "NO":
-        return False
+    text = _THINK_BLOCK.sub("", text)
+    for line in text.splitlines():
+        cleaned = line.strip().strip("*_`'\"").strip().upper()
+        if not cleaned:
+            continue
+        match = _LEADING_VERDICT.match(cleaned)
+        if match is None:
+            return None
+        return match.group(1) == "YES"
     return None
+
+
+async def _judge_attempt(
+    *, url: str, headers: Dict[str, str], body: Dict[str, Any], timeout_s: int, cookies: Optional[Dict[str, str]]
+) -> Dict[str, Any]:
+    """One judge call. Returns passed/error/raw plus whether a retry may help; never raises.
+
+    `timeout_s` bounds the whole exchange, reading either reply body included, so a reply that stalls cannot keep
+    holding a slot of the shared judge semaphore.
+    """
+    try:
+        return await asyncio.wait_for(
+            _judge_exchange(url=url, headers=headers, body=body, cookies=cookies), timeout=timeout_s
+        )
+    except asyncio.TimeoutError:
+        return {"passed": False, "error": "judge timed out", "raw": None, "retryable": True}
+    except Exception as e:
+        return {
+            "passed": False,
+            "error": f"judge request raised {type(e).__name__}: {e}",
+            "raw": None,
+            "retryable": True,
+        }
+
+
+async def _judge_exchange(
+    *, url: str, headers: Dict[str, str], body: Dict[str, Any], cookies: Optional[Dict[str, str]]
+) -> Dict[str, Any]:
+    response = await request(method="POST", url=url, headers=headers, data=orjson.dumps(body), cookies=cookies or {})
+    try:
+        outcome = await _read_judge_reply(response)
+    except BaseException:
+        # Cancelled at the deadline or failed mid-body: drop the connection rather than return it to the pool.
+        response.close()
+        raise
+    response.release()
+    return outcome
+
+
+async def _read_judge_reply(response: Any) -> Dict[str, Any]:
+    if not response.ok:
+        body_text = (await response.content.read()).decode(errors="replace")
+        return {
+            "passed": False,
+            "error": f"judge returned HTTP {response.status}: {body_text[:512]}",
+            "raw": None,
+            "retryable": response.status in _RETRYABLE_HTTP_STATUSES or 500 <= response.status < 600,
+        }
+
+    try:
+        payload = await get_response_json(response)
+        text = payload["choices"][0]["message"]["content"]
+    except Exception as e:
+        return {
+            "passed": False,
+            "error": f"judge response unparseable ({type(e).__name__}: {e})",
+            "raw": None,
+            "retryable": True,
+        }
+
+    parsed = parse_yes_no(text or "")
+    if parsed is None:
+        return {"passed": False, "error": f"judge reply not YES/NO: {text!r}", "raw": text, "retryable": True}
+    return {"passed": parsed, "error": None, "raw": text, "retryable": False}
 
 
 async def _judge_one_item(
@@ -124,8 +213,12 @@ async def _judge_one_item(
     cookies: Optional[Dict[str, str]],
     max_completion_tokens: int,
     reasoning_effort: Optional[str],
+    extra_body: Optional[Dict[str, Any]] = None,
+    max_attempts: int = 1,
+    retry_backoff_s: float = 2.0,
+    semaphore: Optional[asyncio.Semaphore] = None,
 ) -> Dict[str, Any]:
-    """Single judge call. Always returns a dict; never raises."""
+    """Judge one criterion, retrying transient failures. Always returns a dict; never raises."""
     url = f"{base_url.rstrip('/')}/chat/completions"
     headers = {
         "Authorization": f"Bearer {api_key}",
@@ -149,57 +242,27 @@ async def _judge_one_item(
     # burn the whole budget before producing a single visible character.
     if reasoning_effort:
         body["reasoning_effort"] = reasoning_effort
+    # Endpoint-specific knobs, e.g. {"chat_template_kwargs": {"enable_thinking": false}}.
+    if extra_body:
+        body.update(extra_body)
 
-    try:
-        response = await asyncio.wait_for(
-            request(
-                method="POST",
-                url=url,
-                headers=headers,
-                data=orjson.dumps(body),
-                cookies=cookies or {},
-            ),
-            timeout=timeout_s,
-        )
-    except asyncio.TimeoutError:
-        return {"criterion": criterion, "passed": False, "error": "judge timed out", "raw": None}
-    except Exception as e:
-        return {
-            "criterion": criterion,
-            "passed": False,
-            "error": f"judge request raised {type(e).__name__}: {e}",
-            "raw": None,
-        }
+    attempts = max(1, int(max_attempts))
+    outcome: Dict[str, Any] = {}
+    attempt = 0
+    for attempt in range(1, attempts + 1):
+        async with semaphore if semaphore is not None else nullcontext():
+            outcome = await _judge_attempt(url=url, headers=headers, body=body, timeout_s=timeout_s, cookies=cookies)
+        if not outcome["retryable"] or attempt == attempts:
+            break
+        await asyncio.sleep(retry_backoff_s * (2 ** (attempt - 1)))
 
-    if not response.ok:
-        body_text = (await response.content.read()).decode(errors="replace")
-        return {
-            "criterion": criterion,
-            "passed": False,
-            "error": f"judge returned HTTP {response.status}: {body_text[:512]}",
-            "raw": None,
-        }
-
-    try:
-        payload = await get_response_json(response)
-        text = payload["choices"][0]["message"]["content"]
-    except Exception as e:
-        return {
-            "criterion": criterion,
-            "passed": False,
-            "error": f"judge response unparseable ({type(e).__name__}: {e})",
-            "raw": None,
-        }
-
-    parsed = parse_yes_no(text)
-    if parsed is None:
-        return {
-            "criterion": criterion,
-            "passed": False,
-            "error": f"judge reply not YES/NO: {text!r}",
-            "raw": text,
-        }
-    return {"criterion": criterion, "passed": parsed, "error": None, "raw": text}
+    return {
+        "criterion": criterion,
+        "passed": outcome["passed"],
+        "error": outcome["error"],
+        "raw": outcome["raw"],
+        "attempts": attempt,
+    }
 
 
 async def grade(
@@ -214,6 +277,10 @@ async def grade(
     cookies: Optional[Dict[str, str]] = None,
     max_completion_tokens: int = 2048,
     reasoning_effort: Optional[str] = None,
+    extra_body: Optional[Dict[str, Any]] = None,
+    max_attempts: int = 1,
+    retry_backoff_s: float = 2.0,
+    semaphore: Optional[asyncio.Semaphore] = None,
 ) -> JudgeResult:
     """Run the judge against the must-have items in `rubric`."""
     must_have = extract_must_have_items(rubric)
@@ -251,6 +318,10 @@ async def grade(
             cookies=cookies,
             max_completion_tokens=max_completion_tokens,
             reasoning_effort=reasoning_effort,
+            extra_body=extra_body,
+            max_attempts=max_attempts,
+            retry_backoff_s=retry_backoff_s,
+            semaphore=semaphore,
         )
         for item in must_have
     ]
@@ -258,11 +329,13 @@ async def grade(
 
     must_pass = sum(1 for r in per_item if r.get("passed"))
     must_total = len(per_item)
+    judge_errors = sum(1 for r in per_item if r.get("error"))
     reward = must_pass / must_total if must_total else 0.0
     return JudgeResult(
         must_pass=must_pass,
         must_total=must_total,
         reward=reward,
         per_item=per_item,
-        error=None,
+        error=f"{judge_errors} of {must_total} judge calls failed" if judge_errors else None,
+        judge_errors=judge_errors,
     )
