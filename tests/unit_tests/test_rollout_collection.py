@@ -410,7 +410,9 @@ class TestRecoveryDriverMetrics:
         )
         calls = Counter()
 
-        async def post(server_name, url_path, json):
+        async def post(server_name, url_path, json, *, _resend_after_disconnect, _max_num_tries):
+            assert _resend_after_disconnect is False
+            assert _max_num_tries == 1
             index = json[TASK_INDEX_KEY_NAME]
             calls[index] += 1
             if index == 1 and calls[index] == 1:
@@ -669,7 +671,12 @@ class TestRolloutCollection:
         dispatched = []
 
         async def post(
-            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+            server_name: str,
+            url_path: str,
+            json: dict,
+            *,
+            _resend_after_disconnect: bool = True,
+            _max_num_tries: int | None = None,
         ) -> FakeResponse:
             assert url_path == "/run"
             assert server_name == f"{json[AGENT_REF_KEY_NAME]['name']}_environment_server"
@@ -950,7 +957,12 @@ class TestRolloutCollection:
         release = asyncio.Event()
 
         async def post(
-            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+            server_name: str,
+            url_path: str,
+            json: dict,
+            *,
+            _resend_after_disconnect: bool = True,
+            _max_num_tries: int | None = None,
         ) -> FakeResponse:
             assert url_path == "/run"
             started.append((json[AGENT_REF_KEY_NAME]["name"], json[TASK_INDEX_KEY_NAME]))
@@ -997,7 +1009,12 @@ class TestRolloutCollection:
         release = asyncio.Event()
 
         async def post(
-            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+            server_name: str,
+            url_path: str,
+            json: dict,
+            *,
+            _resend_after_disconnect: bool = True,
+            _max_num_tries: int | None = None,
         ) -> FakeResponse:
             nonlocal active_total, max_active_total
             assert url_path == "/run"
@@ -1050,7 +1067,12 @@ class TestRolloutCollection:
         release = asyncio.Event()
 
         async def post(
-            server_name: str, url_path: str, json: dict, *, _resend_after_disconnect: bool = True
+            server_name: str,
+            url_path: str,
+            json: dict,
+            *,
+            _resend_after_disconnect: bool = True,
+            _max_num_tries: int | None = None,
         ) -> FakeResponse:
             nonlocal active
             assert server_name == "gamma_environment_server"

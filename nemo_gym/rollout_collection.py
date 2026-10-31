@@ -4098,6 +4098,9 @@ class RolloutCollectionHelper(BaseModel):
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 record_unrouted_failures=True,
+                # The persisted attempt and recovery selector own retries, including uncertain delivery.
+                retry_requests=False,
+                _max_num_tries=1,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
                 on_dispatch_batch=store.record_dispatches,
@@ -5097,6 +5100,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
+        _max_num_tries: Optional[Literal[1]] = None,
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
@@ -5239,6 +5243,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             url_path="/run",
                             json=request_body,
                             **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                            **({"_max_num_tries": _max_num_tries} if _max_num_tries is not None else {}),
                         )
                     await raise_for_status(res)
                     stage = "response"
