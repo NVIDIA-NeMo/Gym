@@ -396,16 +396,18 @@ def test_gate_summary_never_equates_scored_with_expected_by_dropping_failures(tm
         retries=0,
     )
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
-    t = gate_task_summary(d, score=0.25, fe_valid=True, fe_reasons=[], health_passed=True, health_reasons=[])
+    t = gate_task_summary(d, score=0.25, summary_valid=True, summary_reasons=[], health_passed=True, health_reasons=[])
     assert (t["expected_samples"], t["scored_samples"], t["status"]) == (4, 1, "FAILED")
     assert any("judge failures" in e for e in t["errors"]) and any("no row" in e for e in t["errors"])
 
 
-@pytest.mark.parametrize(("fe", "health"), [(None, True), (True, None), (False, True), (True, False)])
-def test_gate_summary_unknown_or_failed_validity_or_health_is_a_blocker(tmp_path, fe, health) -> None:
+@pytest.mark.parametrize(("summary_valid", "health"), [(None, True), (True, None), (False, True), (True, False)])
+def test_gate_summary_unknown_or_failed_validity_or_health_is_a_blocker(tmp_path, summary_valid, health) -> None:
     job = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
-    t = gate_task_summary(d, score=1.0, fe_valid=fe, fe_reasons=[], health_passed=health, health_reasons=[])
+    t = gate_task_summary(
+        d, score=1.0, summary_valid=summary_valid, summary_reasons=[], health_passed=health, health_reasons=[]
+    )
     assert t["status"] == "FAILED" and t["errors"]
 
 
@@ -413,7 +415,7 @@ def test_gate_summary_complete_run_succeeds_and_keeps_model_zeros_as_warnings(tm
     final = ident(1, failure_kind="model_context_limit", _ng_failure_terminal=True, _ng_failure_counts_as_zero=True)
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[final])
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
-    t = gate_task_summary(d, score=0.5, fe_valid=True, fe_reasons=[], health_passed=True, health_reasons=[])
+    t = gate_task_summary(d, score=0.5, summary_valid=True, summary_reasons=[], health_passed=True, health_reasons=[])
     assert (t["status"], t["expected_samples"], t["scored_samples"], t["errors"]) == ("SUCCESS", 2, 2, [])
     assert t["warnings"] and "final evaluated-model" in t["warnings"][0]
 
@@ -485,7 +487,7 @@ GOOD_VERDICTS = {"healthy": 4, "unhealthy": 0, "unobserved": 0}
 
 
 @pytest.mark.parametrize(
-    ("quality", "criterion", "fe", "health"),
+    ("quality", "criterion", "summary_valid", "health"),
     [
         (None, 0.02, None, None),
         (dict(expected=4, healthy=True, verdicts=GOOD_VERDICTS, partial=True), 0.02, None, True),
@@ -499,7 +501,7 @@ GOOD_VERDICTS = {"healthy": 4, "unhealthy": 0, "unobserved": 0}
     ],
 )
 def test_quality_inputs_keep_validity_and_health_apart_and_fail_closed(
-    tmp_path, quality, criterion, fe, health
+    tmp_path, quality, criterion, summary_valid, health
 ) -> None:
     from nemo_gym.orchestration.recovery import quality_inputs
 
@@ -507,8 +509,8 @@ def test_quality_inputs_keep_validity_and_health_apart_and_fail_closed(
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     collected.quality = unit_quality(**quality) if quality is not None else None
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    got_fe, _, got_health, reasons = quality_inputs(d, collected, max_unhealthy_fraction=criterion)
-    assert (got_fe, got_health) == (fe, health) and reasons
+    got_summary, _, got_health, reasons = quality_inputs(d, collected, max_unhealthy_fraction=criterion)
+    assert (got_summary, got_health) == (summary_valid, health) and reasons
 
 
 def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_everything_holds(tmp_path) -> None:
@@ -783,7 +785,7 @@ def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_exe
     health_errors = [HEALTH_UNKNOWN]
     if mode == "stale":
         health_errors = [
-            'FE validity unknown: ["quality summary is not bound to this run\'s sole rollouts.jsonl source"]',
+            'summary validity unknown: ["quality summary is not bound to this run\'s sole rollouts.jsonl source"]',
             _StartsWith("response/trial health unknown: ['response: the health report has no verified response"),
         ]
     assert out.gate_task["status"] == "FAILED" and out.gate_task["errors"] == health_errors + mlflow
@@ -1580,8 +1582,8 @@ def test_review_quality_from_another_rollout_is_not_accepted(tmp_path, sources):
     path.write_text(json.dumps(payload))
     got = collect(job)
     decision = decide_from_collected(got, max_infra_retries=3, max_walltime_s=None, live_job=False)
-    fe, _, health, _ = quality_inputs(decision, got, max_unhealthy_fraction=0.02)
-    assert fe is not True and health is not True
+    summary_valid, _, health, _ = quality_inputs(decision, got, max_unhealthy_fraction=0.02)
+    assert summary_valid is not True and health is not True
 
 
 @pytest.mark.parametrize("order", [False, True])
@@ -1846,7 +1848,9 @@ def test_review_invalid_gate_criteria_fail_closed(tmp_path, fake_executor, name,
 def test_review_retryable_failures_are_not_labelled_infrastructure(tmp_path):
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[ident(1, **INFRA)])
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
-    task = gate_task_summary(d, score=None, fe_valid=None, fe_reasons=[], health_passed=None, health_reasons=[])
+    task = gate_task_summary(
+        d, score=None, summary_valid=None, summary_reasons=[], health_passed=None, health_reasons=[]
+    )
     assert any("retryable failures awaiting another attempt" in e for e in task["errors"])
     assert not any("infra" in e for e in task["errors"])
 

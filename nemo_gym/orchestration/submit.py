@@ -155,9 +155,9 @@ def _recover(
     chain's stored budget; ``decide_recovery`` picks one action, which runs here: ``noop`` dispatches nothing;
     ``reverify`` re-judges saved answers through the executor (never the policy) or reports that the executor cannot;
     ``resubmit`` queues the run with the existing ``resubmit`` keeping its spent budget (retries, walltime and
-    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``stop`` dispatches nothing and says why. Every outcome carries the Day-0 gate task entry: per-rollout
-    health is judged against ``max_unhealthy_fraction`` and reported in its warnings, ModelOpt response/trial health
-    stays unknown, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is unchanged.
+    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``stop`` dispatches nothing and says why. Every outcome carries the acceptance gate task entry: per-rollout
+    health is judged against ``max_unhealthy_fraction`` and reported in its warnings; response/trial health is evaluated
+    separately, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is unchanged.
     """
     if score_key is not None and (
         not isinstance(score_key, list)
@@ -213,8 +213,8 @@ def _recover(
         else gate_task_summary(
             decision,
             score=None,
-            fe_valid=None,
-            fe_reasons=["no evidence collected"],
+            summary_valid=None,
+            summary_reasons=["no evidence collected"],
             health_passed=None,
             health_reasons=["no evidence collected"],
         )

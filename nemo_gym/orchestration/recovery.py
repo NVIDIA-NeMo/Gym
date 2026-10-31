@@ -125,7 +125,7 @@ class RecoveryOutcome(BaseModel):
     dispatched: str | None
     job_id: str | None = None
     unsupported: str | None = None
-    # The Day-0 gate task entry (status, expected/scored samples, score, errors, warnings); None without evidence.
+    # The acceptance gate task entry (status, expected/scored samples, score, errors, warnings); None without evidence.
     gate_task: dict[str, Any] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
@@ -1416,15 +1416,15 @@ def gate_task_summary(
     decision: RecoveryDecision,
     *,
     score: float | None,
-    fe_valid: bool | None,
-    fe_reasons: list[str],
+    summary_valid: bool | None,
+    summary_reasons: list[str],
     health_passed: bool | None,
     health_reasons: list[str],
 ) -> dict[str, Any]:
-    """One task entry of the Day-0 gate's run summary, filled from the decision and the existing validators.
+    """One task entry of the acceptance gate's run summary, filled from the decision and the existing validators.
 
     ``expected_samples`` is always the full materialized inventory; ``scored_samples`` counts only scored and
-    final-model identities, so a judge, infra, terminal or missing identity can never make them equal. FE validity
+    final-model identities, so a judge, infra, terminal or missing identity can never make them equal. Summary validity
     and response/trial health stay separate; ``None`` (unknown or missing) is a blocker, never a pass.
     """
     errors: list[str] = []
@@ -1446,9 +1446,11 @@ def gate_task_summary(
         errors.append(f"duplicate result rows: {decision.duplicate_results[:5]}")
     if decision.action == RecoveryAction.STOP:
         errors.append(f"recovery stopped: {decision.reason}")
-    if fe_valid is not True:
+    if summary_valid is not True:
         errors.append(
-            "FE validity " + ("unknown" if fe_valid is None else "failed") + (f": {fe_reasons}" if fe_reasons else "")
+            "summary validity "
+            + ("unknown" if summary_valid is None else "failed")
+            + (f": {summary_reasons}" if summary_reasons else "")
         )
     if health_passed is not True:
         errors.append(
@@ -1485,11 +1487,11 @@ RecoveryOutcome.model_rebuild()
 def quality_inputs(
     decision: RecoveryDecision, collected: CollectedEvidence, *, max_unhealthy_fraction: float | None
 ) -> tuple[bool | None, list[str], bool | None, list[str]]:
-    """FE validity and per-rollout health from the run's ``quality_summary.json``, kept separate.
+    """Summary validity and per-rollout health from the run's ``quality_summary.json``, kept separate.
 
     Validity is the health check's own accounting verdict (``run.artifacts.healthy``, null for a partial summary),
     and must count the same expected identities as the inventory. Per-rollout health is the rollout verdict count
-    (``run.verdicts``), judged only against an explicit ``max_unhealthy_fraction``; it is not ModelOpt response or
+    (``run.verdicts``), judged only against an explicit ``max_unhealthy_fraction``; it is not separately validated response or
     trial health, which this adapter has no separate evidence for. Any missing piece is ``None``.
     """
     quality = collected.quality
@@ -1503,47 +1505,52 @@ def quality_inputs(
     if raw_reasons is not None and not isinstance(raw_reasons, list):
         reason = "quality summary artifacts.unhealthy_reasons is malformed"
         return None, [reason], None, [reason]
-    fe_reasons = [str(r) for r in raw_reasons or []]
-    fe_valid = artifacts.get("healthy") if isinstance(artifacts.get("healthy"), bool) else None
+    summary_reasons = [str(r) for r in raw_reasons or []]
+    summary_valid = artifacts.get("healthy") if isinstance(artifacts.get("healthy"), bool) else None
     if artifacts.get("partial"):
-        fe_valid, fe_reasons = None, fe_reasons + ["partial summary: per-record checks not evaluated"]
+        summary_valid, summary_reasons = None, summary_reasons + ["partial summary: per-record checks not evaluated"]
     if (
         type(artifacts.get("expected")) is not int
         or artifacts["expected"] < 0
         or artifacts["expected"] != decision.expected
     ):
-        fe_valid = None if fe_valid is None else False
-        fe_reasons.append(f"summary counts {artifacts.get('expected')} expected, inventory {decision.expected}")
+        summary_valid = None if summary_valid is None else False
+        summary_reasons.append(f"summary counts {artifacts.get('expected')} expected, inventory {decision.expected}")
     verdicts = quality.get("verdicts")
     if not isinstance(verdicts, dict) or not all(
         type(verdicts.get(k)) is int and verdicts[k] >= 0 for k in ("healthy", "unhealthy", "unobserved")
     ):
-        return fe_valid, fe_reasons, None, ["no valid rollout verdict counts (non-negative integers)"]
+        return summary_valid, summary_reasons, None, ["no valid rollout verdict counts (non-negative integers)"]
     counts = f"{verdicts['healthy']} healthy, {verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved"
     if verdicts["healthy"] + verdicts["unhealthy"] + verdicts["unobserved"] != decision.expected:
-        return fe_valid, fe_reasons, None, [f"verdict counts ({counts}) do not cover the {decision.expected} expected"]
+        return (
+            summary_valid,
+            summary_reasons,
+            None,
+            [f"verdict counts ({counts}) do not cover the {decision.expected} expected"],
+        )
     if max_unhealthy_fraction is None:
-        return fe_valid, fe_reasons, None, [f"no response-health criterion configured ({counts})"]
+        return summary_valid, summary_reasons, None, [f"no response-health criterion configured ({counts})"]
     if (
         isinstance(max_unhealthy_fraction, bool)
         or not isinstance(max_unhealthy_fraction, (int, float))
         or not math.isfinite(max_unhealthy_fraction)
         or not 0 < max_unhealthy_fraction <= 1
     ):
-        return fe_valid, fe_reasons, None, [f"invalid response-health criterion {max_unhealthy_fraction!r}"]
+        return summary_valid, summary_reasons, None, [f"invalid response-health criterion {max_unhealthy_fraction!r}"]
     judged = verdicts["healthy"] + verdicts["unhealthy"]
     if verdicts["unobserved"] or not judged:
-        return fe_valid, fe_reasons, None, [f"health not observed for every rollout ({counts})"]
+        return summary_valid, summary_reasons, None, [f"health not observed for every rollout ({counts})"]
     share = verdicts["unhealthy"] / judged
-    # The criterion is a strict bound, as the Day-0 gate's "< limit": a share equal to it fails.
+    # The criterion is a strict bound, as the acceptance gate's "< limit": a share equal to it fails.
     if share >= max_unhealthy_fraction:
         return (
-            fe_valid,
-            fe_reasons,
+            summary_valid,
+            summary_reasons,
             False,
             [f"unhealthy {share:.2%} not below {max_unhealthy_fraction:.2%} ({counts})"],
         )
-    return fe_valid, fe_reasons, True, [counts]
+    return summary_valid, summary_reasons, True, [counts]
 
 
 def mlflow_errors(
@@ -1661,7 +1668,7 @@ def mlflow_errors(
     return errors
 
 
-# The Day-0 bounded failure policy: a gate passes only below this failure rate, measured before rounding.
+# The acceptance bounded failure policy: a gate passes only below this failure rate, measured before rounding.
 GATE_FAILURE_LIMIT = 0.02
 
 
@@ -2171,17 +2178,17 @@ def gate_summary_from_collected(
     mlflow_run_id: str | None = None,
     criteria: GateCriteria | None = None,
 ) -> dict[str, Any]:
-    """The Day-0 gate task entry from the collected run: decision counts, the named score and the quality summary.
+    """The acceptance gate task entry from the collected run: decision counts, the named score and the quality summary.
 
     ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
     ``criteria`` are the response and trial limits (default: the bounded failure policy's); the entry reports the
     effective values under ``criteria``.
     """
     criteria = criteria or GateCriteria()
-    fe_valid, fe_reasons, rollout_health, rollout_reasons = quality_inputs(
+    summary_valid, summary_reasons, rollout_health, rollout_reasons = quality_inputs(
         decision, collected, max_unhealthy_fraction=max_unhealthy_fraction
     )
-    # The Day-0 gate's response and trial health need their own counters and denominators; quality_summary's
+    # The acceptance gate's response and trial health need their own counters and denominators; quality_summary's
     # verdicts are per rollout, so they are reported in warnings, never used as either. A positive trial gate
     # requires source-bound operation evidence for the supported path; recovered failures remain unknown.
     trial_passed, trial_reason = trial_health(decision, collected, limit=criteria.max_trial_failure_fraction)
@@ -2204,8 +2211,8 @@ def gate_summary_from_collected(
     task = gate_task_summary(
         decision,
         score=collected.score,
-        fe_valid=fe_valid,
-        fe_reasons=fe_reasons,
+        summary_valid=summary_valid,
+        summary_reasons=summary_reasons,
         health_passed=health,
         health_reasons=health_reasons,
     )
