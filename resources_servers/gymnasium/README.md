@@ -22,7 +22,7 @@ class MyEnv(GymnasiumServer):
 
 `reset()` runs once per episode. `step()` runs after each model response and returns the 5-tuple:
 
-- **observation**: next message to the model, or `None` to end the episode.
+- **observation**: next message to the model, or `None` to end the episode. It is a string, or a Responses content list (`input_text` and `input_image` parts) when the model must see an image, such as a screenshot.
 - **reward**: per-step reward; the agent sums across steps by default.
 - **terminated**: episode ended naturally (task solved, game over).
 - **truncated**: episode cut short (step limit, timeout).

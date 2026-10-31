@@ -373,6 +373,38 @@ class TestRun:
         assert any(getattr(m, "role", None) == "user" and getattr(m, "content", "") == "obs-1" for m in turn2_input)
 
     @pytest.mark.asyncio
+    async def test_image_observations_reach_the_model(self):
+        image = {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "high"}
+        agent = _make_agent(max_steps=3)
+        call_log = _wire_mock_client(
+            agent,
+            {
+                "/reset": [{"observation": [{"type": "input_text", "text": "target:"}, image], "info": {}}],
+                "/v1/responses": [_model_response("edit"), _model_response("done")],
+                "/step": [
+                    {"observation": [{"type": "input_text", "text": "now:"}, image], "reward": 0.0},
+                    {"observation": None, "reward": 1.0, "terminated": True},
+                ],
+            },
+        )
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(responses_create_params={"input": [{"role": "user", "content": "fix"}]})
+        result = await agent.run(req, body)
+
+        assert result.reward == 1.0
+        turn1_input, turn2_input = [b.input for (_s, u, b) in call_log if u == "/v1/responses"]
+        image_parts = [
+            part
+            for m in turn2_input
+            if getattr(m, "role", None) == "user" and isinstance(m.content, list)
+            for part in m.content
+            if part["type"] == "input_image"
+        ]
+        assert len([m for m in turn1_input if getattr(m, "role", None) == "user"]) == 2
+        assert image_parts == [image, image]
+
+    @pytest.mark.asyncio
     async def test_text_only_history_replays_only_visible_assistant_text(self):
         agent = _make_agent(max_steps=3, text_only_history=True)
         call_log = _wire_mock_client(

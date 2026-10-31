@@ -1,0 +1,7 @@
+body { margin: 0; font-family: sans-serif; background: #f4f4f4; }
+#header { background: #20323f; color: white; padding: 24px 40px; }
+.menu { list-style: none; margin: 0; padding: 0 40px; background: #345; overflow: hidden; }
+.menu li { float: left; color: white; padding: 14px 24px; }
+.content { padding: 30px 40px; overflow: hidden; }
+.card { float: none; width: 360px; height: 220px; margin-right: 24px; background: white; border: 1px solid #ccc; padding: 16px; }
+#footer { clear: both; background: #20323f; color: #ccc; padding: 18px 40px; }

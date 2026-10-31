@@ -15,7 +15,7 @@
 
 import json
 from abc import abstractmethod
-from typing import Any, ClassVar, Dict, Optional
+from typing import Any, ClassVar, Dict, Optional, TypeAlias, Union
 
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
@@ -25,8 +25,13 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInputContentList,
 )
 from nemo_gym.server_runtime import BaseVerifyRequest, SimpleResourcesServer
+
+
+# The next user message: plain text, or a content list that can carry input_image parts (screenshots).
+Observation: TypeAlias = Union[str, NeMoGymResponseInputContentList]
 
 
 class EnvResetRequest(BaseModel):
@@ -35,7 +40,7 @@ class EnvResetRequest(BaseModel):
 
 
 class EnvResetResponse(BaseModel):
-    observation: Optional[str] = None
+    observation: Optional[Observation] = None
     info: dict = {}
 
 
@@ -46,7 +51,7 @@ class EnvStepRequest(BaseModel):
 
 
 class EnvStepResponse(BaseModel):
-    observation: Optional[str] = None
+    observation: Optional[Observation] = None
     reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
@@ -100,13 +105,13 @@ class GymnasiumServer(SimpleResourcesServer):
             self.checkpoint_session_ended(request)
         return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
 
-    async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
+    async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[Observation], dict]:
         return None, {}
 
     @abstractmethod
     async def step(
         self, action: NeMoGymResponse, metadata: dict, session_id: Optional[str] = None
-    ) -> tuple[Optional[str], float, bool, bool, dict]: ...
+    ) -> tuple[Optional[Observation], float, bool, bool, dict]: ...
 
     async def close_session(self, session_id: Optional[str]) -> None:
         self._cleanup_session(session_id)

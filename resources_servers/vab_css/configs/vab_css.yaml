@@ -1,0 +1,39 @@
+vab_css:
+  resources_servers:
+    vab_css:
+      allowed_agents: [gymnasium_agent]
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: VisualAgentBench VAB-CSS. The model fixes a page's CSS from screenshots; reward 1 when 1 - SSIM to the target is below 0.1.
+      value: Evaluate multimodal models as visual agents that edit CSS to match a target layout.
+      # Folder of task folders (upstream data/css_dataset). Null uses the two synthetic tasks in data/example_tasks.
+      data_dir: null
+      max_rounds: 10
+      success_distance: 0.1
+      improve_margin: 0.05
+      max_concurrent_screenshots: 8
+vab_css_gymnasium_agent:
+  responses_api_agents:
+    gymnasium_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: vab_css
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # The environment ends the episode after max_rounds model turns; one spare step is never used.
+      max_steps: 11
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/vab_css/data/example.jsonl
+
+vab_css_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vab_css_gymnasium_agent
