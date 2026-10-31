@@ -54,6 +54,7 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.task_materialization import TASK_ID_FIELDS
 
@@ -613,7 +614,10 @@ def decide_recovery(
 # Run on the cluster over the executor's SSH connection: prints ONE JSON object with identity, failure and cause
 # fields only (never answers or prompts), and the job chain's own budget files. argv[1] is the job dir.
 COLLECT_SCRIPT = (
-    "TASK_ID_FIELDS = "
+    "ACCOUNTING_UNKNOWN_PREFIX = "
+    + repr(ACCOUNTING_UNKNOWN_PREFIX)
+    + "\n"
+    + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
     + "\n"
     + r"""
@@ -726,7 +730,19 @@ try:
     offset = int(open(os.path.join(a, "rollouts_resubmit_offset")).read().strip())
 except (OSError, ValueError):
     offset = 0
-chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
+def accounting_unknown():
+    marker = os.path.join(d, ".gym_chain_incomplete")
+    try:
+        if os.path.exists(marker) and open(marker).read().startswith(ACCOUNTING_UNKNOWN_PREFIX):
+            return True
+        for name in os.listdir(d):
+            if name.startswith(".gym_followup_queued."):
+                value = open(os.path.join(d, name)).read().strip()
+                if not value.isascii() or not value.isdecimal():
+                    return True
+    except (OSError, ValueError):
+        return True
+    return False
 def sha256(path):
     try:
         source = open(path, "rb")
@@ -750,7 +766,22 @@ RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml
                  "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl"}
 source_files = (*RECEIPT_FILES.values(), "quality_summary.json", "rollouts_manifest.json", "rollouts_attempts.jsonl", "rollouts_resubmit_offset",
             "rollouts_coverage.json", "../.gym_infra_retries", "../.gym_accumulated_walltime", "../.gym_job_chain")
+def followup_snapshot():
+    # Keep scheduler state outside the installed Store artifact protocol, but bind both the dynamic
+    # claim set and its contents. Directory timestamps also detect transient creation/removal.
+    try:
+        before = os.stat(d)
+        claims = {name: sha256(os.path.join(d, name)) for name in sorted(os.listdir(d))
+                  if name.startswith(".gym_followup_queued.")}
+        after = os.stat(d)
+        identity = lambda st: (st.st_dev, st.st_ino, st.st_mtime_ns, st.st_ctime_ns)
+        return (identity(after), claims) if identity(before) == identity(after) else None
+    except (OSError, RuntimeError):
+        return None
+initial_followups = followup_snapshot()
 source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
+chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
+unknown_accounting = accounting_unknown()
 mlflow = {"live_run_id": None, "receipt": None}
 try:
     mlflow["live_run_id"] = open(os.path.join(a, "rollouts_mlflow_run_id")).read().strip()
@@ -837,14 +868,20 @@ if len(sys.argv) > 2:
         pass
 collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
                   "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
-                  "infra_retries_state": num(".gym_infra_retries")[1],
+                  "infra_retries_state": "unknown" if unknown_accounting else num(".gym_infra_retries")[1],
                   "walltime_used_s": num(".gym_accumulated_walltime")[0],
-                  "walltime_state": num(".gym_accumulated_walltime")[1], "job_chain": chain,
+                  "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store)}
 if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
     quality["source_matches"] = False
-collected["source_digests"] = source_snapshot if source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files} else None
+stable_sources = (source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files}
+                  and initial_followups is not None and initial_followups == followup_snapshot())
+collected["source_digests"] = source_snapshot if stable_sources else None
+# Do not upgrade a stale scheduler-state read into a fresh budget. The executor and generated job
+# recheck the durable unknown marker under the existing submission/admission boundary as well.
+if not stable_sources or accounting_unknown():
+    collected["infra_retries_state"] = collected["walltime_state"] = "unknown"
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 print(json.dumps(collected))
 """

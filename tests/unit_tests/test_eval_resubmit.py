@@ -301,6 +301,8 @@ def _run_prologue(prologue: str, job_dir: Path, env: dict[str, str]) -> subproce
     (bin_dir / "sbatch").chmod(0o755)
     (bin_dir / "scontrol").write_text('#!/bin/bash\necho "JobId=$SLURM_JOB_ID TimeLimit=00:30:00"\n')
     (bin_dir / "scontrol").chmod(0o755)
+    (bin_dir / "squeue").write_text('#!/bin/bash\necho "7|afternotok:5(unfulfilled)|$PWD"\n')
+    (bin_dir / "squeue").chmod(0o755)
     script = prologue + 'echo "_gym_resubmit=$_gym_resubmit"\n'
     return subprocess.run(
         ["bash", "-c", script],
@@ -995,3 +997,71 @@ def test_recover_keeps_an_eligible_infrastructure_retry_and_spent_budgets(tmp_pa
     out = recover(*_handle(job_dir))
     assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+@pytest.mark.parametrize("recover_budget", [True, False])
+def test_resubmit_refuses_old_allocation_accounting_capability(tmp_path, slurm_bin, recover_budget):
+    from nemo_gym.orchestration.executors.resume_script import ALLOCATION_ACCOUNTING_MARKER
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    old = script.replace(ALLOCATION_ACCOUNTING_MARKER + "\n", "")
+    (job_dir / "job.sh").write_text(old)
+    with pytest.raises(RuntimeError, match="predates durable allocation accounting"):
+        recover(*_handle(job_dir)) if recover_budget else resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+
+
+@pytest.mark.parametrize("state", ["durable_unknown", "empty_claim"])
+def test_manual_resubmit_does_not_queue_with_unknown_prior_accounting(tmp_path, slurm_bin, state):
+    job_dir, _, _ = _resumable_run(tmp_path)
+    if state == "durable_unknown":
+        (job_dir / ".gym_chain_incomplete").write_text("GYM_ACCOUNTING_UNKNOWN: unobserved follower\n")
+    else:
+        (job_dir / ".gym_followup_queued.101").touch()
+    with pytest.raises(RuntimeError, match="unknown"):
+        resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+
+
+@pytest.mark.parametrize("reply", ["success", "lost", "malformed"])
+def test_started_worker_waits_for_real_resubmit_wrapper_acknowledgement(tmp_path, slurm_bin, reply):
+    """Real local executor shell and generated worker, with scheduler commands stubbed and no workloads."""
+    import time
+
+    job_dir, _, resume = _resumable_run(tmp_path)
+    worker = render_resume_prologue(resume) + "\necho REACHED_WORK > reached_work\n"
+    (job_dir / "worker.sh").write_text(worker)
+    (slurm_bin / "scontrol").write_text('#!/bin/bash\necho "JobId=$SLURM_JOB_ID TimeLimit=00:30:00"\n')
+    (slurm_bin / "scontrol").chmod(0o755)
+    response = {"success": "echo 4242", "lost": "echo lost-reply; exit 1", "malformed": "echo unknown-response"}[reply]
+    (slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == --dependency=* ]]; then echo "Submitted batch job 999"; exit 0; fi\n'
+        '(SLURM_JOB_ID=4242 bash "$PWD/worker.sh"; echo $? > "$PWD/worker_exit") > "$PWD/worker.log" 2>&1 &\n'
+        "sleep 0.2\n" + response + "\n"
+    )
+    before = {name: (job_dir / name).read_bytes() for name in (RETRY_FILE_NAME, ".gym_accumulated_walltime")}
+    if reply == "success":
+        assert resubmit(*_handle(job_dir)).job_id == "4242"
+    else:
+        with pytest.raises(RuntimeError, match="Resubmit"):
+            resubmit(*_handle(job_dir))
+    for _ in range(120):
+        if (job_dir / "worker_exit").exists():
+            break
+        time.sleep(0.05)
+    assert (job_dir / "worker_exit").exists(), (job_dir / "worker.log").read_text()
+    if reply == "success":
+        assert (job_dir / "worker_exit").read_text().strip() == "0"
+        assert (job_dir / "reached_work").exists()
+    else:
+        assert (job_dir / "worker_exit").read_text().strip() == "1"
+        assert not (job_dir / "reached_work").exists()
+        assert all((job_dir / name).read_bytes() == value for name, value in before.items())
+        assert (job_dir / ".gym_chain_incomplete").read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
+    assert "4242" in (job_dir / ".gym_job_chain").read_text().split()

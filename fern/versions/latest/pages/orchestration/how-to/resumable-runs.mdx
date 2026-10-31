@@ -58,7 +58,7 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | `.gym_job_chain` | The Slurm job ID of every job in the chain, one per line. |
 | `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
 | `.gym_infra_retries` | Count of infrastructure retries so far. |
-| `.gym_followup_queued.<job ID>` | The claim that this job has queued its successor, so a requeue of the same job does not queue a second one. |
+| `.gym_followup_queued.<job ID>` | The observed successor job ID, or an unresolved submission claim. An unresolved claim cannot authorize another submission. |
 
 ## Recover from saved evidence
 
@@ -101,7 +101,7 @@ Without `--recover`, ordinary `gym eval resubmit` keeps its existing explicit-re
 ## Limits and caveats
 
 - `max_walltime` applies to all continuation paths, including `--recover`. A capped job needs permission to read and decrease its own Slurm time limit with `scontrol`; failure stops before services or another successor start. Existing job scripts are not silently rewritten: stage the new generated prologue to obtain these guards.
-- If queueing a successor fails, the job prints a warning (`Failed to submit auto-resume follow-up`) and carries on. `sbatch` can fail after it created the job, so check with `squeue --me --all`. If there is no successor, a requeue of the job queues one.
+- If queueing a successor fails, the job prints a warning (`Failed to submit auto-resume follow-up`) and carries on. `sbatch` can fail after it created the job, so check with `squeue --me --all`. A missing queue entry does not prove that a successor never ran. Automatic continuation remains stopped until the complete queue and terminal accounting are reconciled, including guard-stopped allocations. Requeueing does not repair unknown accounting or reset its stop state.
 - A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue --me --all` and cancel any job still pending, using `.gym_job_chain` for the IDs of the jobs that have run.
 - `resumable` does not work with a benchmark `command`, because resuming relies on `gym eval run`'s cache.
 - The `gym-job.json` record contains the first job's ID only.

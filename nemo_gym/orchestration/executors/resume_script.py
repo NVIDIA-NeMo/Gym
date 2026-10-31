@@ -47,6 +47,9 @@ KEEP_BUDGET_ENV = "GYM_RESUBMIT_KEEP_BUDGET"
 BOUNDED_BUDGET_MARKER = "# --- Bounded resume budgets v1 ---"
 # Capability: only PREEMPTED, NODE_FAIL and BOOT_FAIL admit an infra retry; FAILED, OUT_OF_MEMORY and DEADLINE stop.
 SCHEDULER_CAUSE_MARKER = "# --- Scheduler-cause retry admission v1 ---"
+RESUBMIT_LOCK_NAME = ".gym_resubmit.lock"
+ACCOUNTING_UNKNOWN_PREFIX = "GYM_ACCOUNTING_UNKNOWN:"
+ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
 
 _PROLOGUE_TEMPLATE = """\
@@ -61,18 +64,60 @@ _incomplete_file="$OUTPUT_DIR/{incomplete_marker_name}"
 # The chain only stops here after a job that did not finish the run: a finished run's job COMPLETEs,
 # and its follow-up never starts. So the stop exits non-zero, and sacct does not read the run as done.
 _gym_stop_incomplete() {{
-    echo "$1" > "$_incomplete_file"
+    if ! grep -q '^{accounting_unknown_prefix}' "$_incomplete_file" 2>/dev/null; then
+        echo "$1" > "$_incomplete_file"
+    fi
     echo "$1"
     exit 1
 }}
+
+_gym_stop_accounting_unknown() {{
+    echo "{accounting_unknown_prefix} $1" > "$_incomplete_file"
+    _gym_stop_incomplete "$1"
+}}
+
+{allocation_accounting_marker}
+# Every started allocation is spent history, including one that stops in a guard below.
+# Keep it before any reset or accounting query; a later reader must account for this allocation too.
+_gym_existing_chain=""
+if [[ -e "$OUTPUT_DIR/{job_chain_name}" ]]; then
+    _gym_existing_chain=$(cat "$OUTPUT_DIR/{job_chain_name}") || _gym_stop_accounting_unknown "Recorded allocation history is unreadable."
+fi
+[[ "${{SLURM_JOB_ID:-}}" =~ ^[0-9]+$ ]] || _gym_stop_accounting_unknown "Current allocation identity is unknown."
+if ! grep -qxF "$SLURM_JOB_ID" "$OUTPUT_DIR/{job_chain_name}" 2>/dev/null; then
+    echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}" || _gym_stop_accounting_unknown "Cannot record the allocation."
+fi
+# A manually submitted worker can start before sbatch returns to its caller. The existing submission
+# lock keeps it from resetting counters until the caller has either confirmed the reply or recorded uncertainty.
+for _gym_submit_wait in {{1..30}}; do
+    [[ -e "$OUTPUT_DIR/{resubmit_lock_name}" ]] || break
+    sleep 1
+done
+[[ ! -e "$OUTPUT_DIR/{resubmit_lock_name}" ]] || \
+    _gym_stop_accounting_unknown "Submission acknowledgement is still unresolved."
+if grep -q '^{accounting_unknown_prefix}' "$_incomplete_file" 2>/dev/null; then
+    _gym_stop_incomplete "Allocation accounting remains unknown; reconcile the complete queue and terminal chain before recovery."
+fi
+# An unresolved earlier claim can name a job whose sbatch reply was lost. Its absence from squeue
+# does not prove that it never ran. The current allocation's own claim is checked below.
+for _claim in "$OUTPUT_DIR"/.gym_followup_queued.*; do
+    [[ -e "$_claim" ]] || continue
+    [[ "$_claim" == "$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID" ]] && continue
+    _claimed_id=$(cat "$_claim" 2>/dev/null) || _gym_stop_accounting_unknown "A predecessor follow-up claim is unreadable."
+    [[ "$_claimed_id" =~ ^[0-9]+$ ]] || _gym_stop_accounting_unknown "A predecessor follow-up submission is unobserved."
+done
+if [[ -n "$_gym_existing_chain" && -z "$_prev_slurm_job_id" && "${{{resubmit_env}:-}}" != 1 ]]; then
+    [[ "${{_gym_existing_chain##*$'\n'}}" == "$SLURM_JOB_ID" ]] || \
+        _gym_stop_accounting_unknown "A manual follower has no predecessor accounting."
+fi
 
 # A Slurm requeue restarts the same job id and may restart its allocation clock. The persisted counters
 # do not identify elapsed time of that prior incarnation. Stop before resets/accounting/work instead of
 # charging the predecessor twice or granting an unaccounted allocation.
 _gym_restart_count="${{SLURM_RESTART_COUNT:-0}}"
-[[ "$_gym_restart_count" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_incomplete "Slurm restart accounting is unknown."
+[[ "$_gym_restart_count" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_accounting_unknown "Slurm restart accounting is unknown."
 if (( 10#$_gym_restart_count > 0 )); then
-    _gym_stop_incomplete "Requeued allocation elapsed time is unknown; recover only after complete terminal accounting."
+    _gym_stop_accounting_unknown "Requeued allocation elapsed time is unknown; recover only after complete terminal accounting."
 fi
 
 # A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
@@ -81,9 +126,6 @@ fi
 _gym_resubmit="${{{resubmit_env}:-}}"
 _gym_keep_budget="${{{keep_budget_env}:-}}"
 unset {resubmit_env} {keep_budget_env}
-if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
-    rm -f "$_retry_file" "$_walltime_file"
-fi
 
 {bounded_budget_marker}
 {scheduler_cause_marker}
@@ -91,15 +133,21 @@ fi
 _gym_accumulated=0
 _retries=0
 if [[ -e "$_walltime_file" ]]; then
-    _gym_accumulated=$(cat "$_walltime_file") || _gym_stop_incomplete "Cannot read stored walltime."
+    _gym_accumulated=$(cat "$_walltime_file") || _gym_stop_accounting_unknown "Cannot read stored walltime."
 fi
 if [[ -e "$_retry_file" ]]; then
-    _retries=$(cat "$_retry_file") || _gym_stop_incomplete "Cannot read stored retries."
+    _retries=$(cat "$_retry_file") || _gym_stop_accounting_unknown "Cannot read stored retries."
 fi
-[[ "$_gym_accumulated" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_incomplete "Stored walltime is unknown or malformed."
-[[ "$_retries" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_incomplete "Stored retries are unknown or malformed."
+[[ "$_gym_accumulated" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_accounting_unknown "Stored walltime is unknown or malformed."
+[[ "$_retries" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_accounting_unknown "Stored retries are unknown or malformed."
 _gym_accumulated=$((10#$_gym_accumulated))
 _retries=$((10#$_retries))
+# An explicit reset is permitted only after the old counters are readable and known.
+if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
+    rm -f "$_retry_file" "$_walltime_file"
+    _gym_accumulated=0
+    _retries=0
+fi
 _gym_needs_retry=0
 _gym_stop_reason=""
 
@@ -113,7 +161,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         fi
         sleep 10
     done
-    [[ "$_accounting" != *$'\n'* ]] || _gym_stop_incomplete "Previous job accounting has multiple rows."
+    [[ "$_accounting" != *$'\n'* ]] || _gym_stop_accounting_unknown "Previous job accounting has multiple rows."
     IFS='|' read -r _prev_state _prev_elapsed _extra <<< "$_accounting"
     _prev_state=${{_prev_state%% *}}
     _prev_state=${{_prev_state%+}}
@@ -135,10 +183,10 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             # Stop after the elapsed time is counted below; a typed recovery goes through "gym eval resubmit --recover".
             _gym_stop_reason="Previous job $_prev_slurm_job_id ended $_prev_state without an infrastructure cause. Chain stopped with rollouts missing; it does not retry." ;;
         *)
-            _gym_stop_incomplete "Previous job state is unknown or nonterminal; refusing to resume." ;;
+            _gym_stop_accounting_unknown "Previous job state is unknown or nonterminal; refusing to resume." ;;
     esac
     [[ -z "$_extra" && "$_prev_elapsed" =~ ^[0-9]{{1,15}}$ ]] || \
-        _gym_stop_incomplete "Previous job elapsed accounting is unknown or malformed."
+        _gym_stop_accounting_unknown "Previous job elapsed accounting is unknown or malformed."
     _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed))
     echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
 elif [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" == 1 ]]; then
@@ -153,8 +201,8 @@ fi
 if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ) ]]; then
     if [[ "$_prev_state" == FAILED || "$_prev_state" == TIMEOUT || "$_prev_state" == PREEMPTED || "$_prev_state" == NODE_FAIL || "$_prev_state" == BOOT_FAIL ]]; then
         _gym_exit_code=$(sacct -X -P -n -j "$_prev_slurm_job_id" --format=ExitCode) || \
-            _gym_stop_incomplete "Previous exit accounting is unknown."
-        [[ "$_gym_exit_code" =~ ^[0-9]+:[0-9]+$ ]] || _gym_stop_incomplete "Previous exit accounting is malformed."
+            _gym_stop_accounting_unknown "Previous exit accounting is unknown."
+        [[ "$_gym_exit_code" =~ ^[0-9]+:[0-9]+$ ]] || _gym_stop_accounting_unknown "Previous exit accounting is malformed."
         {runtime_admission_marker}
         _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "Installed recovery runtime failed."
         _gym_admission=$(printf '%s\n' "$_gym_admission_output" | grep '^__GYM_CONTINUATION:' || true)
@@ -179,11 +227,10 @@ fi
 
 # This job continues the run, so an earlier stop no longer describes it.
 rm -f "$_incomplete_file"
-echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}" || _gym_stop_incomplete "Cannot record the allocation."
 # A requeued job keeps its job id and runs this script again. One follow-up per job id: the marker is a
 # claim on it, taken with an O_EXCL create (bash noclobber, not mkdir: uutils coreutils 0.10.0's mkdir tells
 # concurrent callers that both succeeded). A claim with no follow-up pending on this job was left by a shell
-# that died before sbatch answered, or by an sbatch that failed; replace it.
+# that died before sbatch answered, or by an sbatch that failed. Absence from the queue is not proof it never ran.
 _guard_marker="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
 _gym_claim_followup() {{ (set -C; : > "$_guard_marker") 2>/dev/null; }}
 _gym_queue_followup=1
@@ -196,35 +243,35 @@ if ! _gym_claim_followup; then
     # --all: without it squeue does not list jobs, ours included, in a hidden partition.
     if ! _pending=$(squeue --me --all --noheader --states=PENDING --format='%i|%E|%Z' 2>&1); then
         # Unknown is not none: a second follow-up would run the job dir twice, so keep the claim.
-        echo "WARNING: squeue failed ($_pending); cannot tell whether job $SLURM_JOB_ID has a follow-up, so none is queued."
+        _gym_stop_accounting_unknown "squeue failed; existing follow-up accounting is unknown."
     elif _followup=$(
             while IFS='|' read -r _id _deps _cwd; do
                 [[ -n "$_cwd" && "$_cwd" -ef "$OUTPUT_DIR" ]] || continue
                 if grep -qE "(^|[ ,])afternotok:$SLURM_JOB_ID([(,]|$)" <<< "$_deps"; then
                     echo "$_id"
-                    break
                 fi
             done <<< "$_pending"
-        ) && [[ -n "$_followup" ]]; then
+        ) && [[ "$_followup" =~ ^[0-9]+$ ]]; then
+        echo "$_followup" > "$_guard_marker" || _gym_stop_accounting_unknown "Cannot preserve the observed follow-up."
         echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued: $_followup (requeued job). Not queueing another."
     else
-        echo "Follow-up claim of job $SLURM_JOB_ID has no pending follow-up (submission interrupted or failed). Queueing one."
-        rm -rf -- "$_guard_marker"
-        _gym_claim_followup && _gym_queue_followup=1
+        _gym_stop_accounting_unknown "The existing follow-up claim has no unique observed pending job; it may already have run."
     fi
 fi
 if [[ $_gym_queue_followup == 1 ]]; then
     # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
     if _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
-        _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
-        if [[ -n "$_next_id" ]]; then
-            echo "$_next_id" > "$_guard_marker"
+        _next_id="${{_next_output##* }}"
+        if [[ "$_next_id" =~ ^[0-9]+$ ]]; then
+            echo "$_next_id" > "$_guard_marker" || _gym_stop_accounting_unknown "Cannot preserve the queued follow-up identity."
             echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
+        else
+            echo "{accounting_unknown_prefix} Follow-up submission returned no unique job identity." > "$_incomplete_file"
         fi
     else
-        # Keep the claim: sbatch can fail after the job was created (a lost reply). A requeue of this job asks
-        # squeue, and queues the follow-up only if none is pending.
-        echo "WARNING: Failed to submit auto-resume follow-up. The chain may not continue on failure; a requeue of this job queues one if squeue shows none pending."
+        # The current allocation can finish, but a successor must not erase this uncertainty or reset budgets.
+        echo "{accounting_unknown_prefix} Follow-up submission may have succeeded without an observed reply." > "$_incomplete_file"
+        echo "WARNING: Failed to submit auto-resume follow-up. Inspect the complete queue and terminal accounting; automatic continuation is stopped."
     fi
 fi
 """
@@ -319,6 +366,9 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         bounded_budget_marker=BOUNDED_BUDGET_MARKER,
         scheduler_cause_marker=SCHEDULER_CAUSE_MARKER,
         max_walltime_check=max_walltime_check,
+        resubmit_lock_name=RESUBMIT_LOCK_NAME,
+        accounting_unknown_prefix=ACCOUNTING_UNKNOWN_PREFIX,
+        allocation_accounting_marker=ALLOCATION_ACCOUNTING_MARKER,
         runtime_admission_marker=(
             RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"
         ),
