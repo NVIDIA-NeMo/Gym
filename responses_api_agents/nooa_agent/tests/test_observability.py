@@ -988,3 +988,27 @@ def test_the_root_atom_session_is_parented_to_the_trace_session_that_opened_it(m
         {observability.ATOM_SESSION_ID_ATTR: "child", observability.ATOM_SESSION_PARENT_ATTR: "root-atom"}
     )
     assert observability._current_atom_session() == ("child", "root-atom")
+
+
+def test_a_session_opened_inside_a_code_cell_records_that_cell_as_its_spawner(monkeypatch) -> None:
+    from responses_api_agents.nooa_agent import observability
+
+    sessions = iter([("root-session", None), ("child-session", "root-session"), ("child-session", "root-session")])
+    monkeypatch.setattr(observability, "_current_atom_session", lambda: next(sessions))
+    trace = GymTraceHooks()
+    root = trace.before_agent_call(call_id="call-root", parent_call_id=None)
+    cell = trace.before_code_execution(code="await self.delegate('x', 'y')", execution_id="cell-1")
+    child = trace.before_agent_call(call_id="call-child", parent_call_id=None)
+    trace.after_agent_call(context=child, exception=None)
+    # A later turn of the same session was not spawned by anything.
+    later = trace.before_agent_call(call_id="call-child-2", parent_call_id="call-child")
+    trace.after_agent_call(context=later, exception=None)
+    trace.after_code_execution(context=cell, result=None, exception=None)
+    trace.after_agent_call(context=root, exception=None)
+
+    invocations = trace._invocations
+    assert invocations["call-child"].spawned_by_tool_call_id == "cell-1"
+    assert invocations["call-child"].parent_invocation_id == "call-root"
+    assert invocations["call-child-2"].spawned_by_tool_call_id is None
+    assert invocations["call-root"].spawned_by_tool_call_id is None
+    assert trace._current_tool.get() is None

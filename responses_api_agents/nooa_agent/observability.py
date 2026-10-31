@@ -107,6 +107,7 @@ class _ToolCall:
     observation: TrajectoryToolCall
     arguments: dict[str, Any]
     started: float
+    token: Token[str | None] | None = None
 
 
 class GymTraceHooks:
@@ -118,6 +119,8 @@ class GymTraceHooks:
 
     def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
+        # The tool call executing in this context: a child session opened from inside a code cell was spawned by it.
+        self._current_tool: ContextVar[str | None] = ContextVar("gym_nooa_tool_call", default=None)
         self._invocations: dict[str, AgentInvocation] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._python_outputs: dict[tuple[str, str], str] = {}
@@ -153,12 +156,16 @@ class GymTraceHooks:
         session_id, parent_session_id = _current_atom_session()
         if parent_call_id is None and parent_session_id is not None:
             parent_call_id = self._session_openers.get(parent_session_id)
-        if session_id is not None:
-            self._session_openers.setdefault(session_id, call_id)
+        spawned_by = None
+        if session_id is not None and session_id not in self._session_openers:
+            self._session_openers[session_id] = call_id
+            # A session opened from inside the parent's code cell (delegate, send_child) was spawned by that cell.
+            spawned_by = self._current_tool.get() if parent_session_id is not None else None
         self._invocations[call_id] = AgentInvocation(
             invocation_id=call_id,
             parent_invocation_id=parent_call_id,
             harness_session_id=session_id,
+            spawned_by_tool_call_id=spawned_by,
             status="incomplete",
         )
         return _AgentCall(call_id, perf_counter(), self._current.set(call_id))
@@ -201,6 +208,7 @@ class GymTraceHooks:
             arguments,
             perf_counter(),
         )
+        event.token = self._current_tool.set(call_id)
         self._events.append(event)
         return event
 
@@ -214,6 +222,13 @@ class GymTraceHooks:
             record.output = {"error": str(exception), "error_type": record.error_type}
         elif record.status == "incomplete":
             record.status = "completed"
+        if event.token is not None:
+            try:
+                self._current_tool.reset(event.token)
+            except ValueError:
+                # Finished from another context (a cancelled cell reported by its awaiter): the call is over either way.
+                self._current_tool.set(None)
+            event.token = None
         if self._on_progress is not None:
             self._on_progress()
 
