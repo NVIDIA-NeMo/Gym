@@ -307,6 +307,62 @@ def test_stop_file_stops_the_harness_with_term_first(tmp_path: Path) -> None:
 
 
 @linux_only
+@pytest.mark.parametrize("requested", ["before_launch", "while_running"])
+def test_expire_file_ends_the_harness_as_a_timeout(tmp_path: Path, requested: str) -> None:
+    # A rollout stop moves the deadline to now through this file; the receipt then reads as a timeout.
+    expire = tmp_path / "expire.request"
+    if requested == "before_launch":
+        expire.touch()
+    worker = "trap 'echo saved > checkpoint; exit 0' TERM; touch ready; while :; do sleep 0.05; done"
+    process = subprocess.Popen(
+        ["bash", SUPERVISOR, "--timeout", "60", "--cleanup-timeout", "2", "--receipt", str(tmp_path / "cleanup.json")]
+        + ["--stop-file", str(tmp_path / "stop.request"), "--expire-file", str(expire), "--", "bash", "-c", worker],
+        cwd=tmp_path,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+    try:
+        if requested == "while_running":
+            deadline = time.monotonic() + 10
+            while not (tmp_path / "ready").exists():
+                assert process.poll() is None and time.monotonic() < deadline
+                time.sleep(0.01)
+            expire.touch()
+        _, stderr = process.communicate(timeout=10)
+        assert process.returncode == 0, stderr
+        receipt = _receipt(tmp_path)
+        if requested == "before_launch":
+            assert receipt == {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": True}
+            assert not (tmp_path / "ready").exists()
+        else:
+            # Ended through the timeout path: TERM first, so the harness could save its work.
+            assert receipt == {"cleanup_confirmed": True, "return_code": 0, "error": None, "timed_out": True}
+            assert (tmp_path / "checkpoint").read_text() == "saved\n"
+        assert expire.exists(), "the supervisor never deletes the expire file"
+    finally:
+        if process.poll() is None:
+            process.kill()
+            process.wait()
+
+
+@linux_only
+def test_stop_file_wins_over_an_expire_file_before_launch(tmp_path: Path) -> None:
+    (tmp_path / "stop.request").touch()
+    (tmp_path / "expire.request").touch()
+    result = subprocess.run(
+        ["bash", SUPERVISOR, "--timeout", "10", "--cleanup-timeout", "1", "--receipt", str(tmp_path / "cleanup.json")]
+        + ["--stop-file", str(tmp_path / "stop.request"), "--expire-file", str(tmp_path / "expire.request")]
+        + ["--", "touch", str(tmp_path / "started")],
+        capture_output=True,
+        text=True,
+        timeout=10,
+    )
+    assert result.returncode == 0, result.stderr
+    assert _receipt(tmp_path) == {"cleanup_confirmed": True, "return_code": None, "error": None, "timed_out": False}
+    assert not (tmp_path / "started").exists()
+
+
+@linux_only
 @pytest.mark.parametrize("ending", ["normal", "crash", "timeout", "cancel", "grace", "stubborn", "killed"])
 @pytest.mark.parametrize("detached", [False, True])
 def test_only_detached_services_survive_harness_group_termination(tmp_path: Path, ending: str, detached: bool) -> None:

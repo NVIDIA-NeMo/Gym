@@ -425,6 +425,19 @@ class SupportsSandboxPullPolicy(Protocol):
 
 
 @runtime_checkable
+class SupportsSandboxIndependentUploads(Protocol):
+    """Optional provider capability: a file upload never waits for capacity that running commands hold.
+
+    A provider that bounds its concurrent operations with one limit shared by commands and file transfers
+    (CLI slots, worker threads, pooled connections) cannot promise this: once long-running commands hold every
+    slot, an upload waits until one of them ends. ``SandboxSession.expire`` needs it to stop a running harness,
+    because the stop is a file the harness's supervisor watches for. The answer may depend on configuration.
+    """
+
+    def uploads_independent_of_execs(self) -> bool: ...
+
+
+@runtime_checkable
 class SupportsSandboxEndpoint(Protocol):
     """Optional provider capability for resolving declared service ports."""
 

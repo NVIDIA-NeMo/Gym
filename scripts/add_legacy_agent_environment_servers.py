@@ -60,6 +60,8 @@ from pathlib import Path
 
 import yaml
 
+from nemo_gym.config import AGENT_SESSION_AGENT_TYPES
+
 
 REPO = Path(__file__).resolve().parents[1]
 ROOTS = ("benchmarks", "environments", "resources_servers", "responses_api_agents", "responses_api_models")
@@ -82,7 +84,7 @@ TYPED_SEED = "ResourcesSeedSessionRequest"
 RELAY = "legacy_agent"
 SWITCHED_AGENT_TYPE = "simple_agent"
 # Without a resources_server, the server binds its agent's, so it follows an `_inherit_from` agent rename.
-# The timeouts are the relay's own defaults, which the relay did not enforce and this server does.
+# The server defaults preserve the migrated relay's timeouts without repeating them in every config.
 SWITCHED = """\
 {server}:
   environment_servers:
@@ -93,8 +95,6 @@ SWITCHED = """\
         name: {agent}
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 """
 # A relay that inherits another keeps inheriting it, so the parent stays a template that composition consumes.
 # The parent switches in the same run, so the merge holds one environment server type.
@@ -155,22 +155,7 @@ def needs_environment_server(instance: dict) -> bool:
     # Explicitly unbound templates for agent sessions do not use the compatibility /run route.
     # A legacy relay would conflict with the Environment Server supplied by composition.
     # An omitted binding can inherit Resources and must still migrate.
-    if (
-        agent_type
-        in {
-            "hermes_agent",
-            "pi_agent",
-            "codex_agent",
-            "openclaw_agent",
-            "opencode_agent",
-            "kilocode_agent",
-            "claude_code_agent",
-            "harbor_oracle_agent",
-            "terminus_2_sandboxed_agent",
-            "miniswe_sandboxed_agent",
-        }
-        and resources_server is None
-    ):
+    if agent_type in AGENT_SESSION_AGENT_TYPES and resources_server is None:
         return False
     # Stirrup runs only in agent sessions and has no /run for a legacy relay to call.
     if agent_type == "stirrup_agent":
