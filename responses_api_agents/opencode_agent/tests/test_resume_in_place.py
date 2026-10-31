@@ -24,7 +24,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.agents import AgentSeedSessionRequest, NotResumable, RestoredLaunch, SandboxSession
+from nemo_gym.agents import AgentSeedSessionRequest, ClockRewind, NotResumable, RestoredLaunch, SandboxSession
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox import AsyncSandbox
 from nemo_gym.testing.checkpoint_conformance import _AUTH, TOKEN, LocalExecProvider, _control
@@ -119,6 +119,14 @@ class InPlaceFixture(OpenCodeFixture):
         with socket.socket() as probe:
             probe.bind(("127.0.0.1", 0))
             self.relay_port = probe.getsockname()[1]
+        # The sandbox is this machine: record instead of stopping its time daemons.
+        self.clock_sync_calls: list[Any] = []
+
+        async def record_clock_sync(sandbox: Any, *, timeout: float) -> tuple[str, ...]:
+            self.clock_sync_calls.append(sandbox)
+            return ()
+
+        monkeypatch.setattr(opencode_app, "disable_clock_sync", record_clock_sync)
 
     def make_agent(self, global_config: dict[str, Any], *, model_url: str) -> Any:
         agent = super().make_agent(global_config)
@@ -193,6 +201,16 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
     crashed_server, new_server = ModelServer(answer=False), ModelServer(answer=True)
     endpoints_at_continue: list[dict[str, Any]] = []
     original_continue = SandboxSession.continue_harness
+    restore_steps: list[str] = []
+    original_rewind, original_check = opencode_app.rewind_clock, opencode_app.check_restored
+
+    async def recording_rewind(*args: Any, **kwargs: Any) -> Any:
+        restore_steps.append("rewind_clock")
+        return await original_rewind(*args, **kwargs)
+
+    async def recording_check(*args: Any, **kwargs: Any) -> Any:
+        restore_steps.append("check_restored")
+        return await original_check(*args, **kwargs)
 
     async def recording_continue(session: SandboxSession, **kwargs: Any) -> Any:
         endpoint = Path(session.session_dir) / RELAY_ENDPOINT_FILE
@@ -203,6 +221,8 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
         config, _crashed = await _crash_after_a_checkpoint(fixture, tmp_path / "state", crashed_server)
         harness = fixture.harness_pids()
         monkeypatch.setattr(SandboxSession, "continue_harness", recording_continue)
+        monkeypatch.setattr(opencode_app, "rewind_clock", recording_rewind)
+        monkeypatch.setattr(opencode_app, "check_restored", recording_check)
         caplog.set_level(logging.WARNING)
         _, http = await _replacement(fixture, config, tmp_path / "state", new_server.url)
         fixture.finish()
@@ -221,6 +241,11 @@ async def test_a_restore_that_kept_the_processes_continues_the_same_launch_again
         # The relay was pointed at the replacement attempt before the launch continued.
         assert endpoints_at_continue[0]["gen"] == 2 and "/r-a1" in endpoints_at_continue[0]["upstream"]
         assert "OpenCode resumed in place: session kept, launch 1, pause 1, relay generation 2" in caplog.text
+        # The setup stopped the sandbox's time daemons; the restore looked at its clock before anything else. This
+        # machine never stopped, so its clock had stayed continuous and was left alone.
+        assert len(fixture.clock_sync_calls) == 1
+        assert restore_steps == ["rewind_clock", "check_restored"]
+        assert "OpenCode left the sandbox clock: session kept, reason continuous" in caplog.text
     finally:
         fixture.finish()
         crashed_server.stop()
@@ -322,6 +347,79 @@ async def test_a_restored_session_without_a_held_pause_has_nothing_to_take_over(
     await agent._check_restored_launch(state, {"session_root": "/s", "session_dir": "/s", "launch_started": True})
 
     assert state.adoption is None
+
+
+# -- the sandbox clock after a restore --------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "rewind, logged",
+    [
+        (
+            ClockRewind(applied=True, shift_s=86400.4, touched=3),
+            "OpenCode restored the sandbox clock: session s, shifted 86400 s, touched 3 files",
+        ),
+        (
+            ClockRewind(applied=False, shift_s=0.2, reason="continuous"),
+            "OpenCode left the sandbox clock: session s, reason continuous",
+        ),
+        (
+            ClockRewind(applied=False, reason="set_failed"),
+            "OpenCode left the sandbox clock: session s, reason set_failed",
+        ),
+    ],
+    ids=["rewound", "continuous", "cannot_set"],
+)
+async def test_a_restore_sets_the_clock_back_from_the_pause_it_held(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    caplog: pytest.LogCaptureFixture,
+    rewind: ClockRewind,
+    logged: str,
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    calls: list[dict[str, Any]] = []
+
+    async def record_rewind(sandbox: Any, **kwargs: Any) -> ClockRewind:
+        calls.append(kwargs)
+        return rewind
+
+    monkeypatch.setattr(opencode_app, "rewind_clock", record_rewind)
+    caplog.set_level(logging.WARNING)
+
+    saved = {"pause_seq": 3, "supervisor_identity": "10.20", "pause_wall": 1000.5, "pause_uptime": 50.25}
+    await agent._rewind_restored_clock(state, MagicMock(), saved, ["/work", None, "/sessions/s", "/tmp"])
+
+    assert calls[0]["pause_wall"] == 1000.5 and calls[0]["pause_uptime"] == 50.25
+    assert calls[0]["touch_dirs"] == ["/work", "/sessions/s", "/tmp"]
+    assert logged in caplog.text
+
+
+async def test_a_restore_without_recorded_clocks_or_with_a_failing_rewind_goes_on(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    monkeypatch.setattr(opencode_app, "rewind_clock", MagicMock(side_effect=AssertionError("no clocks: not rewound")))
+
+    await agent._rewind_restored_clock(state, MagicMock(), {"pause_seq": 3}, ["/work"])
+
+    async def failing_rewind(sandbox: Any, **kwargs: Any) -> ClockRewind:
+        raise RuntimeError("sandbox unreachable")
+
+    monkeypatch.setattr(opencode_app, "rewind_clock", failing_rewind)
+    await agent._rewind_restored_clock(state, MagicMock(), {"pause_wall": 1.0, "pause_uptime": 2.0}, ["/work"])
+
+
+async def test_stopping_the_time_daemons_never_fails_a_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+
+    async def failing(sandbox: Any, *, timeout: float) -> tuple[str, ...]:
+        raise RuntimeError("no systemctl")
+
+    monkeypatch.setattr(opencode_app, "disable_clock_sync", failing)
+    await agent._disable_clock_sync(MagicMock(), "s")
 
 
 # -- the launch's model URL and relay -------------------------------------------------------------------------------

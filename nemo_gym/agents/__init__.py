@@ -55,6 +55,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.agents.skills import stage_skills
     from nemo_gym.agents.utils.run_until_parked import Finished, Stopped, run_until_parked
+    from nemo_gym.agents.utils.sandbox_clock import ClockRewind, disable_clock_sync, rewind_clock
     from nemo_gym.agents.utils.sandbox_session import (
         HARNESS_COMMAND_NOT_STARTED,
         HARNESS_RUNNER_FAILED,
@@ -111,6 +112,7 @@ _PUBLIC_API = {
     "Body": "base_responses_api_agent",
     "CLEANUP_PHASE_COUNT": "utils.supervisor_client",
     "CleanupReceipt": "utils.supervisor_client",
+    "ClockRewind": "utils.sandbox_clock",
     "DEFAULT_CLEANUP_TIMEOUT": "utils.supervisor_client",
     "DEFAULT_UV_CACHE_DIR": "utils.uv_bootstrap",
     "Finished": "utils.run_until_parked",
@@ -140,10 +142,12 @@ _PUBLIC_API = {
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "exec_idempotent": "utils.setup_retry",
     "check_restored": "utils.supervisor_client",
+    "disable_clock_sync": "utils.sandbox_clock",
     "exec_timeout": "utils.supervisor_client",
     "parse_cleanup_receipt": "utils.supervisor_client",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",
+    "rewind_clock": "utils.sandbox_clock",
     "run_until_parked": "utils.run_until_parked",
     "sandbox_server_url": "agent_tools",
     "seed_mcp_servers": "agent_tools",

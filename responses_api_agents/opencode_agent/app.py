@@ -54,8 +54,10 @@ from nemo_gym.agents import (
     Stopped,
     abandon_launch,
     check_restored,
+    disable_clock_sync,
     exec_idempotent,
     resolve_agent_timeout,
+    rewind_clock,
     run_until_parked,
 )
 from nemo_gym.client import get_response_json, raise_for_status
@@ -296,6 +298,11 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # The sandbox port of the model relay OpenCode calls the model through, on a sandbox whose snapshots keep
     # processes: a restore re-points the relay at the replacement attempt while OpenCode keeps running.
     sandbox_model_relay_port: int = Field(default=18431, gt=0, lt=65536)
+    # On a sandbox whose snapshots keep processes, keep its wall clock continuous across a restore: stop its time
+    # daemons at setup, and after a restore set the clock back to where it would be had the sandbox never stopped
+    # (the provider sets it to the host's when it resumes). The sandbox's clock then lags real time by the time it
+    # spent stopped.
+    restore_sandbox_clock: bool = True
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -913,6 +920,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             pause_mode="hold" if state.keeps_processes else "stop",
         )
         root = session.session_root
+        if state.keeps_processes and self.config.restore_sandbox_clock:
+            # First, while the restored harness has had the least time to write under the resumed clock.
+            await self._rewind_restored_clock(state, sandbox, saved_session, [access.workdir, root, "/tmp"])
         files = (f"{state.runtime}/opencode", f"{root}/{HARNESS_RUNNER_FILE}", f"{root}/{RESUME_SCRIPT.name}")
         if state.keeps_processes:
             files += (f"{root}/{MODEL_RELAY_SCRIPT.name}",)
@@ -940,6 +950,45 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if state.keeps_processes:
             await self._check_restored_launch(state, saved_session)
         return state
+
+    async def _rewind_restored_clock(
+        self,
+        state: OpenCodeSandboxSession,
+        sandbox: AsyncSandbox,
+        saved: Mapping[str, Any],
+        touch_dirs: list[str | None],
+    ) -> None:
+        """Set a restored sandbox's wall clock back to the checkpoint's plus the time the sandbox ran since.
+
+        Needs the clocks the held pause recorded; a failure is logged and never fails the seed.
+        """
+        pause_wall, pause_uptime = saved.get("pause_wall"), saved.get("pause_uptime")
+        if pause_wall is None or pause_uptime is None:
+            return
+        try:
+            rewind = await rewind_clock(
+                sandbox,
+                pause_wall=pause_wall,
+                pause_uptime=pause_uptime,
+                touch_dirs=[directory for directory in touch_dirs if directory],
+                timeout=self.config.session_close_timeout_seconds,
+            )
+        except Exception:
+            LOG.exception("OpenCode could not restore the sandbox clock of session %s", state.request.agent_session_id)
+            return
+        if rewind.applied:
+            LOG.warning(
+                "OpenCode restored the sandbox clock: session %s, shifted %.0f s, touched %d files",
+                state.request.agent_session_id,
+                rewind.shift_s,
+                rewind.touched,
+            )
+        else:
+            LOG.warning(
+                "OpenCode left the sandbox clock: session %s, reason %s",
+                state.request.agent_session_id,
+                rewind.reason,
+            )
 
     async def _check_restored_launch(self, state: OpenCodeSandboxSession, saved: Mapping[str, Any]) -> None:
         """Decide what becomes of the launch a process-keeping restore brought back: take it over, or end it.
@@ -1127,6 +1176,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             await self._install_session_files(
                 sandbox, directory, workdir, runtime, checkpointed=checkpointed, model_relay=keeps_processes
             )
+            if keeps_processes and self.config.restore_sandbox_clock:
+                await self._disable_clock_sync(sandbox, body.agent_session_id)
         except BaseException as error:
             try:
                 if prepared_directory or owns_sandbox:
@@ -1204,6 +1255,16 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         if missing:
             return "Required Gym MCP tools could not be initialized: " + "; ".join(missing), None
         return None, None
+
+    async def _disable_clock_sync(self, sandbox: AsyncSandbox, agent_session_id: str) -> None:
+        """Stop the sandbox's time daemons, which would move a restored clock forward again; best effort."""
+        try:
+            stopped = await disable_clock_sync(sandbox, timeout=self.config.session_close_timeout_seconds)
+        except Exception:
+            LOG.exception("OpenCode could not stop the time daemons of session %s", agent_session_id)
+            return
+        if stopped:
+            LOG.info("OpenCode stopped the time daemons of session %s: %s", agent_session_id, ", ".join(stopped))
 
     async def _install_session_files(
         self,

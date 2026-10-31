@@ -259,9 +259,15 @@ relaunched when it need not be:
   same way. Otherwise the launch is killed, nothing of it continuing, and relaunched as above.
 - **Without Python 3.6 or later in the task image** there is no relay: OpenCode calls the model server directly, and a
   restore relaunches it.
+- **The wall clock** stays continuous: the provider sets a resumed sandbox's clock to the host's, so the re-bind first
+  sets it back to the checkpoint's plus the time the sandbox ran since (`restore_sandbox_clock`), and gives files
+  written in between that time. Session setup stops the image's time daemons (systemd-timesyncd, chrony, ntpd), which
+  would pull it forward again. `date`, new files and OpenCode's date then read as if the sandbox had never stopped;
+  the sandbox's clock lags real time by the time it spent stopped, which requests it signs with the time (cloud APIs,
+  short-lived tokens) or a freshly rotated TLS certificate could notice.
 
-The agent logs `OpenCode resumed in place:`, `OpenCode cannot resume in place:` and `OpenCode abandoned a restored
-launch:` at WARNING.
+The agent logs `OpenCode resumed in place:`, `OpenCode cannot resume in place:`, `OpenCode abandoned a restored
+launch:`, `OpenCode restored the sandbox clock:` and `OpenCode left the sandbox clock:` at WARNING.
 
 Sessions the agent cannot capture restart after a crash instead: a sandbox the agent owns, and multi-turn continuation
 sessions.
@@ -273,6 +279,7 @@ Settings:
 | `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on the sandbox's snapshotted disk; the saved conversation lives here. |
 | `checkpoint_pause_allowance_seconds` | `3600` | Time a launch may spend paused in all. It extends the provider's command deadline; a longer pause fails the launch. Cover the longest commit. |
 | `sandbox_model_relay_port` | `18431` | Sandbox port of the model relay, on providers whose snapshots keep processes. |
+| `restore_sandbox_clock` | `true` | Keep the wall clock of a sandbox whose snapshots keep processes continuous across a restore. |
 
 The controller's `control_timeout` must cover the pause: a prepare waits until every running OpenCode is paused (up to
 about 45 s for the supervisor to confirm).
