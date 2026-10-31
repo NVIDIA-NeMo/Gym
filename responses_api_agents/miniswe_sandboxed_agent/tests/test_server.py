@@ -701,7 +701,14 @@ async def test_resource_failure_outside_agent_execution_remains_infrastructure(f
     result = await f.agent.run(f.request, f.body)
     assert not result.evaluation_completed
     assert result.infrastructure_error
-    assert result.model_dump()["_ng_failure_class"] == "infrastructure_error"
+    if stage in {"verifier_setup", "restore", "grade"}:
+        # A failed verifier did not grade the saved answer; #5402 keeps it masked and ungraded.
+        assert "_ng_failure_class" not in result.model_dump()
+        assert result.failure_kind == "verifier_error"
+        assert result.mask_sample is True
+        assert result.reward == 0.0
+    else:
+        assert result.model_dump()["_ng_failure_class"] == "infrastructure_error"
     assert result.sandbox_resource_limit is None
     assert all(env.closed for env in f.envs)
 
@@ -1077,7 +1084,13 @@ async def test_run_verify_reaches_registered_route_with_rollout_identity(fixture
     (invocation,) = dumped["ng_verifier_invocations"]
     assert invocation["invocation_id"].startswith("verify-")
     # The verify reply of an agent infrastructure failure carries _ng_failure_class, so its invocation is failed.
-    assert invocation["status"] == ("completed" if graded in {"healthy", "wrong", "limit_then_cleanup"} else "failed")
+    assert invocation["status"] == (
+        "completed"
+        if graded in {"healthy", "wrong", "limit_then_cleanup"}
+        else "incomplete"
+        if graded == "verifier_error"
+        else "failed"
+    )
     assert "ng_verifier_invocations" not in (dumped.get("ng_agent_observations") or {})
     # The collection writer moves the separate top-level field into ng_trajectory.verifier_invocations.
     record = {"_ng_task_index": 0, "_ng_rollout_index": 0, **dumped}
