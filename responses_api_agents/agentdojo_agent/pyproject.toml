@@ -1,0 +1,19 @@
+[project]
+name = "agentdojo-agent"
+version = "0.1.0"
+requires-python = ">=3.13.14"
+dependencies = [
+    "nemo-gym[dev]",
+    "agentdojo[transformers] @ git+https://github.com/ethz-spylab/agentdojo.git@a75aba7631d3ca5fb7ab938965c97ead2f9ff84b",
+]
+
+[build-system]
+build-backend = "setuptools.build_meta"
+requires = ["setuptools"]
+
+[tool.setuptools.packages.find]
+where = [".."]
+include = ["agentdojo_agent", "agentdojo_family"]
+
+[tool.uv]
+sources.nemo-gym = { path = "../..", editable = true }
