@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - resources_servers/indic_arena_judge/configs/indic_arena_judge.yaml
+
+# pointwise scores one answer without a baseline; pairwise preserves Arena-Elo.
+indic_arena_hard_v2_judge_mode: pointwise
+
+indic_arena_hard_v2_resources_server:
+  _inherit_from: indic_arena_judge
+  resources_servers:
+    indic_arena_judge:
+      evaluation_mode: ${indic_arena_hard_v2_judge_mode}
+
+indic_arena_hard_v2_simple_agent:
+  _inherit_from: indic_arena_judge_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: indic_arena_hard_v2_resources_server
+      datasets:
+      - name: indic_arena_hard_v2
+        type: benchmark
+        jsonl_fpath: benchmarks/indic/indic-arena-hard-v2/data/indic_arena_hard_v2_benchmark.jsonl
+        prompt_config: benchmarks/prompts/generic/default.yaml
+        prepare_script: benchmarks/indic/indic-arena-hard-v2/prepare.py
+        prepare_dependencies: [datasets, pyarrow]
+        license: Apache 2.0
+
+indic_arena_hard_v2_environment_server:
+  _inherit_from: indic_arena_judge_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: indic_arena_hard_v2_simple_agent
