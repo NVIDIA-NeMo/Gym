@@ -1012,3 +1012,219 @@ def test_a_session_opened_inside_a_code_cell_records_that_cell_as_its_spawner(mo
     assert invocations["call-child-2"].spawned_by_tool_call_id is None
     assert invocations["call-root"].spawned_by_tool_call_id is None
     assert trace._current_tool.get() is None
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_nooa_rejects_without_running_is_a_failed_tool_call_with_its_feedback() -> None:
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=2)
+    responses = [
+        model_response(
+            NeMoGymResponseFunctionToolCall(
+                id="fc-1", call_id="call-1", name="frobnicate", arguments=json.dumps({"target": "x"})
+            )
+        ),
+        model_response(
+            NeMoGymResponseFunctionToolCall(
+                id="fc-2",
+                call_id="call-2",
+                name="python_cell",
+                arguments=json.dumps({"code": "return_result('done')"}),
+            ),
+            response_id="resp-2",
+        ),
+    ]
+    client = MagicMock(post=AsyncMock(side_effect=[FakeHTTPResponse(response) for response in responses]))
+    llm = GymResponsesLLM(
+        server_client=client,
+        model_server_name="policy",
+        model_url_path="/v1/responses",
+        state=state,
+        cookies={},
+        on_call=trace.on_model_call,
+    )
+    agent = NativeHistoryAgent(llm=llm)
+    try:
+        with hooks_scope(trace):
+            assert await agent.answer("use a tool that does not exist") == "done"
+        episode, trajectory = trace.project(
+            create_params=NeMoGymResponseCreateParamsNonStreaming(input="use a tool that does not exist"),
+            state=state,
+            task_id="task",
+            rollout_id="rollout",
+        )
+    finally:
+        await agent.aclose()
+
+    rejected = next(tool for tool in trajectory.tool_calls if tool.tool_call_id == "call-1")
+    assert rejected.tool_name == "frobnicate"
+    assert rejected.status == "failed"
+    assert rejected.error_type == "ToolCallRejected"
+    assert "Unknown tool `frobnicate`" in rejected.output
+    # The feedback the model read on the next turn is the output the record carries.
+    assert any(
+        isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "call-1" and item.output == rejected.output
+        for item in trajectory.invocations[0].conversation
+    )
+    assert [gap.code for gap in trajectory.gaps] == ["public_assistant_metadata_unavailable"]
+    assert {tool.tool_call_id for tool in trajectory.tool_calls if tool.tool_call_id.startswith("call-")} == {
+        "call-1",
+        "call-2",
+    }
+
+
+@pytest.mark.asyncio
+async def test_a_tool_call_skipped_after_a_failed_cell_is_reported_as_a_gap_not_invented() -> None:
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=2)
+    responses = [
+        model_response(
+            NeMoGymResponseFunctionToolCall(
+                id="fc-1",
+                call_id="call-1",
+                name="python_cell",
+                arguments=json.dumps({"code": "raise ValueError('bad')"}),
+            ),
+            NeMoGymResponseFunctionToolCall(
+                id="fc-2", call_id="call-2", name="python_cell", arguments=json.dumps({"code": "print('never')"})
+            ),
+        ),
+        model_response(
+            NeMoGymResponseFunctionToolCall(
+                id="fc-3",
+                call_id="call-3",
+                name="python_cell",
+                arguments=json.dumps({"code": "return_result('done')"}),
+            ),
+            response_id="resp-2",
+        ),
+    ]
+    client = MagicMock(post=AsyncMock(side_effect=[FakeHTTPResponse(response) for response in responses]))
+    llm = GymResponsesLLM(
+        server_client=client,
+        model_server_name="policy",
+        model_url_path="/v1/responses",
+        state=state,
+        cookies={},
+        on_call=trace.on_model_call,
+    )
+    agent = NativeHistoryAgent(llm=llm)
+    try:
+        with hooks_scope(trace):
+            assert await agent.answer("fail then skip") == "done"
+        episode, trajectory = trace.project(
+            create_params=NeMoGymResponseCreateParamsNonStreaming(input="fail then skip"),
+            state=state,
+            task_id="task",
+            rollout_id="rollout",
+        )
+    finally:
+        await agent.aclose()
+
+    tools = {tool.tool_call_id: tool for tool in trajectory.tool_calls}
+    assert tools["call-1"].status == "failed"
+    assert "call-2" not in tools
+    assert not any(
+        isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "call-2"
+        for item in trajectory.invocations[0].conversation
+    )
+    skipped = [gap for gap in trajectory.gaps if gap.code == "tool_call_not_executed"]
+    assert [(gap.invocation_id, "call-2" in (gap.detail or "")) for gap in skipped] == [
+        (trajectory.invocations[0].invocation_id, True)
+    ]
+    # A partial snapshot cannot tell a skipped call from one that has not started.
+    _, partial = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="fail then skip"),
+        state=state,
+        task_id="task",
+        rollout_id="rollout",
+        partial=True,
+    )
+    assert not [gap for gap in partial.gaps if gap.code == "tool_call_not_executed"]
+
+
+def _call_with_response(invocation_id: str, request_input: list, response_id: str, *outputs: object) -> GymModelCall:
+    call = GymModelCall(
+        model_ref=ModelServerRef(type="responses_api_models", name="policy"),
+        request=NeMoGymResponseCreateParamsNonStreaming(instructions="be brief", input=request_input),
+    )
+    call.response = NeMoGymResponse.model_validate(model_response(*outputs, response_id=response_id))
+    return call
+
+
+def test_a_later_invocation_of_the_same_session_does_not_project_the_history_it_resends(monkeypatch) -> None:
+    from responses_api_agents.nooa_agent import observability
+
+    sessions = iter([("session-a", None), ("session-a", None), ("session-b", None)])
+    monkeypatch.setattr(observability, "_current_atom_session", lambda: next(sessions))
+    trace = GymTraceHooks()
+    state = RolloutLLMState(max_policy_calls=None)
+    cell = NeMoGymResponseFunctionToolCall(id="fc-1", call_id="call-1", name="python_cell", arguments="{}")
+    cell_output = NeMoGymFunctionCallOutput(call_id="call-1", output="status: accepted")
+    first_turn = [{"role": "user", "content": "first task"}]
+    history = [*first_turn, cell.model_dump(), cell_output.model_dump(), {"role": "user", "content": "second task"}]
+
+    first = trace.before_agent_call(call_id="turn-1", parent_call_id=None)
+    call_1 = _call_with_response("turn-1", first_turn, "resp-1", cell)
+    trace.on_model_call(call_1)
+    state.calls.append(call_1)
+    execution = trace.before_code_execution(code="pass", execution_id="exec-1", tool_call_id="call-1")
+    trace.after_code_execution(context=execution, result={"stdout": ""}, exception=None)
+    trace.after_agent_call(context=first, exception=None)
+
+    second = trace.before_agent_call(call_id="turn-2", parent_call_id="turn-1")
+    call_2 = _call_with_response(
+        "turn-2",
+        history,
+        "resp-2",
+        NeMoGymResponseOutputMessage(
+            id="msg-2", role="assistant", status="completed", content=[NeMoGymResponseOutputText(text="ok")]
+        ),
+    )
+    trace.on_model_call(call_2)
+    state.calls.append(call_2)
+    trace.after_agent_call(context=second, exception=None)
+
+    # Another session that happens to resend the same items keeps them: it is its own history.
+    other = trace.before_agent_call(call_id="other-1", parent_call_id=None)
+    call_3 = _call_with_response(
+        "other-1",
+        history,
+        "resp-3",
+        NeMoGymResponseOutputMessage(
+            id="msg-3", role="assistant", status="completed", content=[NeMoGymResponseOutputText(text="ok")]
+        ),
+    )
+    trace.on_model_call(call_3)
+    state.calls.append(call_3)
+    trace.after_agent_call(context=other, exception=None)
+
+    _, trajectory = trace.project(
+        create_params=NeMoGymResponseCreateParamsNonStreaming(input="first task"),
+        state=state,
+        task_id="task",
+        rollout_id="rollout",
+    )
+    conversations = {invocation.invocation_id: invocation.conversation for invocation in trajectory.invocations}
+
+    def shape(items: list) -> list:
+        return [(item.type, getattr(item, "call_id", None) or getattr(item, "role", None)) for item in items]
+
+    assert shape(conversations["turn-1"]) == [
+        ("message", "system"),
+        ("message", "user"),
+        ("function_call", "call-1"),
+        ("function_call_output", "call-1"),
+    ]
+    assert shape(conversations["turn-2"]) == [("message", "system"), ("message", "user"), ("message", "assistant")]
+    assert conversations["turn-2"][1].content == "second task"
+    assert shape(conversations["other-1"]) == [
+        ("message", "system"),
+        ("message", "user"),
+        ("function_call", "call-1"),
+        ("function_call_output", "call-1"),
+        ("message", "user"),
+        ("message", "assistant"),
+    ]
+    assert trajectory.invocations[1].harness_session_id == "session-a"
+    assert not [gap for gap in trajectory.gaps if gap.code == "tool_call_not_executed"]

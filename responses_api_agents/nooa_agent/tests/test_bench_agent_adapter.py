@@ -648,10 +648,18 @@ async def test_real_benchagent_loop_guard_preserves_gradable_evidence(tmp_path, 
     assert {
         item.call_id for item in response.output if item.type == "function_call" and item.name == "python_cell"
     } == expected_calls | native_prefills
-    # Failed repeats are blocked before execution on calls 7 and 8.
-    expected_outputs = {f"c{index}" for index in range(1, 7 if tool_fails else 9)}
+    # Failed repeats are blocked before execution on calls 7 and 8; the guard's feedback is their output.
     actual_outputs = {item.call_id for item in response.output if item.type == "function_call_output"}
-    assert actual_outputs & expected_calls == expected_outputs
+    assert actual_outputs & expected_calls == expected_calls
+    tools = {tool.tool_call_id: tool for tool in result.trajectory.tool_calls}
+    blocked = {call_id for call_id, tool in tools.items() if tool.error_type == "ToolCallRejected"}
+    assert blocked == ({"c7", "c8"} if tool_fails else set())
+    for call_id in blocked:
+        assert tools[call_id].status == "failed"
+        assert tools[call_id].tool_name == "python_cell"
+        # The output is the guard's feedback as the model read it, not an execution result.
+        assert isinstance(tools[call_id].output, str) and tools[call_id].output
+        assert "repeated failure" not in tools[call_id].output
     assert "loop_detected" in {gap.code for gap in observations.gaps}
 
 
