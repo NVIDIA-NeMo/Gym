@@ -522,5 +522,6 @@ class RolloutStore:
             | {
                 "outcomes_recorded": self.outcomes_recorded,
                 "progress_outcomes_recorded": self.progress_outcomes_recorded,
+                "allocation_id": os.environ.get("SLURM_JOB_ID"),
             },
         )

@@ -47,6 +47,7 @@ KEEP_BUDGET_ENV = "GYM_RESUBMIT_KEEP_BUDGET"
 BOUNDED_BUDGET_MARKER = "# --- Bounded resume budgets v1 ---"
 # Capability: only PREEMPTED, NODE_FAIL and BOOT_FAIL admit an infra retry; FAILED, OUT_OF_MEMORY and DEADLINE stop.
 SCHEDULER_CAUSE_MARKER = "# --- Scheduler-cause retry admission v1 ---"
+RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -140,7 +141,6 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _gym_stop_incomplete "Previous job elapsed accounting is unknown or malformed."
     _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed))
     echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
-    [[ -z "$_gym_stop_reason" ]] || _gym_stop_incomplete "$_gym_stop_reason"
 elif [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" == 1 ]]; then
     # Recovery is another allocation, not a fresh allowance. A plain manual resubmit reset above is explicit.
     _gym_needs_retry=1
@@ -150,6 +150,27 @@ if [[ "$_gym_needs_retry" == 1 && $_retries -ge {max_retries} ]]; then
     _gym_stop_incomplete "Infra retry limit ({max_retries}) reached. Stopping."
 fi
 {max_walltime_check}
+if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ) ]]; then
+    if [[ "$_prev_state" == FAILED || "$_prev_state" == TIMEOUT || "$_prev_state" == PREEMPTED || "$_prev_state" == NODE_FAIL || "$_prev_state" == BOOT_FAIL ]]; then
+        _gym_exit_code=$(sacct -X -P -n -j "$_prev_slurm_job_id" --format=ExitCode) || \
+            _gym_stop_incomplete "Previous exit accounting is unknown."
+        [[ "$_gym_exit_code" =~ ^[0-9]+:[0-9]+$ ]] || _gym_stop_incomplete "Previous exit accounting is malformed."
+        {runtime_admission_marker}
+        _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "Installed recovery runtime failed."
+        _gym_admission=$(printf '%s\n' "$_gym_admission_output" | grep '^__GYM_CONTINUATION:' || true)
+        case "$_gym_admission" in
+            __GYM_CONTINUATION:segment) _gym_needs_retry=0 ;;
+            __GYM_CONTINUATION:retry) _gym_needs_retry=1 ;;
+            *) _gym_stop_incomplete "Saved recovery evidence has no eligible retries; $_gym_stop_reason" ;;
+        esac
+    else
+        _gym_stop_incomplete "$_gym_stop_reason"
+    fi
+fi
+# Admission can identify a retry only after reading the authoritative saved outcomes.
+if [[ "$_gym_needs_retry" == 1 && $_retries -ge {max_retries} ]]; then
+    _gym_stop_incomplete "Infra retry limit ({max_retries}) reached. Stopping."
+fi
 if [[ "$_gym_needs_retry" == 1 ]]; then
     _retries=$((_retries + 1))
     echo "$_retries" > "$_retry_file" || _gym_stop_incomplete "Cannot preserve the spent retry."
@@ -280,7 +301,7 @@ def _walltime_to_seconds(duration: str) -> int:
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
-def render_resume_prologue(resume: ResumeConfig) -> str:
+def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "false") -> str:
     """Render the auto-resume prologue for one benchmark's sbatch script."""
     max_walltime_check = ""
     if resume.max_walltime is not None:
@@ -298,4 +319,8 @@ def render_resume_prologue(resume: ResumeConfig) -> str:
         bounded_budget_marker=BOUNDED_BUDGET_MARKER,
         scheduler_cause_marker=SCHEDULER_CAUSE_MARKER,
         max_walltime_check=max_walltime_check,
+        runtime_admission_marker=(
+            RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"
+        ),
+        admission_command=admission_command,
     )

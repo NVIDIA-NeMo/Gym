@@ -14,8 +14,11 @@
 # limitations under the License.
 
 import os
+import shlex
 import shutil
 import subprocess
+import sys
+from pathlib import Path
 
 import pytest
 
@@ -163,6 +166,7 @@ def _run_prologue(
     update_result: str = "",
     restart_count: str = "0",
     manual_resubmit: bool = False,
+    admission_command: str | None = None,
 ) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -177,7 +181,16 @@ def _run_prologue(
         tool.write_text(body)
         tool.chmod(0o755)
     script = tmp_path / "job.sh"
-    script.write_text(render_resume_prologue(resume) + "\necho REACHED_WORK\n")
+    if admission_command is None:
+        # Explicit installed-runtime boundary: host PATH below intentionally has no Gym installation.
+        code = (
+            f"import sys; sys.path.insert(0, {str(Path(__file__).resolve().parents[2])!r}); "
+            "from nemo_gym.orchestration.recovery import continuation_admission; "
+            f"print('__GYM_CONTINUATION:' + continuation_admission({str(tmp_path)!r}, "
+            f"{resume.max_retries}, {_walltime_to_seconds(resume.max_walltime) if resume.max_walltime else None!r}, sys.argv[1], sys.argv[2], sys.argv[3]))"
+        )
+        admission_command = f'{shlex.quote(sys.executable)} -c {shlex.quote(code)} "$_gym_exit_code" "$_prev_slurm_job_id" "$_prev_state"'
+    script.write_text(render_resume_prologue(resume, admission_command=admission_command) + "\necho REACHED_WORK\n")
     args = ["bash", str(script)] + ([] if prev_state is None else [prev_job_id])
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -237,7 +250,12 @@ def test_successor_is_killed_if_its_dependency_can_never_be_met(tmp_path):
 
 @pytest.mark.parametrize("exit_code,continues", [("75:0", True), ("76:0", False)])
 @pytest.mark.parametrize("max_retries", [0, 3])
-def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, exit_code, continues, max_retries):
+def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, monkeypatch, exit_code, continues, max_retries):
+    from tests.unit_tests.test_managed_recovery_selection import prepare_managed
+
+    monkeypatch.setenv("SLURM_JOB_ID", "100")
+    # Real saved outcomes and untouched pending inputs, not an exit-code-only permission token.
+    prepare_managed(tmp_path, "missing" if continues else "healthy", n=2)
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=max_retries), "FAILED", exit_code=exit_code)
     assert result.returncode == (0 if continues else 1), result.stdout
     assert ("REACHED_WORK" in result.stdout) is continues

@@ -312,6 +312,7 @@ def decide_recovery(
     resubmit_offset: int = 0,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     managed_selection: list[ManagedRecoveryFact] | None = None,
+    planned_missing_continuation: bool = False,
 ) -> RecoveryDecision:
     """Classify every materialized identity and choose the run-level action.
 
@@ -588,7 +589,8 @@ def decide_recovery(
         return decision(
             RecoveryAction.STOP, "the job chain or scheduler state is unavailable, so the budget is unknown"
         )
-    if budget.infra_retries_used >= budget.max_infra_retries:
+    segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
+    if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         return decision(
             RecoveryAction.STOP,
             f"the stored infra-retry budget is used ({budget.infra_retries_used} of {budget.max_infra_retries})",
@@ -726,7 +728,8 @@ RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml
                  "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
                  "failures_jsonl_fpath": "rollouts_failures.jsonl",
                  "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl"}
-source_files = (*RECEIPT_FILES.values(), "quality_summary.json", "rollouts_manifest.json", "rollouts_attempts.jsonl", "rollouts_resubmit_offset", "../.gym_infra_retries", "../.gym_accumulated_walltime", "../.gym_job_chain")
+source_files = (*RECEIPT_FILES.values(), "quality_summary.json", "rollouts_manifest.json", "rollouts_attempts.jsonl", "rollouts_resubmit_offset",
+            "rollouts_coverage.json", "../.gym_infra_retries", "../.gym_accumulated_walltime", "../.gym_job_chain")
 source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 mlflow = {"live_run_id": None, "receipt": None}
 try:
@@ -891,6 +894,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             "rollouts_manifest.json",
             "rollouts_attempts.jsonl",
             "rollouts_resubmit_offset",
+            "rollouts_coverage.json",
             "../.gym_infra_retries",
             "../.gym_accumulated_walltime",
             "../.gym_job_chain",
@@ -957,6 +961,7 @@ def decide_from_collected(
     max_walltime_s: float | None,
     live_job: bool | None,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
+    planned_missing_continuation: bool = False,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision."""
     # resume_script creates .gym_infra_retries on the first infra retry, so its absence means none ran; it adds every
@@ -1022,6 +1027,7 @@ def decide_from_collected(
         resubmit_offset=collected.resubmit_offset,
         outcome_policy=outcome_policy,
         managed_selection=collected.managed_selection,
+        planned_missing_continuation=planned_missing_continuation,
     )
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(
@@ -1031,6 +1037,82 @@ def decide_from_collected(
             }
         )
     return decision
+
+
+def continuation_admission(
+    job_dir: str,
+    max_retries: int,
+    max_walltime_s: float | None,
+    exit_code: str,
+    previous_job_id: str,
+    previous_state: str = "FAILED",
+) -> str:
+    """Read saved state in the driver's installed runtime before a terminal allocation continues.
+
+    The shell has already validated and persisted terminal elapsed accounting. This reader never changes
+    artifacts, starts servers, resets budgets, or treats an exit code as sufficient retry evidence.
+    """
+    import json
+    import subprocess
+    import sys
+
+    job = Path(job_dir)
+    if exit_code == "76:0":
+        return "stop"
+    try:
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        collected = CollectedEvidence.model_validate_json(raw.stdout)
+        if not collected.managed_store:
+            return "stop"
+        collected = select_managed_evidence(collected, job)
+        if collected.walltime_state != "ok":
+            return "stop"
+        collected.accounted_walltime_s = collected.walltime_used_s
+        # A completed outcome plus untouched pending inputs establishes planned segment work. Actual failed
+        # attempts still consume infra retries, even if the driver happened to exit75. A missing output,
+        # reservation, judge answer or unowned selected cause is rejected by the ordinary decision below.
+        # A scheduler allocation timeout continues untouched work, but never a failed agent attempt.
+        segment = previous_state == "TIMEOUT"
+        if previous_state == "FAILED" and exit_code == "75:0" and collected.managed_selection is not None:
+            from nemo_gym.rollout_store import RolloutStore
+
+            report_path = job / "artifacts" / "rollouts_coverage.json"
+            if collected.source_digests and collected.source_digests.get(
+                "rollouts_coverage.json"
+            ) == _managed_source_digest(report_path):
+                report = json.loads(report_path.read_text())
+                store = RolloutStore.read(job / "artifacts" / "rollouts.jsonl", import_legacy=False)
+                progress = report.get("progress_outcomes_recorded")
+                segment = (
+                    store is not None
+                    and report.get("allocation_id") == previous_job_id
+                    and bool(previous_job_id)
+                    and type(progress) is int
+                    and progress > 0
+                    and type(report.get("outcomes_recorded")) is int
+                    and progress <= report["outcomes_recorded"]
+                    and all(report.get(key) == value for key, value in store.coverage().items())
+                )
+        if select_managed_evidence(collected, job).managed_selection is None:
+            return "stop"
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=max_retries,
+            max_walltime_s=max_walltime_s,
+            live_job=False,
+            planned_missing_continuation=segment,
+        )
+        print(decision.reason, file=sys.stderr)
+        if decision.action != RecoveryAction.RESUBMIT:
+            return "stop"
+        return "segment" if segment and not decision.counts.get(IdentityState.RETRYABLE) else "retry"
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError):
+        return "stop"
 
 
 def accounted_chain_walltime(

@@ -138,9 +138,11 @@ def ssh_like_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         LocalConnection,
         "run",
-        lambda self, commands: subprocess.run(
-            ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
-        ).stdout,
+        lambda self, commands: (
+            subprocess.run(
+                ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
+            ).stdout
+        ),
     )
 
 
@@ -776,7 +778,10 @@ def _resumable_run(tmp_path: Path) -> tuple[Path, str, ResumeConfig]:
 
 def _start_queued_job(script: str, resume: ResumeConfig, job_dir: Path, slurm_bin: Path) -> list[str]:
     """Start the job sbatch queued: the rendered prologue and `gym eval run` arguments, in the environment it got."""
-    prologue = render_resume_prologue(resume)
+    # Keep the generated installed-runtime admission command rather than substituting a bare prologue.
+    admission_start = script.index("_gym_admission_output=$(") + len("_gym_admission_output=$(")
+    admission_end = script.index(") || _gym_stop_incomplete", admission_start)
+    prologue = render_resume_prologue(resume, admission_command=script[admission_start:admission_end])
     assert prologue in script
     queued = {k: v for k, v in _sbatch_env(slurm_bin).items() if k.startswith("GYM_RESUBMIT")}
     start = script.index("GYM_CMD=(")
