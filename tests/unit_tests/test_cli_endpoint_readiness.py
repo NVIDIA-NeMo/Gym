@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
 import socket
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from threading import Thread
@@ -26,8 +27,10 @@ from nemo_gym.cli.env import (
     _ENDPOINT_POLL_INTERVAL_SEC,
     RunHelper,
     _collect_model_endpoints,
+    _collect_policy_model_tool_call_probe_targets,
     _model_endpoint_timeout_seconds,
     _probe_endpoint,
+    _probe_policy_model_tool_call,
     _wait_for_model_endpoints,
 )
 from nemo_gym.config.config_types import ConfigError
@@ -257,6 +260,361 @@ class TestCheckStopsStartupCleanly:
         assert not isinstance(exc_info.value, SystemExit)
         # The report names the config key, since the endpoint may not be the policy model.
         assert "openai_base_url" in str(exc_info.value)
+
+
+class TestToolCallReadinessProbe:
+    def test_policy_vllm_model_is_probed_only_when_an_agent_is_configured(self) -> None:
+        config = _config(policy_model={"responses_api_models": {"vllm_model": {"uses_reasoning_parser": True}}})
+        model_server = nemo_gym.cli.env.ServerInstanceDisplayConfig(
+            config_path="policy_model",
+            server_type="responses_api_models",
+            name="vllm_model",
+            url="http://127.0.0.1:10669",
+        )
+        agent_server = nemo_gym.cli.env.ServerInstanceDisplayConfig(
+            config_path="agent",
+            server_type="responses_api_agents",
+            name="simple_agent",
+            url="http://127.0.0.1:10670",
+        )
+
+        assert [] == _collect_policy_model_tool_call_probe_targets(config, [model_server])
+        assert [("http://127.0.0.1:10669", True)] == _collect_policy_model_tool_call_probe_targets(
+            config, [model_server, agent_server]
+        )
+
+    def test_vllm_adapter_variants_are_probed(self) -> None:
+        agent_server = nemo_gym.cli.env.ServerInstanceDisplayConfig(
+            config_path="agent",
+            server_type="responses_api_agents",
+            name="simple_agent",
+            url="http://127.0.0.1:10670",
+        )
+
+        for model_type in (
+            "vllm_model",
+            "vllm_model_with_compaction",
+            "local_vllm_model",
+            "local_vllm_model_proxy",
+        ):
+            config = _config(policy_model={"responses_api_models": {model_type: {"uses_reasoning_parser": True}}})
+            model_server = nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="policy_model",
+                server_type="responses_api_models",
+                name=model_type,
+                url="http://127.0.0.1:10669",
+            )
+
+            assert [("http://127.0.0.1:10669", True)] == _collect_policy_model_tool_call_probe_targets(
+                config, [model_server, agent_server]
+            )
+
+    def test_non_chat_tool_modes_are_not_probed_and_native_responses_skips_reasoning_check(self) -> None:
+        config = _config(
+            policy_model={
+                "responses_api_models": {
+                    "vllm_model": {"uses_reasoning_parser": True, "is_responses_native": True},
+                    "local_vllm_model": {"use_completions_api": True},
+                }
+            }
+        )
+        server_instances = [
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="policy_model",
+                server_type="responses_api_models",
+                name="vllm_model",
+                url="http://127.0.0.1:10669",
+            ),
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="policy_model",
+                server_type="responses_api_models",
+                name="local_vllm_model",
+                url="http://127.0.0.1:10670",
+            ),
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="agent",
+                server_type="responses_api_agents",
+                name="simple_agent",
+                url="http://127.0.0.1:10671",
+            ),
+        ]
+
+        assert [("http://127.0.0.1:10669", False)] == _collect_policy_model_tool_call_probe_targets(
+            config, server_instances
+        )
+
+    def test_success_requires_parsed_tool_call_and_reasoning(self, monkeypatch: MonkeyPatch) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "output": [
+                {
+                    "type": "reasoning",
+                    "summary": [{"type": "summary_text", "text": "1 + 1 = 2."}],
+                },
+                {
+                    "type": "function_call",
+                    "name": "nemo_gym_readiness_probe",
+                    "arguments": '{"value":2}',
+                },
+            ]
+        }
+        post = MagicMock(return_value=response)
+        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "post", post)
+
+        _probe_policy_model_tool_call("http://127.0.0.1:10669/", timeout_seconds=12, uses_reasoning_parser=True)
+
+        post.assert_called_once()
+        args, kwargs = post.call_args
+        assert args == ("http://127.0.0.1:10669/v1/responses",)
+        assert kwargs["timeout"] == 12
+        assert kwargs["json"]["tool_choice"] == {"type": "function", "name": "nemo_gym_readiness_probe"}
+        assert kwargs["json"]["tools"][0]["name"] == "nemo_gym_readiness_probe"
+
+    def test_plain_text_tool_call_fails_with_parser_guidance(self, monkeypatch: MonkeyPatch) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": '<tool_call>{"name":"readiness_probe"}</tool_call>'}],
+                }
+            ]
+        }
+        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "post", MagicMock(return_value=response))
+
+        with raises(ConfigError, match="--tool-call-parser") as exc_info:
+            _probe_policy_model_tool_call("http://127.0.0.1:10669", timeout_seconds=12, uses_reasoning_parser=False)
+
+        assert "--dyn-tool-call-parser" in str(exc_info.value)
+
+    def test_live_http_plain_text_tool_call_fails_startup(self) -> None:
+        request_paths: list[str] = []
+        requests_seen: list[dict[str, object]] = []
+
+        class _Handler(BaseHTTPRequestHandler):
+            def do_GET(self) -> None:
+                request_paths.append(self.path)
+                self.send_response(200)
+                self.end_headers()
+
+            def do_POST(self) -> None:
+                request_paths.append(self.path)
+                content_length = int(self.headers["Content-Length"])
+                requests_seen.append(json.loads(self.rfile.read(content_length)))
+                body = json.dumps(
+                    {
+                        "output": [
+                            {
+                                "type": "message",
+                                "content": [
+                                    {
+                                        "type": "output_text",
+                                        "text": '<tool_call>{"name":"readiness_probe"}</tool_call>',
+                                    }
+                                ],
+                            }
+                        ]
+                    }
+                ).encode("utf-8")
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.send_header("Content-Length", str(len(body)))
+                self.end_headers()
+                self.wfile.write(body)
+
+            def log_message(self, *args) -> None:
+                pass
+
+        server = HTTPServer(("127.0.0.1", 0), _Handler)
+        Thread(target=server.serve_forever, daemon=True).start()
+        try:
+            server_url = f"http://127.0.0.1:{server.server_address[1]}"
+            config = _config(
+                model_endpoint_readiness_timeout_seconds=5,
+                policy_model={
+                    "responses_api_models": {
+                        "vllm_model": {"base_url": f"{server_url}/v1", "uses_reasoning_parser": False}
+                    }
+                },
+                agent={"responses_api_agents": {"simple_agent": {"entrypoint": "app.py"}}},
+            )
+            helper = RunHelper.__new__(RunHelper)
+            helper._server_instance_display_configs = [
+                nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                    config_path="policy_model",
+                    server_type="responses_api_models",
+                    name="vllm_model",
+                    url=server_url,
+                ),
+                nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                    config_path="agent",
+                    server_type="responses_api_agents",
+                    name="simple_agent",
+                    url=f"{server_url}/agent",
+                ),
+            ]
+
+            with raises(ConfigError, match="tool-call parser") as exc_info:
+                RunHelper.wait_for_model_endpoints(helper, config)
+
+            assert "--dyn-tool-call-parser" in str(exc_info.value)
+            assert ["/v1/models", "/v1/responses"] == request_paths
+            assert requests_seen[0]["tool_choice"] == {"type": "function", "name": "nemo_gym_readiness_probe"}
+        finally:
+            server.shutdown()
+            server.server_close()
+
+    def test_http_400_includes_parser_guidance(self, monkeypatch: MonkeyPatch) -> None:
+        response = MagicMock(status_code=400)
+        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "post", MagicMock(return_value=response))
+
+        with raises(ConfigError, match="--tool-call-parser") as exc_info:
+            _probe_policy_model_tool_call("http://127.0.0.1:10669", timeout_seconds=12, uses_reasoning_parser=False)
+
+        assert "--dyn-tool-call-parser" in str(exc_info.value)
+
+    def test_request_timeout_fails_before_startup(self, monkeypatch: MonkeyPatch) -> None:
+        monkeypatch.setattr(
+            nemo_gym.cli.env.requests.Session,
+            "post",
+            MagicMock(side_effect=requests.exceptions.Timeout),
+        )
+
+        with raises(ConfigError, match="could not reach a valid model response"):
+            _probe_policy_model_tool_call("http://127.0.0.1:10669", timeout_seconds=12, uses_reasoning_parser=False)
+
+    def test_invalid_json_response_is_not_reported_as_a_network_failure(self, monkeypatch: MonkeyPatch) -> None:
+        response = MagicMock(status_code=200)
+        response.json.side_effect = ValueError("bad JSON")
+        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "post", MagicMock(return_value=response))
+
+        with raises(ConfigError, match="returned invalid JSON"):
+            _probe_policy_model_tool_call("http://127.0.0.1:10669", timeout_seconds=12, uses_reasoning_parser=False)
+
+    def test_missing_expected_reasoning_parser_fails_before_startup(self, monkeypatch: MonkeyPatch) -> None:
+        response = MagicMock(status_code=200)
+        response.json.return_value = {
+            "output": [
+                {
+                    "type": "function_call",
+                    "name": "nemo_gym_readiness_probe",
+                    "arguments": '{"value":2}',
+                },
+            ]
+        }
+        monkeypatch.setattr(nemo_gym.cli.env.requests.Session, "post", MagicMock(return_value=response))
+
+        with raises(ConfigError, match="--reasoning-parser") as exc_info:
+            _probe_policy_model_tool_call("http://127.0.0.1:10669", timeout_seconds=12, uses_reasoning_parser=True)
+
+        assert "--dyn-reasoning-parser" in str(exc_info.value)
+
+    def test_probe_runs_after_connection_readiness(self, monkeypatch: MonkeyPatch) -> None:
+        events: list[str] = []
+
+        def wait_for_endpoints(*_args: object) -> list[tuple[str, str]]:
+            events.append("connection")
+            return []
+
+        def probe_tool_call(*_args: object) -> None:
+            events.append("tool_call")
+
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_wait_for_model_endpoints",
+            MagicMock(side_effect=wait_for_endpoints),
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "_probe_policy_model_tool_call",
+            MagicMock(side_effect=probe_tool_call),
+        )
+        helper = RunHelper.__new__(RunHelper)
+        helper._server_instance_display_configs = [
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="policy_model",
+                server_type="responses_api_models",
+                name="vllm_model",
+                url="http://127.0.0.1:10669",
+            ),
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="agent",
+                server_type="responses_api_agents",
+                name="simple_agent",
+                url="http://127.0.0.1:10670",
+            ),
+        ]
+        config = _config(
+            model_endpoint_readiness_timeout_seconds=12,
+            policy_model={"responses_api_models": {"vllm_model": {"uses_reasoning_parser": True}}},
+        )
+
+        RunHelper.wait_for_model_endpoints(helper, config)
+
+        assert ["connection", "tool_call"] == events
+
+    def test_tool_call_probe_uses_the_remaining_readiness_budget(self, monkeypatch: MonkeyPatch) -> None:
+        wait_for_endpoints = MagicMock(return_value=[])
+        probe_tool_call = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "_wait_for_model_endpoints", wait_for_endpoints)
+        monkeypatch.setattr(nemo_gym.cli.env, "_probe_policy_model_tool_call", probe_tool_call)
+        monkeypatch.setattr(nemo_gym.cli.env, "monotonic", MagicMock(side_effect=[100.0, 104.0]))
+
+        helper = RunHelper.__new__(RunHelper)
+        helper._server_instance_display_configs = [
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="policy_model",
+                server_type="responses_api_models",
+                name="vllm_model",
+                url="http://127.0.0.1:10669",
+            ),
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="agent",
+                server_type="responses_api_agents",
+                name="simple_agent",
+                url="http://127.0.0.1:10670",
+            ),
+        ]
+        config = _config(
+            model_endpoint_readiness_timeout_seconds=12,
+            policy_model={"responses_api_models": {"vllm_model": {"uses_reasoning_parser": True}}},
+        )
+
+        RunHelper.wait_for_model_endpoints(helper, config)
+
+        probe_tool_call.assert_called_once_with("http://127.0.0.1:10669", 8.0, True)
+
+    def test_tool_call_probe_does_not_start_after_readiness_budget_expires(self, monkeypatch: MonkeyPatch) -> None:
+        wait_for_endpoints = MagicMock(return_value=[])
+        probe_tool_call = MagicMock()
+        monkeypatch.setattr(nemo_gym.cli.env, "_wait_for_model_endpoints", wait_for_endpoints)
+        monkeypatch.setattr(nemo_gym.cli.env, "_probe_policy_model_tool_call", probe_tool_call)
+        monkeypatch.setattr(nemo_gym.cli.env, "monotonic", MagicMock(side_effect=[100.0, 112.0]))
+
+        helper = RunHelper.__new__(RunHelper)
+        helper._server_instance_display_configs = [
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="policy_model",
+                server_type="responses_api_models",
+                name="vllm_model",
+                url="http://127.0.0.1:10669",
+            ),
+            nemo_gym.cli.env.ServerInstanceDisplayConfig(
+                config_path="agent",
+                server_type="responses_api_agents",
+                name="simple_agent",
+                url="http://127.0.0.1:10670",
+            ),
+        ]
+        config = _config(
+            model_endpoint_readiness_timeout_seconds=12,
+            policy_model={"responses_api_models": {"vllm_model": {"uses_reasoning_parser": True}}},
+        )
+
+        with raises(ConfigError, match="readiness check exhausted"):
+            RunHelper.wait_for_model_endpoints(helper, config)
+
+        probe_tool_call.assert_not_called()
 
 
 class TestTimeoutFromConfig:
