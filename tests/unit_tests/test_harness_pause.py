@@ -177,8 +177,11 @@ def test_a_pause_before_the_launch_holds_it_until_continued(tmp_path: Path) -> N
             "error": None,
             "mode": "stop",
             "identity": paused["identity"],
+            "wall": paused["wall"],
+            "uptime": paused["uptime"],
         }
         assert _is_identity_of_a_live_process(paused["identity"])
+        assert isinstance(paused["wall"], float) and isinstance(paused["uptime"], float)
         time.sleep(0.3)
         assert not (tmp_path / "started").exists()
         _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
@@ -273,6 +276,28 @@ def test_a_hold_pause_signals_nothing_names_the_supervisor_and_credits_the_deadl
         receipt = json.loads((tmp_path / CLEANUP_RECEIPT_FILE).read_text())
         assert receipt["timed_out"] is False and receipt["return_code"] == 0, receipt
         assert (tmp_path / "finished").exists()
+    finally:
+        _finish(process)
+
+
+@linux_only
+def test_every_acknowledgement_records_the_sandboxs_wall_clock_and_uptime(tmp_path: Path) -> None:
+    worker = "touch ready; sleep 30"
+    process = _start(tmp_path, "bash", "-c", worker, pause_mode="hold")
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        before_wall = time.time()
+        before_uptime = float(Path("/proc/uptime").read_text().split()[0])
+        _request(tmp_path / PAUSE_REQUEST_FILE, 1)
+        paused = _acknowledgement(tmp_path / PAUSED_FILE, 1)
+        after_wall = time.time()
+        after_uptime = float(Path("/proc/uptime").read_text().split()[0])
+        # Both are the moment the acknowledgement was written: a restore rewinds the wall clock from them.
+        assert before_wall - 0.01 <= paused["wall"] <= after_wall + 0.01, (before_wall, paused, after_wall)
+        assert before_uptime - 0.01 <= paused["uptime"] <= after_uptime + 0.01, (before_uptime, paused, after_uptime)
+        _request(tmp_path / CONTINUE_REQUEST_FILE, 1)
+        continued = _acknowledgement(tmp_path / CONTINUED_FILE, 1)
+        assert continued["wall"] >= paused["wall"] and continued["uptime"] >= paused["uptime"], continued
     finally:
         _finish(process)
 
@@ -466,8 +491,10 @@ async def test_a_hold_session_keeps_its_harness_running_and_records_the_pause_it
     assert len((launch_dir / "ticks").read_text()) > before
     state = session.checkpoint_state()
     assert state["pause_seq"] == 1 and state["supervisor_identity"] == paused.identity
+    assert paused.wall is not None and paused.uptime is not None
+    assert (state["pause_wall"], state["pause_uptime"]) == (paused.wall, paused.uptime)
     assert (await session.continue_harness(timeout=10)).confirmed
-    assert "pause_seq" not in session.checkpoint_state()
+    assert not {"pause_seq", "pause_wall", "pause_uptime"} & set(session.checkpoint_state())
     assert await asyncio.wait_for(running, 30) == "artifacts"
 
 
