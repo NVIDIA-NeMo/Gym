@@ -145,6 +145,46 @@ def test_cached_runtime_needs_no_package_installation(sandbox: tuple[Path, dict[
     assert not (root / "download.log").exists()
 
 
+@pytest.mark.parametrize("musl", [False, True])
+@pytest.mark.parametrize("version", ["1.17.11", "1.17.10"])
+def test_mounted_cached_installer_keeps_its_binary_contract(sandbox, musl, version):
+    root, env = sandbox
+    binary = root / "cached opencode"
+    binary.write_text(f"#!/bin/bash\necho {version}\n")
+    binary.chmod(0o755)
+    installer = root / "cached installer.sh"
+    installer.write_text(
+        '#!/bin/bash\nset -eu\nprintf "%s\\n" "$@" > "$TEST_ROOT/cached-arguments"\n'
+        'mkdir -p "$HOME/.opencode/bin"\ncp "$2" "$HOME/.opencode/bin/opencode"\n'
+    )
+    command = [
+        str(root / "bin/bash"),
+        str(root / "install.sh"),
+        str(root / "runtime"),
+        "1.17.11",
+        "",
+        "",
+        "",
+        str(installer),
+        str(binary),
+        str(root / "musl binary") if musl else "",
+    ]
+    result = subprocess.run(command, env=env, capture_output=True, text=True, errors="replace", timeout=10)
+    assert (root / "cached-arguments").read_text().splitlines() == (
+        ["--glibc-binary", str(binary), "--musl-binary", str(root / "musl binary")]
+        if musl
+        else ["--binary", str(binary)]
+    )
+    assert not (root / "download.log").exists()
+    assert not (root / "packages.log").exists()
+    if version == "1.17.11":
+        assert result.returncode == 0, result.stderr
+        assert (root / "runtime/opencode").read_bytes() == binary.read_bytes()
+    else:
+        assert result.returncode != 0
+        assert not (root / "runtime/opencode").exists()
+
+
 # A cached binary that prints the right version and then fails is unhealthy.
 @pytest.mark.parametrize("probe", ["echo 1.17.10", "echo 1.17.11; exit 7"])
 def test_wrong_or_unhealthy_cached_version_is_not_reused(sandbox, probe):

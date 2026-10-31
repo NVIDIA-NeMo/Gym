@@ -203,11 +203,17 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int = 262144
     max_output_tokens: int = 131072
     opencode_version: str = OPENCODE_VERSION
+    # Milliseconds, matching the OpenCode provider's per-request timeout.
+    opencode_model_call_timeout: int | None = Field(default=None, gt=0)
 
     # Optional verified, preinstalled runtime for sandboxes without download egress.
     sandbox_path_prefix: list[str] = Field(default_factory=list)
     sandbox_executable_path: str | None = None
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
+    # Existing benchmark images mount this installer and its libc-specific binaries.
+    remote_opencode_install_script_path: str | None = None
+    remote_opencode_binary_path: str | None = None
+    remote_opencode_musl_binary_path: str | None = None
     # The native model ID affects OpenCode's model-family prompts and tools.
     # Preserve the existing alias unless a benchmark explicitly qualifies another ID.
     sandbox_model_id: str = "dummy_model"
@@ -721,6 +727,14 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             )
         if self.config.env or self.config.extra_args or self.config.command != "opencode":
             raise HTTPException(422, "env, extra_args and command overrides are supported only by local OpenCode")
+        cached_installer = self.config.remote_opencode_install_script_path
+        cached_binary = self.config.remote_opencode_binary_path
+        if bool(cached_installer) != bool(cached_binary) or (
+            self.config.remote_opencode_musl_binary_path and not cached_installer
+        ):
+            raise HTTPException(422, "A cached OpenCode installer requires its script and binary paths together")
+        if cached_installer and self.config.sandbox_executable_path:
+            raise HTTPException(422, "Choose a cached OpenCode installer or a verified executable, not both")
         provider = create_provider(resolve_provider_config(provider_ref, get_global_config_dict()))
         if owns_sandbox:
             sandbox = AsyncSandbox(provider)
@@ -767,6 +781,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     self.config.sandbox_executable_path or "",
                     self.config.sandbox_executable_sha256 or "",
                     ":".join(self.config.sandbox_path_prefix),
+                    cached_installer or "",
+                    cached_binary or "",
+                    self.config.remote_opencode_musl_binary_path or "",
                 )
             )
             result = await sandbox.exec(command, cwd=workdir, timeout_s=self.config.sandbox_install_timeout_seconds)
@@ -802,15 +819,11 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         observations = state.observations or AgentObservationBundle(
             source="opencode", gaps=[ObservationGap(code="agent_activation_interrupted")]
         )
-        if state.is_continuation:
-            return AgentCloseSessionResponse(
-                agent_session_id=state.request.agent_session_id,
-                agent_observations=observations,
-                trajectory=state.trajectory,
-                cleanup_confirmed=state.session.cleanup_confirmed,
-            )
         return AgentCloseSessionResponse(
-            agent_session_id=state.request.agent_session_id, agent_observations=observations
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=observations,
+            trajectory=state.trajectory,
+            cleanup_confirmed=state.session.cleanup_confirmed if state.is_continuation else None,
         )
 
     def _session_input(self, body: NeMoGymResponseCreateParamsNonStreaming) -> tuple[str, str]:
@@ -1107,7 +1120,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                     "options": {
                         "baseURL": base_url,
                         "apiKey": "dummy_key",
-                        "timeout": False,
+                        "timeout": self.config.opencode_model_call_timeout
+                        if self.config.opencode_model_call_timeout is not None
+                        else False,
                     },  # pragma: allowlist secret
                     "models": {
                         self.config.sandbox_model_id: {
