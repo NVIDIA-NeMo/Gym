@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+extend = "../../../../pyproject.toml"
+force-exclude = true
+
+# Preserve the byte-checked bodies while retaining other lint checks.
+[lint.per-file-ignores]
+"validate_response_judge.py" = ["I001"]
+"test_contract.py" = ["I001"]
+
+[format]
+exclude = ["validate_response_judge.py", "test_contract.py"]

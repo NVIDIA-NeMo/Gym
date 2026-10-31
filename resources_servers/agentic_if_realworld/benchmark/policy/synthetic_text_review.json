@@ -1,0 +1,30 @@
+{
+  "policy_version": "agentic-if-generated-response-judge-v2.2-strict",
+  "item_id": "synthetic-strict",
+  "benchmark_mode": "single_turn_text_replay",
+  "scoring_scope": "single_turn_text_observable_constraints",
+  "item_verdict": "fail",
+  "constraints": [
+    {
+      "constraint_id": "literal-001",
+      "subtype": "IF-FORMAT",
+      "support_quote": "Return exactly OK.",
+      "support_origin": "input",
+      "verdict": "fail",
+      "violation_established": true,
+      "deviation_severity": "minor",
+      "rationale": "One extra period violates the exact literal.",
+      "response_evidence": {
+        "kind": "conflicting_span",
+        "field": "content",
+        "quote": "OK.",
+        "expected": "OK",
+        "observation": "An extra period was delivered."
+      }
+    }
+  ],
+  "input_sha256": "297236121cdb5c69b56fb11774ec0379639a47e923f45af350fd9d5bee05b1a6",
+  "response_sha256": "2f77b6cb1e6246da09cfea69e0d4da243b3a5ff47c7732fe3f3fb86f3c0dc603",
+  "constraint_contract_sha256": "e825ee6b03a0c29ca56eb9cb5aea3c1d477591618d74e31f6b7050869b033f09",
+  "benchmark_manifest_sha256": "09ec717016a38244eb27c52f1424cfb92d77fd456d2093618cb32f667654c154"
+}

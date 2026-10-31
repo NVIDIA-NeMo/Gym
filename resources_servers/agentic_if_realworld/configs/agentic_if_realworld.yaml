@@ -1,0 +1,26 @@
+mlflow_tracking_uri: ${oc.env:MLFLOW_TRACKING_URI,""}
+mlflow_tracking_token: ${oc.env:MLFLOW_TRACKING_TOKEN,""}
+# Raw rollouts contain private traces; apply this default to every profile.
+upload_rollouts: false
+
+agentic_if_realworld_resources:
+  resources_servers:
+    agentic_if_realworld:
+      entrypoint: app.py
+      domain: instruction_following
+      verified: false
+      dataset_dir: ${oc.env:AGENTIC_IF_DATA_DIR,""}
+      receipt_dir: ${oc.env:AGENTIC_IF_RECEIPT_DIR,${oc.select:output_jsonl_fpath,${oc.env:HOME}/.cache/nemo-gym/agentic_if_realworld/validation}.receipts}
+      synthetic: ${oc.decode:${oc.env:AGENTIC_IF_SYNTHETIC,0}}
+      split_registry_path: ${oc.env:AGENTIC_IF_SPLIT_REGISTRY,""}
+      ground_truth_path: ${oc.env:AGENTIC_IF_GROUND_TRUTH,""}
+      judge_endpoint: ${oc.env:AGENTIC_IF_JUDGE_ENDPOINT,""}
+      judge_model: ${oc.env:AGENTIC_IF_JUDGE_MODEL,""}
+      judge_api_key_env: AGENTIC_IF_JUDGE_API_KEY
+      judge_reasoning: medium
+      datasets:
+        - name: agentic_if_realworld
+          type: benchmark
+          jsonl_fpath: benchmarks/agentic_if_realworld/data/prepared.jsonl
+          prepare_script: benchmarks/agentic_if_realworld/prepare.py
+          num_repeats: 1
