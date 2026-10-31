@@ -105,7 +105,9 @@ class FormatVerificationResourcesServer(SimpleResourcesServer):
     def _verify_string_match(text: str, verifier: Dict[str, Any]) -> Tuple[float, Dict[str, Any]]:
         """Check that every expected_markers string appears in the text.
 
-        Also detects spurious markers if patterns are provided.
+        Also detects spurious markers if patterns are provided. Besides matches of the given patterns, a marker
+        in the style of an expected one with a different number (e.g. "[ref:3]" when "[ref:2]" is expected) is
+        spurious, so patterns that only match the expected markers still catch citations of other parts.
         Reward is 1.0 if all expected markers are present (and no spurious), else 0.0.
         """
         expected_markers: List[str] = verifier.get("expected_markers", [])
@@ -116,9 +118,12 @@ class FormatVerificationResourcesServer(SimpleResourcesServer):
         spurious: List[str] = []
         if regex_patterns:
             expected_set = set(expected_markers)
-            for pat in regex_patterns:
+            style_patterns = [re.sub(r"\d+", r"\\d+", re.escape(m)) for m in expected_markers]
+            seen_spans = set()
+            for pat in regex_patterns + style_patterns:
                 for found in re.finditer(pat, text):
-                    if found.group(0) not in expected_set:
+                    if found.group(0) not in expected_set and found.span() not in seen_spans:
+                        seen_spans.add(found.span())
                         spurious.append(found.group(0))
 
         passed = len(missing) == 0 and len(spurious) == 0

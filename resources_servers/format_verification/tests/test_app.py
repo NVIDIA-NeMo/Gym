@@ -12,6 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import json
+import re
+from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +31,8 @@ from resources_servers.format_verification.app import (
 MINIMAL_RESPONSES_CREATE_PARAMS = {
     "input": [{"role": "user", "content": "test"}],
 }
+
+DS3_EXAMPLE_FPATH = Path(__file__).parent.parent / "data" / "ds3_citation_format_example.jsonl"
 
 
 def _make_server() -> FormatVerificationResourcesServer:
@@ -239,6 +244,69 @@ class TestVerifyStringMatch:
         )
         assert result.reward == 1.0
         assert result.match_details["passed"] is True
+
+    @pytest.mark.parametrize(
+        "expected,other",
+        [
+            ("[ref:2]", "[ref:3]"),
+            ("<ref:2>", "<ref:3>"),
+            ("{ref:2}", "{ref:3}"),
+            ("[source:2]", "[source:10]"),
+            ("[2]", "[13]"),
+            ("[web:5]", "[web:1]"),
+            ("<<2>>", "<<4>>"),
+            ("(Part 2)", "(Part 1)"),
+            ("(ref 2)", "(ref 4)"),
+        ],
+    )
+    async def test_spurious_marker_with_literal_patterns(self, expected: str, other: str) -> None:
+        # The ds3 data sets patterns to the escaped expected markers, which alone never match another marker.
+        server = _make_server()
+        verifier = {"type": "string_match", "expected_markers": [expected], "patterns": [re.escape(expected)]}
+
+        result = await server.verify(_make_verify_request(f"The answer {expected} {other}.", verifier))
+        assert result.reward == 0.0
+        assert result.match_details["spurious"] == [other]
+
+        result = await server.verify(_make_verify_request(f"The answer {expected}.", verifier))
+        assert result.reward == 1.0
+        assert result.match_details["spurious"] == []
+
+    async def test_spurious_marker_reported_once_when_patterns_overlap(self) -> None:
+        server = _make_server()
+        text = "According to [source:1] and [source:2], the answer is clear."
+        result = await server.verify(
+            _make_verify_request(
+                text,
+                {
+                    "type": "string_match",
+                    "expected_markers": ["[source:1]"],
+                    "patterns": [r"\[source:[0-9]+\]"],
+                },
+            )
+        )
+        assert result.reward == 0.0
+        assert result.match_details["spurious"] == ["[source:2]"]
+
+    async def test_ds3_example_rejects_citing_every_part(self) -> None:
+        server = _make_server()
+        rows = [json.loads(line) for line in DS3_EXAMPLE_FPATH.read_text().splitlines() if line.strip()]
+        assert rows
+        for row in rows:
+            verifier = row["verifier"]
+            expected = verifier["expected_markers"]
+            prompt = row["responses_create_params"]["input"][0]["content"]
+            num_parts = len(set(re.findall(r"\[Part (\d+)\]", prompt)))
+            assert num_parts > len(expected)
+            style = re.sub(r"\d+", "{}", expected[0])
+
+            result = await server.verify(_make_verify_request("Answer. " + " ".join(expected), verifier))
+            assert result.reward == 1.0
+
+            cite_all = "Answer. " + " ".join(style.format(n) for n in range(1, num_parts + 1))
+            result = await server.verify(_make_verify_request(cite_all, verifier))
+            assert result.reward == 0.0
+            assert len(result.match_details["spurious"]) == num_parts - len(expected)
 
 
 class TestVerifyRouting:
