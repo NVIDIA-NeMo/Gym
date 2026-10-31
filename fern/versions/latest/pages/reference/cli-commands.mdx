@@ -1153,7 +1153,9 @@ See [Repeat-Level Metrics](/evaluation/aggregate-metrics#repeat-level-metrics) f
 
 Compare a baseline eval run against a candidate run and write a report.
 
-The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Confidence intervals are read from what each run recorded; this command does not yet perform statistical tests or issue a pass/fail verdict.
+The report contains a table of point-estimate metrics (the change, plus each side's value and confidence interval), split into key metrics and all other metrics, and a per-task sample-flips table. Existing statistics such as percentile and confidence interval fields do not get separate rows. Each run's separate confidence intervals remain the recorded 95% intervals. For eligible metrics with at least two finite repeat-level values on each side and recorded cross-repeat means, the command also computes a two-sided unpaired Welch confidence interval for candidate minus baseline, at 95% by default. Use `--confidence-level` to change the delta confidence level; the JSON report records it in the top-level `confidence_level` field. The command does not issue a pass/fail verdict.
+
+See [Compare Results](/main/evaluation/compare-results) for the evaluation workflow and interpretation of the confidence interval.
 
 | Option | Description |
 | --- | --- |
@@ -1164,6 +1166,7 @@ The report contains a table of point-estimate metrics (the change, plus each sid
 | `--agent NAME` | Agent to compare on both sides. Defaults to every agent present in both runs. |
 | `--baseline-agent NAME` | Agent to read from the baseline. Takes precedence over `--agent`. |
 | `--candidate-agents NAME[,NAME...]` | Agent to read from each candidate, in `--candidates` order. Takes precedence over `--agent`. |
+| `--confidence-level FLOAT` | Confidence level for delta intervals as a fraction strictly between `0` and `1` (default: `0.95`). For example, `0.90` requests 90%. |
 | `--output-dir DIR`, `-o` | Where to write the report. Defaults to the directory containing the candidate rollouts JSONL. |
 | `--report-format` | `md`, `json`, or `both` (default). |
 
