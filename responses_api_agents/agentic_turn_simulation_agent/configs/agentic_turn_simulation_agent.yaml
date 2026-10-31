@@ -1,0 +1,14 @@
+agentic_turn_simulation_agent:
+  responses_api_agents:
+    agentic_turn_simulation_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: ???
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      max_steps: 50
+      max_time_seconds: 7200
+      stop_tools:
+      - ask_user
