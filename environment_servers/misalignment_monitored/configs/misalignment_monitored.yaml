@@ -1,0 +1,17 @@
+# Fronts one agent like legacy_agent and hands each finished rollout to the misalignment monitor.
+# Name your agent here in place of its legacy_agent environment server.
+misalignment_monitored_environment_server:
+  environment_servers:
+    misalignment_monitored:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      monitor_server:
+        type: resources_servers
+        name: misalignment_monitor
+      # Required by BaseEnvironmentServerConfig. A relay applies none of them, and the agent keeps its own limits.
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

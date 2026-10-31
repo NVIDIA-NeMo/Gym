@@ -1004,6 +1004,37 @@ class TestApp:
         used_method.assert_awaited_once()
         unused_method.assert_not_awaited()
 
+    @mark.parametrize("responses_api", [True, False])
+    def test_kv_connector_result_reaches_both_apis(self, monkeypatch: MonkeyPatch, responses_api: bool) -> None:
+        """A vLLM KV connector's per-request result, such as the misalignment monitor's, survives conversion."""
+        server = self._setup_server(monkeypatch)
+        params = {"misalignment_activations_path": "/dev/shm/l0/chatcmpl-1.json"}
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(
+            return_value={
+                "id": "chatcmpl-1",
+                "object": "chat.completion",
+                "created": 0,
+                "model": "dummy_model",
+                "choices": [{"index": 0, "finish_reason": "stop", "message": {"role": "assistant", "content": "hi"}}],
+                "kv_transfer_params": params,
+            }
+        )
+        server._clients = [mock_client]
+
+        response = TestClient(server.setup_webserver()).post(
+            "/v1/responses" if responses_api else "/v1/chat/completions",
+            json={"model": "dummy_model", "input": [{"role": "user", "content": "hi"}]}
+            if responses_api
+            else {"model": "dummy_model", "messages": [{"role": "user", "content": "hi"}]},
+        )
+
+        assert response.status_code == 200
+        if responses_api:
+            assert json.loads(response.json()["metadata"]["kv_transfer_params"]) == params
+        else:
+            assert response.json()["kv_transfer_params"] == params
+
     def test_streaming_responses_context_overflow_is_an_http_400_before_the_stream(
         self, monkeypatch: MonkeyPatch
     ) -> None:

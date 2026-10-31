@@ -1,0 +1,71 @@
+# Misalignment monitor: reviews agent rollouts for misaligned behavior during training and evaluation.
+# Rollouts reach it through the misalignment_monitored environment server
+# (environment_servers/misalignment_monitored/configs/misalignment_monitored.yaml). Rewards are never changed.
+misalignment_monitor:
+  resources_servers:
+    misalignment_monitor:
+      entrypoint: app.py
+      domain: safety
+      verified: false
+      description: Layered misalignment monitor for training and evaluation rollouts (activation screen, model review, investigation)
+      value: Catch reward hacking, deception, sandbox escapes and other misaligned agent behavior without changing rewards
+
+      # Every review and investigation runs on this self-hosted judge model server.
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_responses_create_params:
+        input: []
+        max_output_tokens: 32768
+        temperature: 0.0
+      max_concurrent_judge_calls: 8
+
+      alerts_jsonl_fpath: results/misalignment_monitor/alerts.jsonl
+      # P0 alerts are also POSTed here as JSON.
+      alert_webhook_url: null
+      # Hold new rollouts once a P0 alert has been unresolved this long (POST /resolve closes it). null never holds.
+      pause_after_unresolved_p0_minutes: 30
+
+      # final: one review per rollout, when it finishes.
+      # per_turn: review at the end of each agent turn, when the agent's context is rewritten, when layer 0 flags
+      # a model call, and at least every max_minutes_between_reviews. Needs observability_enabled: true and
+      # model_call_capture_dir in the global config.
+      review_schedule: final
+      max_minutes_between_reviews: 30
+      # Model servers whose captured calls are the agent's own.
+      policy_model_servers: [policy_model]
+      capture_poll_interval_s: 2.0
+
+      # Layer 0. disabled: every review goes to layer 1.
+      # engine: the policy's own activations, scored inside vLLM by vllm_activation_connector.py (see README).
+      # reader: a frozen copy of the model loaded in this server (reader_mode jspace or probe).
+      activation_source: disabled
+      # Share of what layer 0 or layer 1 clears that still goes to the next layer, to measure what they miss.
+      audit_rate: 0.05
+      reader_mode: jspace
+      reader_model: null
+      # For architectures jlens does not detect, for example Nemotron-H:
+      #   {path: backbone, layers: layers, norm: norm_f, embed: embeddings}
+      reader_layout: null
+      reader_max_tokens: 4096
+      probe_path: null
+      probe_threshold: 0.5
+      jlens_path: null
+      jspace_layer: null
+      jspace_concepts: [fake, fictional, manipulation, secretly, deliberately, fraud, injection, blackmail, cheat, deceive]
+      jspace_top_k: 10
+
+      # Layer 2: the security and alignment investigators. With a sandbox provider they can also run Python
+      # over the evidence. null leaves that tool out.
+      investigator_max_steps: 16
+      sandbox_provider: null
+      sandbox_config:
+        image: python:3.12-slim
+        ttl_s: 1800
+      # Layer 3: confirm P0 and P1 security findings against the rollout's record and earlier alerts, and review
+      # alignment alerts for recurring patterns after this many of them (0 turns that off).
+      security_confirmation: true
+      pattern_review_every: 25
+
+      max_transcript_chars: 200000
+      max_backlog: 10000

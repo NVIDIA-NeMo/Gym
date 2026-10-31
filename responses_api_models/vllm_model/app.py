@@ -918,6 +918,11 @@ class VLLMModel(SimpleResponsesAPIModel):
         execution = getattr(request.state, "nemo_gym_model_execution", {})
         if isinstance(execution, dict) and execution.get("local_response_reason") == "context_length_exceeded":
             response.metadata = {**(response.metadata or {}), "nemo_gym_context_window_exceeded": "true"}
+        # A vLLM KV connector's per-request result, such as the misalignment monitor's activation reading.
+        # Chat Completions keep the field as it is, and the Responses conversion would drop it.
+        kv_transfer_params = getattr(chat_completion_response, "kv_transfer_params", None)
+        if kv_transfer_params:
+            response.metadata = {**(response.metadata or {}), "kv_transfer_params": json.dumps(kv_transfer_params)}
         return response
 
     def _apply_sampling_overrides(self, body_dict: Dict[str, Any]) -> Dict[str, Any]:
