@@ -856,6 +856,8 @@ class CollectedEvidence(BaseModel):
     source_job_identity: tuple[str, int, int] | None = None
     managed_selection: list[ManagedRecoveryFact] | None = None
     managed_reader_error: str | None = None
+    # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
+    checkpoint_enabled: bool | None = Field(default=None, strict=True)
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -956,9 +958,44 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             [row for row in failures if row.get("_line") in selected["rollouts_failures.jsonl"]]
         ) != len(selected["rollouts_failures.jsonl"]):
             raise ValueError("selected outcomes are absent from the collected projection")
+        # Read only existing, snapshotted runtime inputs. Missing facts never establish trial coverage.
+        checkpoint_enabled = None
+        try:
+            import yaml
+
+            from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+            from nemo_gym.task_materialization import materialize_task
+
+            config_bytes = (artifacts / "rollouts_resolved_config.yaml").read_bytes()
+            if hashlib.sha256(config_bytes).hexdigest() != collected.source_digests["rollouts_resolved_config.yaml"]:
+                raise ValueError("resolved config changed before parsing")
+            config = yaml.safe_load(config_bytes)
+            if not isinstance(config, dict):
+                raise ValueError("resolved config is not a mapping")
+            checkpoint_enabled = checkpoint_settings(config) is not None
+            servers = ((collected.quality or {}).get("provenance") or {}).get("servers", {})
+            bound_results = []
+            for result, original in zip(results, store.inputs_for(results), strict=True):
+                projected = dict(result)
+                if result.get("_ng_result_type") == "single_agent_turn_legacy":
+                    agent = servers[result["agent_ref"]["name"]]
+                    taskset = original.get("_ng_task_source", agent["resources_server"])
+                    task = materialize_task(original, taskset=taskset)
+                    projected["materialized_task_id"] = task["task_id"]["task_id"]
+                bound_results.append(projected)
+            results = bound_results
+        except (OSError, ValueError, KeyError, TypeError, yaml.YAMLError):
+            checkpoint_enabled = None
         if collected.source_digests != snapshot():
             raise ValueError("managed source changed during authoritative selection")
-        return collected.model_copy(update={"results": results, "failures": failures, "managed_selection": facts})
+        return collected.model_copy(
+            update={
+                "results": results,
+                "failures": failures,
+                "managed_selection": facts,
+                "checkpoint_enabled": checkpoint_enabled,
+            }
+        )
     except (ImportError, OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
         return collected.model_copy(update={"managed_selection": None, "managed_reader_error": str(error)})
 
@@ -1544,7 +1581,7 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
     """Derive coverage for the observed one-turn SimpleAgent/MCQA path; no producer completeness assertion.
 
     Every expected trial must have the actual invocation, selected raw response and verifier outcome. Other
-    adapters, tool execution, session mode, omitted events and incomplete references remain unsupported/unknown.
+    adapters, tool execution, checkpointed sessions, omitted events and incomplete references remain unsupported/unknown.
     """
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
@@ -1571,14 +1608,16 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
             agent = servers[row["agent_ref"]["name"]]
             resource = servers[agent["resources_server"]]
             environment = servers[row["_ng_environment_server"]]
+            session = environment.get("implementation") == "single_agent_turn_legacy"
             if (
                 agent.get("kind") != "responses_api_agents"
                 or resource.get("kind") != "resources_servers"
                 or environment.get("kind") != "environment_servers"
                 or agent.get("implementation") != "simple_agent"
                 or resource.get("implementation") != "mcqa"
-                or environment.get("implementation") != "legacy_agent"
-                or row.get("_ng_result_type") != "legacy_agent"
+                or environment.get("implementation") not in {"legacy_agent", "single_agent_turn_legacy"}
+                or row.get("_ng_result_type") != environment.get("implementation")
+                or (session and (collected.checkpoint_enabled is not False or collected.managed_selection is None))
                 or row.get(FAILURE_CLASS) is not None
                 or row.get("failure_kind") is not None
                 or row.get(FAILURE_ID) is not None
@@ -1590,7 +1629,11 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
                 return False
             t = row["ng_trial_observations"]
             if (
-                t["task_id"] != str(row["_ng_task_index"])
+                t["task_id"] != (row.get("materialized_task_id") if session else str(row["_ng_task_index"]))
+                or (
+                    session
+                    and (not isinstance(row.get("materialized_task_id"), str) or not row["materialized_task_id"])
+                )
                 or t["rollout_id"] != maybe_rollout_id_from_run_body(row)
                 or type(t["tool_call_count"]) is not int
                 or t["tool_call_count"] != 0
@@ -1605,8 +1648,9 @@ def _bounded_mcqa_trial_operations(decision: RecoveryDecision, collected: Collec
             invocation, verifier, call = t["invocations"][0], t["verifier_invocations"][0], t["model_calls"][0]
             if (
                 invocation["status"] != "completed"
-                or invocation["in_session"] is not False
-                or invocation["verification_skipped"] is not False
+                or invocation["in_session"] is not session
+                or (invocation["verification_skipped"] is not (None if session else False))
+                or (session and invocation["invocation_id"] != "root")
                 or verifier["status"] != "completed"
                 or verifier["failure_kind"] is not None
             ):
