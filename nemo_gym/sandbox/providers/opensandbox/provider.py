@@ -160,7 +160,7 @@ RETRYABLE_ERROR_MARKERS = (
     "timeout",
 )
 METADATA_VALUE_RE = re.compile(r"[^A-Za-z0-9_.-]+")
-# Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/run).
+# Kubernetes prefixed-key namespace for auto-injected attribution labels (team/user/workload/cluster/run).
 DEFAULT_ATTRIBUTION_KEY_PREFIX = "nemo-gym.nvidia.com/"
 # Per-attempt metadata key (under the attribution prefix): the only handle on a sandbox whose create
 # request never returned, so a timed-out attempt can find and delete what it started.
@@ -674,14 +674,15 @@ class OpenSandboxAttributionConfig:
     attribution is queryable both through the OpenSandbox list API and at the cluster level
     (e.g. ``kubectl get pods -l nemo-gym.nvidia.com/team=my-team``). ``key_prefix`` namespaces
     the label keys (Kubernetes prefixed-key convention); set it to ``""`` for bare
-    ``team`` / ``user`` / ``workload`` / ``run`` keys.
+    ``team`` / ``user`` / ``workload`` / ``cluster`` / ``run`` keys.
 
     Unset fields are auto-detected: ``NEMO_GYM_TEAM`` / ``NEMO_GYM_USER`` / ``NEMO_GYM_WORKLOAD``
     environment variables first, then Slurm job env vars (``SLURM_JOB_ACCOUNT`` /
     ``SLURM_JOB_USER`` / ``SLURM_JOB_NAME``), then the OS login name for ``user`` (``root`` is
     ignored) and the gym CLI's ``NEMO_GYM_CONFIG_PATH`` server instance name for ``workload``.
-    Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to one launch of the
-    creating process (``NEMO_GYM_RUN_ID``, else generated per process and logged) so a run's
+    ``cluster`` names the cluster that creates the sandboxes; it defaults to ``SLURM_CLUSTER_NAME``,
+    then ``CLUSTER_NAME``. Fields that cannot be resolved are omitted. ``run`` scopes sandboxes to
+    one launch of the creating process (``NEMO_GYM_RUN_ID``, else generated per process and logged) so a run's
     sandboxes can be listed and cleaned up exactly. Explicit ``SandboxSpec.metadata`` keys
     always take precedence over attribution keys.
     """
@@ -690,6 +691,7 @@ class OpenSandboxAttributionConfig:
     team: str | None = None
     user: str | None = None
     workload: str | None = None
+    cluster: str | None = None
     run: str | None = None
     key_prefix: str = DEFAULT_ATTRIBUTION_KEY_PREFIX
 
@@ -2059,6 +2061,7 @@ class OpenSandboxProvider:
             team=self._attribution.team,
             user=self._attribution.user,
             workload=self._attribution.workload,
+            cluster=self._attribution.cluster,
         )
         resolved[RUN_KEY] = resolve_run_id(self._attribution.run)
         prefix = self._attribution.key_prefix
@@ -2069,7 +2072,7 @@ class OpenSandboxProvider:
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Create one sandbox through the configured OpenSandbox path.
 
-        Job attribution keys (``team`` / ``user`` / ``workload`` / ``run``) are merged into the
+        Job attribution keys (``team`` / ``user`` / ``workload`` / ``cluster`` / ``run``) are merged into the
         spec's metadata (explicit spec keys win) so every sandbox is attributable via its labels.
         """
         spec = replace(spec, metadata={**self._attribution_metadata(), **spec.metadata})

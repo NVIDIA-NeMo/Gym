@@ -280,13 +280,14 @@ The provider also normalizes metadata values for backend labels by replacing uns
 ## Job Attribution
 
 The provider merges `nemo-gym.nvidia.com/team`, `nemo-gym.nvidia.com/user`,
-`nemo-gym.nvidia.com/workload`, and `nemo-gym.nvidia.com/run` keys into each sandbox's
+`nemo-gym.nvidia.com/workload`, `nemo-gym.nvidia.com/cluster`, and `nemo-gym.nvidia.com/run` keys into each sandbox's
 metadata when they can be resolved. OpenSandbox propagates sandbox metadata as Kubernetes
 labels on the sandbox resources, so running sandboxes are attributable both through the
 OpenSandbox list API metadata filter and directly at the cluster level:
 
 ```bash
 kubectl get pods -l nemo-gym.nvidia.com/team=my-team
+kubectl get pods -l nemo-gym.nvidia.com/cluster=my-slurm-cluster
 ```
 
 Each field resolves in order: the provider's `attribution` config, then `NEMO_GYM_TEAM` /
@@ -297,6 +298,27 @@ it would attribute the image, not a person), and `workload` to `NEMO_GYM_CONFIG_
 server instance name the gym CLI sets on every server process it spawns. Fields that cannot
 be resolved are omitted. Explicit `sandbox_spec.metadata` and `default_metadata` keys always
 take precedence over attribution keys.
+
+`cluster` names the cluster that creates the sandboxes. It resolves in this order:
+
+1. `attribution.cluster` in the provider config.
+2. `SLURM_CLUSTER_NAME`, which Slurm sets only inside a job.
+3. `CLUSTER_NAME`, which some clusters export on every host. This covers runs on a Slurm login
+   node, where `SLURM_CLUSTER_NAME` is not set.
+
+Runs with none of these, such as a Kubernetes driver pod, get no `cluster` label unless they
+configure one. To read a differently named variable, use an OmegaConf interpolation:
+
+```yaml
+sandbox:
+  opensandbox:
+    attribution:
+      cluster: ${oc.env:MY_CLUSTER_VAR,null}
+```
+
+A site's `CLUSTER_NAME` can differ from Slurm's `ClusterName`, so runs on the login node and
+runs inside jobs can get different labels on the same cluster. To keep them consistent, set
+`attribution.cluster`, which takes precedence over both variables.
 
 `run` identifies one launch of the creating process: `NEMO_GYM_RUN_ID` if set, else an id
 generated per process. The resolved attribution is logged once at the first sandbox create —
@@ -313,10 +335,11 @@ sandbox:
   opensandbox:
     attribution:
       enabled: true                       # set false to disable automatic attribution
-      key_prefix: nemo-gym.nvidia.com/    # label-key namespace; "" for bare team/user/workload/run keys
+      key_prefix: nemo-gym.nvidia.com/    # label-key namespace; "" for bare team/user/workload/cluster/run keys
       # team: my-team                     # override auto-detection
       # user: my-user
       # workload: my-benchmark
+      # cluster: my-cluster               # defaults to SLURM_CLUSTER_NAME, then CLUSTER_NAME
       # run: my-run-id
 ```
 
