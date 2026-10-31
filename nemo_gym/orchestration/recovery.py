@@ -792,7 +792,7 @@ def rows(name, skip=0):
                     "task_id": trajectory.get("task_id"), "rollout_id": trajectory.get("rollout_id"),
                     "invocations": [({k: item.get(k) for k in ("invocation_id", "status", "in_session", "verification_skipped", "error_type", "parent_invocation_id", "stop_reason")} | {"model_calls": trial_refs(item.get("model_calls"))})
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
-                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations"))})
+                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
                     "model_calls": [{"model_call_id": item.get("model_call_id"), "response_metadata": trial_metadata(item.get("response_metadata")),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
@@ -1818,6 +1818,57 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             and (ref.get("response_id") is None or ref["response_id"] == meta["response_id"])
         )
 
+    def completed_once(call):
+        """One successful HTTP response with one completed physical attempt, ids unique in the run."""
+        meta = call["response_metadata"]
+        operations, report = meta["model_operations"], meta["failure_report"]
+        if (
+            type(meta["status_code"]) is not int
+            or not 200 <= meta["status_code"] < 300
+            or meta.get("error_category") is not None
+            or meta.get("response_status") != "completed"
+            or len(operations) != 1
+            or not isinstance(report["events"], dict)
+            or report["events"]
+            or report["omitted"] is not False
+            or report["failure_id"] is not None
+        ):
+            return False
+        operation = operations[0]
+        if (
+            operation["outcome"] != "completed"
+            or operation["failure_id"] is not None
+            or type(operation["http_attempts"]) is not int
+            or operation["http_attempts"] != 1
+            or type(operation["transport_failures"]) is not int
+            or operation["transport_failures"] != 0
+            or not all(
+                nonempty(value)
+                for value in (
+                    call["model_call_id"],
+                    meta["model_ref"]["type"],
+                    meta["model_ref"]["name"],
+                    meta["response_id"],
+                    operation["operation_id"],
+                    operation["final_attempt_id"],
+                )
+            )
+        ):
+            return False
+        if operation["final_attempt_id"] in populations[4]:
+            return False
+        populations[4].add(operation["final_attempt_id"])
+        values = (
+            call["model_call_id"],
+            (meta["model_ref"]["type"], meta["model_ref"]["name"], meta["response_id"]),
+            operation["operation_id"],
+        )
+        if any(value in seen for value, seen in zip(values, populations)):
+            return False
+        for value, seen in zip(values, populations):
+            seen.add(value)
+        return True
+
     try:
         for row in rows:
             agent = servers[row["agent_ref"]["name"]]
@@ -1839,6 +1890,28 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             observed = row["ng_trial_observations"]
             invocations, verifiers = observed["invocations"], observed["verifier_invocations"]
             calls, turns, tools = observed["model_calls"], observed["turns"], observed["tool_calls"]
+            judge_calls = None
+            single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
+            graded = single.get("grading_operations") if isinstance(single, dict) else None
+            if isinstance(graded, list) and len(graded) == 1 and (graded[0] or {}).get("kind") == "llm_judge":
+                # Every dependency is exactly one captured call owned by this verifier invocation, every owned call is
+                # a dependency, and only the remaining calls are the policy's.
+                dependencies, owned = graded[0].get("dependencies"), single.get("model_calls")
+                if not dependencies or not isinstance(dependencies, list) or not isinstance(owned, list):
+                    return False
+                if not isinstance(calls, list):
+                    return False
+                judge_calls = []
+                for ref in dependencies:
+                    hit = [call for call in calls if matches(ref, call)]
+                    if len(hit) != 1 or any(hit[0] is seen for seen in judge_calls):
+                        return False
+                    if sum(1 for item in owned if matches(item, hit[0])) != 1:
+                        return False
+                    judge_calls.append(hit[0])
+                if len(owned) != len(judge_calls):
+                    return False
+                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
             if (
                 not all(isinstance(items, list) for items in (invocations, verifiers, calls, turns, tools))
                 or len(invocations) != 1
@@ -1869,7 +1942,8 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                 or (session and invocation["invocation_id"] != "root")
                 or verifier["status"] != "completed"
                 or verifier["failure_kind"] is not None
-                or verifier["model_calls"] != []
+                or verifier.get("sandbox_observations") not in (None, [])
+                or (judge_calls is None and verifier["model_calls"] != [])
                 or not nonempty(verifier["invocation_id"])
                 or verifier["invocation_id"] in populations[3]
                 or len(invocation["model_calls"]) != len(calls)
@@ -1881,9 +1955,9 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             grade = grading[0]
             binding = row.get("_ng_collected_grading_binding")
             if (
-                grade.get("kind") != "programmatic_calculation"
+                grade.get("kind") != ("programmatic_calculation" if judge_calls is None else "llm_judge")
                 or grade.get("outcome") != "completed"
-                or grade.get("dependencies") != []
+                or (judge_calls is None and grade.get("dependencies") != [])
                 or not nonempty(grade.get("operation_id"))
                 or grade["operation_id"] in grading_ids
                 or not isinstance(binding, str)
@@ -1893,6 +1967,8 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                 return False
             grading_ids.add(grade["operation_id"])
             populations[3].add(verifier["invocation_id"])
+            if judge_calls is not None and not all(completed_once(call) for call in judge_calls):
+                return False
             ordered = []
             for number, turn in enumerate(turns, 1):
                 if (
@@ -1914,53 +1990,8 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             if len(tool_by_id) != len(tools):
                 return False
             for number, (call, turn) in enumerate(zip(ordered, turns), 1):
-                meta = call["response_metadata"]
-                operations, report = meta["model_operations"], meta["failure_report"]
-                if (
-                    type(meta["status_code"]) is not int
-                    or not 200 <= meta["status_code"] < 300
-                    or meta.get("error_category") is not None
-                    or meta.get("response_status") != "completed"
-                    or len(operations) != 1
-                    or not isinstance(report["events"], dict)
-                    or report["events"]
-                    or report["omitted"] is not False
-                    or report["failure_id"] is not None
-                ):
+                if not completed_once(call):
                     return False
-                operation = operations[0]
-                if (
-                    operation["outcome"] != "completed"
-                    or operation["failure_id"] is not None
-                    or type(operation["http_attempts"]) is not int
-                    or operation["http_attempts"] != 1
-                    or type(operation["transport_failures"]) is not int
-                    or operation["transport_failures"] != 0
-                    or not all(
-                        nonempty(value)
-                        for value in (
-                            call["model_call_id"],
-                            meta["model_ref"]["type"],
-                            meta["model_ref"]["name"],
-                            meta["response_id"],
-                            operation["operation_id"],
-                            operation["final_attempt_id"],
-                        )
-                    )
-                ):
-                    return False
-                if operation["final_attempt_id"] in populations[4]:
-                    return False
-                populations[4].add(operation["final_attempt_id"])
-                values = (
-                    call["model_call_id"],
-                    (meta["model_ref"]["type"], meta["model_ref"]["name"], meta["response_id"]),
-                    operation["operation_id"],
-                )
-                if any(value in seen for value, seen in zip(values, populations)):
-                    return False
-                for value, seen in zip(values, populations):
-                    seen.add(value)
                 inputs, outputs = call["input_items"], call["output_items"]
                 if not isinstance(inputs, list) or not isinstance(outputs, list) or not outputs:
                     return False
@@ -2054,7 +2085,7 @@ def trial_health(
     if _observed_trial_operations(decision, collected):
         return (
             True,
-            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); actual model/tool and bound programmatic grading operations cover every identity and repeat",
+            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); actual model/tool and bound grading operations cover every identity and repeat",
         )
     return None, (
         f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "
