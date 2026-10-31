@@ -1,0 +1,64 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+# GDPVal with OpenCode in place of Stirrup: same resources server, judges and multi-stage driver as config.yaml.
+# OpenCode runs in the task sandbox the resources server lends it and reaches the task tools
+# (finish, abandon_task_finish, web_search, fetch_web_page) over MCP. The rows use the harness-neutral prompt.
+# See "Run another harness" in README.md for the run command and the model server settings OpenCode needs.
+# OpenCode has no finish_tool_names: finish does not end its run. OpenCode continues until the model replies without
+# a tool call, a later finish or abandon_task_finish replaces the recorded call, and the resources server collects
+# the files when the run ends.
+config_paths:
+  - benchmarks/gdpval/config.yaml
+
+# Drop the Stirrup agent; the environment server below runs OpenCode instead.
+gdpval_stirrup_agent: null
+
+gdpval_resources_server:
+  resources_servers:
+    gdpval:
+      allowed_agents: [opencode_agent]
+      expose_tools_over_mcp: true
+
+gdpval_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      description: GDPVal professional deliverable tasks with OpenCode in place of Stirrup
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      model: ${policy_model_name}
+      opencode_version: 1.17.11
+      # Concurrent OpenCode runs, as Stirrup's concurrency. Keep it at least the environment server's
+      # max_concurrent_episodes: an episode beyond it waits with its sandbox started and its deadline running.
+      concurrency: 32
+      # OpenCode compacts 20,000 tokens below this but asks for max_output_tokens on every call,
+      # so use the served context length minus max_output_tokens (262,144 - 32,768).
+      context_window: 229376
+      # Per model call.
+      max_output_tokens: 32768
+      # The OpenCode process, inside the environment server's default_episode_timeout_seconds.
+      timeout: 10800
+      session_close_timeout_seconds: 90
+      # Well above a slow web call: httpx gives each step of a search or fetch up to 180 s.
+      mcp_tool_timeout_seconds: 900
+      opencode_config:
+        # Use the task's web_search and fetch_web_page instead of the built-in web tools; shell egress remains.
+        tools:
+          webfetch: false
+          websearch: false
+      datasets:
+        - name: gdpval
+          type: benchmark
+          jsonl_fpath: benchmarks/gdpval/data/gdpval_benchmark_harness_neutral.jsonl
+          prompt_config: benchmarks/gdpval/prompts/harness-neutral.yaml
+          prepare_script: benchmarks/gdpval/prepare_harness_neutral.py
+          num_repeats: 1
+
+gdpval_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        type: responses_api_agents
+        name: gdpval_opencode_agent
+      resources_tool_transports: [mcp]

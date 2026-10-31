@@ -3533,10 +3533,10 @@ async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(
     """An acknowledged stop marks the response; actual verification and failures still decide its outcome."""
     from httpx import ASGITransport, AsyncClient
 
-    from environment_servers.single_agent_turn.tests.test_app import _environment_server, _request, _Response
     from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
     from nemo_gym.rollout_store import RolloutStore
+    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
     from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
 
     agent, sandbox = setup
