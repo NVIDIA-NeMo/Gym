@@ -202,10 +202,6 @@ class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
 class SWEBenchProVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(serialize_by_alias=True)
 
-    failure_class: str | None = Field(default=None, alias="_ng_failure_class", exclude_if=lambda value: value is None)
-    failure_judge_error: str | None = Field(
-        default=None, alias="_ng_failure_judge_error", exclude_if=lambda value: value is None
-    )
     verification_attempts: int | None = Field(default=None, exclude_if=lambda value: value is None)
     image_provenance: dict[str, Any] = Field(default_factory=dict)
     evaluation_completed: bool
@@ -628,8 +624,6 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "mask_sample": False,
             "failure_kind": None,
             "failure_reason": None,
-            "_ng_failure_class": None,
-            "_ng_failure_judge_error": None,
             "verification_attempts": None,
             "evaluation_completed": result.completed and reason is None,
             "eval_timed_out": result.timed_out,
@@ -651,11 +645,12 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                 "mask_sample": True,
                 "failure_kind": VERIFIER_ERROR,
                 "failure_reason": result.error,
-                "_ng_failure_class": "judge_failed",
-                "_ng_failure_judge_error": result.error,
                 "model_patch": model_patch,
                 "verification_attempts": attempt,
             }
+        # The adapter supplies typed verifier facts; collector-owned routing markers cannot cross a native episode.
+        response_data.pop("_ng_failure_class", None)
+        response_data.pop("_ng_failure_judge_error", None)
         return SWEBenchProVerifyResponse.model_validate(response_data)
 
 
