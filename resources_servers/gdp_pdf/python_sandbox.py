@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Optional
 
 from fastapi import HTTPException
+from pydantic import PositiveInt
 
 from nemo_gym.global_config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxProvider
@@ -32,10 +33,13 @@ class PythonSandboxConfig(SandboxConfig):
     workdir: str = "/sandbox"
     # Only a backstop: the sandbox is stopped when its rollout is verified.
     ttl_s: Optional[float] = 21600
+    # Linux RLIMIT_AS on the kernel and its children; independent of provider cgroup support.
+    kernel_address_space_mib: Optional[PositiveInt] = None
 
 
 def _kernel(config: PythonSandboxConfig, command: str) -> str:
-    return f"python3 {shlex.quote(f'{config.workdir}/.ipython_kernel/{KERNEL_SCRIPT.name}')} {command}"
+    limit = f" --address-space-mib {config.kernel_address_space_mib}" if config.kernel_address_space_mib else ""
+    return f"python3 {shlex.quote(f'{config.workdir}/.ipython_kernel/{KERNEL_SCRIPT.name}')} {command}{limit}"
 
 
 def _stdout(result: SandboxExecResult) -> str:

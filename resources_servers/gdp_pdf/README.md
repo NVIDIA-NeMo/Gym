@@ -228,6 +228,12 @@ concurrency limit applies to the whole worker. It does not limit live rollouts w
 `sandbox_config.resources.cpu` also sets library thread hints through Gym's `cpu_cap_env`; explicit
 `sandbox_config.env` values take precedence. Provider resource enforcement is configured separately.
 
+On Linux, `sandbox_config.kernel_address_space_mib` optionally sets a hard address-space limit on
+each Python kernel and its subprocesses, including after kernel restarts. This works without provider
+cgroup delegation. Oversized allocations raise ordinary Python `MemoryError` tool feedback; the kernel
+can keep its state and continue. This bounds virtual memory per process, not total sandbox RSS or the
+whole worker, so also size the worker reservation and live-rollout concurrency appropriately.
+
 Python exceptions and cell timeouts are tool feedback. Provider/kernel-client failures invalidate the
 session: subsequent calls cannot replay the failed cell, and verification uses `lost_session_verification`
 to return `mask_sample=True`. Verification without a live tool session still supports saved-answer

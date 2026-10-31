@@ -19,6 +19,7 @@ import io
 import json
 import os
 import re
+import resource
 import signal
 import subprocess
 import sys
@@ -59,7 +60,7 @@ def connect(timeout: float) -> BlockingKernelClient:
     return client
 
 
-def start() -> BlockingKernelClient:
+def start(*, address_space_mib: int | None = None) -> BlockingKernelClient:
     # Writing the connection file first means the kernel never has to, so no reader sees it half-written.
     write_connection_file(str(CONNECTION_FILE), key=uuid.uuid4().hex.encode())
     with open(KERNEL_DIR / "kernel.log", "ab") as log:
@@ -75,6 +76,14 @@ def start() -> BlockingKernelClient:
         )
     PID_FILE.write_text(str(kernel.pid))
     try:
+        if address_space_mib is not None:
+            # Apply before accepting cells. prlimit avoids preexec_fn in the threaded
+            # client, and the hard limit is inherited by subprocesses and cannot be raised.
+            if not hasattr(resource, "prlimit"):
+                raise RuntimeError("Kernel address-space limits require Linux resource.prlimit")
+            existing = resource.prlimit(kernel.pid, resource.RLIMIT_AS)
+            limit = min([address_space_mib * 2**20, *(v for v in existing if v != resource.RLIM_INFINITY)])
+            resource.prlimit(kernel.pid, resource.RLIMIT_AS, (limit, limit))
         return connect(START_TIMEOUT_S)
     except (OSError, RuntimeError) as error:
         # Setup destroys a failed sandbox. Preserve the kernel's own diagnostic before that happens.
@@ -134,7 +143,7 @@ def image_output(data: str, mime: str, max_size: int) -> list[dict[str, str]]:
         ]
 
 
-def run(timeout: float, max_chars: int, max_image_size: int) -> None:
+def run(timeout: float, max_chars: int, max_image_size: int, *, address_space_mib: int | None = None) -> None:
     output, size, dropped, notes = [], 0, 0, []
     # An unexpected loss between calls invalidates the episode. Only intentional exit() or a
     # timed-out cell below resets the kernel with explicit model-visible feedback.
@@ -157,7 +166,7 @@ def run(timeout: float, max_chars: int, max_image_size: int) -> None:
                     deadline = time.monotonic() + INTERRUPT_GRACE_S
                     continue
                 stop()
-                start().stop_channels()
+                start(address_space_mib=address_space_mib).stop_channels()
                 notes.append(RESTARTED)
                 break
             if message["parent_header"].get("msg_id") != msg_id:
@@ -167,7 +176,7 @@ def run(timeout: float, max_chars: int, max_image_size: int) -> None:
                 if asked_to_exit(client, msg_id):
                     # Start the next kernel now, so the next cell never reaches the one shutting down.
                     stop()
-                    start().stop_channels()
+                    start(address_space_mib=address_space_mib).stop_channels()
                     notes.append(RESTARTED)
                 break
             text = ""
@@ -206,10 +215,13 @@ if __name__ == "__main__":
     parser.add_argument("--timeout", type=float, default=120)
     parser.add_argument("--max-chars", type=int, default=20_000)
     parser.add_argument("--max-image-size", type=int, default=4096)
+    parser.add_argument("--address-space-mib", type=int)
     args = parser.parse_args()
+    if args.address_space_mib is not None and args.address_space_mib < 1:
+        parser.error("--address-space-mib must be positive")
     if args.command == "start":
-        start().stop_channels()
+        start(address_space_mib=args.address_space_mib).stop_channels()
     elif args.command == "run":
-        run(args.timeout, args.max_chars, args.max_image_size)
+        run(args.timeout, args.max_chars, args.max_image_size, address_space_mib=args.address_space_mib)
     else:
         stop()

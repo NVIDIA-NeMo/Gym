@@ -625,6 +625,23 @@ def _process_ended(pid: int) -> bool:
 
 
 class TestPythonTool:
+    @pytest.mark.skipif(sys.platform != "linux", reason="Kernel address-space limits use Linux prlimit")
+    def test_memory_limit_preserves_state_and_survives_restart(self, python_server: GdpPdfResourcesServer) -> None:
+        python_server.config.sandbox_config.kernel_address_space_mib = 4096
+        with TestClient(python_server.setup_webserver()) as client:
+            seeded = _seed(client)
+            assert seeded.status_code == 200, seeded.text
+            limits = "import resource; print(resource.getrlimit(resource.RLIMIT_AS))"
+            expected = f"({4 * 2**30}, {4 * 2**30})\n"
+            # Verify enforcement before attempting an oversized allocation.
+            assert _python(client, limits) == expected
+            _python(client, "x = 42")
+            assert "MemoryError" in _python(client, "bytearray(5 * 2**30)")
+            assert _python(client, "x") == "42\n"
+            assert "restarted" in _python(client, "exit()")
+            assert _python(client, limits) == expected
+            assert _python(client, "print(open('document.pdf', 'rb').read(4))") == "b'%PDF'\n"
+
     def test_unsafe_image_header_is_rejected_before_decoding(self) -> None:
         header = b"IHDR" + struct.pack(">IIBBBBB", 20000, 14000, 8, 2, 0, 0, 0)
         png = b"\x89PNG\r\n\x1a\n" + struct.pack(">I", 13) + header + struct.pack(">I", zlib.crc32(header))
