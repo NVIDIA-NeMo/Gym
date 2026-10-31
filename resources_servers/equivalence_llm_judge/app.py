@@ -682,6 +682,7 @@ class LLMJudgeResourcesServer(SimpleResourcesServer):
         if (
             equal_label != not_equal_label
             and eval_record.verdict_label is not None
+            and judge_response.status != "incomplete"
             and not {"conflicting_verdicts", "truncated_judge_output"} & set(eval_record.judgement_parsing_issues)
         ):
             # Only an unambiguous, complete verdict is a parsed grade; the not-equal fallback stays unknown.

@@ -45,7 +45,7 @@ def _response(id: str, text: str) -> NeMoGymResponse:
     )
 
 
-async def _verify(judge_texts, *, swap=False, transport_error=None):
+async def _verify(judge_texts, *, swap=False, transport_error=None, incomplete=False):
     config = LLMJudgeResourcesServerConfig(
         host="0.0.0.0",
         port=8080,
@@ -61,7 +61,12 @@ async def _verify(judge_texts, *, swap=False, transport_error=None):
     replies = []
     for index, text in enumerate(judge_texts):
         reply = MagicMock(ok=True)
-        reply.read = AsyncMock(return_value=_response(f"judge-{index}", text).model_dump_json())
+        response = _response(f"judge-{index}", text)
+        if incomplete:
+            response = response.model_copy(
+                update={"status": "incomplete", "incomplete_details": {"reason": "max_output_tokens"}}
+            )
+        reply.read = AsyncMock(return_value=response.model_dump_json())
         replies.append(reply)
     client.post = AsyncMock(side_effect=transport_error or replies)
     server = LLMJudgeResourcesServer(config=config, server_client=client)
@@ -116,3 +121,13 @@ async def test_a_failed_judge_transport_is_a_failed_grading():
     (operation,) = invocation.grading_operations
     assert operation.outcome == "failed"
     assert operation.dependencies == []
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,reward", [("[[A=B]]", 1.0), ("[[A!=B]]", 0.0)])
+async def test_truncated_reply_with_valid_label_keeps_score_but_not_completed_grading(text, reward):
+    result, invocation = await _verify([text], incomplete=True)
+    assert result.reward == reward
+    (operation,) = invocation.grading_operations
+    assert operation.outcome == "unknown"
+    assert [d.response_id for d in operation.dependencies] == ["judge-0"]
