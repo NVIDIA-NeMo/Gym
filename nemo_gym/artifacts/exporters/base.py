@@ -25,6 +25,7 @@ import orjson
 from omegaconf import DictConfig, OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
@@ -532,3 +533,6 @@ class BaseExporter(Exporter):
 
     def __exit__(self, exc_type, exc_value, traceback) -> None:
         self.teardown()
+
+
+__getattr__ = moved_names_getattr(__name__)

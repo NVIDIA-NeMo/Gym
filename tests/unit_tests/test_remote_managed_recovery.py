@@ -127,7 +127,8 @@ def test_unbound_remote_directory_is_not_installed(tmp_path):
     assert conn.commands is None
 
 
-def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch):
+@pytest.mark.parametrize("changed_at", ["remote_selection", "collection"])
+def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch, changed_at):
     from nemo_gym.orchestration.executors import slurm
     from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 
@@ -149,7 +150,8 @@ def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch):
     saved = config()
     changed = saved.model_copy(deep=True)
     changed.driver.benchmarks["task"].resumable = ResumeConfig(max_retries=0)
-    reads = iter([saved, changed])
+    # Reads: before collection, right after collection, after remote selection.
+    reads = iter([saved, changed] if changed_at == "collection" else [saved, saved, changed])
     monkeypatch.setattr(slurm, "get_connection", lambda _: Transport())
     monkeypatch.setattr(slurm, "_remote_managed_evidence", lambda *_: selected)
     monkeypatch.setattr(slurm.SlurmExecutor, "_saved_config", staticmethod(lambda *_: next(reads)))
@@ -164,6 +166,10 @@ def test_remote_executor_refuses_changed_saved_budget(tmp_path, monkeypatch):
         hostname="remote.test",
         benchmarks=[BenchmarkJob(benchmark="task", job_dir=str(tmp_path))],
     )
+    if changed_at == "collection":
+        with pytest.raises(RuntimeError, match="changed while collecting recovery evidence"):
+            slurm.SlurmExecutor().recovery_evidence(record, "task")
+        return
     decision, evidence = slurm.SlurmExecutor().recovery_evidence(record, "task")
     assert decision.action.value == "stop"
     assert evidence.managed_selection is None

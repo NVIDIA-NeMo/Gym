@@ -839,21 +839,30 @@ def accounting_unknown():
         return True
     return False
 def sha256(path):
-    try:
-        source = open(path, "rb")
-    except FileNotFoundError:
-        return None
-    h = hashlib.sha256()
-    with source:
-        before = os.fstat(source.fileno())
-        for block in iter(lambda: source.read(1 << 20), b""):
-            h.update(block)
-        after = os.fstat(source.fileno())
-    current = os.stat(path)
+    # Two bounded passes: stat identity misses a same-size in-place rewrite within one timestamp tick, the bytes
+    # of a second read do not. This doubles source reads; it does not make a reader atomic against ABA writes.
     identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    if identity(before) != identity(after) or identity(after) != identity(current):
-        raise RuntimeError("run artifact changed while hashing")
-    return h.hexdigest()
+    first = None
+    for _ in range(2):
+        try:
+            source = open(path, "rb")
+        except FileNotFoundError:
+            if first is None:
+                return None
+            raise RuntimeError("run artifact changed while hashing")
+        h = hashlib.sha256()
+        with source:
+            before = os.fstat(source.fileno())
+            for block in iter(lambda: source.read(1 << 20), b""):
+                h.update(block)
+            after = os.fstat(source.fileno())
+        current = os.stat(path)
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise RuntimeError("run artifact changed while hashing")
+        if first is not None and first != (identity(before), h.hexdigest()):
+            raise RuntimeError("run artifact changed while hashing")
+        first = (identity(before), h.hexdigest())
+    return first[1]
 # The live exporter's run id file, and the post-run export receipt checked against the same files as its version.
 RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
                  "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
@@ -1019,22 +1028,33 @@ class CollectedEvidence(BaseModel):
 
 
 def _managed_source_digest(path: Path) -> str | None:
-    """Hash one stable file with bounded memory, using the exporter's existing identity checks."""
-    try:
-        source = path.open("rb")
-    except FileNotFoundError:
-        return None
-    digest = hashlib.sha256()
-    with source:
-        before = os.fstat(source.fileno())
-        for block in iter(lambda: source.read(1 << 20), b""):
-            digest.update(block)
-        after = os.fstat(source.fileno())
-    current = path.stat()
+    """Hash one stable file with bounded memory, using the exporter's existing identity checks.
+
+    Two streaming passes must agree on stat identity and bytes: a same-size in-place rewrite within one timestamp
+    tick changes no stat field. This doubles source reads; it does not make the reader atomic against ABA writes.
+    """
     identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    if identity(before) != identity(after) or identity(after) != identity(current):
-        raise RuntimeError("managed source changed while hashing")
-    return digest.hexdigest()
+    first = None
+    for _ in range(2):
+        try:
+            source = path.open("rb")
+        except FileNotFoundError:
+            if first is None:
+                return None
+            raise RuntimeError("managed source changed while hashing")
+        digest = hashlib.sha256()
+        with source:
+            before = os.fstat(source.fileno())
+            for block in iter(lambda: source.read(1 << 20), b""):
+                digest.update(block)
+            after = os.fstat(source.fileno())
+        current = path.stat()
+        if identity(before) != identity(after) or identity(after) != identity(current):
+            raise RuntimeError("managed source changed while hashing")
+        if first is not None and first != (identity(before), digest.hexdigest()):
+            raise RuntimeError("managed source changed while hashing")
+        first = (identity(before), digest.hexdigest())
+    return first[1]
 
 
 def _managed_trial_metadata(

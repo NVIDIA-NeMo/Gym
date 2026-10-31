@@ -467,3 +467,59 @@ def test_managed_terminal_infrastructure_is_not_a_model_zero(tmp_path):
     selected = select_managed_evidence(collect(tmp_path), tmp_path)
     assert decide(selected).action.value == "stop"
     assert decide(selected).evidence[0].state.value == "unknown"
+
+
+@pytest.mark.parametrize("age", ["fresh", "aged"])
+@pytest.mark.parametrize("reader", ["managed", "collector"])
+def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_path, monkeypatch, reader, age):
+    # Coarse filesystem timestamps: freeze every stat result, so only the bytes show the rewrite.
+    import builtins
+    import os
+
+    from nemo_gym.orchestration.recovery import _managed_source_digest
+
+    path = tmp_path / "source.jsonl"
+    path.write_bytes(b"a" * (2 << 20))
+    if age == "aged":
+        os.utime(path, ns=(1_000_000_000, 1_000_000_000))
+    frozen = os.stat(path)
+    monkeypatch.setattr(os, "fstat", lambda _fd: frozen)
+    monkeypatch.setattr(os, "stat", lambda *_args, **_kwargs: frozen)
+    digest = _managed_source_digest if reader == "managed" else collector_hash()
+    original_read = None
+
+    def rewrite_once(read):
+        def wrapped(size):
+            nonlocal original_read
+            block = read(size)
+            if block and original_read is None:
+                original_read = block
+                with builtins.open(path, "r+b") as stream:
+                    stream.write(b"b")
+            return block
+
+        return wrapped
+
+    opener = builtins.open
+
+    def instrumented(target, mode="r", *args, **kwargs):
+        source = opener(target, mode, *args, **kwargs)
+        if str(target) == str(path) and mode == "rb" and original_read is None:
+            source.read = rewrite_once(source.read)
+        return source
+
+    monkeypatch.setattr(builtins, "open", instrumented)
+    monkeypatch.setattr(type(path), "open", lambda target, mode="r", *a, **k: instrumented(target, mode, *a, **k))
+    with pytest.raises(RuntimeError, match="changed while hashing"):
+        digest(path)
+
+
+@pytest.mark.parametrize("reader", ["managed", "collector"])
+def test_an_unchanged_file_gets_the_same_digest_from_both_readers(tmp_path, reader):
+    from nemo_gym.orchestration.recovery import _managed_source_digest
+
+    path = tmp_path / "source.jsonl"
+    path.write_bytes(b"a" * (2 << 20) + b"tail")
+    digest = _managed_source_digest if reader == "managed" else collector_hash()
+    assert digest(path) == hashlib.sha256(b"a" * (2 << 20) + b"tail").hexdigest()
+    assert digest(tmp_path / "absent.jsonl") is None
