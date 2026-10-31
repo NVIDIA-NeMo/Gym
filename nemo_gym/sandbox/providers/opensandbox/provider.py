@@ -405,6 +405,13 @@ def _is_retryable_sdk_operation_error(exception: BaseException, seen: set[int] |
     return False
 
 
+def _is_retryable_file_transfer_error(exception: BaseException) -> bool:
+    """Also retry timed-out file transfers: rewriting the same bytes or rereading a file is idempotent."""
+    if isinstance(exception, TimeoutError):
+        return True
+    return _is_retryable_sdk_operation_error(exception)
+
+
 def _is_missing_sandbox_delete_error(exception: BaseException) -> bool:
     """Match kill errors meaning the sandbox is already gone (terminate's goal state).
 
@@ -2628,6 +2635,7 @@ class OpenSandboxProvider:
             timeout_s=float(self._connection.request_timeout_s)
             if self._connection.request_timeout_s is not None
             else None,
+            is_retryable=_is_retryable_file_transfer_error,
         )
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
@@ -2652,6 +2660,7 @@ class OpenSandboxProvider:
             # No overall deadline: the transfer time grows with the file, and the SDK client's request timeout
             # still applies to every read, so a stalled stream fails.
             timeout_s=None,
+            is_retryable=_is_retryable_file_transfer_error,
         )
 
     async def close(self, handle: SandboxHandle) -> None:
