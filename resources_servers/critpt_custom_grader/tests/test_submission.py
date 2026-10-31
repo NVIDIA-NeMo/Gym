@@ -109,6 +109,28 @@ def test_only_the_last_python_or_bare_fence_in_the_finish_answer_is_extracted(an
     assert extract_finish_source(_response(_finish(answer))).source == source
 
 
+@pytest.mark.parametrize("language", ["text", "json", "python3"])
+@pytest.mark.parametrize("accepted_language", ["python", ""])
+def test_unsupported_fence_before_the_answer_cannot_be_reinterpreted_as_a_bare_fence(language, accepted_language):
+    answer = f"```{language}\ndraft\n```\n\n```{accepted_language}\n{SOURCE}\n```"
+    assert extract_finish_source(_response(_finish(answer))) == Submission(SOURCE, "candidate_ready", False)
+
+
+@pytest.mark.parametrize("newline", ["\n", "\r\n"])
+def test_unsupported_fences_between_or_after_python_answers_do_not_change_the_last_answer(newline):
+    answer = (
+        f"```python\nwrong\n```\n\n```text\ndraft\n```\n\n```python\n{SOURCE}\n```\n\n```json\n{{}}\n```"
+    ).replace("\n", newline)
+    assert extract_finish_source(_response(_finish(answer))) == Submission(
+        SOURCE.replace("\n", newline), "candidate_ready", False
+    )
+
+
+def test_only_unsupported_fences_preserve_the_raw_answer_fallback():
+    answer = "```text\ndraft\n```\n\n```json\n{}\n```"
+    assert extract_finish_source(_response(_finish(answer))) == Submission(answer, "candidate_ready", False)
+
+
 @pytest.mark.parametrize("answer", ["", " \n\t", "```python\n\n```"])
 def test_an_acknowledged_empty_answer_is_a_scored_no_answer(answer):
     assert extract_finish_source(_response(_finish(answer))) == Submission(None, "candidate_no_answer", True)

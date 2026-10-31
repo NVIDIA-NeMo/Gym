@@ -15,7 +15,7 @@ from nemo_gym.core import AGENT_LIMIT
 
 
 _PROTOCOL = "critpt-finish-v1"
-_FENCE = re.compile(r"```(?:python)?[ \t]*\r?\n(.*?)\r?\n```", re.DOTALL)
+_FENCE = re.compile(r"```([^\r\n]*)\r?\n(.*?)\r?\n```", re.DOTALL)
 
 
 class FinishRequest(BaseModel):
@@ -182,6 +182,7 @@ def extract_finish_source(response: dict[str, Any]) -> Submission:
     # acknowledgement, but another model turn issuing a new call after it contradicts terminal completion.
     if any(index > result_index for index, _ in calls.values()):
         return _INVALID
-    matches = list(_FENCE.finditer(body.answer))
-    source = (matches[-1].group(1) if matches else body.answer).strip()
+    # Consume unsupported blocks too, so their closing fences cannot open a later bare block.
+    matches = [match for match in _FENCE.finditer(body.answer) if match.group(1).rstrip(" \t") in ("", "python")]
+    source = (matches[-1].group(2) if matches else body.answer).strip()
     return Submission(source, "candidate_ready", False) if source else _NO_ANSWER

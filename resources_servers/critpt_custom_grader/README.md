@@ -173,6 +173,15 @@ Validate the resolved request on each model endpoint before collecting results.
 Gym sizes each call's output budget from estimated prompt tokens and context capacity, with the configured
 completion buffer, minimum and cap. This is a per-call budget; it does not impose a cumulative episode token limit.
 
+For vLLM endpoints that expose `/tokenize`, set `fit_completion_to_context: true` in the `vllm_model` block to
+measure the fully rendered prompt on the selected backend before generation. To use the full available output
+budget, set Stirrup's `min_completion_tokens` equal to `max_completion_tokens_cap`, using the model's supported
+output capacity. The adapter then sends the smaller of that requested cap and the exact remaining context; a
+smaller per-request output limit still applies. This mode preserves the conversation, reasoning settings and turn
+limit. Tokenization failures, exhausted context and rejected model requests remain errors, rather than empty
+completions that consume turns and become misleading no-answer scores. It requires a vLLM chat-completions
+endpoint; see the [model adapter's configuration](../../responses_api_models/vllm_model/README.md).
+
 Start the synthetic example after supplying a model overlay and the provider connection variables:
 
 ```bash

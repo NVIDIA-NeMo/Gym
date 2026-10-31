@@ -20,6 +20,34 @@ Supports the full schema: tool-calling, multi-turn assistant/tool messages,
 images via `image_url` content blocks, and the audio sidechannel
 (`metadata.audio_path` / `audio_paths` / `audio_data` / `audio_ref`).
 
+### Completion budgets
+
+Set `fit_completion_to_context: true` to size each completion using the selected
+vLLM backend's `/tokenize` endpoint. Gym measures the prepared messages, tools,
+reasoning fields and chat-template options used for generation, then limits the
+requested output to `max_model_len - count`. Smaller caller output limits remain
+in force; an omitted limit uses the remaining capacity. History and sampling
+settings are unchanged. Tokenizer template options include generation's effective
+`reasoning_effort`, `documents` and `enable_thinking` settings; passing the same
+top-level HTTP fields to both endpoints alone does not preserve those settings.
+
+The backend must return integer `count` and `max_model_len` values. A missing or
+malformed measurement fails with HTTP 502, and a prompt that fills the context
+fails with HTTP 400. An incompatible `min_tokens` also fails with HTTP 400 rather
+than being silently reduced. There is no character-estimate fallback or extra
+generation attempt. Context rejections propagate even when
+`propagate_context_overflow_errors` is false, so a refused request cannot become
+an empty, apparently successful completion.
+
+This option defaults to false and requires the chat-completions backend
+(`use_completions_api: false`, `is_responses_native: false`). Requests with prompt
+truncation, `response_format`, or tools with a non-automatic `tool_choice` are
+rejected because their generation behavior cannot be measured through this
+tokenizer contract. To use all remaining
+capacity, a harness should request its intended output ceiling and let this
+adapter fit that ceiling to the rendered prompt, rather than first subtracting
+an approximate prompt length.
+
 ### Audio archives
 
 Reuse `simple_agent` with compact rows carrying a JSON-encoded archive/member
