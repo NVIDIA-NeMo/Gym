@@ -34,6 +34,9 @@ sandbox:
       auto_resume: false
       # Sandboxes of a process that died end one lease later instead of at their full lifetime.
       lease_s: 1200.0
+      # At hundreds of creates a minute, AgentENV can report a sandbox created before its gateway reaches it (502):
+      # wait for it to answer instead of failing the first command run in it.
+      reachable_timeout_s: 120.0
       secure: true
       allow_internet_access: true
       strict_resources: false
