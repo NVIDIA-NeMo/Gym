@@ -1343,3 +1343,35 @@ def test_missing_reservation_preserves_prior_replay_gate_and_explicit_budget_res
     assert reloaded.coverage()["missing"] == 1
     assert reloaded.coverage()["counted_failures"] == (0 if resubmit else charged_failures)
     assert (sidecar.read_bytes() if sidecar.exists() else None) == saved_history
+
+
+@pytest.mark.parametrize("new_attempt", [False, True])
+def test_current_unrouted_dispatch_gates_admission_without_replacing_history(prepared_run, new_attempt):
+    from nemo_gym.omitted_rollouts import omitted_rollout_record
+
+    output, prepare = prepared_run
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        row = store.pending(3)[0]
+        store.record_dispatch(row)
+        original = row | {"_ng_failure_class": "provider_unavailable", "reward": 0.0}
+        store.record_outcome(original)
+        diagnostic = row
+        if new_attempt:
+            diagnostic = row | {"_ng_attempt_index": 1}
+            store.record_dispatch(diagnostic)
+        store.record_unstarted(
+            omitted_rollout_record(diagnostic | {"_ng_failure_class": "agent_run_error"})
+            | {"_ng_unrouted_run_error": True}
+        )
+    reader = RolloutStore.read(output)
+    assert not any(item["_ng_task_index"] == 0 for item in reader.pending(3))
+    assert reader.coverage()["counted_failures"] == 1
+    assert list(read_records(failures_path_for(output)))[0] == original
+    # A genuinely newer valid outcome supersedes that diagnostic; no historical blocker leaks forward.
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        later = row | {"_ng_attempt_index": 2 if new_attempt else 1}
+        store.record_dispatch(later)
+        store.record_outcome(later | {"_ng_failure_class": "provider_unavailable", "reward": 0.0})
+    reader = RolloutStore.read(output)
+    assert any(item["_ng_task_index"] == 0 for item in reader.pending(3))
+    assert reader.coverage()["counted_failures"] == 2

@@ -4316,14 +4316,14 @@ class RolloutCollectionHelper(BaseModel):
                 dispatch_name = self._dispatch_name(row)
                 if completed.run_error is not None:
                     # route_failures_to_sidecar is off, so this failed /run ends the run. Its identity, cause and
-                    # report are kept as evidence the run history skips on load: no reader counts it as a failure,
-                    # an attempt or a score, so resume still runs the rollout and no denominator shrinks unasked.
+                    # report are kept as non-superseding evidence: they do not replace a score or earlier failure.
+                    # Admission still stops an unresolved possibly-delivered request from running the agent again.
                     store.record_unstarted(omitted_rollout_record(result) | {NG_UNROUTED_RUN_ERROR_KEY: True})
                     _record_rollout_outcome(result, "omitted", dispatch_name)
                     print(
                         "[rollout_collection] the run stops at a failed /run (route_failures_to_sidecar is off); "
                         f"it is recorded in {failures_path_for(store.output)}. {len(input_rows) - completed_count + 1} "
-                        f"of {len(input_rows)} dispatched rollouts have no result, and resume_from_cache runs them.",
+                        f"of {len(input_rows)} dispatched rollouts have no result; saved evidence governs resume admission.",
                         flush=True,
                     )
                     raise completed.run_error
@@ -5321,7 +5321,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         failure[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure[NG_TERMINAL_KEY] = True
                     failure_row = failure
-                    failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes else failure
+                    failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
                     if (
                         isinstance(failed_outcome, RolloutFailureRecord)
                         and _max_num_tries == 1

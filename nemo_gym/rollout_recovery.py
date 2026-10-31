@@ -75,10 +75,15 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     if row.get("_ng_failure_class") in {"judge_failed", "judge_invalid"}:
         return True  # Verification recovery may reuse an answer; it never reruns the agent.
     record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    not_sent = isinstance(record, Mapping) and (
+        record.get("delivery") == "not_sent" or isinstance(failure, Mapping) and failure.get("stage") == "admission"
+    )
+    if row.get("_ng_unrouted_run_error") is True and not not_sent:
+        # An aborted collection retains this attempt as diagnostic history, not a replacement outcome.
+        return True
     if isinstance(record, Mapping) and record.get("source") == "collector":
-        failure = record.get("failure")
-        admitted = isinstance(failure, Mapping) and failure.get("stage") == "admission"
-        if record.get("delivery") == "possibly_delivered" and not admitted:
+        if record.get("delivery") == "possibly_delivered" and not not_sent:
             return True
     events = row.get("_ng_failure_events")
     selected = row.get("_ng_failure_id")

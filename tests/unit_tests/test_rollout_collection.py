@@ -13567,9 +13567,9 @@ class TestUnroutedRunFailure:
             config.model_copy(update={"resume_from_cache": True})
         )
 
-        # As without the record: the scored row stays done, and the failed and the unfinished rows run again. The run
-        # manifest reserved their first attempts, so they resume as attempt 1; the evidence debits no failure budget.
-        assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {1: 1, 2: 1}
+        # The scored row stays done. The possibly delivered request cannot run again; the untouched input can.
+        # Both reservations remain recorded, and the diagnostic debits no failure budget.
+        assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {2: 1}
         output = Path(config.output_jsonl_fpath)
         from nemo_gym.rollout_store import RolloutStore
 
@@ -13582,7 +13582,7 @@ class TestUnroutedRunFailure:
     async def test_the_record_leaves_an_older_provider_failure_standing(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        """Review of #5243: task 1 failed in the provider, then its resumed /run is cut off with routing off. The kept
+        """Task 1 failed in the provider, then its resumed /run is cut off with routing off. The kept
         evidence must not replace the provider failure: with provider_unavailable counted the rewards stay [1, 0], not [1]."""
         from nemo_gym.rollout_compare.rows import load_rollouts
         from nemo_gym.rollout_health import _rollout_accounting
@@ -13620,7 +13620,11 @@ class TestUnroutedRunFailure:
         output = Path(config.output_jsonl_fpath)
         sidecar = _failures_path_for(output)
         prior_failure, evidence = [orjson.loads(line) for line in sidecar.read_bytes().splitlines()]
-        assert (prior_failure[TASK_INDEX_KEY_NAME], prior_failure[NG_FAILURE_CLASS_KEY], is_omitted_rollout_row(prior_failure)) == (
+        assert (
+            prior_failure[TASK_INDEX_KEY_NAME],
+            prior_failure[NG_FAILURE_CLASS_KEY],
+            is_omitted_rollout_row(prior_failure),
+        ) == (
             1,
             "provider_unavailable",
             False,
@@ -13651,8 +13655,13 @@ class TestUnroutedRunFailure:
         metrics = _failure_export_metrics([sidecar], identity, {(0, 0)})
         assert (metrics["retries/attempts"], metrics["coverage/failed/provider_unavailable"]) == (1, 1)
         dispatched, *_ = RolloutCollectionHelper()._load_from_cache(resumed)
-        # Attempt 1 was reserved for the run the unrouted error ended, so the next execution is attempt 2.
-        assert {row["x"]: row.get(ATTEMPT_INDEX_KEY_NAME) for row in dispatched} == {1: 2}
+        # Attempt 1 may have executed. Keep the older failure's score and debit, but do not dispatch attempt 2.
+        assert dispatched == []
+        from nemo_gym.rollout_store import RolloutStore
+
+        store = RolloutStore.read(output)
+        assert store.manifest.next_attempt["1-0"] == 2
+        assert store.coverage()["counted_failures"] == 1
 
     @pytest.mark.parametrize("failure", [asyncio.CancelledError(), ValueError("not a dispatch failure")])
     async def test_cancellation_and_other_errors_are_neither_recorded_nor_resent(
@@ -13939,6 +13948,7 @@ def test_an_episode_result_keeps_only_a_complete_final_zero_marker(markers, acce
 
 def test_historical_unrouted_diagnostic_does_not_erase_judge_zero(tmp_path):
     """The historical judge-then-unrouted sequence keeps its score denominator without replaying an agent."""
+    from nemo_gym.omitted_rollouts import omitted_rollout_record
     from nemo_gym.rollout_recovery import RunManifest
     from nemo_gym.rollout_store import RolloutStore
 

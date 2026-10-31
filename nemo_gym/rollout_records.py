@@ -293,6 +293,7 @@ class RolloutRecords:
         self.omitted: set[tuple[str, int]] = set()
         # An unanswered reservation cannot erase an earlier outcome's stop decision.
         self.replay_blocked: set[str] = set()
+        self.unresolved_dispatches: set[str] = set()
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
 
     def _key(self, row: dict) -> tuple[str, int]:
@@ -419,8 +420,13 @@ class RolloutRecords:
                 if payload.get("_ng_omitted_rollout") and (
                     payload.get("_ng_dispatch_drained") or payload.get("_ng_unrouted_run_error")
                 ):
-                    # Evidence, not an outcome: a row the dispatch budget never started, or a failed /run that ended
-                    # the run unrouted. It debits nothing and never replaces an earlier attempt's outcome.
+                    # Keep diagnostics out of outcome selection and scoring. An unresolved current dispatch,
+                    # however, cannot be replayed merely because its outcome was lost with the response.
+                    if payload.get("_ng_unrouted_run_error") and has_unclassified_execution_failure(payload):
+                        key = state._key(payload)
+                        state.check_run_identity(payload, legacy=import_legacy)
+                        if key[1] == manifest.next_attempt.get(key[0], 0) - 1:
+                            state.unresolved_dispatches.add(key[0])
                     continue
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
@@ -489,6 +495,9 @@ class RolloutRecords:
         payload = self.payloads.get((identity, self.latest.get(identity)))
         terminal = payload.terminal if payload else False
         if payload and payload.final_zero:
+            return False
+        if identity in self.unresolved_dispatches:
+            # The current dispatch is unresolved even if an older outcome still supplies score/history.
             return False
         if payload is None and identity in self.replay_blocked:
             # A missing newer outcome does not reopen a retained answer, settled zero or unknown interruption.

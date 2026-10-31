@@ -404,13 +404,28 @@ def decide_recovery(
         standing = [row for row in sidecar.get(identity, []) if not is_non_superseding_rollout_row(row)]
         unrouted = [row for row in sidecar.get(identity, []) if row.get(NG_UNROUTED_RUN_ERROR_KEY) is True]
         if not standing and unrouted:
-            # A failed /run kept as evidence is no outcome, but the rollout did not simply never start either:
-            # its cause is unknown here, so it is not restarted as missing. This observation debits no attempt.
+            # A diagnostic does not spend a failure attempt. Only explicit not-sent evidence admits retry;
+            # a possibly delivered request must not regenerate an answer whose response was lost.
             last = unrouted[-1]
+            record = last.get("_ng_failure_record")
+            not_sent = isinstance(record, Mapping) and record.get("delivery") == "not_sent"
+            fact = managed.get(identity)
+            spent = fact.attempts if fact else 0
+            cap = fact.max_attempts if fact else default_max_attempts
+            state = IdentityState.UNKNOWN
+            if not_sent and not _policy_replay_is_unsupported(last):
+                action = _sidecar_action(last, policy)
+                if action == OutcomeAction.FAIL or last.get(TERMINAL) is True:
+                    policy_stopped = True
+                    state = IdentityState.TERMINAL
+                elif action == OutcomeAction.RETRY:
+                    state = IdentityState.RETRYABLE if spent < cap else IdentityState.EXHAUSTED
             evidence.append(
                 IdentityEvidence(
                     identity=identity,
-                    state=IdentityState.UNKNOWN,
+                    state=state,
+                    attempts=spent,
+                    max_attempts=cap,
                     failure_kind=last.get("failure_kind"),
                     failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                     events=_events(last),
