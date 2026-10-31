@@ -691,7 +691,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     import tempfile
 
     from nemo_gym.artifacts.exporters.base import _artifact_version
-    from nemo_gym.artifacts.exporters.metrics import health_source_artifacts
+    from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
     from nemo_gym.artifacts.run_artifacts import RunArtifacts
     from nemo_gym.orchestration.recovery import (
         COLLECT_SCRIPT,
@@ -811,6 +811,8 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
     for entry in aggregate:
         entry.pop("_ng_run_health_metrics", None)
     aggregate[0]["_ng_run_health_metrics"] = payload
+    # Refuse collisions before changing artifacts or sending any health metric to a live exporter.
+    flatten_aggregate_metrics(aggregate, source_artifacts=health_version)
 
     def atomic_json(path, value):
         with tempfile.NamedTemporaryFile(
