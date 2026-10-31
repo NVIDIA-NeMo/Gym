@@ -165,10 +165,13 @@ def test_actual_local_slurm_executor_keeps_budget_and_never_regenerates_saved_an
     prepare_managed(job, case, n=2)
     before = saved_bytes(job / "artifacts")
     result = recover(*_handle(job))
-    assert result.decision.action.value == ("reverify" if case == "judge" else action)
+    assert result.decision.action.value == action
     assert (result.dispatched == "resubmit") is (action == "resubmit")
     if case == "judge":
         assert not result.ok and result.unsupported
+        assert "no existing CPU-only judge execution profile" in result.unsupported
+        assert result.decision.counts == {"judge_recoverable": 1, "scored": 1}
+        assert result.dispatched is None
     assert saved_bytes(job / "artifacts") == before
     assert (job / ".gym_infra_retries").read_text() == "2\n"
     if action == "resubmit":

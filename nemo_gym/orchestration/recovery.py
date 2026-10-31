@@ -41,9 +41,15 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.agent_outcome import OutcomeAction, OutcomePolicyConfig, choose_action
+from nemo_gym.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    OutcomeAction,
+    OutcomePolicyConfig,
+    choose_action,
+)
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
@@ -54,6 +60,7 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.task_materialization import TASK_ID_FIELDS
@@ -205,9 +212,55 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
         return self
 
 
+def _legacy_agent_outcome(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
+    """Read the final agent classification without selecting an unbound diagnostic event.
+
+    Older environments returned a failed agent response but did not select its report's cause. Support only a
+    delivered agent-stage outcome with one matching observed model rejection. An internal wrapper's 500, mixed
+    history, incomplete reports and saved completed answers cannot establish an upstream HTTP rejection.
+    """
+    record = row.get("_ng_failure_record")
+    if (
+        not isinstance(record, Mapping)
+        or record.get("source") != "environment"
+        or record.get("delivery") != "delivered"
+    ):
+        return None, None
+    failure = record.get("failure")
+    if not isinstance(failure, Mapping) or failure.get("stage") != "agent":
+        return None, None
+    answer = row.get("_ng_failure_partial_response")
+    if not isinstance(answer, Mapping) or answer.get("object") != "response" or answer.get("status") != "failed":
+        return None, None
+    metadata = answer.get("metadata")
+    raw = metadata.get(AGENT_OUTCOME_METADATA_KEY) if isinstance(metadata, Mapping) else None
+    if not isinstance(raw, str):
+        return None, None
+    try:
+        outcome = AgentOutcome.model_validate_json(raw)
+    except ValidationError:
+        return None, None
+    report = FailureReportRow.report(row)
+    if report.omitted or report.failure_id is not None or len(report.events) != 1:
+        return None, None
+    event = next(iter(report.events.values()))
+    if (
+        outcome.failure_kind != MODEL_REQUEST_ERROR
+        or event.failure_kind != outcome.failure_kind
+        or event.http_status != outcome.status_code
+        or event.boundary != FailureBoundary.MODEL
+        or event.operation != "model_request"
+        or not event.operation_id
+        or not event.attempt_id
+        or event.cause_id is not None
+    ):
+        return None, None
+    return outcome.failure_kind, outcome.status_code
+
+
 def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
     """The failure kind and HTTP status the policy selects on: the event ``failure_id`` selects first, then the
-    row's own producer fields ``failure_kind`` and ``_ng_failure_http_status``. No other saved event is searched."""
+    row's own producer fields, then a validated final legacy agent outcome. Unselected events are not causes."""
     events = row.get(FAILURE_EVENTS)
     selected_id = row.get(FAILURE_ID)
     selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
@@ -216,6 +269,8 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
     status = next(
         (v for v in (selected.get("http_status"), row.get("_ng_failure_http_status")) if type(v) is int), None
     )
+    if FAILURE_ID not in row and row.get("failure_kind") is None and row.get("_ng_failure_http_status") is None:
+        return _legacy_agent_outcome(row)
     return (kind if isinstance(kind, str) else None), status
 
 
@@ -449,7 +504,7 @@ def decide_recovery(
             if (row.get("_line") if isinstance(row.get("_line"), int) else index) >= resubmit_offset
             and not is_omitted_rollout_row(row)
         ]
-        kind = last.get("failure_kind")
+        kind = _policy_evidence(last)[0]
         if is_omitted_rollout_row(last):
             # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
             interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
@@ -772,6 +827,19 @@ def rows(name, skip=0):
                 if isinstance(answer, dict):
                     output = answer.get("output")
                     selected[key] = {k: answer[k] for k in ("object", "id", "status") if k in answer}
+                    metadata = answer.get("metadata")
+                    if isinstance(metadata, dict) and "ng_agent_outcome" in metadata:
+                        # Export only the bounded public classification, never arbitrary metadata or JSON extras.
+                        outcome = None
+                        try:
+                            value = json.loads(metadata["ng_agent_outcome"])
+                            if (isinstance(value, dict) and set(value) == {"failure_kind", "status_code"}
+                                and value["failure_kind"] == "model_request_error"
+                                and type(value["status_code"]) is int and 400 <= value["status_code"] <= 599):
+                                outcome = json.dumps(value)
+                        except (TypeError, ValueError, RecursionError):
+                            pass
+                        selected[key]["metadata"] = {"ng_agent_outcome": outcome}
                     if answer.get("error") is not None:
                         selected[key]["error"] = {}  # Presence only; diagnostic messages stay on the run host.
                     if isinstance(output, list):
