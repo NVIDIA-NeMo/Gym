@@ -244,3 +244,43 @@ jobs:
           fi
           echo "One or more server-suite shards failed (result: ${{ needs.server-suite.result }})."
           exit 1
+
+  # Non-blocking evidence for verifier changes: re-score each changed resources server's saved rollouts with the
+  # base and PR verifier in-process (no model) and write the reward changes to the job summary.
+  reward-diff:
+    name: Reward diff (non-blocking)
+    needs: detect
+    if: needs.detect.outputs.run_servers == 'true'
+    continue-on-error: true
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@d23441a48e516b6c34aea4fa41551a30e30af803 # v6
+        with:
+          submodules: 'recursive'
+          fetch-depth: 0
+
+      - name: Cache uv dependencies
+        uses: actions/cache@0057852bfaa89a56745cba8c7296529d2fc39830 # v4
+        with:
+          path: ~/.cache/uv
+          key: uv-${{ runner.os }}-${{ hashFiles('uv.lock') }}
+          restore-keys: |
+            uv-${{ runner.os }}-
+
+      - name: Re-score saved rollouts at base and head
+        env:
+          BASE_REF: ${{ inputs.base-ref || github.event.pull_request.base.sha }}
+          CHANGED_SERVER_FILES: ${{ needs.detect.outputs.server_all_changed_files }}
+        run: |
+          source ./scripts/ci/setup_dev.sh
+          servers=$(echo "$CHANGED_SERVER_FILES" | tr ' ' '\n' | grep '^resources_servers/' | cut -d'/' -f1-2 | sort -u || true)
+          if [[ -z "$servers" ]]; then
+            echo "No changed resources servers." | tee -a "$GITHUB_STEP_SUMMARY"
+            exit 0
+          fi
+          for server in $servers; do
+            [[ -f "$server/app.py" ]] || continue
+            python scripts/ci/reward_diff.py run "$server" --base-ref "$BASE_REF" || echo "::warning::reward diff failed for $server"
+          done
