@@ -116,3 +116,67 @@ def test_the_exporters_config_masks_a_url_password_too() -> None:
         "tags": ["http://a:****@h"],  # pragma: allowlist secret
         "model": "m",
     }
+
+
+@pytest.mark.parametrize(
+    "value", [False, True, 17, None, "diagnostic-canary", {"arbitrary": "diagnostic-canary"}, ["diagnostic-canary"]]
+)
+def test_config_projection_masks_arbitrary_secret_values(value):
+    source = {"secrets": {"JUDGE_AUTH": value}, "headers": {"arbitrary": value}}
+    masked = hide_secrets_in_container(source)
+    assert "diagnostic-canary" not in str(masked)
+    assert masked["headers"]["arbitrary"] == MASKED_VALUE
+    expected = (
+        {"arbitrary": MASKED_VALUE}
+        if isinstance(value, dict)
+        else [MASKED_VALUE]
+        if isinstance(value, list)
+        else MASKED_VALUE
+    )
+    assert masked["secrets"]["JUDGE_AUTH"] == expected
+    assert source["secrets"]["JUDGE_AUTH"] == value
+
+
+def test_capture_namespace_cannot_escape_a_secret_ancestor():
+    source = {
+        "token_id_capture": {"enabled": False, "sink": "package:Sink", "headers": {"X-Auth": "diagnostic-canary"}},
+        "secrets": {"token_id_capture": {"enabled": True, "sink": "diagnostic-canary"}},
+        "headers": {"token_id_capture": {"enabled": True}},
+        "my_token_id_capture": {"enabled": True},
+        "nested": {"token_id_capture": {"enabled": True}},
+    }
+    masked = hide_secrets_in_container(source)
+    assert masked["token_id_capture"] == {
+        "enabled": False,
+        "sink": "package:Sink",
+        "headers": {"X-Auth": MASKED_VALUE},
+    }
+    assert masked["secrets"]["token_id_capture"] == {"enabled": MASKED_VALUE, "sink": MASKED_VALUE}
+    assert masked["headers"]["token_id_capture"] == MASKED_VALUE
+    assert masked["my_token_id_capture"]["enabled"] == MASKED_VALUE
+    assert masked["nested"]["token_id_capture"]["enabled"] == MASKED_VALUE
+
+
+def test_public_capture_projection_fields_match_the_supported_schema():
+    from nemo_gym.config.secret_utils import _CAPTURE_PUBLIC_FIELDS
+    from nemo_gym.token_id_capture.config import TokenIdCaptureSettings
+
+    assert _CAPTURE_PUBLIC_FIELDS | {"sink_kwargs", "lineage_store_kwargs", "control_auth_token_env"} == set(
+        TokenIdCaptureSettings.model_fields
+    )
+    source = {
+        "token_id_capture": {
+            "enabled": True,
+            "auth": "diagnostic-canary",
+            "access": {"opaque": "diagnostic-canary"},
+            "arbitrary": ["diagnostic-canary"],
+        }
+    }
+    assert hide_secrets_in_container(source) == {
+        "token_id_capture": {
+            "enabled": True,
+            "auth": MASKED_VALUE,
+            "access": {"opaque": MASKED_VALUE},
+            "arbitrary": [MASKED_VALUE],
+        }
+    }

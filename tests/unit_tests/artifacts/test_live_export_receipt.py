@@ -28,6 +28,7 @@ import nemo_gym.artifacts.exporters as registry
 import nemo_gym.artifacts.exporters.mlflow as module
 from nemo_gym.artifacts.exporters.base import _artifact_version
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.resolved_config import write_resolved_config
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.cli.eval import _finalize_live_exporters
 from nemo_gym.rollout_health import run_health_checks
@@ -129,7 +130,7 @@ def live(tmp_path, monkeypatch):
             "mlflow_run_name": "run",
         }
     )
-    OmegaConf.save(config, artifacts.resolved_config_yaml_fpath)
+    write_resolved_config(config, output)
     aggregate = [{"agent_ref": {"name": "agent"}, "agent_metrics": {"mean/reward": 0.5}, "key_metrics": {}}]
     artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(aggregate))
     run_health_checks(output, workers=1, run_coverage=[RolloutStore.read(output).coverage()])
@@ -397,3 +398,169 @@ def test_postrun_mlflow_export_keeps_canonical_evidence_and_projection_receipt(l
     receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
     assert receipt["rollout_projection_version"] == 1
     assert mlflow_errors(_collected_mlflow(artifacts), "FINISHED", observed_run_id=receipt["run_id"]) == []
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+def test_live_receipt_config_projection_preserves_capture_controls(live, enabled):
+    artifacts, exporter, client = live
+    exporter.global_config_dict.token_id_capture = {
+        "enabled": enabled,
+        "dir": "/tmp/token-capture-fixture",
+        "sink": None,
+        "rebuild_response": False,
+    }
+    from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
+
+    TokenIdCaptureConfig.model_validate(OmegaConf.to_container(exporter.global_config_dict, resolve=False))
+    before = OmegaConf.to_container(exporter.global_config_dict, resolve=False)
+    write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
+    exporter.export_config()
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    version = _artifact_version(artifacts)
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert _artifact_version(artifacts) == version
+    assert artifacts.export_done_fpath("mlflow").exists()
+    saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
+    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved
+    assert saved["token_id_capture"] == before["token_id_capture"]
+    assert OmegaConf.to_container(exporter.global_config_dict, resolve=False) == before
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+
+
+@pytest.mark.parametrize("field,value", [("enabled", True), ("sink", "other:Sink"), ("rebuild_response", True)])
+def test_live_receipt_rejects_changed_capture_controls(live, field, value):
+    artifacts, exporter, client = live
+    exporter.global_config_dict.token_id_capture = {
+        "enabled": False,
+        "sink": "example:Sink",
+        "rebuild_response": False,
+    }
+    write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
+    exporter.export_config()
+    exporter.global_config_dict.token_id_capture[field] = value
+    write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+def test_live_config_projection_masks_secret_ancestry_without_mutating_config(live):
+    artifacts, exporter, client = live
+    exporter.global_config_dict.token_id_capture = {"enabled": True, "sink": "example:Sink"}
+    exporter.global_config_dict.environment_servers = {
+        "harbor": {
+            "secrets": {
+                "JUDGE_AUTH": "private-auth-canary",
+                "nested": {"arbitrary": 123},
+                "enabled": True,
+                "missing": None,
+                "many": ["private-list-canary"],
+                "token_id_capture": {"enabled": True, "sink": "private-sink-canary"},
+            }
+        }
+    }
+    exporter.global_config_dict.openai_default_headers = {
+        "X-Auth": "private-header-canary",
+        "arbitrary": "private-second-header-canary",
+    }
+    before = OmegaConf.to_container(exporter.global_config_dict, resolve=False)
+    write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
+    exporter.export_config()
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert artifacts.export_done_fpath("mlflow").exists()
+    saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
+    delivered = client.artifacts[exporter.CONFIG_ARTIFACT_FILE]
+    assert saved == delivered
+    assert saved["environment_servers"]["harbor"]["secrets"] == {
+        "JUDGE_AUTH": "****",
+        "nested": {"arbitrary": "****"},
+        "enabled": "****",
+        "missing": "****",
+        "many": ["****"],
+        "token_id_capture": {"enabled": "****", "sink": "****"},
+    }
+    assert saved["openai_default_headers"] == {"X-Auth": "****", "arbitrary": "****"}
+    assert saved["token_id_capture"]["enabled"] is True
+    assert OmegaConf.to_container(exporter.global_config_dict, resolve=False) == before
+
+
+@pytest.mark.parametrize("environment_set", [False, True])
+def test_live_config_projection_never_resolves_environment_references(live, monkeypatch, environment_set):
+    artifacts, exporter, client = live
+    variable = "GYM_PROJECTION_TEST_UNRESOLVED"
+    if environment_set:
+        monkeypatch.setenv(variable, "credential-environment-canary")
+    else:
+        monkeypatch.delenv(variable, raising=False)
+    exporter.global_config_dict.diagnostic_url = "${oc.env:GYM_PROJECTION_TEST_UNRESOLVED}"
+    exporter.global_config_dict.policy_api_key = "${oc.env:GYM_PROJECTION_TEST_UNRESOLVED}"
+    before = OmegaConf.to_container(exporter.global_config_dict, resolve=False)
+    write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
+    exporter.export_config()
+    saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
+    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved
+    assert saved["diagnostic_url"] == "${oc.env:GYM_PROJECTION_TEST_UNRESOLVED}"
+    assert saved["policy_api_key"] == "****"
+    assert "credential-environment-canary" not in json.dumps(saved)
+    assert OmegaConf.to_container(exporter.global_config_dict, resolve=False) == before
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert artifacts.export_done_fpath("mlflow").exists()
+
+
+@pytest.mark.parametrize("key", ["sink_kwargs", "lineage_store_kwargs"])
+def test_live_capture_custom_backend_options_do_not_expose_credentials(live, key):
+    artifacts, exporter, client = live
+    exporter.global_config_dict.token_id_capture = {
+        "enabled": True,
+        "sink": "example:Sink",
+        key: {
+            "auth": "credential-kwargs-canary",
+            "opaque": {
+                "access": "credential-kwargs-canary",
+                "url": "https://example.test/credential-kwargs-canary",
+            },
+            "enabled": False,
+            "arbitrary": [17, None, "credential-kwargs-canary"],
+        },
+    }
+    before = OmegaConf.to_container(exporter.global_config_dict, resolve=False)
+    write_resolved_config(exporter.global_config_dict, artifacts.rollouts_jsonl_fpath)
+    exporter.export_config()
+    saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
+    assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved
+    assert saved["token_id_capture"] == {
+        "enabled": True,
+        "sink": "example:Sink",
+        key: {
+            "auth": "****",
+            "opaque": {"access": "****", "url": "****"},
+            "enabled": "****",
+            "arbitrary": ["****", "****", "****"],
+        },
+    }
+    assert OmegaConf.to_container(exporter.global_config_dict, resolve=False) == before
+    run_health_checks(
+        artifacts.rollouts_jsonl_fpath,
+        workers=1,
+        run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
+    )
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert artifacts.export_done_fpath("mlflow").exists()

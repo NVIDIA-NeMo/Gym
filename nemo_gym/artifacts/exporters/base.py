@@ -16,7 +16,6 @@ import hashlib
 import logging
 import os
 from abc import ABC, abstractmethod
-from copy import deepcopy
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -29,7 +28,7 @@ from pydantic import TypeAdapter, ValidationError
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
-from nemo_gym.config.secret_utils import recursively_hide_secrets
+from nemo_gym.config.secret_utils import hide_secrets_in_container
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
 
 
@@ -267,8 +266,9 @@ class BaseExporter(Exporter):
     def export_config(self) -> None:
         # `global_config_dict` holds live credentials (the backend needs its own API key to connect),
         # so mask a copy rather than shipping it to a tracking server as-is.
-        config_dict_to_log = deepcopy(self.global_config_dict)
-        recursively_hide_secrets(config_dict_to_log)
+        config_dict_to_log = OmegaConf.create(
+            hide_secrets_in_container(OmegaConf.to_container(self.global_config_dict, resolve=False))
+        )
         if self.reopened:
             # Collection may still find nothing to resume and start the output over (`start_over`): the earlier
             # job's run must not get this job's config then.
