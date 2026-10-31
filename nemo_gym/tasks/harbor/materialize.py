@@ -249,6 +249,9 @@ def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | Non
     ``[gym.defaults].num_repeats`` is the run config's top-level ``num_repeats`` instead (see
     ``nemo_gym.tasks.harbor.cli.build_run``). A benchmark entry names no ``prepare_script``: the rows are
     written by the preparation that generates this entry.
+
+    Rows under the working directory use a relative path so the recorded dataset metadata survives a
+    checkout move. Rows outside it keep their absolute path.
     """
     dataset = dataset or GymDatasetConfig()
     entry: dict[str, Any] = {"name": taskset, "type": dataset.effective_type}
@@ -259,7 +262,11 @@ def dataset_entry(taskset: str, rows_path: Path, dataset: GymDatasetConfig | Non
     entry["verified"] = dataset.verified
     if dataset.allowed_agents is not None:
         entry["allowed_agents"] = list(dataset.allowed_agents)
-    entry["jsonl_fpath"] = str(Path(rows_path).resolve())
+    resolved_rows = Path(rows_path).resolve()
+    # Collated metrics must not depend on the checkout location when a job resumes.
+    if resolved_rows.is_relative_to(Path.cwd()):
+        resolved_rows = resolved_rows.relative_to(Path.cwd())
+    entry["jsonl_fpath"] = str(resolved_rows)
     return entry
 
 
