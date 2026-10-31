@@ -110,3 +110,89 @@ def test_the_programmatic_trial_fixture_still_passes():
     collected = fixture("healthy")
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert _observed_trial_operations(decision, collected) is True
+
+
+@pytest.mark.parametrize("count", [1, 2])
+def test_chat_judge_completion_uses_the_observed_chat_finish_reason(count):
+    def mutate(observed, grade):
+        grade["dependencies"] = []
+        for number in range(count):
+            call = _judge_call(observed)
+            meta = call["response_metadata"]
+            call["model_call_id"] = f"chat-judge-{number}"
+            meta.update(
+                response_id=f"chat-response-{number}", dialect="chat", response_status=None, finish_reason="stop"
+            )
+            meta["model_operations"][0].update(
+                operation_id=f"chat-op-{number}", final_attempt_id=f"chat-attempt-{number}"
+            )
+            _own(observed, call)
+            grade["dependencies"].append(_dep(call))
+
+    assert _judged(mutate) is True
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "dialect",
+        "finish_absent",
+        "finish_unknown",
+        "finish_length",
+        "contradictory_status",
+        "missing_id",
+        "duplicate_attempt",
+        "recovered",
+    ],
+)
+def test_chat_judge_incomplete_or_unjoined_completion_stays_unknown(change):
+    def mutate(observed, grade):
+        calls = []
+        for number in range(2):
+            call = _judge_call(observed)
+            meta = call["response_metadata"]
+            call["model_call_id"] = f"chat-judge-{number}"
+            meta.update(
+                response_id=f"chat-response-{number}", dialect="chat", response_status=None, finish_reason="stop"
+            )
+            meta["model_operations"][0].update(
+                operation_id=f"chat-op-{number}", final_attempt_id=f"chat-attempt-{number}"
+            )
+            _own(observed, call)
+            calls.append(call)
+        grade["dependencies"] = [_dep(call) for call in calls]
+        meta = calls[1]["response_metadata"]
+        if change == "dialect":
+            meta["dialect"] = "responses"
+        elif change == "finish_absent":
+            meta["finish_reason"] = None
+        elif change == "finish_unknown":
+            meta["finish_reason"] = "unrecognized"
+        elif change == "finish_length":
+            meta["finish_reason"] = "length"
+        elif change == "contradictory_status":
+            meta["response_status"] = "failed"
+        elif change == "missing_id":
+            meta["model_operations"][0]["operation_id"] = None
+        elif change == "duplicate_attempt":
+            meta["model_operations"][0]["final_attempt_id"] = "chat-attempt-0"
+        elif change == "recovered":
+            meta["model_operations"][0]["http_attempts"] = 2
+
+    assert _judged(mutate) is False
+
+
+@pytest.mark.parametrize(
+    "dialect,finish,expected",
+    [("chat", "stop", ("chat", "stop")), ("private-unrecognized", "private-unrecognized", (None, None))],
+)
+def test_stdlib_collector_preserves_only_bounded_chat_completion_metadata(tmp_path, dialect, finish, expected):
+    from tests.unit_tests.test_recovery_health_binding import collect, save_rows, setup
+
+    artifacts, rows = setup(tmp_path, n=1)
+    metadata = rows[0]["ng_trajectory"]["model_calls"][0]["response_metadata"]
+    metadata.update(dialect=dialect, finish_reason=finish, response_status=None)
+    save_rows(artifacts, rows)
+    collected = collect(artifacts)
+    projected = collected.results[0]["ng_trial_observations"]["model_calls"][0]["response_metadata"]
+    assert (projected["dialect"], projected["finish_reason"]) == expected

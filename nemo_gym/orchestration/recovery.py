@@ -726,6 +726,8 @@ def trial_metadata(value):
     if not isinstance(value, dict):
         return None
     result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category")}
+    result["dialect"] = value.get("dialect") if value.get("dialect") in ("chat", "responses") else None
+    result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
     operations = value.get("model_operations")
     result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures")}
@@ -1925,7 +1927,14 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             type(meta["status_code"]) is not int
             or not 200 <= meta["status_code"] < 300
             or meta.get("error_category") is not None
-            or meta.get("response_status") != "completed"
+            or not (
+                meta.get("response_status") == "completed"
+                or (
+                    meta.get("dialect") == "chat"
+                    and meta.get("response_status") is None
+                    and meta.get("finish_reason") == "stop"
+                )
+            )
             or len(operations) != 1
             or not isinstance(report["events"], dict)
             or report["events"]
