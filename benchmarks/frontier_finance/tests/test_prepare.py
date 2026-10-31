@@ -131,6 +131,18 @@ class TestConvert:
         with pytest.raises(ValueError):
             _convert(tmp_path, [row])
 
+    def test_missing_must_have_defaults_to_false(self, tmp_path) -> None:
+        rubrics = [{"rubric_id": 1, "rubric_text": "A."}, {"rubric_id": 2, "rubric_text": "B.", "must_have": None}]
+        _, rows = _convert(tmp_path, [_row(rubrics=rubrics)])
+        assert [r["must_have"] for r in rows[0]["rubrics"]] == [False, False]
+
+    @pytest.mark.parametrize("must_have", ["false", "true", 1, 0])
+    def test_non_boolean_must_have_fails(self, tmp_path, must_have) -> None:
+        rubrics = [{"rubric_id": 1, "rubric_text": "A.", "must_have": must_have}]
+        with pytest.raises(ValueError, match="query q1: must_have must be a boolean"):
+            _convert(tmp_path, [_row(rubrics=rubrics)])
+        assert not (tmp_path / "out.jsonl").exists()
+
     def test_duplicate_query_id_fails(self, tmp_path) -> None:
         with pytest.raises(ValueError, match="duplicate query_id"):
             _convert(tmp_path, [_row("dup"), _row("dup")])

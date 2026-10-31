@@ -101,7 +101,10 @@ def _convert_rubric(query_id: str, rubric: dict) -> dict:
     if rubric.get("rubric_id") is None:
         raise ValueError(f"query {query_id}: rubric without rubric_id: {rubric!r}")
     converted = {field: rubric.get(field) for field in RUBRIC_FIELDS}
-    converted["must_have"] = bool(converted["must_have"])
+    must_have = False if converted["must_have"] is None else converted["must_have"]
+    if not isinstance(must_have, bool):
+        raise ValueError(f"query {query_id}: must_have must be a boolean, got {must_have!r}")
+    converted["must_have"] = must_have
     converted["data_source_detailed"] = list(rubric.get("data_source_detailed") or [])
     return converted
 
