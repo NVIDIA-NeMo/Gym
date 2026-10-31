@@ -692,6 +692,7 @@ class TestOpenCodeSandboxedAgent:
         ],
     )
     @mark.parametrize("collect_observations", [True, False])
+    @mark.parametrize("multiple_verifier_observations", [True, False])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
@@ -700,6 +701,7 @@ class TestOpenCodeSandboxedAgent:
         database_name: str,
         snapshot_failure: str | None,
         collect_observations: bool,
+        multiple_verifier_observations: bool,
     ) -> None:
         class Response:
             ok = True
@@ -870,6 +872,23 @@ class TestOpenCodeSandboxedAgent:
                     "reward": 1.0,
                     "verifier_sandbox_observation": verifier_sandbox.model_dump(mode="json"),
                 }
+                | (
+                    {
+                        "verifier_sandbox_observations": [
+                            verifier_sandbox.model_copy(
+                                update={
+                                    "sandbox_id": "earlier-verifier",
+                                    "outcome": "sandbox_error",
+                                    "teardown_confirmed": False,
+                                    "cleanup_errors": ["close:TimeoutError"],
+                                }
+                            ).model_dump(mode="json"),
+                            verifier_sandbox.model_dump(mode="json"),
+                        ]
+                    }
+                    if multiple_verifier_observations
+                    else {}
+                )
             )
 
         server_client.post = AsyncMock(side_effect=post)
@@ -932,8 +951,11 @@ class TestOpenCodeSandboxedAgent:
         ]
         assert [(record.role, record.sandbox_id) for record in sandbox_records] == [
             ("agent", "connected-sandbox"),
+            *([("verifier", "earlier-verifier")] if multiple_verifier_observations else []),
             ("verifier", "verify-sandbox"),
         ]
+        if multiple_verifier_observations:
+            assert sandbox_records[1].cleanup_errors == ["close:TimeoutError"]
         assert sandbox_records[0].provider == "opensandbox"
         assert sandbox_records[0].outcome == "completed"
         assert sandbox_records[0].wall_time_s is None
