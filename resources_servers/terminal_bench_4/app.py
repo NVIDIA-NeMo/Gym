@@ -23,6 +23,7 @@ from pydantic import Field, ValidationError
 from nemo_gym.agent_utils import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
+from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
@@ -591,7 +592,13 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             termination=session.termination,
             infrastructure_error=failure,
             failure_reason=failure or verifier_failure,
-            failure_kind=VERIFIER_ERROR if verifier_failure or ungraded_verifier else None,
+            failure_kind=(
+                VERIFIER_ERROR
+                if verifier_failure or ungraded_verifier
+                else _selected_failure_kind(extra)
+                if failure
+                else None
+            ),
             mask_sample=bool(failure) and (not legacy or ungraded_verifier),
             artifacts={"trial": str(session.directory)},
             timings={
@@ -784,6 +791,13 @@ def _termination_from_response(response: NeMoGymResponse) -> AgentTermination:
             return AgentTermination(reason="nonzero_exit", detail="The final model call hit max_output_tokens")
         return AgentTermination(reason="timeout", detail="The agent stopped at its time limit")
     return AgentTermination(reason="nonzero_exit", detail=f"Agent response status: {response.status}")
+
+
+def _selected_failure_kind(harness_metadata: dict) -> str | None:
+    """The kind of the failure the agent's harness selected for its result, if it reported one."""
+    report = FailureReportRow.report(harness_metadata)
+    selected = report.events.get(report.failure_id) if report.failure_id is not None else None
+    return selected.failure_kind if selected is not None else None
 
 
 if __name__ == "__main__":

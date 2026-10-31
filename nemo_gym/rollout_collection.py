@@ -181,6 +181,7 @@ from nemo_gym.trajectory.trajectory_record import (
     TrajectoryToolCall,
     TrajectoryTurn,
     VerifierInvocation,
+    failure_observations,
 )
 from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
@@ -1043,6 +1044,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "response_source",
                 "upstream_status_code",
                 "local_response_reason",
+                "failure_report",
+                "model_operations",
                 "error_category",
                 "latency_ttft_ms",
             )
@@ -2426,7 +2429,12 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
     """
     rollout_ran = status is not None and status not in _SERVER_DID_NOT_RUN_STATUSES
     body = getattr(exc, "response_content", None)
+    try:
+        observations = failure_observations(orjson.loads(body)) if body else {}
+    except (TypeError, ValueError):
+        observations = {}
     return {
+        **observations,
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
@@ -4238,7 +4246,11 @@ class RolloutCollectionHelper(BaseModel):
                 # Preserve failure captures even without observations. Explicit agent or verifier evidence also
                 # survives legacy no-persist markers, since reported failures are saved for recovery.
                 if capture_dirs and (
-                    not no_persist or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+                    not no_persist
+                    or NG_AGENT_OBSERVATIONS_KEY in result
+                    or NG_VERIFIER_INVOCATIONS_KEY in result
+                    or NG_TRAJECTORY_KEY in result
+                    or FailureReportRow.EVENTS in result
                 ):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.

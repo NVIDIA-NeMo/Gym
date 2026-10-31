@@ -15,7 +15,8 @@ from pydantic import BaseModel, Field
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import maybe_rollout_id_from_run_body
-from nemo_gym.failure_transport import FailureReportRow, StreamFailureReportReader
+from nemo_gym.failure_transport import FailureReportRow, ModelOperationObservation, StreamFailureReportReader
+from nemo_gym.server_runtime.episode_types import FailureReport
 from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -222,6 +223,8 @@ class ModelCallRecord(BaseModel):
     response_source: Optional[Literal["upstream", "local"]] = None
     upstream_status_code: Optional[int] = None
     local_response_reason: Optional[str] = None
+    failure_report: FailureReport | None = None
+    model_operations: list[ModelOperationObservation] | None = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -309,6 +312,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         response_source=exchange.get("response_source"),
         upstream_status_code=exchange.get("upstream_status_code"),
         local_response_reason=exchange.get("local_response_reason"),
+        failure_report=exchange.get("failure_report"),
+        model_operations=exchange.get("model_operations"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=raw_request if isinstance(raw_request, dict) else None,

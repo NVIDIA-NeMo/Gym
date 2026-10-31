@@ -20,9 +20,9 @@ from collections.abc import Iterator, Mapping
 from contextlib import contextmanager
 from contextvars import ContextVar
 from dataclasses import dataclass, field
-from typing import Any, ClassVar
+from typing import Any, ClassVar, Literal
 
-from pydantic import ValidationError
+from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.server_runtime.episode_types import FailureReport
 from nemo_gym.typed_exceptions import failure_report_for
@@ -90,6 +90,35 @@ class FailureHeader:
             return FailureReport(omitted=True)
 
 
+class ModelOperationObservation(BaseModel):
+    """A terminal HTTP retry-loop observation, not proof that every operation or response body was observed."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True, allow_inf_nan=False)
+    operation_id: str = Field(min_length=1)
+    outcome: Literal["completed", "failed"]
+    final_attempt_id: str | None = None
+    failure_id: str | None = None
+    http_attempts: int | None = Field(
+        default=None,
+        ge=1,
+        strict=True,
+        description="Entries into the HTTP request retry loop; lower transport retry failures are recorded separately.",
+    )
+    transport_failures: int | None = Field(default=None, ge=0, strict=True)
+    retry_wait_s: float | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description="Retry sleep budget charged by the existing loop, in requested sleep seconds.",
+    )
+    request_elapsed_ms: float | None = Field(
+        default=None,
+        ge=0,
+        strict=True,
+        description="Retry-loop walltime to its terminal response/error, including waits; successful body drain is measured by the raw capture.",
+    )
+
+
 @dataclass
 class RequestFailureLog:
     """The failures observed while one server request is served, other than the request's own failure.
@@ -99,6 +128,7 @@ class RequestFailureLog:
     """
 
     report: FailureReport = field(default_factory=FailureReport)
+    model_operations: dict[str, ModelOperationObservation] = field(default_factory=dict)
 
     _current: ClassVar[ContextVar["RequestFailureLog | None"]] = ContextVar("ng_request_failure_log", default=None)
 
@@ -130,6 +160,37 @@ class RequestFailureLog:
 def report_for_current_request(error: BaseException | None) -> FailureReport:
     """Project the explicit Gym cause chain, preserving its origin IDs."""
     return failure_report_for(error)
+
+
+def observe_model_operation(
+    *,
+    operation_id: str,
+    outcome: Literal["completed", "failed"],
+    final_attempt_id: str | None,
+    failure_id: str | None = None,
+    http_attempts: int | None = None,
+    transport_failures: int | None = None,
+    retry_wait_s: float | None = None,
+    request_elapsed_ms: float | None = None,
+) -> None:
+    """Record the client's actual terminal outcome in the existing request observation scope."""
+    log = RequestFailureLog.current()
+    if log is not None:
+        observation = ModelOperationObservation(
+            operation_id=operation_id,
+            outcome=outcome,
+            final_attempt_id=final_attempt_id,
+            failure_id=failure_id,
+            http_attempts=http_attempts,
+            transport_failures=transport_failures,
+            retry_wait_s=retry_wait_s,
+            request_elapsed_ms=request_elapsed_ms,
+        )
+        previous = log.model_operations.get(operation_id)
+        # A later raise-for-status names the same outcome without measuring the retry loop again.
+        log.model_operations[operation_id] = (
+            previous.model_copy(update=observation.model_dump(exclude_none=True)) if previous else observation
+        )
 
 
 def observe_failure(error: BaseException) -> None:

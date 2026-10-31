@@ -24,7 +24,8 @@ from nemo_gym.core.episode import (
     verifier_invocation_context,
 )
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
-from nemo_gym.failure_transport import FailureHeader
+from nemo_gym.failure_transport import FailureHeader, observe_failure
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     GradingOperationObservation,
@@ -33,7 +34,7 @@ from nemo_gym.trajectory.trajectory_record import (
     VerifierInvocation,
     grading_result_binding,
 )
-from nemo_gym.typed_exceptions import failure_report_for
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.verification.judge import JudgeGrading, _judge_grading
 
 
@@ -194,6 +195,20 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
             except Exception as error:
                 invocation.status = "incomplete" if isinstance(error, TimeoutError) else "failed"
                 invocation.failure_kind = TRANSPORT_TIMEOUT if isinstance(error, TimeoutError) else VERIFIER_ERROR
+                # The reply below is an HTTP error, not a raised one, so record the failure for this request's
+                # failure report; its operation_id joins it to the VerifierInvocation. Recorded by type only.
+                failure = NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=invocation.failure_kind,
+                    failure_reason=f"Verification failed: {type(error).__name__}",
+                    operation="verify",
+                    operation_id=invocation.invocation_id,
+                    stage="verification",
+                    http_status=error.status_code if isinstance(error, HTTPException) else 500,
+                    exception_type=type(error).__name__,
+                )
+                failure.__cause__ = error
+                observe_failure(failure)
                 if isinstance(error, HTTPException):
                     result = JSONResponse(
                         {"detail": error.detail}, status_code=error.status_code, headers=error.headers
@@ -202,7 +217,7 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
                     logger.exception("Verification failed.")
                     result = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
                 # The returned reply replaces the raised error, so it carries the error's selected failure and causes.
-                report = failure_report_for(error)
+                report = failure_report_for(failure)
                 inner = FailureHeader.decode(result.headers)
                 if inner is not None:
                     report = report.merged(inner) if report.failure_id is not None else inner.merged(report)

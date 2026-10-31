@@ -450,6 +450,7 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
         await response.prepare(request)
         await response.write(b'{"id":')
         if mode == "truncated":
+            await asyncio.sleep(0.01)
             request.transport.close()
         else:
             await asyncio.sleep(0.15)
@@ -470,6 +471,8 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
             if mode == "complete":
                 assert (await model.create_response(input=[]))["id"] == "reply"
                 assert not log.report.events
+                [operation] = log.model_operations.values()
+                assert operation.outcome == "completed" and operation.failure_id is None
             else:
                 with pytest.raises((aiohttp.ClientPayloadError, TimeoutError)) as caught:
                     await model.create_response(input=[])
@@ -481,6 +484,14 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
                 assert event.http_status == 200
                 assert event.attempt_id.startswith(event.operation_id)
                 assert len(report.events) == 1
+                [operation] = log.model_operations.values()
+                assert operation.operation_id == event.operation_id
+                assert operation.final_attempt_id == event.attempt_id
+                assert operation.outcome == "failed" and operation.failure_id == event.event_id
+                assert caught.value.__cause__.event_id == event.event_id
+                assert operation.request_elapsed_ms >= (40 if mode == "timeout" else 8)
+            assert operation.http_attempts == 1
+            assert operation.transport_failures == 0 and operation.retry_wait_s == 0
     assert hits == 1
 
 

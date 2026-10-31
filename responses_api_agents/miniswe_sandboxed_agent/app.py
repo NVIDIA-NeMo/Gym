@@ -37,6 +37,7 @@ from nemo_gym.core import (
     current_rollout_id,
     rollout_context,
 )
+from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.sandbox import (
     AsyncSandbox,
     DirectSandboxConnection,
@@ -46,6 +47,7 @@ from nemo_gym.sandbox import (
 )
 from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.typed_exceptions import rebuild_failure
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker
 from responses_api_agents.miniswe_sandboxed_agent.harness import (
     HarnessContext,
@@ -570,7 +572,12 @@ class MiniSWESandboxedAgent(SimpleResponsesAPIAgent):
             detail = f"mini-SWE {'setup timeout' if setup_timeout else result.termination.reason}"
             if result.termination.detail:
                 detail += f": {result.termination.detail[:500]}"
-            raise HTTPException(503, detail)
+            error = HTTPException(503, detail)
+            # The harness's own typed failure, when it reported one, stays the cause of the 503's failure report.
+            cause = rebuild_failure(FailureReportRow.report(result.harness_metadata))
+            if cause is not None:
+                raise error from cause
+            raise error
         response = result.response
         metadata = dict(response.metadata or {})
         metadata["miniswe_termination"] = result.termination.reason

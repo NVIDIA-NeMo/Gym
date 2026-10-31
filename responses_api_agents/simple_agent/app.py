@@ -111,6 +111,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryToolCall,
     TrajectoryTurn,
+    failure_observations,
 )
 from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
@@ -841,6 +842,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if collect_trajectory:
             invocation = AgentInvocation(
                 invocation_id=invocation_id,
+                in_session=in_session,
                 status=invocation_status,
                 error_type=invocation_error_type,
                 model_calls=model_calls,
@@ -909,22 +911,39 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     state.activations = index if index is not None else state.activations + 1
                 if state.activations > 1:
                     invocation_id = f"activation-{state.activations}"
-            model_response, trajectory, model_server_cookies, resources_server_cookies = await self._create_episode(
-                body,
-                model_url_path=self.url_path_for_request("/v1/responses", request),
-                resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
-                tool_access=state.tool_access if state is not None else None,
-                # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt.
-                # Each call names the attempt of the activation it serves,
-                # which after a restore is the replacement, not the attempt that seeded the session.
-                resources_prefix=rollout_path_prefix(rollout_id) if participant is not None else "",
-                in_session=state is not None,
-                execute_tools=self.config.execute_tools,
-                invocation_id=invocation_id,
-                rollout_id=rollout_id or "unscoped",
-                collect_trajectory=collect_trajectory,
-                activation=activation,
-            )
+            observed_invocation = None
+            if collect_trajectory:
+                observed_invocation = AgentInvocation(invocation_id=invocation_id, in_session=state is not None)
+                request.state.nemo_gym_agent_observations = AgentObservationBundle(
+                    source="simple_agent", records=[observed_invocation]
+                )
+            try:
+                (
+                    model_response,
+                    trajectory,
+                    model_server_cookies,
+                    resources_server_cookies,
+                ) = await self._create_episode(
+                    body,
+                    model_url_path=self.url_path_for_request("/v1/responses", request),
+                    resources_server_cookies=state.resources_cookies if state is not None else request.cookies,
+                    tool_access=state.tool_access if state is not None else None,
+                    # With checkpointing on, the Resources Server refuses a tool call that does not name its attempt.
+                    # Each call names the attempt of the activation it serves,
+                    # which after a restore is the replacement, not the attempt that seeded the session.
+                    resources_prefix=rollout_path_prefix(rollout_id) if participant is not None else "",
+                    in_session=state is not None,
+                    execute_tools=self.config.execute_tools,
+                    invocation_id=invocation_id,
+                    rollout_id=rollout_id or "unscoped",
+                    collect_trajectory=collect_trajectory,
+                    activation=activation,
+                )
+            except BaseException as error:
+                if observed_invocation is not None:
+                    observed_invocation.status = "failed" if isinstance(error, Exception) else "incomplete"
+                    observed_invocation.error_type = type(error).__name__
+                raise
             if state is not None:
                 # Only a session with a direct tool grant holds the resources cookie jar.
                 if state.tool_access is not None:
@@ -1145,9 +1164,12 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 failure = _policy_timeout_failure(error)
                 if failure is None:
                     raise
-                return JSONResponse(
-                    self._model_timeout_row(failure, elapsed_s=monotonic() - loop_started), status_code=200
-                )
+                result = self._model_timeout_row(failure, elapsed_s=monotonic() - loop_started)
+                try:
+                    result.update(failure_observations(json.loads(getattr(error, "response_content", None))))
+                except (TypeError, ValueError):
+                    pass
+                return JSONResponse(result, status_code=200)
             cookies = _cookie_values(response.cookies)
         elif stage in ("verify", "return"):
             model_response_json = continuation["response"]
@@ -1184,10 +1206,14 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 }
             )
 
+        if trajectory is not None:
+            request.state.nemo_gym_agent_trajectory = trajectory
+        verification_skipped: bool | None = None
         if stage == "return":
             # A /run restored at its return step returns the result it recorded, whether or not it verified.
             result = continuation["result"]
         elif self.config.skip_verification:
+            verification_skipped = True
             result = body.model_dump() | {
                 "response": model_response_json,
                 "reward": float(self.config.skip_verification_reward),
@@ -1214,6 +1240,10 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                     "resources_verify_step_type": resources_verify_step_type,
                 }
             )
+            verification_skipped = False
+            if trajectory is not None:
+                for invocation in trajectory.invocations:
+                    invocation.verification_skipped = False
             verify_payload = body.model_dump() | {"response": model_response_json}
             async with step(resources_verify_step_type):
                 verify_response = await self.server_client.post(
@@ -1244,6 +1274,8 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         if self._closes_after_verify(legacy_run, resources_verify_step_type) and not self.config.skip_verification:
             await self._close_legacy_resources_session(body, cookies)
         if trajectory is not None:
+            for invocation in trajectory.invocations:
+                invocation.verification_skipped = verification_skipped
             resolved = result.get("resolved")
             if isinstance(resolved, bool) and trajectory.turns:
                 trajectory.turns[-1].resolved = resolved

@@ -1012,6 +1012,27 @@ class SimpleServer(BaseServer):
                     # An agent route failure answers with its cause's body and status.
                     reply_error = route_reply_error(raised)
                     response = SimpleServer._failure_reply(self, reply_error)
+                    # These are the same typed observations a successful reply carries.
+                    # A raised route must not turn its actual partial observations into an escaped error string.
+                    from nemo_gym.trajectory.trajectory_record import failure_observations
+
+                    observed = {}
+                    for slot, key in (
+                        ("nemo_gym_agent_observations", "ng_agent_observations"),
+                        ("nemo_gym_agent_trajectory", "ng_trajectory"),
+                    ):
+                        value = getattr(request.state, slot, None)
+                        if isinstance(value, BaseModel):
+                            observed.update(failure_observations({key: value.model_dump(mode="json")}))
+                    if observed:
+                        payload = json.loads(response.body)
+                        payload = payload if isinstance(payload, dict) else {"detail": payload}
+                        payload.update(observed)
+                        response = JSONResponse(
+                            payload,
+                            status_code=response.status_code,
+                            headers={k: v for k, v in response.headers.items() if k != "content-length"},
+                        )
                 # Success or failure, the reply forwards its own failure and those observed while serving it.
                 report = failure_log.reply_report(error)
                 # A nested layer of this middleware may have sent the report already; keep its failure_id.
@@ -1036,7 +1057,14 @@ class SimpleServer(BaseServer):
             response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
             print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
 
-            return JSONResponse(content=response_content, status_code=500)
+            from nemo_gym.trajectory.trajectory_record import failure_observations
+
+            try:
+                observations = failure_observations(json.loads(e.response_content))
+            except (TypeError, ValueError):
+                observations = {}
+            content = {"detail": response_content, **observations} if observations else response_content
+            return JSONResponse(content=content, status_code=500)
         if isinstance(e, CancelledError):
             return JSONResponse(content="Request was cancelled", status_code=500)
         if isinstance(e, Exception):

@@ -18,6 +18,7 @@ from pydantic import (
     ConfigDict,
     Field,
     SerializerFunctionWrapHandler,
+    ValidationError,
     field_validator,
     model_serializer,
     model_validator,
@@ -26,6 +27,8 @@ from pydantic import (
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.failure_kinds import validate_failure_kind
 from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseInputItem
+from nemo_gym.failure_transport import ModelOperationObservation
+from nemo_gym.server_runtime.episode_types import FailureReport
 
 
 if TYPE_CHECKING:
@@ -77,6 +80,8 @@ class TrajectoryResponseMetadata(ObservationModel):
     response_source: Optional[Literal["upstream", "local"]] = None
     upstream_status_code: Optional[int] = None
     local_response_reason: Optional[str] = None
+    failure_report: FailureReport | None = None
+    model_operations: list[ModelOperationObservation] | None = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
 
@@ -152,6 +157,8 @@ class AgentInvocation(ObservationModel):
         default=None,
         description="Session ID assigned by the harness, retained as context across activations; omitted when not reported.",
     )
+    in_session: bool | None = Field(default=None, strict=True)
+    verification_skipped: bool | None = Field(default=None, strict=True)
     parent_invocation_id: Optional[str] = None
     spawned_by_tool_call_id: Optional[str] = None
     status: Literal["completed", "failed", "incomplete", "unknown"] = Field(
@@ -771,3 +778,31 @@ class AgentEpisode:
 
     response: NeMoGymResponse
     observations: AgentObservationBundle
+
+
+def failure_observations(value: Any) -> dict[str, Any]:
+    """Keep the existing typed observation slots across an unsuccessful HTTP reply.
+
+    Error strings are not searched recursively: only producer-owned top-level fields
+    are accepted, and malformed observations remain unavailable.
+    """
+    if not isinstance(value, dict):
+        return {}
+    result: dict[str, Any] = {}
+    for key, schema in ((NG_AGENT_OBSERVATIONS_KEY, AgentObservationBundle), (NG_TRAJECTORY_KEY, TrajectoryRecord)):
+        if key in value:
+            try:
+                result[key] = schema.model_validate(value[key]).model_dump(mode="json")
+            except (ValidationError, TypeError, ValueError):
+                pass
+    if isinstance(value.get(NG_VERIFIER_INVOCATIONS_KEY), list):
+        try:
+            result[NG_VERIFIER_INVOCATIONS_KEY] = [
+                VerifierInvocation.model_validate(item).model_dump(mode="json")
+                for item in value[NG_VERIFIER_INVOCATIONS_KEY]
+            ]
+        except (ValidationError, TypeError, ValueError):
+            pass
+    if isinstance(value.get("verification_skipped"), bool):
+        result["verification_skipped"] = value["verification_skipped"]
+    return result

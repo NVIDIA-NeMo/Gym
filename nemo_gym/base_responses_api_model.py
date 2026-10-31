@@ -1547,6 +1547,7 @@ def _record(
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
     execution: Optional[ModelExecutionOutcome] = None,
+    failure: BaseException | None = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -1589,6 +1590,10 @@ def _record(
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        observations = RequestFailureLog.current()
+        if observations is not None:
+            exchange["failure_report"] = observations.reply_report(failure).model_dump(mode="json")
+            exchange["model_operations"] = [o.model_dump(mode="json") for o in observations.model_operations.values()]
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -1947,6 +1952,7 @@ class _CaptureMiddleware:
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                     execution=request_state.get("nemo_gym_model_execution"),
+                    failure=exc,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)

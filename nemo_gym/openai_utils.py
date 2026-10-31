@@ -24,6 +24,7 @@ from asyncio import sleep
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from time import monotonic
 from typing import (
     Any,
     Dict,
@@ -50,7 +51,7 @@ from nemo_gym.client.http_client import (
 )
 from nemo_gym.core.episode import current_rollout_id
 from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
-from nemo_gym.failure_transport import FailureHeader, observe_failure
+from nemo_gym.failure_transport import FailureHeader, observe_failure, observe_model_operation
 from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.server_utils import ClientResponseError
 from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
@@ -145,6 +146,13 @@ async def _raise_exhausted(
 
     A cause ``raise_for_status`` set itself (a Gym server's rebuilt failure) is kept.
     """
+    if last_failure is not None and last_failure.operation_id and response.status >= 400:
+        observe_model_operation(
+            operation_id=last_failure.operation_id,
+            outcome="failed",
+            final_attempt_id=last_failure.attempt_id,
+            failure_id=last_failure.event_id,
+        )
     try:
         await raise_for_status(response, content)
     except ClientResponseError as error:
@@ -343,6 +351,13 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         )
         error.response_content = body
         if cause is not None:
+            if cause.operation_id:
+                observe_model_operation(
+                    operation_id=cause.operation_id,
+                    outcome="failed",
+                    final_attempt_id=cause.attempt_id,
+                    failure_id=cause.event_id,
+                )
             raise error from cause
         raise error
 
@@ -389,12 +404,26 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # A status response may follow generation too. Keep permanent-error detection,
         # but do not resend it; safe connection setup retries remain in the transport.
         max_num_tries = (self.max_num_tries or self.max_http_attempts) if resend else 1
+        request_started = monotonic()
         tries = 0
         waited = 0.0
         # One logical model call; each HTTP attempt of it is observed under its own attempt id.
         operation_id = uuid.uuid4().hex
         transport_failures = 0
         last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
+
+        def observe_terminal(*, operation_id, outcome, final_attempt_id, failure_id=None) -> None:
+            # HTTP retry-loop observations, including time spent waiting; not inferred token usage.
+            observe_model_operation(
+                operation_id=operation_id,
+                outcome=outcome,
+                final_attempt_id=final_attempt_id,
+                failure_id=failure_id,
+                http_attempts=tries,
+                transport_failures=transport_failures,
+                retry_wait_s=waited,
+                request_elapsed_ms=(monotonic() - request_started) * 1000,
+            )
 
         def observe_transport_failure(error: Exception, upload_complete: bool | None) -> None:
             nonlocal transport_failures, last_transport_failure
@@ -437,7 +466,14 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             except Exception as error:
                 # As in _raise_exhausted, the raised error's explicit cause is the attempt it ended on.
                 if last_transport_failure is not None and last_transport_failure[0] is error:
-                    raise error from last_transport_failure[1]
+                    failed = last_transport_failure[1]
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=failed.attempt_id,
+                        failure_id=failed.event_id,
+                    )
+                    raise error from failed
                 raise
 
             # The body is consumed by the public API method after headers arrive. Keep
@@ -454,6 +490,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                     )
                     response._ng_attempt_failure = failure
                     observe_failure(failure)
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{attempt}",
+                    failure_id=failure.event_id,
+                )
                 return failure
 
             response._ng_observe_body_failure = observe_body_failure
@@ -461,13 +503,33 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 failure = observe_http_failure(response)
                 content = await _read_error_body(response, failure)
                 if _error_body_is_permanent_auth(content):
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=f"{operation_id}-{tries}",
+                        failure_id=failure.event_id if failure else None,
+                    )
                     self._trip_permanent_error(response.status, content, request_kwargs.get("url"), failure)
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{tries}",
+                    failure_id=failure.event_id if failure is not None else None,
+                )
                 return response
 
             if response.status not in RETRY_ERROR_CODES:
                 if response.status >= 400:
                     # The caller raises or handles it; the status is still this call's last observed attempt.
-                    observe_http_failure(response)
+                    failure = observe_http_failure(response)
+                else:
+                    failure = None
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed" if response.status >= 400 else "completed",
+                    final_attempt_id=f"{operation_id}-{tries}",
+                    failure_id=failure.event_id if failure is not None else None,
+                )
                 return response
 
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
@@ -475,6 +537,12 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             last_failure = observe_http_failure(response)
             content = await _read_error_body(response, last_failure)
             if response.status == 429 and _error_body_is_permanent_quota(content):
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{tries}",
+                    failure_id=last_failure.event_id if last_failure else None,
+                )
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 
             wait = _retry_wait_seconds(tries, response)
@@ -492,12 +560,24 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 and self.max_rate_limit_wait_seconds > 0
             ):
                 if waited + wait > self.max_rate_limit_wait_seconds:
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=last_failure.attempt_id if last_failure else f"{operation_id}-{tries}",
+                        failure_id=last_failure.event_id if last_failure else None,
+                    )
                     await _raise_exhausted(response, content, last_failure)
                 max_num_tries = max(max_num_tries, tries + 1)
 
             # Preserve the final error body for raise_for_status and avoid sleeping
             # after the last attempt. Reading intermediate bodies releases sockets.
             if tries >= max_num_tries:
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=last_failure.attempt_id if last_failure else f"{operation_id}-{tries}",
+                    failure_id=last_failure.event_id if last_failure else None,
+                )
                 await _raise_exhausted(response, content, last_failure)
 
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
