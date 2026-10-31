@@ -1,0 +1,6 @@
+# MedXpertQA zero-shot CoT, first round, verbatim from TsinghuaC3I/MedXpertQA@5f1db162
+# eval/config/prompt_templates.py (zero_shot_system_role, zero_shot_cot_prompt). The
+# medxpertqa resources server sends the second round, the answer trigger.
+
+system: "You are a helpful medical assistant."
+user: "Q: {question}\nA: Let's think step by step."
