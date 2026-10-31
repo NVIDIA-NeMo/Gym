@@ -375,6 +375,11 @@ class SlurmExecutor(BaseExecutor):
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
+                record.environment = self.submission_environment(
+                    config,
+                    required_env=compute.forward_env,
+                    forwarded_env=[*compute.forward_env, *([config.otel.token_env] if token is not None else [])],
+                )
                 # Inside the connection, because that is the transport persist()
                 # needs and reopening one would cost a second connection per
                 # submit. Ordering and failure handling live in the base class.

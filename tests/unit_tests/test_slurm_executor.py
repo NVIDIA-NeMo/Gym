@@ -477,3 +477,43 @@ def test_forwarded_variable_name_is_validated(tmp_path, name):
     raw["compute"]["hsg"]["forward_env"] = [name]
     with pytest.raises(ValueError, match="Invalid forward_env"):
         SubmitConfig.model_validate(raw)
+
+
+@pytest.mark.parametrize(
+    "enabled,remote,token_present", [(False, True, True), (True, False, True), (True, True, False), (True, True, True)]
+)
+def test_submission_environment_matches_actual_exports(tmp_path, monkeypatch, enabled, remote, token_present):
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    monkeypatch.setenv("FORWARDED_KEY", "forwarded-test-value")
+    if token_present:
+        monkeypatch.setenv("TEST_TELEMETRY_KEY", "telemetry-test-value")
+    else:
+        monkeypatch.delenv("TEST_TELEMETRY_KEY", raising=False)
+    config = _submit_config(tmp_path, ["bench_a"])
+    config.compute["hsg"].forward_env = ["FORWARDED_KEY"]
+    config.otel.enabled = enabled
+    config.otel.remote_export = remote
+    config.otel.token_env = "TEST_TELEMETRY_KEY"
+    config.otel.endpoint = "https://example.test/telemetry"
+    config.otel.service_name = "test"
+    config.otel.gym_telemetry = False
+    conn = _FakeConnection(["__GYM_JOB:bench_a:0:111 "])
+    _install(monkeypatch, conn)
+    record = SlurmExecutor().run(config)
+    observation = record.environment
+    assert observation.required_env == ["FORWARDED_KEY"]
+    expected = ["FORWARDED_KEY"] + (["TEST_TELEMETRY_KEY"] if enabled and remote and token_present else [])
+    assert observation.forwarded_env == expected
+    actual_export_names = [
+        command.removeprefix("export ").split("=", 1)[0]
+        for command in conn.commands[0]
+        if command.startswith("export ")
+    ]
+    assert sorted(set(actual_export_names)) == expected
+    assert observation.telemetry.enabled is enabled
+    assert observation.telemetry.remote_export is (remote and (not enabled or token_present))
+    assert observation.telemetry.token_env == "TEST_TELEMETRY_KEY"
+    manifest = Path(record.run_dir) / MANIFEST_NAME
+    stored = SubmissionRecord.load(json.loads(manifest.read_text()))
+    assert stored.environment == observation
+    assert "forwarded-test-value" not in record.dumps() and "telemetry-test-value" not in record.dumps()
