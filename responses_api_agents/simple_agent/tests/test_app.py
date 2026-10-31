@@ -50,6 +50,7 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     MODEL_REQUEST_ERROR,
     EpisodeId,
     NeMoGymEasyInputMessage,
@@ -59,7 +60,7 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     TaskId,
 )
-from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, MODEL_POLICY_RESPONSE_TIMEOUT
+from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.rollout_collection import _attach_trajectory_record

@@ -19,6 +19,7 @@ from pydantic import BaseModel, Field, TypeAdapter
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    AGENT_ROUTE_FAILED,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -39,7 +40,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     TrajectoryTurn,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.typed_exceptions import NgFailureEvent, agent_route_failure
 from responses_api_agents.miniswe_sandboxed_agent.bootstrap import bootstrap_assets
 
 
@@ -375,6 +376,7 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
         started = monotonic()
         run_result = None
         cleanup_failure = cleanup_termination = None
+        execution_failure = None
         try:
             await self.sandbox.upload(local_config, f"{remote}/config.yaml")
             await self.sandbox.upload(
@@ -390,6 +392,14 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             )
             if run_result.error_type:
                 termination = HarnessOutcome(reason="infrastructure_error", detail=run_result.error_type)
+                execution_failure = NgFailureEvent(
+                    boundary="agent",
+                    failure_kind=AGENT_ROUTE_FAILED,
+                    failure_reason="Sandbox command completion is unconfirmed",
+                    exception_type=str(run_result.error_type),
+                    operation="harness.run",
+                    stage="agent",
+                )
             elif run_result.return_code:
                 termination = HarnessOutcome(
                     reason="infrastructure_error",
@@ -401,6 +411,8 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             termination = HarnessOutcome(reason="timeout")
         except Exception as error:
             termination = HarnessOutcome(reason="infrastructure_error", detail=f"{type(error).__name__}: {error}")
+            execution_failure = agent_route_failure(error, operation="harness.run", stage="agent")
+            execution_failure.__cause__ = error
         finally:
             try:
                 await self.close()
@@ -494,12 +506,17 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
             else None,
         )
         extra = {"harness_version": info.get("mini_version")}
+        if execution_failure is not None:
+            report = report_for_current_request(execution_failure)
+            if termination.reason != "infrastructure_error" or termination is cleanup_termination:
+                report = report.model_copy(update={"failure_id": None})
+            extra.update(FailureReportRow.fields(report))
         if cleanup_failure is not None:
             report = report_for_current_request(cleanup_failure)
             if termination is not cleanup_termination:
                 # The native limit stands as the result: the failed cleanup is an observation, not the run's cause.
                 report = report.model_copy(update={"failure_id": None})
-            extra.update(FailureReportRow.fields(report))
+            FailureReportRow.merged_into(extra, report)
         if native_trajectory is not None:
             extra["mini_swe_trajectory"] = native_trajectory
             termination.artifacts = [str(self.directory / "trajectory.json")]

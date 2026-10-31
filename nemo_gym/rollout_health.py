@@ -1416,9 +1416,18 @@ def format_health_report(result: HealthCheckResult) -> str:
     checked = sum(verdicts.values())
     ignored = result.summary["run"].get("ignored_checks", [])
     ignored_note = f" (ignored: {', '.join(ignored)})" if ignored else ""
+    responses = result.summary["run"].get("stats", {}).get("responses")
+    response_note = ""
+    if responses is not None:
+        response_note = (
+            f"Model responses: {responses['faulted']}/{responses['selected']} faulted; "
+            f"{responses['unknown']} rollout scopes unobserved; "
+            f"{responses['duplicated']} duplicate call IDs\n"
+        )
     return (
-        f"Rollout health: {checked} checked, {verdicts['healthy']} healthy, "
-        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"Rollout checks: {checked} checked, {verdicts['healthy']} passed, "
+        f"{verdicts['unhealthy']} flagged, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"{response_note}"
         f"Quality summary: {result.summary_path}"
     )
 

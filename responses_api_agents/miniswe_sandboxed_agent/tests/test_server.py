@@ -1327,3 +1327,63 @@ async def test_real_harness_cleanup_failure_reaches_verify_and_recovery(
     assert _policy_evidence(row) == (HARNESS_TERMINATION_UNCONFIRMED, None)
     # A serialized response retains the execution evidence even when no output was emitted.
     assert _policy_replay_is_unsupported(row)
+
+
+@pytest.mark.parametrize("typed", [False, True])
+async def test_actual_harness_exec_cause_survives_legacy_verify(fixture, monkeypatch, typed):
+    from nemo_gym.core import PROVIDER_UNAVAILABLE
+    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.typed_exceptions import NgFailureEvent
+    from responses_api_agents.miniswe_sandboxed_agent.harness import MiniSWEHarness
+
+    f = fixture
+    failure = OSError("provider command status unavailable")
+    if typed:
+        reported = NgFailureEvent(
+            boundary="harness",
+            failure_kind=PROVIDER_UNAVAILABLE,
+            failure_reason="provider command status unavailable",
+            operation="command.status",
+            operation_id="execution-1",
+        )
+        reported.__cause__ = failure
+        failure = reported
+    executions = []
+
+    def harness(**kwargs):
+        actual = MiniSWEHarness(**kwargs)
+        actual.directory.mkdir(parents=True, exist_ok=True)
+        actual.setup = AsyncMock()
+        actual.close = AsyncMock()
+        actual.sandbox.upload = AsyncMock()
+        actual.sandbox.download = AsyncMock(side_effect=FileNotFoundError("no saved native trajectory"))
+
+        async def execute(*args, **kwargs):
+            executions.append(1)
+            raise failure
+
+        actual.sandbox.exec = AsyncMock(side_effect=execute)
+        return actual
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    result = await f.agent.run(f.request, f.body)
+    row = result.model_dump(mode="json")
+    report = FailureReportRow.report(row)
+    selected = report.events[report.failure_id]
+    assert row["_ng_failure_class"] == "infrastructure_error"
+    assert row["failure_kind"] == "agent_route_failed"
+    assert selected.operation == "harness.run" and selected.stage == "agent"
+    assert selected.failure_kind == "agent_route_failed"
+    if typed:
+        cause = report.events[selected.cause_id]
+        assert cause.event_id == failure.event_id
+        assert cause.operation_id == "execution-1"
+        assert cause.failure_kind == PROVIDER_UNAVAILABLE
+        assert cause.foreign_error.exception_type.endswith("OSError")
+    else:
+        assert selected.cause_id is None
+        assert selected.foreign_error.exception_type.endswith("OSError")
+    assert executions == [1]
+    # Grading may complete, but it must not erase the selected execution failure.
+    assert row["reward"] == 0.75
+    assert f.agent._runs

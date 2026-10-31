@@ -15,7 +15,9 @@ from nemo_gym.core.failure_kinds import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
 )
+from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
+from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureReport
 
 
 if TYPE_CHECKING:
@@ -148,3 +150,40 @@ def agent_outcome_policy(
         return OutcomeAction.FAIL
     config = config or AgentOutcomePolicyConfig()
     return choose_action(failure_kind=outcome.failure_kind, http_status=outcome.status_code, config=config)
+
+
+def confirmed_policy_response_timeout(report: FailureReport | None) -> bool:
+    """Whether the selected model operation timed out after upload on every observed attempt.
+
+    Unidentified, mixed, omitted or connecting attempts do not establish a final response timeout.
+    """
+    if report is None or report.omitted or report.failure_id is None:
+        return False
+    final = report.events.get(report.failure_id)
+    if (
+        final is None
+        or final.boundary != FailureBoundary.MODEL
+        or final.operation != "model_request"
+        or not final.operation_id
+        or not final.attempt_id
+    ):
+        return False
+    observed = [
+        event
+        for event in report.events.values()
+        if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
+    ]
+    # An unidentified attempt cannot be proven to belong to an earlier operation instead of the final one.
+    if any(not event.operation_id or not event.attempt_id for event in observed):
+        return False
+    attempts = [event for event in observed if event.operation_id == final.operation_id]
+    return (
+        bool(attempts)
+        and len({event.attempt_id for event in attempts}) == len(attempts)
+        and all(
+            event.attempt_id
+            and event.request_upload_complete is True
+            and event.failure_reason == MODEL_RESPONSE_TIMEOUT_REASON
+            for event in attempts
+        )
+    )

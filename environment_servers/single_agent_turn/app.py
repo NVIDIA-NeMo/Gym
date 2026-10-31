@@ -7,10 +7,18 @@ from typing import Any, Literal
 from uuid import uuid4
 from warnings import warn
 
+from aiohttp import ClientConnectorError
 from fastapi import Body
-from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
+from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, ValidationError
 
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
+from nemo_gym.agent_outcome import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AgentOutcome,
+    AgentOutcomePolicyConfig,
+    OutcomeAction,
+    agent_outcome_policy,
+    confirmed_policy_response_timeout,
+)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
@@ -30,13 +38,16 @@ from nemo_gym.config import (
     ResourcesServerRef,
     get_first_server_config_dict,
 )
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.core import MODEL_REQUEST_ERROR, NeMoGymResponse
+from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
+from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
     DirectHTTPToolAccess,
+    FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     ResourcesCloseSessionRequest,
@@ -61,7 +72,7 @@ from nemo_gym.trajectory import (
     TrajectoryRecord,
     VerifierInvocation,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -264,14 +275,41 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         if stage == "verify":
             action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
-            if action != OutcomeAction.VERIFY:
+            cause = self._agent_failure(agent_response)
+            if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
+                if cause is None and "failure_report" in (agent_response.model_extra or {}):
+                    action = OutcomeAction.FAIL
+                elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
+                    action = self._timeout_action(action)
+                elif cause is not None and cause.failure_kind == MODEL_REQUEST_ERROR and cause.http_status is None:
+                    # An enclosing HTTP 500 is not a provider verdict or evidence of an unexecuted request.
+                    action = action if self._model_request_not_sent(agent_response) else OutcomeAction.FAIL
+            if action == OutcomeAction.COUNT_AS_ZERO:
+                # Explicit policy completion is not a verifier execution.
+                report = FailureReport.model_validate(agent_response.model_extra["failure_report"])
+                verification = SingleAgentTurnResult.model_validate(
+                    self._verify_body(request, agent_response)
+                    | {
+                        "reward": 0.0,
+                        "_ng_failure_class": cause.failure_kind,
+                        "failure_kind": cause.failure_kind,
+                        "_ng_failure_terminal": True,
+                        "_ng_failure_counts_as_zero": True,
+                        **FailureReportRow.fields(report),
+                    }
+                )
+                stage = "return"
+            elif action != OutcomeAction.VERIFY:
                 raise self._failure(
                     stage="agent",
                     failure_reason=agent_response.error.message if agent_response.error else "Agent reported failure",
                     terminal=action == OutcomeAction.FAIL,
+                    failure_kind=cause.failure_kind if cause else None,
                     partial_response=agent_response,
                     agent_observations=observations,
-                )
+                    trajectory=trajectory,
+                ) from cause
+        if stage == "verify":
             await self.checkpoint_boundary(
                 request,
                 lambda: {
@@ -310,8 +348,14 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
 
         # Keep one bounded retry in final unwind without erasing a completed verdict.
         cleanup.register_cleanup("post-verification resources session", resources_cleanup.close)
+        final_zero_report = (
+            FailureReportRow.report(verification.model_dump(mode="json"))
+            if (verification.model_extra or {}).get("_ng_failure_counts_as_zero") is True
+            else None
+        )
         return SingleAgentTurnResponse(
             episode_id=request.episode_id,
+            failure_report=final_zero_report,
             task_id=request.task.task_id,
             result=verification.model_copy(
                 update={NG_AGENT_OBSERVATIONS_KEY: observations, NG_TRAJECTORY_KEY: trajectory}
@@ -536,6 +580,81 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             "response": agent_response.model_dump(mode="json"),
         }
 
+    @staticmethod
+    def _agent_failure(response: NeMoGymResponse) -> NgFailureEvent | None:
+        """Rebuild only the cause selected by this failed reply and matching its outcome."""
+        if response.status != "failed":
+            return None
+        try:
+            outcome = AgentOutcome.model_validate_json((response.metadata or {}).get(AGENT_OUTCOME_METADATA_KEY, ""))
+            report = FailureReport.model_validate((response.model_extra or {}).get("failure_report"))
+        except (ValidationError, TypeError):
+            return None
+        if report.omitted or report.failure_id is None:
+            return None
+        selected = report.events[report.failure_id]
+        if selected.failure_kind != outcome.failure_kind:
+            return None
+        if selected.http_status is not None and selected.http_status != outcome.status_code:
+            return None
+        if selected.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
+            if (
+                selected.boundary != FailureBoundary.AGENT
+                or selected.operation != "agent.policy_request"
+                or not selected.operation_id
+                or selected.cause_id is None
+                or report.events[selected.cause_id].operation_id != selected.operation_id
+                or not confirmed_policy_response_timeout(report.model_copy(update={"failure_id": selected.cause_id}))
+            ):
+                return None
+        return rebuild_failure(report)
+
+    @staticmethod
+    def _model_request_not_sent(response: NeMoGymResponse) -> bool:
+        """A selected connector failure is safe only if every attempt of that operation never connected."""
+        report = FailureReport.model_validate(response.model_extra["failure_report"])
+        selected = report.events[report.failure_id]
+        if (
+            selected.boundary != FailureBoundary.MODEL
+            or selected.operation != "model_request"
+            or not selected.operation_id
+            or not selected.attempt_id
+        ):
+            return False
+        observed = [
+            event
+            for event in report.events.values()
+            if event.boundary == FailureBoundary.MODEL and event.operation == "model_request"
+        ]
+        if any(not event.operation_id or not event.attempt_id for event in observed):
+            return False
+        attempts = [event for event in observed if event.operation_id == selected.operation_id]
+        connector_type = f"{ClientConnectorError.__module__}.{ClientConnectorError.__qualname__}"
+        return len({event.attempt_id for event in attempts}) == len(attempts) and all(
+            event.request_upload_complete is False
+            and event.foreign_error is not None
+            and event.foreign_error.exception_type == connector_type
+            for event in attempts
+        )
+
+    def _timeout_action(self, fallback: OutcomeAction) -> OutcomeAction:
+        """Keep the migrated agent's explicit timeout rule unless the environment overrides policy."""
+        policy = self.config.agent_outcome_policy
+        if MODEL_POLICY_RESPONSE_TIMEOUT in policy.by_failure_kind or "default_action" in policy.model_fields_set:
+            return fallback
+        agent = get_first_server_config_dict(self.server_client.global_config_dict, self.config.agent_server.name)
+        rules = (agent.get("outcome_policy") or {}).get("by_failure_kind") or {}
+        if MODEL_POLICY_RESPONSE_TIMEOUT in rules:
+            return OutcomeAction(rules[MODEL_POLICY_RESPONSE_TIMEOUT])
+        if "final_on_model_timeout" in agent:
+            return (
+                OutcomeAction.COUNT_AS_ZERO
+                if TypeAdapter(bool).validate_python(agent["final_on_model_timeout"])
+                else OutcomeAction.RETRY
+            )
+        # The migrated SimpleAgent /run boundary defaults confirmed timeouts to retry.
+        return OutcomeAction((agent.get("outcome_policy") or {}).get("default_action", OutcomeAction.RETRY))
+
     def _skipped_verification_reward(self) -> float | None:
         """The fixed reward that replaces /verify, or None to verify.
 
@@ -574,6 +693,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         stage: str,
         failure_reason: str,
         terminal: bool,
+        failure_kind: str | None = None,
         partial_response: Any = None,
         agent_observations: Any = None,
         trajectory: Any = None,
@@ -587,6 +707,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             operation="episode",
             failure_reason=failure_reason[:2000],
             terminal=terminal,
+            failure_kind=failure_kind,
             evidence={
                 "partial_response": partial_response,
                 "agent_observations": agent_observations,
