@@ -1,0 +1,16 @@
+{
+    "bookshop|authors|author_id": "Unique identifier of the author.",
+    "bookshop|authors|name": "Full name of the author.",
+    "bookshop|authors|country": "Country the author lives in.",
+    "bookshop|books|book_id": "Unique identifier of the book.",
+    "bookshop|books|title": "Title of the book.",
+    "bookshop|books|author_id": "The author of the book. References authors.author_id.",
+    "bookshop|books|genre": "Genre of the book, such as Fiction or Cooking.",
+    "bookshop|books|list_price": "Price printed on the book, in US dollars.",
+    "bookshop|books|published_year": "Year the book was first published.",
+    "bookshop|sales|sale_id": "Unique identifier of the sale.",
+    "bookshop|sales|book_id": "The book sold. References books.book_id.",
+    "bookshop|sales|sale_date": "Date of the sale, as YYYY-MM-DD.",
+    "bookshop|sales|quantity": "Number of copies sold in the sale.",
+    "bookshop|sales|unit_price": "Price paid for each copy in the sale, in US dollars."
+}
