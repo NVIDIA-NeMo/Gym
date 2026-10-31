@@ -41,6 +41,9 @@ class FailureHeader:
 
     NAME: ClassVar[str] = "X-NG-Failure-Report"
     MAX_BYTES: ClassVar[int] = 4096
+    # A stream's headers are sent before its backend finishes, so a streamed reply carries its report as this field of
+    # its terminal event instead, with the same bound and the same omitted flag.
+    STREAM_FIELD: ClassVar[str] = "nemo_gym_failure_report"
 
     @classmethod
     def encode(cls, report: FailureReport) -> dict[str, str]:
@@ -52,6 +55,26 @@ class FailureHeader:
             LOGGER.warning("Failure report of %d bytes not sent; %d events omitted", len(value), len(report.events))
             value = json.dumps({"omitted": True})
         return {cls.NAME: value}
+
+    @classmethod
+    def stream_value(cls, report: FailureReport) -> dict[str, Any] | None:
+        """The ``STREAM_FIELD`` value for ``report``; ``None`` when it holds nothing."""
+        encoded = cls.encode(report)
+        return json.loads(encoded[cls.NAME]) if encoded else None
+
+    @classmethod
+    def decode_stream_event(cls, payload: Mapping[str, Any] | None) -> FailureReport | None:
+        """The report a terminal stream event carries; ``None`` without one. An invalid value is reported as omitted."""
+        if not isinstance(payload, Mapping) or cls.STREAM_FIELD not in payload:
+            return None
+        try:
+            value = payload[cls.STREAM_FIELD]
+            if len(json.dumps(value, ensure_ascii=True)) > cls.MAX_BYTES:
+                return FailureReport(omitted=True)
+            return FailureReport.model_validate(value)
+        except (ValueError, TypeError, RecursionError):
+            LOGGER.warning("Invalid %s stream field; its failure events are omitted", cls.STREAM_FIELD)
+            return FailureReport(omitted=True)
 
     @classmethod
     def decode(cls, headers: Mapping[str, str] | None) -> FailureReport | None:
@@ -113,6 +136,88 @@ def observe_failure(error: BaseException) -> None:
     log = RequestFailureLog.current()
     if log is not None:
         log.add(failure_report_for(error))
+
+
+class StreamFailureReportReader:
+    """Read bounded terminal SSE failure reports without changing the relayed response."""
+
+    _MAX_LINE_BYTES: ClassVar[int] = 1 << 20
+    _TERMINAL_TYPES: ClassVar[frozenset[str]] = frozenset(
+        {"response.completed", "response.incomplete", "response.failed"}
+    )
+    _FIELD: ClassVar[bytes] = FailureHeader.STREAM_FIELD.encode()
+
+    def __init__(self) -> None:
+        self._pending = b""
+        self.report: FailureReport | None = None
+
+    def _merge(self, report: FailureReport) -> None:
+        if self.report is None:
+            self.report = report
+            return
+        conflict = any(
+            key in self.report.events and self.report.events[key] != event for key, event in report.events.items()
+        ) or bool(self.report.failure_id and report.failure_id and self.report.failure_id != report.failure_id)
+        self.report = self.report.merged(report)
+        if conflict:
+            self.report = self.report.model_copy(update={"omitted": True})
+
+    def feed(self, chunk: bytes) -> None:
+        lines = (self._pending + chunk).split(b"\n")
+        self._pending = lines.pop()
+        if len(self._pending) > self._MAX_LINE_BYTES:
+            self._merge(FailureReport(omitted=True))
+            self._pending = b""
+        for line in lines:
+            if len(line) > self._MAX_LINE_BYTES:
+                self._merge(FailureReport(omitted=True))
+                continue
+            if not line.startswith(b"data: ") or self._FIELD not in line:
+                continue
+            try:
+                payload = json.loads(line[len(b"data: ") :])
+            except (ValueError, RecursionError):
+                self._merge(FailureReport(omitted=True))
+                continue
+            if not isinstance(payload, dict) or FailureHeader.STREAM_FIELD not in payload:
+                continue
+            event_type = payload.get("type")
+            choices = payload.get("choices")
+            final_choice = isinstance(choices, list) and any(
+                isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str) for choice in choices
+            )
+            final_usage = choices == [] and isinstance(payload.get("usage"), dict)
+            terminal = (isinstance(event_type, str) and event_type in self._TERMINAL_TYPES) or (
+                event_type is None and (final_choice or final_usage or isinstance(payload.get("error"), dict))
+            )
+            if not terminal:
+                self._merge(FailureReport(omitted=True))
+                continue
+            report = FailureHeader.decode_stream_event(payload)
+            if report is not None:
+                self._merge(report)
+
+    def feed_text(self, text: str) -> None:
+        """Read an existing capture without copying its entire body or accepting invalid Unicode."""
+        try:
+            for offset in range(0, len(text), 65536):
+                self.feed(text[offset : offset + 65536].encode("utf-8"))
+        except UnicodeError:
+            self._merge(FailureReport(omitted=True))
+
+    def finish(self) -> FailureReport | None:
+        """Close the body; an unfinished data line is not complete report evidence."""
+        if self._pending.strip().startswith(b"data:") or self._FIELD in self._pending:
+            self._merge(FailureReport(omitted=True))
+        self._pending = b""
+        return self.report
+
+    def observe(self) -> None:
+        """Retain model-call observations without selecting an enclosing episode failure."""
+        report = self.finish()
+        log = RequestFailureLog.current()
+        if log is not None and report is not None:
+            log.add(report)
 
 
 def observe_reply(headers: Mapping[str, str] | None) -> None:
