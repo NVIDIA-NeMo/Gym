@@ -624,6 +624,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
 
         # Keepalive events name the response before it exists, so the response takes this id.
         response_id = f"resp_{uuid4().hex}"
+        # The middleware resets the request's log before the body streams; keep this request's log object.
+        failure_log = RequestFailureLog.current()
         pending = asyncio.create_task(self._invoke_responses(request, params, response_id=response_id))
         try:
             # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
@@ -636,7 +638,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         if done:
             return await self._stream_buffered_responses(request, pending, ns_map)
         return StreamingResponse(
-            self._responses_keepalive_events(request, pending, ns_map, keepalive_s, response_id),
+            self._responses_keepalive_events(
+                request, pending, ns_map, keepalive_s, response_id, failure_log=failure_log
+            ),
             media_type="text/event-stream",
             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
         )
@@ -667,8 +671,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         ns_map: NamespaceMap,
         keepalive_s: float,
         response_id: str,
+        *,
+        failure_log: Optional[RequestFailureLog] = None,
     ) -> AsyncIterator[str | bytes]:
-        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes."""
+        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes.
+
+        The headers went out before ``pending`` finished, so the terminal event carries the request's failure report.
+        """
         try:
             for event in synthesize_responses_keepalive_sse(response_id, include_created=True):
                 yield event
@@ -683,13 +692,15 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             except Exception as exc:
                 # The stream is already open, so only a terminal event can report the failure.
                 code, message = self._streamed_responses_failure(exc)
+                report = _stream_report(failure_log, exc)
                 for event in synthesize_responses_failure_sse(
                     message, code=code, response_id=response_id, include_created=False
                 ):
-                    yield event
+                    yield _with_stream_report(event, report)
                 return
+            report = _stream_report(failure_log, None)
             async for event in served.body_iterator:
-                yield event
+                yield _with_stream_report(event, report)
         finally:
             if not pending.done():
                 pending.cancel()
@@ -778,6 +789,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
 
+        # The middleware resets the request's log before the body streams; keep this request's log object.
+        failure_log = RequestFailureLog.current()
         pending = asyncio.create_task(self._invoke_chat_completions(request, params))
         try:
             # StreamingResponse commits HTTP headers before iterating its body.
@@ -815,7 +828,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                             message,
                         )
                         error = {"message": message, "type": "invalid_request_error", "param": param, "code": code}
-                        yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                        payload = _with_report_field({"error": error}, _stream_report(failure_log, exc))
+                        yield f"event: error\ndata: {json.dumps(payload)}\n\n"
                         return
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
@@ -833,13 +847,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                         "type": "server_error" if status >= 500 else "invalid_request_error",
                         "code": status,
                     }
-                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    payload = _with_report_field({"error": error}, _stream_report(failure_log, exc))
+                    yield f"event: error\ndata: {json.dumps(payload)}\n\n"
                     return
                 # Capture finalization and serialization failures must propagate:
                 # treating them as backend SSE errors would hide an invalid capture.
                 response = await completed_stream(completion)
+                report = _stream_report(failure_log, None)
+                last: str | bytes | None = None
                 async for event in response.body_iterator:
-                    yield event
+                    if last is not None:
+                        # The chunk before [DONE] is the last one a client parses: it carries the report.
+                        yield _with_stream_report(last, report) if _is_chat_done(event) else last
+                    last = event
+                if last is not None:
+                    yield last
             finally:
                 if not pending.done():
                     pending.cancel()
@@ -1441,6 +1463,41 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     if usage:
         result["usage"] = usage
     return result
+
+
+def _stream_report(failure_log: Optional[RequestFailureLog], error: BaseException | None) -> Optional[dict]:
+    """The bounded ``FailureHeader.STREAM_FIELD`` value for a stream's request log; ``None`` with nothing to report."""
+    return FailureHeader.stream_value(failure_log.reply_report(error)) if failure_log is not None else None
+
+
+def _with_report_field(payload: dict[str, Any], report: Optional[dict]) -> dict[str, Any]:
+    return payload if report is None else {**payload, FailureHeader.STREAM_FIELD: report}
+
+
+_RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
+
+
+def _is_chat_done(event: str | bytes) -> bool:
+    text = event.decode("utf-8", errors="replace") if isinstance(event, bytes) else event
+    return text.strip() == "data: [DONE]"
+
+
+def _with_stream_report(event: str | bytes, report: Optional[dict]) -> str | bytes:
+    """``event`` with the report added to its data object when it is a terminal Responses event or a Chat chunk."""
+    if report is None:
+        return event
+    text = event.decode("utf-8") if isinstance(event, bytes) else event
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        payload = json.loads(line[len("data: ") :])
+        if payload.get("type", "chat.completion.chunk") not in _RESPONSES_TERMINAL_EVENTS and "choices" not in payload:
+            return event
+        lines[index] = "data: " + json.dumps(_with_report_field(payload, report))
+        joined = "\n".join(lines)
+        return joined.encode("utf-8") if isinstance(event, bytes) else joined
+    return event
 
 
 def _reconstruct_responses_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
