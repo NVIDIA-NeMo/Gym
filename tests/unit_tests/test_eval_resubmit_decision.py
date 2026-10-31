@@ -451,7 +451,13 @@ def artifact_digests(job: Path) -> dict:
 
 def write_postrun_receipt(job: Path, run_id: str = "postrun-run") -> None:
     """The version-1 receipt a content-bound post-run export writes: its backend run id and the artifact digests."""
-    receipt = {"version": 1, "run_id": run_id, "artifacts": artifact_digests(job), "uploaded_rollouts": True}
+    receipt = {
+        "version": 1,
+        "run_id": run_id,
+        "artifacts": artifact_digests(job),
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
     (job / "artifacts" / "rollouts_mlflow_export_done").write_text(json.dumps(receipt))
 
 
@@ -1106,7 +1112,15 @@ def test_a_current_post_run_receipt_with_finished_is_the_only_mlflow_pass() -> N
 
     assert (
         mlflow_errors(
-            {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True, "uploaded_rollouts": True}},
+            {
+                "live_run_id": None,
+                "receipt": {
+                    "run_id": "postrun-run",
+                    "current": True,
+                    "uploaded_rollouts": True,
+                    "rollout_projection_version": 1,
+                },
+            },
             "FINISHED",
             observed_run_id="postrun-run",
         )
@@ -1302,7 +1316,15 @@ def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_pa
 def test_a_finished_status_counts_only_for_the_receipt_s_own_run(observed_run_id, message) -> None:
     from nemo_gym.orchestration.recovery import mlflow_errors
 
-    local = {"live_run_id": None, "receipt": {"run_id": "postrun-run", "current": True, "uploaded_rollouts": True}}
+    local = {
+        "live_run_id": None,
+        "receipt": {
+            "run_id": "postrun-run",
+            "current": True,
+            "uploaded_rollouts": True,
+            "rollout_projection_version": 1,
+        },
+    }
     assert mlflow_errors(local, "FINISHED", observed_run_id=observed_run_id) == [message]
 
 
@@ -1323,7 +1345,12 @@ def test_a_post_run_receipt_beside_an_earlier_live_run_is_bound_only_by_its_own_
 
     local = {
         "live_run_id": "live-old",
-        "receipt": {"run_id": "postrun-run", "current": True, "uploaded_rollouts": True},
+        "receipt": {
+            "run_id": "postrun-run",
+            "current": True,
+            "uploaded_rollouts": True,
+            "rollout_projection_version": 1,
+        },
     }
     errors = mlflow_errors(local, status, observed_run_id=observed_run_id)
     assert (errors == []) is accepted

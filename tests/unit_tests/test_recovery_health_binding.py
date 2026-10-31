@@ -173,6 +173,7 @@ def collect(a, hook=""):
             "version": 1,
             "run_id": "synthetic-export",
             "uploaded_rollouts": True,
+            "rollout_projection_version": 1,
             "artifacts": {k: hashlib.sha256((a / name).read_bytes()).hexdigest() for k, name in names.items()},
         },
     )

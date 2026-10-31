@@ -96,7 +96,29 @@ def live(tmp_path, monkeypatch):
     with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
         for i, row in enumerate(store.pending(3)):
             store.record_dispatch(row)
-            store.record_outcome(row | {"reward": float(i), "response": {"output": []}, "evaluation_completed": True})
+            store.record_outcome(
+                row
+                | {
+                    "reward": float(i),
+                    "response": {"output": []},
+                    "evaluation_completed": True,
+                    "ng_trajectory": {
+                        "schema_version": "1.0",
+                        "task_id": str(i),
+                        "rollout_id": f"{i}-0",
+                        "invocations": [{"invocation_id": "root", "status": "completed", "conversation": []}],
+                        "verifier_invocations": [{"invocation_id": f"verify-{i}", "status": "completed"}],
+                        "model_calls": [
+                            {
+                                "model_call_id": f"call-{i}",
+                                "request": {"input": "private fixture"},
+                                "response": {"output_text": "private fixture"},
+                                "response_metadata": {"status_code": 200},
+                            }
+                        ],
+                    },
+                }
+            )
     artifacts = RunArtifacts(output)
     config = OmegaConf.create(
         {
@@ -129,11 +151,22 @@ def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
     assert not artifacts.export_done_fpath("mlflow").exists()
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
     receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
-    assert receipt == {"version": 1, "run_id": "live-run", "artifacts": before, "uploaded_rollouts": True}
+    assert receipt == {
+        "version": 1,
+        "run_id": "live-run",
+        "artifacts": before,
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
     assert client.status == "FINISHED"
     assert _artifact_version(artifacts) == before
     collected = _collected_mlflow(artifacts)
-    assert collected["receipt"] == {"run_id": "live-run", "current": True, "uploaded_rollouts": True}
+    assert collected["receipt"] == {
+        "run_id": "live-run",
+        "current": True,
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
     from nemo_gym.orchestration.recovery import mlflow_errors
 
     assert mlflow_errors(collected, "FINISHED", observed_run_id="live-run") == []
@@ -276,3 +309,91 @@ def test_live_finalizer_rejects_changed_completion_identity(live, fault):
         assert RolloutStore.read(output).coverage()["complete"] is False
     _finalize_live_exporters(output)
     assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+def test_live_delivery_retains_canonical_observations_without_raw_capture(live):
+    artifacts, exporter, client = live
+    saved = [orjson.loads(line) for line in artifacts.rollouts_jsonl_fpath.read_bytes().splitlines()]
+    delivered = [orjson.loads(row[0]) for row in client.artifacts["rollouts.json"]["data"]]
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert artifacts.export_done_fpath("mlflow").exists()
+    for original, uploaded in zip(saved, delivered, strict=True):
+        trajectory = uploaded["ng_trajectory"]
+        assert trajectory["verifier_invocations"] == original["ng_trajectory"]["verifier_invocations"]
+        assert trajectory["task_id"] == original["ng_trajectory"]["task_id"]
+        assert trajectory["rollout_id"] == original["ng_trajectory"]["rollout_id"]
+        assert (
+            trajectory["model_calls"][0]["model_call_id"]
+            == original["ng_trajectory"]["model_calls"][0]["model_call_id"]
+        )
+        assert trajectory["model_calls"][0]["response_metadata"] == {"status_code": 200}
+        assert "request" not in trajectory["model_calls"][0]
+        assert "response" not in trajectory["model_calls"][0]
+        assert "conversation" not in trajectory["invocations"][0]
+        assert uploaded["reward"] == original["reward"]
+
+
+def test_live_receipt_rejects_verifier_observations_not_in_acknowledged_rows(live):
+    artifacts, exporter, client = live
+    output = artifacts.rollouts_jsonl_fpath
+    rows = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+    rows[0]["ng_trajectory"]["verifier_invocations"].append({"invocation_id": "late-verifier", "status": "completed"})
+    output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    run_health_checks(output, workers=1, run_coverage=[RolloutStore.read(output).coverage()])
+    _finalize_live_exporters(output)
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+@pytest.mark.parametrize("projection", [None, 0, 2, True, "1"])
+def test_old_or_unknown_projection_receipt_cannot_certify_canonical_delivery(live, projection):
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    artifacts, exporter, client = live
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    marker = artifacts.export_done_fpath("mlflow")
+    receipt = orjson.loads(marker.read_bytes())
+    if projection is None:
+        del receipt["rollout_projection_version"]
+    else:
+        receipt["rollout_projection_version"] = projection
+    marker.write_bytes(orjson.dumps(receipt))
+    before = marker.read_bytes()
+    collected = _collected_mlflow(artifacts)
+    assert collected["receipt"]["current"] is True
+    assert any(
+        "canonical trajectory metadata" in error
+        for error in mlflow_errors(collected, "FINISHED", observed_run_id="live-run")
+    )
+    result = module.MLflowExporter(exporter.global_config_dict).export(artifacts)
+    assert result.state.value == "failed"
+    assert marker.read_bytes() == before
+
+
+def test_malformed_canonical_observations_cannot_be_silently_certified(live):
+    artifacts, exporter, client = live
+    output = artifacts.rollouts_jsonl_fpath
+    rows = [orjson.loads(line) for line in output.read_bytes().splitlines()]
+    rows[0]["ng_trajectory"]["verifier_invocations"].append({"invocation_id": "verify-0", "status": "completed"})
+    output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+    run_health_checks(output, workers=1, run_coverage=[RolloutStore.read(output).coverage()])
+    _finalize_live_exporters(output)
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+def test_postrun_mlflow_export_keeps_canonical_evidence_and_projection_receipt(live, monkeypatch):
+    artifacts, live_exporter, live_client = live
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    client = Client()
+    monkeypatch.setattr(module, "MlflowClient", lambda **kwargs: client)
+    exporter = module.MLflowExporter(live_exporter.global_config_dict)
+    result = exporter.export(artifacts)
+    assert result.state.value == "succeeded"
+    delivered = [orjson.loads(row[0]) for row in client.artifacts["rollouts.json"]["data"]]
+    assert [row["ng_trajectory"]["verifier_invocations"][0]["invocation_id"] for row in delivered] == [
+        "verify-0",
+        "verify-1",
+    ]
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt["rollout_projection_version"] == 1
+    assert mlflow_errors(_collected_mlflow(artifacts), "FINISHED", observed_run_id=receipt["run_id"]) == []

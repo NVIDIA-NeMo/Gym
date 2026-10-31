@@ -413,6 +413,8 @@ class BaseExporter(Exporter):
                     or not isinstance(receipt.get("run_id"), str)
                     or not receipt["run_id"].strip()
                     or type(receipt.get("uploaded_rollouts")) is not bool
+                    or type(receipt.get("rollout_projection_version")) is not int
+                    or receipt["rollout_projection_version"] != 1
                     or not isinstance(receipt.get("artifacts"), dict)
                     or receipt["artifacts"].keys() != version.keys()
                     or any(
@@ -484,7 +486,13 @@ class BaseExporter(Exporter):
                 )
             # What this export delivered: every call above returned, so the rollouts table was sent exactly when
             # this export read them for upload. A reader can tell a whole-run receipt from one without rows.
-            receipt = {"version": 1, "run_id": run_id, "artifacts": version, "uploaded_rollouts": rollouts is not None}
+            receipt = {
+                "version": 1,
+                "run_id": run_id,
+                "artifacts": version,
+                "uploaded_rollouts": rollouts is not None,
+                "rollout_projection_version": 1,
+            }
             _write_marker_atomically(marker, orjson.dumps(receipt).decode())
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)
@@ -512,8 +520,8 @@ class BaseExporter(Exporter):
         from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, _rollout_for_export
 
         # Rows flagged as drained stand for tasks the dispatch budget never started, so there is nothing to upload,
-        # and a live run leaves them out of its upload too. `_rollout_for_export` drops the bulky trajectory and
-        # raw model-call payloads, the same trimming a live run applies.
+        # and a live run leaves them out of its upload too. `_rollout_for_export` preserves canonical operation metadata while
+        # dropping conversation and raw model-call payloads, the same trimming a live run applies.
         with artifacts.rollouts_jsonl_fpath.open("rb") as f:
             rows = (orjson.loads(line) for line in f if line.strip())
             return [_rollout_for_export(row) for row in rows if not row.get(NG_DISPATCH_DRAINED_KEY)]

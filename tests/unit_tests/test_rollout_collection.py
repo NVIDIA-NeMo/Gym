@@ -1373,10 +1373,53 @@ class TestRolloutCollection:
             {"code": "trajectory_projection_failed", "invocation_id": None, "detail": "ValueError"}
         ]
 
-    def test_rollout_for_export_omits_new_trajectory_and_raw_capture_payloads(self) -> None:
+    def test_rollout_for_export_keeps_canonical_facts_without_trajectory_or_capture_payloads(self) -> None:
         result = {
             "response": {"output": "existing rollout content"},
-            "ng_trajectory": {"invocations": [{"conversation": ["trajectory secret"]}]},
+            "ng_trajectory": {
+                "task_id": "task",
+                "rollout_id": "task-0",
+                "invocations": [
+                    {
+                        "invocation_id": "root",
+                        "status": "completed",
+                        "conversation": [{"role": "user", "content": "trajectory secret"}],
+                    }
+                ],
+                "verifier_invocations": [{"invocation_id": "verify-1", "status": "completed"}],
+                "model_calls": [
+                    {
+                        "model_call_id": "model-1",
+                        "request": {"input": "request secret"},
+                        "response": {"output": "response secret"},
+                        "response_metadata": {"status_code": 200},
+                    }
+                ],
+                "turns": [
+                    {
+                        "invocation_id": "root",
+                        "task_id": "task",
+                        "rollout_id": "task-0",
+                        "turn_no": 1,
+                        "timestamp": 1.0,
+                        "step_count": 1,
+                        "question": "question secret",
+                        "answer": "answer secret",
+                        "reasoning_content": "reasoning secret",
+                    }
+                ],
+                "tool_calls": [
+                    {
+                        "invocation_id": "root",
+                        "tool_call_id": "tool-1",
+                        "status": "failed",
+                        "error_type": "TimeoutError",
+                        "duration_ms": 12.0,
+                        "output": "tool secret",
+                    }
+                ],
+                "gaps": [{"code": "resolution_unavailable"}],
+            },
             "ng_model_call_capture": {
                 "calls": [
                     {
@@ -1392,7 +1435,31 @@ class TestRolloutCollection:
 
         sanitized = _rollout_for_export(result)
 
-        assert "ng_trajectory" not in sanitized
+        trajectory = sanitized["ng_trajectory"]
+        assert trajectory["verifier_invocations"] == result["ng_trajectory"]["verifier_invocations"]
+        assert trajectory["invocations"] == [{"invocation_id": "root", "status": "completed"}]
+        assert trajectory["model_calls"] == [{"model_call_id": "model-1", "response_metadata": {"status_code": 200}}]
+        assert trajectory["tool_calls"] == [
+            {
+                "invocation_id": "root",
+                "tool_call_id": "tool-1",
+                "status": "failed",
+                "error_type": "TimeoutError",
+                "duration_ms": 12.0,
+            }
+        ]
+        assert trajectory["gaps"] == result["ng_trajectory"]["gaps"]
+        assert trajectory["turns"] == [
+            {
+                "invocation_id": "root",
+                "task_id": "task",
+                "rollout_id": "task-0",
+                "turn_no": 1,
+                "timestamp": 1.0,
+                "step_count": 1,
+            }
+        ]
+        assert b"secret" not in orjson.dumps(sanitized)
         assert sanitized["ng_model_call_capture"]["calls"] == [{"model_call_id": "model-1"}]
         assert sanitized["response"] == result["response"]
         assert result["ng_model_call_capture"]["calls"][0]["request"] == {"input": "request secret"}

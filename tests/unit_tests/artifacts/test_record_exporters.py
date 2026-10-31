@@ -81,7 +81,12 @@ class RecordingBackend(BaseExporter):
 def _make_run(tmp_path: Path, *, saved_config: Optional[dict] = None) -> RunArtifacts:
     rollouts = tmp_path / "run.jsonl"
     rows = [
-        {"_ng_task_index": 0, "reward": 1.0, "ng_trajectory": {"big": "x"}, "ng_model_call_capture": {"calls": []}},
+        {
+            "_ng_task_index": 0,
+            "reward": 1.0,
+            "ng_trajectory": {"task_id": "0", "rollout_id": "0-0"},
+            "ng_model_call_capture": {"calls": []},
+        },
         {"_ng_task_index": 1, "reward": 0.0},
         {"_ng_task_index": 2, "_ng_dispatch_drained": True},
     ]
@@ -124,7 +129,12 @@ class TestExport:
         assert backend.metrics == [flatten_aggregate_metrics(AGGREGATE_ENTRIES)]
         assert backend.rollouts == [
             [
-                {"_ng_task_index": 0, "reward": 1.0, "ng_model_call_capture": {"calls": []}},
+                {
+                    "_ng_task_index": 0,
+                    "reward": 1.0,
+                    "ng_trajectory": {"task_id": "0", "rollout_id": "0-0"},
+                    "ng_model_call_capture": {"calls": []},
+                },
                 {"_ng_task_index": 1, "reward": 0.0},
             ]
         ]

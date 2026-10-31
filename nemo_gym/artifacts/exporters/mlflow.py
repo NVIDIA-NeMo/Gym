@@ -372,6 +372,7 @@ class MLflowExporter(BaseExporter):
                         "run_id": run_id,
                         "artifacts": version,
                         "uploaded_rollouts": True,
+                        "rollout_projection_version": 1,
                     }
                 ).decode(),
             )
