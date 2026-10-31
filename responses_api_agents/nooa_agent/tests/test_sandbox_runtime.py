@@ -503,7 +503,7 @@ def musl_wheelhouse(path: Path, gnu_wheelhouse: Path) -> Path:
     manifest.update(
         target="x86_64/musl",
         libc="musl",
-        libc_version="1.2.5",
+        libc_version="1.2.3",
         python_sha256=sandbox_runtime._PYTHON_SHA256["x86_64/musl"],
     )
     (path / "manifest.json").write_text(json.dumps(manifest))
@@ -511,7 +511,9 @@ def musl_wheelhouse(path: Path, gnu_wheelhouse: Path) -> Path:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("version", ["1.2.5", "1.2.3", "1.2.4_git20230717"])
 async def test_offline_runtime_selects_the_musl_bundle_for_a_musl_image(
+    version: str,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     sandbox: AsyncMock,
@@ -527,7 +529,7 @@ async def test_offline_runtime_selects_the_musl_bundle_for_a_musl_image(
     musl = musl_wheelhouse(tmp_path / "musl-wheelhouse", wheelhouse)
     sandbox.exec.side_effect = [
         SandboxExecResult("x86_64/musl", "", 0),
-        SandboxExecResult("", "musl libc (x86_64)\nVersion 1.2.5\nDynamic Program Loader\n", 1),
+        SandboxExecResult("", f"musl libc (x86_64)\nVersion {version}\nDynamic Program Loader\n", 1),
         SandboxExecResult("", "", 1),
         SandboxExecResult("ready", "", 0),
         SandboxExecResult("", "", 0),
@@ -544,7 +546,9 @@ async def test_offline_runtime_selects_the_musl_bundle_for_a_musl_image(
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("ldd", ["musl libc (x86_64)\nVersion 1.1.24", "GNU libc 2.31", ""])
+@pytest.mark.parametrize(
+    "ldd", ["musl libc (x86_64)\nVersion 1.1.24", "musl libc (x86_64)\nVersion 1.2.2_git20220101", "GNU libc 2.31", ""]
+)
 async def test_offline_runtime_rejects_an_old_or_unknown_musl_without_online_fallback(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -560,7 +564,7 @@ async def test_offline_runtime_rejects_an_old_or_unknown_musl_without_online_fal
     )
     musl = musl_wheelhouse(tmp_path / "musl-wheelhouse", wheelhouse)
     sandbox.exec.side_effect = [SandboxExecResult("x86_64/musl", "", 0), SandboxExecResult("", ldd, 1)]
-    with pytest.raises(RuntimeError, match="requires musl >= 1.2.5"):
+    with pytest.raises(RuntimeError, match="requires musl >= 1.2.3"):
         await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse, musl_wheelhouse_path=musl)
     portable_download.assert_not_awaited()
     sandbox.upload.assert_awaited_once()
