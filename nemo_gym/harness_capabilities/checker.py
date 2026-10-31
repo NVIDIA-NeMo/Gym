@@ -119,6 +119,22 @@ def _missing_content(value: object) -> bool:
     return False
 
 
+def _without_parameter_schema(tool: object) -> object:
+    # Function definitions may be nested inside a namespace or a Chat-style function wrapper.
+    if isinstance(tool, list):
+        return [_without_parameter_schema(item) for item in tool]
+    if isinstance(tool, dict):
+        return {key: _without_parameter_schema(value) for key, value in tool.items() if key != "parameters"}
+    return tool
+
+
+def _without_response_parameter_schemas(response: object) -> object:
+    """Ignore parameter schemas echoed in response tools while retaining their actual media configuration."""
+    if isinstance(response, dict) and isinstance(response.get("tools"), list):
+        return {**response, "tools": [_without_parameter_schema(tool) for tool in response["tools"]]}
+    return response
+
+
 def _resolve(reference: dict, calls: list[dict]) -> list[int]:
     if not Draft202012Validator(MODEL_CALL_REF).is_valid(reference):
         return []
@@ -461,7 +477,11 @@ class Inspector:
                 location="$.ng_trajectory.model_calls",
                 reason="external, encrypted or invalid media is unavailable to this reader",
                 predicate=lambda: not any(
-                    (_missing_content(c.get(k)) for c in self.calls for k in ("request", "response"))
+                    (
+                        _missing_content(c.get("request"))
+                        or _missing_content(_without_response_parameter_schemas(c.get("response")))
+                        for c in self.calls
+                    )
                 ),
                 available=self.available,
                 depends_on=("model_calls.present", "calls.request", "calls.response"),
