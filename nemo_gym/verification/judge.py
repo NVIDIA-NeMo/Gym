@@ -45,6 +45,7 @@ from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
+from aiohttp import ClientTimeout
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -169,6 +170,7 @@ async def call_judge(
     url_path: str,
     json: Any,
     response_model: Type[ResponseT],
+    timeout: ClientTimeout | None = None,
 ) -> ResponseT:
     """POST to a judge model server and parse the reply; report failure as a ``judge_failed`` event.
 
@@ -186,6 +188,7 @@ async def call_judge(
             server_name=server_name,
             url_path=url_path,
             json=json,
+            **({"timeout": timeout} if timeout is not None else {}),
             **({"headers": {VERIFIER_INVOCATION_HEADER: invocation_id}} if invocation_id else {}),
         )
         await raise_for_status(http_response)

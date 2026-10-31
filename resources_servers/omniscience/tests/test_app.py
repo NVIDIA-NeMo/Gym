@@ -15,6 +15,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
+import pytest
 from pytest import approx, fixture
 
 from nemo_gym.client import ServerClient
@@ -497,3 +498,26 @@ class TestExtractTextNoStrip:
     def test_strip_true_removes_reasoning(self) -> None:
         response = self._make_response("reasoning here</think>answer")
         assert extract_text_from_response(response, strip_thinking=True) == "answer"
+
+
+@pytest.mark.parametrize(
+    "text, expected, parsed",
+    [
+        ("A", "A", True),
+        ("B", "B", True),
+        ("explanation\nD", "D", True),
+        ("The grade is A based on analysis", "A", False),
+        ("no clear grade", "B", False),
+    ],
+)
+def test_only_explicit_judge_verdict_marks_grading(text, expected, parsed):
+    from nemo_gym.trajectory.trajectory_record import ModelCallRef
+    from nemo_gym.verification.judge import JudgeGrading, _judge_grading
+
+    grading = JudgeGrading(dependencies=[ModelCallRef(model_call_id="judge-response")])
+    token = _judge_grading.set(grading)
+    try:
+        assert parse_judge_grade(text) == expected
+        assert bool(grading.parsed_dependencies) is parsed
+    finally:
+        _judge_grading.reset(token)

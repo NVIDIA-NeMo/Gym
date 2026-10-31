@@ -324,3 +324,20 @@ async def test_a_parser_judge_error_is_not_observed():
 
 async def _raise(error: BaseException):
     raise error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_call_judge_preserves_optional_transport_timeout(explicit):
+    from aiohttp import ClientTimeout
+
+    client = _client(status=200, body=b'{"verdict": "CORRECT"}')
+    timeout = ClientTimeout(total=17) if explicit else None
+    await call_judge(
+        client, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict, timeout=timeout
+    )
+    kwargs = client.post.call_args.kwargs
+    if explicit:
+        assert kwargs["timeout"] is timeout
+    else:
+        assert "timeout" not in kwargs
