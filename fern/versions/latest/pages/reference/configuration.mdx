@@ -84,7 +84,7 @@ Set it as an `os.pathsep`-separated list (`:` on Linux/macOS):
 export NEMO_GYM_EXTRA_ROOTS=~/my-plugins:~/team-benchmarks
 
 gym list benchmarks                 # your benchmarks appear alongside the built-ins
-gym eval run --benchmark my_bench --model-type vllm_model
+gym eval run --benchmark my_bench --model-type vllm_model --split benchmark --output results/my_bench.jsonl
 ```
 
 The variable is inherited by the servers Gym spawns, so plugin components resolve inside them too.
@@ -95,7 +95,8 @@ The variable is inherited by the servers Gym spawns, so plugin components resolv
 
 ```bash
 gym list benchmarks --search-dir ~/my-plugins
-gym eval run --benchmark my_bench --model-type vllm_model --search-dir ~/my-plugins
+gym eval run --benchmark my_bench --model-type vllm_model --split benchmark --output results/my_bench.jsonl \
+    --search-dir ~/my-plugins
 ```
 
 <Tip>
@@ -403,6 +404,8 @@ separate run, because the run id file shows only that the live run opened, not t
 gym eval run \
     --benchmark gpqa \
     --model-type openai_model \
+    --split benchmark \
+    --output results/gpqa.jsonl \
     +mlflow_tracking_uri=https://mlflow.example.com/ \
     +mlflow_experiment_name=my-experiment \
     +mlflow_run_name=gpqa
@@ -442,8 +445,8 @@ gym env start \
     --config config1.yaml \
     --config config2.yaml
 
-# Use paths stored in env.yaml
-gym env start "+config_paths=${my_config_paths}"
+# Use paths stored in env.yaml (single quotes keep the shell from expanding the interpolation)
+gym env start '+config_paths=${my_config_paths}'
 ```
 
 ### Overriding Values

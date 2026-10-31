@@ -116,7 +116,9 @@ non-default config in that directory.
 gym eval run \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
-    --model-type vllm_model
+    --model-type vllm_model \
+    --split benchmark \
+    --output results/tb21_terminus_2.jsonl
 ```
 
 Available on `gym env start`, `gym env validate`, `gym env prefetch`, and `gym eval run`. Like the other
@@ -135,7 +137,8 @@ gym env start \
     --benchmark terminal_bench_2_1/opencode \
     --agent-type terminus_2_sandboxed_agent \
     --model-type vllm_model
-gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent --input rows.jsonl
+gym eval run --no-serve --agent terminal_bench_2_1_terminus_2_sandboxed_agent \
+    --input rows.jsonl --output results/tb21_terminus_2.jsonl
 ```
 
 <Note>
@@ -185,6 +188,8 @@ When a command needs overrides for keys that have no dedicated flag, you can kee
 gym eval run \
     --benchmark aime24 \
     --model-type openai_model \
+    --split benchmark \
+    --output results/aime24.jsonl \
     ++responses_create_params.reasoning.effort=low \
     +wandb_project=gym-dev
 ```
@@ -839,14 +844,14 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 | `--agent-type NAME[/FLAVOR]` | Compose the environment with the named agent harness. Rejected with `--no-serve`. Refer to [Swapping the agent](#swapping-the-agent). |
 | `--agent`, `-a` | Agent instance to collect rollouts with. |
 | `--allow-unsupported-pairing` | Run even if the environment's resources server does not declare support for the selected agent or model type. |
-| `--input`, `-i` | Input tasks JSONL file. |
-| `--output`, `-o` | Output rollouts JSONL file. |
+| `--input`, `-i` | Input tasks JSONL file. Only accepted with `--no-serve`; end-to-end runs read the dataset prepared for `--split`. |
+| `--output`, `-o` | Output rollouts JSONL file. Required for config-based and `--no-serve` runs; a positional Harbor task target defaults to `results/harbor/<taskset>/rollouts.jsonl`. |
 | `--limit` | Maximum number of tasks to run. |
 | `--num-repeats` | Rollouts per task (for mean@k metrics). Pass an int to apply to every task, or a dict keyed by `agent_ref.name` for per-agent counts (e.g. `'{simple_agent: 32, swe_agent: 1}'`) when one input file mixes agents. In dict form, the special key `_default` is the fallback for agents not explicitly listed; without it, any unlisted row's agent raises a single consolidated error. |
 | `--interleave-repeats` | Start repeats round by round (every task's first rollout, then every task's second) rather than each task's back to back. Use it when a task is heavy on the machine running it, for example when its sandbox loads large data, to spread its repeats over the run. This is best effort: repeats still overlap when the concurrency is high or rollouts are long. GDPVal's multistage orchestrator rebuilds its stage rows per task and does not keep this order. Maps to legacy `+interleave_repeats=true`. |
 | `--prompt-config` | Prompt template YAML to apply. |
 | `--concurrency` | Maximum number of concurrent samples. Must be positive when set. |
-| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). A dataset of the matching `type` must be declared in the loaded configs. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
+| `--split` | Dataset split to use (`train`, `validation`, or `benchmark`). Required for config-based end-to-end runs and ignored with `--no-serve`. A positional Harbor task target supplies its own default split; pass `--split` to choose one explicitly. A dataset of the matching `type` must be declared in the loaded configs; benchmarks declare a `benchmark` dataset, so `--benchmark` runs use `--split benchmark`. `example` datasets are smoke-test samples, not a runnable split — run them with `--no-serve` and `--input` as shown in the [Quickstart](/get-started/quickstart). |
 | `--model`, `-m` | Served model identifier. |
 | `--model-url` | Model server base URL. |
 | `--model-api-key` | Model server API key. |
@@ -864,7 +869,7 @@ In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor ta
 gym eval run --benchmark aime24 \
     --model-type openai_model \
     --output results/aime24.jsonl \
-    --split validation \
+    --split benchmark \
     --concurrency 10
 
 # Two-terminal sequence for --no-serve: model settings go to env start, not eval run.
@@ -879,11 +884,12 @@ gym env start \
     --model-url http://127.0.0.1:10240/v1 \
     --model-api-key dummy_key
 
-# Terminal 2 — collect rollouts against the running servers:
+# Terminal 2 — collect rollouts against the running servers. --no-serve reads tasks from --input
+# and routes them to the --agent instance that env start printed:
 gym eval run --no-serve \
-    --resources-server math_with_judge \
+    --agent math_with_judge_simple_agent \
+    --input resources_servers/math_with_judge/data/example.jsonl \
     --output results/test_001.jsonl \
-    --split validation \
     --temperature 1.0 \
     --top-p 1.0
 
@@ -1305,6 +1311,7 @@ Use the tables below to find their `gym` replacement and update your scripts and
 | `ng_run` | `gym env start` |
 | `ng_status` | `gym env status` |
 | `ng_dump_config` | `gym env resolve` |
+| `ng_validate` | `gym env validate` |
 | `ng_pip_list` | `gym env packages` |
 | `ng_init_resources_server` | `gym env init` |
 | `ng_test` | `gym env test` |
@@ -1401,7 +1408,7 @@ gym eval run --no-serve \
 
 # Reward profiling
 # Before:
-ng_reward_profile +input_jsonl_fpath=materialized_inputs.jsonl +rollouts_jsonl_fpath=rollouts.jsonl
+ng_reward_profile +materialized_inputs_jsonl_fpath=materialized_inputs.jsonl +rollouts_jsonl_fpath=rollouts.jsonl
 # After:
 gym eval profile \
     --inputs materialized_inputs.jsonl \
