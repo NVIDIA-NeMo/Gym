@@ -77,7 +77,19 @@ def _ref_exists(repo: str, ref: str) -> bool:
 
     with tempfile.TemporaryDirectory(prefix="gym-ref-check-") as tmp:
         _git("init", "-q", cwd=tmp)
-        fetched = _git("fetch", "-q", "--depth=1", "--filter=blob:none", repo, ref.lower(), cwd=tmp)
+        _git("remote", "add", "origin", repo, cwd=tmp)
+        # Older Git versions require a promisor remote before the first filtered fetch.
+        fetched = _git(
+            "-c",
+            "remote.origin.promisor=true",
+            "fetch",
+            "-q",
+            "--depth=1",
+            "--filter=blob:none",
+            "origin",
+            ref.lower(),
+            cwd=tmp,
+        )
     if fetched.returncode != 0:
         logger.debug("Fetching %s from %s failed: %s", ref, repo, fetched.stderr.strip())
     return fetched.returncode == 0
