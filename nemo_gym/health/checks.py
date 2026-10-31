@@ -509,6 +509,11 @@ def _response_has_usable_output(response: Any) -> bool:
             or item["type"] == "reasoning"
         ):
             continue
+        if item["type"] == "function_call":
+            # Empty required strings pass response-schema validation but cannot identify an executable call.
+            if all(isinstance(item.get(key), str) and item[key].strip() for key in ("name", "call_id")):
+                return True
+            continue
         # Any other output item is a tool call of some kind.
         if item.get("type") != "message" or _nonempty(item.get("content")):
             return True

@@ -3491,6 +3491,11 @@ def test_response_population_rejects_explicit_capture_gaps(tmp_path: Path, gap: 
         {"output": [{"type": 7}]},
         {"output": [{"type": ""}]},
         {"output": [{"type": "   "}]},
+        {"output": [{"type": "function_call", "name": "", "call_id": "", "arguments": ""}]},
+        {"output": [{"type": "function_call", "name": " ", "call_id": "call-1", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "lookup", "call_id": "", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "lookup", "call_id": None, "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": 123, "call_id": "call-1", "arguments": "{}"}]},
     ],
 )
 def test_response_population_faults_malformed_raw_output(tmp_path: Path, response: dict) -> None:
@@ -3509,7 +3514,8 @@ def test_response_population_faults_malformed_raw_output(tmp_path: Path, respons
     "response",
     [
         {"output_text": "ordinary answer"},
-        {"output": [{"type": "function_call", "name": "get_weather", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "no_args", "call_id": "call-2", "arguments": ""}]},
         {"output": [{"type": "custom_tool_call", "name": "custom", "input": "value"}]},
         {"output": [{"type": "web_search_call", "status": "completed"}]},
         {"choices": [{"message": {"content": None, "refusal": "Cannot help with this request"}}]},
