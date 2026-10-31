@@ -184,3 +184,78 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
             assert bool(store.pending()) is (action == "retry")
         assert client.post.await_count == (2 if action == "retry" else 1)
         assert not any(path == "/verify" for _, path, _ in dependencies.calls)
+
+
+@pytest.mark.parametrize("route", [False, True])
+@pytest.mark.parametrize("status,blocked", [(200, True), (201, True), (299, True), (503, False), (None, False)])
+async def test_selected_model_body_delivery_blocks_collection_resume(tmp_path, monkeypatch, route, status, blocked):
+    import json
+
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    failure = NgFailureEvent(
+        boundary="model",
+        failure_kind="model_request_error",
+        failure_reason="Controlled model request failure",
+        operation="model_request",
+        operation_id="operation",
+        attempt_id="operation-1",
+        http_status=status,
+        request_upload_complete=False if status is None else None,
+    )
+    from aiohttp import ClientResponseError
+
+    from tests.unit_tests.test_rollout_collection import http_error
+
+    error = http_error(500)
+    error.__cause__ = failure
+    post = AsyncMock(side_effect=error)
+    client = install_fake_server_client(monkeypatch, post)
+    monkeypatch.setattr("nemo_gym.rollout_collection.get_global_config_dict", lambda: client.global_config_dict)
+    source, output = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
+    source.write_text(json.dumps({"agent_ref": {"name": "my_agent"}, "responses_create_params": {"input": []}}) + "\n")
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        route_failures_to_sidecar=route,
+        require_complete=False,
+        disable_aggregation=True,
+        disable_health_check=True,
+    )
+    for resume in (False, True):
+        try:
+            await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": resume}))
+        except (IncompleteEvaluationError, ClientResponseError):
+            pass
+    assert post.await_count == (1 if blocked or not route else 2)
+    store = RolloutStore.read(output)
+    # Default-mode diagnostic failures are independently uncertain-delivery guarded.
+    assert bool(store.pending()) is (not blocked and route)
+    if route:
+        rows = store.failures()
+        assert all(failure.event_id in row["_ng_failure_events"] for row in rows)
+        assert all("reward" not in row for row in rows)
+
+
+def test_unselected_body_failure_does_not_override_selected_preanswer_infrastructure():
+    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+
+    events = {
+        "old": {
+            "boundary": "model",
+            "failure_kind": "model_request_error",
+            "operation": "model_request",
+            "http_status": 200,
+        },
+        "current": {
+            "boundary": "model",
+            "failure_kind": "model_request_error",
+            "operation": "model_request",
+            "http_status": 503,
+        },
+        "wrapper": {"boundary": "agent", "failure_kind": "agent_route_failed", "cause_id": "current"},
+    }
+    row = {"_ng_failure_class": "agent_run_error", "_ng_failure_events": events, "_ng_failure_id": "wrapper"}
+    assert not has_unclassified_execution_failure(row)
+    events["wrapper"]["cause_id"] = "old"
+    assert has_unclassified_execution_failure(row)

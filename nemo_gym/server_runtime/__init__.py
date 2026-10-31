@@ -69,7 +69,12 @@ if TYPE_CHECKING:
         SimpleResourcesServer,
         lost_session_verification,
     )
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
+    from nemo_gym.server_runtime.episode_types import (
+        BaseEpisodeRequest,
+        BaseEpisodeResponse,
+        EpisodeFailure,
+        FailureReport,
+    )
     from nemo_gym.server_runtime.mcp_auto_exposure import MCPTool
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER
@@ -111,6 +116,7 @@ _PUBLIC_API = {
     "ClosedResourcesSessionRecords": "base_resources_server",
     "DirectHTTPToolAccess": "tool_access",
     "EpisodeFailure": "episode_types",
+    "FailureReport": "episode_types",
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
