@@ -1,5 +1,6 @@
 import hashlib
 import subprocess
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -10,8 +11,11 @@ from nemo_gym.orchestration.executors.connection import LocalConnection
 from nemo_gym.orchestration.recovery import CollectedEvidence, RecoveryAction, RecoveryDecision
 
 
-@pytest.mark.parametrize("case", ["ok", "exhausted", "unknown", "stale", "live"])
+@pytest.mark.parametrize("case", ["ok", "large", "exhausted", "unknown", "stale", "live"])
 def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
+    large = case == "large"
+    if large:
+        case = "ok"
     job = tmp_path / "run" / "judge"
     (job / "artifacts").mkdir(parents=True)
     (job / "logs").mkdir()
@@ -44,7 +48,14 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
     (job / "artifacts/rollouts.jsonl").write_text("fixture\n")
     for n, v in {".gym_job_chain": "10\n", ".gym_infra_retries": "0\n", ".gym_accumulated_walltime": "60\n"}.items():
         (job / n).write_text(v)
-    digest = lambda p: hashlib.sha256(p.read_bytes()).hexdigest()
+    if large:
+        with (job / "artifacts/rollouts.jsonl").open("wb") as artifact:
+            artifact.truncate(64 * 1024 * 1024)
+
+    def digest(path):
+        with path.open("rb") as artifact:
+            return hashlib.file_digest(artifact, "sha256").hexdigest()
+
     snapshot = {n: digest(job / n) for n in (".gym_job_chain", ".gym_infra_retries", ".gym_accumulated_walltime")}
     snapshot["resume_config"] = cfg.driver.benchmarks["judge"].resume_config.model_dump_json()
     evidence = CollectedEvidence(
@@ -68,6 +79,23 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
         f = bins / name
         f.write_text("#!/bin/bash\n" + body + "\n")
         f.chmod(0o755)
+    if large:
+        # Run the generated admission script normally, rejecting a whole-artifact read in its Python child.
+        python = bins / "python3"
+        python.write_text(
+            f"#!{sys.executable}\n"
+            "import sys\nfrom pathlib import Path\n"
+            "original = Path.read_bytes\n"
+            "def bounded_read(path):\n"
+            " if path.name == 'rollouts.jsonl': raise AssertionError('whole rollout read forbidden')\n"
+            " return original(path)\n"
+            "Path.read_bytes = bounded_read\n"
+            "assert sys.argv[1] == '-c'\n"
+            "code = sys.argv[2]; sys.argv = ['-c', *sys.argv[3:]]\n"
+            "exec(compile(code, '<admission>', 'exec'))\n"
+        )
+        python.chmod(0o755)
+
     import os
 
     monkeypatch.setenv("PATH", str(bins) + ":" + os.environ["PATH"])
