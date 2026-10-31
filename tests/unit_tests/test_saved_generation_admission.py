@@ -45,7 +45,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
     import httpx
     from omegaconf import OmegaConf
 
-    from environment_servers.single_agent_turn.tests.test_app import _environment_server, _request, _Response
+    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()
     if empty_output:
@@ -123,8 +123,8 @@ async def test_failed_agent_partial_output_keeps_the_selected_policy(tmp_path, m
     import httpx
     from omegaconf import OmegaConf
 
-    from environment_servers.single_agent_turn.tests.test_app import _environment_server, _request, _Response
     from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, AgentOutcomePolicyConfig
+    from tests.single_agent_turn_helpers import _environment_server, _request, _Response
 
     environment, dependencies = _environment_server()
     environment.config.agent_outcome_policy = AgentOutcomePolicyConfig(by_status_code={503: action})

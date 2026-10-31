@@ -12,12 +12,12 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as transport
 import nemo_gym.rollout_collection as collection
-from environment_servers.single_agent_turn.tests.test_app import _environment_server, _request
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
 from nemo_gym.rollout_recovery import IncompleteEvaluationError
 from nemo_gym.rollout_store import RolloutStore
+from tests.single_agent_turn_helpers import _environment_server, _request
 
 
 @pytest.mark.parametrize("routed", [False, True])
