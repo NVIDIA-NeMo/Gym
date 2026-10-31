@@ -12,12 +12,14 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 import pytest
+from fastapi import HTTPException
 
 from environment_servers.harbor import app as harbor_app
 from environment_servers.harbor import sandboxes as harbor_sandboxes
 from environment_servers.harbor.entrypoint import entrypoint_to_run
 from environment_servers.harbor.tests.conftest import (
     COMPOSE_YAML,
+    HEALTHCHECK_TOML,
     IMAGE_CONFIGS,
     IMAGE_PATH,
     TASK_TOML,
@@ -222,10 +224,8 @@ class TestGroup:
         ``working_dir`` is the Dockerfile's final ``WORKDIR``, the directory the single sandbox runs the entrypoint
         in, not the base image's recorded ``WorkingDir``; see
         test_a_pull_mode_tasks_main_starts_in_the_workdir_while_the_seed_works_in_the_task_workdir for
-        an ``[environment].workdir`` of its own. ``main`` carries no ``user``: the
-        adapter runs its command, entrypoint included, as the sandbox's default user, the task's resolved user
-        (``task.user``, the Dockerfile's final ``USER`` here, ``app``), which is the user the single sandbox gives
-        the entrypoint (``task.entrypoint_user``) unless ``[agent].user`` names another."""
+        an ``[environment].workdir`` of its own. ``main`` carries no ``user``: the setup hook installs the image's
+        startup user before the adapter runs the command, independently of the later agent user."""
         server, task, _, _, _ = overlay_server(
             tmp_path,
             monkeypatch,
@@ -248,27 +248,17 @@ class TestGroup:
         assert main["working_dir"] == task.entrypoint_workdir == task.workdir == "/app"
         assert "user" not in main
         assert main["image"] == "ubuntu:24.04" and main["command"] == ["sh", "-c", "sleep infinity"]
-        # No user on main: the adapter runs its command as the sandbox's default, the task's resolved user, which is
-        # the entrypoint's user here (the Dockerfile's USER app, else the base's svc); only [agent].user would differ.
+        # These tasks use the same user for startup and subsequent agent commands.
         assert server._sandbox_spec(task, task.workdir).user == task.user == task.entrypoint_user
 
     async def test_a_pull_mode_tasks_main_starts_in_the_workdir_while_the_seed_works_in_the_task_workdir(
         self, tmp_path, monkeypatch
     ):
-        """A pull-mode task whose ``[environment].workdir`` (``/other``) is not the Dockerfile's final ``WORKDIR``
-        (``/app``), with an image ``HEALTHCHECK`` and a task ``[environment.healthcheck]``. The directories are
-        Harbor's: its built image carries the ``WORKDIR`` as the container's directory (``docker-compose-build.yaml``
-        writes no ``working_dir`` for ``main``), so the entrypoint and the image healthcheck run in ``/app``, while
-        ``[environment].workdir`` is the ``cwd`` of Harbor's execs (harbor 0.22.0 ``environments/docker/docker.py``
-        1104), the task healthcheck's among them. The synthesized ``main`` writes the ``WORKDIR`` as ``working_dir``,
-        which the adapter makes as root, as Docker makes a missing ``working_dir``, and the server's setup hook hands
-        to the entrypoint's user before main's command, as the single sandbox makes the ``WORKDIR`` app's before its
-        entrypoint starts (``_start_entrypoint``):
-        the adapter creates main's sandbox in ``/app`` and runs its command, entrypoint included, and its recorded
-        healthcheck there (it gives neither a ``cwd`` of its own) as the sandbox's default user (``task.user``,
-        ``app``), as the single sandbox runs both; the seed then prepares ``/other`` for the agent, as it does in a
-        single sandbox, and gives the task healthcheck that directory explicitly (``_wait_healthy(workdir=...)``),
-        as every exec of the seed, the turns and the verifier names its ``cwd`` (review, round 32)."""
+        """Startup and the image healthcheck use /app; later agent commands use the task's /other.
+
+        The setup hook creates the image directory with its startup owner before the adapter applies that
+        directory as the exec default. Preparing the agent's directory must not change the startup default.
+        """
         toml = TASK_TOML.replace("[environment]\n", '[environment]\nworkdir = "/other"\n')
         toml += (
             '\n[environment.healthcheck]\ncommand = "test -f ready"\ninterval_sec = 0.01\nstart_interval_sec = 0.01\n'
@@ -300,14 +290,13 @@ class TestGroup:
         try:
             assert compose._ready
             spec = main_spec_of(provider, task)
-            assert spec.workdir == "/app" and spec.user == "app"
-            # The adapter made the WORKDIR as root, as Docker creates a missing working_dir, and the server's setup
-            # hook handed it to the entrypoint's user, as root, before main's command started; nothing has made
-            # /other yet.
+            assert spec.workdir is None and spec.user == "app"
+            # Setup creates and hands over the image directory before the adapter's fallback mkdir and startup.
+            # The agent's /other directory has not been created yet.
             entry = entrypoint_exec_of(main_sandbox)
             commands = [r["command"] for r in main_sandbox.execs]
-            handed = commands.index("chown app /app")
-            assert commands.index("mkdir -p /app") < handed < commands.index(entry["command"])
+            handed = commands.index("mkdir -p /app && chown app /app")
+            assert handed < commands.index("mkdir -p /app") < commands.index(entry["command"])
             assert main_sandbox.execs[handed]["ran_as"] == "root"
             assert main_sandbox.dirs["/app"] == "app" and "/other" not in main_sandbox.dirs
             # The entrypoint and the image healthcheck ran as the sandbox's default user in the spec's directory, the
@@ -323,7 +312,8 @@ class TestGroup:
             main_service = compose.services["main"]
             prepared = await server._prepare_workdir(main_service, task, task.workdir)
             assert prepared == "/other" and main_sandbox.dirs["/other"] == "app"
-            assert main_spec_of(provider, task).workdir == "/app"
+            await compose.services["main"].exec("pwd")
+            assert main_sandbox.execs[-1]["cwd"] == "/app"
             await server._wait_healthy(main_service, task, user="app", workdir=prepared, compose_managed=True)
             (task_check,) = [r for r in main_sandbox.execs if r["command"] == "test -f ready"]
             assert task_check["ran_as"] == "app" and task_check["cwd"] == "/other"
@@ -331,13 +321,11 @@ class TestGroup:
             await compose.stop()
 
     async def test_an_overlay_tasks_main_leaves_its_final_workdir_to_the_overlay(self, tmp_path, monkeypatch):
-        """An overlay task (a Dockerfile with ``RUN`` lines) whose final ``WORKDIR`` is a new directory under a
-        non-root ``USER``: the synthesized ``main`` carries no ``working_dir`` and its spec no workdir, as its
-        single sandbox starts (``_create_sandbox_within_deadline``). The adapter creates a service's ``working_dir``
-        as root before the overlay runs, and the overlay's ``WORKDIR`` step leaves an existing directory as it is, so
-        the ``RUN`` line in it would run in a root-owned directory and fail. Through the real adapter the overlay's
-        ``WORKDIR`` step finds the directory missing, creates it owned by ``app``, and the ``RUN`` line runs there as
-        ``app`` (review, round 32)."""
+        """Defer the final directory until Dockerfile setup can create it under the correct USER.
+
+        Creating it as root before setup would leave the non-root RUN unable to write there. The composed service
+        records the final directory, but its initial sandbox spec leaves creation to the WORKDIR setup step.
+        """
         server, task, _, _, _ = overlay_server(
             tmp_path,
             monkeypatch,
@@ -351,7 +339,7 @@ class TestGroup:
         document = server._compose_document(task)
 
         main = document["services"]["main"]
-        assert main["entrypoint"] == [] and "working_dir" not in main and "user" not in main
+        assert main["entrypoint"] == [] and main["working_dir"] == "/home/app/work" and "user" not in main
         assert server._sandbox_spec(task, None if task.overlay else task.workdir).workdir is None
 
         @dataclass
@@ -371,7 +359,6 @@ class TestGroup:
             assert main_spec_of(provider, task).workdir is None
             # The adapter made no directory for main before the overlay: the WORKDIR step found it missing and
             # made it, owned by app, so the RUN line in it ran as app in app's directory.
-            assert "mkdir -p /home/app/work" not in [record["command"] for record in main_sandbox.execs]
             assert main_sandbox.existed_at_workdir_step == [False]
             assert main_sandbox.dirs["/home/app/work"] == "app"
             marker = main_sandbox.run("touch marker")
@@ -380,39 +367,228 @@ class TestGroup:
         finally:
             await compose.stop()
 
-    async def test_an_overlay_tasks_entrypoint_starts_as_the_base_image_runs_it(self, tmp_path, monkeypatch):
-        """The gap ``synthesized_group`` states for an overlay task, pinned so the statement stays true: the base
-        image's recorded ``ENTRYPOINT`` is kept (the Dockerfile does not clear it) and the single sandbox runs it as
-        the Dockerfile's final ``USER`` in its final ``WORKDIR`` (``_start_entrypoint`` names ``task.entrypoint_user``
-        and ``task.entrypoint_workdir``), as Harbor's built image starts it. The group's ``main`` carries neither (the
-        directory would be root-made before the overlay, above), so the adapter starts its command, entrypoint
-        included, before ``_set_default_user`` runs, as the base image's own user in the base image's recorded
-        ``WorkingDir`` that the resolution filled in. The agent's commands run as ``task.user`` in ``task.workdir``
-        once the seed installed both."""
+    async def test_an_overlay_tasks_entrypoint_uses_the_final_dockerfile_user_and_workdir(self, tmp_path, monkeypatch):
+        """Attaching a job service preserves startup after RUN creates the user and its working directory."""
         server, task, _, _, _ = overlay_server(
             tmp_path,
             monkeypatch,
             dockerfile="FROM ubuntu:24.04\nRUN useradd -m app\nUSER app\nWORKDIR /home/app/work\n",
-            image_config={"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entry.sh"], "WorkingDir": "/srv"},
+            image_config={
+                "Env": [f"PATH={IMAGE_PATH}"],
+                "Entrypoint": ["/entry.sh"],
+                "WorkingDir": "/srv",
+                "Healthcheck": {"Test": ["CMD", "test", "-f", "ready"]},
+            },
             overlay=volume_free_overlay(tmp_path),
         )
         assert task.overlay and entrypoint_to_run(task) == ["/entry.sh"]
         assert task.entrypoint_user == "app" and task.entrypoint_workdir == "/home/app/work"
 
         main = server._compose_document(task)["services"]["main"]
-        # The base image's record fills the directory the synthesized main left out; no user anywhere.
-        assert main["entrypoint"] == ["/entry.sh"] and main["working_dir"] == "/srv" and "user" not in main
+        assert main["entrypoint"] == ["/entry.sh"] and main["working_dir"] == "/home/app/work" and "user" not in main
 
         compose, provider, main_sandbox = await start_real_group(monkeypatch, server, task)
         try:
             spec = main_spec_of(provider, task)
-            assert spec.workdir == "/srv" and spec.user is None
-            # No default user yet (`_set_default_user` runs after the group started): the base image's own user, in
-            # the base's recorded WorkingDir, not app in /home/app/work as the single sandbox runs it.
+            assert spec.workdir is None and spec.user is None
             entry = entrypoint_exec_of(main_sandbox)
-            assert entry["user"] is None and main_sandbox.default_user is None
-            assert entry["ran_as"] == main_sandbox.image_user == "root" and entry["cwd"] == "/srv"
-            assert main_sandbox.dirs["/srv"] == "root" and main_sandbox.dirs["/home/app/work"] == "app"
+            assert entry["ran_as"] == "app" and entry["cwd"] == "/home/app/work"
+            assert entry["cwd_owner"] == "app"
+            (check,) = [r for r in main_sandbox.execs if r["command"] == "test -f ready"]
+            assert check["ran_as"] == "app" and check["cwd"] == "/home/app/work"
+        finally:
+            await compose.stop()
+
+    @pytest.mark.parametrize(
+        "image_user,startup_user",
+        [("app", "app"), ("root", "root"), ("1000", "agent"), ("12345", 12345)],
+    )
+    @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
+    async def test_startup_user_is_independent_of_agent_user(
+        self, tmp_path, monkeypatch, image_user, startup_user, with_run
+    ):
+        class NumericUserSandbox(FakeSandbox):
+            async def exec(self, command, *, cwd=None, env=None, timeout_s=None, user=None):
+                # OpenSandbox's name-based path cannot switch to an unnamed numeric string.
+                assert not (isinstance(user, str) and user.isdigit()), user
+                return await super().exec(command, cwd=cwd, env=env, timeout_s=timeout_s, user=user)
+
+        run = "RUN true\n" if with_run else ""
+        if image_user == "root" and with_run:
+            startup_user = None  # Overlay sandboxes are created as root, before installing the agent's user.
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "other"\n'),
+            dockerfile=f"FROM ubuntu:24.04\n{run}USER {image_user}\nWORKDIR /app\n",
+            image_config={
+                "Env": [f"PATH={IMAGE_PATH}"],
+                "Entrypoint": ["/entry.sh"],
+                "Healthcheck": {"Test": ["CMD", "test", "-f", "ready"]},
+            },
+            overlay=volume_free_overlay(tmp_path),
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task, NumericUserSandbox())
+        try:
+            entry = entrypoint_exec_of(sandbox)
+            assert entry["user"] == startup_user and entry["cwd"] == "/app"
+            (check,) = [r for r in sandbox.execs if r["command"] == "test -f ready"]
+            assert check["user"] == startup_user and check["cwd"] == "/app"
+            if image_user.isdigit():
+                assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
+            # The seed switches back only after startup; the agent still gets its own configured user.
+            await server._set_default_user(compose.services["main"], task, server._overlay_names.pop("r1"))
+            await compose.services["main"].exec("id")
+            assert sandbox.execs[-1]["user"] == "other"
+        finally:
+            await compose.stop()
+
+    @pytest.mark.parametrize(
+        "startup",
+        ["none", "keepalive", "cleared-entrypoint", "disabled-healthcheck", "entrypoint", "healthcheck", "command"],
+    )
+    @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
+    async def test_image_group_is_checked_before_create_only_when_startup_uses_it(
+        self, tmp_path, monkeypatch, startup, with_run
+    ):
+        from nemo_gym.sandbox.adapters import docker_compose
+
+        overlay = volume_free_overlay(tmp_path)
+        if startup == "command":
+            with overlay.files[0].open("a") as file:
+                file.write('    command: ["touch", "/tmp/started"]\n')
+        config = {"Env": [f"PATH={IMAGE_PATH}"]}
+        if startup in ("entrypoint", "cleared-entrypoint"):
+            config["Entrypoint"] = ["/entry.sh"]
+        elif startup == "keepalive":
+            config["Entrypoint"] = ["sh", "-c", "sleep infinity"]
+        elif startup in ("healthcheck", "disabled-healthcheck"):
+            config["Healthcheck"] = {"Test": ["CMD", "true"]}
+        with overlay.files[0].open("a") as file:
+            if startup == "cleared-entrypoint":
+                file.write("    entrypoint: []\n")
+            elif startup == "disabled-healthcheck":
+                file.write("    healthcheck:\n      disable: true\n")
+        run = "RUN true\n" if with_run else ""
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n').replace(
+                "[verifier]\n", '[verifier]\nuser = "root"\n'
+            ),
+            dockerfile=f"FROM ubuntu:24.04\n{run}USER app:app\nWORKDIR /app\n",
+            image_config=config,
+            overlay=overlay,
+        )
+        sandbox = FakeSandbox()
+        provider = DirectoryProvider(task, sandbox)
+        monkeypatch.setattr(docker_compose, "create_provider", lambda config: provider)
+        write_image_config(
+            task.path.parent, "org/memory:1", Cmd=["memory-server"], Healthcheck={"Test": ["CMD", "true"]}
+        )
+        if startup in ("none", "keepalive", "cleared-entrypoint", "disabled-healthcheck"):
+            compose = await harbor_app.HarborEnvironmentServer._create_compose(server, task, "r1")
+            try:
+                assert compose._ready
+                assert compose.services["main"].default_user is None
+            finally:
+                await compose.stop()
+        else:
+            with pytest.raises(HTTPException, match="app:app"):
+                await harbor_app.HarborEnvironmentServer._create_compose(server, task, "r1")
+            assert not provider.created, "Reject unsupported startup users before provisioning any service"
+            assert not sandbox.execs, "Reject unsupported startup users before running Dockerfile setup"
+
+    async def test_root_startup_without_agent_override_uses_plain_exec(self, tmp_path, monkeypatch):
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            image_config={
+                "Env": [f"PATH={IMAGE_PATH}"],
+                "Entrypoint": ["/entry.sh"],
+                "Healthcheck": {"Test": ["CMD", "true"]},
+            },
+            overlay=volume_free_overlay(tmp_path),
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            assert entrypoint_exec_of(sandbox)["user"] is None
+            (check,) = [r for r in sandbox.execs if r["command"] == "true"]
+            assert check["user"] is None
+        finally:
+            await compose.stop()
+
+    async def test_unnamed_image_uid_runs_the_groups_task_healthcheck_as_an_integer(self, tmp_path, monkeypatch):
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=HEALTHCHECK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n'),
+            dockerfile="FROM ubuntu:24.04\nRUN true\nUSER 12345\nWORKDIR /app\n",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entry.sh"]},
+            overlay=volume_free_overlay(tmp_path),
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            names = server._overlay_names.pop("r1")
+            main = compose.services["main"]
+            await server._set_default_user(main, task, names)
+            image_user = await server._image_user_name(main, task, names)
+            await server._wait_healthy(main, task, user=image_user, workdir="/app", compose_managed=True)
+            (check,) = [r for r in sandbox.execs if r["command"] == "test -f /app/ready.txt"]
+            assert check["user"] == 12345
+            assert sum(r["command"].startswith("getent passwd ") for r in sandbox.execs) == 1
+        finally:
+            await compose.stop()
+
+    @pytest.mark.parametrize("compose_user", ["root", "0", "null", '""'])
+    async def test_explicit_job_user_replaces_an_unused_image_group(self, tmp_path, monkeypatch, compose_user):
+        overlay = volume_free_overlay(tmp_path)
+        with overlay.files[0].open("a") as file:
+            file.write(f"    user: {compose_user}\n")
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "root"\n').replace(
+                "[verifier]\n", '[verifier]\nuser = "root"\n'
+            ),
+            dockerfile="FROM ubuntu:24.04\nUSER root:1234\n",
+            image_config={
+                "Env": [f"PATH={IMAGE_PATH}"],
+                "Entrypoint": ["/entry.sh"],
+                "Healthcheck": {"Test": ["CMD", "true"]},
+            },
+            overlay=overlay,
+        )
+        if compose_user in ("null", '""'):
+            with pytest.raises(HTTPException, match="root:1234"):
+                await start_real_group(monkeypatch, server, task)
+            return
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            expected = "root" if compose_user == "root" else 0
+            assert entrypoint_exec_of(sandbox)["user"] == expected
+            (check,) = [r for r in sandbox.execs if r["command"] == "true"]
+            assert check["user"] == expected
+        finally:
+            await compose.stop()
+
+    async def test_explicit_job_startup_settings_override_the_image_defaults(self, tmp_path, monkeypatch):
+        overlay = volume_free_overlay(tmp_path)
+        with overlay.files[0].open("a") as file:
+            file.write("    user: operator\n    working_dir: /operator\n")
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            dockerfile="FROM ubuntu:24.04\nRUN useradd -m app\nUSER app\nWORKDIR /home/app/work\n",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"], "Entrypoint": ["/entry.sh"]},
+            overlay=overlay,
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            entry = entrypoint_exec_of(sandbox)
+            assert entry["user"] == "operator" and entry["cwd"] == "/operator"
+            assert sandbox.dirs["/home/app/work"] == "app"
+            assert sandbox.dirs.get("/operator") == "root"
         finally:
             await compose.stop()
 

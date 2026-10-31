@@ -278,6 +278,9 @@ class TestOverlay:
         # "4242" would be looked up as an account name by the su-backed providers and fail.
         assert lookup["command"] == "getent passwd 4242 | cut -d: -f1"
         assert run["user"] == 4242 and isinstance(run["user"], int) and run["seen"]["user"] == "4242"
+        assert sandbox.default_user == 4242
+        (seed,) = [kwargs["json"] for _, path, kwargs in server.server_client.calls if path == "/v1/agent_sessions"]
+        assert seed["sandbox_access"]["user"] == 4242
         # A uid:gid pair stays as written, on the line and as the default: only Docker's --user takes the pair.
         server, task, sandbox, _ = self.overlay_server(
             tmp_path, monkeypatch, dockerfile="FROM img\nUSER 4242:4242\nRUN id\n", provider="docker"

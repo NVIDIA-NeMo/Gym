@@ -69,7 +69,7 @@ def overlay_shell_command(step: OverlayRun, sandbox_env: Mapping[str, str] | Non
     return "; ".join(parts)
 
 
-def overlay_workdir_command(workdir: str, user: str | None) -> str:
+def overlay_workdir_command(workdir: str, user: str | int | None) -> str:
     """Create a ``WORKDIR`` as root the way BuildKit does: missing directories are made and owned by the user.
 
     An existing directory (one the image ships) is left as it is. ``root:1234`` is not plain root: the
@@ -78,7 +78,7 @@ def overlay_workdir_command(workdir: str, user: str | None) -> str:
     quoted = shlex.quote(workdir)
     if _is_plain_root(user):
         return f"mkdir -p {quoted}"
-    return f"test -d {quoted} || (mkdir -p {quoted} && chown {shlex.quote(user)} {quoted})"
+    return f"test -d {quoted} || (mkdir -p {quoted} && chown {shlex.quote(str(user))} {quoted})"
 
 
 def _output_tail(result: SandboxExecResult, limit: int = OVERLAY_OUTPUT_TAIL) -> str:
@@ -160,8 +160,9 @@ class HarborOverlayMixin:
             if uid not in user_names:
                 lookup = await as_root(f"getent passwd {shlex.quote(uid)} | cut -d: -f1", label, f"USER {uid} lookup")
                 name = (lookup.stdout or "").strip().splitlines()
-                user_names[uid] = name[-1] if name and name[-1] else uid
-            return user_names[uid] + (f":{group}" if group else "")
+                # Share _user_name's missing-name sentinel so startup can use the provider's integer uid path.
+                user_names[uid] = name[-1] if name and name[-1] else ""
+            return (user_names[uid] or uid) + (f":{group}" if group else "")
 
         async def make_workdir(path: str, user: str | None, label: str) -> None:
             if path in prepared_workdirs:

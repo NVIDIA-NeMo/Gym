@@ -120,9 +120,10 @@ class AsyncSandboxCompose:
     its shared storage; ``service_volume_sources`` gives a service on its own provider that provider's
     mapping, which its volumes resolve through instead. ``service_setup`` names, per service, a coroutine
     function the group awaits with that service's sandbox once it is created and its runtime is configured,
-    before its uploads, its command, its hooks and its healthcheck: the caller's own image setup (the Harbor
-    server runs an overlay Dockerfile's ``RUN`` lines there, so they precede the mounts and the command, as
-    a build precedes ``compose up``). An exception from it fails the start and stops the group.
+    before its log links, uploads, command, hooks and healthcheck. Named/external volumes are already mounted
+    when the sandbox is created, so setup (including Harbor's overlay Dockerfile ``RUN`` lines) can write to
+    shared storage. For a service with setup, its working directory is applied afterwards:
+    setup may create that directory under a different user. An exception fails the start and stops the group.
     """
 
     def __init__(
@@ -602,6 +603,8 @@ class AsyncSandboxCompose:
                         service_options = self._plans[name]["spec"].provider_options
                         seed_spec = replace(
                             self._plans[name]["spec"],
+                            # Copy-up reads the base image before setup creates the service's final WORKDIR.
+                            workdir=None if name in self.service_setup else self._plans[name]["spec"].workdir,
                             metadata=metadata,
                             provider_options=_merge_provider_options(
                                 {key: value for key, value in service_options.items() if key != "volumes"},
@@ -618,6 +621,7 @@ class AsyncSandboxCompose:
                                 f"elif test -d {target}; then cp -a {target}/. {root}/; "
                                 f"elif test -e {target}; then exit 1; fi",
                                 user="root",
+                                cwd="/",  # The service's working directory may not exist in the seed image.
                                 timeout_s=300,
                             )
                             if result.return_code:
@@ -945,9 +949,14 @@ class AsyncSandboxCompose:
                     await self._prepare_volumes()
                 for name in order:
                     provider = self._provider_for(name)
-                    self.services[name] = AsyncSandbox(provider, self._plans[name]["spec"], owns_provider=False)
+                    spec = self._plans[name]["spec"]
+                    # Image setup owns directory creation, including its permissions. Do not let the provider
+                    # or our bootstrap create the final WORKDIR as root before a Dockerfile's RUN lines.
+                    creation_spec = replace(spec, workdir=None) if name in self.service_setup else spec
+                    self.services[name] = AsyncSandbox(provider, creation_spec, owns_provider=False)
                     await self.services[name].start()
-                    await self._create_workdir(name)
+                    if name not in self.service_setup:
+                        await self._create_workdir(name)
                     service = self.document["services"][name]
                     if service.get("cap_add") or service.get("shm_size") is not None:
                         await provider.configure_runtime(
@@ -960,6 +969,8 @@ class AsyncSandboxCompose:
                     # into the mounted container), then, below, the command, hooks and healthcheck.
                     if name in self.service_setup:
                         await self.service_setup[name](self.services[name])
+                        await self._create_workdir(name)
+                        self.services[name].set_default_workdir(spec.workdir)
                     if (service.get("x-sandbox") or {}).get("logs"):
                         await self._prepare_logs(name)
                     if (service.get("x-sandbox") or {}).get("uploads"):
