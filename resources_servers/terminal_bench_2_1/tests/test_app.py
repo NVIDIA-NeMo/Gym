@@ -17,6 +17,7 @@ from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import NeMoGymResponse
 from resources_servers.terminal_bench_2_1.app import (
     _BULLSEYE_SECURITY_SNAPSHOT_SETUP,
+    _PREPARE_VERIFIER_LOGS,
     GOLDEN_PATCH_SOLVE_SH_PATCHES,
     TEST_SH_PATCHES,
     TerminalBench21ResourcesServer,
@@ -89,7 +90,9 @@ class TestApp:
                 destination.write_text(reward_text)
 
         sandbox = MagicMock()
-        sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout="verifier output", stderr="", return_code=0))
+        sandbox.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="verifier output", stderr="", return_code=0, error_type=None)
+        )
         sandbox.download = AsyncMock(side_effect=download_reward)
         sandbox.stop = AsyncMock()
         server._upload_folder = AsyncMock()
@@ -113,7 +116,9 @@ class TestApp:
         server.config.is_verifying_golden_patch = True
         server.config.evaluation_timeout = timeout
         sandbox = MagicMock()
-        sandbox.exec = AsyncMock(return_value=SimpleNamespace(stdout="/app\n", stderr=None, return_code=0))
+        sandbox.exec = AsyncMock(
+            return_value=SimpleNamespace(stdout="/app\n", stderr=None, return_code=0, error_type=None)
+        )
         sandbox.download = AsyncMock(side_effect=lambda remote_path, local_path: Path(local_path).write_text("1"))
         sandbox.stop = AsyncMock()
         server._create_sandbox = AsyncMock(return_value=sandbox)
@@ -124,7 +129,7 @@ class TestApp:
         assert sandbox.exec.await_args_list == [
             call("pwd"),
             call("bash /app/solve.sh", timeout_s=timeout, preserve_background_services=True),
-            call("mkdir -p /logs/verifier", timeout_s=timeout),
+            call(_PREPARE_VERIFIER_LOGS, timeout_s=timeout),
             call("bash /tests/test.sh", timeout_s=timeout),
         ]
 
@@ -201,7 +206,9 @@ class TestApp:
             )
 
     @pytest.mark.parametrize("test_exit_code", [0, 1, 127])
-    @pytest.mark.parametrize("logs_state", ["missing", "directory", "file"])
+    @pytest.mark.parametrize(
+        "logs_state", ["missing", "directory", "file", "symlink", "parent_symlink", "parent_file"]
+    )
     async def test_verify_prepares_reward_directory(
         self, monkeypatch, tmp_path: Path, test_exit_code: int, logs_state: str
     ) -> None:
@@ -211,6 +218,19 @@ class TestApp:
         elif logs_state == "file":
             verifier_dir.parent.mkdir()
             verifier_dir.write_text("not a directory")
+        elif logs_state == "symlink":
+            linked_dir = tmp_path / "linked"
+            linked_dir.mkdir()
+            (linked_dir / "reward.txt").write_text("1")
+            verifier_dir.parent.mkdir()
+            verifier_dir.symlink_to(linked_dir)
+        elif logs_state == "parent_symlink":
+            linked_dir = tmp_path / "linked"
+            (linked_dir / "verifier").mkdir(parents=True)
+            (linked_dir / "verifier" / "reward.txt").write_text("1")
+            verifier_dir.parent.symlink_to(linked_dir)
+        elif logs_state == "parent_file":
+            verifier_dir.parent.write_text("not a directory")
         script = tmp_path / "test.sh"
         # Like the benchmark scripts, report the test command's outcome without
         # relying on a test runner to create the output directory as a side effect.
@@ -220,10 +240,12 @@ class TestApp:
         )
 
         async def execute(command, **kwargs):
-            command = command.replace("/logs/verifier", quote(str(verifier_dir)))
+            command = command.replace("/logs", quote(str(verifier_dir.parent)))
             command = command.replace("/tests/test.sh", quote(str(script)))
             result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
-            return MagicMock(return_code=result.returncode, stdout=result.stdout, stderr=result.stderr)
+            return SimpleNamespace(
+                return_code=result.returncode, stdout=result.stdout, stderr=result.stderr, error_type=None
+            )
 
         async def download(remote_path, local_path):
             assert remote_path == "/logs/verifier/reward.txt"
@@ -265,14 +287,82 @@ class TestApp:
 
         result = await server.verify(Request({"type": "http", "session": {SESSION_ID_KEY: "test-session"}}), body)
 
-        assert result.evaluation_completed == (logs_state != "file")
-        assert result.reward == (1.0 if test_exit_code == 0 and logs_state != "file" else 0.0)
-        if logs_state == "file":
+        assert result.evaluation_completed == (logs_state != "parent_file")
+        assert result.reward == (1.0 if test_exit_code == 0 and logs_state != "parent_file" else 0.0)
+        if logs_state == "symlink":
+            assert not verifier_dir.is_symlink()
+            assert (tmp_path / "linked" / "reward.txt").read_text() == "1"
+        if logs_state == "parent_symlink":
+            assert not verifier_dir.parent.is_symlink()
+            assert (tmp_path / "linked" / "verifier" / "reward.txt").read_text() == "1"
+        if logs_state == "parent_file":
             sandbox.download.assert_not_awaited()
             assert not any("test.sh" in call.args[0] for call in sandbox.exec.await_args_list)
         assert result.test_output == ""
         sandbox.stop.assert_awaited_once()
         assert "test-session" not in server._session_id_to_sandbox
+
+    async def test_verify_discards_reward_left_before_tests(
+        self, server: TerminalBench21ResourcesServer, tmp_path: Path
+    ) -> None:
+        # The agent shares the sandbox and can leave a passing reward behind; a test run that writes none must not
+        # inherit it.
+        verifier_dir = tmp_path / "logs" / "verifier"
+        verifier_dir.mkdir(parents=True)
+        (verifier_dir / "reward.txt").write_text("1\n")
+        script = tmp_path / "test.sh"
+        script.write_text("exit 1\n")
+
+        async def execute(command, **kwargs):
+            command = command.replace("/logs", quote(str(verifier_dir.parent)))
+            command = command.replace("/tests/test.sh", quote(str(script)))
+            result = subprocess.run(["bash", "-c", command], capture_output=True, text=True, timeout=10)
+            return SimpleNamespace(
+                return_code=result.returncode, stdout=result.stdout, stderr=result.stderr, error_type=None
+            )
+
+        async def download(remote_path, local_path):
+            copyfile(verifier_dir / "reward.txt", local_path)
+
+        sandbox = AsyncMock()
+        sandbox.exec.side_effect = execute
+        sandbox.download.side_effect = download
+        server._session_id_to_sandbox["test-session"] = sandbox
+        server._upload_folder = AsyncMock()
+
+        result = await server.verify(
+            Request({"type": "http", "session": {SESSION_ID_KEY: "test-session"}}), _verify_request(tmp_path)
+        )
+
+        assert result.reward == 0.0
+        assert result.evaluation_completed is False
+        assert not (verifier_dir / "reward.txt").exists()
+
+    @pytest.mark.parametrize("error_type", ["timeout", "sandbox"])
+    async def test_verify_discards_reward_when_tests_do_not_finish(
+        self, server: TerminalBench21ResourcesServer, tmp_path: Path, error_type: str
+    ) -> None:
+        # Providers report an exec timeout as a result rather than raising; the reward file then predates the tests.
+        async def execute(command, **kwargs):
+            if command == "bash /tests/test.sh":
+                return SimpleNamespace(stdout=None, stderr="timed out", return_code=125, error_type=error_type)
+            return SimpleNamespace(stdout="", stderr="", return_code=0, error_type=None)
+
+        sandbox = AsyncMock()
+        sandbox.exec.side_effect = execute
+        sandbox.download.side_effect = lambda remote_path, local_path: Path(local_path).write_text("1\n")
+        server._session_id_to_sandbox["test-session"] = sandbox
+        server._upload_folder = AsyncMock()
+
+        result = await server.verify(
+            Request({"type": "http", "session": {SESSION_ID_KEY: "test-session"}}), _verify_request(tmp_path)
+        )
+
+        assert result.reward == 0.0
+        assert result.evaluation_completed is False
+        assert result.test_output == "timed out"
+        sandbox.download.assert_not_awaited()
+        sandbox.stop.assert_awaited_once()
 
 
 @pytest.mark.parametrize("distro", ["debian:bullseye", "debian:bookworm", "ubuntu:noble"])

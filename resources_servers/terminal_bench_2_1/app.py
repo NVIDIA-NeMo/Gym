@@ -64,6 +64,16 @@ fi
 """
 
 
+# The agent shares the sandbox the tests run in. Replace a link at /logs and a link or non-directory at
+# /logs/verifier, then empty /logs/verifier, so a reward file left before the tests is never read.
+_PREPARE_VERIFIER_LOGS = (
+    "if [ -L /logs ]; then rm -f /logs; fi"
+    " && if [ -L /logs/verifier ] || { [ -e /logs/verifier ] && [ ! -d /logs/verifier ]; };"
+    " then rm -f /logs/verifier; fi"
+    " && mkdir -p /logs/verifier && find /logs/verifier -mindepth 1 -delete"
+)
+
+
 class TerminalBench21ResourcesServerConfig(BaseResourcesServerConfig):
     REVERIFY_MODE: ClassVar[ReverifyMode] = ReverifyMode.STATELESS
 
@@ -607,7 +617,7 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
         try:
             await self._upload_folder(eval_sandbox, task_folder / "tests", "/tests", TEST_SH_PATCHES, body.task_name)
             # Test scripts write rewards here even if their test runner fails to start.
-            setup_result = await eval_sandbox.exec("mkdir -p /logs/verifier", timeout_s=self.config.evaluation_timeout)
+            setup_result = await eval_sandbox.exec(_PREPARE_VERIFIER_LOGS, timeout_s=self.config.evaluation_timeout)
             if setup_result.return_code != 0:
                 raise RuntimeError(f"Failed to prepare TerminalBench verifier output directory: {setup_result}")
             eval_result = await eval_sandbox.exec(
@@ -626,7 +636,8 @@ class TerminalBench21ResourcesServer(SimpleResourcesServer):
 
         evaluation_completed = False
         reward = 0.0
-        if eval_result is not None:
+        # A timed-out or failed exec did not finish test.sh, so reward.txt says nothing about this test run.
+        if eval_result is not None and eval_result.error_type is None:
             try:
                 with NamedTemporaryFile(mode="w+", suffix=".txt") as temp_file:
                     await eval_sandbox.download("/logs/verifier/reward.txt", temp_file.name)
