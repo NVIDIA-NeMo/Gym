@@ -1701,6 +1701,31 @@ COMMANDS = {
             ),
         ),
     ),
+    "eval compare-suite": Command(
+        target="nemo_gym.cli.eval:compare_suite",
+        summary="Compare baseline and candidate runs across a configured benchmark and model suite.",
+        flags=(
+            _value_flag("suite", "suite_fpath", "Path to the benchmark and model suite YAML (required).", quote=True),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Confidence level as a fraction between 0 and 1 (default: 0.90).",
+            ),
+            _value_flag(
+                "output-dir",
+                "output_dirpath",
+                "Where to write the reports (default: the suite YAML's directory).",
+                aliases=("-o",),
+                quote=True,
+            ),
+            _value_flag(
+                "report-format",
+                "report_format",
+                "Report artifacts to write (default: both).",
+                choices=("md", "json", "both"),
+            ),
+        ),
+    ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),
     # Temporary migration aid: the parity gate before an old resources server is deleted for its Harbor path.
     # Register-only flags (no Hydra translation) are consumed by `_dev_compare`, like `gym eval run`'s TARGET.

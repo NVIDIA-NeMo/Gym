@@ -272,6 +272,75 @@ class TestEvalRunFlags:
         assert "+responses_create_params.tool_choice=auto" in overrides  # unknown +override passes through
 
 
+class TestEvalCompareCommands:
+    @pytest.mark.parametrize(
+        ("command", "target"),
+        [
+            ("compare", "nemo_gym.cli.eval:compare"),
+            ("compare-suite", "nemo_gym.cli.eval:compare_suite"),
+        ],
+    )
+    def test_commands_dispatch_independently(self, monkeypatch: MonkeyPatch, command: str, target: str) -> None:
+        actual_target, overrides = _dispatch_for(monkeypatch, ["eval", command])
+        assert actual_target == target
+        assert overrides == []
+
+    def test_suite_is_discoverable_in_eval_help(self, monkeypatch: MonkeyPatch, capsys) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", "--help"])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 0
+        assert "compare-suite" in capsys.readouterr().out
+
+    @pytest.mark.parametrize(
+        ("command", "accepted", "absent"),
+        [
+            ("compare", ("--baseline", "--candidates", "--agent"), ("--suite", "--confidence-level", "--level")),
+            ("compare-suite", ("--suite", "--confidence-level"), ("--baseline", "--candidates", "--agent", "--level")),
+        ],
+    )
+    def test_command_help_lists_only_its_own_inputs(
+        self, monkeypatch: MonkeyPatch, capsys, command: str, accepted: tuple[str, ...], absent: tuple[str, ...]
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", command, "--help"])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 0
+        help_text = capsys.readouterr().out
+        for flag in (*accepted, "--output-dir", "--report-format"):
+            assert flag in help_text
+        for flag in absent:
+            assert flag not in help_text
+
+    @pytest.mark.parametrize(
+        ("command", "flag", "value"),
+        [
+            ("compare", "--suite", "suite.yaml"),
+            ("compare", "--confidence-level", "0.9"),
+            ("compare", "--level", "suite"),
+            ("compare", "--level", "run"),
+            ("compare-suite", "--level", "suite"),
+            ("compare-suite", "--baseline", "base.jsonl"),
+            ("compare-suite", "--candidates", "candidate.jsonl"),
+            ("compare-suite", "--baseline-agg-metrics", "base.json"),
+            ("compare-suite", "--candidates-agg-metrics", "candidate.json"),
+            ("compare-suite", "--agent", "agent"),
+            ("compare-suite", "--baseline-agent", "agent"),
+            ("compare-suite", "--candidate-agents", "agent"),
+        ],
+    )
+    def test_commands_reject_flags_from_the_other_interface(
+        self, monkeypatch: MonkeyPatch, capsys, command: str, flag: str, value: str
+    ) -> None:
+        monkeypatch.setattr(sys, "argv", ["gym", "eval", command, flag, value])
+        with pytest.raises(SystemExit) as error:
+            main()
+        assert error.value.code == 2
+        stderr = capsys.readouterr().err
+        assert "unrecognized arguments" in stderr
+        assert flag in stderr
+
+
 class TestEvalExportFlags:
     def test_flags_dispatch_as_hydra_overrides(self, monkeypatch: MonkeyPatch) -> None:
         target, overrides = _dispatch_for(

@@ -972,3 +972,22 @@ def compare() -> None:  # pragma: no cover
     for table in render_key_metrics_tables(result):
         print_rich_table(table)
     print("\n".join(summary_lines(result, written)))
+
+
+@exit_cleanly_on_config_error
+def compare_suite() -> None:
+    """Compare baseline and candidate runs across a configured benchmark and model suite."""
+    from nemo_gym.comparison.suite.report import render_suite_summary, write_suite_reports
+    from nemo_gym.comparison.suite.runner import build_suite_comparison, invoked_command
+    from nemo_gym.comparison.suite.schema import SuiteComparisonConfig
+
+    config_dict = get_global_config_dict()
+    if not config_dict.get("suite_fpath"):
+        raise ConfigError("gym eval compare-suite requires --suite PATH.")
+    config = SuiteComparisonConfig.model_validate(config_dict)
+    result = build_suite_comparison(config, invoked_command())
+    output = Path(config.output_dirpath) if config.output_dirpath else result.suite_fpath.parent
+    written = write_suite_reports(result, output, config.report_format)
+    print(render_suite_summary(result))
+    for path in written:
+        print(f"Wrote: {path}")

@@ -5,6 +5,8 @@ position: 5
 ---
 After rollout collection, NeMo Gym computes **aggregate metrics** for each agent by calling the `/aggregate_metrics` endpoint on the agent server. The results are written to a single `_aggregate_metrics.json` file.
 
+To compare these saved metrics between runs, or aggregate benchmark scores across models with confidence intervals, see [Compare Results](/evaluation/compare-results). Run aggregation produces the input artifacts; suite comparison combines their selected repeat scores.
+
 ---
 
 ## How It Works
@@ -120,7 +122,7 @@ in `<output>_failures.jsonl`. A process death before an outcome is saved remains
 A row the dispatch budget never started leaves no row; with `+record_omitted_rollouts=true` it leaves a sidecar row
 marked `_ng_omitted_rollout: true`, which records that it never ran and is not counted as a failure.
 
-To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics`, and the completion summary `gym eval profile` prints at the end of a run.
+To check planned coverage, compare the completed observations against the materialized inputs and inspect the completion summary from `gym eval profile`. When aggregation receives only completed results, even group-level expected/missing counts can omit tasks that never returned. [Suite comparison](/evaluation/compare-results#check-exclusions-and-coverage) uses materialized inputs when available and labels planned coverage unverified otherwise.
 </Warning>
 
 ### Across repeats
