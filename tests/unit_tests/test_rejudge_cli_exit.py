@@ -1,0 +1,53 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+from argparse import Namespace
+from types import SimpleNamespace
+
+import pytest
+
+from nemo_gym.cli.main import _eval_resubmit
+from nemo_gym.orchestration import submit
+
+
+@pytest.mark.parametrize(
+    "requested,status,expected",
+    [(True, "SUCCESS", 0), (True, "FAILED", 1), (True, "UNKNOWN", 1), (False, "FAILED", 0)],
+)
+def test_requested_gate_controls_exit(monkeypatch, requested, status, expected):
+    outcome = SimpleNamespace(ok=True, gate_task={"status": status}, model_dump_json=lambda **kw: "{}")
+    monkeypatch.setattr(submit, "recover", lambda *a, **kw: outcome)
+    args = Namespace(
+        gym_job_id="saved", benchmark="judge", recover=True, score_key='["reward"]' if requested else None
+    )
+    if expected:
+        with pytest.raises(SystemExit) as error:
+            _eval_resubmit(args, [])
+        assert error.value.code == expected
+    else:
+        _eval_resubmit(args, [])
+
+
+@pytest.mark.parametrize("status,expected", [("SUCCESS", 0), ("FAILED", 1), ("UNKNOWN", 1)])
+def test_inspection_status_controls_exit_without_criterion_overrides(monkeypatch, status, expected):
+    """Exit-code boundary only; the persisted-evidence CLI controls exercise the real gate separately."""
+    calls = []
+    outcome = SimpleNamespace(ok=True, gate_task={"status": status}, model_dump_json=lambda **kw: "{}")
+
+    def inspect(*args, **kwargs):
+        calls.append("inspect")
+        return outcome
+
+    monkeypatch.setattr(submit, "inspect_recovery", inspect)
+
+    def no_recover(*args, **kwargs):
+        raise AssertionError("inspection must not dispatch recovery")
+
+    monkeypatch.setattr(submit, "recover", no_recover)
+    args = Namespace(gym_job_id="saved", benchmark="judge", recover=True, inspect=True)
+    if expected:
+        with pytest.raises(SystemExit) as error:
+            _eval_resubmit(args, [])
+        assert error.value.code == expected
+    else:
+        _eval_resubmit(args, [])
+    assert calls == ["inspect"]

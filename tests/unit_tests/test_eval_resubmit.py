@@ -119,7 +119,9 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     (bin_dir / "sbatch").write_text(
         '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
     )
-    for stub in ("squeue", "sbatch"):
+    (bin_dir / "sacct").write_text('#!/bin/bash\ncat "$(dirname "$0")/accounting"\n')
+    (bin_dir / "accounting").write_text("100|FAILED|7200\n101|FAILED|60\n")
+    for stub in ("squeue", "sbatch", "sacct"):
         (bin_dir / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
@@ -136,9 +138,11 @@ def ssh_like_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         LocalConnection,
         "run",
-        lambda self, commands: subprocess.run(
-            ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
-        ).stdout,
+        lambda self, commands: (
+            subprocess.run(
+                ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
+            ).stdout
+        ),
     )
 
 
@@ -295,6 +299,10 @@ def _run_prologue(prologue: str, job_dir: Path, env: dict[str, str]) -> subproce
     bin_dir.mkdir(exist_ok=True)
     (bin_dir / "sbatch").write_text('#!/bin/bash\necho "GYM_RESUBMIT=${GYM_RESUBMIT:-}" > follow_up_env\necho 7\n')
     (bin_dir / "sbatch").chmod(0o755)
+    (bin_dir / "scontrol").write_text('#!/bin/bash\necho "JobId=$SLURM_JOB_ID TimeLimit=00:30:00"\n')
+    (bin_dir / "scontrol").chmod(0o755)
+    (bin_dir / "squeue").write_text('#!/bin/bash\necho "7|afternotok:5(unfulfilled)|$PWD"\n')
+    (bin_dir / "squeue").chmod(0o755)
     script = prologue + 'echo "_gym_resubmit=$_gym_resubmit"\n'
     return subprocess.run(
         ["bash", "-c", script],
@@ -744,3 +752,379 @@ def test_resubmit_missing_auth_does_not_change_an_active_runs_collector(
 
     assert collector_path.read_text() == original
     assert not (slurm_bin / "cwd").exists()
+
+
+# --- Recovery keeps the spent budget; a plain resubmit starts a fresh one ---------------------------------------
+
+
+def _resumable_run(tmp_path: Path) -> tuple[Path, str, ResumeConfig]:
+    """A staged resumable run whose job.sh is rendered by this Gym, with spent retries, walltime and one missing row."""
+    resume = ResumeConfig(max_retries=3, max_walltime="16:00:00")
+    config = _config(tmp_path)
+    config.driver.benchmarks["gsm8k"].resumable = resume
+    job_dir = _staged_run(tmp_path, config=config)
+    script = build_sbatch_script(
+        config, "gsm8k", config.driver.benchmarks["gsm8k"], next(iter(config.compute.values())), job_dir
+    )
+    (job_dir / "job.sh").write_text(script)
+    artifacts = job_dir / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(2)]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (artifacts / "rollouts.jsonl").write_text(json.dumps(rows[0] | {"reward": 1.0}) + "\n")
+    (job_dir / ".gym_job_chain").write_text("100\n101\n")
+    (job_dir / RETRY_FILE_NAME).write_text("2\n")
+    (job_dir / ".gym_accumulated_walltime").write_text("7200\n")
+    return job_dir, script, resume
+
+
+def _start_queued_job(script: str, resume: ResumeConfig, job_dir: Path, slurm_bin: Path) -> list[str]:
+    """Start the job sbatch queued: the rendered prologue and `gym eval run` arguments, in the environment it got."""
+    # Keep the generated installed-runtime admission command rather than substituting a bare prologue.
+    admission_start = script.index("_gym_admission_output=$(") + len("_gym_admission_output=$(")
+    admission_end = script.index(") || _gym_stop_incomplete", admission_start)
+    prologue = render_resume_prologue(resume, admission_command=script[admission_start:admission_end])
+    assert prologue in script
+    queued = {k: v for k, v in _sbatch_env(slurm_bin).items() if k.startswith("GYM_RESUBMIT")}
+    start = script.index("GYM_CMD=(")
+    end = script.index("; fi\n", start) + len("; fi\n")
+    body = prologue + script[start:end] + 'printf "ARG %s\\n" "${GYM_CMD[@]}"\n'
+    out = _run_prologue(body, job_dir, queued).stdout
+    return [line[4:] for line in out.splitlines() if line.startswith("ARG ")]
+
+
+def test_recover_resubmit_keeps_the_spent_retries_walltime_and_attempts(tmp_path: Path, slurm_bin: Path) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, resume = _resumable_run(tmp_path)
+
+    out = recover(*_handle(job_dir))
+
+    assert out.dispatched == "resubmit" and out.job_id == "4242"
+    args = _start_queued_job(script, resume, job_dir, slurm_bin)
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "3\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+    # It resumes without `++resubmit=True`, which would start a fresh per-rollout attempt budget.
+    assert args[-1] == "++resume_from_cache=True" and "++resubmit=True" not in args
+    # The follow-up the prologue queues is an ordinary hop.
+    assert (job_dir / "follow_up_env").read_text() == "GYM_RESUBMIT=\n"
+
+
+def test_plain_resubmit_of_the_same_run_still_starts_a_fresh_budget(tmp_path: Path, slurm_bin: Path) -> None:
+    job_dir, script, resume = _resumable_run(tmp_path)
+
+    resubmit(*_handle(job_dir))
+
+    args = _start_queued_job(script, resume, job_dir, slurm_bin)
+    assert not (job_dir / RETRY_FILE_NAME).exists()
+    assert not (job_dir / ".gym_accumulated_walltime").exists()
+    assert args[-2:] == ["++resubmit=True", "++resume_from_cache=True"]
+
+
+def test_recover_refuses_a_job_sh_that_would_reset_the_budget(tmp_path: Path, slurm_bin: Path) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    # A job.sh rendered before budget-preserving recovery: its prologue resets on any resubmit.
+    (job_dir / "job.sh").write_text(
+        re.sub(r" && \"\$_gym_keep_budget\" != 1", "", script).replace("GYM_RESUBMIT_KEEP_BUDGET", "UNUSED")
+    )
+
+    with pytest.raises(RuntimeError, match="predates budget-preserving recovery"):
+        recover(*_handle(job_dir))
+
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+def _provider_failures(task: int, attempts: int, cap: int) -> str:
+    rows = [
+        {
+            "_ng_task_index": task,
+            "_ng_rollout_index": 0,
+            "_ng_attempt_index": attempt,
+            "failure_kind": "provider_unavailable",
+            "_ng_failure_class": "provider_unavailable",
+            "_ng_failure_terminal": False,
+            "_ng_failure_max_attempts": cap,
+            "_ng_failure_id": f"f{task}-{attempt}",
+            "_ng_failure_events": {
+                f"f{task}-{attempt}": {
+                    "event_id": f"f{task}-{attempt}",
+                    "boundary": "model",
+                    "failure_kind": "provider_unavailable",
+                    "operation": "model_request",
+                    "operation_id": f"op{task}",
+                    "attempt_id": f"a{task}-{attempt}",
+                    "cause_id": None,
+                }
+            },
+        }
+        for attempt in range(attempts)
+    ]
+    return "".join(json.dumps(row) + "\n" for row in rows)
+
+
+def _core_pending(job_dir: Path, monkeypatch: pytest.MonkeyPatch, cap: int) -> list[tuple[int, int]]:
+    """The inputs rollout collection's resume would run (`_load_from_cache`), as a resume without resubmit loads it."""
+    from types import SimpleNamespace
+
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", str(cap))
+    artifacts = job_dir / "artifacts"
+    config = SimpleNamespace(
+        materialized_jsonl_fpath=artifacts / "rollouts_materialized_inputs.jsonl",
+        output_jsonl_fpath=artifacts / "rollouts.jsonl",
+        retry_terminal_timeouts=False,
+        dispatch_longest_first=False,
+    )
+    rows = RolloutCollectionHelper._load_from_cache(None, config, retain_results_in_memory=False)[0]
+    return [(row["_ng_task_index"], row["_ng_rollout_index"]) for row in rows]
+
+
+def test_recover_queues_nothing_when_every_unscored_identity_used_its_attempts(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (job_dir / "artifacts" / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+
+    out = recover(*_handle(job_dir))
+
+    assert out.decision.action == "stop" and out.decision.identities["exhausted"] == [(1, 0)]
+    assert out.dispatched is None and not (slurm_bin / "env").exists()
+    assert _core_pending(job_dir, monkeypatch, cap=2) == []
+
+
+def test_recover_queues_a_mixed_run_and_the_resume_runs_only_the_eligible_identity(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    artifacts = job_dir / "artifacts"
+    rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(3)]
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in rows))
+    (artifacts / "rollouts_failures.jsonl").write_text(_provider_failures(1, attempts=2, cap=2))
+
+    out = recover(*_handle(job_dir))
+
+    assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    assert out.decision.identities["missing"] == [(2, 0)] and out.decision.identities["exhausted"] == [(1, 0)]
+    assert _core_pending(job_dir, monkeypatch, cap=2) == [(2, 0)]
+
+
+@pytest.mark.parametrize(
+    "accounting",
+    [
+        "",
+        "100|FAILED|7200\n",
+        "100|FAILED|7200\n101|RUNNING|60\n",
+        "100|FAILED|7200\n101|FAILED|50400\n",
+    ],
+)
+def test_recovery_never_queues_unaccounted_or_exhausted_chain(tmp_path, slurm_bin, accounting):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (slurm_bin / "accounting").write_text(accounting)
+    before = (job_dir / ".gym_accumulated_walltime").read_bytes()
+    out = recover(*_handle(job_dir))
+    assert out.decision.action == "stop" and out.dispatched is None
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / ".gym_accumulated_walltime").read_bytes() == before
+
+
+def test_recovery_does_not_recount_the_last_allocation_when_it_is_already_stored(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (job_dir / ".gym_accumulated_walltime").write_text("7260\n")
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+
+
+def test_recovery_does_not_reconstruct_an_unknown_manual_budget_epoch(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (job_dir / ".gym_accumulated_walltime").write_text("0\n")
+    out = recover(*_handle(job_dir))
+    assert out.decision.action == "stop" and out.dispatched is None
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "0\n"
+
+
+def test_recover_refuses_unbounded_saved_prologue_before_dispatch(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.executors.resume_script import BOUNDED_BUDGET_MARKER
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    (job_dir / "job.sh").write_text(script.replace(BOUNDED_BUDGET_MARKER, ""))
+    with pytest.raises(RuntimeError, match="predates bounded recovery budgets"):
+        recover(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+@pytest.mark.parametrize("recover_budget", [True, False])
+def test_resubmit_refuses_a_chain_without_scheduler_cause_admission_before_dispatch(
+    tmp_path: Path, slurm_bin: Path, recover_budget: bool
+) -> None:
+    # A job.sh rendered before scheduler-cause admission retries FAILED, OUT_OF_MEMORY and DEADLINE jobs.
+    from nemo_gym.orchestration.executors.resume_script import SCHEDULER_CAUSE_MARKER
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    old = script.replace(SCHEDULER_CAUSE_MARKER + "\n", "")
+    assert old != script
+    (job_dir / "job.sh").write_text(old)
+    with pytest.raises(RuntimeError, match="predates scheduler-cause retry admission"):
+        recover(*_handle(job_dir)) if recover_budget else resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / "job.sh").read_text() == old
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+
+
+def test_recover_keeps_an_eligible_infrastructure_retry_and_spent_budgets(tmp_path: Path, slurm_bin: Path) -> None:
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    (slurm_bin / "accounting").write_text("100|PREEMPTED|7200\n101|NODE_FAIL|60\n")
+    out = recover(*_handle(job_dir))
+    assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+
+
+@pytest.mark.parametrize("recover_budget", [True, False])
+def test_resubmit_refuses_old_allocation_accounting_capability(tmp_path, slurm_bin, recover_budget):
+    from nemo_gym.orchestration.executors.resume_script import ALLOCATION_ACCOUNTING_MARKER
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, script, _ = _resumable_run(tmp_path)
+    old = script.replace(ALLOCATION_ACCOUNTING_MARKER + "\n", "")
+    (job_dir / "job.sh").write_text(old)
+    with pytest.raises(RuntimeError, match="predates durable allocation accounting"):
+        recover(*_handle(job_dir)) if recover_budget else resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+
+
+@pytest.mark.parametrize("state", ["durable_unknown", "empty_claim"])
+def test_manual_resubmit_does_not_queue_with_unknown_prior_accounting(tmp_path, slurm_bin, state):
+    job_dir, _, _ = _resumable_run(tmp_path)
+    if state == "durable_unknown":
+        (job_dir / ".gym_chain_incomplete").write_text("GYM_ACCOUNTING_UNKNOWN: unobserved follower\n")
+    else:
+        (job_dir / ".gym_followup_queued.101").touch()
+    with pytest.raises(RuntimeError, match="unknown"):
+        resubmit(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7200\n"
+
+
+@pytest.mark.parametrize("reply", ["success", "lost", "malformed"])
+def test_started_worker_waits_for_real_resubmit_wrapper_acknowledgement(tmp_path, slurm_bin, reply):
+    """Real local executor shell and generated worker, with scheduler commands stubbed and no workloads."""
+    import time
+
+    job_dir, _, resume = _resumable_run(tmp_path)
+    worker = render_resume_prologue(resume) + "\necho REACHED_WORK > reached_work\n"
+    (job_dir / "worker.sh").write_text(worker)
+    (slurm_bin / "scontrol").write_text('#!/bin/bash\necho "JobId=$SLURM_JOB_ID TimeLimit=00:30:00"\n')
+    (slurm_bin / "scontrol").chmod(0o755)
+    response = {"success": "echo 4242", "lost": "echo lost-reply; exit 1", "malformed": "echo unknown-response"}[reply]
+    (slurm_bin / "sbatch").write_text(
+        "#!/bin/bash\n"
+        'if [[ "$1" == --dependency=* ]]; then echo "Submitted batch job 999"; exit 0; fi\n'
+        '(SLURM_JOB_ID=4242 bash "$PWD/worker.sh"; echo $? > "$PWD/worker_exit") > "$PWD/worker.log" 2>&1 &\n'
+        "sleep 0.2\n" + response + "\n"
+    )
+    before = {name: (job_dir / name).read_bytes() for name in (RETRY_FILE_NAME, ".gym_accumulated_walltime")}
+    if reply == "success":
+        assert resubmit(*_handle(job_dir)).job_id == "4242"
+    else:
+        with pytest.raises(RuntimeError, match="Resubmit"):
+            resubmit(*_handle(job_dir))
+    for _ in range(120):
+        if (job_dir / "worker_exit").exists():
+            break
+        time.sleep(0.05)
+    assert (job_dir / "worker_exit").exists(), (job_dir / "worker.log").read_text()
+    if reply == "success":
+        assert (job_dir / "worker_exit").read_text().strip() == "0"
+        assert (job_dir / "reached_work").exists()
+    else:
+        assert (job_dir / "worker_exit").read_text().strip() == "1"
+        assert not (job_dir / "reached_work").exists()
+        assert all((job_dir / name).read_bytes() == value for name, value in before.items())
+        assert (job_dir / ".gym_chain_incomplete").read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
+    assert "4242" in (job_dir / ".gym_job_chain").read_text().split()
+
+
+@pytest.mark.parametrize(
+    "change", ["none", "chain", "claim", "retries", "walltime", "incomplete", "config", "offset", "config_before_lock"]
+)
+def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    # An allocation can end between evidence collection and the locked resubmit: squeue no longer lists it,
+    # so only the accounting files it changed show that the collected decision is stale.
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    collect = SlurmExecutor.recovery_evidence
+
+    def collect_then_change(self, *args, **kwargs):
+        result = collect(self, *args, **kwargs)
+        if change == "chain":
+            (job_dir / ".gym_job_chain").write_text("100\n101\n102\n")
+        elif change == "claim":
+            (job_dir / ".gym_followup_queued.102").write_text("102\n")
+        elif change == "retries":
+            (job_dir / RETRY_FILE_NAME).write_text("3\n")
+        elif change == "walltime":
+            (job_dir / ".gym_accumulated_walltime").write_text("7300\n")
+        elif change == "incomplete":
+            (job_dir / ".gym_chain_incomplete").write_text("follow-up queued\n")
+        elif change == "config":
+            resolved = job_dir.parent / RESOLVED_CONFIG_NAME
+            resolved.write_text(resolved.read_text().replace("16:00:00", "17:00:00"))
+        elif change == "offset":
+            (job_dir / "artifacts" / "rollouts_resubmit_offset").write_text("5\n")
+        counters.update(
+            {name: (job_dir / name).read_bytes() for name in (RETRY_FILE_NAME, ".gym_accumulated_walltime")}
+        )
+        return result
+
+    original_run = LocalConnection.run
+
+    def run_with_late_config_change(self, commands, *args, **kwargs):
+        if change == "config_before_lock" and any(".gym_resubmit.lock" in command for command in commands):
+            resolved = job_dir.parent / RESOLVED_CONFIG_NAME
+            resolved.write_text(resolved.read_text().replace("16:00:00", "17:00:00"))
+        return original_run(self, commands, *args, **kwargs)
+
+    monkeypatch.setattr(LocalConnection, "run", run_with_late_config_change)
+    counters: dict[str, bytes] = {}
+    monkeypatch.setattr(SlurmExecutor, "recovery_evidence", collect_then_change)
+    job_sh = (job_dir / "job.sh").read_text()
+    if change == "none":
+        out = recover(*_handle(job_dir))
+        assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+        # The one eligible submit records the sacct-accounted chain walltime once.
+        assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+        return
+    with pytest.raises(RuntimeError, match="changed since the recovery evidence was collected"):
+        recover(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / "job.sh").read_text() == job_sh
+    assert {name: (job_dir / name).read_bytes() for name in counters} == counters
+    assert not (job_dir / ".gym_resubmit.lock").exists()
+    assert (job_dir / ".gym_chain_incomplete").exists() == (change == "incomplete")
+    assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"

@@ -14,10 +14,14 @@
 # limitations under the License.
 
 import getpass
+import inspect
+import json
+import math
 import os
 import re
 import shlex
 import tempfile
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -27,7 +31,7 @@ import yaml
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
-from nemo_gym.orchestration.executors.connection import Connection, get_connection
+from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
@@ -39,7 +43,18 @@ from nemo_gym.orchestration.executors.otel import (
     validate_destination,
     validate_gym_telemetry,
 )
-from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
+from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTING_UNKNOWN_PREFIX,
+    ALLOCATION_ACCOUNTING_MARKER,
+    BOUNDED_BUDGET_MARKER,
+    KEEP_BUDGET_ENV,
+    PROLOGUE_MARKER,
+    RESUBMIT_ENV,
+    RESUBMIT_LOCK_NAME,
+    SCHEDULER_CAUSE_MARKER,
+    _walltime_to_seconds,
+)
+from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
@@ -50,6 +65,142 @@ from nemo_gym.orchestration.jobs import (
     utc_now,
     utc_timestamp,
 )
+from nemo_gym.orchestration.recovery import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+    RecoveryOutcomePolicyConfig,
+    _managed_trial_metadata,
+    accounted_chain_walltime,
+    decide_from_collected,
+    select_managed_evidence,
+)
+
+
+# Executed only inside the saved pinned install. The projection contains no saved answer text.
+_REMOTE_MANAGED_READER = r"""
+import json, subprocess, sys
+from pathlib import Path
+import nemo_gym.orchestration.recovery as recovery
+job, expected_ref = Path(sys.argv[1]), sys.argv[2]
+raw = json.load(sys.stdin)
+root = Path.cwd().resolve()
+def check_source():
+    if not Path(recovery.__file__).resolve().is_relative_to(root / "nemo_gym"):
+        raise ValueError("reader import is outside its pinned checkout")
+    if subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip() != expected_ref:
+        raise ValueError("reader checkout does not match the saved immutable ref")
+    if subprocess.check_output(["git", "status", "--porcelain"], text=True).strip():
+        raise ValueError("reader checkout changed")
+def identity():
+    stat = job.stat()
+    return [str(job.resolve()), stat.st_dev, stat.st_ino]
+check_source()
+if not job.is_absolute() or raw.get("source_job_identity") != identity():
+    raise ValueError("reader job path does not match the collected directory")
+collected = recovery.CollectedEvidence.model_validate(raw)
+selected = recovery.select_managed_evidence(collected, job)
+projection = json.loads(selected.model_dump_json())
+# The saved install may predate these facts: derive them with the caller's helper on the install's own APIs.
+projection["checkpoint_enabled"] = None
+if selected.managed_selection is not None and selected.managed_reader_error is None:
+    artifacts = job / "artifacts"
+    def snapshot():
+        return {name: recovery._managed_source_digest(artifacts / name) for name in collected.source_digests}
+    # A changed source stops the reader; only a missing optional API leaves the metadata unknown.
+    if snapshot() != collected.source_digests:
+        raise ValueError("managed source changed after Store selection")
+    try:
+        from nemo_gym.rollout_store import RolloutStore
+    except ImportError:
+        RolloutStore = None
+    if RolloutStore is not None:
+        store = RolloutStore.read(artifacts / "rollouts.jsonl", import_legacy=False)
+        projection["results"], projection["checkpoint_enabled"] = _managed_trial_metadata(
+            artifacts, collected.source_digests, collected.quality, projection["results"], store
+        )
+    if snapshot() != collected.source_digests:
+        raise ValueError("managed source changed while reading trial metadata")
+check_source()
+if raw.get("source_job_identity") != identity():
+    raise ValueError("reader job directory changed")
+print("__GYM_MANAGED:" + json.dumps(projection))
+"""
+
+
+def _remote_managed_reader_script() -> str:
+    """The reader with the caller's metadata helper defined after its imports, sent as one script."""
+    head, body = _REMOTE_MANAGED_READER.split("job, expected_ref", 1)
+    return head + inspect.getsource(_managed_trial_metadata) + "job, expected_ref" + body
+
+
+def _remote_managed_evidence(
+    conn: Connection, collected: CollectedEvidence, job_dir: Path, config: SubmitConfig
+) -> CollectedEvidence:
+    """Use the saved pinned install over the existing transport; never import Gym into plain host Python."""
+    if not job_dir.is_absolute() or collected.source_job_identity is None:
+        return collected.model_copy(
+            update={"managed_reader_error": "remote Store collection has no directory identity"}
+        )
+    install = config.driver.gym_install
+    if install is None or re.fullmatch(r"[0-9a-fA-F]{40}", install.ref) is None:
+        return collected.model_copy(
+            update={"managed_reader_error": "remote Store reader requires a saved immutable Gym ref"}
+        )
+    try:
+        command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
+        entrypoint = render_driver_entrypoint(
+            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True
+        )
+        # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
+        # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
+        # bootstrap stdin. No service, prepare script or scheduler is invoked.
+        output = conn.run(
+            [
+                "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+                f"timeout --kill-after=10s 300s {entrypoint} 3<<'GYM_MANAGED_INPUT'\n"
+                + collected.model_dump_json()
+                + "\nGYM_MANAGED_INPUT",
+            ]
+        )
+        lines = [
+            line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
+        ]
+        if len(lines) != 1:
+            raise ValueError("remote Store reader returned no unique projection")
+        selected = CollectedEvidence.model_validate_json(lines[0])
+        if selected.source_job_identity is not None and selected.source_job_identity != collected.source_job_identity:
+            raise ValueError("remote Store reader changed job identity")
+        if selected.source_digests != collected.source_digests:
+            raise ValueError("remote Store reader changed the collection snapshot")
+        # Selection may only replace selected outcomes and attach authoritative attempt facts.
+        allowed = {
+            "results",
+            "failures",
+            "managed_selection",
+            "managed_reader_error",
+            "source_job_identity",
+            "checkpoint_enabled",
+        }
+        # A pinned reader older than the accounting snapshot drops it; the host collection owns it either way.
+        compared = allowed | {"accounting_snapshot"}
+        if selected.model_dump(exclude=compared) != collected.model_dump(exclude=compared):
+            raise ValueError("remote Store reader changed collection evidence")
+        return selected.model_copy(
+            update={
+                "source_job_identity": collected.source_job_identity,
+                "accounting_snapshot": collected.accounting_snapshot,
+            }
+        )
+    except (RuntimeError, OSError, ValueError) as error:
+        return collected.model_copy(
+            update={
+                "managed_selection": None,
+                "managed_reader_error": f"remote Store reader unavailable: {type(error).__name__}",
+            }
+        )
 
 
 # Each sbatch reports its own result on a line that names its benchmark, so a
@@ -68,7 +219,7 @@ _VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 _JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
 
 # Held by `gym eval resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
-_RESUBMIT_LOCK = ".gym_resubmit.lock"
+_RESUBMIT_LOCK = RESUBMIT_LOCK_NAME
 
 
 def _validate_benchmark_names(benchmarks: list[str]) -> None:
@@ -224,6 +375,11 @@ class SlurmExecutor(BaseExecutor):
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
+                record.environment = self.submission_environment(
+                    config,
+                    required_env=compute.forward_env,
+                    forwarded_env=[*compute.forward_env, *([config.otel.token_env] if token is not None else [])],
+                )
                 # Inside the connection, because that is the transport persist()
                 # needs and reopening one would cost a second connection per
                 # submit. Ordering and failure handling live in the base class.
@@ -231,8 +387,282 @@ class SlurmExecutor(BaseExecutor):
 
         return record
 
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+    def recovery_evidence(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        score_key: list[str | int] | None = None,
+        score_agent: str | None = None,
+        score_environment: str | None = None,
+        outcome_policy: RecoveryOutcomePolicyConfig | None = None,
+    ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
+        """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH."""
+        job_dir = Path(record.benchmark_job(benchmark).job_dir)
+        with get_connection(record.hostname) as conn:
+            config = self._saved_config(conn, Path(record.run_dir))
+            resume = config.driver.benchmarks[benchmark].resume_config
+            if resume is None:
+                stop = RecoveryDecision(
+                    action=RecoveryAction.STOP,
+                    reason=f"{benchmark} stores no resume_config, so its infra-retry budget is unknown",
+                    expected=0,
+                    counts={},
+                    identities={},
+                    evidence=[],
+                )
+                return stop, None
+            selector = {k: v for k, v in (("agent", score_agent), ("environment", score_environment)) if v is not None}
+            args = [shlex.quote(str(job_dir))]
+            if score_key:
+                args += [shlex.quote(json.dumps(score_key)), shlex.quote(json.dumps(selector))]
+            collected = CollectedEvidence.model_validate_json(
+                conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
+            )
+            if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
+                raise RuntimeError(
+                    "saved submission config changed while collecting recovery evidence; collect it again"
+                )
+            if collected.managed_store:
+                if isinstance(conn, LocalConnection):
+                    collected = select_managed_evidence(collected, job_dir)
+                else:
+                    collected = _remote_managed_evidence(conn, collected, job_dir, config)
+                    try:
+                        if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
+                            raise ValueError("saved submission config changed during remote selection")
+                    except (RuntimeError, OSError, ValueError):
+                        collected = collected.model_copy(
+                            update={
+                                "managed_selection": None,
+                                "managed_reader_error": "saved submission config changed or could not be rechecked",
+                            }
+                        )
+                    if collected.managed_selection is None:
+                        return decide_from_collected(
+                            collected,
+                            max_infra_retries=resume.max_retries,
+                            max_walltime_s=_walltime_to_seconds(resume.max_walltime)
+                            if resume.max_walltime is not None
+                            else None,
+                            live_job=None,
+                            outcome_policy=outcome_policy,
+                        ), collected
+            workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
+            if resume.max_walltime is not None and collected.job_chain and str(job_dir) not in workdirs:
+                try:
+                    chain = ",".join(collected.job_chain)
+                    accounting = conn.run(
+                        [f"sacct -n -P -X -j {shlex.quote(chain)} --format=JobIDRaw,State,ElapsedRaw"]
+                    )
+                    collected.accounted_walltime_s = accounted_chain_walltime(
+                        collected.job_chain,
+                        accounting,
+                        stored_walltime_s=collected.walltime_used_s or 0,
+                    )
+                except (RuntimeError, OSError, ValueError):
+                    # Unavailable accounting cannot grant fresh walltime.
+                    collected.accounted_walltime_s = None
+        if collected.accounting_snapshot is not None:
+            collected.accounting_snapshot = {
+                **collected.accounting_snapshot,
+                "resume_config": resume.model_dump_json(),
+            }
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=resume.max_retries,
+            max_walltime_s=_walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None,
+            live_job=str(job_dir) in workdirs,
+            outcome_policy=outcome_policy,
+        )
+        return decision, collected
+
+    def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
+        """The decision of ``recovery_evidence`` without a score key."""
+        return self.recovery_evidence(record, benchmark)[0]
+
+    def reverify_judge_failures(
+        self, record: SubmissionRecord, benchmark: str, decision: RecoveryDecision
+    ) -> RecoveryOutcome:
+        """Admit a saved-answer CPU rejudge using the original chain's remaining allowance.
+
+        Only an already CPU-only submission with no deployed model services is supported. This never
+        invents a new compute profile, starts a policy service, or turns an unavailable judge into a model run.
+        Other deployments remain explicitly unsupported until they supply a judge-only execution capability.
+        """
+        from nemo_gym.orchestration.executors.utils import flatten_run_args
+
+        def stopped(reason: str) -> RecoveryOutcome:
+            return RecoveryOutcome(
+                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+                ok=False,
+                dispatched=None,
+                unsupported=reason,
+            )
+
+        current, evidence = self.recovery_evidence(record, benchmark)
+        if current.action != RecoveryAction.REVERIFY or evidence is None:
+            return stopped("saved-answer rejudge admission changed; collect the current evidence")
+        job = record.benchmark_job(benchmark)
+        job_dir = Path(job.job_dir)
+        with get_connection(record.hostname) as conn:
+            config = self._saved_config(conn, Path(record.run_dir))
+            original = config.driver.benchmarks[benchmark]
+            resume = original.resume_config
+            compute = config.compute[record.cluster]
+            if not isinstance(compute, SlurmComputeConfig):
+                return stopped("saved rejudge compute is not Slurm")
+            if (
+                config.services
+                or config.driver.policy_model
+                or not compute.node_pools
+                or any(pool.gpus_per_node != 0 for pool in compute.node_pools.values())
+            ):
+                return stopped(
+                    "this submission has no existing CPU-only judge execution profile; policy services are not restarted"
+                )
+            install = config.driver.gym_install
+            if (
+                install is None
+                or install.ref != installed_gym_commit()
+                or not re.fullmatch(r"[0-9a-f]{40}", install.ref)
+            ):
+                return stopped("saved judge driver and installed recovery source must be the same immutable revision")
+            if resume is None or resume.max_walltime is None or evidence.accounting_snapshot is None:
+                return stopped("saved rejudge walltime or accounting owner is unknown")
+            used = evidence.accounted_walltime_s
+            retries = evidence.infra_retries_used
+            if (
+                used is None
+                or not math.isfinite(used)
+                or used < 0
+                or retries is None
+                or not math.isfinite(retries)
+                or retries < 0
+            ):
+                return stopped("actual chain walltime or retry accounting is unknown")
+            if retries > resume.max_retries or not evidence.job_chain or evidence.chain_incomplete:
+                return stopped("recorded chain is incomplete or exceeds its original retry allowance")
+            cap = _walltime_to_seconds(resume.max_walltime)
+            remaining = math.floor(cap - used)
+            if compute.walltime is not None:
+                remaining = min(remaining, _walltime_to_seconds(compute.walltime))
+            if remaining < 1:
+                return stopped("original walltime allowance is exhausted")
+            if evidence.accounting_snapshot.get("resume_config") != resume.model_dump_json():
+                return stopped("saved resume configuration changed since accounting")
+            # Use the original runtime/configuration. Only operational output/cache controls change.
+            run = dict(original.run)
+            for name in (
+                "output_jsonl_fpath",
+                "materialized_inputs_jsonl_fpath",
+                "resume_from_cache",
+                "resubmit",
+                "require_complete",
+            ):
+                run.pop(name, None)
+            if evidence.source_digests is None:
+                return stopped("saved source snapshot is unavailable")
+            queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
+            nonce = new_gym_job_id(utc_now())
+            output = job_dir / "reverification" / nonce / "rollouts.jsonl"
+            command = " ".join(
+                [
+                    "gym eval reverify",
+                    "--judge-failed-only",
+                    "--settle-into-source",
+                    "--settle-source-snapshot",
+                    shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
+                    "--rollouts",
+                    shlex.quote(str(job_dir / "artifacts/rollouts.jsonl")),
+                    "--inputs",
+                    shlex.quote(str(job_dir / "artifacts/rollouts_materialized_inputs.jsonl")),
+                    "--output",
+                    shlex.quote(str(output)),
+                    *flatten_run_args(run),
+                ]
+            )
+            # No preparation, fresh model run, reset prologue, or afternotok successor.
+            bench = original.model_copy(update={"prepare": {}, "run": {}, "command": command, "resumable": False})
+            bounded_compute = compute.model_copy(
+                update={"walltime": f"{remaining // 3600:02}:{remaining % 3600 // 60:02}:{remaining % 60:02}"}
+            )
+            driver = config.driver.model_copy(update={"benchmarks": {benchmark: bench}})
+            bound = config.model_copy(update={"driver": driver, "compute": {record.cluster: bounded_compute}})
+            script = build_sbatch_script(bound, benchmark, bench, bounded_compute, job_dir)
+            script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
+            script_path = job_dir / f"reverify-{nonce}.sh"
+            expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
+            if evidence.source_digests is None:
+                return stopped("saved source snapshot is unavailable")
+            config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
+            config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
+            if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
+                return stopped("saved submission configuration digest is unknown")
+            check = (
+                "import hashlib,json,os,sys; from pathlib import Path\n"
+                "expected=json.loads(sys.argv[1])\n"
+                "def digest(n):\n"
+                " p=Path(n)\n"
+                " if not p.exists(): return None\n"
+                " h=hashlib.sha256()\n"
+                " with p.open('rb') as f:\n"
+                "  for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)\n"
+                " return h.hexdigest()\n"
+                "names=set(expected)|{n for n in os.listdir('.') if n.startswith('.gym_followup_queued.')}\n"
+                f"source=json.loads({json.dumps(json.dumps(evidence.source_digests))})\n"
+                "if {n:digest('artifacts/'+n) for n in source} != source: raise ValueError('saved source changed')\n"
+                f"if digest({str(config_path)!r}) != {config_digest!r}: raise ValueError('saved configuration changed')\n"
+                "if {n:digest(n) for n in names} != expected: raise ValueError('stale accounting')\n"
+                f"p=Path('.gym_accumulated_walltime'); total=max(float(p.read_text()) if p.exists() else 0, {used!r})\n"
+                f"if not __import__('math').isfinite(total) or total < 0 or total >= {cap!r}: raise ValueError('spent walltime')\n"
+                "tmp=p.with_suffix('.tmp'); tmp.write_text(str(total)+'\\n'); os.replace(tmp,p)\n"
+            )
+            commands = _submission_exports(config) + [
+                'fail() { echo "Error: $*" >&2; exit 1; }',
+                f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
+                f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
+                "_gym_submit_started=0; _gym_submit_confirmed=0",
+                "_gym_release_rejudge_lock() { "
+                'if [[ "$_gym_submit_started" == 1 && "$_gym_submit_confirmed" != 1 ]]; then '
+                "printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge acknowledgement unknown' > .gym_chain_incomplete; fi; "
+                f"rm -f {_RESUBMIT_LOCK}; }}",
+                "trap _gym_release_rejudge_lock EXIT",
+                f"live=$(squeue --all --noheader -j {shlex.quote(','.join(evidence.job_chain))} --format=%A) || fail 'scheduler unknown'",
+                '[ -z "$live" ] || fail "an original allocation is still live"',
+                f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} || fail 'accounting changed or exhausted'",
+                "umask 077",
+                f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage judge driver'",
+                "_gym_submit_started=1",
+                _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
+                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+                "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1); [[ $jid =~ ^[0-9]+$ ]] || { printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge submission acknowledgement unknown' > .gym_chain_incomplete; fail 'unknown job identity'; }",
+                'printf "%s\\n" "$jid" >> .gym_job_chain || fail "cannot preserve judge allocation accounting"',
+                "_gym_submit_confirmed=1",
+            ]
+            results = _parse_sbatch_results(conn.run(commands))
+            job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
+            if job_id is None:
+                return stopped(f"saved-answer rejudge was not admitted: {error}")
+            updated = job.model_copy(update={"job_id": job_id, "error": None})
+            self.persist_record(record.with_benchmark(updated), conn.write_text)
+        return RecoveryOutcome(decision=current, ok=True, dispatched="reverify", job_id=job_id)
+
+    def resubmit(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        keep_budget: bool = False,
+        accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
+    ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
+
+        With ``keep_budget`` (``--recover``) the job keeps the spent retry count, walltime and per-rollout attempts;
+        a job.sh rendered before that option would reset them, so it is refused. ``accounting_snapshot`` is the
+        collected evidence's ``accounting_snapshot``; it is required with ``keep_budget`` and rechecked under the
+        resubmit lock before anything in the job dir changes, so a decision made on stale accounting is refused.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -252,6 +682,47 @@ class SlurmExecutor(BaseExecutor):
                 collector_update = [
                     f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
                 ]
+            snapshot_check = []
+            if keep_budget:
+                stale = "run accounting changed since the recovery evidence was collected; collect it again"
+                if accounting_snapshot is None:
+                    raise RuntimeError(f"Resubmit of {benchmark} refused: no collected accounting snapshot")
+                resume = config.driver.benchmarks[benchmark].resume_config
+                files = {name: digest for name, digest in accounting_snapshot.items() if name != "resume_config"}
+                if accounting_snapshot.get("resume_config") != (resume.model_dump_json() if resume else None):
+                    raise RuntimeError(f"Resubmit of {benchmark} refused: {stale}")
+                check = (
+                    "import hashlib, json, os, sys\n"
+                    "def digest(name):\n"
+                    "    try:\n"
+                    "        with open(name, 'rb') as f: return hashlib.sha256(f.read()).hexdigest()\n"
+                    "    except FileNotFoundError: return None\n"
+                    "expected=json.loads(sys.argv[1])\n"
+                    "names=set(expected)|{n for n in os.listdir('.') if n.startswith('.gym_followup_queued.')}\n"
+                    "sys.exit(0 if {n: digest(n) for n in names}==expected else 1)\n"
+                )
+                snapshot_check = [
+                    f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(files))} || fail {shlex.quote(stale)}"
+                ]
+            budget_update = []
+            if keep_budget and accounted_walltime_s is not None:
+                # This is terminal accounting of the complete recorded chain, not a new allowance.
+                if not math.isfinite(accounted_walltime_s) or accounted_walltime_s < 0:
+                    raise ValueError("accounted walltime must be finite and non-negative")
+                resume = config.driver.benchmarks[benchmark].resume_config
+                cap = _walltime_to_seconds(resume.max_walltime) if resume and resume.max_walltime else None
+                update = (
+                    "import math, os\nfrom pathlib import Path\n"
+                    "p=Path('.gym_accumulated_walltime')\n"
+                    "old=float(p.read_text()) if p.exists() else 0\n"
+                    "if not math.isfinite(old) or old < 0: raise ValueError('malformed walltime counter')\n"
+                    f"total=max(old, {accounted_walltime_s!r})\n"
+                    f"cap={cap!r}\n"
+                    "if cap is not None and total >= cap: raise ValueError('walltime budget exhausted')\n"
+                    "p.with_suffix('.tmp').write_text(str(int(total) if total.is_integer() else total)+'\\n')\n"
+                    "os.replace(p.with_suffix('.tmp'), p)\n"
+                )
+                budget_update = [f"python3 -c {shlex.quote(update)} || fail 'cannot preserve accounted walltime'"]
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
             # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
@@ -265,11 +736,33 @@ class SlurmExecutor(BaseExecutor):
                         # report success to two concurrent callers.
                         f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
                         f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
-                        f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+                        "_gym_submit_started=0; _gym_submit_confirmed=0",
+                        "_gym_release_resubmit_lock() { "
+                        'if [[ "$_gym_submit_started" == 1 && "$_gym_submit_confirmed" != 1 ]]; then '
+                        f"printf '%s\\n' {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' Resubmit acknowledgement was not confirmed.')} "
+                        "> .gym_chain_incomplete || return; fi; "
+                        f"rm -f {_RESUBMIT_LOCK}; }}",
+                        "trap _gym_release_resubmit_lock EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
+                        # Before any job.sh, collector, counter or sbatch change, under the same lock.
+                        *snapshot_check,
+                        # An older chain retries FAILED, OUT_OF_MEMORY and DEADLINE as infrastructure failures.
+                        # Refuse it before anything in the job dir changes.
+                        f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
+                        f"&& ! grep -qxF -- {shlex.quote(SCHEDULER_CAUSE_MARKER)} job.sh; then "
+                        'fail "job.sh in $PWD predates scheduler-cause retry admission, so its chain would retry '
+                        'FAILED, OUT_OF_MEMORY and DEADLINE jobs; stage a new job script"; fi',
+                        f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
+                        f"&& ! grep -qxF -- {shlex.quote(ALLOCATION_ACCOUNTING_MARKER)} job.sh; then "
+                        'fail "job.sh predates durable allocation accounting; stage a new compatible script"; fi',
+                        f"if grep -q -- {shlex.quote('^' + ACCOUNTING_UNKNOWN_PREFIX)} .gym_chain_incomplete 2>/dev/null; then "
+                        'fail "allocation accounting is unknown; reconcile every allocation before resubmission"; fi',
+                        'for claim in .gym_followup_queued.*; do [ -e "$claim" ] || continue; '
+                        'claimed=$(cat "$claim") || fail "follow-up claim unreadable"; '
+                        '[[ "$claimed" =~ ^[0-9]+$ ]] || fail "follow-up submission identity unknown"; done',
                         # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
                         # `gym eval run` on a line of its own (see `render_gym_cmd`).
                         "if [ -s artifacts/rollouts.jsonl ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "
@@ -283,8 +776,32 @@ class SlurmExecutor(BaseExecutor):
                         "sed -i 's/GYM_CMD+=(++resubmit=True)/GYM_CMD+=(++resubmit=True ++resume_from_cache=True)/g' "
                         "job.sh || fail 'cannot normalize resubmit flags in job.sh'; fi",
                         *collector_update,
+                        *(
+                            [
+                                f"if {{ grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
+                                "|| grep -qx -- '[[:space:]]*gym eval run' job.sh; } "
+                                f"&& ! grep -qF -- {KEEP_BUDGET_ENV} job.sh; then "
+                                'fail "job.sh in $PWD predates budget-preserving recovery, so a resubmit would reset '
+                                'its spent retries, walltime and attempts; use a plain resubmit or submit again"; fi',
+                                f"if ! grep -qxF -- {shlex.quote(BOUNDED_BUDGET_MARKER)} job.sh; then "
+                                'fail "job.sh in $PWD predates bounded recovery budgets; stage a new job script '
+                                'before automatic recovery"; fi',
+                                f"export {KEEP_BUDGET_ENV}=1",
+                            ]
+                            if keep_budget
+                            else []
+                        ),
+                        *budget_update,
                         f"export {RESUBMIT_ENV}=1",
+                        "_gym_submit_started=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
+                        # Same accepted job-ID grammar as _parse_sbatch_results, evaluated while the lock is held.
+                        "if [[ $rc == 0 ]] && python3 -c "
+                        + shlex.quote(
+                            "import re,sys; words=sys.argv[1].split(); "
+                            f"sys.exit(0 if words and re.fullmatch({_JOB_ID_RE.pattern!r}, words[-1]) else 1)"
+                        )
+                        + ' "$out"; then _gym_submit_confirmed=1; fi',
                     ]
                 )
             )

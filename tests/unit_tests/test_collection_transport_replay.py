@@ -3,6 +3,8 @@
 
 import asyncio
 import json
+import subprocess
+import sys
 
 import aiohttp
 import httpx
@@ -112,6 +114,9 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
     assert store.manifest.next_attempt["0-0"] == 1
     assert store.coverage()["max_rollout_attempts"] == 3
     assert store.pending() == []
+    decision = decide_persisted(tmp_path)
+    assert decision.action.value == "stop"
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (int(routed), 3)
     failures = [json.loads(line) for line in output.with_name("rollouts_failures.jsonl").read_text().splitlines()]
     assert len(failures) == 1
     assert failures[0]["_ng_failure_type"] == (
@@ -172,5 +177,25 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     assert RolloutStore.read(output).coverage()["attempts"] == 1
     assert RolloutStore.read(output).manifest.next_attempt["0-0"] == 1
     assert len(RolloutStore.read(output).pending()) == 1
+    decision = decide_persisted(tmp_path)
+    assert decision.action.value == "resubmit"
     # One transport attempt was reserved, but a proven not-sent interruption spends no model/failure attempt.
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (0, 3)
     assert RolloutStore.read(output).coverage()["counted_failures"] == 0
+    assert decide_persisted(tmp_path, max_infra_retries=0).action.value == "stop"
+
+
+def decide_persisted(job, max_infra_retries=3):
+    from nemo_gym.orchestration.recovery import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+        decide_from_collected,
+        select_managed_evidence,
+    )
+
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+    )
+    selected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
+    assert selected.managed_reader_error is None
+    return decide_from_collected(selected, max_infra_retries=max_infra_retries, max_walltime_s=None, live_job=False)

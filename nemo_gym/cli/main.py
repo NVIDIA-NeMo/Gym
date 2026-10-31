@@ -696,11 +696,84 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
-    from nemo_gym.orchestration.submit import resubmit
+    from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
+
+    inspect_only = getattr(args, "inspect", False)
+    record_path = getattr(args, "record", None)
+    if inspect_only and not getattr(args, "recover", False):
+        args._parser.error("--inspect requires --recover")
+    if record_path is not None and not inspect_only:
+        args._parser.error("--record requires --inspect")
 
     try:
+        score_key = getattr(args, "score_key", None)
+        if score_key is not None:
+            score_key = json.loads(score_key)
+            if (
+                not isinstance(score_key, list)
+                or not score_key
+                or not all(isinstance(k, str) or (type(k) is int and k >= 0) for k in score_key)
+            ):
+                args._parser.error(
+                    "--score-key must be a JSON list of object keys and non-negative array indices, "
+                    'e.g. \'["agent_metrics", "mean/reward"]\''
+                )
+        if (
+            score_key is not None
+            or getattr(args, "score_agent", None) is not None
+            or getattr(args, "score_environment", None) is not None
+            or getattr(args, "max_unhealthy_fraction", None) is not None
+            or getattr(args, "max_response_failure_fraction", None) is not None
+            or getattr(args, "max_trial_failure_fraction", None) is not None
+            or getattr(args, "mlflow_status", None) is not None
+            or getattr(args, "mlflow_run_id", None) is not None
+        ) and not getattr(args, "recover", False):
+            args._parser.error("--score-key and --max-unhealthy-fraction need --recover")
+        if getattr(args, "recover", False):
+            operation = inspect_recovery if inspect_only else recover
+            extra = {}
+            record_digest = None
+            if record_path is not None:
+                original_record, record_digest = load_original_submission_record(record_path)
+                extra["original_record"] = original_record
+            outcome = operation(
+                args.gym_job_id,
+                args.benchmark,
+                **extra,
+                score_key=score_key,
+                score_agent=getattr(args, "score_agent", None),
+                score_environment=getattr(args, "score_environment", None),
+                max_unhealthy_fraction=getattr(args, "max_unhealthy_fraction", None),
+                max_response_failure_fraction=getattr(args, "max_response_failure_fraction", None),
+                max_trial_failure_fraction=getattr(args, "max_trial_failure_fraction", None),
+                mlflow_status=getattr(args, "mlflow_status", None),
+                mlflow_run_id=getattr(args, "mlflow_run_id", None),
+            )
+            if record_digest is not None:
+                payload = outcome.model_dump(mode="json", exclude={"decision": {"evidence"}})
+                payload["original_record_sha256"] = record_digest
+                print(json.dumps(payload))
+            else:
+                print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
+            requested_gate = inspect_only or any(
+                getattr(args, name, None) is not None
+                for name in (
+                    "score_key",
+                    "score_agent",
+                    "score_environment",
+                    "max_unhealthy_fraction",
+                    "max_response_failure_fraction",
+                    "max_trial_failure_fraction",
+                    "mlflow_status",
+                    "mlflow_run_id",
+                )
+            )
+            gate_failed = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
+            if not outcome.ok or gate_failed:
+                sys.exit(1)
+            return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)
-    except (ValueError, RuntimeError) as error:
+    except (OSError, ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
 
@@ -1585,6 +1658,18 @@ COMMANDS = {
                 "With --judge-failed-only: append recovered results to an existing --output (never cleared) "
                 "instead of seeding successes into a fresh file.",
             ),
+            _value_flag(
+                "settle-source-snapshot",
+                "settle_source_snapshot_json",
+                "Expected source artifact SHA256 snapshot, checked under the source lock before judging.",
+                quote=True,
+            ),
+            _bool_flag(
+                "settle-into-source",
+                "settle_into_source",
+                "With --judge-failed-only: settle each re-judged judge failure in the manifest-backed source run "
+                "(same attempt and saved answer, no model attempt added).",
+            ),
         ),
     ),
     "eval profile": Command(
@@ -1648,6 +1733,88 @@ COMMANDS = {
                 ),
             ),
             Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--recover",
+                    action="store_true",
+                    help="Decide from the run's persisted evidence first: do nothing when it is complete, re-judge "
+                    "saved answers when only judge failures remain, queue only within the stored retry budget.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--inspect",
+                    action="store_true",
+                    help="With --recover: inspect saved evidence and the gate without dispatching any action.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--record",
+                    type=Path,
+                    metavar="PATH",
+                    help="With --inspect: read an original submission record without updating the local index.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--score-key",
+                    metavar="JSON",
+                    help="With --recover: the metric path within the selected aggregate entry, as a JSON list; lists require an identity selector.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--score-agent",
+                    metavar="NAME",
+                    help="With --recover: select exactly one aggregate entry by agent_ref.name.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--score-environment",
+                    metavar="NAME",
+                    help="With --recover: select by _ng_environment_server; combine with --score-agent if needed.",
+                )
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-unhealthy-fraction",
+                    type=float,
+                    metavar="FRACTION",
+                    help="With --recover: the per-rollout health criterion; independent response/trial gates still apply.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-response-failure-fraction",
+                    type=float,
+                    metavar="FRACTION",
+                    help="With --recover: the response gate passes only strictly below this fraction (default 0.02).",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-trial-failure-fraction",
+                    type=float,
+                    metavar="FRACTION",
+                    help="With --recover: the trial gate fails at or above this fraction (default 0.02).",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--mlflow-status",
+                    metavar="STATUS",
+                    help="With --recover: the tracking run's terminal status as read from the MLflow server.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--mlflow-run-id",
+                    metavar="RUN_ID",
+                    help="With --recover: the id of the run whose --mlflow-status was read.",
+                ),
+            ),
         ),
     ),
     "eval compare": Command(

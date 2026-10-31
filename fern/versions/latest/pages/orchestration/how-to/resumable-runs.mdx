@@ -26,6 +26,8 @@ To tune it, pass a mapping instead of `true`:
 
 Only executors that support it may set `resumable`, and Slurm does. The setting is per benchmark.
 
+Recovered grading attempts are reported separately and do not count toward the trial-health threshold when every observed attempt is joined to the same completed grading operation and its valid saved verdict. A completed grader that returns a bound result without a valid verdict counts as a trial fault; missing or unbound grading evidence remains unknown. The denominator remains the full expected trial inventory, including repeats.
+
 ## How it works
 
 The job script begins with a prologue that runs before any service starts. Each job in the chain receives its predecessor's Slurm job ID, looks at that job's final state with `sacct`, and decides whether to carry on. **Before doing any real work**, it queues its own successor with `sbatch --dependency=afternotok:<this job> --kill-on-invalid-dep=yes`, so the chain continues even if this job is killed mid-run.
@@ -37,13 +39,15 @@ What the next job does with the previous job's state:
 | Previous job state | Next job |
 | --- | --- |
 | none (the first job) | Starts. |
-| state not yet visible to `sacct` | Resumes without counting a retry. It retries the lookup for about a minute first, to allow for accounting lag. |
+| state not yet visible to `sacct` | Retries the lookup for about a minute, then stops if accounting is still unavailable. |
 | `COMPLETED` | Exits successfully. |
 | `CANCELLED...` | Stops the chain. |
-| `TIMEOUT`, `PREEMPTED`, `NODE_FAIL` | Resumes, unless `max_walltime` has been reached, in which case it stops. |
-| anything else (a failed job, out of memory, and so on) | Counts one retry and resumes, until `max_retries` is exceeded, at which point it exits with an error. |
+| `TIMEOUT` | Continues the planned allocation segments within the remaining `max_walltime`. This scheduler state does not classify a model response timeout. |
+| `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Resumes only with remaining retry and walltime budgets; records one admitted retry before work. |
+| `FAILED`, `OUT_OF_MEMORY`, `DEADLINE` | Preserves known elapsed time and stops. These states alone do not establish a retryable infrastructure cause. |
+| unknown, malformed or nonterminal accounting | Stops without dispatching more work. |
 
-Time limits, preemption, and node failure are not counted against `max_retries`, which exists so a job whose own script is broken does not requeue forever.
+Preemption and node failure count against `max_retries`; `max_retries: 0` admits no retry after either. Scheduler allocation timeouts retain the planned-segment behavior, bounded by `max_walltime`. Unknown elapsed time cannot grant a fresh allowance. A generic `FAILED` state can represent invalid configuration or an application failure; the chain never classifies it as infrastructure failure from its exit code or log text. Saved-evidence recovery remains subject to the checks below.
 
 ## What gets resumed
 
@@ -55,13 +59,73 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | --- | --- |
 | `.gym_job_chain` | The Slurm job ID of every job in the chain, one per line. |
 | `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
-| `.gym_infra_retries` | Count of non-timeout retries so far. |
-| `.gym_followup_queued.<job ID>` | The claim that this job has queued its successor, so a requeue of the same job does not queue a second one. |
+| `.gym_infra_retries` | Count of infrastructure retries so far. |
+| `.gym_followup_queued.<job ID>` | The observed successor job ID, or an unresolved submission claim. An unresolved claim cannot authorize another submission. |
+
+## Recover from saved evidence
+
+For a submitted Slurm benchmark, recovery reads the existing materialized inventory, results, failure sidecar, quality report, scheduler state and retry/time counters before choosing an action. It requires the saved resumable configuration and a job script that supports budget-preserving recovery.
+
+For managed rollouts on a remote host, recovery uses the saved `driver.gym_install` repository and immutable commit to run the authoritative Store reader over SSH. The temporary installation and read are bounded to five minutes; recovery checks the imported source, exact job directory, stable artifact snapshots and saved submission configuration. An unavailable runtime, an unpinned ref, or an older pinned version without the reader stops recovery. It does not silently upgrade the saved version or copy saved answers to the caller.
+
+Use the submission ID printed by `gym eval submit` and the benchmark name. Select an aggregate entry by its saved `agent_ref.name` and, where needed, `_ng_environment_server`; its position in the aggregate array is not an identity.
+
+```bash
+gym eval resubmit "$GYM_JOB_ID" gpqa --recover \
+  --score-agent simple_agent \
+  --score-key '["agent_metrics", "mean/reward"]' \
+  --max-unhealthy-fraction 0.02
+```
+
+Replace `simple_agent` with the name in that run's aggregate entry. Add `--score-environment NAME` when the agent has several environment entries. Missing or ambiguous identities and nonfinite scores leave the score unavailable; a genuine score of zero is retained. Legacy aggregate objects can still use a string-key metric path without an identity selector.
+
+The JSON response separates dispatch from acceptance:
+
+| Field or status | Meaning |
+| --- | --- |
+| `ok` | The requested recovery operation was supported and completed. A successful NOOP does not certify the evaluation. |
+| `dispatched` | The action actually taken; null means no job or re-verification was dispatched. |
+| `gate_task.status = RUNNING` | A job for the run is already live; recovery does not queue a duplicate. |
+| `RESUMING` | Eligible work was submitted or supported saved-answer re-verification was dispatched. |
+| `FAILED` | Recovery stopped, the action is unsupported, or required acceptance evidence is missing or failed. Read `errors` and `unsupported`. |
+| `SUCCESS` | Requires complete results and every acceptance gate. Trial health can pass only when supported, source-bound operation and grading observations cover every expected identity; completion alone is insufficient. |
+
+Completed answers, ordinary incorrect answers and supported final model zeros are not regenerated. Judge-only failures request re-verification of saved answers; Slurm does not yet implement that operation and reports it as unsupported. A run containing both judge failures and missing/retryable policy work stops until a supported separate saved-answer recovery path is available.
+
+The optional unhealthy fraction is a **per-rollout** criterion for the existing quality report. It is not a response or trial denominator. Response health separately requires unique, verified raw-response observations and a failure fraction strictly below 2%. Trial health can reject at 2% from its known-failure lower bound. Below that threshold, it can pass when source-bound agent, model-attempt, supported client-executed function-tool, and verifier observations join across every expected identity and repeat. The verifier must record an actually executed programmatic grading calculation bound to the saved response and reward. Unjoined recovered failures, unsupported hosted or custom tools, unobserved judge dependencies, sandbox lifecycle gaps, and historical records without grading observations remain unknown; a low failure count alone does not certify them. Missing report-source identity, unsupported multi-source summaries, malformed counters or missing runtime facts remain unknown.
+
+Only supply `--mlflow-run-id ID --mlflow-status FINISHED` after observing that exact backend run and status. Those flags do not perform an export. Acceptance also requires a current content-bound receipt recording rollout delivery. The postrun exporter writes this receipt. A fresh live MLflow activation can also write it for the same run after final collection and health artifacts are stable, acknowledged rollout/config/metric delivery matches those artifacts, and the backend confirms completion. Resumed activations and incomplete delivery remain unverified; legacy run-ID-only markers do not satisfy this check. A successful recovery invocation is therefore separate from confirmed tracking delivery.
+
+Rollout export projection version 1 retains the canonical `ng_trajectory` identities, invocation and verifier outcomes, model/tool joins, timing, failure evidence, and observation gaps. It omits invocation conversations, turn question/answer/reasoning payloads, raw model requests/responses, and tool outputs. Omitted payloads remain unavailable; the projection does not by itself establish response health or saved-answer reverification. Delivery receipts include `rollout_projection_version: 1` and bind the acknowledged projection to the saved artifacts. Older receipts without this field do not verify canonical evidence delivery and are not overwritten or automatically re-exported.
+
+Automatic recovery preserves spent history and rollout attempts, and a recovery allocation consumes one remaining retry when it starts. For a capped run, every recorded allocation must have terminal scheduler accounting, consistent with the stored budget epoch. The last allocation's elapsed time is preserved before scheduling. Automatic resubmit rechecks the collected chain, counters, reset offset, saved configuration and follow-up claims under its existing submission lock before changing files or submitting. If any changed, it refuses and requires fresh evidence. Before starting services, the generated prologue limits the current Slurm allocation to the remaining walltime and verifies the scheduler readback. It only decreases the existing limit and rounds the remaining allowance down to whole minutes; less than one minute, failed updates or unknown accounting stop the job. Slurm enforces the time limit with the cluster's normal termination grace. A Slurm requeue of the same job ID stops before work or counter resets: these counters cannot establish the elapsed time of the prior incarnation. Recover only when complete terminal accounting is available.
+
+Without `--recover`, ordinary `gym eval resubmit` keeps its existing explicit-reset behavior: it starts a fresh retry/time and per-rollout attempt allowance. Do not use it as an automatic substitute for a recovery STOP.
 
 ## Limits and caveats
 
-- `max_walltime` is checked when the previous job ended by timeout, preemption, or node failure, against the walltime of the jobs that already finished. When it is reached the chain stops and exits with status 0, so a stopped chain is not an error.
-- If queueing a successor fails, the job prints a warning (`Failed to submit auto-resume follow-up`) and carries on. `sbatch` can fail after it created the job, so check with `squeue --me --all`. If there is no successor, a requeue of the job queues one.
+- `max_walltime` applies to all continuation paths, including `--recover`. A capped job needs permission to read and decrease its own Slurm time limit with `scontrol`; failure stops before services or another successor start. Existing job scripts are not silently rewritten: stage the new generated prologue to obtain these guards.
+- If queueing a successor fails, the job prints a warning (`Failed to submit auto-resume follow-up`) and carries on. `sbatch` can fail after it created the job, so check with `squeue --me --all`. A missing queue entry does not prove that a successor never ran. Automatic continuation remains stopped until the complete queue and terminal accounting are reconciled, including guard-stopped allocations. Requeueing does not repair unknown accounting or reset its stop state.
 - A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue --me --all` and cancel any job still pending, using `.gym_job_chain` for the IDs of the jobs that have run.
 - `resumable` does not work with a benchmark `command`, because resuming relies on `gym eval run`'s cache.
 - The `gym-job.json` record contains the first job's ID only.
+
+
+Recovery uses the shared outcome policy for eligible failures. The Python `recover(...,
+outcome_policy=RecoveryOutcomePolicyConfig(...))` API accepts partial failure-kind and HTTP-status overrides.
+`retry` permits another episode only within the saved attempt and chain budgets; `verify` re-verifies a saved
+judge answer, and `fail` leaves it ungraded. Settled results and terminal failures are never reopened.
+Mixed decisions stop when the executor cannot honor them separately. Saved-answer re-verification still
+requires an executor that supports it.
+
+The independent response and trial criteria are configurable with `--max-response-failure-fraction` and
+`--max-trial-failure-fraction`. Both default to a strict fraction below `0.02`, before rounding; reports include
+the effective values under `criteria`. These criteria do not change rewards or retry policy. A positive trial
+result requires observed coverage of every expected identity. Supported paths join invocation, selected response, model operations, client-executed function-tool results,
+and observed programmatic grading bound to the saved result. Unsupported paths, missing grading or runtime
+observations, and unjoined recovered failures remain unknown. Recovery NOOP is separate from acceptance and tracking delivery.
+
+
+The live and post-run tracking paths export the same saved-evidence health snapshot under `health/response`, `health/trial`, and separate model/grading recovery namespaces. Always check the current `known` metric before interpreting a `passed` value or rate: `known=0` means unknown and resets `passed=0` (not passed, not a classified failure); older count and rate values remain historical. Trial `counts_known=0` labels a known failure from a lower bound; its `failed_lower_bound` and `failure_rate_lower_bound` are not exact counts. These facts do not certify tracking delivery or replace the independent response and trial gates.
+
+These exported health flags use the default strict 2% response and trial thresholds. They are not a later recovery command’s custom-threshold result. Upstream recovery includes observed model HTTP operations, including judge calls; grading recovery is a separate joined projection. These counters overlap and must not be summed.

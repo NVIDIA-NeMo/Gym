@@ -315,6 +315,7 @@ def test_all_registered_semantic_checks_fire_on_synthetic_artifacts(tmp_path: Pa
         "verdict",
         "findings",
         "unobserved",
+        "responses",
     }
 
 
@@ -1196,7 +1197,16 @@ _ACTIONABLE = {
         ]
     },
     "responses_answer": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "cut off"}]}]},
-    "chat_tool_call": {"choices": [{"message": {"content": "", "tool_calls": [{"id": "t1", "type": "function"}]}}]},
+    "chat_tool_call": {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "run", "arguments": ""}}],
+                }
+            }
+        ]
+    },
     "messages_tool_use": {"content": [{"type": "thinking", "thinking": "partial"}, {"type": "tool_use", "id": "t1"}]},
 }
 
@@ -3193,6 +3203,383 @@ class TestFailureGroupsAreNamedByRetry:
 
         _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
         assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]
+
+
+def test_the_response_population_judges_faults_from_the_raw_output_by_call_id(tmp_path: Path) -> None:
+    # Labelled synthetic data through the real producer: 3 rollouts (trials) carry 4 selected raw responses.
+    two = [{"model_call_id": "a1"}, {"model_call_id": "a2"}]
+    rows = [
+        (
+            _record(0, 0, refs=two),
+            [_call(model_call_id="a1", response_id="ra1"), _call(model_call_id="a2", call_index=1)],
+        ),
+        # Zero completion tokens with a usable body: token metadata is not an empty output, so no fault.
+        (_record(1, 0, refs=[{"model_call_id": "b1"}]), [_call(model_call_id="b1", tokens_out=0)]),
+        # A raw {} is a malformed, unusable output: selected and faulted.
+        (_record(2, 0, refs=[{"model_call_id": "d1"}]), [_call(model_call_id="d1", response={})]),
+    ]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    by_rollout = {(d.task_index, d.rollout_index): d.responses for d in result.rollouts}
+    assert by_rollout == {
+        (0, 0): {"selected": ["a1", "a2"], "faulted": []},
+        (1, 0): {"selected": ["b1"], "faulted": []},
+        (2, 0): {"selected": ["d1"], "faulted": ["d1"]},
+    }
+    summary = json.loads(result.summary_path.read_text())
+    assert summary["run"]["stats"]["responses"] == {
+        "rollouts": 3,
+        "unknown": 0,
+        "selected": 4,
+        "faulted": 1,
+        "duplicated": 0,
+    }
+    rows_written = [json.loads(line) for line in result.verdicts_path.read_text().splitlines()]
+    assert [row["responses"] for row in rows_written] == [by_rollout[(t, 0)] for t in range(3)]
+
+
+def test_a_response_selected_by_two_rollouts_is_a_duplicate_not_two_responses(tmp_path: Path) -> None:
+    rows = [(_record(t, 0, refs=[{"model_call_id": "same"}]), [_call(model_call_id="same")]) for t in range(2)]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]
+    assert (stats["selected"], stats["duplicated"]) == (1, 1)
+
+
+@pytest.mark.parametrize(
+    "updates",
+    [{"status_code": None}, {"response": None}, {"model_call_id": None, "response_id": None}],
+)
+def test_an_unverified_selected_call_leaves_the_response_population_unknown(tmp_path: Path, updates: dict) -> None:
+    ref = [{"model_call_id": "c1"}] if updates.get("model_call_id", "c1") else None
+    rows = [(_record(0, 0, refs=ref), [_call(**updates)])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    assert [d.responses for d in result.rollouts] == [None]
+    assert json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]["unknown"] == 1
+
+
+def _assert_report_input_digests(summary: dict, rollout_path: Path) -> None:
+    import hashlib
+
+    files = {
+        "rollouts_jsonl_fpath": rollout_path,
+        "failures_jsonl_fpath": rollout_path.with_name("rollouts_failures.jsonl"),
+        "materialized_inputs_jsonl_fpath": rollout_path.with_name("rollouts_materialized_inputs.jsonl"),
+        "resolved_config_yaml_fpath": rollout_path.with_name("rollouts_resolved_config.yaml"),
+    }
+    assert summary["run"]["provenance"].pop("rollout_artifact_digests") == [
+        {key: hashlib.sha256(path.read_bytes()).hexdigest() if path.exists() else None for key, path in files.items()}
+    ]
+
+
+def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(
+        "bench_agent:\n"
+        "  responses_api_agents:\n"
+        "    simple_agent:\n"
+        "      resources_server: {type: resources_servers, name: bench_resources}\n"
+        "      skip_verification: true\n"
+        "other_agent:\n"
+        "  responses_api_agents:\n"
+        "    simple_agent:\n"
+        "      skip_verification: ${oc.env:SKIP}\n"
+        "bench_resources:\n"
+        "  resources_servers:\n"
+        "    scicode: {timeout_secs: 30}\n"
+        "bench_environment:\n"
+        "  environment_servers:\n"
+        "    bench_env: {}\n"
+        "output_jsonl_fpath: rollouts.jsonl\n"
+    )
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    _assert_report_input_digests(summary, rollout_path)
+    assert summary["run"]["provenance"] == {
+        "resolved_config": "read",
+        # Not written, so unknown: never defaulted to the collector's False.
+        "route_failures_to_sidecar": None,
+        "servers": {
+            "bench_agent": {
+                "kind": "responses_api_agents",
+                "implementation": "simple_agent",
+                "resources_server": "bench_resources",
+                "skip_verification": True,
+            },
+            "other_agent": {
+                "kind": "responses_api_agents",
+                "implementation": "simple_agent",
+                "resources_server": None,
+                "skip_verification": None,
+            },
+            "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
+            "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
+        },
+        "mlflow": {"configured": False},
+    }
+
+
+@pytest.mark.parametrize(("content", "state"), [(None, "absent"), ("- a list", "unreadable"), ("a: [", "unreadable")])
+def test_run_provenance_without_a_readable_resolved_config_is_not_guessed(tmp_path: Path, content, state) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    if content is not None:
+        (tmp_path / "rollouts_resolved_config.yaml").write_text(content)
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    _assert_report_input_digests(summary, rollout_path)
+    assert summary["run"]["provenance"] == {"resolved_config": state}
+
+
+def test_rows_are_counted_by_their_own_verification_skipped_value(tmp_path: Path) -> None:
+    rows = [(_record(t, 0, refs=[{"model_call_id": f"c{t}"}]), [_call(model_call_id=f"c{t}")]) for t in range(3)]
+    rows[0][0]["verification_skipped"] = True
+    rows[1][0]["verification_skipped"] = False
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["model_call_errors"]
+    assert stats["verification_skipped"] == {"true": 1, "false": 1, "absent": 1}
+
+
+def test_rows_are_counted_by_their_own_context_window_step_status(tmp_path: Path) -> None:
+    rows = [(_record(t, 0, refs=[{"model_call_id": f"c{t}"}]), [_call(model_call_id=f"c{t}")]) for t in range(4)]
+    rows[0][0]["step_usage"] = [{"status": "generated"}, {"status": "context_window_exceeded"}]
+    rows[1][0]["step_usage"] = [{"status": "prefilled"}, {"status": "generated"}]
+    rows[2][0]["step_usage"] = [{"status": 3}]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["model_call_errors"]
+    assert stats["context_window_exceeded"] == {"true": 1, "false": 1, "absent": 2}
+
+
+@pytest.mark.parametrize(
+    ("names", "configured"),
+    [
+        ({"mlflow_tracking_uri": "https://t", "mlflow_experiment_name": "e", "mlflow_run_name": "r"}, True),
+        ({"mlflow_tracking_uri": "https://t", "mlflow_experiment_name": "e"}, False),
+        ({}, False),
+        ({"mlflow_tracking_uri": "${oc.env:URI}", "mlflow_experiment_name": "e", "mlflow_run_name": "r"}, None),
+        ({"mlflow_tracking_uri": 5, "mlflow_experiment_name": "e", "mlflow_run_name": "r"}, None),
+    ],
+)
+def test_run_provenance_reads_mlflow_configuration_from_names_only(tmp_path: Path, names: dict, configured) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    lines = "".join(f"{key}: {json.dumps(value)}\n" for key, value in names.items())
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(lines + "mlflow_tracking_token: secret\n")
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    assert summary["run"]["provenance"]["mlflow"] == {"configured": configured}
+    assert "secret" not in result_text(tmp_path)
+
+
+def result_text(root: Path) -> str:
+    return (root / "quality_summary.json").read_text()
+
+
+@pytest.mark.parametrize(
+    ("updates", "expected"),
+    [
+        # A stream that stopped on its output budget is selected and faulted as truncated.
+        (
+            {"response_status": "incomplete", "error_category": "incomplete", "finish_reason": "max_output_tokens"},
+            {"selected": ["c1"], "faulted": ["c1"]},
+        ),
+        ({"response_status": "incomplete", "error_category": "incomplete", "finish_reason": "length"}, None),
+        # Failed, cancelled and transport-failed calls stay trial matters, not selected responses.
+        ({"response_status": "failed", "error_category": "incomplete", "finish_reason": "max_output_tokens"}, []),
+        ({"response_status": "cancelled", "finish_reason": "max_output_tokens"}, []),
+        ({"status_code": 502, "error_category": "incomplete", "response_status": "incomplete"}, []),
+        ({"response_status": "incomplete", "error_category": "incomplete", "finish_reason": "stop"}, []),
+    ],
+)
+def test_an_output_budget_incomplete_stream_is_a_selected_truncated_response(
+    tmp_path: Path, updates: dict, expected
+) -> None:
+    rows = [(_record(0, 0, refs=[{"model_call_id": "c1"}]), [_call(**updates)])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    if expected is None:
+        expected = {"selected": ["c1"], "faulted": ["c1"]}
+    elif expected == []:
+        expected = {"selected": [], "faulted": []}
+    assert [d.responses for d in result.rollouts] == [expected]
+
+
+@pytest.mark.parametrize(
+    ("message", "finish_reason", "faulted"),
+    [
+        ({"role": "assistant", "content": None, "refusal": "I can't help with that."}, "stop", []),
+        ({"role": "assistant", "content": None, "refusal": "   "}, "stop", ["c1"]),
+        ({"role": "assistant", "content": None, "refusal": ""}, "stop", ["c1"]),
+        ({"role": "assistant", "content": None, "refusal": "I can't help with that."}, "length", ["c1"]),
+    ],
+)
+def test_a_chat_refusal_is_usable_output(tmp_path: Path, message: dict, finish_reason: str, faulted: list) -> None:
+    response = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    rows = [(_record(0, 0, refs=[{"model_call_id": "c1"}]), [_call(response=response, finish_reason=finish_reason)])]
+    result = run_health_checks(_write_fixture(tmp_path, rows), output_dir=tmp_path / "report", workers=1)
+    assert [d.responses for d in result.rollouts] == [{"selected": ["c1"], "faulted": faulted}]
+
+
+@pytest.mark.parametrize(
+    ("stream_status", "expected_selected", "expected_faulted"),
+    [("incomplete", 1, 1), ("completed", 1, 0), ("failed", 0, 0)],
+)
+def test_raw_responses_stream_capture_preserves_response_population(
+    tmp_path, stream_status, expected_selected, expected_faulted
+):
+    from fastapi import FastAPI
+    from fastapi.responses import StreamingResponse
+    from fastapi.testclient import TestClient
+
+    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.observability.model_calls import read_model_call_records
+    from tests.unit_tests.test_base_responses_api_model import _install_capture
+
+    app = FastAPI()
+    response = {
+        "id": "captured-response",
+        "status": stream_status,
+        "output": [
+            {"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "partial answer"}]}
+        ],
+        "usage": {"input_tokens": 3, "output_tokens": 2, "total_tokens": 5},
+    }
+    if stream_status == "incomplete":
+        response["incomplete_details"] = {"reason": "max_output_tokens"}
+    raw = (
+        b"event: response."
+        + stream_status.encode()
+        + b"\ndata: "
+        + orjson.dumps({"type": "response." + stream_status, "response": response})
+        + b"\n\n"
+    )
+
+    @app.post("/v1/responses")
+    async def responses():
+        return StreamingResponse(iter([raw[:17], raw[17:]]), media_type="text/event-stream")
+
+    captures = tmp_path / "capture"
+    _install_capture(app, captures)
+    received = TestClient(app).post("/ng-rollout/raw-sse/v1/responses", json={"input": "question", "stream": True})
+    assert received.status_code == 200 and received.content == raw
+    [call] = read_model_call_records(CaptureStore(captures), "raw-sse")
+    assert call.response_status == stream_status
+    if stream_status == "incomplete":
+        assert call.error_category == "incomplete" and call.finish_reason == "max_output_tokens"
+    record = _record(0, 0, refs=[{"model_call_id": call.model_call_id}])
+    saved = _write_fixture(tmp_path, [(record, [call.model_dump(mode="json")])])
+    result = run_health_checks(saved, output_dir=tmp_path / "report", workers=1)
+    assert len(result.rollouts[0].responses["selected"]) == expected_selected
+    assert len(result.rollouts[0].responses["faulted"]) == expected_faulted
+
+
+@pytest.mark.parametrize(
+    "gap",
+    [
+        "model_calls_unavailable",
+        "model_call_capture_incomplete",
+        "model_call_capture_records_unreadable",
+        "model_call_capture_unreadable",
+        "model_call_capture_pending",
+        "model_call_capture_no_records",
+    ],
+)
+def test_response_population_rejects_explicit_capture_gaps(tmp_path: Path, gap: str) -> None:
+    record = _record(0, 0)
+    record["reward"] = 0.0
+    record["ng_trajectory"]["gaps"] = [{"code": gap}]
+    path = _write_fixture(tmp_path, [(record, [_call()])])
+    before = path.read_bytes()
+
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+
+    assert result.rollouts[0].responses is None
+    assert json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]["unknown"] == 1
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"output": 1},
+        {"choices": 1},
+        {"output": [{}]},
+        {"output": [{"type": None}]},
+        {"output": [{"type": 7}]},
+        {"output": [{"type": ""}]},
+        {"output": [{"type": "   "}]},
+        {"output": [{"type": "function_call", "name": "", "call_id": "", "arguments": ""}]},
+        {"output": [{"type": "function_call", "name": " ", "call_id": "call-1", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "lookup", "call_id": "", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "lookup", "call_id": None, "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": 123, "call_id": "call-1", "arguments": "{}"}]},
+    ],
+)
+def test_response_population_faults_malformed_raw_output(tmp_path: Path, response: dict) -> None:
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response)])])
+    before = path.read_bytes()
+
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": ["c1"]}
+    stats = json.loads(result.summary_path.read_text())["run"]["stats"]["responses"]
+    assert stats["selected"] == 1 and stats["faulted"] == 1 and stats["unknown"] == 0
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        {"output_text": "ordinary answer"},
+        {"output": [{"type": "function_call", "name": "get_weather", "call_id": "call-1", "arguments": "{}"}]},
+        {"output": [{"type": "function_call", "name": "no_args", "call_id": "call-2", "arguments": ""}]},
+        {"output": [{"type": "custom_tool_call", "name": "custom", "input": "value"}]},
+        {"output": [{"type": "web_search_call", "status": "completed"}]},
+        {"choices": [{"message": {"content": None, "refusal": "Cannot help with this request"}}]},
+    ],
+)
+def test_response_population_keeps_supported_actionable_output(tmp_path: Path, response: dict) -> None:
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response)])])
+    before = path.read_bytes()
+
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": []}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        [{"id": "", "type": "function", "function": {"name": "", "arguments": ""}}],
+        [{"id": "call-1", "type": "function"}],
+        [{"id": " ", "type": "function", "function": {"name": "lookup"}}],
+        [{"id": "call-1", "type": "function", "function": {"name": " "}}],
+        [{"id": 1, "type": "custom", "custom": {"name": "lookup"}}],
+        [{"id": "call-1", "type": "custom", "custom": {"name": None}}],
+        {"id": "call-1"},
+        "not-a-list",
+        1,
+    ],
+)
+def test_chat_tool_identity_is_required_in_persisted_response_population(tmp_path, calls):
+    response = {"choices": [{"finish_reason": "stop", "message": {"content": None, "tool_calls": calls}}]}
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response, finish_reason="stop")])])
+    before = path.read_bytes()
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": ["c1"]}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "no_args", "arguments": ""}}]},
+        {"tool_calls": [{"id": "call-1", "type": "custom", "custom": {"name": "custom", "input": ""}}]},
+        {"content": "ordinary wrong answer"},
+        {"refusal": "I cannot help with this request"},
+    ],
+)
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_chat_actionable_output_and_length_fault_remain_distinct(tmp_path, message, finish_reason):
+    response = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response, finish_reason=finish_reason)])])
+    before = path.read_bytes()
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": ["c1"] if finish_reason == "length" else []}
+    assert path.read_bytes() == before
 
 
 @pytest.mark.parametrize(

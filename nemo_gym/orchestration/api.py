@@ -421,9 +421,9 @@ ComputeConfig = Annotated[
 
 
 class ResumeConfig(_StrictModel):
-    # Non-timeout failures (job script bugs, OOM, etc.) are resubmitted at most this many
-    # times, so a broken benchmark doesn't requeue forever.
-    max_retries: int = 3
+    # Non-timeout failures, including preemption/node loss, are retried at most this many times.
+    # Scheduler TIMEOUT continues planned segments within max_walltime; it is not a model timeout.
+    max_retries: int = Field(default=3, ge=0)
     # Optional cap on the chain's total accumulated walltime, as a Slurm-style
     # duration string (e.g. "48:00:00"). None means resume until max_retries is
     # hit on a non-timeout failure, or the job completes/is cancelled.

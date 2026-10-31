@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -75,7 +76,15 @@ class KubernetesExecutor(BaseExecutor):
 
     name = "kubernetes"
 
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+    def resubmit(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        keep_budget: bool = False,
+        accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
+    ) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
@@ -139,6 +148,7 @@ class KubernetesExecutor(BaseExecutor):
             submitted_by=getpass.getuser(),
             benchmarks=benchmarks,
             executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
+            environment=self.submission_environment(config, required_env=[], forwarded_env=[]),
         )
         # The manifest/config write already happened in each Job's own apply (kubernetes_script.py),
         # so write_manifest is a no-op here; only persist()'s local index write matters.
@@ -172,6 +182,7 @@ class KubernetesExecutor(BaseExecutor):
                 submitted_by=getpass.getuser(),
                 benchmarks=[BenchmarkJob(benchmark=name, job_dir=str(run_dir), job_id=name_in_cluster)],
                 executor_metadata={"namespace": compute.namespace, "context": compute.context or ""},
+                environment=self.submission_environment(config, required_env=[], forwarded_env=[]),
             )
             job = build_job_manifest(
                 config,

@@ -1636,8 +1636,10 @@ class TestRunVerificationPayloads:
         mock_client.global_config_dict = {}
         posted_to: list[tuple[str, str]] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted_to.append((server_name, json[AGENT_REF_KEY_NAME]["name"]))
+            # A /verify that may have been delivered is never resent: the verifier may already have graded it.
+            assert options == {"_resend_after_disconnect": False}
             return MagicMock()
 
         mock_client.post = capture_post
@@ -1653,7 +1655,7 @@ class TestRunVerificationPayloads:
         mock_client.global_config_dict = {}
         posted_rows: list[dict] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted_rows.append(json)
             return MagicMock()
 
@@ -2002,7 +2004,7 @@ class TestCallAggregateMetrics:
 
         posted: list[tuple[str, list]] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append((server_name, json.verify_responses))
             return MagicMock()
 
@@ -2089,7 +2091,7 @@ class TestCallAggregateMetrics:
         """A row whose AGENT_REF has no name contributes nothing (it can't be routed to an RS)."""
         posted: list[str] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append(server_name)
             return MagicMock()
 
@@ -2410,7 +2412,7 @@ class TestRolloutReverificationRunFromConfig:
         mock_client.get = capture_reverify_mode
         posted_rows: list[dict] = []
 
-        async def capture_verify(server_name: str, url_path: str, json: dict) -> object:
+        async def capture_verify(server_name: str, url_path: str, json: dict, **options: object) -> object:
             assert server_name == "fixture-rs"
             assert url_path == "/verify"
             posted_rows.append(json)
@@ -2708,7 +2710,7 @@ class TestRolloutReverificationRunFromConfig:
         mock_client.global_config_dict = {}
         verify_calls: list[tuple[str, dict]] = []
 
-        async def capturing_post(server_name, url_path, json):  # noqa: ARG001
+        async def capturing_post(server_name, url_path, json, **options):  # noqa: ARG001
             verify_calls.append((server_name, json))
             return MagicMock(headers={})
 
@@ -3112,7 +3114,7 @@ class TestResumeOfOutputCachedWithoutIdentityStamps:
         monkeypatch.setattr("nemo_gym.rollout_reverification._run_verification_payloads", fake_run)
         client = MagicMock(global_config_dict={})
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append(sorted(r[TASK_INDEX_KEY_NAME] for r in json.verify_responses))
             return MagicMock()
 
@@ -3814,7 +3816,7 @@ class TestVerifyAggregationRoutingConsistency:
 
         posted: list[str] = []
 
-        async def capture_post(server_name, url_path, json):  # noqa: ARG001
+        async def capture_post(server_name, url_path, json, **options):  # noqa: ARG001
             posted.append(server_name)
             return MagicMock()
 

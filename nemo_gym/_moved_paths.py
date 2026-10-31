@@ -386,6 +386,10 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # Moved, and still imported by batch_status for its own use.
         **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
     },
+    "nemo_gym.exporters.base": {
+        # Imported by the exporter base before it masked a plain container copy instead.
+        **_names("nemo_gym.config.secret_utils", "0.8.0", "recursively_hide_secrets"),
+    },
 }
 
 

@@ -678,6 +678,207 @@ def e2e_rollout_collection():  # pragma: no cover
         mark_run_failed()
         raise
 
+    _finalize_live_exporters(output_fpath)
+
+
+def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
+    """Project the existing saved-evidence health calculation under the caller's run lock.
+
+    This is not tracking acceptance. Unknown health exports a known=0 signal, never a healthy rate.
+    Scientific aggregate entries and scores remain unchanged; only the reserved run metadata is replaced.
+    """
+    import subprocess
+    import tempfile
+
+    from nemo_gym.artifacts.exporters.base import _artifact_version
+    from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.orchestration.recovery import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+        IdentityState,
+        _observed_trial_operations,
+        decide_from_collected,
+        response_health,
+        select_managed_evidence,
+        trial_health,
+    )
+
+    artifacts = RunArtifacts(output)
+    version = _artifact_version(artifacts)
+    health_version = health_source_artifacts(artifacts, version)
+    try:
+        aggregate_bytes = artifacts.aggregate_metrics_json_fpath.read_bytes()
+        aggregate = json.loads(aggregate_bytes)
+    except (OSError, ValueError):
+        # The exporter's existing artifact validation owns missing or malformed aggregate errors.
+        return {}
+    if (
+        not isinstance(aggregate, list)
+        or not aggregate
+        or any(not isinstance(entry, dict) or not isinstance(entry.get("agent_ref"), dict) for entry in aggregate)
+    ):
+        return {}
+    health = output.parent / QUALITY_SUMMARY_FILENAME
+    health_bytes = health.read_bytes() if health.is_file() else None
+    try:
+        summary = json.loads(health_bytes) if health_bytes is not None else None
+    except ValueError:
+        summary = None
+    metrics: dict[str, int | float] = {
+        "health/response/known": 0,
+        "health/response/passed": 0,
+        "health/trial/known": 0,
+        "health/trial/passed": 0,
+        "health/grading_recovery/known": 0,
+        "health/upstream_recovery/known": 0,
+        "health/trial/counts_known": 0,
+    }
+    # The ordinary collector reads these exact conventional paths. Other layouts retain explicit UNKNOWN.
+    job = output.parent.parent
+    if output.name == "rollouts.jsonl" and output.parent.name == "artifacts":
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+        )
+        collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
+        decision = decide_from_collected(collected, max_infra_retries=None, max_walltime_s=None, live_job=None)
+        quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
+        response, _ = response_health(decision, quality)
+        trial, _ = trial_health(decision, collected)
+        if response is not None:
+            counts = quality["responses"]
+            metrics.update(
+                {
+                    "health/response/known": 1,
+                    "health/response/passed": int(response),
+                    "health/response/faulted": counts["faulted"],
+                    "health/response/selected": counts["selected"],
+                    "health/response/failure_rate": counts["faulted"] / counts["selected"],
+                }
+            )
+        if trial is not None:
+            failures = []
+            exact = _observed_trial_operations(decision, collected, grading_failures=failures)
+            failed = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(failures)
+            metrics.update(
+                {
+                    "health/trial/known": 1,
+                    "health/trial/passed": int(trial),
+                    "health/trial/counts_known": int(exact),
+                    "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
+                    "health/trial/expected": decision.expected,
+                    "health/trial/failure_rate" if exact else "health/trial/failure_rate_lower_bound": failed
+                    / decision.expected,
+                }
+            )
+        if trial is None and decision.expected > 0:
+            # A known terminal model failure remains a lower bound when other trial facts are unobserved.
+            lower_bound = decision.counts.get(IdentityState.MODEL_FINAL, 0)
+            metrics.update(
+                {
+                    "health/trial/expected": decision.expected,
+                    "health/trial/failed_lower_bound": lower_bound,
+                    "health/trial/failure_rate_lower_bound": lower_bound / decision.expected,
+                }
+            )
+        upstream = (quality or {}).get("observed_upstream_recovery")
+        upstream_keys = (
+            "observed_attempt_errors",
+            "observed_failed_operations",
+            "recovered_attempt_errors",
+            "recovered_operations",
+            "operations_without_terminal_observation",
+        )
+        if isinstance(upstream, dict) and all(
+            type(upstream.get(key)) is int and upstream[key] >= 0 for key in upstream_keys
+        ):
+            metrics["health/upstream_recovery/known"] = 1
+            metrics.update({f"health/upstream_recovery/{key}": upstream[key] for key in upstream_keys})
+        recovery = {}
+        if _observed_trial_operations(decision, collected, judge_recovery=recovery, grading_failures=[]):
+            metrics["health/grading_recovery/known"] = 1
+            metrics.update({f"health/grading_recovery/{key}": value for key, value in recovery.items()})
+    if (
+        _artifact_version(artifacts) != version
+        or health_source_artifacts(artifacts, version) != health_version
+        or (health.read_bytes() if health.is_file() else None) != health_bytes
+    ):
+        raise RuntimeError("Run artifacts changed while deriving health metrics.")
+    payload = {
+        "source_artifacts": health_version,
+        "metrics": metrics,
+    }
+    for entry in aggregate:
+        entry.pop("_ng_run_health_metrics", None)
+    aggregate[0]["_ng_run_health_metrics"] = payload
+    # Refuse collisions before changing artifacts or sending any health metric to a live exporter.
+    flatten_aggregate_metrics(aggregate, source_artifacts=health_version)
+
+    def atomic_json(path, value):
+        with tempfile.NamedTemporaryFile(
+            mode="w", encoding="utf-8", dir=path.parent, prefix=f".{path.name}.", delete=False
+        ) as stream:
+            temporary = Path(stream.name)
+            json.dump(value, stream, indent=2)
+            stream.write("\n")
+        try:
+            temporary.replace(path)
+        finally:
+            temporary.unlink(missing_ok=True)
+
+    atomic_json(artifacts.aggregate_metrics_json_fpath, aggregate)
+    if (
+        isinstance(summary, dict)
+        and isinstance(summary.get("run"), dict)
+        and isinstance(summary["run"].get("stats"), dict)
+    ):
+        summary["run"]["stats"]["acceptance_health"] = payload
+        atomic_json(health, summary)
+    return metrics
+
+
+def _finalize_live_exporters(output: Path) -> None:
+    """Verify final persisted coverage and health before certifying an active live exporter."""
+    from nemo_gym.artifacts.exporters import get_exporters, run_failed
+    from nemo_gym.artifacts.exporters.base import _artifact_version
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.rollout_health import _health_artifact_digests, _report_sources
+    from nemo_gym.rollout_recovery import run_lock
+    from nemo_gym.rollout_store import RolloutStore
+
+    exporters = get_exporters()
+    if not exporters or run_failed():
+        return
+    try:
+        with run_lock(output):
+            artifacts = RunArtifacts(output)
+            version = _artifact_version(artifacts)
+            store = RolloutStore.read(output, import_legacy=False)
+            if store is None or store.coverage().get("complete") is not True:
+                return
+            health = output.parent / QUALITY_SUMMARY_FILENAME
+            health_bytes = health.read_bytes()
+            summary = json.loads(health_bytes)
+            if summary["run"].get("rollouts") != _report_sources([output], output.parent):
+                return
+            if summary["run"]["provenance"].get("rollout_artifact_digests") != _health_artifact_digests([output]):
+                return
+            if any(version[key] is None for key in version):
+                return
+            if any(artifacts.export_done_fpath(exporter.name).exists() for exporter in exporters):
+                return
+            health_metrics = _prepare_run_health_metrics(output)
+            version = _artifact_version(artifacts)
+            health_bytes = health.read_bytes()
+            for exporter in exporters:
+                exporter.export_metrics(health_metrics)
+                if health.read_bytes() != health_bytes or _artifact_version(artifacts) != version:
+                    raise RuntimeError("Final run artifacts changed before live finalization.")
+                exporter.finalize_live(artifacts, version)
+    except Exception as exc:
+        # Tracking failure never changes scores or requests another model attempt.
+        logging.getLogger(__name__).warning("Live tracking completion remains unverified: %s", exc, exc_info=True)
+
 
 _terminated = False
 
@@ -809,6 +1010,7 @@ def collect_rollouts():  # pragma: no cover
     finally:
         shutdown_telemetry()
     _exit_if_terminated()
+    _finalize_live_exporters(Path(config.output_jsonl_fpath))
 
 
 @exit_cleanly_on_config_error
@@ -864,7 +1066,18 @@ def export_run() -> None:  # pragma: no cover
     )
     name = global_config_dict.get("exporter") or DEFAULT_RUN_EXPORTER
     exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
-    result = exporter.export(RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath))
+    from nemo_gym.rollout_recovery import run_lock
+
+    artifacts = RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath)
+    from nemo_gym.artifacts.exporters.base import BaseExporter
+
+    if isinstance(exporter, BaseExporter):
+        with run_lock(artifacts.rollouts_jsonl_fpath):
+            if not artifacts.export_done_fpath(name).exists():
+                _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+            result = exporter.export(artifacts)
+    else:
+        result = exporter.export(artifacts)
 
     print(f"Export {name}: {result.state.value}")
     for key, value in result.detail.items():
@@ -880,11 +1093,13 @@ def reverify_rollouts():  # pragma: no cover
 
     rh = RunHelper()
     rh.start(None)
+    try:
+        config = RolloutReverificationConfig.model_validate(get_global_config_dict())
+        rrh = RolloutReverificationHelper()
 
-    config = RolloutReverificationConfig.model_validate(get_global_config_dict())
-    rrh = RolloutReverificationHelper()
-
-    asyncio.run(rrh.run_from_config(config))
+        asyncio.run(rrh.run_from_config(config))
+    finally:
+        rh.shutdown()  # stop the servers this command started
 
 
 @exit_cleanly_on_config_error

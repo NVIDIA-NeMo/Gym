@@ -59,5 +59,5 @@ class RunArtifacts:
         return exporter_run_id_path_for(self.rollouts_jsonl_fpath, exporter)
 
     def export_done_fpath(self, exporter: str) -> Path:
-        """Marker a post-run export writes, holding the backend run id, once the whole run has been sent."""
+        """Receipt written after verified delivery of the whole run, either live or by a post-run export."""
         return export_done_path_for(self.rollouts_jsonl_fpath, exporter)

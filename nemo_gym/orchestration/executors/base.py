@@ -14,14 +14,29 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import ClassVar
 
 import yaml
+from pydantic import BaseModel
 
 from nemo_gym.orchestration.api import HOST_ENV_REFS, SubmitConfig
-from nemo_gym.orchestration.jobs import MANIFEST_NAME, RESOLVED_CONFIG_NAME, BenchmarkJob, SubmissionRecord
+from nemo_gym.orchestration.jobs import (
+    MANIFEST_NAME,
+    RESOLVED_CONFIG_NAME,
+    BenchmarkJob,
+    SubmissionEnvironment,
+    SubmissionRecord,
+    SubmissionTelemetry,
+)
+from nemo_gym.orchestration.recovery import (
+    CollectedEvidence,
+    RecoveryAction,
+    RecoveryDecision,
+    RecoveryOutcome,
+    RecoveryOutcomePolicyConfig,
+)
 
 
 class UnsupportedOperationError(RuntimeError):
@@ -45,14 +60,96 @@ class BaseExecutor(ABC):
         raises.
         """
 
+    def recovery_evidence(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        score_key: list[str | int] | None = None,
+        score_agent: str | None = None,
+        score_environment: str | None = None,
+        outcome_policy: RecoveryOutcomePolicyConfig | None = None,
+    ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
+        """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
+        return self.recovery_decision(record, benchmark), None
+
+    def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
+        """Decide from the run's persisted evidence whether ``resubmit`` may queue it; without a collector, stop."""
+        return RecoveryDecision(
+            action=RecoveryAction.STOP,
+            reason=f"{type(self).__name__} cannot collect the run's evidence, so a resubmit is not decided",
+            expected=0,
+            counts={},
+            identities={},
+            evidence=[],
+        )
+
+    def reverify_judge_failures(
+        self, record: SubmissionRecord, benchmark: str, decision: RecoveryDecision
+    ) -> RecoveryOutcome:
+        """Re-judge the run's saved judge-failed answers; executors without a saved-answer path report that."""
+        return RecoveryOutcome(
+            decision=decision,
+            ok=False,
+            dispatched=None,
+            unsupported=f"{type(self).__name__} has no saved-answer re-judgment; run `gym eval reverify "
+            "--judge-failed-only` on the run's artifacts. The policy is not queued.",
+        )
+
     @abstractmethod
-    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+    def resubmit(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        *,
+        keep_budget: bool = False,
+        accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
+    ) -> BenchmarkJob:
         """Queue `benchmark` of `record` again, in place, and return its updated entry.
+
+        ``keep_budget`` (used by recovery) keeps the run's spent retry, walltime and attempt budget instead of
+        starting a fresh one.
 
         Refuses while a job of that benchmark is still active, so two jobs never write one run.
         Persists the updated record before returning. An executor that cannot do this raises
         `UnsupportedOperationError`.
         """
+
+    @staticmethod
+    def submission_environment(
+        config: SubmitConfig, *, required_env: list[str], forwarded_env: list[str]
+    ) -> SubmissionEnvironment:
+        """Capture known names and resolved controls without inspecting environment values.
+
+        Executors pass the names their actual transport required/forwarded. Host references
+        are already retained by config validation, including nested service configurations.
+        """
+        required = set(required_env)
+
+        def host_inputs(model: BaseModel) -> None:
+            required.update(
+                reference.removeprefix("host:") for reference in getattr(model, "_host_env_refs", {}).values()
+            )
+            for name in type(model).model_fields:
+                if name == "env":
+                    continue  # Never enumerate resolved literal/credential values.
+                child = getattr(model, name)
+                if isinstance(child, BaseModel):
+                    host_inputs(child)
+                elif isinstance(child, dict):
+                    for value in child.values():
+                        if isinstance(value, BaseModel):
+                            host_inputs(value)
+
+        host_inputs(config)
+        return SubmissionEnvironment(
+            required_env=sorted(required),
+            forwarded_env=forwarded_env,
+            telemetry=SubmissionTelemetry(
+                enabled=config.otel.enabled, token_env=config.otel.token_env, remote_export=config.otel.remote_export
+            ),
+        )
 
     def persist(
         self,

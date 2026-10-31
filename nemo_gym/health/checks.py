@@ -290,6 +290,8 @@ def _normalized_trajectory_calls(trajectory: dict[str, Any]) -> list[dict[str, A
                 "finish_reason": metadata.get("finish_reason"),
                 "error_category": metadata.get("error_category"),
                 "upstream_attempted": metadata.get("upstream_attempted"),
+                "failure_report": metadata.get("failure_report"),
+                "model_operations": metadata.get("model_operations"),
                 "upstream_status_code": metadata.get("upstream_status_code"),
                 "local_response_reason": metadata.get("local_response_reason"),
                 "tokens_in": tokens.get("prompt_tokens"),
@@ -491,6 +493,24 @@ def _call_locator(call: dict[str, Any], fallback: int) -> dict[str, int | str]:
     return {"call_id": str(call.get("model_call_id") or call.get("response_id") or fallback)}
 
 
+def _chat_has_usable_tool_call(calls: Any) -> bool:
+    if not isinstance(calls, list):
+        return False
+    for call in calls:
+        if not isinstance(call, dict) or call.get("type") not in ("function", "custom"):
+            continue
+        payload = call.get(call["type"])
+        if (
+            isinstance(call.get("id"), str)
+            and call["id"].strip()
+            and isinstance(payload, dict)
+            and isinstance(payload.get("name"), str)
+            and payload["name"].strip()
+        ):
+            return True
+    return False
+
+
 def _response_has_usable_output(response: Any) -> bool:
     """Whether a saved response holds something the agent can act on: answer text, a refusal or a tool call, in the
     Responses, Chat Completions or Messages shape. Reasoning alone, a summary of it included, is not usable."""
@@ -498,8 +518,19 @@ def _response_has_usable_output(response: Any) -> bool:
         return False
     if _nonempty(response.get("output_text")):
         return True
-    for item in response.get("output") or []:
-        if not isinstance(item, dict) or item.get("type") == "reasoning":
+    output = response.get("output")
+    for item in output if isinstance(output, list) else []:
+        if (
+            not isinstance(item, dict)
+            or not isinstance(item.get("type"), str)
+            or not item["type"].strip()
+            or item["type"] == "reasoning"
+        ):
+            continue
+        if item["type"] == "function_call":
+            # Empty required strings pass response-schema validation but cannot identify an executable call.
+            if all(isinstance(item.get(key), str) and item[key].strip() for key in ("name", "call_id")):
+                return True
             continue
         # Any other output item is a tool call of some kind.
         if item.get("type") != "message" or _nonempty(item.get("content")):
@@ -512,11 +543,17 @@ def _response_has_usable_output(response: Any) -> bool:
             block.get("type") == "tool_use" or (block.get("type") == "text" and _nonempty(block.get("text")))
         ):
             return True
-    for choice in response.get("choices") or []:
+    choices = response.get("choices")
+    for choice in choices if isinstance(choices, list) else []:
         if not isinstance(choice, dict):
             continue
         message = choice.get("message") if isinstance(choice.get("message"), dict) else {}
-        if _nonempty(choice.get("text")) or _nonempty(message.get("content")) or message.get("tool_calls"):
+        if (
+            _nonempty(choice.get("text"))
+            or _nonempty(message.get("content"))
+            or _nonempty(message.get("refusal"))
+            or _chat_has_usable_tool_call(message.get("tool_calls"))
+        ):
             return True
     return False
 

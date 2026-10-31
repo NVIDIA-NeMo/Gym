@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import hashlib
 import logging
+import math
 import os
 import warnings
 from collections import Counter, defaultdict
@@ -47,6 +48,7 @@ from nemo_gym.health.checks import (
     _is_successful,
     _normalized_trajectory_calls,
     _replay_identity,
+    _response_has_usable_output,
     _subject,
     _token_count,
     _trajectory_has_any_gap,
@@ -78,7 +80,12 @@ from nemo_gym.health.types import (
 from nemo_gym.rollout_records import RUN_ID_KEY, resolve_rollout_path
 from nemo_gym.rollout_recovery import manifest_path_for
 from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
-from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+from nemo_gym.utils.path_utils import (
+    aggregation_sources_path_for,
+    failures_path_for,
+    materialized_path_for,
+    resolved_config_path_for,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -279,13 +286,26 @@ def evaluate_record(
         policy_calls_observed=turn_call_scope_complete and turn_bindings.complete,
         model_calls=len(calls),
         successful_model_calls=sum(_is_successful(call) for call in turn_bindings.matched_calls),
+        responses=_response_population(
+            turn_call_scope_complete
+            and model_calls_observed
+            and not _trajectory_has_any_gap(
+                trajectory or {}, frozenset({"model_call_capture_pending", "model_call_capture_no_records"})
+            ),
+            turn_bindings,
+        ),
         model_call_errors=len(failed),
+        upstream_recovery_observations=_observed_upstream_recovery(calls),
         model_call_errors_usage_unknown=sum(
             _is_failed_attempt(call) and (call.get("tokens_in") is None or call.get("tokens_out") is None)
             for call in failed
         ),
         errors_by_status=dict(errors_by_status),
         ended_on_error=model_calls_observed and _ended_on_failed_call(calls),
+        context_window_exceeded=_context_window_exceeded(record),
+        verification_skipped=(
+            record.get("verification_skipped") if isinstance(record.get("verification_skipped"), bool) else None
+        ),
         duplicated_calls=duplicated,
         transcript_prompt_tokens=transcript_prompt,
         transcript_completion_tokens=transcript_completion,
@@ -293,6 +313,50 @@ def evaluate_record(
         capture_completion_tokens=sum(_token_count(call, "tokens_out") for call in calls),
         timing=read_rollout_timing(record),
     )
+
+
+def _observed_upstream_recovery(calls: list[dict[str, Any]]) -> dict[str, int] | None:
+    """Count only observed failed attempts and explicitly completed operations; never certify completeness."""
+    attempts = {}
+    outcomes = {}
+    for call in calls:
+        report = call.get("failure_report")
+        operations = call.get("model_operations")
+        if isinstance(report, dict):
+            for event_id, event in (report.get("events") or {}).items():
+                if (
+                    isinstance(event, dict)
+                    and event.get("boundary") == "model"
+                    and event.get("operation") == "model_request"
+                    and event.get("operation_id")
+                    and event.get("attempt_id")
+                ):
+                    attempts[event_id] = event["operation_id"]
+        for observation in operations if isinstance(operations, list) else []:
+            if not isinstance(observation, dict) or not observation.get("operation_id"):
+                continue
+            if observation.get("outcome") in {"completed", "failed"}:
+                outcome = observation["outcome"]
+                # A 2xx header alone cannot recover a call whose body subsequently failed.
+                if outcome == "completed" and (
+                    type(call.get("status_code")) is not int
+                    or not 200 <= call["status_code"] < 400
+                    or _is_failed(call)
+                ):
+                    continue
+                outcomes.setdefault(observation["operation_id"], set()).add(outcome)
+    if not attempts:
+        return None  # No failed-attempt observation is not proof that no earlier failure occurred.
+    failed_operations = set(attempts.values())
+    completed = {operation for operation, values in outcomes.items() if values == {"completed"}}
+    ended = {operation for operation, values in outcomes.items() if len(values) == 1}
+    return {
+        "observed_attempt_errors": len(attempts),
+        "observed_failed_operations": len(failed_operations),
+        "recovered_attempt_errors": sum(operation in completed for operation in attempts.values()),
+        "recovered_operations": len(failed_operations & completed),
+        "operations_without_terminal_observation": len(failed_operations - ended),
+    }
 
 
 def _index_jsonl(paths: Sequence[Path], *, source_indices: Mapping[str, int] | None = None) -> list[_LineSlice]:
@@ -424,6 +488,44 @@ def _task_findings(
     return findings, coverage
 
 
+def _response_population(scope_complete: bool, bindings: Any) -> dict[str, list[str]] | None:
+    """The call ids of the rollout's verified successful raw model responses selected for evaluation, and of the
+    faulted ones among them. IDs only: no response text is kept.
+
+    Selected means bound to an agent turn of a complete call scope. A bound call that failed is a trial matter and
+    is left out. Every other bound call must carry an explicit 2xx/3xx status, a raw response and a call id, or the
+    population is unknown. A fault is judged from the raw output itself: a length-limited finish that is not a
+    length refusal (truncated), or an output with nothing usable (`_response_has_usable_output`: empty, reasoning
+    only or malformed). Token counts alone are never a fault.
+    """
+    if not scope_complete or not bindings.complete:
+        return None
+    selected: list[str] = []
+    faulted: list[str] = []
+    for call in bindings.matched_calls:
+        status = call.get("status_code")
+        # The SSE capture marks a stream that stopped on its output budget as failed; the model still answered.
+        length_incomplete = (
+            type(status) is int
+            and 200 <= status < 400
+            and isinstance(call.get("response"), dict)
+            and call.get("response_status") == "incomplete"
+            and call.get("error_category") == "incomplete"
+            and call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS
+            and not _is_length_refusal(call)
+        )
+        if _is_failed(call) and not length_incomplete:
+            continue
+        identity = str(call.get("model_call_id") or call.get("response_id") or "")
+        if type(status) is not int or not 200 <= status < 400 or call.get("response") is None or not identity:
+            return None
+        selected.append(identity)
+        truncated = call.get("finish_reason") in _LENGTH_LIMIT_FINISH_REASONS and not _is_length_refusal(call)
+        if truncated or not _response_has_usable_output(call["response"]):
+            faulted.append(identity)
+    return {"selected": sorted(selected), "faulted": sorted(faulted)}
+
+
 def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dict[str, Any]:
     records_by_task: dict[int | str, list[RolloutDigest]] = defaultdict(list)
     for digest in digests:
@@ -444,6 +546,7 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
     issues = Counter(finding.check for digest in digests for finding in digest.findings)
     issues.update(finding.check for findings in task_findings.values() for finding in findings)
     verdicts = Counter(digest.verdict for digest in digests)
+    selected_ids = Counter(i for digest in digests if digest.responses for i in digest.responses["selected"])
     error_statuses: Counter[str] = Counter()
     for digest in digests:
         error_statuses.update(digest.errors_by_status)
@@ -475,14 +578,48 @@ def _reduce(digests: list[RolloutDigest], ignored_checks: frozenset[str]) -> dic
             },
             "issues": {spec.id: issues[spec.id] for spec in CHECK_REGISTRY},
             "stats": {
+                "observed_upstream_recovery": (
+                    {
+                        key: sum((d.upstream_recovery_observations or {}).get(key, 0) for d in digests)
+                        for key in (
+                            "observed_attempt_errors",
+                            "observed_failed_operations",
+                            "recovered_attempt_errors",
+                            "recovered_operations",
+                            "operations_without_terminal_observation",
+                        )
+                    }
+                    if any(d.upstream_recovery_observations is not None for d in digests)
+                    else None
+                ),
                 "model_call_errors": {
                     "total": sum(digest.model_call_errors for digest in digests),
                     "by_status": dict(sorted(error_statuses.items())),
                     "rollouts_affected": sum(bool(digest.model_call_errors) for digest in digests),
                     "ended_on_error": sum(digest.ended_on_error for digest in digests),
+                    # Rows by their own step_usage: a sub-step recorded context_window_exceeded, none, or no step_usage.
+                    "context_window_exceeded": {
+                        "true": sum(digest.context_window_exceeded is True for digest in digests),
+                        "false": sum(digest.context_window_exceeded is False for digest in digests),
+                        "absent": sum(digest.context_window_exceeded is None for digest in digests),
+                    },
+                    # Rows by their own verification_skipped: written True, written False, or not written.
+                    "verification_skipped": {
+                        "true": sum(digest.verification_skipped is True for digest in digests),
+                        "false": sum(digest.verification_skipped is False for digest in digests),
+                        "absent": sum(digest.verification_skipped is None for digest in digests),
+                    },
                     # Failed calls with no finished response and no usage: the token checks skip them,
                     # and any tokens the server spent on them are counted nowhere else.
                     "usage_unknown": sum(digest.model_call_errors_usage_unknown for digest in digests),
+                },
+                # Counted by call id across the whole run, so a response selected twice is a duplicate, never two.
+                "responses": {
+                    "rollouts": len(digests),
+                    "unknown": sum(digest.responses is None for digest in digests),
+                    "selected": len(selected_ids),
+                    "faulted": len({i for d in digests if d.responses for i in d.responses["faulted"]}),
+                    "duplicated": sum(count > 1 for count in selected_ids.values()),
                 },
                 "duplicated_calls": {
                     "replayed": sum(digest.duplicated_calls for digest in digests),
@@ -746,6 +883,7 @@ def _write_reports(summary: dict[str, Any], digests: list[RolloutDigest], output
                 "verdict": digest.verdict,
                 "findings": findings,
                 "unobserved": digest.unobserved,
+                "responses": digest.responses,
             }
             if digest.stage_index is not None:
                 row["stage_index"] = digest.stage_index
@@ -819,6 +957,22 @@ def _with_captured_calls(rows: Iterable[dict[str, Any]], capture_dirs: Sequence[
         yield row if calls is None else {**row, "ng_model_call_capture": {"calls": calls}}
 
 
+def _health_artifact_digests(paths: Sequence[Path]) -> list[dict[str, str | None]]:
+    """Bind gate facts to saved rollout inputs, not to external captures or observation completeness."""
+    return [
+        {
+            name: _sha256(source) if source.is_file() else None
+            for name, source in {
+                "rollouts_jsonl_fpath": path,
+                "failures_jsonl_fpath": failures_path_for(path),
+                "materialized_inputs_jsonl_fpath": materialized_path_for(path),
+                "resolved_config_yaml_fpath": resolved_config_path_for(path),
+            }.items()
+        }
+        for path in paths
+    ]
+
+
 def run_health_checks(
     rollout_paths: Path | Sequence[Path],
     *,
@@ -856,6 +1010,7 @@ def run_health_checks(
     # A legacy run reached through a link keeps the link's name when its companions sit beside the link, as the
     # aggregation that read it did; otherwise its companions are the ones beside the file the link resolves to.
     paths = [resolve_rollout_path(path, read_only=True) for path in paths]
+    source_digests = _health_artifact_digests(paths)
     if needs_projection:
         source_indices = {}
         for index, path in enumerate(paths):
@@ -935,10 +1090,80 @@ def run_health_checks(
         for row in _jsonl_rows(failures_path_for(path))
     )
     summary["run"]["stats"]["timeouts"] = summarize_timeouts(timings, attempts).model_dump(mode="json")
+    # Preserve observations from unsuccessful writer rows as well as scored rows.
+    # These are known attempt/runtime facts; they do not establish a complete trial population.
+    observed_records = (
+        row
+        for path in paths
+        for source in (path, failures_path_for(path))
+        if source.is_file()
+        for row in _jsonl_rows(source)
+    )
+    observed_calls = []
+    runtime = {
+        "invocation_observations": 0,
+        "in_session": {"true": 0, "false": 0, "absent": 0},
+        "verification_skipped": {"true": 0, "false": 0, "absent": 0},
+        "row_elapsed_s": {"sum_observed": 0.0, "absent": 0},
+    }
+    for record in observed_records:
+        trajectory, _ = _canonical_trajectory(record)
+        if trajectory is not None:
+            # Keep only the bounded metadata needed below, rather than retaining all request/response payloads.
+            observed_calls.extend(
+                {
+                    key: call.get(key)
+                    for key in (
+                        "status_code",
+                        "response_status",
+                        "error_category",
+                        "failure_report",
+                        "model_operations",
+                    )
+                }
+                for call in _normalized_trajectory_calls(trajectory)
+            )
+            for invocation in trajectory.get("invocations") or []:
+                runtime["invocation_observations"] += 1
+                for key in ("in_session", "verification_skipped"):
+                    value = invocation.get(key)
+                    runtime[key][str(value).lower() if isinstance(value, bool) else "absent"] += 1
+        elapsed = record.get("_ng_elapsed_s")
+        if type(elapsed) in (int, float) and math.isfinite(elapsed) and elapsed >= 0:
+            runtime["row_elapsed_s"]["sum_observed"] += elapsed
+        else:
+            runtime["row_elapsed_s"]["absent"] += 1
+    summary["run"]["stats"]["observed_upstream_recovery"] = _observed_upstream_recovery(observed_calls)
+    summary["run"]["stats"]["observed_runtime"] = runtime
+    operations = {}
+    for call in observed_calls:
+        for operation in call.get("model_operations") or []:
+            # The producer's opaque ID is the join key, not capture position or retry-label parsing.
+            operations.setdefault(operation["operation_id"], []).append(operation)
+    effort = {}
+    for key in ("http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms"):
+        values = []
+        for observations in operations.values():
+            known = {
+                o[key]
+                for o in observations
+                if type(o.get(key)) in (int, float) and math.isfinite(o[key]) and o[key] >= 0
+            }
+            if len(known) == 1:
+                values.append(known.pop())
+        effort[key] = {
+            "sum_observed": sum(values) if values else None,
+            "operations_observed": len(values),
+            "operations_unknown": len(operations) - len(values),
+        }
+    summary["run"]["stats"]["observed_request_effort"] = effort
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
     _judge_run(artifacts, run_findings, run_coverage)
     summary["run"]["issues"][_RUN_FAILURES_CHECK] = len(run_findings)
     summary["run"]["findings"] = [finding.model_dump(mode="json", exclude={"subject"}) for finding in run_findings]
+    summary["run"]["provenance"] = run_provenance(paths[0])
+    if source_digests == _health_artifact_digests(paths):
+        summary["run"]["provenance"]["rollout_artifact_digests"] = source_digests
     report_dir = output_dir or paths[0].parent
     summary["run"][QUALITY_SUMMARY_SOURCES_KEY] = _report_sources(paths, report_dir)
     summary_path, verdicts_path = _write_reports(summary, digests, report_dir)
@@ -993,6 +1218,93 @@ def write_provisional_summary(
     summary_path.write_bytes(orjson.dumps({"run": run}, option=orjson.OPT_INDENT_2))
     (rollout_path.parent / ROLLOUT_VERDICTS_FILENAME).unlink(missing_ok=True)
     return summary_path
+
+
+def _flag(value: Any) -> bool | None:
+    """A config flag as written: a bool is known, anything else (absent, interpolated, malformed) is unknown."""
+    return value if isinstance(value, bool) else None
+
+
+def _context_window_exceeded(record: Mapping[str, Any]) -> bool | None:
+    """From the row's own `step_usage` (written by scicode_agent): a sub-step recorded as context_window_exceeded.
+
+    scicode_agent sets that status from a best-effort error-text match or model metadata, so it is a signal of a
+    context-window failure, not proof that the input was clipped.
+    """
+    steps = record.get("step_usage")
+    if not isinstance(steps, list) or not all(isinstance(s, dict) and isinstance(s.get("status"), str) for s in steps):
+        return None
+    return any(step["status"] == "context_window_exceeded" for step in steps)
+
+
+# The three MLflow name fields `MLFlowConfig.is_available` reads (its token check is not judged here).
+_MLFLOW_REQUIRED_NAMES = ("mlflow_tracking_uri", "mlflow_experiment_name", "mlflow_run_name")
+
+
+def _mlflow_configured(config: Mapping[str, Any]) -> bool | None:
+    """A names-only fact about the saved config snapshot: whether its three MLflow name fields are concrete.
+
+    True when all three are concrete strings, False when any is absent, null or empty, None when a value is
+    interpolated or not a string. It is not `MLFlowConfig.is_available` (the token, which the snapshot may mask, is
+    not judged) and says nothing about whether an exporter was activated, whether tracking was required or
+    disabled, or whether anything was delivered: overrides, resumes and post-run exports can differ from the
+    snapshot. No value is copied.
+    """
+    states = []
+    for key in _MLFLOW_REQUIRED_NAMES:
+        value = config.get(key)
+        if value is None or value == "":
+            states.append("missing")
+        elif isinstance(value, str) and value.strip() and "${" not in value:
+            states.append("set")
+        else:
+            states.append("unknown")
+    if "unknown" in states:
+        return None
+    return all(state == "set" for state in states)
+
+
+def run_provenance(rollout_path: Path) -> dict[str, Any]:
+    """Facts about how the run was configured, read from the resolved config saved beside the rollouts.
+
+    Only values the config states are reported: ``route_failures_to_sidecar`` and each agent's ``skip_verification``
+    are booleans when written as booleans and ``None`` otherwise, never a default. Each top-level server entry
+    reports its kind (``responses_api_agents``, ``resources_servers`` or ``environment_servers``), its implementation
+    key and, for an agent, the resources server it names. No values beyond these names and flags are copied.
+    """
+    import yaml
+
+    config_path = resolved_config_path_for(rollout_path)
+    try:
+        config = yaml.safe_load(config_path.read_text())
+    except FileNotFoundError:
+        return {"resolved_config": "absent"}
+    except (OSError, yaml.YAMLError, UnicodeDecodeError):
+        return {"resolved_config": "unreadable"}
+    if not isinstance(config, dict):
+        return {"resolved_config": "unreadable"}
+    servers: dict[str, Any] = {}
+    for name, entry in config.items():
+        if not isinstance(entry, dict):
+            continue
+        for kind in ("responses_api_agents", "resources_servers", "environment_servers"):
+            block = entry.get(kind)
+            if not isinstance(block, dict) or len(block) != 1:
+                continue
+            [(implementation, settings)] = block.items()
+            settings = settings if isinstance(settings, dict) else {}
+            fact: dict[str, Any] = {"kind": kind, "implementation": str(implementation)}
+            if kind == "responses_api_agents":
+                resources = settings.get("resources_server")
+                fact["resources_server"] = resources.get("name") if isinstance(resources, dict) else None
+                fact["skip_verification"] = _flag(settings.get("skip_verification"))
+            servers[str(name)] = fact
+    return {
+        "resolved_config": "read",
+        "route_failures_to_sidecar": _flag(config.get("route_failures_to_sidecar")),
+        "servers": servers,
+        "mlflow": {"configured": _mlflow_configured(config)},
+    }
 
 
 def _persisted_limits(run_dir: Path) -> RunHealthLimits:

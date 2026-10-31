@@ -174,7 +174,7 @@ class FakeMlflowClient:
     def log_dict(self, run_id: str, dictionary: dict[str, Any], artifact_file: str) -> None:
         self.artifacts[artifact_file] = deepcopy(dictionary)
 
-    def log_batch(self, run_id: str, params: tuple = ()) -> None:
+    def log_batch(self, run_id: str, params: tuple = (), synchronous: bool | None = None) -> None:
         for param in params:
             if self.params.get(param.key, param.value) != param.value:
                 raise MlflowException(
