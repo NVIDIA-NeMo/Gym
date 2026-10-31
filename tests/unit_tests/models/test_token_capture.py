@@ -2160,6 +2160,66 @@ def test_lineage_is_a_tree_so_forks_get_the_parent_not_the_previous_call():
     assert parent.match.cumulative_token_ids == (1, 2, 3)
 
 
+def _reasoning(text: str) -> dict:
+    return {"type": "reasoning", "summary": [{"type": "summary_text", "text": text}]}
+
+
+def _record_a_reasoning_only_call(lineage: RolloutLineage, call_id: str = "call-1", digest: str = "d1") -> list[dict]:
+    """call-0 answers; then a call whose whole output is reasoning (a model that never closed its <think>)."""
+    first = [{"role": "user", "content": "task"}]
+    lineage.record("call-0", first + [_reasoning("r0"), {"role": "assistant", "content": "A0"}], [1, 2], "d0", 1)
+    second = first + [{"role": "assistant", "content": "A0"}, {"role": "user", "content": "terminal output"}]
+    lineage.record(call_id, second + [_reasoning("r1")], [1, 2, 3, 4], digest, len(second))
+    return second
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        pytest.param([{"role": "assistant", "content": ""}], id="an-empty-message"),
+        pytest.param([_reasoning("r1")], id="the-reasoning-item"),
+        pytest.param([_reasoning("r1"), {"role": "assistant", "content": ""}], id="reasoning-and-an-empty-message"),
+        pytest.param([], id="nothing"),
+    ],
+)
+def test_lineage_continues_a_reasoning_only_call(echo: list[dict]):
+    """A reasoning-only output adds nothing to the assistant fingerprint (reasoning is not fingerprinted), so the
+    call shares its parent's continuation fingerprint and both contexts prefix the next request. The request
+    continues the later call, whose tokens include its parent's, whatever the harness echoed of that turn
+    (Terminus 2 echoes it as an empty message, or as the reasoning item with interleaved thinking)."""
+    lineage = RolloutLineage()
+    second = _record_a_reasoning_only_call(lineage)
+
+    parent = lineage.resolve(second + echo + [{"role": "user", "content": "parse error, answer again"}])
+
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-1"
+    assert parent.match.cumulative_token_ids == (1, 2, 3, 4)
+
+
+def test_lineage_resolves_a_retry_of_a_reasoning_only_call_to_that_calls_parent():
+    """A request that repeats a call's whole recorded context is that call again (a retry), not its continuation."""
+    lineage = RolloutLineage()
+    second = _record_a_reasoning_only_call(lineage)
+
+    parent = lineage.resolve(second)
+
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-0"
+
+
+def test_lineage_keeps_sibling_reasoning_only_calls_ambiguous():
+    """Two reasoning-only answers to the same request are siblings: neither is more recent, so refuse to guess."""
+    lineage = RolloutLineage()
+    second = _record_a_reasoning_only_call(lineage, "call-1a", "d1a")
+    lineage.record("call-1b", second + [_reasoning("another")], [1, 2, 5, 6], "d1b", len(second))
+
+    parent = lineage.resolve(second + [{"role": "user", "content": "parse error, answer again"}])
+
+    assert parent.status == ParentResolutionStatus.UNRESOLVED
+    assert parent.reason == "ambiguous"
+
+
 def test_lineage_index_is_bounded():
     """Bound worker-local lineage for abandoned rollouts."""
     index = LineageIndex(max_rollouts=3)

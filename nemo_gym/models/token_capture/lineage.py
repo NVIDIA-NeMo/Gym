@@ -318,6 +318,16 @@ class RolloutLineage:
             digests = {(node.digest, node.cum_len) for node in candidates}
             if len(digests) == 1 and candidates[0].digest:
                 candidates = [min(candidates, key=lambda node: node.call_id)]
+        if len(candidates) > 1:
+            # Reasoning is not fingerprinted, so a call whose output was reasoning only (a model that never closed
+            # its <think>) shares its parent's continuation fingerprint, and both continue the request. Their
+            # contexts both prefix the request, so the longer one extends the shorter: the request continues the
+            # most recent call, whose tokens include its ancestors', whatever the harness echoed of that turn.
+            # Calls with equal contexts are siblings (two answers to one request) and stay ambiguous.
+            longest = max(node.context_len for node in candidates)
+            most_recent = [node for node in candidates if node.context_len == longest]
+            if len(most_recent) == 1:
+                candidates = most_recent
         if len(candidates) != 1:
             return ParentResolutionStatus.UNRESOLVED, None, "no_match" if not candidates else "ambiguous"
         return ParentResolutionStatus.RESOLVED, candidates[0], reason
@@ -379,7 +389,8 @@ class RolloutLineage:
         if not node.context_digest:
             # Fail closed when no context digest is available.
             return False
-        if len(messages) < node.context_len:
+        if len(messages) <= node.context_len:
+            # A request that is a call's whole recorded context repeats that call (a retry); it does not continue it.
             return False
         return conversation_digest(messages[: node.context_len]) == node.context_digest
 

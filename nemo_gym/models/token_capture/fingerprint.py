@@ -152,7 +152,8 @@ def _is_assistant_authored(message: dict) -> bool:
     # Reasoning is deliberately excluded.
     # A harness need not echo standalone reasoning items.
     # Including reasoning would make fingerprints depend on the dialect and echo behavior.
-    # Reasoning-only collisions resolve as ambiguous and fall back.
+    # A reasoning-only call so shares its parent's fingerprint; lineage resolves that collision to the more recent
+    # call (RolloutLineage.resolve_node), and calls with equal contexts stay ambiguous.
     return message.get("type") in ("function_call", "custom_tool_call")
 
 

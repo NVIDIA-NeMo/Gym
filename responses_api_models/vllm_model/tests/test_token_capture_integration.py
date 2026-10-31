@@ -309,6 +309,106 @@ def test_external_staging_conversion_failure_does_not_commit(tmp_path, monkeypat
         asyncio.run(ledger.close())
 
 
+def _staging_app(
+    ledger: FileLineageStore, reply: Callable[[int, dict], None]
+) -> tuple[_CaptureMiddleware, list[CaptureAdmission | None]]:
+    """The external-staging route over an inference worker double that stages each admitted call.
+
+    ``reply(index, message)`` shapes the served message of the index-th call (1-based); every reply carries
+    reasoning_content, as Nemotron's do. Returns the app and the admissions the worker received, in order.
+    """
+    records = {}
+
+    class Sink:
+        def stage(self, record, *, attachments=None):
+            key = f"{record.capture_key}/{record.model_call_id}"
+            records[key] = record
+            return StageResult(ok=True, staging_key=key)
+
+    capture = RolloutTokenCapture(sink=Sink(), weight_version_fn=lambda: 7)
+    admissions: list[CaptureAdmission | None] = []
+
+    async def complete(**body):
+        admission = CaptureAdmission.model_validate(body[NG_CAPTURE_FIELD]) if NG_CAPTURE_FIELD in body else None
+        admissions.append(admission)
+        index = len(admissions)
+        payload = _completion([], [], f"answer {index}")
+        message = payload["choices"][0]["message"]
+        message["reasoning_content"] = f"reasoning {index}"
+        reply(index, message)
+        if admission is not None:
+            prefix = [token for key in admission.staging_chain for token in records[key].token_ids_delta]
+            coords = capture.complete_call(
+                capture.begin_call(admission, prefix_token_ids=prefix),
+                prompt_token_ids=prefix + [10 * index],
+                generated_token_ids=[100 + index],
+                generated_logprobs=[-0.1],
+            )
+            payload[NG_COMMIT_COORDS_FIELD] = coords.model_dump(mode="json")
+        return payload
+
+    backend = MagicMock(spec=NeMoGymAsyncOpenAI)
+    backend.create_chat_completion = AsyncMock(side_effect=complete)
+    model = _model(
+        backend, return_token_id_information=False, supply_prefix_token_ids=False, uses_reasoning_parser=True
+    )
+    model._external_capture_handler = VLLMWorkerCaptureHandler()
+    app = _CaptureMiddleware(
+        model.setup_webserver(),
+        store=None,
+        model_server_name="vllm_model",
+        lineage_store=ledger,
+        external_staging=True,
+        token_capture_enabled=True,
+    )
+    return app, admissions
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        pytest.param([{"role": "assistant", "content": ""}], id="an-empty-message"),
+        pytest.param(
+            [{"type": "reasoning", "id": "rs_echo", "summary": [{"type": "summary_text", "text": "reasoning 2"}]}],
+            id="the-reasoning-item",
+        ),
+    ],
+)
+def test_external_staging_continues_after_a_reasoning_only_reply(tmp_path, echo: list[dict]) -> None:
+    """A reply that is all reasoning (a <think> the model never closed, as Nemotron does on Terminus 2's JSON turns)
+    adds nothing to the assistant fingerprint, so its ledger row shares its parent's. The next request must still
+    continue it, through the ledger rows external staging resolves on, whether the harness echoes that turn as an
+    empty message (Terminus 2) or as the reasoning item (with interleaved thinking).
+    """
+
+    def reply(index: int, message: dict) -> None:
+        if index == 2:
+            message["content"] = ""
+
+    ledger = FileLineageStore(tmp_path)
+    app, admissions = _staging_app(ledger, reply)
+    url = "/ng-rollout/reasoning-only-rollout/training-token-capture/v1/responses"
+    history: list[dict] = [{"role": "user", "content": "question"}]
+    try:
+        with TestClient(app) as client:
+            first = client.post(url, json={"input": history})
+            assert first.status_code == 200, first.text
+            history += [*first.json()["output"], {"role": "user", "content": "output 1"}]
+            second = client.post(url, json={"input": history})
+            assert second.status_code == 200, second.text
+            assert not [item for item in second.json()["output"] if item["type"] != "reasoning"]
+            history += [*echo, {"role": "user", "content": "parse error, answer again"}]
+            third = client.post(url, json={"input": history})
+            assert third.status_code == 200, third.text
+        manifest = asyncio.run(ledger.manifest("reasoning-only-rollout"))
+        assert not manifest["failures"], manifest["failures"]
+        assert len(manifest["records"]) == 3
+        assert admissions[-1] is not None
+        assert admissions[-1].parent_call_id == admissions[-2].model_call_id
+    finally:
+        asyncio.run(ledger.close())
+
+
 def _completion(prompt: list[int], generation: list[int], content: str) -> dict[str, Any]:
     return {
         "id": f"completion-{content}",
