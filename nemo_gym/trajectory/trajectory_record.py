@@ -320,6 +320,19 @@ class SandboxObservation(ObservationModel):
     )
     resource_usage_source: Optional[str] = None
     error_type: Optional[str] = None
+    observed_client_interval_s: Optional[float] = Field(
+        default=None,
+        ge=0,
+        description="Client-observed interval from the provider's create return to its close return; "
+        "not the remote sandbox lifetime or its CPU time.",
+    )
+    teardown_confirmed: Optional[bool] = Field(
+        default=None,
+        description="Whether a provider close returned successfully; False means unconfirmed, not proof the sandbox remains alive. None if unattempted.",
+    )
+    cleanup_errors: list[str] = Field(
+        default_factory=list, description="Every failed close or client release, in order; kept after a retry."
+    )
 
 
 class ContextCompactionObservation(ObservationModel):

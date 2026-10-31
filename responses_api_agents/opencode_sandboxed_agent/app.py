@@ -1209,6 +1209,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         if trajectory is not None:
             response_dict["ng_trajectory"] = scope_opencode_trajectory(trajectory, body, rollout_id)
         raw_verifier_sandbox_observation = response_dict.pop("verifier_sandbox_observation", None)
+        raw_verifier_sandbox_observations = response_dict.pop("verifier_sandbox_observations", None)
+        if raw_verifier_sandbox_observations is None:
+            raw_verifier_sandbox_observations = (
+                [raw_verifier_sandbox_observation] if raw_verifier_sandbox_observation is not None else []
+            )
         if rollout_id is not None:
             if observations is None:
                 observations = AgentObservationBundle(
@@ -1216,16 +1221,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     records=[AgentInvocation(invocation_id=rollout_id)],
                     gaps=[ObservationGap(code="observation_capture_failed")],
                 )
-            if raw_verifier_sandbox_observation is not None:
-                try:
-                    verifier_observation = SandboxObservation.model_validate(raw_verifier_sandbox_observation)
-                    if verifier_observation.role != "verifier":
-                        raise ValueError("resources server returned a non-verifier sandbox observation")
-                    observations.records.append(verifier_observation)
-                except Exception:
-                    observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
-            else:
+            if not isinstance(raw_verifier_sandbox_observations, list):
+                observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
+            elif not raw_verifier_sandbox_observations:
                 observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+            else:
+                for raw_observation in raw_verifier_sandbox_observations:
+                    if raw_observation is None:
+                        observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_unavailable"))
+                        continue
+                    try:
+                        verifier_observation = SandboxObservation.model_validate(raw_observation)
+                        if verifier_observation.role != "verifier":
+                            raise ValueError("resources server returned a non-verifier sandbox observation")
+                        observations.records.append(verifier_observation)
+                    except Exception:
+                        observations.gaps.append(ObservationGap(code="verifier_sandbox_observation_invalid"))
             response_dict["ng_agent_observations"] = observations.model_dump(mode="json")
         return OpenCodeSandboxedAgentVerifyResponse.model_validate(response_dict)
 
