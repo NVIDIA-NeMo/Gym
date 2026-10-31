@@ -27,7 +27,7 @@ import signal
 import socket
 import tempfile
 import uuid
-from collections.abc import Iterator, Mapping
+from collections.abc import Awaitable, Iterator, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -96,6 +96,12 @@ def _apptainer_subprocess_env(bin_path: str | None) -> dict[str, str]:
     env = os.environ.copy()
     if bin_path:
         env["PATH"] = f"{bin_path}:{env.get('PATH', '')}"
+    # Ray services may run in a different Pyxis mount namespace from the
+    # launcher preamble. Create node-local Apptainer directories in the
+    # process that will actually launch the nested container.
+    for variable in ("APPTAINER_CACHEDIR", "APPTAINER_TMPDIR"):
+        if value := env.get(variable):
+            Path(value).mkdir(mode=0o700, parents=True, exist_ok=True)
     return env
 
 
@@ -107,6 +113,7 @@ class ApptainerCreateConfig:
     start_timeout_s: float | None = 600
     extra_start_args: list[str] = field(default_factory=list)
     apply_resource_limits: bool = True
+    use_instance: bool = True
 
     def __post_init__(self) -> None:
         if self.start_timeout_s is not None and self.start_timeout_s <= 0:
@@ -166,6 +173,10 @@ class _ApptainerInstance:
     mount_point: str  # where the folder shows up inside
     image: str  # what it was built from
     env: dict[str, str] = field(default_factory=dict)
+    use_instance: bool = True
+    direct_exec_args: list[str] = field(default_factory=list)
+    exec_tasks: set[asyncio.Task] = field(default_factory=set, repr=False)
+    closing: bool = False
 
 
 def _resource_flags(resources: SandboxResources) -> list[str]:
@@ -314,6 +325,9 @@ class ApptainerProvider:
         self._binary = _require_apptainer(bin_path)
         self._subprocess_env = _apptainer_subprocess_env(bin_path)
         self._semaphore = asyncio.Semaphore(self._exec_config.concurrency)
+        # create() has not transferred these handles to AsyncSandbox yet.
+        # Keep failed cleanup retryable through aclose(), including cancellation.
+        self._pending_creates: dict[str, SandboxHandle] = {}
 
     async def _run(
         self,
@@ -342,7 +356,7 @@ class ApptainerProvider:
             if daemonize:
                 return await self._run_daemonizing(argv, timeout_s=timeout_s)
 
-            proc = await asyncio.create_subprocess_exec(
+            proc = await self._spawn(
                 *argv,
                 stdin=asyncio.subprocess.PIPE if stdin is not None else None,
                 stdout=asyncio.subprocess.PIPE,
@@ -369,6 +383,15 @@ class ApptainerProvider:
                     with contextlib.suppress(Exception):
                         await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+            except asyncio.CancelledError:
+                # Long-lived direct-exec sandboxes are represented by the
+                # running Apptainer command itself. Cancellation must reap its
+                # entire process group or simulator children would leak.
+                try:
+                    await self._kill_cancelled_process(proc)
+                except (Exception, asyncio.CancelledError):
+                    LOGGER.warning("Cancelled command cleanup failed", exc_info=True)
+                raise
 
             return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
             return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
@@ -381,7 +404,7 @@ class ApptainerProvider:
         only for the foreground process to exit.
         """
         with tempfile.TemporaryFile() as out_f, tempfile.TemporaryFile() as err_f:
-            proc = await asyncio.create_subprocess_exec(
+            proc = await self._spawn(
                 *argv,
                 stdin=asyncio.subprocess.DEVNULL,
                 stdout=out_f,
@@ -405,6 +428,12 @@ class ApptainerProvider:
                     with contextlib.suppress(Exception):
                         await proc.wait()
                 raise TimeoutError(f"apptainer command timed out after {timeout_s:g}s: {argv}") from e
+            except asyncio.CancelledError:
+                try:
+                    await self._kill_cancelled_process(proc)
+                except (Exception, asyncio.CancelledError):
+                    LOGGER.warning("Cancelled daemon launcher cleanup failed", exc_info=True)
+                raise
 
             out_f.seek(0)
             err_f.seek(0)
@@ -413,6 +442,45 @@ class ApptainerProvider:
 
         return_code = proc.returncode if proc.returncode is not None else SANDBOX_RUNTIME_RETURN_CODE
         return return_code, stdout_b.decode(errors="replace"), stderr_b.decode(errors="replace")
+
+    @staticmethod
+    async def _shield_cleanup(cleanup: Awaitable[Any]) -> None:
+        """Bound cleanup independently of repeated caller cancellation."""
+        import anyio
+
+        async def bounded():
+            async with asyncio.timeout(30):
+                await cleanup
+
+        task = asyncio.create_task(bounded())
+        with anyio.CancelScope(shield=True):
+            while not task.done():
+                try:
+                    await asyncio.shield(task)
+                except asyncio.CancelledError:
+                    if task.done():
+                        break
+            task.result()
+
+    async def _spawn(self, *argv: str, **kwargs: Any) -> asyncio.subprocess.Process:
+        # Cancellation can arrive while asyncio is attaching subprocess pipes.
+        # Obtain the process object before propagating it, so it can be reaped.
+        creation = asyncio.create_task(asyncio.create_subprocess_exec(*argv, **kwargs))
+        try:
+            return await asyncio.shield(creation)
+        except asyncio.CancelledError:
+            try:
+                await self._shield_cleanup(creation)
+                await self._kill_cancelled_process(creation.result())
+            except (Exception, asyncio.CancelledError):
+                LOGGER.warning("Cancelled process creation cleanup failed", exc_info=True)
+            raise
+
+    async def _kill_cancelled_process(self, proc: asyncio.subprocess.Process) -> None:
+        # pid is the group ID even if the leader exited before its children.
+        with contextlib.suppress(ProcessLookupError):
+            os.killpg(proc.pid, signal.SIGKILL)
+        await self._shield_cleanup(proc.wait())
 
     async def create(self, spec: SandboxSpec) -> SandboxHandle:
         """Start an apptainer instance and return a ready handle.
@@ -459,13 +527,14 @@ class ApptainerProvider:
         )  # create a new empty temp directory on the host and returns that path
         name = INSTANCE_NAME_PREFIX + uuid.uuid4().hex
 
-        # build the `apptainer instance start` command line.
-        argv: list[str] = [self._binary, "instance", "start"]
-        argv += ["--bind", f"{staging_dir}:{mount_point}"]
+        # Build the common container arguments. In direct-exec mode these are
+        # applied to every command; this supports nested Pyxis/Enroot runtimes
+        # where persistent Apptainer instances cannot be re-entered.
+        container_args: list[str] = ["--bind", f"{staging_dir}:{mount_point}"]
         for bind in self._exec_config.default_binds:
-            argv += ["--bind", bind]
+            container_args += ["--bind", bind]
         for bind in extra_binds:
-            argv += ["--bind", bind]
+            container_args += ["--bind", bind]
         start_args = list(self._create_config.extra_start_args)
         resource_limit_flags = _resource_limit_flags(spec.resources)
         if resource_limit_flags and self._create_config.apply_resource_limits:
@@ -474,31 +543,10 @@ class ApptainerProvider:
                     "Skipping apptainer CPU/memory resource flags because create.extra_start_args contains --fakeroot."
                 )
             else:
-                argv += resource_limit_flags
-        argv += _resource_passthrough_flags(spec.resources)
-        argv += start_args
+                container_args += resource_limit_flags
+        container_args += _resource_passthrough_flags(spec.resources)
+        container_args += start_args
 
-        # start the instance; clean up the staging dir on any failure.
-        try:
-            with _private_env_file(staging_dir, env_file_content) as env_file:
-                if env_file is not None:
-                    argv += ["--no-eval", "--env-file", str(env_file)]
-                argv += [image, name]
-                code, _out, err = await self._run(
-                    argv,
-                    timeout_s=self._create_config.start_timeout_s,
-                    daemonize=True,
-                )
-        except TimeoutError as e:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}: {e}") from e
-        if code != 0:
-            shutil.rmtree(staging_dir, ignore_errors=True)
-            raise ApptainerCreateError(
-                f"apptainer instance start failed (code={code}) for image={image!r}: {err.strip()}"
-            )
-
-        # wrap provider-private state on the handle.
         handle = SandboxHandle(
             sandbox_id=name,
             provider_name=self.name,
@@ -508,18 +556,40 @@ class ApptainerProvider:
                 mount_point=mount_point,
                 image=image,
                 env=dict(spec.env),
+                use_instance=self._create_config.use_instance,
+                direct_exec_args=container_args if not self._create_config.use_instance else [],
             ),
         )
 
-        # Verify the sandbox can actually run a command before handing it back.
-        # On any failure, tear down the half-created sandbox so we don't leak a
-        # running instance / staging dir.
+        self._pending_creates[name] = handle
         try:
+            if self._create_config.use_instance:
+                argv: list[str] = [self._binary, "instance", "start", *container_args]
+                with _private_env_file(staging_dir, env_file_content) as env_file:
+                    if env_file is not None:
+                        argv += ["--no-eval", "--env-file", str(env_file)]
+                    argv += [image, name]
+                    code, _out, err = await self._run(
+                        argv,
+                        timeout_s=self._create_config.start_timeout_s,
+                        daemonize=True,
+                    )
+                if code != 0:
+                    raise ApptainerCreateError(
+                        f"apptainer instance start failed (code={code}) for image={image!r}: {err.strip()}"
+                    )
             await self._verify_created_handle(handle)
-        except Exception:
-            await self._cleanup_failed_create_handle(handle)
+        except BaseException as exc:
+            # A daemon can escape the launcher's process group. Stop by the
+            # reserved instance name even if start never returned successfully.
+            try:
+                await self._shield_cleanup(self._cleanup_failed_create_handle(handle))
+            except Exception:
+                LOGGER.warning("Sandbox startup cleanup failed; retained for aclose retry", exc_info=True)
+            if isinstance(exc, TimeoutError):
+                raise ApptainerCreateError(f"apptainer instance start timed out for image={image!r}") from exc
             raise
-
+        self._pending_creates.pop(name)
         return handle
 
     async def _verify_created_handle(self, handle: SandboxHandle) -> None:
@@ -565,14 +635,9 @@ class ApptainerProvider:
                 await asyncio.sleep(probe.stable_delay_s)
 
     async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
-        """Best-effort teardown of a sandbox that failed verification."""
-        inst = handle.raw
-        with contextlib.suppress(Exception):
-            await self._run(
-                [self._binary, "instance", "stop", inst.name],
-                timeout_s=self._exec_config.default_timeout_s,
-            )
-        shutil.rmtree(inst.staging_dir, ignore_errors=True)
+        """Retain ownership until teardown of a failed create is confirmed."""
+        await self.close(handle)
+        self._pending_creates.pop(handle.sandbox_id, None)
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Share a local instance with another Gym worker on the same host/UID.
@@ -582,6 +647,8 @@ class ApptainerProvider:
         Either handle can stop the instance; callers must coordinate ownership.
         """
         inst = handle.raw
+        if not inst.use_instance:
+            raise ValueError("Direct-exec handles cannot be transferred: their exec lifetimes belong to this worker")
         return {
             "provider": self.name,
             "sandbox_id": inst.name,
@@ -591,9 +658,13 @@ class ApptainerProvider:
             "mount_point": inst.mount_point,
             "image": inst.image,
             "env": dict(inst.env),
+            "use_instance": inst.use_instance,
+            "direct_exec_args": list(inst.direct_exec_args),
         }
 
     async def connect(self, descriptor: Mapping[str, Any]) -> SandboxHandle:
+        if descriptor.get("use_instance") is False:
+            raise ValueError("Direct-exec handles cannot be transferred: their exec lifetimes belong to this worker")
         if descriptor.get("provider") != self.name:
             raise ValueError("Apptainer requires a full serialized descriptor, not a bare sandbox id")
         if descriptor.get("hostname") != socket.gethostname() or descriptor.get("uid") != os.getuid():
@@ -616,6 +687,8 @@ class ApptainerProvider:
                 mount_point=mount_point,
                 image=descriptor["image"],
                 env=env,
+                use_instance=descriptor.get("use_instance", True),
+                direct_exec_args=list(descriptor.get("direct_exec_args", [])),
             ),
         )
         if await self.status(handle) != SandboxStatus.RUNNING:
@@ -646,6 +719,8 @@ class ApptainerProvider:
         """
         inst = handle.raw
 
+        if not inst.use_instance and inst.closing:
+            raise RuntimeError("Direct-exec sandbox is closing or closed")
         flags: list[str] = []
         if cwd is not None:
             flags += ["--pwd", cwd]
@@ -672,8 +747,29 @@ class ApptainerProvider:
             with _private_env_file(inst.staging_dir, env_file_content) as env_file:
                 if env_file is not None:
                     flags += ["--no-eval", "--env-file", str(env_file)]
-                argv = [self._binary, "exec", *flags, f"instance://{inst.name}", "sh", "-c", effective_command]
-                code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+                target = f"instance://{inst.name}" if inst.use_instance else inst.image
+                argv = [
+                    self._binary,
+                    "exec",
+                    *([] if inst.use_instance else inst.direct_exec_args),
+                    *flags,
+                    # A process-group kill alone misses setsid()/double-forked
+                    # daemons. Kernel PID-namespace teardown reaps them too.
+                    *([] if inst.use_instance else ["--pid"]),
+                    target,
+                    "sh",
+                    "-c",
+                    effective_command,
+                ]
+                if inst.use_instance:
+                    code, out, err = await self._run(argv, timeout_s=effective_timeout, stdin=stdin)
+                else:
+                    task = asyncio.create_task(self._run(argv, timeout_s=effective_timeout, stdin=stdin))
+                    inst.exec_tasks.add(task)
+                    try:
+                        code, out, err = await task
+                    finally:
+                        inst.exec_tasks.discard(task)
         except TimeoutError as e:
             return SandboxExecResult(
                 stdout=None,
@@ -706,6 +802,12 @@ class ApptainerProvider:
             dest.parent.mkdir(parents=True, exist_ok=True)
             dest.write_bytes(source_path.read_bytes())
             return
+
+        if not inst.use_instance:
+            raise ValueError(
+                f"Direct-exec uploads require the persistent staging mount {inst.mount_point!r}; "
+                "other paths may disappear after exec exits"
+            )
 
         tmp_name = uuid.uuid4().hex
         host_tmp = inst.staging_dir / tmp_name
@@ -755,6 +857,9 @@ class ApptainerProvider:
         """
         inst = handle.raw
 
+        if not inst.use_instance:
+            return SandboxStatus.RUNNING if inst.staging_dir.exists() else SandboxStatus.STOPPED
+
         try:
             code, out, _err = await self._run(
                 [self._binary, "instance", "list", "--json"],
@@ -786,6 +891,19 @@ class ApptainerProvider:
         """
         inst = handle.raw
 
+        if not inst.use_instance:
+            inst.closing = True
+
+            async def stop_execs() -> None:
+                tasks = list(inst.exec_tasks)
+                for task in tasks:
+                    task.cancel()
+                await asyncio.gather(*tasks, return_exceptions=True)
+
+            await self._shield_cleanup(stop_execs())
+            shutil.rmtree(inst.staging_dir, ignore_errors=True)
+            return
+
         stop_error: Exception | None = None
         try:
             code, _out, err = await self._run(
@@ -799,15 +917,16 @@ class ApptainerProvider:
         except TimeoutError as e:
             stop_error = e
 
-        # Always best-effort remove the host staging dir, even if stop failed.
+        if stop_error is not None:
+            raise stop_error
+
+        # Preserve staging on failed stop so teardown can be retried safely.
         try:
             shutil.rmtree(inst.staging_dir, ignore_errors=False)
         except OSError as e:
             LOGGER.warning("failed to remove staging dir %s: %s", inst.staging_dir, e)
 
-        if stop_error is not None:
-            raise stop_error
-
     async def aclose(self) -> None:
-        """No provider-wide resources to close."""
-        return None
+        """Retry teardown of starts that failed before transferring a handle."""
+        for handle in list(self._pending_creates.values()):
+            await self._cleanup_failed_create_handle(handle)

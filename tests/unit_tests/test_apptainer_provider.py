@@ -13,10 +13,15 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import contextlib
 import json
+import os
 import shlex
 import shutil
+import signal
 import socket
+import sys
 from pathlib import Path
 from typing import Any, Callable
 from unittest.mock import AsyncMock
@@ -37,6 +42,69 @@ pytestmark = pytest.mark.sandbox
 
 
 FAKE_BINARY = "/usr/bin/apptainer"
+
+
+def _process_is_running(pid: int) -> bool:
+    try:
+        state = Path(f"/proc/{pid}/stat").read_text().split()[2]
+    except FileNotFoundError:
+        # The reaper can remove the entry between polling iterations.
+        return False
+    return state != "Z"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("daemonize", [False, True])
+@pytest.mark.parametrize("failure", [TimeoutError("cleanup deadline"), RuntimeError("cleanup failure")])
+async def test_cancelled_command_preserves_cancellation_when_cleanup_fails(
+    fake_binary, tmp_path, monkeypatch, caplog, daemonize, failure
+):
+    provider = apptainer_provider.ApptainerProvider()
+    entered = asyncio.Event()
+
+    async def pending(*args, **kwargs):
+        entered.set()
+        await asyncio.Event().wait()
+
+    proc = AsyncMock()
+    proc.communicate.side_effect = pending
+    proc.wait.side_effect = pending
+    monkeypatch.setattr(provider, "_spawn", AsyncMock(return_value=proc))
+    cleanup = AsyncMock(side_effect=failure)
+    monkeypatch.setattr(provider, "_kill_cancelled_process", cleanup)
+    # Exercise exec's TimeoutError-to-result conversion too, not just _run.
+    operation = (
+        provider._run([FAKE_BINARY], timeout_s=60, daemonize=True)
+        if daemonize
+        else provider.exec(_make_handle(tmp_path), "true")
+    )
+    task = asyncio.create_task(operation)
+    await entered.wait()
+    task.cancel("caller cancelled")
+    with pytest.raises(asyncio.CancelledError, match="caller cancelled"):
+        await task
+    cleanup.assert_awaited_once_with(proc)
+    assert "cleanup failed" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_cancelled_spawn_preserves_cancellation_when_creation_fails(fake_binary, monkeypatch, caplog):
+    provider = apptainer_provider.ApptainerProvider()
+    entered, release = asyncio.Event(), asyncio.Event()
+
+    async def spawn(*args, **kwargs):
+        entered.set()
+        await release.wait()
+        raise FileNotFoundError("launcher unavailable")
+
+    monkeypatch.setattr(asyncio, "create_subprocess_exec", spawn)
+    task = asyncio.create_task(provider._spawn(FAKE_BINARY))
+    await entered.wait()
+    task.cancel("cancel during spawn")
+    release.set()
+    with pytest.raises(asyncio.CancelledError, match="cancel during spawn"):
+        await task
+    assert "creation cleanup failed" in caplog.text
 
 
 @pytest.mark.asyncio
@@ -69,6 +137,21 @@ async def test_reconnect_preserves_workdir_environment_and_transfers(fake_binary
     await received.upload(source, "/sandbox/transferred")
     await original.download("/sandbox/transferred", tmp_path / "download")
     assert (tmp_path / "download").read_text() == "payload"
+
+
+@pytest.mark.asyncio
+async def test_reconnect_direct_exec_rejects_unowned_lifetimes(
+    fake_binary: str, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    container_args = ["--bind", f"{staging}:/sandbox", "--bind", "/data:/data:ro", "--writable-tmpfs"]
+    creator = apptainer_provider.ApptainerProvider(create={"use_instance": False})
+    handle = _make_handle(staging, use_instance=False, direct_exec_args=container_args)
+    with pytest.raises(ValueError, match="cannot be transferred"):
+        await creator.serialize_handle(handle)
+    with pytest.raises(ValueError, match="cannot be transferred"):
+        await creator.connect({"use_instance": False})
 
 
 @pytest.mark.asyncio
@@ -113,6 +196,8 @@ def _make_handle(
     name: str = "nemo-gym-x",
     mount: str = "/sandbox",
     env: dict[str, str] | None = None,
+    use_instance: bool = True,
+    direct_exec_args: list[str] | None = None,
 ) -> SandboxHandle:
     inst = apptainer_provider._ApptainerInstance(
         name=name,
@@ -120,6 +205,8 @@ def _make_handle(
         mount_point=mount,
         image="docker://img",
         env=env or {},
+        use_instance=use_instance,
+        direct_exec_args=direct_exec_args or [],
     )
     return SandboxHandle(sandbox_id=name, provider_name="apptainer", raw=inst)
 
@@ -371,6 +458,51 @@ async def test_create_builds_argv_and_runs_probe(
     assert all(not path.exists() for path in env_files)
 
 
+async def test_direct_exec_mode_skips_instance_and_reuses_container_arguments(
+    fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    provider, rec = _make_provider(
+        monkeypatch,
+        lambda argv: (0, apptainer_provider.READY_PROBE_EXPECTED, ""),
+        exec={"default_binds": ["/data:/data"]},
+        create={"use_instance": False, "extra_start_args": ["--writable-tmpfs", "--cleanenv"]},
+    )
+    handle = await provider.create(
+        SandboxSpec(
+            image="docker://img",
+            env={"A": "b"},
+            provider_options={"binds": ["/host/runtime:/production:ro"]},
+        )
+    )
+
+    assert not handle.raw.use_instance
+    assert len(rec.calls) == 1
+    argv = rec.calls[0]["argv"]
+    assert argv[:2] == [FAKE_BINARY, "exec"]
+    assert "instance" not in argv
+    assert "docker://img" in argv
+    assert _contains_seq(argv, ["--bind", f"{staging}:/sandbox"])
+    assert _contains_seq(argv, ["--bind", "/data:/data"])
+    assert _contains_seq(argv, ["--bind", "/host/runtime:/production:ro"])
+    assert "--writable-tmpfs" in argv
+    assert "--cleanenv" in argv
+    assert argv[argv.index("docker://img") - 1] == "--pid"
+
+    rec.calls.clear()
+    result = await provider.exec(handle, "printf done")
+    assert result.return_code == 0
+    assert rec.calls[0]["argv"][-3:] == ["sh", "-c", "printf done"]
+
+    rec.calls.clear()
+    assert await provider.status(handle) is SandboxStatus.RUNNING
+    await provider.close(handle)
+    assert rec.calls == []
+    assert not staging.exists()
+
+
 @pytest.mark.parametrize("create_config", [{"apply_resource_limits": False}, {"extra_start_args": ["--fakeroot"]}])
 async def test_create_skips_cgroup_resource_limits(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path, create_config: dict[str, Any]
@@ -456,6 +588,8 @@ async def test_create_start_failure_cleans_up(
 
     def responder(argv: list[str]) -> tuple[int, str, str]:
         nonlocal env_file
+        if "stop" in argv:
+            return 0, "", ""
         env_file = _env_file_path(argv)
         assert env_file.exists()
         assert "not-a-real-secret" not in argv
@@ -479,6 +613,8 @@ async def test_create_start_timeout_cleans_up(
 
     def responder(argv: list[str]) -> tuple[int, str, str]:
         nonlocal env_file
+        if "stop" in argv:
+            return 0, "", ""
         env_file = _env_file_path(argv)
         assert env_file.exists()
         raise TimeoutError(f"slow: {argv}")
@@ -850,7 +986,7 @@ async def test_close_missing_instance_is_success(
     assert not staging.exists()
 
 
-async def test_close_real_failure_raises_but_cleans_up(
+async def test_close_real_failure_retains_staging_for_retry(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     staging = tmp_path / "staging"
@@ -858,7 +994,7 @@ async def test_close_real_failure_raises_but_cleans_up(
     provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "permission denied"))
     with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(_make_handle(staging))
-    assert not staging.exists()
+    assert staging.exists()
 
 
 async def test_close_fatal_permission_denied_raises(
@@ -869,7 +1005,7 @@ async def test_close_fatal_permission_denied_raises(
     provider, _rec = _make_provider(monkeypatch, lambda argv: (1, "", "FATAL: permission denied"))
     with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(_make_handle(staging))
-    assert not staging.exists()
+    assert staging.exists()
 
 
 async def test_close_timeout_raises(fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -882,7 +1018,7 @@ async def test_close_timeout_raises(fake_binary: str, monkeypatch: pytest.Monkey
     provider, _rec = _make_provider(monkeypatch, responder)
     with pytest.raises(TimeoutError):
         await provider.close(_make_handle(staging))
-    assert not staging.exists()
+    assert staging.exists()
 
 
 async def test_close_staging_removal_failure_is_logged(
@@ -1026,3 +1162,180 @@ async def test_create_uses_daemonize_for_instance_start(
     # The readiness probe (exec) must NOT use the daemonizing path.
     exec_calls = [c for c in rec.calls if "exec" in c["argv"]]
     assert exec_calls and all(c["daemonize"] is False for c in exec_calls)
+
+
+@pytest.mark.parametrize("daemonize", [False, True])
+async def test_cancel_run_reaps_process_group(fake_binary, tmp_path, daemonize):
+    """Exercise actual processes, not a mock of the cancellation branch."""
+    provider = apptainer_provider.ApptainerProvider()
+    pid_file = tmp_path / "pids"
+    script = (
+        "import os, subprocess, sys, time; "
+        "child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)']); "
+        "open(sys.argv[1], 'w').write(f'{os.getpid()} {child.pid}'); time.sleep(60)"
+    )
+    task = asyncio.create_task(
+        provider._run([sys.executable, "-c", script, str(pid_file)], timeout_s=30, daemonize=daemonize)
+    )
+    pids = []
+    try:
+        async with asyncio.timeout(10):
+            while not pid_file.exists() or len(pid_file.read_text().split()) != 2:
+                await asyncio.sleep(0.01)
+        pids = list(map(int, pid_file.read_text().split()))
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with asyncio.timeout(5):
+            # Orphan zombies await init's reaper; they cannot execute or hold sockets.
+            while any(_process_is_running(pid) for pid in pids):
+                await asyncio.sleep(0.01)
+    finally:
+        task.cancel()
+        for pid in pids:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+
+
+async def test_direct_exec_close_waits_for_commands_before_removing_staging(fake_binary, tmp_path, monkeypatch):
+    provider = apptainer_provider.ApptainerProvider(create={"use_instance": False})
+    staging = tmp_path / "staging"
+    staging.mkdir()
+    handle = _make_handle(staging, use_instance=False)
+    entered, cleaned = asyncio.Event(), asyncio.Event()
+
+    async def run(*args, **kwargs):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            await asyncio.sleep(0.01)
+            assert staging.exists()
+            cleaned.set()
+
+    monkeypatch.setattr(provider, "_run", run)
+    task = asyncio.create_task(provider.exec(handle, "long-lived-command"))
+    await entered.wait()
+    await provider.close(handle)
+    assert cleaned.is_set() and not staging.exists() and not handle.raw.exec_tasks
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    with pytest.raises(RuntimeError, match="closing or closed"):
+        await provider.exec(handle, "cannot-start-after-close")
+
+
+@pytest.mark.parametrize("cancel_at", ["start", "probe"])
+async def test_cancel_create_stops_named_instance(fake_binary, tmp_path, monkeypatch, cancel_at):
+    provider = apptainer_provider.ApptainerProvider()
+    entered = asyncio.Event()
+    stopped = []
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+
+    async def run(argv, **kwargs):
+        if "stop" in argv:
+            stopped.append(argv[-1])
+            return 0, "", ""
+        if (cancel_at == "start" and "start" in argv) or (cancel_at == "probe" and "exec" in argv):
+            entered.set()
+            await asyncio.Event().wait()
+        return 0, "", ""
+
+    monkeypatch.setattr(provider, "_run", run)
+    task = asyncio.create_task(provider.create(SandboxSpec(image="image.sif")))
+    await asyncio.wait_for(entered.wait(), 5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert len(stopped) == 1
+    assert not staging.exists()
+
+
+async def test_direct_exec_upload_rejects_ephemeral_path(fake_binary, tmp_path, monkeypatch):
+    provider = apptainer_provider.ApptainerProvider(create={"use_instance": False})
+    source = tmp_path / "source"
+    source.write_text("persistent")
+    handle = _make_handle(tmp_path / "staging", use_instance=False)
+    handle.raw.staging_dir.mkdir()
+    monkeypatch.setattr(
+        provider, "exec", AsyncMock(return_value=SandboxExecResult(return_code=0, stdout="", stderr=""))
+    )
+    with pytest.raises(ValueError, match="persistent.*mount"):
+        await provider.upload_file(handle, source, "/etc/app.conf")
+    await provider.upload_file(handle, source, "/sandbox/app.conf")
+    assert (handle.raw.staging_dir / "app.conf").read_text() == "persistent"
+
+
+async def test_failed_create_cleanup_is_retried_by_sandbox_stop(fake_binary, tmp_path, monkeypatch):
+    from nemo_gym.sandbox import AsyncSandbox
+
+    provider = apptainer_provider.ApptainerProvider()
+    staging = tmp_path / "staging"
+    monkeypatch.setattr(apptainer_provider.tempfile, "mkdtemp", lambda prefix: str(staging.mkdir() or staging))
+    stop_fails = True
+
+    async def run(argv, **kwargs):
+        if "stop" in argv:
+            return (1, "", "stop unavailable") if stop_fails else (0, "", "")
+        raise asyncio.CancelledError()
+
+    monkeypatch.setattr(provider, "_run", run)
+    sandbox = AsyncSandbox(provider, SandboxSpec(image="image.sif"))
+    with pytest.raises(asyncio.CancelledError):
+        await sandbox.start()
+    assert sandbox._handle is None and staging.exists()
+    assert len(provider._pending_creates) == 1
+    with pytest.raises(RuntimeError, match="stop unavailable"):
+        await sandbox.stop()
+    assert not sandbox._closed and staging.exists()
+    stop_fails = False
+    await sandbox.stop()
+    assert sandbox._closed and not staging.exists() and not provider._pending_creates
+
+
+@pytest.mark.parametrize("cancel_at", ["start", "probe"])
+async def test_cancel_create_reaps_detached_daemon(tmp_path, monkeypatch, cancel_at):
+    """A daemon escaping the launcher's group must be stopped by instance name."""
+    daemon_pid_file = tmp_path / "daemon.pid"
+    ready = tmp_path / "ready"
+    cli = tmp_path / "apptainer"
+    cli.write_text(
+        f"#!{sys.executable}\n"
+        "import os, signal, subprocess, sys, time\n"
+        "from pathlib import Path\n"
+        f"pidfile = Path({str(daemon_pid_file)!r})\nready = Path({str(ready)!r})\n"
+        "if sys.argv[1:3] == ['instance', 'start']:\n"
+        "    child = subprocess.Popen([sys.executable, '-c', 'import time; time.sleep(60)'], "
+        "start_new_session=True, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)\n"
+        "    pidfile.write_text(str(child.pid))\n"
+        f"    if {cancel_at!r} == 'start':\n        ready.touch()\n        time.sleep(60)\n"
+        "elif sys.argv[1] == 'exec':\n    ready.touch()\n    time.sleep(60)\n"
+        "elif sys.argv[1:3] == ['instance', 'stop']:\n"
+        "    os.kill(int(pidfile.read_text()), signal.SIGKILL)\n"
+    )
+    cli.chmod(0o700)
+    monkeypatch.setattr(apptainer_provider, "_require_apptainer", lambda _: str(cli))
+    provider = apptainer_provider.ApptainerProvider()
+    task = asyncio.create_task(provider.create(SandboxSpec(image="image.sif")))
+    pid = None
+    try:
+        async with asyncio.timeout(10):
+            while not ready.exists():
+                await asyncio.sleep(0.01)
+        pid = int(daemon_pid_file.read_text())
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        async with asyncio.timeout(5):
+            while _process_is_running(pid):
+                await asyncio.sleep(0.01)
+        assert not provider._pending_creates
+    finally:
+        task.cancel()
+        with contextlib.suppress(asyncio.CancelledError):
+            await task
+        if pid is not None:
+            with contextlib.suppress(ProcessLookupError):
+                os.kill(pid, signal.SIGKILL)
