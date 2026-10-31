@@ -194,6 +194,21 @@ async with resources_operation(self._semaphore, operation="verify", executor="su
 
 Every metric carries `nemo.gym.resources.operation` (`verify`, `tool`, `judge`, or `other`) and `nemo.gym.resources.executor` (`inline`, `thread`, `process`, `subprocess`, or `other`). They are recorded only while metrics are exported. `math_with_judge` uses this contract for its SymPy verifier subprocesses.
 
+### Sandbox Metrics
+
+These are recorded only while the `sandbox` span group is enabled. `AsyncSandbox` records them for every sandbox provider, except `gym.sandbox.create_retry_total`, which a provider that retries creates records from its own loop (Daytona and OpenSandbox do). Every metric carries `nemo.gym.sandbox.provider`, such as `docker` or `opensandbox`.
+
+| Metric | Type | Unit | Meaning |
+| --- | --- | --- | --- |
+| `gym.sandbox.active` | Up/down counter | count | Sandboxes this process holds, from the provider handing back a handle until Gym releases it. |
+| `gym.sandbox.startup_duration_ms` | Histogram | ms | Time to provision one sandbox. |
+| `gym.sandbox.exec_duration_ms` | Histogram | ms | Time to run one command in a sandbox. |
+| `gym.sandbox.create_retry_total` | Counter | count | Sandbox-create attempts a provider retried. |
+| `gym.sandbox.transfer_duration_ms` | Histogram | ms | Time to move one file into or out of a sandbox, by `nemo.gym.sandbox.transfer.direction` (`upload` or `download`) and `nemo.gym.sandbox.transfer.outcome` (`ok`, `error`, or `cancelled`). |
+| `gym.sandbox.transfer_bytes_total` | Counter | bytes | Bytes of files moved successfully, by `nemo.gym.sandbox.transfer.direction`. |
+
+Transfers include `upload()`, `download()`, and the seed files in `SandboxSpec.files`, which `start()` uploads after the provider returns the sandbox, so seed uploads are not part of `gym.sandbox.startup_duration_ms`. Transfer spans record the file size but not the paths, because a path can name task content.
+
 ### Memory Metrics
 
 Memory metrics are emitted only when `telemetry.memory_profiling.enabled` is true. Server points carry `nemo.gym.server.name`, `nemo.gym.server.type`, and the root `process.pid`; server memory gauges also carry `memory.type`, which is `rss` or `pss`. Host points rely on the existing `host.name` resource attribute and carry no per-sample attributes.

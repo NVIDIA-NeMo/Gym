@@ -53,6 +53,7 @@ from nemo_gym.telemetry.gym_metrics import (
     record_sandbox_active,
     record_sandbox_exec_duration,
     record_sandbox_startup,
+    record_sandbox_transfer,
 )
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 
@@ -390,6 +391,56 @@ def _sandbox_id(handle: Any) -> str | None:
     return getattr(handle, "sandbox_id", None)
 
 
+def _file_size(path: Path) -> int | None:
+    """The size of a regular file, or None when it cannot be read, so telemetry never fails a transfer."""
+    try:
+        return path.stat().st_size if path.is_file() else None
+    except OSError:
+        return None
+
+
+async def _instrumented_transfer(
+    direction: str, transfer: Callable[[], Awaitable[None]], *, local_path: Path, provider: str, handle: Any
+) -> None:
+    """Run one file transfer with a span, a duration sample and a byte count when the sandbox span group is on.
+
+    ``local_path`` is the host side of the transfer, which is read for the size after the transfer succeeds.
+    Paths are deliberately not recorded.
+    A path can name task content, the same way an exec command can.
+    """
+    if not is_span_group_enabled(GymSpanGroup.SANDBOX):
+        await transfer()
+        return
+    started = time.perf_counter()
+    outcome, size_bytes = "error", None
+    try:
+        with managed_span(
+            GymSpanGroup.SANDBOX,
+            f"gym.sandbox.{direction}",
+            **{
+                "nemo.gym.sandbox.provider": provider,
+                "nemo.gym.sandbox.id": _sandbox_id(handle),
+                **default_span_attributes(),
+            },
+        ) as span:
+            await transfer()
+            size_bytes = _file_size(local_path)
+            if span is not None and size_bytes is not None:
+                safe_set_span_attributes(span, {"nemo.gym.sandbox.transfer.size_bytes": size_bytes})
+        outcome = "ok"
+    except asyncio.CancelledError:
+        outcome = "cancelled"
+        raise
+    finally:
+        record_sandbox_transfer(
+            (time.perf_counter() - started) * 1000.0,
+            provider=provider,
+            direction=direction,
+            outcome=outcome,
+            size_bytes=size_bytes if outcome == "ok" else None,
+        )
+
+
 def _missing_keywords(method: Callable[..., Any], keywords: Mapping[str, Any]) -> list[str]:
     """The names in ``keywords`` that ``method`` does not take, none when it takes them all or ``**kwargs``."""
     try:
@@ -492,7 +543,7 @@ class AsyncSandbox:
                     for index, (target_path, contents) in enumerate(requested_spec.files.items()):
                         source_path = tmp_path / f"file-{index}"
                         source_path.write_text(contents, encoding="utf-8")
-                        await self._provider.upload_file(handle, source_path, target_path)
+                        await self._upload(handle, source_path, target_path)
         except BaseException:
             await self.stop()
             raise
@@ -630,10 +681,26 @@ class AsyncSandbox:
         self._spec = replace(self._spec, user=user) if self._spec is not None else SandboxSpec(user=user)
 
     async def upload(self, local_path: Path | str, remote_path: str) -> None:
-        await self._provider.upload_file(self._require_handle(), Path(local_path), remote_path)
+        await self._upload(self._require_handle(), Path(local_path), remote_path)
 
     async def download(self, remote_path: str, local_path: Path | str) -> None:
-        await self._provider.download_file(self._require_handle(), remote_path, Path(local_path))
+        handle, local_path = self._require_handle(), Path(local_path)
+        await _instrumented_transfer(
+            "download",
+            lambda: self._provider.download_file(handle, remote_path, local_path),
+            local_path=local_path,
+            provider=self._telemetry_provider_name(),
+            handle=handle,
+        )
+
+    async def _upload(self, handle: SandboxHandle, local_path: Path, remote_path: str) -> None:
+        await _instrumented_transfer(
+            "upload",
+            lambda: self._provider.upload_file(handle, local_path, remote_path),
+            local_path=local_path,
+            provider=self._telemetry_provider_name(),
+            handle=handle,
+        )
 
     def sidecar(self, name: str) -> "AsyncSandboxSidecar":
         """Return a sidecar container declared in ``SandboxSpec.sidecars``, to run commands in and read files from."""
