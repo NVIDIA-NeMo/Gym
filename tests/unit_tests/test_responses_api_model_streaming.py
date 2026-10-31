@@ -936,6 +936,29 @@ class _EchoModel(SimpleResponsesAPIModel):
         raise NotImplementedError
 
 
+class _ReasoningReplayModel(_EchoModel):
+    last_payload: dict | None = None
+
+    async def responses(self, body: NeMoGymResponseCreateParamsNonStreaming = Body()) -> NeMoGymResponse:
+        # Match model servers' upstream serialization, including its unset-field filtering.
+        self.last_payload = body.model_dump(mode="json", exclude_unset=True)
+        return _build_response(
+            [
+                {
+                    "type": "reasoning",
+                    "id": "rs_readable",
+                    "summary": [
+                        {"type": "summary_text", "text": "First."},
+                        {"type": "summary_text", "text": "Second."},
+                    ],
+                    "encrypted_content": "opaque-readable",
+                },
+                _function_call_item("shell"),
+                {"type": "reasoning", "id": "rs_opaque", "summary": [], "encrypted_content": "opaque-only"},
+            ]
+        )
+
+
 class _RequestAwareEchoModel(_EchoModel):
     saw_request: bool = False
 
@@ -977,6 +1000,86 @@ def _client(model_cls, *, global_config_dict: dict | None = None) -> tuple[TestC
         server_client=MagicMock(spec=ServerClient, global_config_dict=global_config_dict or {}),
     )
     return TestClient(server.setup_webserver()), server
+
+
+class TestAnthropicReasoningReplayRoute:
+    @pytest.mark.parametrize("stream", [False, True])
+    def test_replayed_reasoning_has_explicit_summaries_in_forwarded_payload(self, stream) -> None:
+        client, server = _client(_ReasoningReplayModel)
+        first = client.post(
+            "/v1/messages",
+            json={
+                "model": "synthetic",
+                "max_tokens": 10,
+                "stream": stream,
+                "messages": [{"role": "user", "content": "Go"}],
+            },
+        )
+        assert first.status_code == 200
+        if stream:
+            events = [json.loads(line[6:]) for line in first.text.splitlines() if line.startswith("data: ")]
+            content = []
+            for event in events:
+                if event["type"] == "content_block_start":
+                    content.append(event["content_block"])
+                elif event["type"] == "content_block_delta":
+                    block = content[event["index"]]
+                    delta = event["delta"]
+                    if delta["type"] == "thinking_delta":
+                        block["thinking"] += delta["thinking"]
+                    elif delta["type"] == "signature_delta":
+                        block["signature"] = block.get("signature", "") + delta["signature"]
+                    elif delta["type"] == "input_json_delta":
+                        block["input"] = json.loads(delta["partial_json"])
+        else:
+            content = first.json()["content"]
+        assert content == [
+            {
+                "type": "thinking",
+                "thinking": "First.\n\nSecond.",
+                "signature": "nemo_gym_responses_reasoning:opaque-readable",
+            },
+            {"type": "tool_use", "id": "call_1", "name": "shell", "input": {}},
+            {"type": "redacted_thinking", "data": "nemo_gym_responses_reasoning:opaque-only"},
+        ]
+        replay = client.post(
+            "/v1/messages",
+            json={
+                "max_tokens": 10,
+                "messages": [
+                    {"role": "assistant", "content": content},
+                    {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "call_1", "content": "Done"}]},
+                ],
+            },
+        )
+        assert replay.status_code == 200
+        forwarded = server.last_payload["input"]
+        assert [item["type"] for item in forwarded] == [
+            "reasoning",
+            "function_call",
+            "reasoning",
+            "function_call_output",
+        ]
+        reasoning = [item for item in forwarded if item["type"] == "reasoning"]
+        assert [item["summary"] for item in reasoning] == [[{"type": "summary_text", "text": "First.\n\nSecond."}], []]
+        assert [item["encrypted_content"] for item in reasoning] == ["opaque-readable", "opaque-only"]
+        assert forwarded[1]["call_id"] == forwarded[3]["call_id"] == "call_1"
+        assert forwarded[3]["output"] == "Done"
+
+    @pytest.mark.parametrize(
+        "block", [{"type": "redacted_thinking"}, {"type": "redacted_thinking", "data": "native-data"}]
+    )
+    def test_unsupported_redacted_history_does_not_fail_the_route(self, block) -> None:
+        client, server = _client(_ReasoningReplayModel)
+        result = client.post(
+            "/v1/messages",
+            json={
+                "max_tokens": 10,
+                "messages": [{"role": "assistant", "content": [block, {"type": "text", "text": "Continue"}]}],
+            },
+        )
+        assert result.status_code == 200
+        assert server.last_payload["input"] == [{"role": "assistant", "content": "Continue", "type": "message"}]
 
 
 class TestResponsesDispatchRoute:

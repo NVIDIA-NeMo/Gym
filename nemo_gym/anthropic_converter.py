@@ -14,12 +14,11 @@
 # limitations under the License.
 """Bidirectional converter between NeMo Gym Responses API objects and Anthropic Messages.
 
-This module is the single source of truth for the Anthropic <-> Responses mapping. It is
-shared by two opposite-direction consumers:
+This module is the single source of truth for the Anthropic <-> Responses mapping. It
+provides two opposite-direction mappings:
 
-* **Egress** (`responses_api_models/anthropic_model`): NeMo Gym is the client and Anthropic is
-  the backend. Uses ``responses_to_anthropic`` (request) and ``anthropic_to_responses``
-  (response).
+* **Egress**: NeMo Gym is the client and Anthropic is the backend. Uses
+  ``responses_to_anthropic`` (request) and ``anthropic_to_responses`` (response).
 * **Ingress** (an Anthropic-Messages proxy, e.g. for the Claude Code CLI): an Anthropic client
   talks to NeMo Gym, which forwards to a downstream Gym model server. Uses
   ``anthropic_request_to_responses`` (request), ``responses_to_anthropic_response`` (response),
@@ -70,6 +69,10 @@ from nemo_gym.core.responses_api_types import (
 
 
 SUPPORTED_ANTHROPIC_IMAGE_MEDIA_TYPES = {"image/jpeg", "image/png", "image/gif", "image/webp"}
+
+
+# Like LiteLLM, tunnel opaque Responses reasoning through Anthropic clients, but use a Gym-owned marker.
+_RESPONSES_REASONING_CARRIER_PREFIX = "nemo_gym_responses_reasoning:"
 
 
 class AnthropicConverter:
@@ -392,7 +395,20 @@ class AnthropicConverter:
                     NeMoGymResponseReasoningItem(
                         id=f"rs_{uuid4().hex}",
                         summary=[NeMoGymSummary(text=block.get("thinking", ""), type="summary_text")],
-                        encrypted_content=block.get("signature"),
+                        encrypted_content=self._encrypted_content_from_carrier(block.get("signature")),
+                        type="reasoning",
+                    )
+                )
+            elif block_type == "redacted_thinking":
+                encrypted_content = self._encrypted_content_from_carrier(block.get("data"))
+                if encrypted_content is None:
+                    continue
+                flush_message()
+                items.append(
+                    NeMoGymResponseReasoningItem(
+                        id=f"rs_{uuid4().hex}",
+                        summary=[],
+                        encrypted_content=encrypted_content,
                         type="reasoning",
                     )
                 )
@@ -490,7 +506,7 @@ class AnthropicConverter:
             if item_type == "message":
                 content.extend(self._output_message_to_anthropic_blocks(item))
             elif item_type == "reasoning":
-                content.extend(self._reasoning_item_to_anthropic_blocks(item))
+                content.extend(self._reasoning_item_to_anthropic_response_blocks(item))
             elif item_type == "function_call":
                 content.append(self._function_call_to_tool_use(item))
                 has_tool_use = True
@@ -593,6 +609,8 @@ class AnthropicConverter:
             return {"type": "text", "text": ""}
         if block_type == "thinking":
             return {"type": "thinking", "thinking": ""}
+        if block_type == "redacted_thinking":
+            return {"type": "redacted_thinking", "data": block["data"]}
         if block_type == "tool_use":
             return {"type": "tool_use", "id": block["id"], "name": block["name"], "input": {}}
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -602,7 +620,12 @@ class AnthropicConverter:
         if block_type == "text":
             return [{"type": "text_delta", "text": block.get("text", "")}]
         if block_type == "thinking":
-            return [{"type": "thinking_delta", "thinking": block.get("thinking", "")}]
+            return [
+                {"type": "thinking_delta", "thinking": block.get("thinking", "")},
+                {"type": "signature_delta", "signature": block.get("signature", "")},
+            ]
+        if block_type == "redacted_thinking":
+            return []
         if block_type == "tool_use":
             return [{"type": "input_json_delta", "partial_json": json.dumps(block.get("input", {}))}]
         raise NotImplementedError(f"Unsupported Anthropic block for SSE synthesis: {block_type}")
@@ -720,6 +743,21 @@ class AnthropicConverter:
 
     def _system_parts_to_anthropic_blocks(self, system_parts: List[str]) -> List[Dict[str, str]]:
         return [{"type": "text", "text": text} for text in system_parts if text]
+
+    def _encrypted_content_from_carrier(self, value: Any) -> Optional[str]:
+        if isinstance(value, str) and value.startswith(_RESPONSES_REASONING_CARRIER_PREFIX):
+            return value[len(_RESPONSES_REASONING_CARRIER_PREFIX) :] or None
+        return None
+
+    def _reasoning_item_to_anthropic_response_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
+        encrypted = item.get("encrypted_content")
+        carrier = _RESPONSES_REASONING_CARRIER_PREFIX + encrypted if encrypted else ""
+        summaries = item.get("summary", [])
+        if summaries:
+            return [{"type": "thinking", "thinking": "\n\n".join(s["text"] for s in summaries), "signature": carrier}]
+        if carrier:
+            return [{"type": "redacted_thinking", "data": carrier}]
+        return []
 
     def _reasoning_item_to_anthropic_blocks(self, item: Dict[str, Any]) -> List[Dict[str, Any]]:
         blocks = []

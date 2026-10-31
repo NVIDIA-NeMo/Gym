@@ -201,7 +201,7 @@ class TestAnthropicRequestToResponses:
         item = params.input[0]
         assert item.type == "reasoning"
         assert item.summary[0].text == "hmm"
-        assert item.encrypted_content == "sig-1"
+        assert item.encrypted_content is None
 
     def test_tools_and_tool_choice_variants(self) -> None:
         conv = _converter()
@@ -335,7 +335,7 @@ class TestResponsesToAnthropicResponse:
         thinking = out["content"][0]
         assert thinking["type"] == "thinking"
         assert thinking["thinking"] == "step"
-        assert thinking["signature"] == "sig"
+        assert thinking["signature"] == "nemo_gym_responses_reasoning:sig"
         assert out["stop_reason"] == "end_turn"
 
     def test_max_tokens_stop_reason(self) -> None:
