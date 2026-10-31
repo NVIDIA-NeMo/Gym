@@ -5,6 +5,7 @@
 import hashlib
 import json
 import subprocess
+from pathlib import Path
 
 import pytest
 
@@ -526,3 +527,36 @@ def test_an_unchanged_file_gets_the_same_digest_from_both_readers(tmp_path, read
     digest = _managed_source_digest if reader == "managed" else collector_hash()
     assert digest(path) == hashlib.sha256(b"a" * (2 << 20) + b"tail").hexdigest()
     assert digest(tmp_path / "absent.jsonl") is None
+
+
+def test_public_cli_fails_acceptance_without_resubmitting_a_complete_store(tmp_path, slurm_bin, monkeypatch):
+    """The real entrypoint/executor reads the Store; only scheduler binaries are local test doubles."""
+    import sys
+
+    monkeypatch.setenv("XDG_CACHE_HOME", str(tmp_path / "cache"))
+    job, _, _ = _resumable_run(tmp_path)
+    prepare_managed(job, "healthy", n=2)
+    before = saved_bytes(job)
+    result = subprocess.run(
+        [
+            str(Path(sys.executable).with_name("gym")),
+            "eval",
+            "resubmit",
+            *_handle(job),
+            "--recover",
+            "--max-unhealthy-fraction",
+            "0.02",
+        ],
+        cwd=Path(__file__).resolve().parents[2],
+        text=True,
+        capture_output=True,
+    )
+    assert result.returncode == 1, result.stderr
+    assert result.stdout.strip(), result.stderr
+    outcome = json.loads(result.stdout.strip().splitlines()[-1])
+    assert outcome["decision"]["action"] == "noop"
+    assert outcome["decision"]["counts"] == {"scored": 2}
+    assert outcome["gate_task"]["status"] == "FAILED"
+    assert outcome["dispatched"] is None
+    assert not (slurm_bin / "env").exists()
+    assert saved_bytes(job) == before
