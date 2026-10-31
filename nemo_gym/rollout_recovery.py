@@ -107,6 +107,17 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
             # Store resume and legacy collection also use this gate, before the recovery reader runs.
             return True
         seen.add(selected)
+        status = event.get("http_status")
+        if (
+            event.get("boundary") == "model"
+            and event.get("failure_kind") == "model_request_error"
+            and event.get("operation") == "model_request"
+            and type(status) is int
+            and 200 <= status < 300
+        ):
+            # The provider sent successful headers, but the model operation failed
+            # before its body was usable. Running the agent again could regenerate.
+            return True
         cause = event.get("cause_id")
         if cause is None:
             return event.get("failure_kind") == "agent_route_failed" or (
