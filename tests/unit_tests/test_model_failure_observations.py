@@ -435,3 +435,50 @@ async def test_failed_body_upload_never_reports_a_response_wait_timeout(monkeypa
     [attempt] = report.events.values()
     assert attempt.request_upload_complete is False
     assert attempt.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
+
+
+@pytest.mark.parametrize("mode", ["truncated", "timeout", "complete"])
+async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode):
+    hits = 0
+
+    async def endpoint(request):
+        nonlocal hits
+        hits += 1
+        if mode == "complete":
+            return web.json_response({"id": "reply", "output": []})
+        response = web.StreamResponse(headers={"Content-Type": "application/json", "Content-Length": "1000"})
+        await response.prepare(request)
+        await response.write(b'{"id":')
+        if mode == "truncated":
+            request.transport.close()
+        else:
+            await asyncio.sleep(0.15)
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("")).rstrip("/"),
+            request_timeout_seconds=0.05,
+            max_num_tries=1,
+        )
+        with RequestFailureLog.capture() as log:
+            if mode == "complete":
+                assert (await model.create_response(input=[]))["id"] == "reply"
+                assert not log.report.events
+            else:
+                with pytest.raises((aiohttp.ClientPayloadError, TimeoutError)) as caught:
+                    await model.create_response(input=[])
+                report = log.reply_report(caught.value)
+                assert report.failure_id is not None
+                event = report.events[report.failure_id]
+                assert event.failure_kind == MODEL_REQUEST_ERROR
+                assert event.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
+                assert event.http_status == 200
+                assert event.attempt_id.startswith(event.operation_id)
+                assert len(report.events) == 1
+    assert hits == 1

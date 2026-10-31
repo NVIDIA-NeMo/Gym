@@ -101,8 +101,7 @@ that the tasks and model configuration match the saved experiment; it does not e
 
 Coverage includes `counted_failures`, `failure_budget_exhausted`, and `max_rollout_attempts`. Its `attempts` field counts reserved
 execution numbers, including reservations made immediately before an interruption; it is not the retry-budget counter.
-For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The next resume can
-still start execution 3 with the original failure budget.
+For example, three interruptions can reserve executions 0, 1, and 2 while consuming zero failures. The failure budget is still intact, but unknown execution or a saved answer blocks replay; only evidence establishing eligibility permits execution 3.
 
 Explicit `_ng_rollout_id` values must be valid capture IDs. Preprocessing preserves them for single copies and adds
 `-r<rollout_index>` when repeats or agent fan-out expand a row. Direct preprocessing callers should use the returned
@@ -113,7 +112,7 @@ Invalid or colliding IDs are configuration errors before dispatch.
 Tasks drained before dispatch by `dispatch_budget_s` consume no attempt and remain available on resume.
 The opt-in `retry_terminal_timeouts` and `dispatch_longest_first` controls
 also apply to manifest-backed runs. Incomplete final writes are repaired after history validation;
-conflicting or foreign payloads still fail validation. Core collection retries unfinished tasks from their inputs.
+conflicting or foreign payloads still fail validation. Core collection retries eligible unfinished tasks from their inputs. Saved judge answers, possibly delivered requests, and unclassified execution remain stopped. Manifest-backed judge-only reverification is not currently supported.
 GDPVal manages its own cached-deliverable reuse; core invalid-judge migration options are no longer supported.
 
 Managed runs save `retry_terminal_timeouts` in the run manifest. Resume keeps that policy unless the option
@@ -128,8 +127,7 @@ A suppression without a reported failure is an intentional omission. Existing le
 
 The **newest reserved execution number** determines the current outcome. A late result from an older execution
 remains in the append-only artifacts but cannot replace the newer attempt or count as an extra sample. If the newest
-execution has no saved outcome, the rollout remains unfinished and can restart from input without spending a failure
-retry. Collection and offline aggregation share this rule, recorded as `selection_policy: "latest_allocated"`.
+execution has no saved outcome, the rollout remains unfinished without spending a failure retry. Restart still requires eligible execution evidence; older saved answers and uncertain dispatch history block regeneration. Collection and offline aggregation share this rule, recorded as `selection_policy: "latest_allocated"`.
 
 Gym writes `<output_stem>_coverage.json` with an exact inventory:
 

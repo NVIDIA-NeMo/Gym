@@ -48,9 +48,16 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
     A diagnostic error object or an empty mapping is not generation. A typed response
     has its producer identity and output list even when no assistant text was emitted.
     """
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    stage = failure.get("stage") if isinstance(failure, Mapping) else row.get("_ng_failure_stage")
     for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
         answer = row.get(key)
         if not isinstance(answer, Mapping):
+            continue
+        # The agent outcome policy already rejected this failed response as an answer. Retain its
+        # diagnostic output without vetoing RETRY; cleanup/verification responses keep their protection.
+        if stage == "agent" and answer.get("status") == "failed":
             continue
         output = answer.get("output")
         if not isinstance(output, list):
@@ -72,7 +79,7 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
 
 def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     """A selected route failure names no owned cause that permits running the agent again."""
-    if row.get("_ng_failure_class") in {"judge_failed", "judge_invalid"}:
+    if matches_failure_class(row, {"judge_failed", "judge_invalid"}):
         return True  # Verification recovery may reuse an answer; it never reruns the agent.
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
@@ -100,6 +107,17 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
             # Store resume and legacy collection also use this gate, before the recovery reader runs.
             return True
         seen.add(selected)
+        status = event.get("http_status")
+        if (
+            event.get("boundary") == "model"
+            and event.get("failure_kind") == "model_request_error"
+            and event.get("operation") == "model_request"
+            and type(status) is int
+            and 200 <= status < 300
+        ):
+            # The provider sent successful headers, but the model operation failed
+            # before its body was usable. Running the agent again could regenerate.
+            return True
         cause = event.get("cause_id")
         if cause is None:
             return event.get("failure_kind") == "agent_route_failed" or (

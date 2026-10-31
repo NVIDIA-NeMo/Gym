@@ -15,6 +15,7 @@ from pydantic import BaseModel, Field
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
 from nemo_gym.config.config_types import ModelServerRef
 from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+from nemo_gym.failure_transport import FailureReportRow, StreamFailureReportReader
 from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
@@ -505,6 +506,21 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
+    # Captured SSE preserves the terminal report even when an external client ignores the extension.
+    # A model call's selected failure is only an observation of the enclosing episode.
+    for call in calls:
+        if isinstance(call.response_raw, str) and call.dialect in {"responses", "chat"}:
+            reader = StreamFailureReportReader()
+            reader.feed_text(call.response_raw)
+            reader.finish()
+            if reader.report is not None:
+                observed = reader.report.model_copy(update={"failure_id": None})
+                existing = FailureReportRow.report(record)
+                if any(
+                    key in existing.events and existing.events[key] != event for key, event in observed.events.items()
+                ):
+                    observed = observed.model_copy(update={"omitted": True})
+                record.update(FailureReportRow.merged_into(record, observed))
     observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:

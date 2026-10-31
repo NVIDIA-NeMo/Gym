@@ -15,10 +15,12 @@ from nemo_gym.agent_utils.sandbox_session import (
     SandboxSession,
     shell_assignments,
 )
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOG = logging.getLogger(__name__)
@@ -71,6 +73,8 @@ class OpenClawSandboxSession(AgentSessionState):
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # An MCP probe whose termination is not yet confirmed; close stops it before releasing the sandbox.
+    probe: SandboxSession[dict[str, str]] | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
@@ -81,7 +85,13 @@ class OpenClawSandboxSession(AgentSessionState):
         return await read_text(self.session.sandbox, path=f"{self.session.session_dir}/{name}")
 
     async def close(self, timeout: float) -> None:
-        """Capture and release before cancelling the HTTP activation."""
+        """Stop an MCP probe, then capture and release before cancelling the HTTP activation."""
+        if not self.session.launch_started:
+            # Before the agent run launches, the activation may still be staging or about to start an MCP probe.
+            # Join it first so no probe can start while release removes the session directory.
+            await self._join_activation(timeout)
+        if self.probe is not None:
+            await self._stop_probe(timeout)
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -95,6 +105,44 @@ class OpenClawSandboxSession(AgentSessionState):
                 if not self.task.done():
                     raise
                 # The agent base replays the activation error independently of close.
+
+    async def _join_activation(self, timeout: float) -> None:
+        """Cancel an unfinished activation and wait for it; a task that outlives the timeout fails close."""
+        if self.task is None or self.task.done():
+            return
+        if not self.task.cancelling():
+            self.task.cancel()
+        try:
+            await asyncio.wait_for(asyncio.shield(self.task), timeout=timeout)
+        except asyncio.CancelledError:
+            if not self.task.cancelled():
+                raise
+        except Exception:
+            if not self.task.done():
+                raise
+            # The agent base replays the activation error independently of close.
+
+    async def _stop_probe(self, timeout: float) -> None:
+        """Confirm an MCP probe stopped; unconfirmed termination fails close, which keeps the session for retry."""
+        probe = self.probe
+        assert probe is not None
+        # Cancelling the activation unwinds the probe's execute, which stops it and records its receipt.
+        await self._join_activation(timeout)
+        if not probe.cleanup_confirmed:
+            try:
+                await probe.stop_harness(timeout=timeout)
+            except NgFailureEvent as error:
+                if not is_harness_termination_failure(error):
+                    raise
+                # A final negative receipt cannot be retried. Release the borrowed sandbox as the agent run's
+                # session does, with cleanup reported unconfirmed; Resources tears the sandbox down.
+                LOG.exception("OpenClaw MCP probe termination unconfirmed; releasing for Resources teardown")
+                self.session.termination_error = error
+                self.probe = None
+                return
+        if not probe.cleanup_confirmed:
+            raise RuntimeError("OpenClaw MCP probe termination is unconfirmed")
+        self.probe = None
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> dict[str, str]:
         """Run through the common lifecycle; the adapter validates terminal events."""

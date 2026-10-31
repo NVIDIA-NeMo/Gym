@@ -27,6 +27,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
+    observe_programmatic_grading,
 )
 
 
@@ -438,6 +439,9 @@ class MCQAResourcesServer(SimpleResourcesServer):
         return key
 
     async def verify(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
+        return observe_programmatic_grading(lambda: self._programmatic_score(body))
+
+    def _programmatic_score(self, body: MCQAVerifyRequest) -> MCQADualVerifyResponse | MCQAVerifyResponse:
         # Pull options/expected_answer from dataset-style metadata if available
         options, expected_answer = _extract_options_and_expected(body)
         gold = (expected_answer or "").strip().upper()

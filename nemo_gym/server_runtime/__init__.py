@@ -69,7 +69,12 @@ if TYPE_CHECKING:
         SimpleResourcesServer,
         lost_session_verification,
     )
-    from nemo_gym.server_runtime.episode_types import BaseEpisodeRequest, BaseEpisodeResponse, EpisodeFailure
+    from nemo_gym.server_runtime.episode_types import (
+        BaseEpisodeRequest,
+        BaseEpisodeResponse,
+        EpisodeFailure,
+        FailureReport,
+    )
     from nemo_gym.server_runtime.mcp_auto_exposure import MCPTool
     from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
     from nemo_gym.server_runtime.request_handling.session_routing import SESSION_OWNER_HEADER
@@ -85,7 +90,7 @@ if TYPE_CHECKING:
         MCPToolAccess,
         ToolAccess,
     )
-    from nemo_gym.server_runtime.verifier_observability import observe_verifier
+    from nemo_gym.server_runtime.verifier_observability import observe_programmatic_grading, observe_verifier
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
@@ -111,6 +116,7 @@ _PUBLIC_API = {
     "ClosedResourcesSessionRecords": "base_resources_server",
     "DirectHTTPToolAccess": "tool_access",
     "EpisodeFailure": "episode_types",
+    "FailureReport": "episode_types",
     "LegacyRun": "_checkpoint.agent",
     "MCPStreamableHTTPConnection": "tool_access",
     "MCPTool": "mcp_auto_exposure",
@@ -142,6 +148,7 @@ _PUBLIC_API = {
     "is_retryable_dependency_error": "base_environment_server",
     "is_retryable_dependency_status": "base_environment_server",
     "lost_session_verification": "base_resources_server",
+    "observe_programmatic_grading": "verifier_observability",
     "observe_verifier": "verifier_observability",
     "require_rollout": "_checkpoint.agent",
     "seed_restarts": "_checkpoint.steps",
