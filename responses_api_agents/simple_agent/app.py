@@ -59,6 +59,7 @@ from nemo_gym.core import (
     NeMoGymResponseInput,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseUsage,
+    NeMoGymToolParam,
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import (
@@ -331,6 +332,7 @@ class SimpleAgent(SimpleResponsesAPIAgent):
         trajectory_gaps: list[ObservationGap] = []
         body = body.model_copy(deep=True)
         body = self._strip_resource_only_metadata(body)
+        declared_tools = _declared_function_names(body.tools)
 
         if isinstance(body.input, str):
             body.input = [NeMoGymEasyInputMessage(role="user", content=body.input)]
@@ -566,50 +568,58 @@ class SimpleAgent(SimpleResponsesAPIAgent):
                 if collect_trajectory:
                     started_at = time()
                     started_monotonic = perf_counter()
-                try:
-                    parsed_arguments = json.loads(output_function_call.arguments)
-                except (json.JSONDecodeError, TypeError) as e:
-                    tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
+                if output_function_call.name not in declared_tools:
+                    # The name becomes the last part of the tool URL, so a name the request does not declare could
+                    # reach any route of the server, such as /verify or "../verify". The model gets an error instead.
+                    tool_output = json.dumps({"error": f"Unknown tool {output_function_call.name!r}"})
                     if collect_trajectory:
-                        error_type = type(e).__name__
+                        error_type = "unknown_tool"
                         tool_status = "failed"
                 else:
-                    # Resource-server errors are valid model-visible tool outputs.
-                    if tool_access is not None:
-                        api_response = await http_request(
-                            method="POST",
-                            url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                            headers=dict(tool_access.headers),
-                            _internal=True,
-                        )
+                    try:
+                        parsed_arguments = json.loads(output_function_call.arguments)
+                    except (json.JSONDecodeError, TypeError) as e:
+                        tool_output = json.dumps({"error": f"Invalid tool call arguments: {e!r}"})
+                        if collect_trajectory:
+                            error_type = type(e).__name__
+                            tool_status = "failed"
                     else:
-                        if in_session:
-                            # An Environment Server episode reaches Resources only through its grants; the
-                            # configured resources_server has no session for this episode.
-                            raise RuntimeError(
-                                f"Model called tool {output_function_call.name!r}, but this agent session has no "
-                                "direct HTTP tool access"
+                        # Resource-server errors are valid model-visible tool outputs.
+                        if tool_access is not None:
+                            api_response = await http_request(
+                                method="POST",
+                                url=f"{_tools_base_url(tool_access, resources_prefix)}/{output_function_call.name}",
+                                json=parsed_arguments,
+                                cookies=resources_server_cookies,
+                                headers=dict(tool_access.headers),
+                                _internal=True,
                             )
-                        if self.config.resources_server is None:
-                            raise RuntimeError(
-                                "Simple Agent received a tool call without direct HTTP tool access "
-                                "or a legacy resources_server configuration"
+                        else:
+                            if in_session:
+                                # An Environment Server episode reaches Resources only through its grants; the
+                                # configured resources_server has no session for this episode.
+                                raise RuntimeError(
+                                    f"Model called tool {output_function_call.name!r}, but this agent session has "
+                                    "no direct HTTP tool access"
+                                )
+                            if self.config.resources_server is None:
+                                raise RuntimeError(
+                                    "Simple Agent received a tool call without direct HTTP tool access "
+                                    "or a legacy resources_server configuration"
+                                )
+                            api_response = await self.server_client.post(
+                                server_name=self.config.resources_server.name,
+                                url_path=f"{resources_prefix}/{output_function_call.name}",
+                                json=parsed_arguments,
+                                cookies=resources_server_cookies,
                             )
-                        api_response = await self.server_client.post(
-                            server_name=self.config.resources_server.name,
-                            url_path=f"{resources_prefix}/{output_function_call.name}",
-                            json=parsed_arguments,
-                            cookies=resources_server_cookies,
-                        )
-                    tool_output = (await api_response.content.read()).decode()
-                    resources_server_cookies = dict(resources_server_cookies or {})
-                    resources_server_cookies.update(_cookies(api_response))
-                    if collect_trajectory:
-                        completed = 200 <= api_response.status < 400
-                        tool_status = "completed" if completed else "failed"
-                        error_type = None if completed else f"http_{api_response.status}"
+                        tool_output = (await api_response.content.read()).decode()
+                        resources_server_cookies = dict(resources_server_cookies or {})
+                        resources_server_cookies.update(_cookies(api_response))
+                        if collect_trajectory:
+                            completed = 200 <= api_response.status < 400
+                            tool_status = "completed" if completed else "failed"
+                            error_type = None if completed else f"http_{api_response.status}"
 
                 if collect_trajectory:
                     tool_records.append(
@@ -1084,6 +1094,17 @@ def _tools_base_url(tool_access: DirectHTTPToolAccess, resources_prefix: str) ->
     if not resources_prefix:
         return base_url
     return f"{_ROLLOUT_PREFIX_SUFFIX.sub('', base_url)}{resources_prefix}"
+
+
+def _declared_function_names(tools: list[NeMoGymToolParam]) -> set[str]:
+    """The names of the request's function tools, including those inside a namespace: the tools the model may call."""
+    names = set()
+    for tool in tools:
+        if tool.get("type") == "function":
+            names.add(tool["name"])
+        elif tool.get("type") == "namespace":
+            names.update(inner["name"] for inner in tool["tools"] if inner.get("type") == "function")
+    return names
 
 
 if __name__ == "__main__":
