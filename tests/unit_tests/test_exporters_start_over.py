@@ -19,6 +19,7 @@ reopened run continues or the output starts over (`start_over`)."""
 
 from asyncio import Future
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import MagicMock
 
@@ -26,7 +27,7 @@ import orjson
 import pytest
 from mlflow import MlflowClient
 from mlflow.exceptions import MlflowException
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch
 
 import nemo_gym.artifacts.exporters.wandb as wandb_module
@@ -410,6 +411,9 @@ class TestStringFlags:
         assert exporter.run_id != old_run and not exporter.reopened
 
         monkeypatch.setattr(collection_module, "get_global_config_dict", MagicMock(return_value={}))
+        # The run manifest fingerprints the running servers' configuration.
+        servers = SimpleNamespace(global_config_dict=OmegaConf.create({"a": {"responses_api_agents": {"impl": {}}}}))
+        monkeypatch.setattr(collection_module, "setup_server_client_utils", lambda *args, **kwargs: servers)
         inputs = tmp_path / "input.jsonl"
         inputs.write_bytes(
             orjson.dumps({"responses_create_params": {"input": []}, "agent_ref": {"name": "a"}}) + b"\n"

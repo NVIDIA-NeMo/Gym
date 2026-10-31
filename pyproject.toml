@@ -872,7 +872,7 @@ layers = [
     # orchestration/
     "nemo_gym.cli.setup_command : nemo_gym.h2_ping_sidecar : nemo_gym.orchestration",
     # rollouts/
-    "nemo_gym.batch_status : nemo_gym.health : nemo_gym.observability.model_calls : nemo_gym.omitted_rollouts : nemo_gym.rollout_collection : nemo_gym.rollout_health : nemo_gym.rollout_outcomes",
+    "nemo_gym.batch_status : nemo_gym.health : nemo_gym.observability.model_calls : nemo_gym.omitted_rollouts : nemo_gym.rollout_collection : nemo_gym.rollout_health : nemo_gym.rollout_outcomes : nemo_gym.rollout_records : nemo_gym.rollout_recovery : nemo_gym.rollout_store",
     # data/
     "nemo_gym.dataset_metrics : nemo_gym.dataset_orchestrator : nemo_gym.gitlab_utils : nemo_gym.hf_utils : nemo_gym.prompt : nemo_gym.task_data : nemo_gym.task_materialization : nemo_gym.tasks.harbor : nemo_gym.train_data_utils : nemo_gym.vision_input",
     # agents/

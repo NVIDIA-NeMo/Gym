@@ -169,6 +169,11 @@ collections. OpenSandbox requires `networking.enabled=True` and mutually reachab
 sandbox IPs. Service names and aliases are installed in each sandbox's `/etc/hosts`.
 Client-facing proxy endpoints cannot substitute for direct service communication.
 
+Because services talk by IP and share storage, every sandbox of one collection
+(services, the shared-volume helper, and seeds) is labeled
+`nemo.nvidia.com/placement-group=<project>`. A multi-cell front end routes every
+create with the same label to one cell. On a single server the label has no effect.
+
 For `network_mode: service:<name>`, OpenSandbox can opt into TCP loopback
 forwarding with `networking.loopback_forwarding=True`. This forwards the target's
 YAML-declared TCP ports on both `127.0.0.1` and `::1`. It provides the localhost

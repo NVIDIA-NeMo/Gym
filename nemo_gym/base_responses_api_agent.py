@@ -15,7 +15,9 @@
 import asyncio
 import contextvars
 import ipaddress
+import json
 import logging
+import re
 from abc import abstractmethod
 from collections import OrderedDict
 from collections.abc import AsyncIterator, Mapping
@@ -45,6 +47,7 @@ from nemo_gym.agent_activation_types import (
 )
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.ordered_operations import ActivationConflictError, OrderedOperationLedger
+from nemo_gym.agent_utils.sandbox_session import ExpiryUnsupportedError, SandboxSession
 from nemo_gym.client.server_client import apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT, ModelServerRef
 from nemo_gym.config.global_config import (
@@ -90,6 +93,9 @@ LOG = logging.getLogger(__name__)
 
 # Session cookie key that binds later activation and close requests to their agent session.
 AGENT_SESSION_COOKIE_KEY = "agent_session_id"
+# With several workers, the worker running a rollout's open session also claims this prefix plus the rollout id,
+# the path its stop names, so a stop without the session cookie reaches that worker.
+ROLLOUT_CLAIM_PREFIX = "/rollouts/"
 # An agent session is named by agent_session_id, in its seed and close bodies and in the cookie after its seed
 # (see nemo_gym.server_runtime.request_handling.session_routing).
 AGENT_SESSIONS = SessionKind(
@@ -98,6 +104,7 @@ AGENT_SESSIONS = SessionKind(
     seed_path="/v1/agent_sessions",
     close_path="/v1/agent_sessions/close",
     cookie_session=False,
+    path_claim=re.compile(rf"(?P<claim>{re.escape(ROLLOUT_CLAIM_PREFIX)}[^/]+)/stop"),
 )
 # Request header with an activation's index: its 1-based count within its agent session.
 # With checkpointing,
@@ -108,6 +115,11 @@ AGENT_SESSIONS = SessionKind(
 # Multi-turn continuation sessions use this same header without checkpointing.
 # Other adapters may treat requests without the header as new activations.
 AGENT_ACTIVATION_HEADER = "x-ng-agent-activation"
+# Bounds the sandbox command that asks a running harness's supervisor to end it.
+ROLLOUT_STOP_TIMEOUT_SECONDS = 60.0
+# Response metadata that marks a run POST /rollouts/{rollout_id}/stop ended: a JSON object with the caller's
+# reason. It is not a failure: the run keeps a timeout's ``incomplete`` status and is verified like one.
+ROLLOUT_STOP_METADATA_KEY = "ng_rollout_stop"
 LOG = logging.getLogger(__name__)
 
 
@@ -249,6 +261,21 @@ class AgentCloseSessionResponse(BaseModel):
         return result
 
 
+class RolloutStopRequest(BaseModel):
+    """Body of ``POST /rollouts/{rollout_id}/stop``; the reason is recorded on the stopped run's response."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    reason: str | None = Field(default=None, max_length=200)
+
+
+class RolloutStopResponse(BaseModel):
+    """``stopped`` is false when the rollout's run already ended or a stop was already requested."""
+
+    rollout_id: str
+    stopped: bool
+
+
 @dataclass(frozen=True)
 class ModelEndpoint:
     """The OpenAI-compatible endpoint a harness sends its model calls to.
@@ -345,6 +372,9 @@ class _AgentSessionRecord:
     expires_at: float = float("inf")
     activations: OrderedOperationLedger[NeMoGymResponse] = field(default_factory=OrderedOperationLedger)
     close_task: asyncio.Task[AgentCloseSessionResponse] | None = None
+    # A rollout stop that arrived while the session was still seeding, and the caller's reason.
+    stop_requested: bool = False
+    stop_reason: str | None = None
 
 
 # Sandbox providers whose processes share the host network namespace, so a loopback model URL still resolves
@@ -417,7 +447,12 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         return {"kind": AGENT_SESSIONS, "agent_sessions": self}
 
     def holds_agent_session(self, agent_session_id: str) -> bool:
-        """Whether this worker keeps any record of the session: open, failed and awaiting close, or closed."""
+        """Whether this worker keeps any record of the session: open, failed and awaiting close, or closed.
+
+        For a rollout's claim key, ``/rollouts/<rollout id>``, whether this worker runs the rollout's open session.
+        """
+        if agent_session_id.startswith(ROLLOUT_CLAIM_PREFIX):
+            return self._open_rollout_record(agent_session_id.removeprefix(ROLLOUT_CLAIM_PREFIX)) is not None
         return agent_session_id in self._session_records
 
     def use_agent_session_claims(self, claims: SessionClaims) -> None:
@@ -427,6 +462,33 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     def _release_agent_session_claim(self, agent_session_id: str) -> None:
         if self._agent_session_claims is not None:
             self._agent_session_claims.release(agent_session_id)
+
+    def _claim_rollout(self, episode_id: EpisodeId) -> None:
+        """Claim the rollout's key for this worker, so a stop that names only the rollout reaches its session."""
+        claims = self._agent_session_claims
+        if claims is not None and claims.claim(ROLLOUT_CLAIM_PREFIX + episode_id.capture_key) != claims.routing_id:
+            LOG.warning(
+                "Rollout %s has an open session on another worker, which gets its stops", episode_id.capture_key
+            )
+
+    def _release_rollout_claim(self, record: _AgentSessionRecord) -> None:
+        """Release the rollout's key once its session is no longer open here; a no-op while it is."""
+        if self._agent_session_claims is not None and record.episode_id is not None:
+            self._agent_session_claims.release(ROLLOUT_CLAIM_PREFIX + record.episode_id.capture_key)
+
+    def _open_rollout_record(self, rollout_id: str) -> _AgentSessionRecord | None:
+        """The record of the open session, seeded or still seeding, that runs the rollout."""
+        return next(
+            (
+                record
+                for record in self._session_records.values()
+                if record.episode_id is not None
+                and record.episode_id.capture_key == rollout_id
+                and record.close_response is None
+                and not record.closing
+            ),
+            None,
+        )
 
     def expire_agent_session_records(self) -> None:
         """Drop the close receipts whose window has passed, and release the failed seeds nobody closed."""
@@ -472,6 +534,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     ):
                         del self._session_records[session_id]
                         self._release_agent_session_claim(session_id)
+                        self._release_rollout_claim(record)
                 return
 
     def _keep_failed_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
@@ -480,6 +543,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
         self._failed_seed_records.pop(agent_session_id, None)
         self._failed_seed_records[agent_session_id] = record
+        self._release_rollout_claim(record)
 
     async def _undo_seed(self, agent_session_id: str, record: _AgentSessionRecord) -> None:
         """Release a seeded session's state with the close hook, or keep it as a failed seed if the hook fails."""
@@ -650,6 +714,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         app.post("/aggregate_metrics")(self.aggregate_metrics)
         app.post("/v1/agent_sessions")(self.seed_agent_session)
         app.post("/v1/agent_sessions/close")(self.close_agent_session)
+        app.post("/rollouts/{rollout_id}/stop")(self.stop_rollout)
         app.get("/v1/agent_sessions/capabilities")(self.agent_session_capabilities)
 
         return app
@@ -703,6 +768,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 if current is not None:
                     raise HTTPException(409, "Agent session cookie has expired")
                 record.episode_id = body.episode_id
+                # Before setup, so a stop that arrives during it reaches this worker's seeding record.
+                self._claim_rollout(body.episode_id)
                 try:
                     record.state = await self._seed_agent_session_state(body.model_copy(deep=True))
                 except AgentSessionSetupError as error:
@@ -722,6 +789,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     # so the lock's exit drops the record and, with several workers, its claim.
                     await self._undo_seed(body.agent_session_id, record)
                     raise
+                if record.stop_requested and (session := self._rollout_sandbox_session(record.state)) is not None:
+                    await session.expire(timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=record.stop_reason)
             elif record.state.request != body:
                 raise HTTPException(409, "agent_session_id is already bound to another seed request")
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
@@ -764,6 +833,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
             record.expires_at = monotonic() + self.config.session_close_retry_window_seconds
             self._failed_seed_records.pop(body.agent_session_id, None)
             self._closed_session_records[body.agent_session_id] = record
+            self._release_rollout_claim(record)
             # Keep the marker so a stale /responses request cannot fall back to the non-session path.
             request.session[AGENT_SESSION_COOKIE_KEY] = body.agent_session_id
             return result
@@ -836,6 +906,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     def _install_restored_session(self, agent_session_id: str, state: AgentSessionState) -> None:
         """Install a session restored from a checkpoint, as its replacement attempt's seed would have."""
         self._session_records[agent_session_id] = _AgentSessionRecord(state=state, episode_id=state.request.episode_id)
+        self._claim_rollout(state.request.episode_id)
 
     def _free_session(self, agent_session_id: str) -> None:
         """Free a retired session that has no close receipt: its episode's close then finds nothing to free."""
@@ -843,6 +914,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         if record is not None and record.close_response is None:
             self._session_records.pop(agent_session_id, None)
             self._release_agent_session_claim(agent_session_id)
+            self._release_rollout_claim(record)
 
     def _agent_continuation_capabilities(self) -> AgentContinuationCapabilities | None:
         """Opt into multi-turn continuation; existing one-activation adapters stay unchanged."""
@@ -927,6 +999,41 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
         """Release harness state, or raise without losing the handle needed for another close."""
         raise NotImplementedError("This agent does not implement episode sessions")
+
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        """The sandbox session that runs ``state``'s harness; an agent returns it to support rollout stops."""
+        return None
+
+    async def stop_rollout(self, rollout_id: str, body: RolloutStopRequest | None = None) -> RolloutStopResponse:
+        """End a rollout's harness as at its time limit, so the episode is verified and graded as a timeout.
+
+        For a caller that enforces its own budget (agent time, tokens, cost) or an operator's cancel.
+        ``rollout_id`` is the id in ``/ng-rollout/<id>``. A stop that arrives while the session is still
+        seeding takes effect when the harness would launch. With several workers, the request reaches the
+        worker running the rollout without the session cookie (see nemo_gym.session_routing).
+        """
+        if type(self)._rollout_sandbox_session is SimpleResponsesAPIAgent._rollout_sandbox_session:
+            raise HTTPException(501, "This agent cannot stop a rollout")
+        record = self._open_rollout_record(rollout_id)
+        if record is None:
+            raise HTTPException(404, f"No open agent session runs rollout {rollout_id}")
+        reason = body.reason if body else None
+        if record.state is None:
+            stopped = not record.stop_requested
+            if stopped:
+                record.stop_requested, record.stop_reason = True, reason
+        else:
+            session = self._rollout_sandbox_session(record.state)
+            try:
+                stopped = session is not None and await session.expire(
+                    timeout=ROLLOUT_STOP_TIMEOUT_SECONDS, reason=reason
+                )
+            except ExpiryUnsupportedError as error:
+                raise HTTPException(501, f"Cannot stop rollout {rollout_id}: {error}") from error
+            except RuntimeError as error:
+                raise HTTPException(502, f"Could not stop rollout {rollout_id}: {error}") from error
+        LOG.info("Rollout %s stop (stopped=%s, reason=%s)", rollout_id, stopped, reason)
+        return RolloutStopResponse(rollout_id=rollout_id, stopped=stopped)
 
     def _capture_correlation_enabled(self) -> bool:
         """Return whether this agent needs rollout correlation.
@@ -1093,4 +1200,18 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                     AGENT_OUTCOME_METADATA_KEY: outcome.model_dump_json(exclude_none=True),
                 }
             }
+        )
+
+    def report_rollout_stop(self, response: NeMoGymResponse, session: SandboxSession) -> NeMoGymResponse:
+        """Mark the response of a run that ``POST /rollouts/{rollout_id}/stop`` ended.
+
+        The response keeps a timeout's ``incomplete`` status, so it is verified like one, and gains the
+        ``ng_rollout_stop`` marker that tells it apart from a timeout or a cancellation. A stop is not a
+        failure, so the response carries no failure kind.
+        """
+        if not session.expired or response.status != "incomplete":
+            return response
+        marker = json.dumps({"reason": session.expire_reason}, separators=(",", ":"))
+        return response.model_copy(
+            update={"metadata": {**(response.metadata or {}), ROLLOUT_STOP_METADATA_KEY: marker}}
         )

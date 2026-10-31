@@ -22,6 +22,6 @@ aime26_math_with_judge_simple_agent:
 aime26_math_with_judge_environment_server:
   _inherit_from: math_with_judge_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: aime26_math_with_judge_simple_agent

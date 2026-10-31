@@ -2,21 +2,49 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import contextlib
 import json
 import shutil
 import subprocess
-from unittest.mock import AsyncMock
+import sys
+from time import monotonic
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
 from nemo_gym.agent_utils import supervisor_client
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession, shell_assignments
+from nemo_gym.agent_utils.sandbox_session import (
+    ExpiryUnsupportedError,
+    SandboxCommand,
+    SandboxSession,
+    shell_assignments,
+)
 from nemo_gym.sandbox.api import AsyncSandbox
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.providers import SupportsSandboxIndependentUploads
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
+from nemo_gym.sandbox.providers.local import LocalProvider
+from nemo_gym.sandbox.providers.registry import get_provider_class
 
 
 RECEIPT = {"cleanup_confirmed": True, "return_code": 0, "timed_out": False, "error": None}
 OK = SandboxExecResult(stdout="", stderr="", return_code=0)
+EXPIRE_MARKER = "/session/expire.request"
+
+
+def _expiry_writes(session) -> int:
+    return sum(1 for call in session.sandbox.upload.await_args_list if call.args[1] == EXPIRE_MARKER)
+
+
+@contextlib.asynccontextmanager
+async def _launched(session, launched: asyncio.Event):
+    """Start an activation and wait, bounded, for its launch; cancel it on exit if it is still running."""
+    activation = asyncio.create_task(execute(session))
+    try:
+        await asyncio.wait_for(launched.wait(), 2)
+        yield activation
+    finally:
+        activation.cancel()
+        await asyncio.gather(activation, return_exceptions=True)
 
 
 @pytest.fixture
@@ -599,6 +627,404 @@ async def test_missing_failure_log_does_not_mask_capture_failure(session, monkey
     assert session.cleanup == RECEIPT
     await session.close(timeout=1)
     assert session.closed
+
+
+async def test_expire_while_running_requests_the_timeout_path_once(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file /session/expire.request" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    async with _launched(session, launched) as activation:
+        execs = session.sandbox.exec.await_count
+        assert await session.expire(timeout=1, reason="budget") is True
+        assert await session.expire(timeout=1, reason="operator") is False
+        assert session.expire_reason == "budget"
+        # The marker is written as a file, once, with no exec the running harness could hold up.
+        assert _expiry_writes(session) == 1 and session.sandbox.exec.await_count == execs
+        assert not session.expired
+        session.sandbox.exec.side_effect = None
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and not session.expired_before_launch
+    assert await session.expire(timeout=1) is False
+    await session.close(timeout=1)
+
+
+async def test_expire_before_launch_marks_the_launch_expired(session, receipt_reader):
+    assert await session.expire(timeout=1) is True
+    session.sandbox.exec.assert_not_awaited()
+    assert _expiry_writes(session) == 0
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": None, "timed_out": True})
+    assert await execute(session) == "transcript"
+    assert session.expired and session.expired_before_launch
+    # The marker is in place before the supervisor launches, so it never starts the harness.
+    calls = [(name, args) for name, args, _ in session.sandbox.mock_calls if name in ("upload", "exec")]
+    marker = next(index for index, (name, args) in enumerate(calls) if name == "upload" and args[1] == EXPIRE_MARKER)
+    launch = next(index for index, (name, args) in enumerate(calls) if name == "exec" and "--expire-file" in args[0])
+    assert marker < launch
+    assert f"--expire-file {EXPIRE_MARKER}" in calls[launch][1][0]
+    await session.close(timeout=1)
+
+
+async def test_expire_refused_once_closing(session):
+    await session.close(timeout=1)
+    calls = session.sandbox.exec.await_count
+    assert await session.expire(timeout=1) is False
+    assert session.sandbox.exec.await_count == calls and _expiry_writes(session) == 0
+
+
+async def test_failed_expire_request_can_be_retried(session):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER and upload.fail:
+            upload.fail = False
+            raise OSError("no dir")
+
+    upload.fail = True
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        with pytest.raises(RuntimeError, match="Could not request test expiry: no dir"):
+            await session.expire(timeout=1, reason="budget")
+        assert session.expire_reason is None
+        assert await session.expire(timeout=1) is True
+        finish.set()
+        await asyncio.wait_for(activation, 5)
+    await session.close(timeout=1)
+
+
+async def test_expire_is_bounded_when_the_marker_cannot_be_written(session):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER and upload.stall:
+            # A transport that never answers, or a provider queue the call cannot leave.
+            await asyncio.Future()
+
+    upload.stall = True
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        started = asyncio.get_running_loop().time()
+        with pytest.raises(RuntimeError, match="Could not request test expiry within 0.2 s"):
+            await session.expire(timeout=0.2, reason="budget")
+        assert asyncio.get_running_loop().time() - started < 1
+        assert session.expire_reason is None
+        upload.stall = False
+        assert await session.expire(timeout=1, reason="operator") is True
+        assert session.expire_reason == "operator"
+        finish.set()
+        await asyncio.wait_for(activation, 5)
+    await session.close(timeout=1)
+
+
+@pytest.mark.parametrize("marker_landed", [True, False])
+async def test_failed_expire_write_keeps_the_stop_only_if_the_marker_landed(session, receipt_reader, marker_landed):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+    written = set()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        if "echo present" in command:
+            present = EXPIRE_MARKER in written
+            return SandboxExecResult(stdout="present\n" if present else "", stderr="", return_code=0 if present else 1)
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER:
+            if marker_landed:
+                written.add(target)
+            raise ConnectionError("acknowledgment lost")
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        with pytest.raises(RuntimeError, match="Could not request test expiry"):
+            await session.expire(timeout=1, reason="budget")
+        assert session.expire_reason is None
+        # The harness ends at a timeout: the stop's if its marker landed, its own deadline otherwise.
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired is marker_landed
+    assert session.expire_reason == ("budget" if marker_landed else None)
+    await session.close(timeout=1)
+
+
+async def test_expire_write_failing_during_finalization_still_keeps_a_landed_stop(session, receipt_reader):
+    # The marker lands, the harness ends at the stop, and the write fails only once finalization has begun.
+    launched, landed, fail_write = asyncio.Event(), asyncio.Event(), asyncio.Event()
+    finish = asyncio.Event()
+    written = set()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        if "echo present" in command:
+            present = EXPIRE_MARKER in written
+            return SandboxExecResult(stdout="present\n" if present else "", stderr="", return_code=0 if present else 1)
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER:
+            written.add(target)
+            landed.set()
+            await fail_write.wait()
+            raise ConnectionError("acknowledgment lost")
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        stop = asyncio.create_task(session.expire(timeout=5, reason="budget"))
+        await asyncio.wait_for(landed.wait(), 2)
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        # Finalization waits for the write still in flight instead of reconciling past it.
+        await asyncio.sleep(0.1)
+        assert not activation.done()
+        fail_write.set()
+        with pytest.raises(RuntimeError, match="Could not request test expiry"):
+            await asyncio.wait_for(stop, 2)
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.expire_reason == "budget"
+    await session.close(timeout=1)
+
+
+@pytest.mark.parametrize("write_fails", [False, True])
+async def test_a_stop_whose_caller_disconnects_before_its_write_starts_is_delivered_or_retryable(
+    session, receipt_reader, write_fails
+):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER and upload.fail:
+            upload.fail = False
+            raise OSError("no dir")
+
+    upload.fail = write_fails
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        stop = asyncio.create_task(session.expire(timeout=1, reason="budget"))
+        await asyncio.sleep(0)
+        # expire has created its write, which has not run yet, when the stop request disconnects.
+        assert session._expire_write is not None and not session._expire_write.done()
+        stop.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await stop
+        await asyncio.wait({session._expire_write}, timeout=2)
+        assert _expiry_writes(session) == 1
+        if write_fails:
+            assert await session.expire(timeout=1, reason="operator") is True
+            assert _expiry_writes(session) == 2
+        else:
+            assert await session.expire(timeout=1) is False
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert session.expired and session.expire_reason == ("operator" if write_fails else "budget")
+    await session.close(timeout=1)
+
+
+async def test_a_stop_write_still_pending_when_finalization_stops_waiting_stays_unattributed(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+    fail_write = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    async def upload(source, target):
+        if target == EXPIRE_MARKER:
+            await fail_write.wait()
+            raise ConnectionError("upload failed")
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.upload.side_effect = upload
+    async with _launched(session, launched) as activation:
+        stop = asyncio.create_task(session.expire(timeout=5, reason="budget"))
+        await asyncio.sleep(0.05)
+        # The harness ends at its own deadline while the write is still pending, past finalization's 1 s bound.
+        receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": -15, "timed_out": True})
+        finish.set()
+        assert await asyncio.wait_for(activation, 3) == "transcript"
+        assert not session.expired and session.expire_reason is None
+        fail_write.set()
+        with pytest.raises(RuntimeError, match="Could not request test expiry"):
+            await asyncio.wait_for(stop, 2)
+    assert not session.expired
+    await session.close(timeout=1)
+
+
+async def test_expire_refuses_a_running_harness_whose_sandbox_uploads_can_wait_behind_it(session, receipt_reader):
+    launched = asyncio.Event()
+    finish = asyncio.Event()
+
+    async def exec_(command, **_):
+        if "--expire-file" in command:
+            launched.set()
+            await finish.wait()
+        return OK
+
+    session.sandbox.exec.side_effect = exec_
+    session.sandbox.uploads_independent_of_execs = False
+    async with _launched(session, launched) as activation:
+        with pytest.raises(ExpiryUnsupportedError, match="cannot stop a running harness"):
+            await session.expire(timeout=1, reason="budget")
+        assert _expiry_writes(session) == 0 and session.expire_reason is None
+        finish.set()
+        assert await asyncio.wait_for(activation, 5) == "transcript"
+    assert not session.expired
+    await session.close(timeout=1)
+
+
+async def test_expire_before_launch_works_whatever_the_sandbox_uploads(session, receipt_reader):
+    session.sandbox.uploads_independent_of_execs = False
+    assert await session.expire(timeout=1) is True
+    receipt_reader.return_value = json.dumps({**RECEIPT, "return_code": None, "timed_out": True})
+    assert await execute(session) == "transcript"
+    assert session.expired_before_launch
+    await session.close(timeout=1)
+
+
+@pytest.mark.parametrize(
+    "name,options,independent",
+    [
+        ("local", {}, True),
+        ("opensandbox", {"operations": {"background_exec": True}}, True),
+        # A running foreground command holds one of the shared HTTP pool's connections.
+        ("opensandbox", {"operations": {"background_exec": False}}, False),
+        # Uploads share the CLI slots or worker threads that running commands hold.
+        ("docker", None, False),
+        ("apptainer", None, False),
+        ("enroot", None, False),
+        ("openshell", None, False),
+        # Not shown to be independent: their SDKs keep running commands on connection pools Gym does not bound.
+        ("daytona", None, False),
+        ("e2b", None, False),
+        ("ecs_fargate", None, False),
+    ],
+)
+def test_which_sandboxes_can_stop_a_running_harness(name, options, independent):
+    provider_class = get_provider_class(name)
+    if options is None:
+        assert not issubclass(provider_class, SupportsSandboxIndependentUploads)
+        provider = MagicMock(spec=provider_class)
+    else:
+        provider = provider_class(**options)
+    assert AsyncSandbox(provider=provider, spec=SandboxSpec()).uploads_independent_of_execs is independent
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
+async def test_stop_confirmation_is_bounded_when_every_local_exec_slot_is_held(tmp_path, monkeypatch):
+    # The marker check runs during finalization; another workload holding every exec slot must not stall grading.
+    monkeypatch.setattr(LocalProvider, "_semaphores", {})
+    provider = LocalProvider(workspace_root=str(tmp_path), concurrency=1)
+    workdir = tmp_path / "task"
+    sandbox = await AsyncSandbox(provider, owns_provider=False).start(SandboxSpec(workdir=str(workdir)))
+    session = SandboxSession(
+        sandbox=sandbox, session_dir=str(workdir / "session"), workdir=str(workdir), harness="test", owns_sandbox=True
+    )
+    holder = asyncio.create_task(sandbox.exec("sleep 30", timeout_s=60))
+    try:
+        async with asyncio.timeout(5):
+            while not provider._semaphore.locked():
+                await asyncio.sleep(0.01)
+        # A stop whose marker write failed, possibly after the marker landed, and a run that ended at a timeout.
+        session._unconfirmed_expiry, session._unconfirmed_expire_reason = True, "budget"
+        session.cleanup = {**RECEIPT, "return_code": -15, "timed_out": True}
+        begun = monotonic()
+        await asyncio.wait_for(session._finish(timeout=0.2), 5)
+        assert monotonic() - begun < 1
+        assert not session.expired and session.expire_reason is None
+    finally:
+        holder.cancel()
+        await asyncio.gather(holder, return_exceptions=True)
+        await session.close(timeout=5)
+
+
+@pytest.mark.skipif(sys.platform != "linux", reason="process supervision requires Linux")
+@pytest.mark.parametrize("sessions, concurrency", [(1, 1), (8, 8)])
+async def test_expire_reaches_harnesses_that_hold_every_local_exec_slot(tmp_path, monkeypatch, sessions, concurrency):
+    # Each harness's launch holds one of the provider's exec slots for as long as it runs.
+    monkeypatch.setattr(LocalProvider, "_semaphores", {})
+    provider = LocalProvider(workspace_root=str(tmp_path), concurrency=concurrency)
+    runs = []
+    for index in range(sessions):
+        workdir = tmp_path / f"task-{index}"
+        sandbox = await AsyncSandbox(provider, owns_provider=False).start(SandboxSpec(workdir=str(workdir)))
+        session = SandboxSession(
+            sandbox=sandbox,
+            session_dir=str(workdir / "session"),
+            workdir=str(workdir),
+            harness="test",
+            owns_sandbox=True,
+        )
+        started = workdir / "started"
+        worker = f"import pathlib,time; pathlib.Path({str(started)!r}).touch(); time.sleep(60)"
+        activation = asyncio.create_task(
+            session.execute(
+                stage_activation=AsyncMock(return_value=SandboxCommand(argv=[sys.executable, "-c", worker])),
+                collect=AsyncMock(return_value="partial transcript"),
+                timeout=60,
+                close_timeout=5,
+            )
+        )
+        runs.append((session, started, activation))
+    try:
+        async with asyncio.timeout(20):
+            while not all(started.exists() for _, started, _ in runs):
+                await asyncio.sleep(0.05)
+        begun = monotonic()
+        assert [await session.expire(timeout=2, reason="budget") for session, _, _ in runs] == [True] * sessions
+        assert monotonic() - begun < 2 * sessions
+        async with asyncio.timeout(20):
+            results = await asyncio.gather(*(activation for _, _, activation in runs))
+        assert results == ["partial transcript"] * sessions
+        for session, _, _ in runs:
+            assert session.cleanup["timed_out"] is True and session.cleanup["cleanup_confirmed"] is True
+            assert session.expired and not session.expired_before_launch
+    finally:
+        for session, _, activation in runs:
+            activation.cancel()
+            await asyncio.gather(activation, return_exceptions=True)
+            await session.close(timeout=5)
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash is required")
