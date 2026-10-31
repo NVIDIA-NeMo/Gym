@@ -13,8 +13,7 @@ from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.typed_exceptions import NgFailureEvent
 
 
-@pytest.mark.parametrize("adapter", ["tavily_search", "browsecomp_advanced_harness", "rolemrc", "rolemrc_multi"])
-async def test_real_verifier_reply_preserves_the_original_judge_model_cause(tmp_path, monkeypatch, adapter):
+async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tmp_path, monkeypatch, adapter):
     multiple = adapter == "rolemrc_multi"
     adapter = "rolemrc" if multiple else adapter
     module = import_module(f"resources_servers.{adapter}.app")
@@ -139,8 +138,9 @@ async def test_real_verifier_reply_preserves_the_original_judge_model_cause(tmp_
     dispatch.assert_not_called()
 
 
-@pytest.mark.parametrize("error_first", [False, True])
-async def test_browsecomp_received_unparseable_verdict_keeps_zero_and_transport_observations(monkeypatch, error_first):
+async def assert_browsecomp_received_unparseable_verdict_keeps_zero_and_transport_observations(
+    monkeypatch, error_first
+):
     from tests.unit_tests.test_rollout_collection import FakeResponse
 
     module = import_module("resources_servers.browsecomp_advanced_harness.app")
