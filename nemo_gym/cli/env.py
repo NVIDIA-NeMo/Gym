@@ -21,7 +21,7 @@ import sys
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
-from signal import SIGINT
+from signal import SIGINT, SIGKILL
 from subprocess import Popen, TimeoutExpired
 from tempfile import TemporaryDirectory
 from threading import Thread
@@ -106,8 +106,8 @@ from nemo_gym.telemetry.setup import (
 from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV, SupervisorStartup
 
 
-# Grace period after SIGINT before escalating to SIGKILL. Kept short so Ctrl-C is responsive.
-_GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 1
+# One shared grace period for server lifespans, including sandbox cleanup.
+_GRACEFUL_SHUTDOWN_TIMEOUT_SEC: int = 120
 # Grace period after SIGKILL for the kernel to reap the child and avoid <defunct> entries.
 _FORCE_KILL_REAP_TIMEOUT_SEC: int = 2
 
@@ -636,6 +636,7 @@ class RunHelper:  # pragma: no cover
                 server_name=top_level_path,
                 project_root=dir_path.parent.parent if (PARENT_DIR / "pyproject.toml").is_file() else None,
                 extra_env=extra_env,
+                start_new_session=True,
             )
             self._processes[top_level_path] = process
             # In dry run mode, wait for each setup command to finish before starting the next.
@@ -853,16 +854,25 @@ Process `{process_name}` stderr:
 
         print("Sending interrupt signals to servers...")
         for process in self._processes.values():
-            process.send_signal(SIGINT)
+            # The launcher can be a shell/tee pipeline. Signal its own process
+            # group so the server runs lifespan cleanup before the shell exits.
+            try:
+                os.killpg(process.pid, SIGINT)
+            except ProcessLookupError:
+                pass
 
         print("Waiting for processes to finish...")
+        deadline = monotonic() + _GRACEFUL_SHUTDOWN_TIMEOUT_SEC
         killed_process_names: List[str] = []
         unreaped_process_names: List[str] = []
         for process_name, process in self._processes.items():
             try:
-                process.wait(timeout=_GRACEFUL_SHUTDOWN_TIMEOUT_SEC)
+                process.wait(timeout=max(0.0, deadline - monotonic()))
             except TimeoutExpired:
-                process.kill()
+                try:
+                    os.killpg(process.pid, SIGKILL)
+                except ProcessLookupError:
+                    pass
                 killed_process_names.append(process_name)
                 # Reap the child after SIGKILL to avoid leaving a <defunct> entry.
                 try:

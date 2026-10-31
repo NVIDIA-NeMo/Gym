@@ -320,8 +320,7 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                 async with parent_lifespan(app) as maybe_state:
                     yield maybe_state
             finally:
-                for session_id in list(self._python_sandboxes):
-                    await self._stop_python_sandbox(session_id)
+                await asyncio.gather(*(self._stop_python_sandbox(s) for s in list(self._python_sandboxes)))
                 await self._sandbox_provider.aclose()
 
         app.router.lifespan_context = lifespan

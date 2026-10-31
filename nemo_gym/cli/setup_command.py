@@ -357,6 +357,7 @@ def run_command(
     stdout_target: IO[Any] | None = None,
     stderr_target: IO[Any] | None = None,
     extra_env: Mapping[str, str] | None = None,
+    start_new_session: bool = False,
 ) -> Popen:
     if global_config_dict is None:
         global_config_dict = get_global_config_dict()
@@ -416,4 +417,5 @@ def run_command(
         env=custom_env,
         stdout=redirect_stdout,
         stderr=redirect_stderr,
+        start_new_session=start_new_session,
     )

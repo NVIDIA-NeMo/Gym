@@ -19,6 +19,7 @@ import tomllib
 from dataclasses import replace
 from importlib import import_module
 from pathlib import Path
+from signal import SIGINT, SIGKILL
 from subprocess import TimeoutExpired
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -65,6 +66,14 @@ from nemo_gym.config_types import (
 from nemo_gym.environment.scaffold import ScaffoldError
 from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME
 from nemo_gym.registry import EnvironmentCatalogEntry
+
+
+@pytest.fixture(autouse=True)
+def server_process_groups(monkeypatch):
+    """The CLI unit tests use mocked launchers; never signal a real process group."""
+    killpg = MagicMock()
+    monkeypatch.setattr(nemo_gym.cli.env.os, "killpg", killpg)
+    return killpg
 
 
 class TestSelectShard:
@@ -957,7 +966,7 @@ class TestRunHelperStartUnwind:
             runner.start(None)
 
         assert excinfo.value is error
-        process.send_signal.assert_called_once()
+        nemo_gym.cli.env.os.killpg.assert_called_once_with(process.pid, SIGINT)
         assert runner._processes == {}
 
 
@@ -980,10 +989,10 @@ class TestRunHelperShutdownReap:
         runner = self._make_runner_with_processes({"good_server": good, "bad_server": bad})
         runner.shutdown()
 
-        good.send_signal.assert_called_once()
-        bad.send_signal.assert_called_once()
-        good.kill.assert_not_called()
-        bad.kill.assert_called_once()
+        nemo_gym.cli.env.os.killpg.assert_any_call(good.pid, SIGINT)
+        nemo_gym.cli.env.os.killpg.assert_any_call(bad.pid, SIGINT)
+        nemo_gym.cli.env.os.killpg.assert_any_call(bad.pid, SIGKILL)
+        assert nemo_gym.cli.env.os.killpg.call_count == 3
         assert good.wait.call_count == 1
         assert bad.wait.call_count == 2
         assert runner._processes == {}
@@ -995,7 +1004,7 @@ class TestRunHelperShutdownReap:
         runner = self._make_runner_with_processes({"zombie_server": zombie})
         runner.shutdown()
 
-        zombie.kill.assert_called_once()
+        nemo_gym.cli.env.os.killpg.assert_any_call(zombie.pid, SIGKILL)
         assert zombie.wait.call_count == 2
         out: str = capsys.readouterr().out
         assert "zombie_server" in out
@@ -1019,8 +1028,7 @@ class TestRunHelperShutdownReap:
         runner = self._make_runner_with_processes({"a": a, "b": b})
         runner.shutdown()
 
-        a.kill.assert_not_called()
-        b.kill.assert_not_called()
+        assert all(call.args[1] == SIGINT for call in nemo_gym.cli.env.os.killpg.call_args_list)
         assert a.wait.call_count == 1
         assert b.wait.call_count == 1
         assert runner._processes == {}
@@ -1029,7 +1037,7 @@ class TestRunHelperShutdownReap:
         profiler = MagicMock()
         process = MagicMock()
         process.wait.return_value = 0
-        process.send_signal.side_effect = lambda _signal: profiler.stop.assert_called_once_with()
+        nemo_gym.cli.env.os.killpg.side_effect = lambda *_: profiler.stop.assert_called_once_with()
         runner = self._make_runner_with_processes({"server": process})
         runner._memory_profiler = profiler
 
@@ -1047,7 +1055,7 @@ class TestRunHelperShutdownReap:
         runner.shutdown()
         runner.shutdown()
 
-        process.send_signal.assert_called_once()
+        nemo_gym.cli.env.os.killpg.assert_called_once_with(process.pid, SIGINT)
         head_server_thread.join.assert_called_once_with()
         assert runner._head_server is None
 

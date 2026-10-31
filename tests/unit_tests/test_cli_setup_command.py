@@ -656,6 +656,7 @@ class TestCLISetupCommandRunCommand:
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -676,6 +677,7 @@ class TestCLISetupCommandRunCommand:
             env={"PYTHONPATH": "/my path:existing pythonpath", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -740,6 +742,7 @@ class TestCLISetupCommandRunCommand:
             },
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -777,6 +780,7 @@ class TestCLISetupCommandRunCommand:
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -959,6 +963,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -983,6 +988,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
             env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args

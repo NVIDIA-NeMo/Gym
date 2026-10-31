@@ -12,7 +12,9 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 import shlex
+import signal
 import subprocess
 import sys
 import time
@@ -21,14 +23,58 @@ from pathlib import Path
 import pytest
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli.env import _server_launch_command
+from nemo_gym.cli.env import RunHelper, _server_launch_command
+from nemo_gym.cli.setup_command import run_command
 from nemo_gym.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    NEMO_GYM_LOG_DIR_KEY_NAME,
     UV_VENV_DIR_KEY_NAME,
 )
 from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV
 from tests.unit_tests.test_global_config import TestGlobalConfig as _TestGlobalConfig
+
+
+def test_shutdown_reaches_logged_server_and_waits_for_cleanup(tmp_path: Path) -> None:
+    """A shell/tee wrapper must not orphan the server before its lifespan finishes."""
+    ready, stopped = tmp_path / "ready", tmp_path / "stopped"
+    script = tmp_path / "server.py"
+    script.write_text(
+        "import os, signal, time\nfrom pathlib import Path\n"
+        "def stop(*_):\n time.sleep(1.2)\n"
+        f" Path({str(stopped)!r}).write_text('cleaned')\n raise SystemExit(0)\n"
+        "signal.signal(signal.SIGINT, stop)\n"
+        f"Path({str(ready)!r}).write_text(str(os.getpid()))\n"
+        "while True: time.sleep(.05)\n"
+    )
+    config = _TestGlobalConfig._default_global_config_dict_values.fget(None) | {
+        NEMO_GYM_LOG_DIR_KEY_NAME: str(tmp_path / "logs")
+    }
+    process = run_command(
+        shlex.join([sys.executable, str(script)]),
+        tmp_path,
+        global_config_dict=config,
+        start_new_session=True,
+    )
+    runner = RunHelper()
+    runner._processes = {"server": process}
+    runner._head_server = None
+    try:
+        deadline = time.monotonic() + 5
+        while not ready.exists() and time.monotonic() < deadline:
+            time.sleep(0.02)
+        assert ready.exists(), "Server did not start"
+        assert os.getpgid(process.pid) != os.getpgrp()
+        runner.shutdown()
+        assert stopped.read_text() == "cleaned"
+        with pytest.raises(ProcessLookupError):
+            os.kill(int(ready.read_text()), 0)
+    finally:
+        try:
+            os.killpg(process.pid, signal.SIGKILL)
+        except ProcessLookupError:
+            pass
+        process.wait(timeout=5)
 
 
 class TestServerLaunchCommand:
