@@ -225,7 +225,7 @@ class HarborEntrypointMixin:
         Gym's providers start their own keepalive instead, so the same process is started here as a
         long-lived exec through a ``run.sh`` that records a started marker, the exit status and the
         output under :data:`ENTRYPOINT_DIR`, the way the Compose adapter starts a service. ``user`` is
-        the image's user by name (:meth:`_image_user_name`); ``compose_managed`` says the adapter started this
+        the image's user by name or numeric ID (:meth:`_image_user_name`); ``compose_managed`` says the adapter started this
         sandbox's service, entrypoint included, so nothing is started here (see :func:`entrypoint_to_run`).
         For a Dockerfile the loader resolved (not a
         built image, which holds its ``WorkingDir``) the entrypoint's working directory is created as

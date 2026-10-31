@@ -724,7 +724,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
                 "second": {
                     "image": "image",
                     "working_dir": str(workdir),
-                    "command": ["sh", "-c", f"pwd > {shlex.quote(str(startup_cwd))} && sleep 1"],
+                    "command": ["sh", "-c", f"pwd > {shlex.quote(str(startup_cwd))}"],
                     "volumes": [
                         {"type": "volume", "source": "data", "target": "/data"},
                         {"type": "bind", "source": "/operator/source", "target": "/external", "read_only": True},
@@ -739,7 +739,7 @@ async def test_volume_copy_after_nocopy_mount_and_external_source_cleanup(tmp_pa
         poll_interval_s=0.01,
     )
     async with group:
-        await group._wait("second", "service_started")
+        await group._wait("second", "service_completed_successfully")
         assert startup_cwd.read_text().strip() == str(workdir)
         (seed,) = group._seeds
         assert seed._spec.workdir == (None if with_setup else str(workdir))

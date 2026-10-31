@@ -724,6 +724,7 @@ class HarborSandboxMixin:
             and main.get("user") in (None, "")
             and (
                 startup_command
+                or any(hook.get("user") in (None, "") for hook in main.get("post_start") or [])
                 or (
                     bool(healthcheck.get("test"))
                     and not healthcheck.get("disable")
@@ -733,7 +734,7 @@ class HarborSandboxMixin:
         )
         if startup_uses_image_user:
             # Fail before creating any service or running setup; an unused image identity needs no support.
-            self._refuse_unsupported_group(task, task.entrypoint_user, global_config_dict, "image startup")
+            self._refuse_unsupported_group(task, task.entrypoint_user, global_config_dict, " image startup")
         own_workdir = task.built_image is None and task.entrypoint_workdir and not _is_root(task.entrypoint_user)
         if task.overlay or image_startup or own_workdir:
 

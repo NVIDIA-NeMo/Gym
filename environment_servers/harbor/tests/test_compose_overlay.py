@@ -444,8 +444,62 @@ class TestGroup:
             await compose.stop()
 
     @pytest.mark.parametrize(
+        "main_user,hook_user,expected_user",
+        [
+            (None, None, "app"),
+            (None, "", "app"),
+            (None, "root", "root"),
+            (None, 0, 0),
+            ("operator", None, "operator"),
+            ("operator", "root", "root"),
+        ],
+        ids=["image-user", "empty-hook-user", "hook-user", "hook-uid", "service-user", "hook-over-service"],
+    )
+    @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
+    async def test_post_start_user_is_independent_of_agent_user(
+        self, tmp_path, monkeypatch, main_user, hook_user, expected_user, with_run
+    ):
+        overlay = volume_free_overlay(tmp_path)
+        hook = {"command": "echo startup-hook"}
+        if hook_user is not None:
+            hook["user"] = hook_user
+        with overlay.files[0].open("a") as file:
+            file.write(f"    post_start: {json.dumps([hook])}\n")
+            if main_user is not None:
+                file.write(f"    user: {main_user}\n")
+        run = "RUN true\n" if with_run else ""
+        server, task, *_ = overlay_server(
+            tmp_path,
+            monkeypatch,
+            toml=TASK_TOML.replace("[agent]\n", '[agent]\nuser = "other"\n'),
+            dockerfile=f"FROM ubuntu:24.04\n{run}USER app\nWORKDIR /app\n",
+            image_config={"Env": [f"PATH={IMAGE_PATH}"]},
+            overlay=overlay,
+        )
+        compose, _, sandbox = await start_real_group(monkeypatch, server, task)
+        try:
+            (executed,) = [record for record in sandbox.execs if record["command"] == "echo startup-hook"]
+            assert executed["user"] == expected_user
+            # Startup hooks finish before the seed installs the later agent's user.
+            await server._set_default_user(compose.services["main"], task, server._overlay_names.pop("r1"))
+            await compose.services["main"].exec("id")
+            assert sandbox.execs[-1]["user"] == "other"
+        finally:
+            await compose.stop()
+
+    @pytest.mark.parametrize(
         "startup",
-        ["none", "keepalive", "cleared-entrypoint", "disabled-healthcheck", "entrypoint", "healthcheck", "command"],
+        [
+            "none",
+            "keepalive",
+            "cleared-entrypoint",
+            "disabled-healthcheck",
+            "entrypoint",
+            "healthcheck",
+            "command",
+            "post-start",
+            "explicit-hook-user",
+        ],
     )
     @pytest.mark.parametrize("with_run", [False, True], ids=["pull", "overlay"])
     async def test_image_group_is_checked_before_create_only_when_startup_uses_it(
@@ -457,6 +511,13 @@ class TestGroup:
         if startup == "command":
             with overlay.files[0].open("a") as file:
                 file.write('    command: ["touch", "/tmp/started"]\n')
+        if startup in ("post-start", "explicit-hook-user"):
+            with overlay.files[0].open("a") as file:
+                file.write(
+                    '    post_start: [{command: "echo startup-hook"'
+                    + (", user: root" if startup == "explicit-hook-user" else "")
+                    + "}]\n"
+                )
         config = {"Env": [f"PATH={IMAGE_PATH}"]}
         if startup in ("entrypoint", "cleared-entrypoint"):
             config["Entrypoint"] = ["/entry.sh"]
@@ -486,7 +547,7 @@ class TestGroup:
         write_image_config(
             task.path.parent, "org/memory:1", Cmd=["memory-server"], Healthcheck={"Test": ["CMD", "true"]}
         )
-        if startup in ("none", "keepalive", "cleared-entrypoint", "disabled-healthcheck"):
+        if startup in ("none", "keepalive", "cleared-entrypoint", "disabled-healthcheck", "explicit-hook-user"):
             compose = await harbor_app.HarborEnvironmentServer._create_compose(server, task, "r1")
             try:
                 assert compose._ready
