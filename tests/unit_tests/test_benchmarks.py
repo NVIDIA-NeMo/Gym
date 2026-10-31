@@ -49,6 +49,24 @@ def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
     assert agent["pinchbench_agent"]["responses_api_agents"]["pinchbench"]["tavily_api_key"] == ("${tavily_api_key}")
 
 
+def test_simple_agent_max_steps_is_an_int_in_every_benchmark_config() -> None:
+    # SimpleAgentConfig.max_steps is an int, so any other value stops the agent at startup.
+    benchmarks_dir = Path(__file__).parents[2] / "benchmarks"
+    non_int_max_steps = []
+    for config_path in sorted(benchmarks_dir.rglob("*.yaml")):
+        config = safe_load(config_path.read_text())
+        if not isinstance(config, dict):
+            continue
+        for name, entry in config.items():
+            if not isinstance(entry, dict):
+                continue
+            simple_agent = (entry.get("responses_api_agents") or {}).get("simple_agent") or {}
+            if "max_steps" in simple_agent and not isinstance(simple_agent["max_steps"], int):
+                non_int_max_steps.append(f"{config_path.relative_to(benchmarks_dir)}: {name}")
+
+    assert non_int_max_steps == []
+
+
 @pytest.fixture(autouse=True)
 def _mock_port_allocation(monkeypatch):
     """Keep benchmark-discovery tests independent of socket availability."""
