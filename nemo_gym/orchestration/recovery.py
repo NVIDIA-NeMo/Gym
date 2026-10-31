@@ -833,7 +833,8 @@ if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
             and set(receipt["artifacts"]) == set(RECEIPT_FILES)):
         current = {k: sha256(os.path.join(a, n)) for k, n in RECEIPT_FILES.items()}
         mlflow["receipt"] = {"run_id": receipt["run_id"], "current": receipt["artifacts"] == current,
-                             "uploaded_rollouts": receipt.get("uploaded_rollouts")}
+                             "uploaded_rollouts": receipt.get("uploaded_rollouts"),
+                             "rollout_projection_version": receipt.get("rollout_projection_version")}
     elif not isinstance(receipt, (dict, list)) and len(text.split()) == 1:
         # A marker that names only the backend run: it carries no digests to check the artifacts against.
         mlflow["receipt"] = {"run_id": text.strip(), "current": None}
@@ -1534,6 +1535,16 @@ def mlflow_errors(
                 if scope is False
                 else "does not record whether the rollouts were uploaded"
             )
+        )
+    if (
+        isinstance(receipt, dict)
+        and receipt.get("current") is True
+        and receipt.get("uploaded_rollouts") is True
+        and (type(receipt.get("rollout_projection_version")) is not int or receipt["rollout_projection_version"] != 1)
+    ):
+        errors.append(
+            "MLflow export receipt does not verify delivery of canonical trajectory metadata "
+            "(rollout projection version 1 required)"
         )
     if isinstance(receipt, dict) and not live and observed_status is not None:
         bound = receipt.get("run_id")

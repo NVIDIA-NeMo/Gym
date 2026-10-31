@@ -128,10 +128,21 @@ def test_a_complete_export_writes_a_version_1_receipt_of_what_it_sent(tmp_path: 
     result = _backend(artifacts).export(artifacts)
     assert result.state is ExportState.SUCCEEDED
     receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
-    assert receipt == {"version": 1, "run_id": "run-1", "artifacts": _digests(artifacts), "uploaded_rollouts": True}
+    assert receipt == {
+        "version": 1,
+        "run_id": "run-1",
+        "artifacts": _digests(artifacts),
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
     # Recovery's collector binds the receipt to the current files; only FINISHED for the receipt's own run passes.
     local = _collected_mlflow(artifacts)
-    assert local["receipt"] == {"run_id": "run-1", "current": True, "uploaded_rollouts": True}
+    assert local["receipt"] == {
+        "run_id": "run-1",
+        "current": True,
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
     assert mlflow_errors(local, "FINISHED", observed_run_id="run-1") == []
     assert mlflow_errors(local, "FINISHED", observed_run_id="another-run")
     assert mlflow_errors(local, "FAILED", observed_run_id="run-1")
