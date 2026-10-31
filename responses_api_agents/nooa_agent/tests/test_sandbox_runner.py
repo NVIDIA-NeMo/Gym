@@ -997,3 +997,46 @@ async def test_provider_execution_failure_is_not_replaced_by_a_capture_error() -
     assert caught.value.__cause__ is provider_error
     assert "sandbox_capture_failed" in {gap.code for gap in r.observations.gaps}
     await r.close()
+
+
+@pytest.mark.asyncio
+async def test_trace_jsonl_is_requested_and_copied_per_rollout(tmp_path: Path) -> None:
+    """With trace_jsonl on, the worker is told where to write traces and the joined file lands under
+    <artifacts_dir>/<rollout_id>/traces.jsonl; the sandbox files stay the collector's only source."""
+    r, s = runner()
+    r.trace_jsonl = True
+    r.artifacts_dir = tmp_path / "artifacts"
+    complete_files(r, s)
+    s.files[r.directory + "/traces.jsonl"] = '{"resourceSpans":[{"a":1}]}\n{"resourceSpans":[{"a":2}]}\n'
+    request = payload().request
+    await r.run(request)
+    launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
+    assert launch.trace_dir == r.directory + "/traces"
+    copied = tmp_path / "artifacts" / request.rollout_id / "traces.jsonl"
+    assert r.trace_file == copied
+    assert copied.read_text().count("\n") == 2
+
+
+@pytest.mark.asyncio
+async def test_trace_jsonl_off_sends_no_trace_dir_and_reads_no_trace(tmp_path: Path) -> None:
+    r, s = runner()
+    complete_files(r, s)
+    request = payload().request
+    await r.run(request)
+    launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
+    assert launch.trace_dir is None
+    assert r.trace_file is None
+    assert not (tmp_path / "artifacts").exists()
+
+
+@pytest.mark.asyncio
+async def test_missing_trace_file_does_not_fail_the_rollout(tmp_path: Path) -> None:
+    """A worker that died before flushing leaves no traces.jsonl; the result is still collected and graded."""
+    r, s = runner()
+    r.trace_jsonl = True
+    r.artifacts_dir = tmp_path / "artifacts"
+    complete_files(r, s)
+    request = payload().request
+    result = await r.run(request)
+    assert result.episode.response is not None
+    assert r.trace_file is None

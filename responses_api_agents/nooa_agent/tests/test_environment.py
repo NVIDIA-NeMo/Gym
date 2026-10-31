@@ -270,7 +270,8 @@ async def test_nooa_close_precedes_verification_with_final_cookies_and_evidence(
     record = _episode_record(response.model_dump(mode="json"))
     assert record["ng_agent_observations"]["source"] == "nooa"
     assert record["benchmark_field"] == "preserved"
-    assert "ng_trajectory" not in record
+    # The environment server takes the row's trajectory from the close receipt.
+    assert record["ng_trajectory"]["rollout_id"] == "rollout-a2"
     assert "agent_timed_out" not in record
     assert "agent_timeout_seconds" not in record
     assert request.task.task_input.task_data == {"instance_id": "task"}

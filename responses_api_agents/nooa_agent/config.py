@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 from pathlib import Path
+from typing import Literal
 
 from pydantic import ConfigDict, Field, field_validator, model_validator
 
@@ -52,6 +53,13 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Controller-prepared offline runtime bundle; when set, task setup uses no package-network access.",
     )
+    runtime_wheelhouse_musl: Path | None = Field(
+        default=None,
+        description=(
+            "Offline runtime bundle for musl task images (Alpine or BusyBox based), prepared with "
+            "`--target x86_64/musl`; without it a musl task fails at setup when a glibc bundle is configured."
+        ),
+    )
     runtime_wheelhouse_required: bool = Field(
         default=False, description="Require an explicitly prepared offline runtime before starting this agent."
     )
@@ -61,6 +69,23 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     )
     context_window: int | None = Field(
         default=None, gt=0, description="Known policy context window used by NOOA's context planner."
+    )
+    trace_jsonl: bool = Field(
+        default=False,
+        description=(
+            "Write NOOA's OTLP JSONL trace in the sandbox for each rollout and copy it to "
+            "<artifacts_dir>/<rollout_id>/traces.jsonl on this host. A debugging artifact, not evidence: Gym's own "
+            "capture and the rollout record remain authoritative."
+        ),
+    )
+    artifacts_dir: Path = Field(
+        default=Path("nooa-artifacts"),
+        description="Host directory for per-rollout NOOA artifacts such as the trace file; relative to the server's cwd.",
+    )
+    media_inputs: tuple[Literal["image", "audio", "video", "pdf"], ...] = Field(
+        default=(),
+        description="Media the policy model accepts, as NOOA's media_inputs. Empty is text-only: "
+        "NOOA replaces other media with a short note.",
     )
 
     sandbox_runner_timeout_seconds: float = Field(
@@ -76,7 +101,7 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
         description="Budget in seconds for each sandbox close phase and for joining the remaining activation.",
     )
 
-    @field_validator("runtime_wheelhouse")
+    @field_validator("runtime_wheelhouse", "runtime_wheelhouse_musl")
     @classmethod
     def normalize_runtime_wheelhouse(cls, value: Path | None) -> Path | None:
         if value is None:

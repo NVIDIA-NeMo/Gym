@@ -27,7 +27,7 @@ from nooa.context_blocks.models import RenderedMessage, Role, ToolCallInfo
 from nooa.llm_types import AssistantReasoning, AssistantText
 from nooa.storage.serialization import deserialize, serialize
 from nooa.storage.sqlite import SQLiteStorageManager
-from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
+from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall, UnifiedLLM
 from pydantic import BaseModel
 
 from nemo_gym.openai_utils import (
@@ -102,6 +102,7 @@ def make_llm(
     max_policy_calls: int | None = 2,
     sampling_overrides: dict | None = None,
     context_window: int | None = None,
+    media_inputs: tuple[str, ...] = (),
 ) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -114,6 +115,7 @@ def make_llm(
         cookies={},
         sampling_overrides=sampling_overrides,
         context_window=context_window,
+        media_inputs=media_inputs,
     )
     return llm, server_client, state
 
@@ -154,6 +156,45 @@ async def test_context_planning_reserves_the_effective_gym_reply_cap() -> None:
     assert overrides == {"max_tokens": 128, "extra_body": {"max_completion_tokens": 64, "custom": True}}
     await llm.acall([{"role": "user", "content": "hello"}], max_tokens=128)
     assert client.post.await_args.kwargs["json"].max_output_tokens == limits.reserved_output_tokens
+
+
+# What NOOA's show() puts in a message: portable Chat-style blocks, not Responses blocks.
+requires_nooa_media = pytest.mark.skipif(
+    not hasattr(UnifiedLLM, "_prepare_media_messages"), reason="the pinned NOOA predates explicit media inputs"
+)
+SHOWN_IMAGE = {"type": "image_url", "image_url": {"url": "data:image/png;base64,iVBORw0KGgo=", "format": "image/png"}}
+
+
+@requires_nooa_media
+@pytest.mark.asyncio
+async def test_media_the_model_is_not_set_up_for_is_replaced_with_nooas_note() -> None:
+    llm, client, _ = make_llm(model_response())
+    await llm.acall(
+        [
+            {"role": "user", "content": [{"type": "text", "text": "Output:"}, SHOWN_IMAGE]},
+            {"role": "tool", "tool_call_id": "call-1", "content": [{"type": "text", "text": "ran"}, SHOWN_IMAGE]},
+        ]
+    )
+    request = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)
+    user, tool = request["input"]
+    assert user["content"][0] == {"type": "input_text", "text": "Output:"}
+    assert user["content"][1]["type"] == "input_text" and "image was removed" in user["content"][1]["text"]
+    assert tool["output"][0] == {"type": "input_text", "text": "ran"}
+    assert "image was removed" in tool["output"][1]["text"]
+    assert "data:image/png" not in json.dumps(request)
+
+
+@requires_nooa_media
+@pytest.mark.asyncio
+async def test_enabled_images_reach_the_model_as_responses_input_images() -> None:
+    llm, client, _ = make_llm(model_response(), media_inputs=("image",))
+    await llm.acall([{"role": "user", "content": [{"type": "text", "text": "Output:"}, SHOWN_IMAGE]}])
+    (user,) = client.post.await_args.kwargs["json"].model_dump(mode="json", exclude_none=True)["input"]
+    assert user["content"][1] == {
+        "type": "input_image",
+        "image_url": "data:image/png;base64,iVBORw0KGgo=",
+        "detail": "auto",
+    }
 
 
 def test_context_planning_without_gym_reply_override_keeps_nooa_reserve_semantics() -> None:

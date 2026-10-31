@@ -79,7 +79,7 @@ async def test_offline_runtime_failure_never_activates_or_destroys_borrowed_sand
     staging.side_effect = ValueError("Offline runtime source fingerprint mismatch")
     with pytest.raises(ValueError, match="source fingerprint mismatch"):
         await instance.seed_agent_session(request(), seed(sandbox_access=access()))
-    staging.assert_awaited_once_with(sandbox, wheelhouse_path=Path("/prepared/nooa"))
+    staging.assert_awaited_once_with(sandbox, wheelhouse_path=Path("/prepared/nooa"), musl_wheelhouse_path=None)
     connect.assert_awaited_once()
     sandbox.exec.assert_not_awaited()
     with pytest.raises(HTTPException, match="closing"):
@@ -309,7 +309,7 @@ async def test_seed_wires_resolved_endpoint_runtime_and_limits_into_one_runner(s
     assert runner.invocation is instance.config.nooa
     instance.server_client._resolve_base_url.assert_not_called()
     instance.server_client._build_server_base_url.assert_called_once_with({"host": "model", "port": 8000})
-    staging.assert_awaited_once_with(sandbox, wheelhouse_path=None)
+    staging.assert_awaited_once_with(sandbox, wheelhouse_path=None, musl_wheelhouse_path=None)
     connect.assert_awaited_once()
     await instance.seed_agent_session(request(), body)
     assert instance._require_agent_session("session").runner is runner

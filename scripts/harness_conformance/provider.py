@@ -121,13 +121,23 @@ class Probe:
             function = tool.get("function", tool)
             name = function.get("name", "")
             if name.rsplit("__", 1)[-1] == "python_cell":
+                # BenchAgent's turn returns a nooa_bench TaskResult; Atom's turn ends with a Done
+                # carrying a nooa.interactive TaskResult and exposes Done in the cell namespace.
                 return (
                     name,
                     {
                         "code": (
-                            "from nooa_bench.bench_agent import TaskResult\n"
-                            f"return_result(TaskResult(solution_description={ANSWER!r}, "
-                            f"evidence={ANSWER!r}, how_to_verify={ANSWER!r}))"
+                            "try:\n"
+                            "    Done\n"
+                            "except NameError:\n"
+                            "    from nooa_bench.bench_agent import TaskResult as _Result\n"
+                            f"    return_result(_Result(solution_description={ANSWER!r}, "
+                            f"evidence={ANSWER!r}, how_to_verify={ANSWER!r}))\n"
+                            "else:\n"
+                            "    from nooa.interactive import TaskResult as _Result\n"
+                            f"    return_result(Done(explanation={ANSWER!r}, result=_Result("
+                            f"solution_description={ANSWER!r}, evidence={ANSWER!r}, "
+                            f"how_to_verify={ANSWER!r}, report={ANSWER!r})))"
                         )
                     },
                     namespaces,

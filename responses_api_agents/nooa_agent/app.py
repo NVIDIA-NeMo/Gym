@@ -18,6 +18,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import Mapping
 from dataclasses import dataclass, field
+from typing import Any
 
 from fastapi import Body, FastAPI, HTTPException, Request
 
@@ -38,6 +39,7 @@ from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.providers import create_provider
 from nemo_gym.tool_access import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent.config import NOOAAgentConfig
+from responses_api_agents.nooa_agent.provenance import provenance_metadata
 from responses_api_agents.nooa_agent.result import finalize_run_result, is_transient_infrastructure_error
 from responses_api_agents.nooa_agent.runner import (
     InProcessNOOARunner,
@@ -68,6 +70,11 @@ class NOOAAgent(SimpleResponsesAPIAgent):
     """Run one NOOA activation per Environment Server-owned episode."""
 
     config: NOOAAgentConfig
+
+    def report_outcome(self, response: NeMoGymResponse, native_result: Mapping[str, Any]) -> NeMoGymResponse:
+        """Stamp the NOOA pin and adapter commit on every response, then attach outcome evidence as the base does."""
+        response = super().report_outcome(response, native_result)
+        return response.model_copy(update={"metadata": {**(response.metadata or {}), **provenance_metadata()}})
 
     def classify_outcome(self, native_result: Mapping[str, object]) -> AgentOutcome:
         """Report a trusted model rejection; the environment owns grading and retry policy."""
@@ -108,6 +115,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 model_server_name=self.config.model_server.name,
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
+                media_inputs=self.config.media_inputs,
             )
         else:
             if body.sandbox_access is None:
@@ -133,12 +141,16 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
+                trace_jsonl=self.config.trace_jsonl,
+                artifacts_dir=self.config.artifacts_dir,
+                media_inputs=self.config.media_inputs,
             )
             state.runner = runner
             try:
                 runner.python = await prepare_nooa_runtime(
                     sandbox,
                     wheelhouse_path=self.config.runtime_wheelhouse,
+                    musl_wheelhouse_path=self.config.runtime_wheelhouse_musl,
                 )
                 await runner.prepare()
             except BaseException as error:
@@ -282,6 +294,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=observations,
+            # The run's own turns and model-call references. Without them collection has no producer turns:
+            # evaluation runs capture no model calls, so every row would report its turns as unavailable.
+            trajectory=state.result.trajectory if state.result is not None else None,
             resources_cookies=dict(
                 state.result.resource_cookies if state.result is not None else state.resources_cookies
             )

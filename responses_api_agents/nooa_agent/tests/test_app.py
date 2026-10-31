@@ -160,6 +160,9 @@ async def test_agent_session_activation_and_close_preserve_identity_cookies_and_
     receipt = await close(instance)
     assert receipt.agent_observations.source == "nooa"
     assert receipt.resources_cookies == {"session": "resource-cookie"}
+    # Rollout collection takes the run's turns from the receipt; evaluation runs capture no model calls to rebuild them.
+    assert receipt.trajectory == result().trajectory
+    assert "trajectory" in receipt.model_dump(mode="json")
     assert await close(instance) == receipt
     instance.server_client.post.assert_not_called()
 
@@ -241,6 +244,8 @@ async def test_failed_activation_replays_error_and_returns_evidence_on_close(
     assert runner_run.call_count == 1
     receipt = await close(instance)
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
+    # A failed activation keeps the turns it took before failing, like its observations.
+    assert receipt.trajectory == failure.result.trajectory
 
 
 @pytest.mark.parametrize(

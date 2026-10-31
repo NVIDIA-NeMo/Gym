@@ -107,6 +107,13 @@ def test_context_window_defaults_to_unknown_and_accepts_known_positive_limit() -
             agent_config(context_window=invalid)
 
 
+def test_media_inputs_default_to_text_only_and_accept_only_nooa_media_kinds() -> None:
+    assert agent_config().media_inputs == ()
+    assert agent_config(media_inputs=["image", "pdf"]).media_inputs == ("image", "pdf")
+    with pytest.raises(ValidationError, match="media_inputs"):
+        agent_config(media_inputs=["file"])
+
+
 def test_sandboxed_execution_mode_is_reserved_for_a_future_runner() -> None:
     assert invocation_config(execution_mode="sandboxed").execution_mode == "sandboxed"
 

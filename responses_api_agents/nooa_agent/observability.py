@@ -55,6 +55,36 @@ if TYPE_CHECKING:
     from nooa.agent import Agent
 
 
+ATOM_SESSION_ID_ATTR = "nooa.atom.session.id"
+ATOM_SESSION_PARENT_ATTR = "nooa.atom.session.parent_id"
+TRACE_SESSION_ID_ATTR = "session.id"
+
+
+def _current_atom_session() -> tuple[str | None, str | None]:
+    """(session id, parent session id) of the current trace context.
+
+    Atom stamps its sessions' spans with `nooa.atom.session.*` through NOOA's trace context (the root Atom session
+    has no Atom parent). Calls made before any Atom session opens carry only NOOA's trace session id, which stands
+    in as their session and as the root Atom session's parent. Without NOOA tracing, (None, None).
+    """
+    try:
+        from nooa.tracing._session import get_span_attributes
+        from opentelemetry import context as otel_context
+    except ImportError:
+        return None, None
+    attributes = get_span_attributes()
+    trace_session_id = otel_context.get_value(TRACE_SESSION_ID_ATTR)
+    session_id = attributes.get(ATOM_SESSION_ID_ATTR)
+    if session_id is None:
+        session_id = trace_session_id
+    parent_id = attributes.get(ATOM_SESSION_PARENT_ATTR)
+    if parent_id is None and trace_session_id is not None and str(session_id) != str(trace_session_id):
+        # The root Atom session has no Atom parent; the entry calls (solve, send_message) that opened it carry
+        # only the trace session id, so they are its parent.
+        parent_id = trace_session_id
+    return (str(session_id) if session_id is not None else None, str(parent_id) if parent_id is not None else None)
+
+
 def _json_output(value: Any) -> str:
     return value if isinstance(value, str) else to_json(value, serialize_unknown=True).decode()
 
@@ -63,6 +93,21 @@ def _input_items(value: Any) -> list[Any]:
     if isinstance(value, str):
         return [NeMoGymEasyInputMessage(role="user", content=value)]
     return list(value)
+
+
+def _history_key(item: Any) -> tuple[Any, ...] | None:
+    """Identity of a conversation item across the requests of one harness session, or None if it has none.
+
+    Tool calls and their outputs are identified by call id; user and assistant messages by their content. System
+    instructions are sent with every request and are not history.
+    """
+    call_id = getattr(item, "call_id", None)
+    if call_id is not None:
+        return (item.type, call_id)
+    role = getattr(item, "role", None)
+    if role in {"user", "assistant"}:
+        return (item.type, role, to_json(getattr(item, "content", None), serialize_unknown=True))
+    return None
 
 
 @dataclass(slots=True)
@@ -77,6 +122,7 @@ class _ToolCall:
     observation: TrajectoryToolCall
     arguments: dict[str, Any]
     started: float
+    token: Token[str | None] | None = None
 
 
 class GymTraceHooks:
@@ -88,11 +134,16 @@ class GymTraceHooks:
 
     def __init__(self, *, on_progress: Callable[[], None] | None = None) -> None:
         self._current: ContextVar[str] = ContextVar("gym_nooa_invocation", default="root")
+        # The tool call executing in this context: a child session opened from inside a code cell was spawned by it.
+        self._current_tool: ContextVar[str | None] = ContextVar("gym_nooa_tool_call", default=None)
         self._invocations: dict[str, AgentInvocation] = {}
         self._events: list[GymModelCall | _ToolCall] = []
         self._python_outputs: dict[tuple[str, str], str] = {}
         self._captured_python_outputs: dict[tuple[str, str], str] = {}
         self._python_output_gaps: set[tuple[str, str]] = set()
+        self._session_openers: dict[str, str] = {}
+        # Tool calls NOOA answered without running them (unknown tool, invalid arguments): recorded once each.
+        self._rejected_tools: set[str] = set()
         self._on_progress = on_progress
 
     def _invocation(self, identity: str) -> AgentInvocation:
@@ -116,14 +167,37 @@ class GymTraceHooks:
         )
 
     def before_agent_call(self, *, call_id: str, parent_call_id: str | None, **_: Any) -> _AgentCall:
+        # A delegated Atom session runs its own method calls with no traced caller, so NOOA reports no parent
+        # call. Atom's session tree (the trace context attributes) still names the parent session; link the
+        # invocation to the invocation that opened that session so root and child cells stay separable.
+        session_id, parent_session_id = _current_atom_session()
+        if parent_call_id is None and parent_session_id is not None:
+            parent_call_id = self._session_openers.get(parent_session_id)
+        spawned_by = None
+        if session_id is not None and session_id not in self._session_openers:
+            self._session_openers[session_id] = call_id
+            # A session opened from inside the parent's code cell (delegate, send_child) was spawned by that cell.
+            spawned_by = self._current_tool.get() if parent_session_id is not None else None
         self._invocations[call_id] = AgentInvocation(
-            invocation_id=call_id, parent_invocation_id=parent_call_id, status="incomplete"
+            invocation_id=call_id,
+            parent_invocation_id=parent_call_id,
+            harness_session_id=session_id,
+            spawned_by_tool_call_id=spawned_by,
+            status="incomplete",
         )
         return _AgentCall(call_id, perf_counter(), self._current.set(call_id))
 
-    def after_agent_call(self, *, context: Any, exception: BaseException | None, **_: Any) -> None:
+    def after_agent_call(
+        self, *, context: Any, exception: BaseException | None, agent: Agent | None = None, **_: Any
+    ) -> None:
         if not isinstance(context, _AgentCall):
             return
+        if agent is not None:
+            # A rejection on the call's last turn is followed by no message build; record it here.
+            self._record_rejected_tool_calls(
+                agent,
+                {event.observation.tool_call_id for event in self._events if isinstance(event, _ToolCall)},
+            )
         invocation = self._invocations[context.invocation_id]
         invocation.status = (
             "incomplete"
@@ -159,6 +233,7 @@ class GymTraceHooks:
             arguments,
             perf_counter(),
         )
+        event.token = self._current_tool.set(call_id)
         self._events.append(event)
         return event
 
@@ -172,6 +247,13 @@ class GymTraceHooks:
             record.output = {"error": str(exception), "error_type": record.error_type}
         elif record.status == "incomplete":
             record.status = "completed"
+        if event.token is not None:
+            try:
+                self._current_tool.reset(event.token)
+            except ValueError:
+                # Finished from another context (a cancelled cell reported by its awaiter): the call is over either way.
+                self._current_tool.set(None)
+            event.token = None
         if self._on_progress is not None:
             self._on_progress()
 
@@ -292,6 +374,31 @@ class GymTraceHooks:
                 self._python_output_gaps.discard(key)
             elif key not in self._python_outputs:
                 self._python_output_gaps.add(key)
+        self._record_rejected_tool_calls(agent, {call_id for _, call_id in owned_tools})
+
+    def _record_rejected_tool_calls(self, agent: Agent, owned_call_ids: set[str]) -> None:
+        """Observe the tool calls NOOA answered without running them.
+
+        An unknown tool name or invalid arguments get an error ToolResult (the feedback the model reads next turn)
+        and no execution hook. Without a record of their own, those calls would show up only through the history
+        a later request re-renders. Each becomes a failed tool call whose output is that feedback.
+        """
+        from nooa.context_blocks.events import ResultStatus, ToolCallEvent
+
+        for event in agent.events.query(type="ToolCallEvent"):
+            if not isinstance(event, ToolCallEvent) or event.result is None:
+                continue
+            call_id = event.tool_call_id
+            if event.result.result_status != ResultStatus.ERROR or call_id in owned_call_ids:
+                continue
+            if call_id in self._rejected_tools:
+                continue
+            self._rejected_tools.add(call_id)
+            rejected = self._start_tool(event.name, dict(event.arguments), call_id)
+            rejected.observation.status = "failed"
+            rejected.observation.error_type = "ToolCallRejected"
+            rejected.observation.output = event.result.content
+            self._finish_tool(rejected, None)
 
     def project(
         self,
@@ -336,6 +443,17 @@ class GymTraceHooks:
             if isinstance(item, NeMoGymFunctionCallOutput)
         }
         visible_outputs.update(python_outputs)
+        # A later invocation of a harness session re-sends the session's history in its first request. Those items
+        # belong to the invocations that produced them: a session's history is its invocations' conversations in
+        # order, so each item is projected once, in the invocation that produced it.
+        session_history: dict[str, set[tuple[Any, ...]]] = {}
+
+        def extend_conversation(invocation: AgentInvocation, items: list[Any]) -> None:
+            invocation.conversation.extend(items)
+            if invocation.harness_session_id is not None:
+                seen = session_history.setdefault(invocation.harness_session_id, set())
+                seen.update(key for item in items if (key := _history_key(item)) is not None)
+
         for event in self._events:
             if isinstance(event, GymModelCall):
                 invocation = invocations[event.invocation_id]
@@ -351,18 +469,22 @@ class GymTraceHooks:
                         if isinstance(event.request.input, str)
                         else event.request.input
                     )
+                    earlier = session_history.get(invocation.harness_session_id or "", set())
+                    initial = [item for item in initial if _history_key(item) not in earlier]
                     visible = {(item.type, getattr(item, "call_id", None)) for item in initial}
-                    invocation.conversation = initial + [
+                    prefill = [
                         item
                         for item in invocation.conversation
                         if (item.type, getattr(item, "call_id", None)) not in visible
                     ]
+                    invocation.conversation = []
+                    extend_conversation(invocation, initial + prefill)
                 if event.response is None:
                     continue
                 response = event.response
                 reference = ModelCallRef(model_ref=event.model_ref, response_id=response.id)
                 invocation.model_calls.append(reference)
-                invocation.conversation.extend(response.output)
+                extend_conversation(invocation, list(response.output))
                 output.extend(response.output)
                 turn_no = turn_counts.get(invocation.invocation_id, 0) + 1
                 turn_counts[invocation.invocation_id] = turn_no
@@ -403,7 +525,7 @@ class GymTraceHooks:
                             arguments=_json_output(event.arguments),
                         )
                     )
-                    invocation.conversation.append(call_item)
+                    extend_conversation(invocation, [call_item])
                     output.append(call_item)
                 if partial and record.completed_at is None:
                     # A sibling tool may still be running at a checkpoint. Keep
@@ -418,9 +540,25 @@ class GymTraceHooks:
                 )
                 # Persist the same serialized evidence as the conversation, not NOOA runtime objects.
                 record.output = result_item.output
-                invocation.conversation.append(result_item)
+                extend_conversation(invocation, [result_item])
                 output.append(result_item)
                 tools.append(record)
+
+        # A tool call the model emitted that reached no tool boundary and got no output: NOOA stops a response's
+        # remaining calls after one fails or completes the call, and tells the model nothing about them.
+        if not partial:
+            observed = {(tool.invocation_id, tool.tool_call_id) for tool in tools}
+            not_executed = sorted(
+                (call.invocation_id, item.call_id)
+                for call in state.calls
+                if call.response is not None
+                for item in call.response.output
+                if isinstance(item, NeMoGymResponseFunctionToolCall)
+                and (call.invocation_id, item.call_id) not in observed
+                and (call.invocation_id, item.call_id) not in visible_outputs
+            )
+        else:
+            not_executed = []
 
         # The first request can replace an earlier prefill result with its native
         # acceptance receipt. Normalize after that merge as collection obtains tool
@@ -458,6 +596,14 @@ class GymTraceHooks:
                     detail=f"Native execution feedback for {call_id} did not join exactly to the rendered messages.",
                 )
                 for invocation_id, call_id in sorted(self._python_output_gaps)
+            ),
+            *(
+                ObservationGap(
+                    code="tool_call_not_executed",
+                    invocation_id=invocation_id,
+                    detail=f"The model emitted {call_id} but the harness never ran it and gave it no output.",
+                )
+                for invocation_id, call_id in not_executed
             ),
         ]
         observations = AgentObservationBundle(

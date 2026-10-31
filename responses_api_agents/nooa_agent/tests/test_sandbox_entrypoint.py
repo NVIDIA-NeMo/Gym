@@ -2,6 +2,8 @@
 # SPDX-License-Identifier: Apache-2.0
 
 import asyncio
+import json
+import os
 import signal
 import stat
 import sys
@@ -40,6 +42,7 @@ def payload() -> entrypoint.SandboxInput:
         model_server_name="policy",
         max_policy_calls=3,
         context_window=262144,
+        media_inputs=("image",),
     )
 
 
@@ -122,6 +125,7 @@ async def test_child_preserves_evidence_and_classifies_outcome(monkeypatch, outc
     artifact = await entrypoint.execute(p)
     assert runner_factory.call_args.kwargs["max_policy_calls"] == limit
     assert runner_factory.call_args.kwargs["context_window"] == 262144
+    assert runner_factory.call_args.kwargs["media_inputs"] == ("image",)
     assert artifact.observations.gaps[0].code == "test"
     assert artifact.model_cookies == {"model": "new"}
     assert artifact.resource_cookies == {"resource": "new"}
@@ -671,3 +675,61 @@ async def test_only_checkpoint_publication_failures_are_best_effort(
         assert not destination.exists()
         assert entrypoint.SandboxCheckpoint.model_validate_json((tmp_path / "checkpoint.json").read_text()).partial
     client.close.assert_awaited_once()
+
+
+def test_collect_trace_export_joins_session_files_and_tolerates_absence(tmp_path: Path) -> None:
+    traces = tmp_path / "traces"
+    traces.mkdir()
+    (traces / "a.jsonl").write_text('{"resourceSpans":[1]}\n\n{"resourceSpans":[2]}\n')
+    (traces / "b.jsonl").write_text('{"resourceSpans":[3]}\n')
+    (traces / "notes.txt").write_text("ignored")
+    out = tmp_path / "traces.jsonl"
+    assert entrypoint.collect_trace_export(str(traces), out) == 3
+    assert out.read_text().splitlines() == ['{"resourceSpans":[1]}', '{"resourceSpans":[2]}', '{"resourceSpans":[3]}']
+    assert entrypoint.collect_trace_export(str(tmp_path / "absent"), tmp_path / "empty.jsonl") == 0
+    assert (tmp_path / "empty.jsonl").read_text() == ""
+
+
+def test_enable_trace_export_writes_otlp_jsonl_per_session(tmp_path: Path) -> None:
+    """The real NOOA exporter: a span stamped with session.id lands in <trace_dir>/<session>.jsonl as OTLP JSON."""
+    pytest.importorskip("nooa.tracing")
+    from opentelemetry import trace
+
+    trace_dir = tmp_path / "traces"
+    entrypoint.enable_trace_export(str(trace_dir))
+    with trace.get_tracer("test").start_as_current_span("probe") as span:
+        span.set_attribute("session.id", "probe-session")
+    lines = entrypoint.collect_trace_export(str(trace_dir), tmp_path / "traces.jsonl")
+    assert lines >= 1
+    assert (trace_dir / "probe-session.jsonl").exists()
+    first = json.loads((tmp_path / "traces.jsonl").read_text().splitlines()[0])
+    assert "resourceSpans" in first
+
+
+def test_expose_runtime_scripts_exposes_only_rg_not_the_runtime_bin(tmp_path, monkeypatch) -> None:
+    """The agent's shells must see the runtime's rg, while python3 and pip keep resolving to the task image's."""
+    prefix = tmp_path / "runtime"
+    bin_dir = prefix / "bin"
+    bin_dir.mkdir(parents=True)
+    for name in ("python3", "pip", "rg"):
+        (bin_dir / name).write_text("#!/bin/sh\n")
+        (bin_dir / name).chmod(0o755)
+    monkeypatch.setattr(entrypoint.sys, "executable", str(bin_dir / "python3"))
+    env = {"PATH": f"/usr/bin:{bin_dir}:/bin"}
+    path = entrypoint.expose_runtime_scripts(env).split(os.pathsep)
+    tools_dir = str(prefix / "shell-tools")
+    assert path == [tools_dir, "/usr/bin", "/bin"], path
+    assert sorted(os.listdir(tools_dir)) == ["rg"]
+    assert os.path.realpath(os.path.join(tools_dir, "rg")) == str(bin_dir / "rg")
+    # Idempotent: a second call keeps one entry and relinks.
+    assert entrypoint.expose_runtime_scripts(env).split(os.pathsep) == [tools_dir, "/usr/bin", "/bin"]
+
+
+def test_expose_runtime_scripts_without_rg_only_removes_the_runtime_bin(tmp_path, monkeypatch) -> None:
+    """A runtime without rg exposes nothing; the runtime bin never stays on PATH."""
+    bin_dir = tmp_path / "runtime" / "bin"
+    bin_dir.mkdir(parents=True)
+    monkeypatch.setattr(entrypoint.sys, "executable", str(bin_dir / "python3"))
+    env = {"PATH": f"{bin_dir}:/usr/bin"}
+    assert entrypoint.expose_runtime_scripts(env) == "/usr/bin"
+    assert not (tmp_path / "runtime" / "shell-tools").exists()

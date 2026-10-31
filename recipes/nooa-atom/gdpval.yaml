@@ -1,0 +1,91 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# Atom (NOOA) on GDPval through the sandboxed NOOA adapter: 220 professional deliverable tasks, one attempt
+# each, rubric mode. Unlike Terminal-Bench and SWE-bench, a judge model scores every deliverable: the default
+# panel is GPT-5.5, Gemini 3.1 Pro and Claude Opus 4.8 through one OpenAI-compatible endpoint, so a run has a
+# judge budget on top of the policy budget.
+#
+#   recipes/nooa-atom/preflight.sh gdpval      # resolve, check every input, one real row (one judged deliverable)
+#   recipes/nooa-atom/run.sh gdpval            # full benchmark
+#
+# Set in .env: POLICY_API_KEY, OPENSANDBOX_DOMAIN, OPENSANDBOX_API_KEY, and for this benchmark also
+#   JUDGE_API_KEY (and JUDGE_BASE_URL unless the judges live at inference-api.nvidia.com/v1),
+#   HF_TOKEN (reference files from huggingface.co/datasets/openai/gdpval),
+#   TAVILY_API_KEY (the web_search and fetch_web_page task tools),
+#   GDPVAL_SANDBOX_IMAGE (built from resources_servers/gdpval/containers/Dockerfile, pullable by OpenSandbox),
+#   PERSIST_DELIVERABLES_DIR (absolute; where submitted files are kept, one directory per run).
+# Set in env.yaml: policy_base_url, policy_model_name (copy recipes/nooa-atom/env.yaml.example).
+# Set NOOA_RUNTIME_WHEELHOUSE to the prepared offline runtime (see README, "Runtime").
+#
+# Every pin below is checked by preflight.sh before anything runs.
+
+# Gym commit this recipe is frozen at; run.sh pins the checkout to it (PIN_GYM=0 to skip).
+gym_commit: PENDING-UNTIL-FREEZE
+# NOOA revision the agent's requirements.txt must pin (labs-OO-Agents dev/atom with the Atom harness).
+nooa_commit: ec92597ae49df66d8905412476140db6f7085592  # pragma: allowlist secret
+
+# Rows come from the benchmark split of the dataset; metrics conflicts across repeats are overwritten.
+split: benchmark
+overwrite_metrics_conflicts: true
+
+# Gym configs this recipe builds on. benchmarks/gdpval/config.yaml already includes the OpenSandbox provider.
+benchmark_config:
+  - benchmarks/gdpval/atom.yaml
+
+# The agent instance the GDPval environment pairs with (see benchmarks/gdpval/nooa.yaml).
+# The controller-prepared offline NOOA runtime is required: a task sandbox never installs from the network.
+gdpval_nooa_agent:
+  responses_api_agents:
+    nooa_agent:
+      runtime_wheelhouse: ${oc.env:NOOA_RUNTIME_WHEELHOUSE}
+      runtime_wheelhouse_required: true
+      # Bundle for musl (Alpine/BusyBox) task images, prepared with --target x86_64/musl; unset = those tasks fail at setup.
+      runtime_wheelhouse_musl: ${oc.env:NOOA_RUNTIME_WHEELHOUSE_MUSL,null}
+      # Atom's context accounting; the sealed endpoint's window. Identical for every run of this recipe.
+      context_window: 1048576
+      # Keep NOOA's own OTLP JSONL trace per rollout under <artifacts_dir>/<rollout_id>/ for debugging.
+      trace_jsonl: true
+      artifacts_dir: ${oc.env:NOOA_ARTIFACTS_DIR,nooa-artifacts}
+      # GDPval tasks ship PDFs, spreadsheets and images as reference files; let the policy see what it accepts.
+      media_inputs: [image, pdf]
+      nooa:
+        init_kwargs:
+          # Atom's root turn method: handle_batch (one agent, unattended) or handle_orchestrate (the root may
+          # delegate to child sessions). One arm per value; set NOOA_ATOM_TURN_METHOD per submission.
+          turn_method: ${oc.env:NOOA_ATOM_TURN_METHOD,handle_batch}
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # Set by Gym on every request, whatever the harness asks for.
+      sampling_overrides:
+        temperature: 1.0
+        top_p: 1.0
+        max_tokens: 131072
+      # A context-length refusal reaches the agent as the provider's 400 so NOOA's own recovery runs.
+      propagate_context_overflow_errors: true
+
+# Sandboxes call Gym's servers back over the network, so advertise this host's resolvable address.
+use_absolute_ip: true
+
+# The provider's create budget must cover the create request bound (1200 s) plus the task's ready_timeout_s (1200 s).
+sandbox:
+  opensandbox:
+    create:
+      timeout_s: 2400
+
+# Tasks at once; PARALLEL overrides it. Each task is a 16-CPU OpenSandbox container plus judge calls at verify.
+num_samples_in_parallel: 8

@@ -120,6 +120,7 @@ class InProcessNOOARunner:
         max_policy_calls: int | None,
         on_progress: Callable[[NOOARunResult], None] | None = None,
         context_window: int | None = None,
+        media_inputs: tuple[str, ...] = (),
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
@@ -127,6 +128,7 @@ class InProcessNOOARunner:
         self._max_policy_calls = max_policy_calls
         self._on_progress = on_progress
         self._context_window = context_window
+        self._media_inputs = media_inputs
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
@@ -179,6 +181,7 @@ class InProcessNOOARunner:
             on_response=checkpoint,
             sampling_overrides=sampling_overrides,
             context_window=self._context_window,
+            media_inputs=self._media_inputs,
         )
         dispatcher = ResourceToolDispatcher(
             tool_access=request.tool_access,
