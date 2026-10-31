@@ -46,16 +46,18 @@ from fastapi import Body, Request, Response
 from pydantic import ConfigDict, PrivateAttr, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ResourcesServerRef
-from nemo_gym.global_config import SKILLS_REF_KEY_NAME
-from nemo_gym.openai_utils import (
+from nemo_gym.client import (
+    get_response_json,
+    is_global_aiohttp_client_request_debug_enabled,
+    raise_for_status,
+)
+from nemo_gym.client import (
+    request as http_request,
+)
+from nemo_gym.config import SKILLS_REF_KEY_NAME, AggregateMetrics, AggregateMetricsRequest, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -64,15 +66,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_collection import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_global_aiohttp_client_request_debug_enabled,
-    raise_for_status,
-)
-from nemo_gym.server_utils import (
-    request as http_request,
-)
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 
 
 REMOTE_AGENT_FAILURE_CLASS = "remote_agent_error"
@@ -86,7 +81,15 @@ _AGGREGATE_PROXY_TIMEOUT_SECS = 600.0
 # Result/routing keys this server itself produces. Input rows may carry stale copies
 # (e.g. a rollouts or failures JSONL re-fed as a dataset); they must never collide with
 # the fresh values or leak through the verify echo into the dispatcher's routing.
-_RESERVED_RESULT_KEYS = ("reward", "response", "error", NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY, NG_TERMINAL_KEY)
+_RESERVED_RESULT_KEYS = (
+    "reward",
+    "response",
+    "error",
+    "failure_reason",
+    NG_FAILURE_CLASS_KEY,
+    NG_NO_PERSIST_KEY,
+    NG_TERMINAL_KEY,
+)
 
 
 class RemoteAgentError(RuntimeError):
@@ -463,7 +466,11 @@ class RemoteAgent(SimpleResponsesAPIAgent):
         n = self._num_failures
         if n <= _FAILURE_PRINT_HEAD or n % _FAILURE_PRINT_INTERVAL == 0:
             print(f"[remote_agent] rollout failed (failure #{n}): {error}", flush=True)
-        routing: Dict[str, Any] = {NG_FAILURE_CLASS_KEY: REMOTE_AGENT_FAILURE_CLASS, "error": error}
+        routing: Dict[str, Any] = {
+            NG_FAILURE_CLASS_KEY: REMOTE_AGENT_FAILURE_CLASS,
+            "failure_reason": error,
+            "error": error,
+        }
         if terminal:
             routing[NG_TERMINAL_KEY] = True
         # Dict-merge with later keys winning: `record` is sanitized of reserved keys, but merge

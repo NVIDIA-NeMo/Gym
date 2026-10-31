@@ -17,16 +17,8 @@ import json
 import sys
 from typing import Dict, Iterable, Optional
 
-
-def did_you_mean(value: str, candidates: Iterable[str]) -> str:
-    """A ` Did you mean \\`X\\`?` fragment for the closest candidate to `value`, or `""` if none is close enough."""
-    # Exclude the exact input so it is not suggested as its own correction.
-    matches = difflib.get_close_matches(
-        value,
-        [candidate for candidate in candidates if candidate != value],
-        n=1,
-    )
-    return f" Did you mean `{matches[0]}`?" if matches else ""
+from nemo_gym._moved_paths import moved_names_getattr
+from nemo_gym.utils.text import did_you_mean
 
 
 def exit_unknown_component(name: str, candidates: Iterable[str], type_label: str) -> None:
@@ -154,13 +146,21 @@ def exit_cleanly_on_config_error(fn):
         import rich
         from rich.markup import escape
 
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.rollout_recovery import IncompleteEvaluationError
 
         try:
             return fn(*args, **kwargs)
+        except IncompleteEvaluationError as e:
+            rich.print(f"[yellow]Evaluation incomplete:[/yellow] {escape(str(e))}")
+            raise SystemExit(e.exit_code) from None
         except ConfigError as e:
             # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
             rich.print(f"[red]Error:[/red] {escape(str(e))}")
             raise SystemExit(1)
 
     return wrapper
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

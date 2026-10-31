@@ -137,6 +137,10 @@ class LocalProvider:
             error_type=None,
         )
 
+    def uploads_independent_of_execs(self) -> bool:
+        # Uploads copy in a worker thread; only commands take the exec semaphore.
+        return True
+
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         target = Path(target_path)
         if not target.is_absolute():

@@ -10,10 +10,14 @@ from pydantic import BaseModel, ConfigDict, Field, JsonValue, ModelWrapValidator
 
 from environment_servers.swe_together.task import TaskData
 from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
-from nemo_gym.episode_types import BaseEpisodeRequest, BaseEpisodeResponse
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import TrajectoryRecord
-from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResult
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
+from nemo_gym.server_runtime import (
+    BaseEpisodeRequest,
+    BaseEpisodeResponse,
+    SingleAgentTurnFailure,
+    SingleAgentTurnResult,
+)
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 class CandidateTurn(BaseModel):
@@ -110,6 +114,9 @@ class UserTurn(BaseModel):
 
 
 class SWETResult(SingleAgentTurnResult):
+    # Required, so a result path that does not say whether the judge measured the patch fails to serialize
+    # instead of defaulting to a completed measurement.
+    evaluation_completed: bool
     judge_score: float | None = None
     task_id: str
     ng_activations: list[CandidateTurn] = Field(default_factory=list)

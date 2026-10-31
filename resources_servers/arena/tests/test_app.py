@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 from pathlib import Path
 from typing import Any
@@ -24,16 +25,16 @@ from openai.types.responses.response import IncompleteDetails
 from pydantic import ValidationError
 from pytest import approx, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from resources_servers.arena.app import (
     ArenaResourcesServer,
     ArenaResourcesServerConfig,
@@ -772,6 +773,33 @@ class TestArenaResourcesServer:
         result = await server.verify(self._make_verify_request("Answer."))
         assert result.reward == approx(0.5)
 
+    @mark.parametrize("failed_ordering", [1, 2])
+    async def test_verify_cancels_the_other_ordering_when_one_judge_call_fails(
+        self, server: ArenaResourcesServer, monkeypatch, failed_ordering: int
+    ):
+        # Either failed ordering must cancel and await the sibling before returning the error.
+        started = asyncio.Event()
+        state = {"calls": 0, "cancelled": False}
+
+        async def judge_game(self, *args, **kwargs):
+            state["calls"] += 1
+            ordering = state["calls"]
+            if state["calls"] == 2:
+                started.set()
+            if ordering == failed_ordering:
+                await started.wait()
+                raise RuntimeError("judge down")
+            try:
+                await asyncio.Event().wait()
+            except asyncio.CancelledError:
+                state["cancelled"] = True
+                raise
+
+        monkeypatch.setattr(ArenaResourcesServer, "_run_judge_game", judge_game)
+        with raises(RuntimeError, match="judge down"):
+            await asyncio.wait_for(server.verify(self._make_verify_request("My answer.")), timeout=2)
+        assert state == {"calls": 2, "cancelled": True}
+
     async def test_verify_unparseable_judge_output(self, server: ArenaResourcesServer):
         # Judge doesn't output a valid verdict label → 0.0 for both rounds
         self._setup_judge_responses(server, ["I cannot decide.", "unclear"])
@@ -1394,8 +1422,25 @@ class TestArenaResourcesServer:
             "style_reference_token_count": 10,
             "games": None,
         }
-        context_exceeded = truncated | {
+        # Rollouts saved before vllm_model marked context rejections carry no usage.
+        context_exceeded_without_marker = truncated | {
             "response": {"incomplete_details": {"reason": "max_output_tokens"}, "usage": None}
+        }
+        # vllm_model now reports zero usage for a context rejection and marks it in metadata.
+        context_exceeded = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+                "metadata": {"nemo_gym_context_window_exceeded": "true"},
+            }
+        }
+        # vllm_model also reports zero usage, without the marker, when the output budget alone exceeds the
+        # context window (invalid_output_token_parameter); that rejection stays an output-limit failure.
+        output_budget_rejected = truncated | {
+            "response": {
+                "incomplete_details": {"reason": "max_output_tokens"},
+                "usage": {"input_tokens": 0, "output_tokens": 0, "total_tokens": 0},
+            }
         }
         reasoning_only = truncated | {
             "response": {"status": "completed"},
@@ -1403,16 +1448,25 @@ class TestArenaResourcesServer:
             "policy_reasoning": "Reasoning without a final answer",
         }
 
-        metrics = reference_server.compute_metrics([[win], [truncated], [context_exceeded], [reasoning_only]])
+        metrics = reference_server.compute_metrics(
+            [
+                [win],
+                [truncated],
+                [context_exceeded_without_marker],
+                [context_exceeded],
+                [output_budget_rejected],
+                [reasoning_only],
+            ]
+        )
 
-        assert metrics["max_token_reached_rate"] == approx(1 / 4)
-        assert metrics["context_window_exceeded_rate"] == approx(1 / 4)
+        assert metrics["max_token_reached_rate"] == approx(2 / 6)
+        assert metrics["context_window_exceeded_rate"] == approx(2 / 6)
         assert metrics["rollout_failure_rate"] == approx(0.0)
-        assert metrics["reasoning_only_response_rate"] == approx(1 / 4)
+        assert metrics["reasoning_only_response_rate"] == approx(1 / 6)
         assert metrics["missing_judgment_rate"] == approx(0.0)
-        assert metrics["win_rate_no_SC"] == approx(1 / 4, abs=0.05)
-        assert metrics["win_rate"] == approx(1 / 4, abs=0.05)
-        assert metrics["verbosity_acceptance_rate"] == approx(1 / 4)
+        assert metrics["win_rate_no_SC"] == approx(1 / 6, abs=0.05)
+        assert metrics["win_rate"] == approx(1 / 6, abs=0.05)
+        assert metrics["verbosity_acceptance_rate"] == approx(1 / 6)
 
     @mark.parametrize("style_control_method", ["bradley_terry", "none"])
     def test_compute_metrics_v2_max_token_response_remains_failure(
@@ -1623,3 +1677,46 @@ class TestArenaResourcesServer:
             }
         )
         assert key == {"response_tokens/mean": approx(10.0), "reasoning_tokens/mean": approx(2.0)}
+
+
+class TestJudgeHttpError:
+    """A judge reply with an HTTP error status fails as that HTTP error, before its body is parsed."""
+
+    config = TestArenaResourcesServer.config
+    server = TestArenaResourcesServer.server
+    _make_verify_request = TestArenaResourcesServer._make_verify_request
+
+    async def test_a_judge_500_is_a_judge_failure_with_its_status_and_body_not_a_parse_error(
+        self, server: ArenaResourcesServer
+    ):
+        import aiohttp
+        from aiohttp import web
+        from aiohttp.test_utils import TestServer
+
+        from nemo_gym.verification import judge_failsafe
+
+        body = "Error code: 429 - rate limit exceeded"
+        hits = []
+
+        async def judge(_request):
+            hits.append(1)
+            return web.Response(status=500, text=body)
+
+        app = web.Application()
+        app.router.add_post("/v1/responses", judge)
+        request = self._make_verify_request("Paris is the capital.")
+        request.category = "lmarena_v3"
+        async with TestServer(app) as judge_server, aiohttp.ClientSession() as session:
+
+            async def post(*, server_name, url_path, json, **kwargs):
+                return await session.post(judge_server.make_url(url_path), json=json.model_dump(mode="json"))
+
+            server.server_client.post = post
+            row = json.loads((await judge_failsafe(server.verify)(body=request)).body)
+
+        assert row["_ng_failure_class"] == "judge_failed" and row["mask_sample"] is True
+        error = row["_ng_failure_judge_error"]
+        # The judge's real status and body are kept; the 429 in the body text classifies nothing.
+        assert "ClientResponseError" in error and "500" in error and "ValidationError" not in error
+        assert row["response"] == request.response.model_dump(mode="json")  # the saved answer is kept
+        assert len(hits) == 2  # one call per ordering, no extra request

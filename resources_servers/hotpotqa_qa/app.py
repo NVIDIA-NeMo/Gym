@@ -28,18 +28,18 @@
 # `nemo_skills/evaluation/metrics/hotpotqa_metrics.py` and
 # `nemo_skills/evaluation/metrics/hotpotqa_filtering.py`.
 
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
 from resources_servers.hotpotqa_qa.scoring import (
     answer_exact_match,
     answer_f1_score,
@@ -57,6 +57,12 @@ class HotpotQAQAResourcesServerConfig(BaseResourcesServerConfig):
     # evaluation (long strings or multi-word proper names). Mirrors Skills'
     # HotpotQAMetrics.get_metrics behavior.
     report_filtered_metrics: bool = True
+    # Score that /verify returns as the reward. "is_correct_strict" (default) is the
+    # NeMo Skills metric the closed-book benchmark ranks on; it accepts the ground truth
+    # inside a longer answer, so "blue or red" scores 1.0 for "blue". "answer_em"
+    # (SQuAD-normalized exact match) scores such hedged answers 0.0 and is recommended
+    # for training.
+    reward_metric: Literal["is_correct_strict", "answer_em"] = "is_correct_strict"
 
 
 class HotpotQAQARunRequest(BaseRunRequest):
@@ -93,10 +99,11 @@ class HotpotQAQAVerifyResponse(BaseVerifyResponse):
 class HotpotQAQAResourcesServer(SimpleResourcesServer):
     """Deterministic verification for short-answer QA (HotpotQA-style).
 
-    The reward emitted on `/verify` is `is_correct_strict` — the strictest
-    of the four scores above — which is what the closed-book benchmark
-    primarily ranks on. The full set of scores is returned in the response
-    so downstream metric aggregation can compute pass@k for every channel.
+    The reward emitted on `/verify` is set by `config.reward_metric`: by
+    default `is_correct_strict`, which is what the closed-book benchmark
+    primarily ranks on, or `answer_em`, which is recommended for training.
+    The full set of scores is returned in the response so downstream metric
+    aggregation can compute pass@k for every channel.
     """
 
     config: HotpotQAQAResourcesServerConfig
@@ -125,7 +132,7 @@ class HotpotQAQAResourcesServer(SimpleResourcesServer):
 
         return HotpotQAQAVerifyResponse(
             **body.model_dump(),
-            reward=alt_correct_strict,
+            reward=ans_em if self.config.reward_metric == "answer_em" else alt_correct_strict,
             extracted_answer=pred_answer if pred_answer else None,
             answer_em=ans_em,
             answer_f1=ans_f1,

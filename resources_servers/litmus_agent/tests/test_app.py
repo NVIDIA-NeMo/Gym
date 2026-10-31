@@ -23,7 +23,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.sandbox import (
     SandboxExecResult,
     SandboxHandle,
@@ -31,7 +32,6 @@ from nemo_gym.sandbox import (
     list_providers,
     register_provider,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.litmus_agent.app import (
     _ANSWER_FORMAT_REGEXES,
     _CODE_EXEC_DRIVER_PATH,

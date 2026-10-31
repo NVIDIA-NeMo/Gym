@@ -52,7 +52,7 @@ from typing import TYPE_CHECKING, Any
 
 import orjson
 
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.token_id_capture.fingerprint import (
     FINGERPRINT_VERSION,
     assistant_fingerprint,
@@ -64,6 +64,7 @@ from nemo_gym.token_id_capture.fingerprint import (
     canonicalize_tool_arguments as canonicalize_tool_arguments,
 )
 from nemo_gym.token_id_capture.protocols import (
+    CaptureAdmissionError,
     LineageMatch,
     LineageResolution,
     RolloutRemovalPayload,
@@ -96,31 +97,6 @@ def _log_late_write_dropped(rollout_id: str, model_call_id: str, staging_key: st
     )
 
 
-# Names of the token-free CallRecord custody columns a ledger row carries.
-# ``staging_digest`` is the worker's staged-record digest; the row's ``digest``
-# key remains the lineage digest over the cumulative token IDs.
-_CUSTODY_FIELDS = (
-    "parent_call_id",
-    "staging_key",
-    "weight_version",
-    "prev_len",
-    "delta_len",
-    "cum_len",
-    "staging_digest",
-    "extras_digest",
-    "mode",
-    "admitted_at",
-    "staging_chain",
-    "chain_hash",
-    "cumulative_hash",
-    "response_id",
-    "output_fingerprint",
-    "continuation_fingerprint",
-    "fingerprint_version",
-    "finish_reason",
-)
-
-
 def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[str] = ()) -> dict:
     """Return the ledger custody columns for one committed ``CallRecord``.
 
@@ -145,7 +121,15 @@ def _custody_columns(record: CallRecord, staging_chain: tuple[str, ...] | list[s
         "output_fingerprint": record.output_fingerprint or None,
         "continuation_fingerprint": record.continuation_fingerprint or None,
         "fingerprint_version": record.fingerprint_version,
+        "replay": record.replay.model_dump(exclude={"schema_version"}) if record.replay is not None else None,
+        "output_items": [item.model_dump(exclude={"schema_version"}) for item in record.output_items]
+        if record.output_items is not None
+        else None,
+        "response_status": record.response_status,
         "finish_reason": record.finish_reason,
+        "last_output_item": record.last_output_item,
+        "root_reason": record.root_reason,
+        "source_capture_key": record.source_capture_key,
     }
 
 
@@ -169,7 +153,15 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
 
     records = []
     failures = []
+    refused = {row["model_call_id"] for row in rows if row.get("refused_before_generation")}
+    completed = {row["model_call_id"] for row in rows if row.get("staging_key")} | refused
+    attempted = list(dict.fromkeys(row["model_call_id"] for row in rows if row.get("intent")))
+    # Keep refusals in the audit log, but require training custody only for calls that could generate.
+    attempted = [call_id for call_id in attempted if call_id not in refused]
+    pending = [row["model_call_id"] for row in rows if row.get("intent") and row["model_call_id"] not in completed]
     for row in rows:
+        if row.get("intent"):
+            continue
         if row.get("failure_reason") is not None:
             failures.append(
                 ManifestFailure(
@@ -218,14 +210,42 @@ def _manifest_from_rows(rollout_id: str, rows: list[dict]) -> dict:
                     output_fingerprint=row.get("output_fingerprint") or None,
                     continuation_fingerprint=row.get("continuation_fingerprint") or None,
                     fingerprint_version=int(row.get("fingerprint_version") or 0),
+                    replay=row.get("replay"),
+                    output_items=row.get("output_items"),
+                    response_status=row.get("response_status"),
+                    last_output_item=row.get("last_output_item"),
+                    root_reason=row.get("root_reason"),
                     # Set on rows a checkpoint restore carried over from an earlier attempt.
-                    capture_key=row.get("capture_key"),
+                    source_capture_key=row.get("source_capture_key"),
                     # A row written before the column existed reads as an unstated reason.
                     finish_reason=row.get("finish_reason") or None,
                 )
             )
-    manifest = RolloutManifest(rollout_id=rollout_id, records=records, failures=failures)
+    manifest = RolloutManifest(
+        capture_key=rollout_id,
+        records=records,
+        failures=failures,
+        attempted_call_ids=attempted,
+        pending_call_ids=pending,
+    )
     return manifest.model_dump(mode="json")
+
+
+def _validate_call_intent(rows: list[dict], model_call_id: str) -> None:
+    if any(row.get("admissions_closed") for row in rows):
+        raise CaptureAdmissionError("Capture admissions are closed for this rollout")
+    if any(row.get("model_call_id") == model_call_id for row in rows):
+        raise CaptureAdmissionError(f"Capture call ID already registered: {model_call_id}")
+
+
+def _refusal_row(rows: list[dict], model_call_id: str) -> dict | None:
+    row = {"model_call_id": model_call_id, "refused_before_generation": True}
+    existing = [r for r in rows if r.get("model_call_id") == model_call_id and not r.get("intent")]
+    if existing == [row]:
+        return None
+    if existing or not any(r.get("model_call_id") == model_call_id and r.get("intent") for r in rows):
+        raise ValueError(f"Cannot settle non-pending call as refused: {model_call_id}")
+    return row
 
 
 @dataclass
@@ -527,26 +547,54 @@ class InMemoryLineageStore:
     def is_process_shared(self) -> bool:
         return False
 
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Register one unique call before dispatch; independent calls may overlap."""
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+        rows = self._ledgers.setdefault(rollout_id, [])
+        _validate_call_intent(rows, model_call_id)
+        rows.append({"model_call_id": model_call_id, "intent": True})
+
+    async def refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Settle an acknowledged refusal without erasing its audit record."""
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+        rows = self._ledgers.setdefault(rollout_id, [])
+        row = _refusal_row(rows, model_call_id)
+        if row is not None:
+            rows.append(row)
+
+    async def close_admissions(self, rollout_id: str) -> dict:
+        """Stop new calls idempotently; admitted calls may still commit."""
+        if rollout_id in self._retired:
+            raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+        rows = self._ledgers.setdefault(rollout_id, [])
+        if not any(row.get("admissions_closed") for row in rows):
+            rows.append({"admissions_closed": True})
+        return _manifest_from_rows(rollout_id, rows)
+
     async def record(self, commit: CaptureLedgerCommit) -> None:
         # Custody rows are token-free (mirrors FileLineageStore): the chain
         # hash covers continuity, so the index keeps tokens only for
         # lineage-only local-capture rows that inject prompt prefixes.
         record = commit.record
-        if commit.rollout_id in self._retired:
-            _log_late_write_dropped(commit.rollout_id, record.model_call_id, record.staging_key)
+        if commit.capture_key in self._retired:
+            _log_late_write_dropped(commit.capture_key, record.model_call_id, record.staging_key)
             return
-        rows = self._ledgers.setdefault(commit.rollout_id, [])
+        rows = self._ledgers.setdefault(commit.capture_key, [])
         row = {"model_call_id": record.model_call_id, **_custody_columns(record, commit.staging_chain)}
         # Write-once per model call (CaptureLedger contract): an identical
         # replay is a no-op, any differing field is a conflict. Checked on the
         # full custody row, not just the columns the lineage index keeps.
-        existing = next((r for r in rows if r.get("model_call_id") == record.model_call_id), None)
+        existing = next(
+            (r for r in rows if r.get("model_call_id") == record.model_call_id and not r.get("intent")), None
+        )
         if existing is not None:
             if existing != row:
                 raise ValueError(f"conflicting lineage record for model call {record.model_call_id}")
             return
         if record.fingerprint_version == FINGERPRINT_VERSION:
-            self.index.for_rollout(commit.rollout_id).record(
+            self.index.for_rollout(commit.capture_key).record(
                 record.model_call_id,
                 list(commit.request_items) + list(commit.response_items),
                 [],
@@ -1058,6 +1106,44 @@ class FileLineageStore(IncrementalLineageStore):
             ),
         )
 
+    async def begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Register one unique call before dispatch; independent calls may overlap."""
+        await asyncio.to_thread(self._begin_call, rollout_id, model_call_id)
+
+    def _begin_call(self, rollout_id: str, model_call_id: str) -> None:
+        with self._locked(rollout_id):
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            rows = self._read(rollout_id)
+            _validate_call_intent(rows, model_call_id)
+            self._append(rollout_id, {"model_call_id": model_call_id, "intent": True}, rows)
+
+    async def refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+        """Settle a worker-acknowledged refusal under the admission lock."""
+        await asyncio.to_thread(self._refuse_call, rollout_id, model_call_id)
+
+    def _refuse_call(self, rollout_id: str, model_call_id: str) -> None:
+        with self._locked(rollout_id):
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            rows = self._read(rollout_id)
+            row = _refusal_row(rows, model_call_id)
+            if row is not None:
+                self._append(rollout_id, row, rows)
+
+    async def close_admissions(self, rollout_id: str) -> dict:
+        """Close new admissions atomically with begin_call and return a snapshot."""
+        return await asyncio.to_thread(self._close_admissions, rollout_id)
+
+    def _close_admissions(self, rollout_id: str) -> dict:
+        with self._locked(rollout_id):
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            rows = self._read(rollout_id)
+            if not any(row.get("admissions_closed") for row in rows):
+                self._append(rollout_id, {"admissions_closed": True}, rows)
+            return _manifest_from_rows(rollout_id, rows)
+
     async def record(self, commit: CaptureLedgerCommit) -> None:
         await asyncio.to_thread(self._record, commit)
 
@@ -1076,12 +1162,16 @@ class FileLineageStore(IncrementalLineageStore):
             "digest": commit.record.cumulative_hash,
             **_custody_columns(commit.record, commit.staging_chain),
         }
-        with self._locked(commit.rollout_id):
-            records = self._read(commit.rollout_id)
-            if not records and self._is_retired(commit.rollout_id):
-                _log_late_write_dropped(commit.rollout_id, model_call_id, commit.record.staging_key)
+        with self._locked(commit.capture_key):
+            records = self._read(commit.capture_key)
+            if not records and self._is_retired(commit.capture_key):
+                _log_late_write_dropped(commit.capture_key, model_call_id, commit.record.staging_key)
                 return
-            matches = [existing for existing in records if existing["model_call_id"] == model_call_id]
+            matches = [
+                existing
+                for existing in records
+                if existing.get("model_call_id") == model_call_id and not existing.get("intent")
+            ]
             if matches:
                 # A replay of a pre-column row remains a no-op. Without the original
                 # output in that row, a reader cannot safely backfill its fallback key.
@@ -1094,7 +1184,7 @@ class FileLineageStore(IncrementalLineageStore):
                 if existing != comparable:
                     raise ValueError(f"conflicting lineage record for model call {model_call_id}")
                 return
-            self._append(commit.rollout_id, record, records)
+            self._append(commit.capture_key, record, records)
 
     async def record_failure(self, rollout_id: str, model_call_id: str, reason: str) -> None:
         await asyncio.to_thread(self._record_failure, rollout_id, model_call_id, reason)
@@ -1116,6 +1206,12 @@ class FileLineageStore(IncrementalLineageStore):
         return await asyncio.to_thread(self._manifest, rollout_id)
 
     def _manifest(self, rollout_id: str) -> dict:
+        # Do not mint a lock just to measure an unused rollout. An existing lock
+        # may belong to a writer before its first row, so still wait for it below.
+        if not self._ledger_path(rollout_id).exists() and not self._store.lock_path_for(rollout_id).exists():
+            if self._is_retired(rollout_id):
+                raise RolloutRetiredError(f"rollout {rollout_id} is retired")
+            return _manifest_from_rows(rollout_id, [])
         with self._locked(rollout_id):
             rows = list(self._read(rollout_id))
             if not rows and self._is_retired(rollout_id):

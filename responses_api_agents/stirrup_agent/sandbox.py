@@ -15,9 +15,9 @@ from typing import Any
 from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
 from nemo_gym.agent_utils.uv_bootstrap import uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 
 
 # The sandbox runs the Python and Stirrup versions installed with this server.
@@ -85,7 +85,6 @@ class StirrupSessionState(AgentSessionState):
             await upload_text(self.session.sandbox, path=input_path, text=json.dumps(payload))
             return SandboxCommand(
                 argv=[SANDBOX_PYTHON, f"{_PACKAGE_DIR}/sandbox_runner.py", input_path, output_path],
-                python=SANDBOX_PYTHON,
             )
 
         async def collect() -> dict[str, Any]:

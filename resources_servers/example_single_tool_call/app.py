@@ -18,7 +18,8 @@ from typing import Any
 from fastapi import FastAPI
 from pydantic import BaseModel, PrivateAttr
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -32,8 +33,8 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionFence,
     SimpleResourcesServer,
 )
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.verification import VerifierFixture
 
 
 class SimpleWeatherResourcesServerConfig(BaseResourcesServerConfig):
@@ -118,3 +119,6 @@ VERIFIER_FIXTURE = VerifierFixture(
 
 if __name__ == "__main__":
     SimpleWeatherResourcesServer.run_webserver()
+elif is_nemo_gym_fastapi_entrypoint(__file__):
+    # With num_workers > 1, uvicorn imports this module in each worker and serves its module-level `app`.
+    app = SimpleWeatherResourcesServer.run_webserver()  # noqa: F401

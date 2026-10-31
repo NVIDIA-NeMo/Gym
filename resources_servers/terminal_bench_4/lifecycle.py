@@ -55,12 +55,26 @@ class Session:
     slots: Any = None
     config: Any = None
     persist: Callable = field(default=lambda: None, repr=False)
+    # Environment Server sessions: the seed request, the SandboxAccess response or the HTTP
+    # error the seed replays, and the first verify body (retries must repeat it exactly).
+    resources_request: Any = None
+    resources_response: Any = None
+    resources_error: tuple[int, str] | None = None
+    resources_verify_body: Any = None
 
 
 def exception(session, error, error_type=None):
     record = {"exception_type": error_type or type(error).__name__, "exception_message": str(error)}
     session.result.setdefault("exception_info", record)
     session.diagnostics.append({"phase": session.phase, "subphase": session.subphase, **record})
+
+
+def released(session):
+    """Whether every sandbox this session allocated (task, verifier, EFS helper) has stopped."""
+    return all(
+        resource is None or resource.closed
+        for resource in (session.environment, session.verifier_environment, session.shared_logs)
+    )
 
 
 async def cleanup(session):
@@ -181,6 +195,11 @@ async def finalize_session(session, *, grade):
         if session.termination.reason == "infrastructure_error" and _grade_resource_limit(
             session, session.termination.detail
         ):
+            return
+        if session.termination.reason == "killed":
+            # A self-kill and a per-process OOM kill look the same afterwards, and either ends the attempt.
+            exception(session, session.termination.detail or "Agent was killed", "NonZeroAgentExitCodeError")
+            session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "agent_killed"}
             return
         session.subphase = "quiesce"
         session.persist()

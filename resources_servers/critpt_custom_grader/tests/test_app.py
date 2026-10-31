@@ -16,10 +16,11 @@ from fastapi.exceptions import RequestValidationError
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym import failure_kinds, server_utils
-from nemo_gym.config_types import DatasetConfig, ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
-from nemo_gym.server_metadata import visit_resources_server
-from nemo_gym.server_utils import ServerClient
+from nemo_gym import server_utils
+from nemo_gym.client import ServerClient
+from nemo_gym.config import DatasetConfig, visit_resources_server
+from nemo_gym.config.config_types import ResourcesServerTypeConfig, ResponsesAPIAgentServerTypeConfig
+from nemo_gym.core import failure_kinds
 from nemo_gym.task_data import normalize_task_fields
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader import task_data as task_schema
@@ -264,7 +265,7 @@ def probing_server(provider, *, startup_probe=True, **spec_fields):
 
 @pytest.mark.asyncio
 async def test_stock_agent_defaults_tool_choice_auto_with_empty_tools_are_accepted(make_server):
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
     server, app, fake = make_server()
     request = payload()
@@ -1322,7 +1323,26 @@ async def test_raw_text_fallback_still_honors_source_bounds(make_server):
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error"])
+@pytest.mark.parametrize("has_source", [True, False])
+async def test_token_limit_is_scored_zero_without_regeneration(make_server, has_source):
+    _, app, fake = make_server()
+    row = payload()
+    row["response"]["status"] = "incomplete"
+    row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
+    if not has_source:
+        row["response"]["output"] = []
+    result = (await post(app, "/verify", row))[1]
+    assert result["reward"] == 0.0
+    assert result["scored"] is True
+    assert result["mask_sample"] is False
+    assert result["category"] == "response_truncated"
+    assert result["response"] == row["response"]
+    assert "_ng_failure_class" not in result
+    fake.grade.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("mode", ["incomplete", "incomplete_details", "error", "token_limit_with_error"])
 async def test_uncompleted_response_needs_regeneration(make_server, mode):
     # An uncompleted, incomplete, or error response has no usable source. It carries needs_regeneration, not
     # verifier_unavailable, because reverify would reach the same verdict. The class is not terminal.
@@ -1334,6 +1354,9 @@ async def test_uncompleted_response_needs_regeneration(make_server, mode):
         row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     else:
         row["response"]["error"] = {"code": "server_error", "message": "synthetic"}
+        if mode == "token_limit_with_error":
+            row["response"]["status"] = "incomplete"
+            row["response"]["incomplete_details"] = {"reason": "max_output_tokens"}
     result = (await post(app, "/verify", row))[1]
     assert result["reward"] == 0.0 and result["scored"] is False
     assert result["mask_sample"] is True

@@ -222,7 +222,7 @@ class TestSeedSessionMavenSettings:
     async def test_seed_sandbox_follows_config(self, overwrite: bool) -> None:
         from unittest.mock import AsyncMock
 
-        from nemo_gym.server_utils import SESSION_ID_KEY
+        from nemo_gym.client import SESSION_ID_KEY
         from resources_servers.swemer_ultra.app import SwemerUltraResourcesServer
 
         create_sandbox = AsyncMock(side_effect=self._Stop)

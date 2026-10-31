@@ -19,7 +19,7 @@ import metrics as M
 from pydantic import model_validator
 from response_parsing import extract_json, to_prediction, to_prediction_lm
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,

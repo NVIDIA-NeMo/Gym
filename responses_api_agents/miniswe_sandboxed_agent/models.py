@@ -9,7 +9,7 @@ adapter local until Gym's shared agent/task session contracts are available.
 
 from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 
 

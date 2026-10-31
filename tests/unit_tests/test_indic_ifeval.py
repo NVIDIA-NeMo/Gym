@@ -9,8 +9,8 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.indic.ifeval import prepare as module
-from nemo_gym.base_resources_server import BaseRunRequest
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.server_runtime.base_resources_server import BaseRunRequest
 from nemo_gym.task_data import find_server_dir, load_task_data_schema, validate_jsonl_rows
 
 
@@ -152,7 +152,7 @@ def test_manifest_matches_config_and_routes_to_indic_environment():
             assert getattr(declared, key) == configured.get(key)
     assert dataset["num_repeats"] == 1
     environment = config["indic_ifeval_instruction_following_environment_server"]["environment_servers"][
-        "legacy_agent"
+        "single_agent_turn_legacy"
     ]
     assert environment["agent_server"]["name"] == "indic_ifeval_instruction_following_simple_agent"
     assert "instruction_following_environment_server" not in config
@@ -301,5 +301,7 @@ def test_english_and_indic_keep_separate_verifiers(english_first):
         assert agent["resources_server"]["name"] == expected_server
         verifier = config[expected_server]["resources_servers"]["instruction_following"]
         assert verifier.get("instruction_backend", "english") == backend
-        env = config[f"{prefix}_instruction_following_environment_server"]["environment_servers"]["legacy_agent"]
+        env = config[f"{prefix}_instruction_following_environment_server"]["environment_servers"][
+            "single_agent_turn_legacy"
+        ]
         assert env["agent_server"]["name"] == agent_name

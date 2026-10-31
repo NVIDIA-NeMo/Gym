@@ -82,10 +82,10 @@ task working directory. Without access, configure agent-owned creation as noted 
 Session setup rejects `pi_version: latest`. Pi's `resources_server` setting is required
 only for its compatibility `/run`, not agent sessions.
 
-Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with Python 3.8+,
-bash, tar/gzip, and SHA-256 utilities. Session setup uses POSIX sh to install missing Python/Bash
+Supported task images are Linux x86_64/aarch64 glibc or x86_64 musl/Alpine with
+bash, tar/gzip, and SHA-256 utilities; no Python is needed. Session setup uses POSIX sh to install missing Bash
 with apt-get or apk when running as root, before launching the Bash runtime installer;
-otherwise preinstall them in the image. Setup fails on either a nonzero exit or a provider error.
+otherwise preinstall it in the image. Pi runs under Gym's shared Bash harness runner and process supervisor. Setup fails on either a nonzero exit or a provider error.
 Older Alpine images
 also need patchelf so Pi's Node can use a private, checksum-verified C++ library without
 replacing the task's system library. The pinned Node version has no arm64 musl build.
@@ -126,7 +126,11 @@ Pi provides its own sandbox tools. It can also use the Resources server's tools 
   A finish call from a reply cut off at the output limit is not run, since its arguments may be cut off, and
   the model is asked to call it again. A reply counts as cut off when the server reports `length`, or when it
   used all of its `max_tokens`, as vLLM reports `tool_calls` for a reply it parsed a tool call from. Setup
-  fails if no granted server offers a listed tool. Without usable MCP grants the setting has no effect.
+  fails if no grant left in offers a listed tool. Names are matched without the grant, so another grant's tool of
+  the same name would end the run too: as for grant names, an optional grant that offers a listed tool another grant
+  offers is left out and recorded as an `mcp_server_skipped` gap, and two required grants that offer the same listed
+  tool fail setup.
+  Without usable MCP grants the setting has no effect.
 - Responses name MCP calls `mcp__<grant name>__<tool name>`; a Resources server's `/verify` strips its own
   grant's prefix. Observations and model calls keep the names the model saw.
 - The grant's headers are readable inside the sandbox, including by the model's tools. For a Resources
@@ -164,14 +168,18 @@ configuration must not replace the agent's cap with a larger value. Enforcement 
 7. Environment Server asks Resources to verify and close the task session. The benchmark
    owns its verification procedure and sandbox teardown.
 
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
 Services must use task-owned files rather than the temporary agent session directory.
+The supervisor and the runner above Pi are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end Pi.
 
 Harness execution uses `nemo_gym.agent_utils.sandbox_session.SandboxSession`, shared with Hermes.
 The adapter stages its worker input and collects its own output. The shared session
@@ -179,7 +187,7 @@ uploads the supervisor at activation and owns its control files and log access; 
 confirms process cleanup, captures artifacts, then releases the provider connection or
 owned sandbox. Concurrent closes share that work; missing evidence or failed release remains retryable,
 and interrupted activations keep captured observations after session files are removed.
-`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.py`
+`supervisor_client.py` handles controller-side launch/stop commands; `process_supervisor.sh`
 runs inside the sandbox. Benchmark Resources session identity/verdict state stays separate.
 Missing worker identity or exit diagnostics become `runtime_info_unavailable` or
 `worker_exit_code_unavailable` observation gaps. Positive cleanup confirmation remains
@@ -219,8 +227,8 @@ detail, not a separate endpoint or a setup step users must run.
 - `sandbox_bash_timeout_seconds`: maximum runtime of each sandbox bash tool call (default 900);
   shorter tool-requested deadlines are preserved
 - `sandbox_mcp_timeout_seconds`: maximum time of each call to a granted MCP tool (default 300)
-- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run (default none;
-  uses Pi's `terminate`, available from Pi 0.69.0)
+- `finish_tool_names`: granted MCP tools whose successful call ends a sandbox session's run; only one required
+  grant may offer each (default none; uses Pi's `terminate`, available from Pi 0.69.0)
 - `session_close_timeout_seconds`: sandbox process cleanup timeout (default 60)
 
 ## Results and limits
@@ -235,7 +243,14 @@ captured observations.
 Pi does not set reward or masking policy.
 
 Response metadata includes `harness_execution: sandbox`, hostname, supervisor PID, and
-the pinned Pi version. Model-call references and tool observations are returned by agent close.
+the pinned Pi version. When `timeout` stops a run that was still working and in which no call of a
+`finish_tool_names` tool had succeeded, the metadata also has `stop_reason: wall_time`, as Stirrup reports a timeout,
+so a benchmark can tell a timeout from a run that ended without a submission. A run has ended once a reply stops
+(`stop` or `length`) without a tool call, even if `timeout` then stops Pi's compaction call, unless it is an empty
+`length` reply at a full context window: Pi counts that as a context overflow and compacts to retry it (Pi 0.80.2 then
+exits with code 1, which fails the run). A timeout while Pi waits to retry a failed model call, or while
+the provider gives up on the supervisor after the deadline, is reported the same way. Model-call references and tool
+observations are returned by agent close.
 Tool timestamps are supervisor receipt times, not executor timestamps; unsupported evidence
 is explicitly marked as gaps.
 

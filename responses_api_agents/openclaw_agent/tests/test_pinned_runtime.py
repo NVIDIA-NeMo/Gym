@@ -14,10 +14,10 @@ import pytest
 from aiohttp import web
 from fastapi import Request
 
-from nemo_gym.agent_utils import process_supervisor
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from responses_api_agents.openclaw_agent import sandbox_runner
-from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup  # noqa: F401
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_SCRIPT, shell_assignments
+from nemo_gym.agent_utils.supervisor_client import SUPERVISOR_SCRIPT
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup, staged  # noqa: F401
 
 
 @pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision required")
@@ -57,7 +57,7 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
         state = agent._session_records[body.agent_session_id].state
         state.session.session_dir = str(directory)
         await agent.responses(request, NeMoGymResponseCreateParamsNonStreaming(input="Wait for the model response."))
-        payload = json.loads(sandbox.files[f"{directory}/input.json"])
+        payload = staged(sandbox)
         payload["command"][:2] = [node, entrypoint]
         identities = directory / "node-identities.jsonl"
         preload = directory / "identity.cjs"
@@ -69,12 +69,14 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
         payload["env"]["NODE_OPTIONS"] = f"--require={preload}"
         payload["env"]["NODE_COMPILE_CACHE"] = str(directory / "compile-cache")
         payload["env"]["HOME"] = str(tmp_path / "task-home")
-        (directory / "home/.openclaw/openclaw.json").write_text(json.dumps(payload["config"]))
-        (directory / "input.json").write_text(json.dumps(payload))
+        (directory / "home/.openclaw/openclaw.json").write_text(
+            sandbox.files[f"{directory}/home/.openclaw/openclaw.json"]
+        )
+        (directory / "prompt.txt").write_text(payload.pop("prompt"))
+        (directory / "params.sh").write_text(shell_assignments(payload))
         process = await asyncio.create_subprocess_exec(
-            sys.executable,
-            "-I",
-            process_supervisor.__file__,
+            "bash",
+            str(SUPERVISOR_SCRIPT),
             "--timeout",
             "90",
             "--cleanup-timeout",
@@ -84,10 +86,9 @@ async def test_pinned_non_tty_cli_stays_in_supervised_group_and_stops(setup, tmp
             "--stop-file",
             str(directory / "stop.request"),
             "--",
-            sys.executable,
-            "-I",
-            sandbox_runner.__file__,
-            str(directory / "input.json"),
+            "bash",
+            str(HARNESS_RUNNER_SCRIPT),
+            str(directory / "params.sh"),
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )

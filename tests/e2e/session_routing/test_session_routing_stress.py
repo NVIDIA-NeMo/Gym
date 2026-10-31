@@ -59,7 +59,7 @@ import psutil
 import pytest
 import yaml
 
-from nemo_gym.runtime_dir import RUNTIME_ROOT
+from nemo_gym.server_runtime.runtime_dir import RUNTIME_ROOT
 from tests.e2e.session_routing.test_session_routing_e2e import COUNTER_TOOL, _free_port, _port, _server, _wait_healthy
 
 

@@ -1,0 +1,2 @@
+{"task_id":"addition","task_data":{"question":"What is 17 + 25?","expected_answer":"42"}}
+{"task_id":"multiplication","task_data":{"question":"What is 9 multiplied by 7?","expected_answer":"63"}}

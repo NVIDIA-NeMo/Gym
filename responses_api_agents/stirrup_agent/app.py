@@ -26,8 +26,8 @@ from uuid import uuid4
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, model_validator
 
+from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -37,9 +37,9 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, get_global_config_dict
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
@@ -47,19 +47,22 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.sandbox.agent_tools import sandbox_server_url
+from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ModelCallRef,
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.sandbox.providers import create_provider
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPToolAccess
 from responses_api_agents.stirrup_agent.sandbox import StirrupSessionState
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
@@ -235,6 +238,10 @@ class StirrupAgentWrapperConfig(BaseResponsesAPIAgentConfig):
         default=None,
         description="Request tools that end the episode when they succeed. None uses Stirrup's own finish tool.",
     )
+    code_exec: bool = Field(
+        default=True,
+        description="Give the model the code_exec shell tool. Off for tasks whose only tools are the request's.",
+    )
     sandbox_provider: Optional[str] = Field(
         default=None, description="Sandbox provider config to start a sandbox from when the session lends none."
     )
@@ -327,6 +334,13 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             resources_cookies=state.resources_cookies,
         )
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Use the SDK HTTP status retained by the sandbox runner; never infer it from error text."""
+        status = native_result.get("model_error_status")
+        if native_result.get("model_error") and type(status) is int and 400 <= status <= 599:
+            return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=status)
+        return super().classify_outcome(native_result)
+
     async def _run_sandbox_episode(
         self, body: NeMoGymResponseCreateParamsNonStreaming, state: StirrupSessionState
     ) -> NeMoGymResponse:
@@ -351,6 +365,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             "instructions": params["instructions"],
             "tools": params["tools"],
             "finish_tool_names": self.config.finish_tool_names,
+            "code_exec": self.config.code_exec,
             "tool_access": state.tool_access.model_dump(mode="json") if state.tool_access else None,
             "workdir": state.session.workdir,
             "stop_request_path": state.session.stop_request_path,
@@ -392,7 +407,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             # The only request was rejected before any processing: a known zero. A request killed in flight may
             # have used tokens, so that case stays unknown.
             usage = _zero_usage()
-        return NeMoGymResponse(
+        response = NeMoGymResponse(
             id=f"stirrup-{state.request.episode_id.capture_key}",
             created_at=int(time.time()),
             model=model_name,
@@ -409,6 +424,7 @@ class StirrupAgentWrapper(SimpleResponsesAPIAgent):
             error={"code": "server_error", "message": output["model_error"]} if output.get("model_error") else None,
             usage=usage,
         )
+        return self.report_outcome(response, output)
 
     async def responses(
         self, request: Request, body: NeMoGymResponseCreateParamsNonStreaming = Body()

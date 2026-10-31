@@ -33,7 +33,7 @@ from nemo_gym.cli.env import (
     _probe_policy_model_tool_call,
     _wait_for_model_endpoints,
 )
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 
 
 class _FakeClock:
