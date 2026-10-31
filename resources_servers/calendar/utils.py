@@ -173,7 +173,10 @@ def grade_assistant_response(assistant_response, exp_cal_state, allow_no_json_li
 
             events_dict = {}
             for event in cal_state:
-                events_dict[str(event["event_id"])] = event
+                event_id = str(event["event_id"])
+                if event_id in events_dict:
+                    return 0, "duplicate_event_id"
+                events_dict[event_id] = event
 
             # Assistant response has a different number of events than the expected calendar state
             if len(events_dict) != len(exp_cal_state):
