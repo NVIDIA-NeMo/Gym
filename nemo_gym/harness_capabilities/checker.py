@@ -119,6 +119,13 @@ def _missing_content(value: object) -> bool:
     return False
 
 
+def _without_tool_definitions(request: object) -> object:
+    """Drop a request's tool definitions: their JSON Schemas name parameters (a `file_id` argument), not media."""
+    if isinstance(request, dict):
+        return {key: value for key, value in request.items() if key != "tools"}
+    return request
+
+
 def _resolve(reference: dict, calls: list[dict]) -> list[int]:
     if not Draft202012Validator(MODEL_CALL_REF).is_valid(reference):
         return []
@@ -461,7 +468,11 @@ class Inspector:
                 location="$.ng_trajectory.model_calls",
                 reason="external, encrypted or invalid media is unavailable to this reader",
                 predicate=lambda: not any(
-                    (_missing_content(c.get(k)) for c in self.calls for k in ("request", "response"))
+                    (
+                        _missing_content(_without_tool_definitions(c.get("request")))
+                        or _missing_content(c.get("response"))
+                        for c in self.calls
+                    )
                 ),
                 available=self.available,
                 depends_on=("model_calls.present", "calls.request", "calls.response"),

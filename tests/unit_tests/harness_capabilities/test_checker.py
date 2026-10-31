@@ -47,6 +47,29 @@ def test_external_media_is_not_a_complete_payload(record):
     assert verdict(record, "TE-7") == "not_fulfilled"
 
 
+def test_tool_parameter_named_like_a_media_reference_is_not_media(record):
+    # A tool's JSON Schema may name an argument `file_id`; that is a parameter, not an unresolved file.
+    record["ng_trajectory"]["model_calls"][0]["request"]["tools"] = [
+        {
+            "type": "function",
+            "function": {
+                "name": "download_file",
+                "parameters": {"type": "object", "properties": {"file_id": {"type": "string"}}},
+            },
+        }
+    ]
+    assert verdict(record, "TE-4") == "fulfilled"
+    assert verdict(record, "TE-7") == "fulfilled"
+
+
+def test_media_reference_in_a_message_still_fails_beside_tool_definitions(record):
+    record["ng_trajectory"]["model_calls"][0]["request"]["tools"] = []
+    record["ng_trajectory"]["model_calls"][0]["request"]["input"] = [
+        {"role": "user", "content": [{"type": "input_file", "file_id": "file-unresolved"}]}
+    ]
+    assert verdict(record, "TE-4") == "not_fulfilled"
+
+
 def test_payload_removal_fails_even_with_complete_conversation(record):
     record["ng_trajectory"]["model_calls"][0]["request"] = None
     assert verdict(record, "TE-4") == "not_fulfilled"
