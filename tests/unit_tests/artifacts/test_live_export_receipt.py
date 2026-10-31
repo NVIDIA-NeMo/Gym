@@ -149,18 +149,28 @@ def live(tmp_path, monkeypatch):
 def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
     artifacts, exporter, client = live
     before = _artifact_version(artifacts)
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
     assert not artifacts.export_done_fpath("mlflow").exists()
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
     receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
     assert receipt == {
         "version": 1,
         "run_id": "live-run",
-        "artifacts": before,
+        "artifacts": _artifact_version(artifacts),
         "uploaded_rollouts": True,
         "rollout_projection_version": 1,
     }
     assert client.status == "FINISHED"
-    assert _artifact_version(artifacts) == before
+    after = _artifact_version(artifacts)
+    assert {k: v for k, v in after.items() if k != "aggregate_metrics_json_fpath"} == {
+        k: v for k, v in before.items() if k != "aggregate_metrics_json_fpath"
+    }
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    health = changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    assert health["metrics"]["health/trial/known"] == 0
+    assert client.metrics["health/trial/known"] == 0
+    assert client.metrics["health/trial/passed"] == 0
     collected = _collected_mlflow(artifacts)
     assert collected["receipt"] == {
         "run_id": "live-run",
@@ -422,7 +432,10 @@ def test_live_receipt_config_projection_preserves_capture_controls(live, enabled
     )
     version = _artifact_version(artifacts)
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
-    assert _artifact_version(artifacts) == version
+    after = _artifact_version(artifacts)
+    assert {k: v for k, v in after.items() if k != "aggregate_metrics_json_fpath"} == {
+        k: v for k, v in version.items() if k != "aggregate_metrics_json_fpath"
+    }
     assert artifacts.export_done_fpath("mlflow").exists()
     saved = OmegaConf.to_container(OmegaConf.load(artifacts.resolved_config_yaml_fpath), resolve=False)
     assert client.artifacts[exporter.CONFIG_ARTIFACT_FILE] == saved
@@ -564,3 +577,205 @@ def test_live_capture_custom_backend_options_do_not_expose_credentials(live, key
     )
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
     assert artifacts.export_done_fpath("mlflow").exists()
+
+
+def test_postrun_exports_the_same_bound_health_metric_snapshot(live, monkeypatch):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, live_exporter, _ = live
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    client = Client()
+    monkeypatch.setattr(module, "MlflowClient", lambda **kwargs: client)
+    exporter = module.MLflowExporter(live_exporter.global_config_dict)
+    result = exporter.export(artifacts)
+    assert result.state.value == "succeeded"
+    assert all(client.metrics[key] == value for key, value in values.items())
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    payload = changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    summary = orjson.loads((artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json").read_bytes())
+    assert payload == summary["run"]["stats"]["acceptance_health"]
+    assert payload["metrics"] == values
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+
+
+@pytest.mark.parametrize("fault", ["duplicate", "stale", "nan", "non_health_key"])
+def test_postrun_rejects_unbound_or_malformed_health_metrics(live, fault):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, exporter, _ = live
+    _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    payload = entries[0]["_ng_run_health_metrics"]
+    if fault == "duplicate":
+        entries.append(dict(entries[0]))
+    elif fault == "stale":
+        payload["source_artifacts"]["rollouts_jsonl_fpath"] = "changed"
+    elif fault == "nan":
+        payload["metrics"]["health/trial/known"] = float("nan")
+    elif fault == "non_health_key":
+        payload["metrics"]["agent/mean/reward"] = 1
+    artifacts.aggregate_metrics_json_fpath.write_text(json.dumps(entries))
+    result = module.MLflowExporter(exporter.global_config_dict).export(artifacts)
+    assert result.state.value == "failed"
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+def test_current_unknown_health_replaces_stale_healthy_metadata_without_changing_scores(live):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, _ = live
+    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    original = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    entries[0]["_ng_run_health_metrics"] = {
+        "metrics": {"health/trial/known": 1, "health/trial/passed": 1, "health/trial/failure_rate": 0}
+    }
+    artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(entries))
+    values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert values["health/trial/known"] == 0
+    assert values["health/trial/passed"] == 0 and "health/trial/failure_rate" not in values
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == original
+
+
+def test_empty_aggregate_does_not_invent_an_agent_or_health_metric(live):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, _ = live
+    artifacts.aggregate_metrics_json_fpath.write_text("[]")
+    before = artifacts.aggregate_metrics_json_fpath.read_bytes()
+    assert _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath) == {}
+    assert artifacts.aggregate_metrics_json_fpath.read_bytes() == before
+
+
+def test_artifact_change_during_health_derivation_leaves_aggregate_and_summary_untouched(live, monkeypatch):
+    import subprocess
+
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, _ = live
+    health = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+    before = (artifacts.aggregate_metrics_json_fpath.read_bytes(), health.read_bytes())
+    original = subprocess.run
+
+    def changed(*args, **kwargs):
+        result = original(*args, **kwargs)
+        artifacts.rollouts_jsonl_fpath.write_bytes(artifacts.rollouts_jsonl_fpath.read_bytes() + b"\n")
+        return result
+
+    monkeypatch.setattr(subprocess, "run", changed)
+    with pytest.raises(RuntimeError, match="changed"):
+        _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert (artifacts.aggregate_metrics_json_fpath.read_bytes(), health.read_bytes()) == before
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+@pytest.mark.parametrize("source", ["quality", "manifest", "journal"])
+def test_existing_receipt_does_not_certify_changed_health_inputs_or_resend(live, source):
+    artifacts, exporter, client = live
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    marker = artifacts.export_done_fpath("mlflow")
+    receipt = marker.read_bytes()
+    before_backend = (dict(client.metrics), dict(client.tags), dict(client.artifacts))
+    if source == "quality":
+        path = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+        summary = orjson.loads(path.read_bytes())
+        summary["run"]["stats"]["responses"]["faulted"] += 1
+        path.write_bytes(orjson.dumps(summary))
+    else:
+        suffix = "manifest.json" if source == "manifest" else "attempts.jsonl"
+        path = artifacts.rollouts_jsonl_fpath.with_name(f"rollouts_{suffix}")
+        path.write_bytes((path.read_bytes() if path.exists() else b"") + b"\n")
+    result = module.MLflowExporter(exporter.global_config_dict).export(artifacts)
+    assert result.state.value == "failed"
+    assert marker.read_bytes() == receipt
+    assert _collected_mlflow(artifacts)["receipt"]["current"] is False
+    assert (client.metrics, client.tags, client.artifacts) == before_backend
+
+
+def test_unknown_snapshot_invalidates_interpretation_of_prior_backend_pass_metrics(live):
+    artifacts, exporter, client = live
+    exporter.export_metrics({"health/trial/known": 1, "health/trial/passed": 1, "health/trial/failure_rate": 0})
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert client.metrics["health/trial/known"] == 0
+    # Unknown resets the current pass flag without fabricating a failure count or rate.
+    assert client.metrics["health/trial/passed"] == 0
+    payload = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())[0]["_ng_run_health_metrics"]["metrics"]
+    assert payload["health/trial/known"] == 0
+    assert payload["health/trial/passed"] == 0 and "health/trial/failure_rate" not in payload
+
+
+@pytest.mark.parametrize("health_first", [True, False])
+def test_reserved_health_metric_names_cannot_collide_with_scientific_metrics(health_first):
+    from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+
+    health = {
+        "agent_ref": {"name": "policy"},
+        "_ng_run_health_metrics": {
+            "source_artifacts": {},
+            "metrics": {"health/response/known": 0, "health/response/passed": 0},
+        },
+    }
+    scientific = {"agent_ref": {"name": "health"}, "agent_metrics": {"response/passed": 1}}
+    entries = [health, scientific] if health_first else [scientific, health]
+    with pytest.raises(ValueError, match="collide"):
+        flatten_aggregate_metrics(entries, source_artifacts={})
+
+
+@pytest.mark.parametrize("raw", ['{"run":{"stats":{}},"other":NaN}', "{invalid", "[]"])
+def test_existing_unhashable_health_summary_is_not_treated_as_absent(live, raw):
+    from nemo_gym.artifacts.exporters.base import _artifact_version
+    from nemo_gym.artifacts.exporters.metrics import health_source_artifacts
+
+    artifacts, _, _ = live
+    path = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+    path.write_text(raw)
+    with pytest.raises(ValueError, match="cannot be bound"):
+        health_source_artifacts(artifacts, _artifact_version(artifacts))
+
+
+@pytest.mark.parametrize("case", ["healthy", "wrong", "recovered", "invalid"])
+def test_health_export_projects_validated_collector_facts_without_changing_scores(live, monkeypatch, case):
+    """Explicit collector projection boundary; real classifier, persisted metadata and SDK delivery."""
+    import nemo_gym.orchestration.recovery as recovery
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+    from tests.unit_tests.test_llm_judge_trial_coverage import _recovered_fixture
+    from tests.unit_tests.test_tool_trial_coverage import fixture
+
+    artifacts, exporter, client = live
+    if case in {"recovered", "invalid"}:
+        collected, _, grade = _recovered_fixture()
+        if case == "invalid":
+            grade["outcome"] = "unknown"
+    else:
+        collected = fixture(case)
+    # Preserve the two upstream counters and all their actual coverage metadata.
+    collected.quality["observed_upstream_recovery"] = {
+        "observed_attempt_errors": 0,
+        "observed_failed_operations": 0,
+        "recovered_attempt_errors": 0,
+        "recovered_operations": 0,
+        "operations_without_terminal_observation": 0,
+    }
+    before = collected.model_dump()
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert collected.model_dump() == before
+    assert values["health/response/known"] == 1
+    assert values["health/trial/known"] == 1
+    assert values["health/trial/counts_known"] == 1
+    assert values["health/trial/expected"] == 1
+    assert values["health/trial/failed"] == int(case == "invalid")
+    assert values["health/trial/passed"] == int(case != "invalid")
+    assert values["health/trial/failure_rate"] == int(case == "invalid")
+    assert values["health/upstream_recovery/known"] == 1
+    assert values["health/grading_recovery/judge_recovered_attempts"] == int(case == "recovered")
+    assert values["health/grading_recovery/judge_recovered_operations"] == int(case == "recovered")
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    exporter.export_metrics(values)
+    assert all(client.metrics[key] == value for key, value in values.items())

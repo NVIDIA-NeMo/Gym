@@ -26,7 +26,7 @@ from omegaconf import DictConfig, OmegaConf
 from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.secret_utils import hide_secrets_in_container
@@ -439,8 +439,16 @@ class BaseExporter(Exporter):
                         "unchanged and nothing was exported.",
                         run_id=receipt["run_id"],
                     )
+                if artifacts.aggregate_metrics_json_fpath.is_file():
+                    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+                    if isinstance(entries, list) and any(
+                        isinstance(entry, dict) and "_ng_run_health_metrics" in entry for entry in entries
+                    ):
+                        flatten_aggregate_metrics(
+                            entries, source_artifacts=health_source_artifacts(artifacts, version)
+                        )
                 return ExportResult.skipped(reason="already exported", run_id=receipt["run_id"])
-        except (OSError, RuntimeError) as exc:
+        except (OSError, RuntimeError, ValueError) as exc:
             return ExportResult.failed(f"Could not verify export artifacts: {exc}")
         # The rollouts file is only required below, when the rollouts are actually uploaded.
         unexportable = unexportable_reason(artifacts, rollouts_required=False)
@@ -464,7 +472,10 @@ class BaseExporter(Exporter):
                     f"Rollouts file not found: {artifacts.rollouts_jsonl_fpath}. "
                     "Pass `+upload_rollouts=false` to export without the rollouts."
                 )
-            metrics = flatten_aggregate_metrics(orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()))
+            health_version = health_source_artifacts(artifacts, version)
+            metrics = flatten_aggregate_metrics(
+                orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
+            )
             rollouts = self._read_rollouts(artifacts) if upload else None
             with self:
                 self._log_config(saved_config)
@@ -479,7 +490,10 @@ class BaseExporter(Exporter):
                     f"The {self.name} exporter did not report a run id: its setup() must call _record_run_id(). "
                     "The export is not marked as done."
                 )
-            if _artifact_version(artifacts) != version:
+            if (
+                _artifact_version(artifacts) != version
+                or health_source_artifacts(artifacts, version) != health_version
+            ):
                 return ExportResult.failed(
                     "Run artifacts changed during export; the backend may hold the earlier version, "
                     "but the current run is not marked as exported.",

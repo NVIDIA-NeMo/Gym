@@ -980,7 +980,28 @@ if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
             and isinstance(receipt.get("artifacts"), dict)
             and set(receipt["artifacts"]) == set(RECEIPT_FILES)):
         current = {k: sha256(os.path.join(a, n)) for k, n in RECEIPT_FILES.items()}
-        mlflow["receipt"] = {"run_id": receipt["run_id"], "current": receipt["artifacts"] == current,
+        health_current = True
+        try:
+            aggregate = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
+            payloads = [entry["_ng_run_health_metrics"] for entry in aggregate if isinstance(entry, dict) and "_ng_run_health_metrics" in entry]
+            if payloads:
+                health_sources = {k: v for k, v in current.items() if k != "aggregate_metrics_json_fpath"}
+                health_sources.update({name: sha256(os.path.join(a, "rollouts_" + name)) for name in ("manifest.json", "attempts.jsonl")})
+                try:
+                    summary = json.load(open(os.path.join(a, "quality_summary.json")))
+                    stats = summary.get("run", {}).get("stats", {})
+                    if isinstance(stats, dict): stats.pop("acceptance_health", None)
+                    health_sources["quality_summary"] = hashlib.sha256(json.dumps(summary, sort_keys=True, separators=(",", ":"), allow_nan=False).encode()).hexdigest()
+                except FileNotFoundError:
+                    health_sources["quality_summary"] = None
+                health_current = (len(payloads) == 1 and isinstance(payloads[0], dict)
+                    and payloads[0].get("source_artifacts") == health_sources
+                    and isinstance(payloads[0].get("metrics"), dict) and bool(payloads[0]["metrics"])
+                    and all(isinstance(k, str) and k.startswith("health/") and type(v) in (int, float) and math.isfinite(v)
+                            for k, v in payloads[0]["metrics"].items()))
+        except (OSError, ValueError, TypeError, AttributeError):
+            health_current = False
+        mlflow["receipt"] = {"run_id": receipt["run_id"], "current": receipt["artifacts"] == current and health_current,
                              "uploaded_rollouts": receipt.get("uploaded_rollouts"),
                              "rollout_projection_version": receipt.get("rollout_projection_version")}
     elif not isinstance(receipt, (dict, list)) and len(text.split()) == 1:

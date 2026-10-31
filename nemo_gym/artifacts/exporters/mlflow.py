@@ -38,7 +38,7 @@ from omegaconf import DictConfig, OmegaConf
 
 from nemo_gym.artifacts.exporters import run_failed
 from nemo_gym.artifacts.exporters.base import BaseExporter, _artifact_version, _live_run_id, _write_marker_atomically
-from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics
+from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
 from nemo_gym.artifacts.run_artifacts import RunArtifacts
 from nemo_gym.config.config_types import MLFlowConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
@@ -345,7 +345,10 @@ class MLflowExporter(BaseExporter):
             run = client.get_run(run_id)
             if run.info.run_id != run_id:
                 raise RuntimeError("Tracking service returned a different run.")
-            metrics = flatten_aggregate_metrics(orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()))
+            health_version = health_source_artifacts(artifacts, version)
+            metrics = flatten_aggregate_metrics(
+                orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes()), source_artifacts=health_version
+            )
             if not metrics:
                 raise RuntimeError("Final aggregate has no delivery evidence.")
             for key, value in metrics.items():
@@ -362,7 +365,10 @@ class MLflowExporter(BaseExporter):
             finished = client.get_run(run_id)
             if finished.info.run_id != run_id or finished.info.status != "FINISHED":
                 raise RuntimeError("Tracking service did not confirm the same run finished.")
-            if version != _artifact_version(artifacts):
+            if (
+                version != _artifact_version(artifacts)
+                or health_source_artifacts(artifacts, version) != health_version
+            ):
                 raise RuntimeError("Run artifacts changed during live delivery verification.")
             _write_marker_atomically(
                 marker,
