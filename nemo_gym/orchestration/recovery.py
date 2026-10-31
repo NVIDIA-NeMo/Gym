@@ -233,7 +233,10 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
         return row[SAVED_ANSWER_KEY] is True
     from nemo_gym.rollout_recovery import has_saved_generation
 
-    return has_saved_generation(row)
+    # Match the saved input used by _rollout_response: diagnostic response bodies are not verifier inputs.
+    # A present response takes precedence over the native judge-failure partial response, even if unusable.
+    answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
+    return has_saved_generation({"response": answer})
 
 
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
@@ -278,9 +281,9 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
 
 def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
     """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
-    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.rollout_recovery import has_saved_generation, has_unclassified_execution_failure
 
-    if has_unclassified_execution_failure(row) or _saved_answer(row):
+    if has_unclassified_execution_failure(row) or has_saved_generation(row) or _saved_answer(row):
         return True
     chain = _cause_chain(row)
     if chain is None:
@@ -707,6 +710,8 @@ def rows(name, skip=0):
                     "failure": {"stage": failure.get("stage")} if isinstance(failure, dict) else None}
             for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
                 answer = r.get(key)
+                if key in r and not isinstance(answer, dict):
+                    selected[key] = None  # Preserve unusable-slot presence and verifier-input precedence.
                 if isinstance(answer, dict):
                     output = answer.get("output")
                     selected[key] = {k: answer[k] for k in ("object", "id", "status") if k in answer}

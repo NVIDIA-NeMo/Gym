@@ -241,3 +241,210 @@ async def test_current_unrouted_diagnostic_blocks_projected_older_retryable_outc
     assert decision.evidence[0].attempts == 1
     assert RolloutStore.read(output).selected("failure") == [original]
     assert RolloutStore.read(output).pending() == []
+
+
+@pytest.mark.parametrize(
+    "slot,expected",
+    [
+        ("response", "reverify"),
+        ("_ng_failure_partial_response", "reverify"),
+        ("_ng_failure_response", "stop"),
+    ],
+)
+async def test_reverification_requires_the_original_verifier_input_slot(tmp_path, monkeypatch, slot, expected):
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.rollout_reverification import _rollout_response
+
+    result = {"_ng_failure_class": "judge_failed", "failure_kind": "judge_failed", slot: response()}
+    decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
+    failure = store.failures()[0]
+    assert has_actual_generation(failure)
+    assert store.pending() == []
+    assert decision.action.value == expected
+    assert decision.evidence[0].attempts == 1
+    if slot == "_ng_failure_response":
+        with pytest.raises(ConfigError, match="no .response."):
+            _rollout_response(failure)
+    else:
+        assert _rollout_response(failure) == response()
+
+
+@pytest.mark.parametrize("empty_output", [False, True])
+async def test_actual_judge_route_saved_input_survives_collection_and_reverification(
+    tmp_path, monkeypatch, empty_output
+):
+    from unittest.mock import MagicMock
+
+    from fastapi.testclient import TestClient
+    from omegaconf import OmegaConf
+
+    import nemo_gym.rollout_reverification as reverify
+    from nemo_gym.client.server_client import ServerClient
+    from nemo_gym.server_runtime.base_resources_server import (
+        BaseResourcesServerConfig,
+        BaseVerifyRequest,
+        BaseVerifyResponse,
+        SimpleResourcesServer,
+    )
+    from nemo_gym.verification.judge import JudgeError
+
+    state = {"fail": True, "inputs": []}
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            state["inputs"].append(body.response.model_dump(mode="json"))
+            if state["fail"]:
+                raise JudgeError("synthetic judge unavailable")
+            return BaseVerifyResponse(**body.model_dump(), reward=0.0 if empty_output else 1.0)
+
+    original = response(
+        []
+        if empty_output
+        else [
+            {
+                "id": "saved-message",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "synthetic saved answer", "annotations": []}],
+            }
+        ]
+    )
+    resources_client = MagicMock(spec=ServerClient)
+    resources_client.global_config_dict = {
+        "observability_enabled": True,
+        "model_call_capture_dir": str(tmp_path / "captures"),
+    }
+    resources = Resources(
+        config=BaseResourcesServerConfig(name="resources", host="resources", port=8000, entrypoint="app.py"),
+        server_client=resources_client,
+    )
+    http = TestClient(resources.setup_webserver())
+    malformed = http.post(
+        "/verify",
+        json={
+            "responses_create_params": {"input": "synthetic task"},
+            "response": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "synthetic"}]}]},
+        },
+    )
+    assert malformed.status_code == 422
+    assert state["inputs"] == []
+    initial = http.post(
+        "/ng-rollout/saved-judge/verify",
+        json={"responses_create_params": {"input": "synthetic task"}, "response": original},
+    )
+    assert initial.status_code == 200
+    decision, store, projected = await persist_producer_result(tmp_path / "job", monkeypatch, initial.json())
+    assert decision.action.value == "reverify"
+    assert store.pending() == []
+    failure = store.failures()[0]
+    before = {path.name: path.read_bytes() for path in (tmp_path / "job" / "artifacts").iterdir() if path.is_file()}
+    assert reverify._rollout_response(failure) == original
+    assert "synthetic saved answer" not in projected.model_dump_json()
+    assert len(state["inputs"]) == 1
+    state["fail"] = False
+
+    async def post(**kwargs):
+        assert kwargs["url_path"] == "/verify"
+        assert kwargs["json"]["response"] == original
+        reply = http.post("/verify", json=kwargs["json"])
+        return FakeResponse(reply.status_code, reply.json())
+
+    client = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    client.global_config_dict = OmegaConf.create({"resources": {"resources_servers": {"test": {}}}})
+    monkeypatch.setattr(reverify, "setup_server_client", lambda: client)
+    inputs = json.loads((tmp_path / "job" / "artifacts" / "rollouts_materialized_inputs.jsonl").read_text())
+    payload = reverify._build_verify_payload(reverify.InputRolloutPair(input=inputs, rollout=failure))
+    futures = reverify._run_verification_payloads([payload])
+    _, result = await next(iter(futures))
+    assert result["reward"] == (0.0 if empty_output else 1.0)
+    assert state["inputs"] == [original, original]
+    assert client.post.await_count == 1
+    assert before == {
+        path.name: path.read_bytes() for path in (tmp_path / "job" / "artifacts").iterdir() if path.is_file()
+    }
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (1, 3)
+    import hashlib
+
+    digest = lambda value: hashlib.sha256(json.dumps(value, sort_keys=True).encode()).hexdigest()
+    (tmp_path / "producer-proof.json").write_text(
+        json.dumps(
+            {
+                "empty_output": empty_output,
+                "malformed_request_status": malformed.status_code,
+                "decision": decision.action.value,
+                "attempts": decision.evidence[0].attempts,
+                "max_attempts": decision.evidence[0].max_attempts,
+                "original_response_sha256": digest(original),
+                "actual_verifier_input_sha256": [digest(value) for value in state["inputs"]],
+                "reverify_post_calls": client.post.await_count,
+                "reverify_route": "/verify",
+                "saved_artifact_bytes_unchanged": True,
+                "ordinary_resume_pending": len(store.pending()),
+                "reverified_reward": result["reward"],
+            },
+            indent=2,
+        )
+    )
+
+
+async def test_diagnostic_generation_blocks_replay_without_becoming_verifier_input(tmp_path, monkeypatch):
+    from tests.unit_tests.test_rollout_recovery import known_pre_answer_provider_failure
+
+    result = known_pre_answer_provider_failure() | {"_ng_failure_response": response()}
+    decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
+    assert decision.action.value == "stop"
+    assert store.pending() == []
+    assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (1, 3)
+
+
+@pytest.mark.parametrize("unusable", [{}, None])
+async def test_unusable_original_response_does_not_fall_back_to_different_partial_input(
+    tmp_path, monkeypatch, unusable
+):
+    result = {
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_failed",
+        "response": {},
+        "_ng_failure_partial_response": response(),
+    }
+    decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
+    assert decision.action.value == "stop"
+    assert store.pending() == []
+
+
+def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
+    from nemo_gym.orchestration.recovery import _saved_answer
+    from nemo_gym.rollout_recovery import has_saved_generation
+    from nemo_gym.rollout_reverification import _rollout_response
+    from tests.unit_tests.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
+
+    row = _judge_failure(0, response=None) | {"_ng_failure_partial_response": response()}
+    job = write_job_dir(tmp_path / "job", n=1, results=[], failures=[row])
+    before = {path.name: path.read_bytes() for path in (job / "artifacts").iterdir()}
+    collected = collect(job)
+    selected = collected.failures[0]
+    assert "response" in selected and selected["response"] is None
+    assert has_saved_generation(selected)
+    assert not _saved_answer(selected)
+    assert _rollout_response(row) is None
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.action.value == "stop"
+    assert {path.name: path.read_bytes() for path in (job / "artifacts").iterdir()} == before
+
+
+async def test_producer_null_is_omitted_before_saved_native_partial_selection(tmp_path, monkeypatch):
+    from nemo_gym.rollout_reverification import _rollout_response
+
+    result = {
+        "_ng_failure_class": "judge_failed",
+        "failure_kind": "judge_failed",
+        "response": None,
+        "_ng_failure_partial_response": response(),
+    }
+    decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
+    failure = store.failures()[0]
+    assert "response" not in failure
+    assert _rollout_response(failure) == response()
+    assert decision.action.value == "reverify"
+    assert store.pending() == []
