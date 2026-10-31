@@ -16,7 +16,8 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.server_runtime import verifier_observability
-from nemo_gym.trajectory.trajectory_record import VerifierInvocation, grading_result_binding
+from nemo_gym.trajectory import VerifierInvocation
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from resources_servers.equivalence_llm_judge.app import (
     LLMJudgeResourcesServer,
     LLMJudgeResourcesServerConfig,
