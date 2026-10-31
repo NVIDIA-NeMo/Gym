@@ -532,7 +532,9 @@ def decide_recovery(
         if fact is None:
             continue
         item.attempts, item.max_attempts = fact.attempts, fact.max_attempts
-        if item.state == IdentityState.MISSING and (fact.reserved or not fact.pending):
+        if item.state == IdentityState.JUDGE_RECOVERABLE and fact.attempts >= fact.max_attempts:
+            item.state = IdentityState.EXHAUSTED
+        elif item.state == IdentityState.MISSING and (fact.reserved or not fact.pending):
             # A reservation without an outcome is not proof that work never reached the agent.
             item.state = IdentityState.UNKNOWN
         elif item.state == IdentityState.RETRYABLE and not fact.pending:
@@ -1148,6 +1150,8 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             raise ValueError("managed source has no readable manifest or inventory")
         if store.manifest.max_rollout_attempts is None:
             raise ValueError("managed manifest does not preserve its rollout attempt cap")
+        if store.unresolved_rejudgments():
+            raise ValueError(f"admitted re-judgment outcome unknown for {store.unresolved_rejudgments()}")
         coverage = store.coverage()
         if len(collected.materialized) != coverage["expected"] or not coverage["identity_verified"]:
             raise ValueError("managed inventory is ambiguous or its identity is not verified")

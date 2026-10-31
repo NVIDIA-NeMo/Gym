@@ -1625,6 +1625,12 @@ COMMANDS = {
                 "With --judge-failed-only: append recovered results to an existing --output (never cleared) "
                 "instead of seeding successes into a fresh file.",
             ),
+            _bool_flag(
+                "settle-into-source",
+                "settle_into_source",
+                "With --judge-failed-only: settle each re-judged judge failure in the manifest-backed source run "
+                "(same attempt and saved answer, no model attempt added).",
+            ),
         ),
     ),
     "eval profile": Command(

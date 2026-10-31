@@ -463,6 +463,17 @@ def atomic_write_json(path: Path, value: dict) -> None:
         file.write((json.dumps(value, indent=2, allow_nan=False) + "\n").encode("utf-8"))
 
 
+class PendingRejudge(BaseModel):
+    """A judge-only re-judgment admitted before its judge call; it closes when its outcome is saved."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+
+    operation_id: Annotated[str, Field(pattern=r"^[0-9a-f]{32}$")]
+    predecessor_failure_id: Annotated[str, Field(min_length=1)]
+    predecessor_sha256: Annotated[str, Field(pattern=r"^[0-9a-f]{64}$")]
+    admitted_at: Annotated[float, Field(ge=0, allow_inf_nan=False, strict=True)]  # UTC epoch seconds
+
+
 class RunManifest(BaseModel):
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -478,6 +489,8 @@ class RunManifest(BaseModel):
     config_digest: str
     legacy_import: bool = False
     identity_overridden: bool = False
+    # Admitted judge-only re-judgments whose outcome is not saved yet, by logical rollout id.
+    pending_rejudge: dict[str, PendingRejudge] = Field(default_factory=dict)
 
     @classmethod
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
@@ -491,8 +504,12 @@ class RunManifest(BaseModel):
         )
 
     def write(self, path: Path) -> None:
-        # Publish a complete manifest, or leave the previous one intact.
-        atomic_write_json(path, self.model_dump(mode="json"))
+        # Publish a complete manifest, or leave the previous one intact. An empty pending_rejudge is omitted so a
+        # manifest without admissions keeps the version-2 shape that readers without the field accept.
+        value = self.model_dump(mode="json")
+        if not value["pending_rejudge"]:
+            del value["pending_rejudge"]
+        atomic_write_json(path, value)
 
     @classmethod
     def import_legacy(cls, rows: list[dict]) -> "RunManifest":
