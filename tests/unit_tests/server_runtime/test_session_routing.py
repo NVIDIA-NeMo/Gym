@@ -63,7 +63,12 @@ from nemo_gym.server_runtime.base_resources_server import (
     ResourcesSeedSessionResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.server_runtime.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose, session_token_serializer
+from nemo_gym.server_runtime.mcp_auto_exposure import (
+    TOKEN_HEADER,
+    maybe_auto_expose,
+    session_token_header,
+    session_token_serializer,
+)
 from nemo_gym.server_runtime.request_handling import session_routing
 from nemo_gym.server_runtime.request_handling.session_routing import (
     SESSION_CLAIMS_DIR,
@@ -197,6 +202,20 @@ class SessionIgnoringSeedServer(StateServer):
     seed_session = SimpleResourcesServer.seed_session
 
 
+class SecretSigningServer(StateServer):
+    """Signs its sessions with a secret instead of its public name, as a server a sandbox can reach does."""
+
+    def get_session_secret(self) -> str:
+        return "a secret, not the server's name"
+
+
+class CookieNamingServer(StateServer):
+    """Names its session cookie itself, as a server a sandbox can reach may, so callers see no class name."""
+
+    def get_session_cookie_name(self) -> str:
+        return "sid_state"
+
+
 class Worker:
     """One worker of a resources server, wired as run_webserver wires it; no socket directory means one worker."""
 
@@ -208,6 +227,7 @@ class Worker:
         mcp: bool = False,
         close_window_seconds: float = 300,
         server_class: type[StateServer] = StateServer,
+        mcp_bearer_token: bool = False,
     ) -> None:
         config = BaseResourcesServerConfig(
             host="",
@@ -215,6 +235,7 @@ class Worker:
             entrypoint="",
             name="state",
             expose_tools_over_mcp=mcp,
+            mcp_bearer_token=mcp_bearer_token,
             session_close_retry_window_seconds=close_window_seconds,
         )
         self.server = server_class(config=config, server_client=MagicMock(spec=ServerClient), label=label)
@@ -224,15 +245,16 @@ class Worker:
         if mcp:
             maybe_auto_expose(self.server, self.app)
             mcp_routing = dict(
-                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(self.server)
+                mcp_token_header=session_token_header(self.server),
+                mcp_token_serializer=session_token_serializer(self.server),
             )
-        self.cookie_name = self.server.get_session_middleware_key()
+        self.cookie_name = self.server.get_session_cookie_name()
         self.socket_dir = socket_dir
         self.routing_id = install_session_routing(
             self.app,
             socket_dir=socket_dir,
             session_cookie=self.cookie_name,
-            secret_key=self.cookie_name,
+            secret_key=self.server.get_session_secret(),
             **mcp_routing,
             **self.server.claimed_session_routing(),
         )
@@ -240,7 +262,7 @@ class Worker:
         self.client = TestClient(self.app, raise_server_exceptions=False)
 
     def session(self, response: Response) -> dict:
-        signer = itsdangerous.TimestampSigner(self.cookie_name)
+        signer = itsdangerous.TimestampSigner(self.server.get_session_secret())
         return json.loads(b64decode(signer.unsign(response.cookies[self.cookie_name].encode())))
 
     def post(self, path: str, *, cookie: Optional[str] = None, **kwargs) -> Response:
@@ -280,12 +302,13 @@ def mcp_workers(socket_dir: str) -> Iterator[tuple[Worker, Worker]]:
         yield a, b
 
 
-def _mcp_call(client: TestClient, name: str, arguments: dict, token: str) -> dict:
+def _mcp_call(client: TestClient, name: str, arguments: dict, token: str, *, bearer: bool = False) -> dict:
     """A tools/call as a CLI harness sends it: the session token header, and no cookies."""
     client.cookies.clear()
+    credentials = {"Authorization": f"Bearer {token}"} if bearer else {TOKEN_HEADER: token}
     response = client.post(
         "/mcp",
-        headers={"accept": "application/json, text/event-stream", TOKEN_HEADER: token},
+        headers={"accept": "application/json, text/event-stream", **credentials},
         json={"jsonrpc": "2.0", "id": 1, "method": "tools/call", "params": {"name": name, "arguments": arguments}},
     )
     assert response.status_code == 200, response.text
@@ -390,7 +413,7 @@ class AgentWorker:
         )
         self.agent = agent_class(config=config, server_client=MagicMock(spec=ServerClient), label=label)
         self.app = self.agent.setup_webserver()
-        self.cookie_name = self.agent.get_session_middleware_key()
+        self.cookie_name = self.agent.get_session_cookie_name()
         self.socket_dir = socket_dir
         self.routing_id = install_session_routing(
             self.app,
@@ -512,6 +535,40 @@ class TestTheSessionIdSources:
         # A later request with that cookie names the same session.
         assert a.post("/store", json={"value": 1}, cookie=seeded.cookies[b.cookie_name]).json() == {"worker": "b"}
         assert b.server.store == {"typed": 1}
+
+    def test_a_cookie_under_the_servers_own_name(self, socket_dir: str) -> None:
+        a = Worker("a", socket_dir, server_class=CookieNamingServer)
+        b = Worker("b", socket_dir, server_class=CookieNamingServer)
+        with a.client, b.client:
+            stored = a.post("/store", json={"value": 7})
+            assert list(stored.cookies) == ["sid_state"]
+            assert _set_cookies(stored, a.server.get_session_middleware_key()) == []
+            # The router reads the cookie under that name, so it reaches the worker that holds the session.
+            assert b.post("/take", cookie=stored.cookies["sid_state"]).json() == {"worker": "a", "value": 7}
+
+    def test_a_bearer_token(self, socket_dir: str) -> None:
+        a = Worker("a", socket_dir, mcp=True, mcp_bearer_token=True)
+        b = Worker("b", socket_dir, mcp=True, mcp_bearer_token=True)
+        with a.client, b.client:
+            grant = a.post("/seed_session", json={}).json()["mcp"]["headers"]["Authorization"]
+            token = grant.removeprefix("Bearer ")
+            assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token, bearer=True)) == {"worker": "a"}
+            assert _mcp_payload(_mcp_call(b.client, "take", {}, token, bearer=True)) == {"worker": "a", "value": 5}
+
+    def test_a_cookie_and_a_token_signed_with_the_servers_secret(self, socket_dir: str) -> None:
+        a = Worker("a", socket_dir, mcp=True, server_class=SecretSigningServer)
+        b = Worker("b", socket_dir, mcp=True, server_class=SecretSigningServer)
+        with a.client, b.client:
+            stored = a.post("/store", json={"value": 7})
+            session_id = a.session(stored)[SESSION_ID_KEY]
+            # A cookie signed with the server's public name names no session.
+            forged = _sign_cookie(b.cookie_name, {SESSION_ID_KEY: session_id})
+            assert b.post("/take", cookie=forged).json() == {"worker": "b", "value": None}
+            assert b.post("/take", cookie=stored.cookies[a.cookie_name]).json() == {"worker": "a", "value": 7}
+
+            token = a.post("/seed_session", json={}).json()["mcp"]["headers"][TOKEN_HEADER]
+            assert _mcp_payload(_mcp_call(b.client, "store", {"value": 5}, token)) == {"worker": "a"}
+            assert _mcp_payload(_mcp_call(b.client, "take", {}, token)) == {"worker": "a", "value": 5}
 
 
 def _stop(worker: AgentWorker, rollout_id: str = "r", reason: Optional[str] = None) -> Response:

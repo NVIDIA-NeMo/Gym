@@ -1,0 +1,28 @@
+# OfficeEnv's episodes for a sandboxed harness, without the harness: each Environment Server episode borrows a
+# sandbox (a container from sandbox/Dockerfile), reaches the apps the way its row's exposure says (MCP tools, commands
+# or endpoints), and moves file content over the episode's file API (README.md in the workspace). The harness configs
+# compose it with a harness and the Environment Server that binds the two: configs/officeenv_sandbox.yaml (Pi),
+# configs/officeenv_sandbox_codex.yaml (Codex CLI) and configs/officeenv_sandbox_miniswe.yaml (mini-SWE).
+oe:
+  resources_servers:
+    officeenv:
+      entrypoint: app.py
+      domain: agent
+      verified: false
+      description: OfficeEnv episodes lent to sandboxed harnesses (MCP tools, commands or endpoints, a sandbox per episode, a file API)
+      expose_tools_over_mcp: true
+      # Everything the sandbox reads names a company's API, the MCP endpoint too: harnesses list it as `company` (Pi
+      # names its tools company_<tool>, at most 64 characters: the longest tool name is 56), and the session token
+      # goes as a standard bearer token, which tools/list requires.
+      mcp_server_name: company
+      mcp_bearer_token: true
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: officeenv-sandbox:pilot
+        ttl_s: 7200
+        # File content (Google Drive, Box, SharePoint, OneDrive) stays out of the model's context: a download saves
+        # the file in the workspace (/workspace/<app folder>/<file id>/<name>) and answers with its path, the content
+        # inline only for text up to this many bytes; an upload that pastes binary content or longer text is refused
+        # with the file API command. Gmail's attachments too: get_attachment saves one in the workspace, and a
+        # message attaches a workspace file by its path. null answers and takes content in full.
+        inline_file_bytes: 8192

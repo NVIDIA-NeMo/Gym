@@ -938,9 +938,28 @@ class SimpleServer(BaseServer):
         instrument_fastapi_app(app)
 
     def get_session_middleware_key(self) -> str:
-        # This method is here to override in case we want to ever use an actual session middleware secret key.
-        # e.g. for an actual product.
+        # Names this server in logs and error text, and by default its session cookie, so it is public.
+        # To sign sessions with a secret, override get_session_secret instead.
         return f"{self.__class__.__name__}___{self.config.name}"
+
+    def get_session_secret(self) -> str:
+        """The key that signs this server's session cookies and MCP session tokens.
+
+        The default is ``get_session_middleware_key()``, which anyone who knows the server's class and name can
+        compute. A server whose routes untrusted callers can reach, such as code in a sandbox the server lends,
+        returns a secret instead, so those callers cannot forge another session's cookie or token.
+        Only the signing changes: the cookie keeps its name (``get_session_cookie_name()``).
+        """
+        return self.get_session_middleware_key()
+
+    def get_session_cookie_name(self) -> str:
+        """The name of this server's session cookie, for SessionMiddleware and the session router that reads it.
+
+        The default is ``get_session_middleware_key()``. Callers see the name in every answer that sets the cookie,
+        so a server whose routes code in a sandbox can reach may return one that says nothing of the server.
+        It must stay unique per server: a client keeps one cookie per name and host, and servers share hosts.
+        """
+        return self.get_session_middleware_key()
 
     def setup_session_middleware(self, app: FastAPI) -> None:
         if getattr(app.state, "nemo_gym_session_middleware_installed", False):
@@ -995,8 +1014,9 @@ class SimpleServer(BaseServer):
         # Direct MCP dispatch materializes the session itself.
         add_session_id.skipped_on_direct_mcp_dispatch = True
 
-        session_middleware_key = self.get_session_middleware_key()
-        app.add_middleware(SessionMiddleware, secret_key=session_middleware_key, session_cookie=session_middleware_key)
+        app.add_middleware(
+            SessionMiddleware, secret_key=self.get_session_secret(), session_cookie=self.get_session_cookie_name()
+        )
 
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
@@ -1156,15 +1176,15 @@ repr(e): {repr(e)}"""
         mcp_token_routing = {}
         if getattr(getattr(server, "config", None), "expose_tools_over_mcp", False):
             from nemo_gym.server_runtime.mcp_auto_exposure import (
-                TOKEN_HEADER,
                 maybe_auto_expose,
+                session_token_header,
                 session_token_serializer,
             )
 
             maybe_auto_expose(server, app)
             startup.mark("expose_tools_over_mcp")
             mcp_token_routing = dict(
-                mcp_token_header=TOKEN_HEADER, mcp_token_serializer=session_token_serializer(server)
+                mcp_token_header=session_token_header(server), mcp_token_serializer=session_token_serializer(server)
             )
         server.setup_liveness(app)
         server.set_ulimit()
@@ -1185,12 +1205,12 @@ repr(e): {repr(e)}"""
         if server.routes_sessions_to_owner and not is_multi_worker_main_proc:
             # Outside SessionMiddleware and the exception middleware:
             # a forwarded request is handled only by the worker that claims its session.
-            session_cookie = server.get_session_middleware_key()
             install_session_routing(
                 app,
                 socket_dir=session_socket_dir,
-                session_cookie=session_cookie,
-                secret_key=session_cookie,
+                session_cookie=server.get_session_cookie_name(),
+                # Reads the cookie as SessionMiddleware does, so with the same key.
+                secret_key=server.get_session_secret(),
                 backlog=backlog,
                 **mcp_token_routing,
                 **server.claimed_session_routing(),

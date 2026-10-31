@@ -1,0 +1,23 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for OpenClaw, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). OpenClaw borrows each episode's sandbox and takes no MCP
+# tools, so the episode grants none. Compose and run as configs/officeenv_sandbox.yaml shows, with this config and
+# `--agent openclaw_agent`. OpenClaw installs Node and its own package in each sandbox at session start (from
+# nodejs.org and npm), so its sandboxes need the internet, or the `openclaw` image of sandbox/Dockerfile.harness.
+config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/openclaw_agent/configs/openclaw_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+openclaw_agent:
+  responses_api_agents:
+    openclaw_agent:
+      timeout: 1800
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: oe
+      agent_server:
+        name: openclaw_agent
+      resources_tool_transports: []

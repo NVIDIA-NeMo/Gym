@@ -1,0 +1,44 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for Pi. Pi borrows each episode's
+# sandbox (a container from sandbox/Dockerfile), reaches OfficeEnv's tools over MCP, and moves file content over the
+# episode's file API (README.md in the workspace). Compose with a sandbox provider and a model server; the sandbox
+# must reach both this resources server and the model server, so bind them to an address the containers can reach:
+#
+#   gym env start \
+#     --config resources_servers/officeenv/configs/officeenv_sandbox.yaml \
+#     --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+#     --model-type inference_provider --model <model> --model-url <url> '+policy_api_key=...' \
+#     ++oe.resources_servers.officeenv.host=<host address> \
+#     ++policy_model.responses_api_models.inference_provider.host=<host address>
+#
+# Rows: data/sandbox_pilot.jsonl (sandbox/prepare_rows.py), whose prompts name the tools as Pi lists
+# them (company_<tool>). Rows in another exposure (prepare_rows.py --exposure cli|api_search) grant no
+# user_complete_task tool, so they run with ++pi_agent.responses_api_agents.pi_agent.finish_tool_names=[],
+# and commands' rows (cli) with no MCP tools at all:
+# ++single_agent_turn_legacy.environment_servers.single_agent_turn_legacy.resources_tool_transports=[].
+config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/pi_agent/configs/pi_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+oe:
+  resources_servers:
+    officeenv:
+      verified: false
+      sandbox_config:
+        # How Pi names the MCP tools (`<mcp_server_name>_<tool>`), for the workspace guide
+        mcp_tool_prefix: company_
+
+pi_agent:
+  responses_api_agents:
+    pi_agent:
+      finish_tool_names: [user_complete_task]
+      timeout: 1800
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: oe
+      agent_server:
+        name: pi_agent
+      resources_tool_transports: [mcp]

@@ -1405,6 +1405,19 @@ class TestRunWebserverProxyKwargs:
 
         assert 4096 == install.call_args.kwargs["backlog"]
 
+    def test_the_session_router_reads_the_cookie_as_the_session_middleware_does(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        install = MagicMock()
+        monkeypatch.setattr(nemo_gym.server_utils, "install_session_routing", install)
+        monkeypatch.setattr(SimpleServer, "get_session_cookie_name", lambda self: "sid_named")
+        monkeypatch.setattr(SimpleServer, "get_session_secret", lambda self: "a secret")
+
+        self._capture_uvicorn_kwargs(monkeypatch, {}, num_workers=4, is_worker=True, routes_sessions=True)
+
+        assert install.call_args.kwargs["session_cookie"] == "sid_named"
+        assert install.call_args.kwargs["secret_key"] == "a secret"
+
     def test_a_listen_backlog_below_one_fails_before_uvicorn_starts(self, monkeypatch: MonkeyPatch) -> None:
         with raises(ValidationError, match="uvicorn_backlog"):
             self._capture_uvicorn_kwargs(monkeypatch, {"uvicorn_backlog": 0}, num_workers=1)

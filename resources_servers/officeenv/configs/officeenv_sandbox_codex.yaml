@@ -1,0 +1,30 @@
+# OfficeEnv's sandboxed episodes (configs/officeenv_sandbox_episodes.yaml) for Codex CLI, on rows whose apps are
+# commands (`cli`: sandbox/prepare_rows.py --exposure cli). Codex borrows each episode's sandbox and runs `codex exec`
+# there; the model reaches the apps through their commands and moves files with the file API, all in Codex's shell,
+# so the episode grants no MCP tools. Codex starts its shell without the sandbox's environment: the commands, and the
+# workspace guide, take the API's URL and token from /etc/company-api.env instead. Compose and run as
+# configs/officeenv_sandbox.yaml shows, with this config and `--agent codex_agent`. Codex installs Node and its own
+# package in each sandbox at session start (from nodejs.org and npm), so its sandboxes need the internet, or an image
+# with both installed.
+#
+# For rows in the `tools` exposure, set resources_tool_transports: [mcp] and sandbox_config.mcp_tool_prefix:
+# mcp__company__ (how Codex names the MCP tools); one tool name, google_workspace_admin_list_licenses_for_product_and_sku,
+# is then longer than the 64 characters a function name may have.
+config_paths:
+  - resources_servers/officeenv/configs/officeenv_sandbox_episodes.yaml
+  - responses_api_agents/codex_agent/configs/codex_agent.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+codex_agent:
+  responses_api_agents:
+    codex_agent:
+      timeout: 1800
+
+single_agent_turn_legacy:
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        name: oe
+      agent_server:
+        name: codex_agent
+      resources_tool_transports: []
