@@ -15,6 +15,7 @@ from nemo_gym.models.model_call_capture import _CaptureMiddleware
 from nemo_gym.models.token_capture import (
     NG_CAPTURE_FIELD,
     NG_COMMIT_COORDS_FIELD,
+    REFUSED_CALL_REASON,
     UNCOMMITTED_CALL_REASON,
     CaptureContext,
     FileLineageStore,
@@ -454,6 +455,34 @@ def test_external_staging_continues_after_a_reasoning_only_first_reply(tmp_path,
         admissions[0].model_call_id,
         admissions[1].model_call_id,
     ]
+
+
+@pytest.mark.parametrize("refused_first", [False, True])
+def test_external_staging_a_refused_call_poisons_the_rollout(tmp_path, refused_first: bool) -> None:
+    """A call the route refuses (a 4xx) leaves a poisoning ledger row, admitted or not.
+
+    Here request validation refuses a temperature that is not a number (422). Before, a call refused ahead of
+    admission left no row, so a harness that died on the refusal trained as a shorter rollout that looked valid.
+    """
+    ledger = FileLineageStore(tmp_path)
+    app, admissions = _staging_app(ledger, lambda index, message: None)
+    url = "/ng-rollout/refused-rollout/training-token-capture/v1/responses"
+    history: list[dict] = [{"role": "user", "content": "question"}]
+    try:
+        with TestClient(app) as client:
+            if not refused_first:
+                first = client.post(url, json={"input": history})
+                assert first.status_code == 200, first.text
+                history += first.json()["output"]
+            history += [{"role": "user", "content": "continue"}]
+            refused = client.post(url, json={"input": history, "temperature": "hot"})
+            assert refused.status_code == 422, refused.text
+        assert len(admissions) == (0 if refused_first else 1), "the refused call must not reach the worker"
+        manifest = asyncio.run(ledger.manifest("refused-rollout"))
+        assert len(manifest["records"]) == (0 if refused_first else 1)
+        assert [row["reason"] for row in manifest["failures"]] == [REFUSED_CALL_REASON]
+    finally:
+        asyncio.run(ledger.close())
 
 
 def _completion(prompt: list[int], generation: list[int], content: str) -> dict[str, Any]:

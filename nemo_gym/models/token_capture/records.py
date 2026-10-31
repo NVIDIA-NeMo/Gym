@@ -70,6 +70,12 @@ UNRESOLVED_PARENT_REASON = "unresolved_parent"
 # The call was admitted but finished without worker commit coordinates.
 # Written by the capture middleware.
 UNCOMMITTED_CALL_REASON = "request_finished_without_staged_coordinates"
+# The route refused the call (a 4xx client error other than 408 and 429), whether or not it was admitted: the
+# harness never got this completion, so the rest of its episode is not one the policy produced. Written by the
+# capture middleware. Unlike the reasons in ``UNSERVED_CALL_FAILURE_REASONS``, it poisons the rollout: a call
+# refused before admission leaves no other row, and without this one a harness that died on the refusal
+# would train as a shorter rollout that looks valid.
+REFUSED_CALL_REASON = "request_refused"
 # The engine answered the admitted call with a refusal (a prompt that does not fit the context
 # window, or an output-token parameter it rejected), so generation never ran and nothing was
 # staged. Unlike a lost response, this outcome is definite. Written by the model server at the
