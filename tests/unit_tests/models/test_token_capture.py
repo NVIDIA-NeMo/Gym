@@ -2220,6 +2220,67 @@ def test_lineage_keeps_sibling_reasoning_only_calls_ambiguous():
     assert parent.reason == "ambiguous"
 
 
+def test_an_assistant_turn_with_nothing_in_it_adds_nothing_to_the_fingerprint():
+    """The empty message a harness echoes for a reply that was all reasoning carries nothing the key covers: turns
+    that are all empty hash as no turns, and an empty turn after an answer leaves the answer's fingerprint."""
+    task, parse_error = {"role": "user", "content": "task"}, {"role": "user", "content": "parse error"}
+    empty, answer = {"role": "assistant", "content": ""}, {"role": "assistant", "content": "A0"}
+
+    assert assistant_fingerprint([task, empty, parse_error]) == assistant_fingerprint([task, parse_error]) == ""
+    assert assistant_fingerprint([task, answer, empty, parse_error]) == assistant_fingerprint([task, answer])
+    assert assistant_fingerprint([task, answer]) != ""
+
+
+def _record_a_reasoning_only_first_call(lineage: RolloutLineage, call_id: str = "call-0") -> list[dict]:
+    """A rollout whose first reply was all reasoning: no model-authored history, and none in the output."""
+    first = [{"role": "user", "content": "task"}]
+    lineage.record(call_id, first + [_reasoning("r0")], [1, 2], f"d-{call_id}", len(first))
+    return first
+
+
+@pytest.mark.parametrize(
+    "echo",
+    [
+        pytest.param([{"role": "assistant", "content": ""}], id="an-empty-message"),
+        pytest.param([_reasoning("r0")], id="the-reasoning-item"),
+        pytest.param([_reasoning("r0"), {"role": "assistant", "content": ""}], id="reasoning-and-an-empty-message"),
+        pytest.param([], id="nothing"),
+    ],
+)
+def test_lineage_continues_a_reasoning_only_first_call(echo: list[dict]):
+    """A first reply that was all reasoning leaves nothing to fingerprint, so the request after it has no fingerprint
+    either, like a first request. It continues the call whose context it extends, whatever the harness echoed of the
+    reply, instead of starting a second root."""
+    lineage = RolloutLineage()
+    first = _record_a_reasoning_only_first_call(lineage)
+
+    parent = lineage.resolve(first + echo + [{"role": "user", "content": "parse error, answer again"}])
+
+    assert parent.status == ParentResolutionStatus.RESOLVED
+    assert parent.match is not None and parent.match.model_call_id == "call-0"
+
+
+def test_lineage_keeps_a_new_conversation_and_a_retry_roots_after_a_reasoning_only_first_call():
+    """Requests that extend no recorded call stay roots: another conversation, and the first request sent again."""
+    lineage = RolloutLineage()
+    first = _record_a_reasoning_only_first_call(lineage)
+
+    assert lineage.resolve([{"role": "user", "content": "another task"}]).status == ParentResolutionStatus.ROOT
+    assert lineage.resolve(first).status == ParentResolutionStatus.ROOT
+
+
+def test_lineage_keeps_sibling_reasoning_only_first_calls_ambiguous():
+    """Two reasoning-only first replies to the same request are siblings: a request extending both is not guessed."""
+    lineage = RolloutLineage()
+    first = _record_a_reasoning_only_first_call(lineage, "call-0a")
+    _record_a_reasoning_only_first_call(lineage, "call-0b")
+
+    parent = lineage.resolve(first + [{"role": "user", "content": "parse error, answer again"}])
+
+    assert parent.status == ParentResolutionStatus.UNRESOLVED
+    assert parent.reason == "ambiguous"
+
+
 def test_lineage_index_is_bounded():
     """Bound worker-local lineage for abandoned rollouts."""
     index = LineageIndex(max_rollouts=3)

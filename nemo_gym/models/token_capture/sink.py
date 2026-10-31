@@ -226,7 +226,8 @@ async def resolve_parent(request_messages: list | None) -> None:
     For external staging, parent resolution determines whether the worker may capture the call:
 
     * A unique parent creates a ``token_in`` admission.
-    * A request with no prior assistant output creates a ``text`` root.
+    * A request with no prior assistant output creates a ``text`` root, unless it continues a recorded call that
+      had none either (a first reply that was all reasoning): the lineage store decides, as for any request.
     * An unresolved request may create a ``text`` root only when the rollout has no ledger rows.
     * Every other result records a failure and leaves the call unadmitted.
 
@@ -241,7 +242,7 @@ async def resolve_parent(request_messages: list | None) -> None:
         await _admit_candidate(context, request_messages)
         return
     try:
-        if not assistant_fingerprint(request_messages):
+        if not assistant_fingerprint(request_messages) and context.lineage_store is None:
             context.parent_resolution = LineageResolution(ParentResolutionStatus.ROOT)
         elif context.lineage_store is None:
             context.parent_resolution = LineageResolution(

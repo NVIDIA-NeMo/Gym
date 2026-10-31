@@ -409,6 +409,53 @@ def test_external_staging_continues_after_a_reasoning_only_reply(tmp_path, echo:
         asyncio.run(ledger.close())
 
 
+@pytest.mark.parametrize(
+    "echo",
+    [
+        pytest.param([{"role": "assistant", "content": ""}], id="an-empty-message"),
+        pytest.param(
+            [{"type": "reasoning", "id": "rs_echo", "summary": [{"type": "summary_text", "text": "reasoning"}]}],
+            id="the-reasoning-item",
+        ),
+        pytest.param([], id="nothing"),
+    ],
+)
+def test_external_staging_continues_after_a_reasoning_only_first_reply(tmp_path, echo: list[dict]) -> None:
+    """A first reply that was all reasoning (a first turn an output cap stopped inside its reasoning, or a <think>
+    never closed) leaves no model-authored history, so the next request has none either, like a first request. It
+    must continue that call through the ledger rows, whatever the harness echoed of the reply, and not start a
+    second root or lose its parent; a second reasoning-only reply in a row too.
+    """
+
+    def reply(index: int, message: dict) -> None:
+        if index < 3:
+            message["content"] = ""
+
+    ledger = FileLineageStore(tmp_path)
+    app, admissions = _staging_app(ledger, reply)
+    url = "/ng-rollout/reasoning-only-first-rollout/training-token-capture/v1/responses"
+    history: list[dict] = [{"role": "user", "content": "task"}]
+    try:
+        with TestClient(app) as client:
+            for turn in range(1, 4):
+                response = client.post(url, json={"input": history})
+                assert response.status_code == 200, response.text
+                if turn < 3:
+                    assert not [item for item in response.json()["output"] if item["type"] != "reasoning"]
+                history += [*echo, {"role": "user", "content": f"parse error {turn}, answer again"}]
+        manifest = asyncio.run(ledger.manifest("reasoning-only-first-rollout"))
+    finally:
+        asyncio.run(ledger.close())
+    assert not manifest["failures"], manifest["failures"]
+    assert len(manifest["records"]) == 3
+    assert all(admission is not None for admission in admissions)
+    assert [admission.parent_call_id for admission in admissions] == [
+        None,
+        admissions[0].model_call_id,
+        admissions[1].model_call_id,
+    ]
+
+
 def _completion(prompt: list[int], generation: list[int], content: str) -> dict[str, Any]:
     return {
         "id": f"completion-{content}",
