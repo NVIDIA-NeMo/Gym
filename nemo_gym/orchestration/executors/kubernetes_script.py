@@ -28,6 +28,7 @@ from typing import Any
 
 from nemo_gym.orchestration.api import (
     BenchmarkRunConfig,
+    DeclarativeServiceConfig,
     KubernetesComputeConfig,
     RayServiceConfig,
     SubmitConfig,
@@ -159,6 +160,8 @@ _READINESS_FAILURE_THRESHOLD = 3
 def _sidecar_containers(config: SubmitConfig, compute: KubernetesComputeConfig) -> list[dict[str, Any]]:
     containers = []
     for name, service in config.services.items():
+        if isinstance(service, DeclarativeServiceConfig):
+            continue
         if isinstance(service, RayServiceConfig):
             raise ValueError(f"Service '{name}': ray services are not supported by the kubernetes executor yet.")
         if service.use_ray_serve:

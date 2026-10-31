@@ -17,7 +17,9 @@ import copy
 import os
 import re
 import warnings
+from dataclasses import replace
 from typing import Annotated, Any, Literal
+from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
@@ -34,6 +36,12 @@ from pydantic import (
 )
 
 from nemo_gym.orchestration.executors.script_templates import bash_var
+from nemo_gym.orchestration.service_refs import (
+    ServiceAccessors,
+    check_host_var_collisions,
+    resolve_service_refs,
+    service_host_env_var,
+)
 
 
 # Reject unknown fields on all config models so typos in YAML surface immediately.
@@ -168,6 +176,19 @@ class BaseModelServiceConfig(BaseServiceConfig):
     port: int = 8000
     served_model_name: str | None = None
 
+    def accessors(self, name: str) -> ServiceAccessors:
+        """The fields `service:` references can read. Without a node pool the service shares the driver's
+        node; a pinned one is on its pool's first node, which only the running job knows."""
+        deferred = self.node_pool is not None
+        host = f"${{oc.env:{service_host_env_var(name)}}}" if deferred else "localhost"
+        return ServiceAccessors(
+            url=f"http://{host}:{self.port}/v1",
+            host=host,
+            port=str(self.port),
+            model=self.served_model_name or self.model,
+            host_deferred=deferred,
+        )
+
 
 class VllmServiceConfig(BaseModelServiceConfig):
     type: Literal["vllm"]
@@ -201,6 +222,14 @@ class VllmServiceConfig(BaseModelServiceConfig):
 
 class VllmNodeServiceConfig(VllmServiceConfig):
     server_per_node: bool = False
+    _node_count: int = PrivateAttr(default=1)
+
+    def accessors(self, name: str) -> ServiceAccessors:
+        """With one server per node, `url` is the list of every node's URL, and `host` the first node's."""
+        accessors = super().accessors(name)
+        if not self.server_per_node:
+            return accessors
+        return replace(accessors, url=self.node_urls(self._node_count))
 
     def node_host_var(self, index: int) -> str:
         """The env var the batch script exports with the host of one node of this service's pool."""
@@ -346,11 +375,52 @@ class RayServiceConfig(BaseServiceConfig):
         return self
 
 
+_HYDRA_UNSAFE_CHARS = frozenset("$,[]{}#?='\"\\")
+
+
+class DeclarativeServiceConfig(_StrictModel):
+    """An OpenAI-compatible endpoint that already exists (a hosted judge, say): nothing is deployed
+    for it, so it has no container, placement or node pool. It is only addressed through `service:` references."""
+
+    type: Literal["openai_compatible"]
+    base_url: str
+    model: str
+
+    @field_validator("base_url", "model")
+    @classmethod
+    def _validate_hydra_safe(cls, v: str) -> str:
+        # Both are written into a Hydra override for `gym eval run`, which rejects or interprets these.
+        bad = sorted(set(v) & _HYDRA_UNSAFE_CHARS)
+        if bad or any(c.isspace() for c in v):
+            raise ValueError(
+                f"{v!r} contains characters that cannot go into a Hydra override: {''.join(bad) or 'whitespace'}"
+            )
+        return v
+
+    def accessors(self, name: str) -> ServiceAccessors:
+        parsed = urlparse(self.base_url)
+        port = parsed.port or (443 if parsed.scheme == "https" else 80)
+        return ServiceAccessors(url=self.base_url, host=parsed.hostname or "", port=str(port), model=self.model)
+
+    @field_validator("base_url")
+    @classmethod
+    def _validate_base_url(cls, v: str) -> str:
+        parsed = urlparse(v)
+        if parsed.scheme not in ("http", "https") or not parsed.hostname:
+            raise ValueError(f"base_url must be an http(s) URL with a host, like 'https://host/v1', got {v!r}")
+        try:
+            parsed.port
+        except ValueError:
+            raise ValueError(f"base_url has an invalid port: {v!r}") from None
+        return v
+
+
 # Discriminated union keyed on `type`; Pydantic rejects unknown type values at parse time.
 ServiceConfig = Annotated[
     Annotated[VllmNodeServiceConfig, Tag("vllm")]
     | Annotated[RayServiceConfig, Tag("ray")]
-    | Annotated[VllmPDServiceConfig, Tag("vllm_pd")],
+    | Annotated[VllmPDServiceConfig, Tag("vllm_pd")]
+    | Annotated[DeclarativeServiceConfig, Tag("openai_compatible")],
     Discriminator("type"),
 ]
 
@@ -585,11 +655,15 @@ class SubmitConfig(_StrictModel):
     job: JobConfig
     otel: OtelConfig = OtelConfig()
 
+    _deferred_host_services: set[str] = PrivateAttr(default_factory=set)
+
     @property
     def deployed_services(self) -> dict[str, ServiceConfig]:
-        """`services` with each vllm_pd service expanded into its two tiers and its router."""
+        """`services` that run in the job, with each vllm_pd service expanded into its two tiers and its router."""
         deployed: dict[str, ServiceConfig] = {}
         for name, service in self.services.items():
+            if isinstance(service, DeclarativeServiceConfig):
+                continue
             if isinstance(service, VllmPDServiceConfig):
                 deployed.update(service.tiers(name))
             deployed[name] = service
@@ -687,6 +761,7 @@ class SubmitConfig(_StrictModel):
                         "instances for the Ray Serve gateway to route; drop use_ray_serve."
                     )
                 service_nodes = 1
+                service._node_count = compute.node_pools[service.node_pool].nodes
             if isinstance(compute, SlurmComputeConfig):
                 service_gpus = [p.gpus_per_node for p in service_pools.values() if p.gpus_per_node is not None]
             else:
@@ -757,7 +832,30 @@ class SubmitConfig(_StrictModel):
                         )
                     benchmark.run.update(copy.deepcopy(policy_run))
 
+        for bench_name, benchmark in self.driver.benchmarks.items():
+            try:
+                benchmark.run, deferred = resolve_service_refs(benchmark.run, self.services)
+            except ValueError as e:
+                raise ValueError(f"Benchmark '{bench_name}' run config: {e}") from None
+            self._deferred_host_services |= deferred
+        # A saved config holds the resolved references, so the hosts a run needs are read back from its values.
+        runs = repr([benchmark.run for benchmark in self.driver.benchmarks.values()])
+        self._deferred_host_services |= {
+            name
+            for name, service in self.services.items()
+            if isinstance(service, BaseModelServiceConfig)
+            and service.node_pool is not None
+            and f"oc.env:{service_host_env_var(name)}" in runs
+        }
+        check_host_var_collisions(self._deferred_host_services)
+
         return self
+
+    @property
+    def deferred_host_services(self) -> list[str]:
+        """Pinned services whose hostname a `service:` reference needs; the executor exports each one's
+        `service_host_env_var` to the driver."""
+        return sorted(self._deferred_host_services)
 
     def _validate_pd_services(self, compute: "ComputeConfig") -> None:
         pools = list(compute.node_pools) if isinstance(compute, SlurmComputeConfig) else []

@@ -13,7 +13,7 @@ The record format is deliberately executor-neutral. Nothing in it is named after
 | Location | File | Notes |
 | --- | --- | --- |
 | Run directory on the cluster | `gym-job.json` | The durable copy. |
-| Run directory on the cluster | `resolved-config.yaml` | The config exactly as submitted: interpolations resolved, overrides applied. |
+| Run directory on the cluster | `resolved-config.yaml` | The config exactly as submitted: interpolations resolved, overrides applied. `service:` references appear as the values they resolved to, so the file is a record, not a config to submit again. |
 | Your machine | `$XDG_CACHE_HOME/nemo-gym/jobs/<gym_job_id>.json`, or `~/.cache/nemo-gym/jobs/<gym_job_id>.json` when `XDG_CACHE_HOME` is unset | A copy of the manifest, so you can list your own submissions. |
 
 The resolved config is the right thing to archive or diff: the config file may have changed since, and the overrides mean nothing without the file they were applied to. It is also what `--resolve-only` prints.

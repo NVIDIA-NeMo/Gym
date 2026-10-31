@@ -25,7 +25,13 @@ from pathlib import Path
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import (
+    SAVED_CONFIG,
+    DeclarativeServiceConfig,
+    SlurmComputeConfig,
+    SubmitConfig,
+    VllmPDServiceConfig,
+)
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
@@ -136,6 +142,8 @@ def _parse_sbatch_results(output: str) -> dict[str, tuple[str | None, str | None
 def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
     entries = [("driver", m) for m in config.driver.mounts]
     for name, service in config.services.items():
+        if isinstance(service, DeclarativeServiceConfig):
+            continue
         entries += [(f"services.{name}", m) for m in service.mounts]
         if isinstance(service, VllmPDServiceConfig):
             for tier in ("prefill", "decode"):

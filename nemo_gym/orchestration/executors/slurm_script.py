@@ -62,6 +62,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     render_write_file_from_base64,
 )
 from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.service_refs import service_host_env_var
 
 
 _SCRIPT_TEMPLATE = """\
@@ -1109,6 +1110,10 @@ def build_sbatch_script(
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
+    for name in config.deferred_host_services:
+        # A pinned service's host is its pool's first node, which only the running job knows.
+        first_node = offsets[config.services[name].node_pool][0]
+        driver_env[service_host_env_var(name)] = f"{RUNTIME_ENV_PREFIX}gym_nodes[{first_node}]"
     if instrumented:
         driver_env = {
             **driver_telemetry_env(

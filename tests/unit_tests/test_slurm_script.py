@@ -29,7 +29,13 @@ import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
-from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
+from nemo_gym.orchestration.api import (
+    DeclarativeServiceConfig,
+    NodePool,
+    RayServiceConfig,
+    SubmitConfig,
+    VllmPDTierConfig,
+)
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
@@ -1421,6 +1427,14 @@ def test_validate_mounts_local_passes_when_src_exists(tmp_path):
     src = str(tmp_path)
     config = _make_submit_config_with_mounts(driver_mounts=[f"{src}:/data"])
     # No exception means all srcs were found — implicitly asserted by the call completing.
+    _validate_mounts(config, LocalConnection())
+
+
+def test_validate_mounts_skips_a_declarative_service(tmp_path):
+    config = _make_submit_config_with_mounts(driver_mounts=[f"{tmp_path}:/data"])
+    config.services["hosted"] = DeclarativeServiceConfig(
+        type="openai_compatible", base_url="https://grader.example.com/v1", model="g"
+    )
     _validate_mounts(config, LocalConnection())
 
 
@@ -2987,3 +3001,23 @@ def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged
     assert service_steps and driver_steps
     assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
     assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)
+
+
+def test_a_referenced_pinned_service_host_reaches_the_driver_and_the_hydra_override(tmp_path):
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "policy": _vllm(8000, "gpu", tensor_parallel_size=4),
+                "scorer": _vllm(8001, "aux", tensor_parallel_size=4),
+            },
+            "compute": {"hsg": {"type": "slurm", "account": "acct", "node_pools": _TWO_POOLS}},
+            "driver": {"container": "gym:latest", "benchmarks": {"b": {"run": {"judge_url": "service:scorer.url"}}}},
+            "job": {"output_path": str(tmp_path / "jobs")},
+        }
+    )
+    script = build_sbatch_script(
+        config, "b", config.driver.benchmarks["b"], config.compute["hsg"], tmp_path / "jobs" / "b"
+    )
+    assert "GYM_SERVICE_SCORER_HOST=${gym_nodes[1]} " in script
+    assert "'+judge_url=http://${oc.env:GYM_SERVICE_SCORER_HOST}:8001/v1'" in script
+    assert "GYM_SERVICE_POLICY_HOST" not in script
