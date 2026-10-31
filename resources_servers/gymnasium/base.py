@@ -45,12 +45,24 @@ class EnvStepRequest(BaseModel):
     response: NeMoGymResponse
 
 
+# Reserved ``info`` keys: an environment that ends an episode because of its own failure (an unavailable
+# user simulator or judge, a lost session) puts these next to its metrics, and ``_step_endpoint`` lifts
+# them into the typed fields below so ``info`` keeps only the environment's own, fixed-shape metrics.
+# They mean what ``BaseVerifyResponse`` says they mean: ``mask_sample`` excludes the reward from quality
+# metrics and training data; ``failure_kind`` is a registered or ``<server>:<kind>`` name;
+# ``failure_reason`` is the human-readable detail.
+FAILURE_INFO_KEYS: tuple[str, ...] = ("mask_sample", "failure_kind", "failure_reason")
+
+
 class EnvStepResponse(BaseModel):
     observation: Optional[str] = None
     reward: float = 0.0
     terminated: bool = False
     truncated: bool = False
     info: dict = {}
+    mask_sample: bool = False
+    failure_kind: Optional[str] = None
+    failure_reason: Optional[str] = None
 
 
 def extract_text(response: NeMoGymResponse) -> str:
@@ -72,6 +84,10 @@ class GymnasiumServer(SimpleResourcesServer):
     """Gymnasium-style base class. Used with gymnasium_agent.
 
     step() returns (observation, reward, terminated, truncated, info).
+
+    ``info`` may carry the reserved keys in :data:`FAILURE_INFO_KEYS` (``mask_sample``, ``failure_kind``,
+    ``failure_reason``) when the environment, not the policy, ended the episode; ``/step`` lifts them out of
+    ``info`` into the step response, and ``gymnasium_agent`` reports them on the rollout.
 
     A session starts at ``/reset`` and ends at a terminal ``/step``. Sessions are ``restart_only`` for
     checkpoints unless a subclass sets ``checkpoint_mode = "exported"``. The default hooks then export and
@@ -95,10 +111,16 @@ class GymnasiumServer(SimpleResourcesServer):
     async def _step_endpoint(self, body: EnvStepRequest, request: Request) -> EnvStepResponse:
         session_id = request.session.get(SESSION_ID_KEY)
         obs, reward, terminated, truncated, info = await self.step(body.response, body.model_extra or {}, session_id)
+        info = dict(info or {})
+        # A reserved key set to None (an env that computes the flag) counts as absent; the session is already
+        # closed below, so a value that fails EnvStepResponse validation would turn the step into a 500.
+        failure = {key: value for key in FAILURE_INFO_KEYS if (value := info.pop(key, None)) is not None}
         if terminated or truncated:
             await self.close_session(session_id)
             self.checkpoint_session_ended(request)
-        return EnvStepResponse(observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info)
+        return EnvStepResponse(
+            observation=obs, reward=reward, terminated=terminated, truncated=truncated, info=info, **failure
+        )
 
     async def reset(self, metadata: dict, session_id: Optional[str] = None) -> tuple[Optional[str], dict]:
         return None, {}

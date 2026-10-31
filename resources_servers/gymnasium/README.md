@@ -26,7 +26,7 @@ class MyEnv(GymnasiumServer):
 - **reward**: per-step reward; the agent sums across steps by default.
 - **terminated**: episode ended naturally (task solved, game over).
 - **truncated**: episode cut short (step limit, timeout).
-- **info**: extra metadata the env wants to return (debug info, scores, stats). Also how the env sends `tool_outputs` to the agent (see Tool Use).
+- **info**: extra metadata the env wants to return (debug info, scores, stats). Also how the env sends `tool_outputs` to the agent (see Tool Use). Three keys are reserved for episodes the environment itself could not finish (an unavailable user simulator or judge, a lost session): `mask_sample` (`True` excludes the reward from quality metrics and training data), `failure_kind` (a registered name from `nemo_gym.failure_kinds` or `<server>:<kind>`) and `failure_reason` (free text). `/step` lifts them out of `info` into the step response on every step, and `gymnasium_agent` copies the values of the step that ends the episode onto the rollout, so set them on that final step (a mask set on an earlier step is dropped and leaves no trace in `info`); the keys that stay in `info` keep a fixed shape.
 
 Only `step()` is required. The default `reset()` returns `(None, {})`, meaning the prompt from the dataset is used as-is. A non-`None` observation from `reset()` is appended to the input as a user message before the first model call.
 

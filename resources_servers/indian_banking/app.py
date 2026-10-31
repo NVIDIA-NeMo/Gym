@@ -48,7 +48,16 @@ _FORCED_TOOL_ARGS: dict[str, dict[str, Any]] = {
     "search_knowledge_base": {"top_k": 1},
 }
 
+# Reported when the user simulator could not continue the dialog: the episode is masked
+# (its reward is not a measurement of the policy) and the kind is recorded on the rollout row.
+USER_SIM_FAILED = "indian_banking:user_sim_failed"
+# vllm_model sets this response metadata key when the request outgrew the model's context window.
+CONTEXT_WINDOW_EXCEEDED_MARKER = "nemo_gym_context_window_exceeded"
+
 # Never add or drop a key here, or downstream aggregation ends up with a ragged column.
+# The failure fields a masked episode adds next to these (``mask_sample``, ``failure_kind``,
+# ``failure_reason``) are reserved keys that ``GymnasiumServer._step_endpoint`` lifts out of
+# ``info`` into the step response, so they never reach the per-episode metrics columns.
 _REWARD_KEYS: tuple[str, ...] = (
     "score",
     "strict",
@@ -87,6 +96,10 @@ def _coerce_args(args: dict) -> dict:
                     value = parsed
         out[key] = value
     return out
+
+
+def _context_window_exceeded(response: NeMoGymResponse) -> bool:
+    return str((response.metadata or {}).get(CONTEXT_WINDOW_EXCEEDED_MARKER, "")).lower() == "true"
 
 
 def _reward_info(scores: dict[str, Any]) -> dict[str, float]:
@@ -222,6 +235,7 @@ class IndianBankingResourcesServer(GymnasiumServer):
 
         assistant_text = extract_text(action)
         nl_history: list[dict[str, str]] = state.setdefault("nl_history", [])
+        task_id = (state.get(TASK_KEY) or {}).get("task_id")
 
         if not assistant_text.strip():
             # An empty turn (no text, no tool calls) ends the episode.
@@ -236,9 +250,15 @@ class IndianBankingResourcesServer(GymnasiumServer):
 
         user_reply = await self._user_sim_reply(state)
         if user_reply is None:
-            # Unreachable after all retries: end the episode instead of hanging.
+            # No usable reply after all retries: the simulator, not the policy, ended the dialog.
+            # Score what happened so the reward columns stay complete, but mask the episode and
+            # name the failure so it is excluded from quality metrics and training data.
+            reason = state.get("user_sim_failure") or "user simulator returned no usable reply"
+            logger.warning("Ending episode task_id=%r as a masked user-simulator failure: %s", task_id, reason)
             scores = await self._finish(state)
-            return None, scores["score"], False, True, _reward_info(scores)
+            info = _reward_info(scores)
+            info.update(mask_sample=True, failure_kind=USER_SIM_FAILED, failure_reason=reason)
+            return None, scores["score"], False, True, info
 
         nl_history.append({"role": "user", "content": user_reply})
 
@@ -268,7 +288,10 @@ class IndianBankingResourcesServer(GymnasiumServer):
         create_params = self.config.user_sim_responses_create_params.model_copy(deep=True)
         create_params.input = sim_input
 
-        for attempt in range(self.config.user_sim_retries):
+        attempts = self.config.user_sim_retries
+        last_failure = "no attempt was made"
+        for attempt in range(1, attempts + 1):
+            overflow = False
             try:
                 resp = await self.server_client.post(
                     server_name=self.config.user_sim_model_server.name,
@@ -276,12 +299,40 @@ class IndianBankingResourcesServer(GymnasiumServer):
                     json=create_params,
                 )
                 await raise_for_status(resp)
-                content = self._response_text(NeMoGymResponse.model_validate(await get_response_json(resp)))
-                if content:
+                response = NeMoGymResponse.model_validate(await get_response_json(resp))
+                content = self._response_text(response)
+                if content and response.status in (None, "completed"):
+                    state.pop("user_sim_failure", None)
                     return content
+                # HTTP 200 but nothing usable: an incomplete reply (e.g. a reasoning model that spent
+                # max_output_tokens on reasoning) or an empty message. Retry like a transport error.
+                last_failure = self._describe_unusable_reply(response)
+                overflow = _context_window_exceeded(response)
             except Exception as exc:  # noqa: BLE001 - transient server hiccup, retry
-                logger.warning("user-sim call failed (attempt %d): %s", attempt + 1, exc)
+                last_failure = f"{type(exc).__name__}: {exc}"
+            logger.warning("user-sim call failed (attempt %d/%d): %s", attempt, attempts, last_failure)
+            if overflow:
+                # Another attempt would send the same dialog and overflow the same way.
+                break
+        state["user_sim_failure"] = (
+            f"user simulator returned no usable reply in {attempt} attempts; last: {last_failure}"
+        )
         return None
+
+    @staticmethod
+    def _describe_unusable_reply(response: NeMoGymResponse) -> str:
+        details = response.incomplete_details
+        reason = getattr(details, "reason", None) if details is not None else None
+        text = extract_text(response)
+        shape = "empty text" if not text.strip() else f"{len(text)} chars of text"
+        description = f"HTTP 200 reply with {shape} (status={response.status!r}, incomplete reason={reason!r})"
+        if _context_window_exceeded(response):
+            # Reads like the reasoning-budget case otherwise, but raising max_output_tokens would not help.
+            description += (
+                f"; the dialog no longer fits the simulator's context window ({CONTEXT_WINDOW_EXCEEDED_MARKER} "
+                "set by the model server), so the remedy is a larger context length, not max_output_tokens"
+            )
+        return description
 
     async def _maybe_judge(self, state: dict) -> Optional[float]:
         if not self.config.should_use_judge:

@@ -14,9 +14,11 @@
 # limitations under the License.
 import hashlib
 import json
+import json as json_mod
+import logging
 from pathlib import Path
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from pytest import fixture
@@ -25,6 +27,8 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.indian_banking.app import (
+    _REWARD_KEYS,
+    USER_SIM_FAILED,
     IndianBankingResourcesServer,
     IndianBankingResourcesServerConfig,
 )
@@ -719,3 +723,159 @@ class TestShippedDataIntegrity:
                 assert score["score"] == 1.0, f"{row['task_id']}: gold replay score={score['score']}"
         finally:
             engine.configure()
+
+
+class TestUserSimFailure:
+    """NVBug 6900615: a simulator that never answers must mask the episode, not score it as a policy outcome."""
+
+    @staticmethod
+    def _incomplete_reply() -> dict:
+        # The wire shape seen in the 2026-10-08 QA runs: HTTP 200, status incomplete, no text.
+        return {
+            "id": "resp_sim",
+            "object": "response",
+            "created_at": 0.0,
+            "model": "aux",
+            "status": "incomplete",
+            "incomplete_details": {"reason": "max_output_tokens"},
+            "output": [
+                {"id": "msg_sim", "type": "message", "role": "assistant", "status": "incomplete", "content": []}
+            ],
+            "parallel_tool_calls": False,
+            "tool_choice": "none",
+            "tools": [],
+        }
+
+    @staticmethod
+    def _server_with_simulator(configured_engine, payloads: list[dict]) -> tuple[IndianBankingResourcesServer, list]:
+        config = _config(
+            db_fpath=configured_engine._DB_PATH, kb_fpath=configured_engine._KB_PATH, should_use_judge=False
+        )
+        server = IndianBankingResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
+        posts: list[str] = []
+
+        async def _post(server_name, url_path, json=None, **kwargs):
+            posts.append(url_path)
+            resp = MagicMock()
+            resp.ok = True
+            resp.status = 200
+            resp.read = AsyncMock(return_value=json_mod.dumps(payloads[min(len(posts), len(payloads)) - 1]).encode())
+            return resp
+
+        server.server_client.post = AsyncMock(side_effect=_post)
+        return server, posts
+
+    @staticmethod
+    def _text_turn(text: str):
+        return TestReviewFixes._response(
+            [
+                {
+                    "type": "message",
+                    "id": "m1",
+                    "role": "assistant",
+                    "status": "completed",
+                    "content": [{"type": "output_text", "text": text, "annotations": []}],
+                }
+            ]
+        )
+
+    _META = {
+        "task_id": "t-sim",
+        "customer": CUSTOMER,
+        "opening_message": "Hi, I want to block my card.",
+        "evaluation_criteria": {"actions": [], "reward_basis": ["ACTION"]},
+    }
+
+    async def test_unusable_simulator_reply_masks_the_episode(self, configured_engine, caplog) -> None:
+        server, posts = self._server_with_simulator(configured_engine, [self._incomplete_reply()])
+        await server.reset(self._META, session_id="s-sim")
+        with caplog.at_level(logging.WARNING, logger="resources_servers.indian_banking.app"):
+            obs, reward, terminated, truncated, info = await server.step(
+                self._text_turn("Sure. Which card should I block?"), self._META, session_id="s-sim"
+            )
+        engine.configure()
+
+        assert posts == ["/v1/responses"] * server.config.user_sim_retries
+        assert obs is None and not terminated and truncated
+        # The episode is still scored (reward keys stay flat for aggregation) ...
+        assert set(_REWARD_KEYS) <= set(info) and reward == info["score"]
+        # ... but flagged as the simulator's failure, not the policy's outcome.
+        assert info["mask_sample"] is True
+        assert info["failure_kind"] == USER_SIM_FAILED
+        assert "max_output_tokens" in info["failure_reason"]
+        messages = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        attempts = [m for m in messages if m.startswith("user-sim call failed (attempt ")]
+        assert len(attempts) == server.config.user_sim_retries
+        assert all("max_output_tokens" in m for m in attempts)
+        assert (
+            sum(m.startswith("Ending episode task_id='t-sim' as a masked user-simulator failure") for m in messages)
+            == 1
+        )
+
+    async def test_partial_text_with_incomplete_status_is_a_failed_attempt(self, configured_engine, caplog) -> None:
+        # A reasoning simulator that writes some text and then hits max_output_tokens: the status decides,
+        # not the presence of text, so the attempt is retried and the episode ends masked.
+        partial = {**self._incomplete_reply()}
+        partial["output"] = [
+            {
+                "id": "msg_sim",
+                "type": "message",
+                "role": "assistant",
+                "status": "incomplete",
+                "content": [{"type": "output_text", "text": "Let me think about", "annotations": []}],
+            }
+        ]
+        server, posts = self._server_with_simulator(configured_engine, [partial])
+        await server.reset(self._META, session_id="s-sim-partial")
+        with caplog.at_level(logging.WARNING, logger="resources_servers.indian_banking.app"):
+            _, _, _, truncated, info = await server.step(
+                self._text_turn("Sure. Which card should I block?"), self._META, session_id="s-sim-partial"
+            )
+        engine.configure()
+
+        assert posts == ["/v1/responses"] * server.config.user_sim_retries
+        assert truncated and info["mask_sample"] is True and info["failure_kind"] == USER_SIM_FAILED
+        assert "18 chars of text" in info["failure_reason"] and "status='incomplete'" in info["failure_reason"]
+
+    async def test_context_window_overflow_is_named_and_not_retried(self, configured_engine, caplog) -> None:
+        # vllm_model marks a reply whose request outgrew the context window. The same dialog would overflow
+        # again, so the simulator is not retried, and the reason says what to change (not max_output_tokens).
+        overflow = {**self._incomplete_reply(), "metadata": {"nemo_gym_context_window_exceeded": "true"}}
+        server, posts = self._server_with_simulator(configured_engine, [overflow])
+        await server.reset(self._META, session_id="s-sim-overflow")
+        with caplog.at_level(logging.WARNING, logger="resources_servers.indian_banking.app"):
+            _, _, _, truncated, info = await server.step(
+                self._text_turn("Sure. Which card should I block?"), self._META, session_id="s-sim-overflow"
+            )
+        engine.configure()
+
+        assert posts == ["/v1/responses"]
+        assert truncated and info["mask_sample"] is True and info["failure_kind"] == USER_SIM_FAILED
+        assert "in 1 attempts" in info["failure_reason"]
+        assert "nemo_gym_context_window_exceeded" in info["failure_reason"]
+        assert "not max_output_tokens" in info["failure_reason"]
+
+    async def test_recovered_simulator_reply_is_not_flagged(self, configured_engine, caplog) -> None:
+        good = {**self._incomplete_reply(), "status": "completed", "incomplete_details": None}
+        good["output"] = [
+            {
+                "id": "msg_sim",
+                "type": "message",
+                "role": "assistant",
+                "status": "completed",
+                "content": [{"type": "output_text", "text": "The card ending 4974.", "annotations": []}],
+            }
+        ]
+        server, posts = self._server_with_simulator(configured_engine, [self._incomplete_reply(), good])
+        await server.reset(self._META, session_id="s-sim-ok")
+        with caplog.at_level(logging.WARNING, logger="resources_servers.indian_banking.app"):
+            obs, reward, terminated, truncated, info = await server.step(
+                self._text_turn("Sure. Which card should I block?"), self._META, session_id="s-sim-ok"
+            )
+        engine.configure()
+
+        assert posts == ["/v1/responses"] * 2
+        assert obs == "The card ending 4974." and not terminated and not truncated
+        assert "mask_sample" not in info and "failure_kind" not in info
+        # The first, unusable attempt is still visible in the log.
+        assert sum("attempt 1/" in r.getMessage() for r in caplog.records) == 1

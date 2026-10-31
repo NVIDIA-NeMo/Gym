@@ -258,7 +258,7 @@ async def step(
 - **`reward`**: reward for this step. `gymnasium_agent` sums rewards across the episode.
 - **`terminated`**: `True` when the episode reaches a natural terminal state.
 - **`truncated`**: `True` when a limit or timeout cuts the episode short.
-- **`info`**: diagnostic metadata and optional `tool_outputs` for the Agent Server.
+- **`info`**: diagnostic metadata and optional `tool_outputs` for the Agent Server. Three keys are reserved for episodes the environment itself could not finish (an unavailable user simulator or judge, a lost session): `mask_sample` (`True` excludes the reward from quality metrics and training data), `failure_kind` (a registered name from `nemo_gym.failure_kinds`, or `<server>:<kind>`) and `failure_reason` (free text). `/step` lifts them out of `info` into the step response, and `gymnasium_agent` reports the values from the step that ends the episode on the rollout; a mask set on an earlier step is dropped.
 
 ### Tool Calls as Gymnasium Actions
 

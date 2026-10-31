@@ -73,6 +73,20 @@ class _TruncatingEnv(GymnasiumServer):
         return None, 0.0, False, True, {}
 
 
+class _MaskingEnv(GymnasiumServer):
+    async def step(self, action, metadata, session_id=None):
+        # The reserved keys ride in `info`; the endpoint lifts them into typed fields.
+        info = {"score": 0.2, "mask_sample": True, "failure_kind": "my_env:sim_failed", "failure_reason": "no reply"}
+        return None, 0.2, False, True, info
+
+
+class _NoneFailureFieldsEnv(GymnasiumServer):
+    async def step(self, action, metadata, session_id=None):
+        # An env that computes the flags and leaves them unset: None must read as absent, not as a bad value.
+        info = {"score": 0.2, "mask_sample": None, "failure_kind": None, "failure_reason": None}
+        return None, 0.2, True, False, info
+
+
 _close_log: list = []
 
 
@@ -157,6 +171,39 @@ class TestGymnasiumServer:
         assert resp.terminated is False
         assert resp.truncated is False
         assert "sid-1" in env.session_state
+
+    @pytest.mark.asyncio
+    async def test_step_lifts_failure_fields_out_of_info(self):
+        env = _make_env(_MaskingEnv)
+        env.session_state["sid-1"] = {"x": 1}
+        body = EnvStepRequest(responses_create_params={"input": []}, response=_make_response("x"))
+        resp = await env._step_endpoint(body, _FakeRequest("sid-1"))
+        assert resp.truncated is True
+        assert resp.mask_sample is True
+        assert resp.failure_kind == "my_env:sim_failed"
+        assert resp.failure_reason == "no reply"
+        # Only the env's own metrics stay in info, so aggregation columns do not change shape.
+        assert resp.info == {"score": 0.2}
+        assert resp.model_dump()["mask_sample"] is True
+
+    @pytest.mark.asyncio
+    async def test_step_without_failure_fields_reports_a_valid_sample(self):
+        env = _make_env(_TruncatingEnv)
+        env.session_state["sid-1"] = {"x": 1}
+        body = EnvStepRequest(responses_create_params={"input": []}, response=_make_response("x"))
+        resp = await env._step_endpoint(body, _FakeRequest("sid-1"))
+        assert resp.mask_sample is False
+        assert resp.failure_kind is None and resp.failure_reason is None
+        assert resp.info == {}
+
+    @pytest.mark.asyncio
+    async def test_step_treats_none_failure_fields_as_absent(self):
+        env = _make_env(_NoneFailureFieldsEnv)
+        body = EnvStepRequest(responses_create_params={"input": []}, response=_make_response("x"))
+        resp = await env._step_endpoint(body, _FakeRequest("sid-1"))
+        assert resp.mask_sample is False
+        assert resp.failure_kind is None and resp.failure_reason is None
+        assert resp.info == {"score": 0.2}
 
     @pytest.mark.asyncio
     async def test_close_session_override_invoked(self):
