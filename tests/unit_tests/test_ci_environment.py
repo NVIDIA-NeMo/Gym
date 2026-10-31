@@ -890,6 +890,73 @@ def _write_executable(path: Path, contents: str) -> None:
     path.chmod(0o755)
 
 
+def _run_core_unit_tests(tmp_path: Path, workers: str | None) -> subprocess.CompletedProcess[str]:
+    repo_root = tmp_path / "repo"
+    shutil.copytree(REPO_ROOT / "scripts" / "ci", repo_root / "scripts" / "ci")
+    shutil.copy2(REPO_ROOT / ".python-version", repo_root / ".python-version")
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    venv_bin = repo_root / ".venv" / "bin"
+    venv_bin.mkdir(parents=True)
+    _write_executable(venv_bin / "python", "#!/usr/bin/env bash\nexit 0\n")
+    (venv_bin / "activate").write_text("")
+    _write_executable(
+        bin_dir / "uv",
+        """#!/usr/bin/env bash
+set -eu
+case "${1:-}" in
+    --version) printf '%s\\n' 'uv 0.11.29' ;;
+    cache) printf '%s\\n' "${UV_CACHE_DIR}" ;;
+    lock|sync) ;;
+    *) printf 'unexpected fake uv command: %s\\n' "$*" >&2; exit 2 ;;
+esac
+""",
+    )
+    _write_executable(
+        bin_dir / "ng_dev_test",
+        """#!/usr/bin/env bash
+printf '%s\\n' "${PYTEST_ADDOPTS}" > "${GYM_CI_CAPTURE}"
+""",
+    )
+    env = os.environ.copy()
+    env.update(
+        PATH=f"{bin_dir}:{env['PATH']}",
+        UV_CACHE_DIR=str(tmp_path / "cache"),
+        GYM_CI_CAPTURE=str(tmp_path / "core.args"),
+        GYM_CI_JUNIT_DIR=str(tmp_path / "test reports"),
+    )
+    # The invoking CI provider can set this variable for its own core suite.
+    env.pop("GYM_CI_PYTEST_WORKERS", None)
+    if workers is not None:
+        env["GYM_CI_PYTEST_WORKERS"] = workers
+    return subprocess.run(
+        [str(repo_root / "scripts" / "ci" / "core_unit_tests.sh")], capture_output=True, text=True, env=env
+    )
+
+
+@pytest.mark.parametrize("workers", [None, "", "1", "16"])
+def test_core_unit_tests_run_the_requested_pytest_workers(tmp_path: Path, workers: str | None) -> None:
+    result = _run_core_unit_tests(tmp_path, workers)
+
+    assert result.returncode == 0, result.stderr
+    addopts = (tmp_path / "core.args").read_text()
+    if workers:
+        assert addopts.rstrip().endswith(f"-n {workers}")
+    else:
+        assert " -n " not in addopts
+    assert "--junit-prefix=nemo_gym.core" in addopts
+    assert "--cov-report= --cov-fail-under=0" in addopts
+
+
+@pytest.mark.parametrize("workers", ["0", "-1", "1.5", "auto", " 2", "2; exit 0"])
+def test_core_unit_tests_reject_invalid_worker_counts(tmp_path: Path, workers: str) -> None:
+    result = _run_core_unit_tests(tmp_path, workers)
+
+    assert result.returncode == 2
+    assert "GYM_CI_PYTEST_WORKERS must be a positive integer" in result.stderr
+    assert not (tmp_path / "core.args").exists()
+
+
 def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -> None:
     repo_root = tmp_path / "repo"
     ci_dir = repo_root / "scripts" / "ci"
