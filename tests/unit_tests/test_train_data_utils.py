@@ -19,12 +19,16 @@ from pathlib import Path
 from unittest.mock import MagicMock, mock_open
 
 from pydantic import ValidationError
-from pytest import MonkeyPatch, raises
+from pytest import MonkeyPatch, raises, warns
 
 import nemo_gym.config.global_config
 import nemo_gym.train_data_utils
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config.config_types import DatasetConfig, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.config_types import (
+    DatasetConfig,
+    ResourcesServerInstanceConfig,
+    ResponsesAPIAgentServerInstanceConfig,
+)
 from nemo_gym.config.global_config import DictConfig, GlobalConfigDictParser
 from nemo_gym.train_data_utils import (
     AvgMinMax,
@@ -918,6 +922,19 @@ class TestValidateSamplesAndAggregateMetrics:
                 "Standard deviation": 0,
             },
         }
+
+    def test_dataset_metrics_hook_lookup_warns_when_the_server_dir_is_missing(
+        self, tmp_path: Path, monkeypatch: MonkeyPatch
+    ) -> None:
+        # A schema home that resolves to no directory anywhere used to be skipped silently (NVBug 6900465).
+        monkeypatch.chdir(tmp_path)
+        rs = ResourcesServerInstanceConfig(
+            name="plugin_rs",
+            server_type_config_dict=DictConfig({}),
+            resources_servers={"no_such_server_xyz": {"entrypoint": "app.py", "domain": "agent"}},
+        )
+        with warns(UserWarning, match=r"no resources_servers/no_such_server_xyz directory"):
+            assert TrainDataProcessor._dataset_metrics_hook_for(rs, [rs]) is None
 
     def test_categorical_metrics_merge_distributions(self) -> None:
         left = CategoricalMetrics()

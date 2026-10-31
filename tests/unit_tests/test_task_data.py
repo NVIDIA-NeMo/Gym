@@ -5,6 +5,7 @@
 import ast
 import json
 import sys
+import warnings
 from pathlib import Path
 from typing import get_args
 
@@ -452,10 +453,17 @@ class TestSelfContainedAgentSchemaFallback:
         assert validator.report.server_name == "tau2"
 
     def test_agent_without_rs_reference_and_no_schema_is_skipped(self, tmp_path, monkeypatch):
-        (tmp_path / "responses_api_agents" / "tau2").mkdir(parents=True)
+        # A real server directory (it ships requirements.txt) that has not adopted a schema. An empty directory no
+        # longer stands in for one, and a tmp dir named `tau2` would now resolve to the built-in tau2, which ships
+        # a schema (NVBug 6900465), so the directory gets its own name.
+        agent_dir = tmp_path / "responses_api_agents" / "tau2_without_schema"
+        agent_dir.mkdir(parents=True)
+        (agent_dir / "requirements.txt").write_text("")
         monkeypatch.chdir(tmp_path)
-        agent = self._agent("tau2", None)
-        assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
+        agent = self._agent("tau2_without_schema", None)
+        with warnings.catch_warnings():
+            warnings.simplefilter("error")  # a found server without task_data.py is skipped silently
+            assert TrainDataProcessor._task_data_validator_for(agent, self._dataset(), [agent]) is None
 
     def test_agent_with_dangling_rs_reference_is_skipped(self, tmp_path, monkeypatch):
         agent_dir = tmp_path / "responses_api_agents" / "tau2"
@@ -840,5 +848,144 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
         processor, config, in_scope = self._processor_and_configs(tmp_path, monkeypatch, [self._row()])
         paths = processor._collate_samples_single_type(
             "validation", in_scope, task_data_validation=config.effective_task_data_validation
+        )
+        assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1
+
+
+class TestFindServerDirRejectsOutputOnlyDirs:
+    """A directory that holds only Gym's own collate output must not resolve as the server (NVBug 6900465).
+
+    ``gym dataset collate`` creates ``<cwd>/<base_folder>/<server>/data/`` for the per-dataset sidecar and
+    prepared file before it looks the schema up, and cwd is searched before the install root.
+    """
+
+    def test_output_only_dir_under_cwd_does_not_shadow_the_server_dir(self, tmp_path, monkeypatch):
+        (tmp_path / "resources_servers" / "mcqa" / "data").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        server_dir = find_server_dir("mcqa")
+        assert server_dir is not None
+        assert server_dir.resolve() == (REPO_ROOT / "resources_servers" / "mcqa").resolve()
+        assert load_task_data_schema(server_dir) is not None
+
+    def test_output_only_dir_does_not_shadow_an_agent_dir_either(self, tmp_path, monkeypatch):
+        (tmp_path / "responses_api_agents" / "tau2" / "data").mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        server_dir = find_server_dir("tau2", base_folder="responses_api_agents")
+        assert server_dir is not None
+        assert server_dir.resolve() == (REPO_ROOT / "responses_api_agents" / "tau2").resolve()
+
+    def test_schema_only_server_dir_under_cwd_still_resolves(self, tmp_path, monkeypatch):
+        # A plugin server that ships a schema but neither requirements.txt nor pyproject.toml.
+        plugin_dir = tmp_path / "resources_servers" / "plugin_rs"
+        plugin_dir.mkdir(parents=True)
+        (plugin_dir / "task_data.py").write_text(
+            "from pydantic import BaseModel\nclass TaskData(BaseModel):\n    pass\n"
+        )
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("plugin_rs") == plugin_dir
+
+    def test_missing_server_is_none(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("no_such_server_xyz") is None
+
+    # The markers are spelled out rather than taken from SERVER_DIR_MARKERS so that dropping one from the tuple
+    # fails here: requirements.txt and pyproject.toml are the CLI's server-dir rule, task_data.py and
+    # dataset_metrics.py are the modules the data tooling looks up.
+    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    def test_a_directory_holding_only_that_marker_is_a_server_dir(self, tmp_path, monkeypatch, marker):
+        server_dir = tmp_path / "resources_servers" / "marker_only_rs"
+        server_dir.mkdir(parents=True)
+        (server_dir / marker).write_text("")
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("marker_only_rs") == server_dir
+
+    @pytest.mark.parametrize("marker", ["requirements.txt", "pyproject.toml", "task_data.py", "dataset_metrics.py"])
+    def test_a_marker_that_is_a_directory_does_not_count(self, tmp_path, monkeypatch, marker):
+        (tmp_path / "resources_servers" / "marker_dir_rs" / marker).mkdir(parents=True)
+        monkeypatch.chdir(tmp_path)
+        assert find_server_dir("marker_dir_rs") is None
+
+    def test_unresolvable_schema_home_warns_and_skips(self, tmp_path, monkeypatch):
+        from types import SimpleNamespace
+
+        monkeypatch.chdir(tmp_path)
+        rs = ResourcesServerInstanceConfig(
+            name="plugin_rs",
+            server_type_config_dict=OmegaConf.create({}),
+            resources_servers={"no_such_server_xyz": {"entrypoint": "app.py", "domain": "agent"}},
+        )
+        dataset = SimpleNamespace(jsonl_fpath="data/example.jsonl")
+        with pytest.warns(UserWarning, match=r"no resources_servers/no_such_server_xyz directory"):
+            assert TrainDataProcessor._task_data_validator_for(rs, dataset, [rs]) is None
+
+
+class TestExternalCwdThroughTheProcessor:
+    """Collating a built-in dataset from a cwd outside the checkout must still validate it (NVBug 6900465).
+
+    The dataset's ``jsonl_fpath`` is repo-relative, so collate writes its artifacts under
+    ``<cwd>/resources_servers/<server>/data/``; that directory must not be mistaken for the server.
+    """
+
+    def _processor_and_configs(self, tmp_path, monkeypatch, rows):
+        from omegaconf import DictConfig
+
+        from nemo_gym.config.global_config import GlobalConfigDictParser
+        from nemo_gym.train_data_utils import TrainDataProcessorConfig
+
+        rel_path = Path("resources_servers") / "example_session_state_mgmt" / "data" / "rows.jsonl"
+        rows_path = tmp_path / rel_path
+        rows_path.parent.mkdir(parents=True)
+        rows_path.write_text("".join(json.dumps(row) + "\n" for row in rows))
+        monkeypatch.chdir(tmp_path)
+        global_config_dict = GlobalConfigDictParser().parse_no_environment(
+            DictConfig(
+                {
+                    "ssm_resources": {
+                        "resources_servers": {
+                            "example_session_state_mgmt": {
+                                "entrypoint": "app.py",
+                                "domain": "agent",
+                                "datasets": [
+                                    {
+                                        "name": "example",
+                                        "type": "example",
+                                        "license": "TBD",
+                                        "jsonl_fpath": str(rel_path),
+                                    }
+                                ],
+                            }
+                        }
+                    },
+                }
+            )
+        )
+        processor = TrainDataProcessor()
+        config = TrainDataProcessorConfig(output_dirpath=str(tmp_path / "out"), mode="example_validation")
+        in_scope = processor.load_and_validate_server_instance_configs(config, global_config_dict)
+        assert [c.name for c in in_scope] == ["ssm_resources"]
+        return processor, config, in_scope
+
+    @staticmethod
+    def _row(**fields):
+        return {"responses_create_params": {"input": [{"role": "user", "content": "count"}]}, **fields}
+
+    def test_schema_violation_is_rejected_from_an_external_cwd(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(
+            tmp_path,
+            monkeypatch,
+            [self._row(initial_count=3)],  # expected_count missing
+        )
+        assert config.effective_task_data_validation == "error"
+        with pytest.raises(ValueError, match=r"(?s)against the `example_session_state_mgmt` schema.*expected_count"):
+            processor._collate_samples_single_type(
+                "example", in_scope, task_data_validation=config.effective_task_data_validation
+            )
+
+    def test_valid_rows_pass_from_an_external_cwd(self, tmp_path, monkeypatch):
+        processor, config, in_scope = self._processor_and_configs(
+            tmp_path, monkeypatch, [self._row(initial_count=3, expected_count=6)]
+        )
+        paths = processor._collate_samples_single_type(
+            "example", in_scope, task_data_validation=config.effective_task_data_validation
         )
         assert len(paths) == 1 and len(paths[0].read_text().splitlines()) == 1
