@@ -98,6 +98,7 @@ class CaptureContext:
     refused: bool = False
     # Store resolved continuations as parent-relative suffixes.
     delta_records: bool = False
+    unresolved_as_root: bool = False
     # This records the model server's intent to request prefix supply.
     prefix_requested: bool = False
     # This records proven application based on generation-time prompt_token_ids.
@@ -227,11 +228,12 @@ async def resolve_parent(request_messages: list | None) -> None:
 
     * A unique parent creates a ``token_in`` admission.
     * A request with no prior assistant output creates a ``text`` root.
-    * An unresolved request may create a ``text`` root only when the rollout has no ledger rows.
+    * An unresolved request may create a ``text`` root only when the rollout has no ledger rows,
+      or when ``unresolved_as_root`` is set.
     * Every other result records a failure and leaves the call unadmitted.
 
-    An unresolved continuation cannot become a new root.
-    Doing so would train the earlier generated tokens as prompt tokens.
+    By default an unresolved continuation cannot become a new root, because a
+    single-chain trainer would then treat the earlier generated tokens as prompt.
     """
     context = _CAPTURE_CONTEXT.get()
     if context is None or request_messages is None:
@@ -326,7 +328,7 @@ async def resolve_parent(request_messages: list | None) -> None:
             context.rollout_id,
         )
         return
-    if is_root or not has_rows:
+    if is_root or context.unresolved_as_root or not has_rows:
         context.capture_admission = CaptureAdmission(
             capture_key=context.rollout_id,
             model_call_id=context.model_call_id,

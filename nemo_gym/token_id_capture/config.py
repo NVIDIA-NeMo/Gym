@@ -162,6 +162,11 @@ class TokenIdCaptureSettings(BaseModel):
     # This avoids repeatedly storing the growing full prompt.
     # Root and unresolved records remain full-prompt reconstruction anchors.
     delta_records: bool = False
+    # Admit an unresolved continuation (e.g. rewritten harness history) as a new root instead of poisoning.
+    # Requires a trainer that trains every captured chain, such as NeMo-RL's token_capture.train_all_paths: training
+    # only the terminal chain drops the earlier chains' signal. This flag alone is not end-to-end enablement, the
+    # trainer pin and config wiring follow in NVIDIA-NeMo/RL#4285.
+    unresolved_as_root: bool = False
     # Whether an incomplete snapshot always masks the sample.
     # Incomplete means a model call registered its capture intent and never committed a record.
     # ``False`` keeps the sample when terminal attribution delivered its chain whole, which
