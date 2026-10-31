@@ -27,6 +27,8 @@ import textwrap
 import types
 import typing
 import warnings
+from collections.abc import Iterator
+from contextlib import contextmanager
 from pathlib import Path
 from unittest import mock
 
@@ -328,6 +330,60 @@ class TestMovedNames:
             for name in ("old_home", "new_home"):
                 sys.modules.pop(name, None)
         assert [Path(w.filename).name for w in caught if w.category is DeprecationWarning] == ["importer.py"]
+
+    @staticmethod
+    @contextmanager
+    def _old_and_new_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, old_source: str) -> Iterator[None]:
+        (tmp_path / "old_home.py").write_text(
+            old_source
+            + "from nemo_gym._moved_paths import moved_names_getattr\n__getattr__ = moved_names_getattr(__name__)\n"
+        )
+        (tmp_path / "new_home.py").write_text("THING = 'thing'\n_HIDDEN = 3\n")
+        monkeypatch.syspath_prepend(str(tmp_path))
+        monkeypatch.setitem(
+            moved_paths.MOVED_NAMES,
+            "old_home",
+            {"THING": MovedPath(new="new_home", since="0.8.0"), "_HIDDEN": MovedPath(new="new_home", since="0.8.0")},
+        )
+        for name in ("old_home", "new_home"):
+            monkeypatch.delitem(sys.modules, name, raising=False)
+        try:
+            yield
+        finally:
+            # Before monkeypatch teardown, so a module cached before the test is put back afterwards.
+            for name in ("old_home", "new_home"):
+                sys.modules.pop(name, None)
+
+    def test_a_star_import_brings_in_the_moved_names_with_a_warning(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        with self._old_and_new_home(tmp_path, monkeypatch, "import os\nLOCAL = 1\n_PRIVATE = 2\n"):
+            (tmp_path / "importer.py").write_text("from old_home import *\n")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                namespace = runpy.run_path(str(tmp_path / "importer.py"))
+            assert namespace["THING"] == "thing"
+            # The module's own public names come along as before; private names, moved or not, do not.
+            assert namespace["LOCAL"] == 1 and "os" in namespace
+            assert "_PRIVATE" not in namespace and "_HIDDEN" not in namespace
+            assert [Path(w.filename).name for w in caught if w.category is DeprecationWarning] == ["importer.py"]
+
+    def test_dir_lists_the_moved_names(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        with self._old_and_new_home(tmp_path, monkeypatch, "LOCAL = 1\n"):
+            listed = dir(importlib.import_module("old_home"))
+            assert {"LOCAL", "THING", "_HIDDEN"} <= set(listed)
+
+    def test_a_module_keeps_its_own_all_and_dir(self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+        with self._old_and_new_home(
+            tmp_path, monkeypatch, "LOCAL = 1\n__all__ = ['LOCAL']\ndef __dir__():\n    return ['LOCAL']\n"
+        ):
+            (tmp_path / "importer.py").write_text("from old_home import *\n")
+            with warnings.catch_warnings(record=True) as caught:
+                warnings.simplefilter("always")
+                namespace = runpy.run_path(str(tmp_path / "importer.py"))
+            assert "LOCAL" in namespace and "THING" not in namespace
+            assert not [w for w in caught if w.category is DeprecationWarning]
+            assert dir(importlib.import_module("old_home")) == ["LOCAL"]
 
     @pytest.mark.parametrize(
         "getattr_source",

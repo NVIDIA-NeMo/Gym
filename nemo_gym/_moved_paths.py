@@ -517,11 +517,24 @@ def moved_names_getattr(module_name: str) -> Callable[[str], Any]:
     Names the old module still defines or imports never reach it.
     If the module itself moves later, its entries stay under its old path, and this `__getattr__`
     keeps serving them once the module runs under its new name.
+
+    It also serves `__all__`, unless the module defines its own: the module's public names plus the public moved
+    names, so `from <old module> import *` still brings in the moved names, each with its warning. And it gives the
+    module a `__dir__` that lists the moved names, unless the module defines its own.
     """
 
     warned: set[str] = set()
 
+    def moved_names() -> set[str]:
+        return {name for listed_as in _names_were_listed_under(module_name) for name in MOVED_NAMES.get(listed_as, {})}
+
     def __getattr__(name: str) -> Any:
+        if name == "__all__":
+            module = sys.modules.get(module_name)
+            if module is None:
+                raise AttributeError(f"module {module_name!r} has no attribute '__all__'")
+            # Without `__all__`, a star import takes the namespace's public names; keep those and add the moved ones.
+            return sorted(attr for attr in set(vars(module)) | moved_names() if not attr.startswith("_"))
         for listed_as in _names_were_listed_under(module_name):
             moved = MOVED_NAMES.get(listed_as, {}).get(name)
             if moved is not None:
@@ -543,4 +556,8 @@ def moved_names_getattr(module_name: str) -> Callable[[str], Any]:
             warned.add(name)
         return value
 
+    module = sys.modules.get(module_name)
+    if module is not None:
+        # A module-level `__dir__` must be in the module's namespace for `dir()` to use it.
+        vars(module).setdefault("__dir__", lambda: sorted(set(vars(module)) | moved_names()))
     return __getattr__
