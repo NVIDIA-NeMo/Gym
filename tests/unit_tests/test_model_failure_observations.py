@@ -482,3 +482,65 @@ async def test_actual_200_body_failure_keeps_one_model_attempt(monkeypatch, mode
                 assert event.attempt_id.startswith(event.operation_id)
                 assert len(report.events) == 1
     assert hits == 1
+
+
+@pytest.mark.parametrize("forwarded", [False, True])
+@pytest.mark.parametrize("mode", ["truncated", "timeout"])
+@pytest.mark.parametrize("status", [401, 422, 503])
+async def test_a_failed_error_body_read_selects_the_attempt_that_returned_it(monkeypatch, status, mode, forwarded):
+    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    hits = 0
+    remote = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason="remote model server failure",
+        operation="model_request",
+        operation_id="remote-op",
+        attempt_id="remote-op-1",
+        http_status=status,
+    )
+
+    async def endpoint(request):
+        nonlocal hits
+        hits += 1
+        headers = {"Content-Type": "application/json", "Content-Length": "1000"}
+        if forwarded:
+            headers.update(FailureHeader.encode(failure_report_for(remote)))
+        response = web.StreamResponse(status=status, headers=headers)
+        await response.prepare(request)
+        await response.write(b'{"error":')
+        if mode == "truncated":
+            request.transport.close()
+        else:
+            await asyncio.sleep(0.15)
+        return response
+
+    app = web.Application()
+    app.router.add_post("/responses", endpoint)
+    async with TestServer(app) as server, aiohttp.ClientSession() as session:
+        monkeypatch.setattr(http_client, "get_global_aiohttp_client", lambda: session)
+        monkeypatch.setattr(http_client, "is_span_group_enabled", lambda _: False)
+        model = NeMoGymAsyncOpenAI(
+            api_key="test",
+            base_url=str(server.make_url("")).rstrip("/"),
+            request_timeout_seconds=0.05,
+            max_num_tries=1,
+        )
+        with RequestFailureLog.capture() as log:
+            with pytest.raises((aiohttp.ClientPayloadError, TimeoutError)) as caught:
+                await model.create_response(input=[])
+            report = log.reply_report(caught.value)
+    assert hits == 1, "a failed body read sends no second request"
+    assert report.failure_id is not None
+    event = report.events[report.failure_id]
+    assert event.http_status == status
+    assert event.failure_kind == MODEL_REQUEST_ERROR
+    assert event.failure_reason != MODEL_RESPONSE_TIMEOUT_REASON
+    assert event.operation_id and event.attempt_id
+    if forwarded:
+        assert report.failure_id == remote.event_id, "the forwarded failure keeps its original ids"
+        assert list(report.events) == [remote.event_id], "no local attempt is added beside it"
+    else:
+        assert len(report.events) == 1

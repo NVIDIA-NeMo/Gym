@@ -151,6 +151,35 @@ async def _raise_exhausted(
         if last_failure is None or error.__cause__ is not None:
             raise
         raise error from last_failure
+    except (ClientError, TimeoutError) as error:
+        # raise_for_status read the error body itself; a failed read names the attempt that returned it.
+        cause = _body_read_cause(response, last_failure)
+        if cause is None:
+            raise
+        raise error from cause
+
+
+def _body_read_cause(response: ClientResponse, failure: Optional[NgFailureEvent]) -> Optional[NgFailureEvent]:
+    """The failure an error reply's failed body read is linked to: its observed attempt or the forwarded failure.
+
+    A forwarded Gym failure keeps its original ids; no local attempt is added for it.
+    """
+    if failure is None:
+        forwarded = FailureHeader.decode(getattr(response, "headers", None))
+        if forwarded is not None and forwarded.failure_id is not None:
+            return rebuild_failure(forwarded)
+    return failure
+
+
+async def _read_error_body(response: ClientResponse, failure: Optional[NgFailureEvent]) -> bytes:
+    """Read an error reply's body once; a failed read names the attempt that returned it as its explicit cause."""
+    try:
+        return await response.content.read()
+    except (ClientError, TimeoutError) as error:
+        cause = _body_read_cause(response, failure)
+        if cause is None:
+            raise
+        raise error from cause
 
 
 def _retry_wait_seconds(tries: int, response: ClientResponse) -> float:
@@ -430,7 +459,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             response._ng_observe_body_failure = observe_body_failure
             if response.status in (401, 403):
                 failure = observe_http_failure(response)
-                content = await response.content.read()
+                content = await _read_error_body(response, failure)
                 if _error_body_is_permanent_auth(content):
                     self._trip_permanent_error(response.status, content, request_kwargs.get("url"), failure)
                 return response
@@ -444,7 +473,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
             # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
             last_failure = observe_http_failure(response)
-            content = await response.content.read()
+            content = await _read_error_body(response, last_failure)
             if response.status == 429 and _error_body_is_permanent_quota(content):
                 self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 

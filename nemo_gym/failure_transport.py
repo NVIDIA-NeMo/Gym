@@ -69,7 +69,8 @@ class FailureHeader:
             return None
         try:
             value = payload[cls.STREAM_FIELD]
-            if len(json.dumps(value, ensure_ascii=True)) > cls.MAX_BYTES:
+            # The same compact size ``encode`` budgets, so a report it emitted intact is not omitted here.
+            if len(json.dumps(value, ensure_ascii=True, separators=(",", ":"))) > cls.MAX_BYTES:
                 return FailureReport(omitted=True)
             return FailureReport.model_validate(value)
         except (ValueError, TypeError, RecursionError):

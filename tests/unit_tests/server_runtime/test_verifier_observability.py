@@ -349,3 +349,137 @@ def test_owner_observation_outside_verification_does_not_create_an_invocation():
     from nemo_gym.server_runtime.verifier_observability import observe_verifier_sandbox
 
     assert observe_verifier_sandbox({"role": "invalid"}) is None
+
+
+def _verifier_cause_chain():
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="judge model HTTP 503",
+        operation="model_request",
+        http_status=503,
+    )
+    resources = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="provider_unavailable",
+        failure_reason="scoring provider unavailable",
+        operation="verify",
+    )
+    resources.__cause__ = model
+    return resources, model
+
+
+@pytest.mark.asyncio
+async def test_a_verify_failure_returned_as_500_keeps_its_selected_failure_and_causes():
+    from nemo_gym.failure_transport import FailureHeader
+
+    resources, model = _verifier_cause_chain()
+
+    async def verify():
+        raise resources
+
+    with rollout_context("caused"):
+        response = await observe_verifier(verify, enabled=True)()
+    assert response.status_code == 500
+    (invocation,) = json.loads(response.body)["ng_verifier_invocations"]
+    assert invocation["status"] == "failed" and invocation["failure_kind"] == VERIFIER_ERROR
+    report = FailureHeader.decode(response.headers)
+    assert report is not None and report.failure_id == resources.event_id
+    assert report.events[resources.event_id].cause_id == model.event_id
+    assert list(report.events).count(model.event_id) == 1
+
+
+@pytest.mark.asyncio
+async def test_an_http_exception_keeps_its_explicit_cause_and_an_existing_report():
+    from starlette.exceptions import HTTPException
+
+    from nemo_gym.failure_transport import FailureHeader
+    from nemo_gym.server_runtime.episode_types import FailureReport
+
+    resources, model = _verifier_cause_chain()
+
+    async def caused():
+        raise HTTPException(status_code=503, detail="busy") from resources
+
+    with rollout_context("http-caused"):
+        response = await observe_verifier(caused, enabled=True)()
+    assert response.status_code == 503 and json.loads(response.body)["detail"] == "busy"
+    report = FailureHeader.decode(response.headers)
+    assert report.failure_id == resources.event_id and model.event_id in report.events
+
+    existing = FailureReport(failure_id=None, events={}, omitted=True)
+
+    async def reported():
+        raise HTTPException(status_code=502, detail="upstream", headers=FailureHeader.encode(existing))
+
+    with rollout_context("http-reported"):
+        response = await observe_verifier(reported, enabled=True)()
+    assert response.status_code == 502
+    assert FailureHeader.decode(response.headers).omitted, "the reply's own report is kept"
+
+
+@pytest.mark.asyncio
+async def test_a_plain_verify_error_gets_no_invented_failure_report():
+    from nemo_gym.failure_transport import FailureHeader
+
+    async def verify():
+        raise RuntimeError("scoring broke")
+
+    with rollout_context("plain"):
+        response = await observe_verifier(verify, enabled=True)()
+    assert response.status_code == 500
+    assert FailureHeader.decode(response.headers) is None
+
+
+_VERIFY_BODY = {
+    "responses_create_params": {"input": "task"},
+    "response": {
+        "id": "response",
+        "created_at": 0,
+        "model": "test",
+        "object": "response",
+        "output": [],
+        "parallel_tool_calls": True,
+        "tool_choice": "auto",
+        "tools": [],
+    },
+}
+
+
+@pytest.mark.parametrize("http", [False, True])
+def test_the_registered_verify_route_keeps_a_raised_failure_and_its_cause(tmp_path, http: bool):
+    from starlette.exceptions import HTTPException
+
+    from nemo_gym.failure_transport import FailureHeader
+
+    resources, model = _verifier_cause_chain()
+
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            if http:
+                raise HTTPException(status_code=503, detail="busy", headers={"Retry-After": "7"}) from resources
+            raise resources
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True, "model_call_capture_dir": str(tmp_path)}
+    server = Resources(
+        config=BaseResourcesServerConfig(name="programmatic", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    app = server.setup_webserver()
+    server.setup_exception_middleware(app)
+    response = TestClient(app, raise_server_exceptions=False).post(
+        "/ng-rollout/programmatic/verify", json=_VERIFY_BODY
+    )
+    assert response.status_code == (503 if http else 500), response.text
+    if http:
+        assert response.json()["detail"] == "busy" and response.headers["Retry-After"] == "7"
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    assert invocation["status"] == "failed"
+    report = FailureHeader.decode(response.headers)
+    assert report is not None and report.failure_id == resources.event_id
+    assert report.events[resources.event_id].cause_id == model.event_id
+    assert list(report.events).count(model.event_id) == 1

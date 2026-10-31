@@ -210,3 +210,58 @@ def test_invalid_terminal_report_locations_are_omitted() -> None:
     with RequestFailureLog.capture() as log:
         cut.observe()  # the stream ended inside the report's line
     assert log.report.omitted
+
+
+@pytest.mark.parametrize("fail", [False, True])
+def test_a_buffered_responses_stream_selects_its_failure_in_the_reply_header(fail: bool) -> None:
+    # Without keepalives the backend finishes before any byte is sent, so the header can still carry the report.
+    client = _client(_LateResponses, fail=fail)
+    reply = client.post("/v1/responses", json={"stream": True, "input": [{"role": "user", "content": "hi"}]})
+    assert reply.status_code == 200
+    events = _payloads(reply.text)
+    assert events[-1]["type"] == ("response.failed" if fail else "response.completed")
+    report = FailureHeader.decode(reply.headers)
+    assert report is not None and not report.omitted
+    assert report.failure_id == (FINAL.event_id if fail else None)
+    assert list(report.events).count(RECOVERED.event_id) == 1
+
+
+def _report_with_compact_size(size: int):
+    from nemo_gym.typed_exceptions import failure_report_for
+
+    def report(padding: int):
+        cause = _model_event("c" * 1800, "c1")
+        final = NgFailureEvent(
+            boundary=FailureBoundary.AGENT,
+            failure_kind="agent_route_failed",
+            failure_reason="r" * padding,
+            operation="agent.run",
+        )
+        final.__cause__ = cause
+        return failure_report_for(final)
+
+    def compact(value) -> int:
+        return len(json.dumps(value.model_dump(mode="json"), ensure_ascii=True, separators=(",", ":")))
+
+    padding = 100
+    padding += size - compact(report(padding))
+    built = report(padding)
+    assert compact(built) == size
+    return built
+
+
+def test_a_stream_report_within_the_compact_budget_is_decoded_intact() -> None:
+    from nemo_gym.failure_transport import StreamFailureReportReader
+
+    field = FailureHeader.STREAM_FIELD
+    fits = _report_with_compact_size(FailureHeader.MAX_BYTES)
+    value = FailureHeader.stream_value(fits)
+    assert len(json.dumps(value, ensure_ascii=True)) > FailureHeader.MAX_BYTES, "spaced form exceeds the budget"
+    assert FailureHeader.decode_stream_event({field: value}) == fits
+    reader = StreamFailureReportReader()
+    reader.feed(b"data: " + json.dumps({"type": "response.completed", field: value}).encode() + b"\n")
+    assert reader.report == fits
+    # One byte over the budget is still omitted, by the producer and by the reader.
+    over = _report_with_compact_size(FailureHeader.MAX_BYTES + 1)
+    assert FailureHeader.stream_value(over) == {"omitted": True}
+    assert FailureHeader.decode_stream_event({field: over.model_dump(mode="json")}).omitted

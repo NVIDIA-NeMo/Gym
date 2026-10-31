@@ -92,6 +92,9 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     if isinstance(record, Mapping) and record.get("source") == "collector":
         if record.get("delivery") == "possibly_delivered" and not not_sent:
             return True
+    if row.get("_ng_failure_events_omitted"):
+        # Missing causal evidence cannot authorize another agent execution.
+        return True
     events = row.get("_ng_failure_events")
     selected = row.get("_ng_failure_id")
     if "_ng_failure_id" not in row:

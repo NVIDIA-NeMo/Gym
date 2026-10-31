@@ -24,6 +24,7 @@ from nemo_gym.core.episode import (
     verifier_invocation_context,
 )
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.trajectory.trajectory_record import (
     NG_VERIFIER_INVOCATIONS_KEY,
     GradingOperationObservation,
@@ -32,6 +33,7 @@ from nemo_gym.trajectory.trajectory_record import (
     VerifierInvocation,
     grading_result_binding,
 )
+from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.verification.judge import JudgeGrading, _judge_grading
 
 
@@ -199,6 +201,12 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
                 else:
                     logger.exception("Verification failed.")
                     result = JSONResponse({"detail": "Internal Server Error"}, status_code=500)
+                # The returned reply replaces the raised error, so it carries the error's selected failure and causes.
+                report = failure_report_for(error)
+                inner = FailureHeader.decode(result.headers)
+                if inner is not None:
+                    report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
+                result.headers.update(FailureHeader.encode(report))
             else:
                 _finish(invocation, result)
             finally:
