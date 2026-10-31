@@ -3284,3 +3284,110 @@ async def test_exhausted_model_retries_preserve_partial_work_without_repeating_t
         assert response.usage.total_tokens == 28
     else:
         assert response.usage is None
+
+
+def _seed_continuation(client: TestClient, **seed_fields: Any) -> httpx.Response:
+    return client.post(
+        "/v1/agent_sessions",
+        json=AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+            continuation={"observations": ["trajectory", "timing"]},
+            **seed_fields,
+        ).model_dump(mode="json"),
+    )
+
+
+class TestContinuationSessions:
+    async def test_each_activation_sends_the_conversation_and_close_returns_every_turn(self) -> None:
+        server, server_client = _make_agent(True)
+        server_client.post = AsyncMock(side_effect=[_message_response("resp-1"), _message_response("resp-2")])
+        client = TestClient(server.setup_webserver())
+        seed = _seed_continuation(client)
+        assert seed.json()["capabilities"]["mode"] == "resume_harness_session"
+
+        first = client.post(
+            "/ng-rollout/rollout/v1/responses",
+            json={
+                "input": [{"role": "system", "content": "Be brief."}, {"role": "user", "content": "first?"}],
+                "tools": [{"type": "function", "name": "lookup", "parameters": {}, "strict": True}],
+            },
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+        )
+        second = client.post(
+            "/ng-rollout/rollout/v1/responses",
+            json={"input": [{"role": "user", "content": "second?"}]},
+            headers={AGENT_ACTIVATION_HEADER: "2"},
+        )
+        close = client.post(
+            "/v1/agent_sessions/close",
+            json={"agent_session_id": "agent-session", "episode_id": {"rollout_id": "rollout", "attempt": 0}},
+        )
+
+        assert first.status_code == second.status_code == close.status_code == 200
+        second_request = _drop_nulls(server_client.post.await_args_list[1].kwargs["json"].model_dump(mode="json"))
+        assert [item.get("content") for item in second_request["input"]] == [
+            "Be brief.",
+            "first?",
+            [{"annotations": [], "text": "Done.", "type": "output_text"}],
+            "second?",
+        ]
+        # The second activation keeps the tools of the first, which did not send them again.
+        assert [tool["name"] for tool in second_request["tools"]] == ["lookup"]
+        trajectory = TrajectoryRecord.model_validate(close.json()["trajectory"])
+        assert [(invocation.invocation_id, invocation.activation_id) for invocation in trajectory.invocations] == [
+            ("root", 1),
+            ("activation-2", 2),
+        ]
+        assert all(invocation.duration_ms is not None for invocation in trajectory.invocations)
+
+    async def test_a_later_activation_cannot_replace_the_session_tools(self) -> None:
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(return_value=_message_response("resp-1"))
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+        client.post(
+            "/v1/responses",
+            json={"input": "first?", "tools": []},
+            headers={AGENT_ACTIVATION_HEADER: "1"},
+        )
+
+        replaced = client.post(
+            "/v1/responses",
+            json={"input": "second?", "tools": [{"type": "function", "name": "x", "parameters": {}, "strict": True}]},
+            headers={AGENT_ACTIVATION_HEADER: "2"},
+        )
+
+        assert replaced.status_code == 422
+        assert "cannot replace session tools" in replaced.json()["detail"]
+        assert server_client.post.await_count == 1
+
+    async def test_a_retried_activation_gets_its_reply_without_another_model_call(self) -> None:
+        server, server_client = _make_agent(False)
+        server_client.post = AsyncMock(return_value=_message_response("resp-1"))
+        client = TestClient(server.setup_webserver())
+        _seed_continuation(client)
+
+        replies = [
+            client.post("/v1/responses", json={"input": "first?"}, headers={AGENT_ACTIVATION_HEADER: "1"})
+            for _ in range(2)
+        ]
+
+        assert [reply.json()["id"] for reply in replies] == ["resp-1", "resp-1"]
+        assert server_client.post.await_count == 1
+
+    async def test_checkpointing_refuses_a_continuation_seed(self) -> None:
+        server, _ = _make_agent(False)
+        server._checkpoint_participant = MagicMock()
+        body = AgentSeedSessionRequest(
+            agent_session_id="agent-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="example", task_id="0"),
+            continuation={"observations": ["trajectory"]},
+        )
+
+        with pytest.raises(HTTPException, match="partial-rollout checkpoints") as refused:
+            server._new_session_state(body)
+
+        assert refused.value.status_code == 422
