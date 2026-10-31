@@ -20,8 +20,17 @@
 #   sbatch --account=<acct> --partition=cpu --job-name=atom-tb21 recipes/nooa-atom/slurm/run.sbatch terminal-bench-2.1 <attempts dir>
 #
 # Needs in the checkout: .env (keys), env.yaml (endpoint), and NOOA_RUNTIME_WHEELHOUSE exported or set in .env.
-# LIMIT and PARALLEL pass through to run.sh. The job name is the idempotency key: refuse to submit a second
-# job with the same name while one is pending or running (check squeue before sbatch).
+# LIMIT, PARALLEL and ONLY_TASKS pass through to run.sh. The job name is the idempotency key: refuse to submit a
+# second job with the same name while one is pending or running (check squeue before sbatch).
+#
+# A run that outlived its allocation continues in place:
+#
+#   RESUME_ATTEMPT=<attempts dir>/<attempt> sbatch ... recipes/nooa-atom/slurm/run.sbatch terminal-bench-2.1 <attempts dir>
+#
+# Completed rows are kept. A row the time limit killed left no record and runs again; a row that failed gets one more
+# attempt (NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=2 against the one the failures sidecar recorded), so the resumed rows are
+# infrastructure retries, never a second try at a task the agent finished. Results and per-rollout artifacts land in
+# the same attempt directory; preflight does not run again.
 #SBATCH --nodes=1
 #SBATCH --ntasks=1
 #SBATCH --cpus-per-task=16
@@ -31,10 +40,15 @@ umask 077
 
 BENCH="${1:?recipe name}"
 ATTEMPTS="${2:?attempts directory}"
-ATTEMPT="$ATTEMPTS/${SLURM_JOB_NAME:-run}-$(date -u +%Y%m%dT%H%M%SZ)-${SLURM_JOB_ID:-nojob}"
-mkdir -p "$ATTEMPT"
+if [ -n "${RESUME_ATTEMPT:-}" ]; then
+  ATTEMPT="$RESUME_ATTEMPT"
+  [ -f "$ATTEMPT/run/evaluator_rollouts.jsonl" ] || { echo "nothing to resume in $ATTEMPT" >&2; exit 3; }
+else
+  ATTEMPT="$ATTEMPTS/${SLURM_JOB_NAME:-run}-$(date -u +%Y%m%dT%H%M%SZ)-${SLURM_JOB_ID:-nojob}"
+  mkdir -p "$ATTEMPT"
+fi
 exec > >(tee -a "$ATTEMPT/job.log") 2>&1
-echo "attempt $ATTEMPT on $(hostname) ($(uname -m)); checkout $(git rev-parse HEAD)"
+echo "${RESUME_ATTEMPT:+resume of }attempt $ATTEMPT on $(hostname) ($(uname -m)); job ${SLURM_JOB_ID:-nojob}; checkout $(git rev-parse HEAD)"
 
 [ -f .env ] || { echo ".env missing in $PWD" >&2; exit 3; }
 set -a; source .env; set +a
@@ -45,6 +59,13 @@ export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS="${NEMO_GYM_MAX_ROLLOUT_ATTEMPTS:-1}"
 # Rollout ids repeat across runs, so each attempt keeps its own artifacts.
 export NOOA_ARTIFACTS_DIR="$ATTEMPT/nooa-artifacts"
 
+if [ -n "${RESUME_ATTEMPT:-}" ]; then
+  # Completed rows stay; killed rows left no record and run again; a failed row gets one more attempt.
+  export NEMO_GYM_MAX_ROLLOUT_ATTEMPTS=2
+  RESUME=1 REUSE_VENVS=1 OUT="$ATTEMPT/run" recipes/nooa-atom/run.sh "$BENCH"
+  echo "resumed: $ATTEMPT/run/evaluator_rollouts.jsonl"
+  exit 0
+fi
 # Preflight writes its own one-row result; the full run only starts if it passes.
 OUT="$ATTEMPT/preflight" recipes/nooa-atom/preflight.sh "$BENCH"
 REUSE_VENVS=1 OUT="$ATTEMPT/run" recipes/nooa-atom/run.sh "$BENCH"   # venvs were just built by preflight

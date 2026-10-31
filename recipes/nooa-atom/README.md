@@ -99,6 +99,21 @@ One allocation runs preflight then the full recipe into a fresh attempt director
 idempotency key: check `squeue --name=atom-tb21` before submitting again. The controller node only
 needs the Gym venv; sandboxes come from OpenSandbox, so the node's architecture does not matter.
 
+Size the time limit from the rows, not the task count: at `PARALLEL=32` a full SWE-bench Pro or
+Terminal-Bench 2.1 run is four to six waves of rows, and a wave lasts as long as its slowest row (p90 around
+50 min for SWE-bench Pro, 20 min for Terminal-Bench, with a tail above two hours), so a four-hour queue
+limit usually ends the job with a few rows unfinished. Resume the attempt in place instead of starting over:
+
+```bash
+RESUME_ATTEMPT=<attempts dir>/atom-tb21-<timestamp>-<jobid> sbatch --account=<acct> --partition=cpu \
+  --job-name=atom-tb21-resume recipes/nooa-atom/slurm/run.sbatch terminal-bench-2.1 <attempts dir>
+```
+
+Completed rows are kept. Rows the time limit killed left no record and run again; a row whose attempt
+failed gets exactly one more attempt. Report the first attempt's rows as the primary result and the
+resumed rows separately: they are infrastructure retries, and `evaluator_rollouts_failures.jsonl` keeps
+every failed attempt so the two are separable after the fact.
+
 ## RL
 
 The same configs are the environment for NeMo RL. In the RL config, under `env.nemo_gym.config_paths`,
