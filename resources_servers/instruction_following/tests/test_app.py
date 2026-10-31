@@ -292,22 +292,84 @@ class TestApp:
         assert local.get_instruction_args() == upstream.get_instruction_args()
         assert local.get_instruction_args_keys() == upstream.get_instruction_args_keys()
 
+    def _create_keyword_specific_position_request(self, keyword, n, m, response_content):
+        """Helper to create a keywords:keyword_specific_position request with the instruction text it is graded by."""
+        return self._create_real_request(
+            instruction_ids=["keywords:keyword_specific_position"],
+            prompt=f"Include keyword {keyword} in the {n}-th sentence, as the {m}-th word of that sentence.",
+            kwargs=[{"keyword": keyword, "n": n, "m": m}],
+            response_content=response_content,
+        )
+
+    @pytest.mark.parametrize(
+        "n, response_content",
+        [
+            pytest.param(1, "The big cat sat.", id="no-punctuation-passed-upstream-too"),
+            pytest.param(1, "Yes, the cat sat.", id="comma-is-not-a-word"),
+            pytest.param(1, '"The big cat," she said.', id="opening-quote-is-not-a-word"),
+            pytest.param(1, "“The big cat,” she said.", id="curly-quotes-also-dropped"),
+            pytest.param(1, "**The big** cat sat.", id="markdown-bold-dropped"),
+            pytest.param(1, "Well: the cat sat.", id="colon-is-not-a-word"),
+            pytest.param(1, "- The big cat sat.", id="markdown-bullet-dropped"),
+            pytest.param(2, "Dogs bark. Yes, the cat sat.", id="comma-in-second-sentence"),
+        ],
+    )
+    def test_keyword_specific_position_positive(self, n, response_content):
+        """Test keywords:keyword_specific_position (cat as word 3 of sentence n) - should pass despite punctuation."""
+        real_request = self._create_keyword_specific_position_request("cat", n, 3, response_content)
+        self._run_verify_test(real_request, True, 1.0, [True])
+
+    @pytest.mark.parametrize(
+        "n, response_content",
+        [
+            pytest.param(1, "The cat sat here.", id="cat-is-word-2"),
+            pytest.param(1, "Yes, the big cat sat.", id="cat-is-word-4"),
+            pytest.param(1, "Yes, cat sat.", id="cat-is-word-2-although-upstream-counted-the-comma"),
+            pytest.param(1, "The big dog sat. The cat ran.", id="cat-in-the-wrong-sentence"),
+            pytest.param(2, "The big cat sat.", id="only-one-sentence"),
+            pytest.param(1, "The big Cat sat.", id="case-kept-as-upstream"),
+            pytest.param(1, "It's the cat.", id="contraction-split-as-upstream"),
+            pytest.param(1, "1. The big cat sat.", id="list-number-split-into-its-own-sentence-as-upstream"),
+        ],
+    )
+    def test_keyword_specific_position_negative(self, n, response_content):
+        """Test keywords:keyword_specific_position (cat as word 3 of sentence n) - should fail when it is not."""
+        real_request = self._create_keyword_specific_position_request("cat", n, 3, response_content)
+        self._run_verify_test(real_request, False, 0.0, [False])
+
+    def test_keyword_specific_position_checker_keeps_upstream_instruction_text(self):
+        """Only `check_following` is overridden, so the published prompts still describe what is graded."""
+        from verifiable_instructions import instructions_registry
+
+        from resources_servers.instruction_following.keyword_specific_position import KeywordSpecificPositionChecker
+
+        instruction_id = "keywords:keyword_specific_position"
+        kwargs = {"keyword": "cat", "n": 1, "m": 3}
+        upstream = instructions_registry.INSTRUCTION_DICT[instruction_id](instruction_id)
+        local = KeywordSpecificPositionChecker(instruction_id)
+        assert local.build_description(**kwargs) == upstream.build_description(**kwargs)
+        assert local.get_instruction_args() == upstream.get_instruction_args()
+        assert local.get_instruction_args_keys() == upstream.get_instruction_args_keys()
+
     def test_only_local_checkers_replace_upstream(self):
-        """Only the two local count: checkers are overridden; every other instruction uses the upstream checker."""
+        """Only the three local checkers are overridden; every other instruction uses the upstream checker."""
         from verifiable_instructions import instructions_registry
 
         from resources_servers.instruction_following.app import INSTRUCTION_DICT
         from resources_servers.instruction_following.count_unique import CountUniqueChecker
         from resources_servers.instruction_following.counting_composition import CountingCompositionChecker
+        from resources_servers.instruction_following.keyword_specific_position import KeywordSpecificPositionChecker
 
         upstream = instructions_registry.INSTRUCTION_DICT
         assert INSTRUCTION_DICT.keys() == upstream.keys()
         assert {key for key, cls in INSTRUCTION_DICT.items() if cls is not upstream[key]} == {
             "count:counting_composition",
             "count:count_unique",
+            "keywords:keyword_specific_position",
         }
         assert INSTRUCTION_DICT["count:counting_composition"] is CountingCompositionChecker
         assert INSTRUCTION_DICT["count:count_unique"] is CountUniqueChecker
+        assert INSTRUCTION_DICT["keywords:keyword_specific_position"] is KeywordSpecificPositionChecker
 
     def test_multiple_constraints_positive(self):
         """Test multiple constraints together - should pass both."""
