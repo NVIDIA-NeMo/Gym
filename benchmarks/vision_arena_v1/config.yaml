@@ -53,12 +53,14 @@ responses_create_params:
   stream: false
 
 # Judge outages go to the failures sidecar, not the score; above this share of expected rollouts the run's
-# health check reports it unhealthy (the score is still published).
+# health check reports it unhealthy (the score is still published). An outage counts as final once its retries
+# are used up, so both limits are set.
 health_check_max_not_final_failure_fraction: 0.05
+health_check_max_final_failure_fraction: 0.05
 
 vision_arena_v1_benchmark_environment_server:
   _inherit_from: vision_arena_v1_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: vision_arena_v1_benchmark_agent

@@ -657,11 +657,11 @@ class TestDriverMetrics:
     def test_output_writes_record_their_duration_and_size(self, collected):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollout_store import _record_output_write
 
         async def run():
             async with observer.observe_event_loop("driver"):
-                _record_output_write(time.perf_counter(), b"x" * 999)
+                _record_output_write(time.perf_counter(), b"x" * 999 + b"\n")
                 return collected()
 
         exported = asyncio.run(run())
@@ -672,7 +672,7 @@ class TestDriverMetrics:
     def test_nothing_is_recorded_without_an_observer(self):
         import time
 
-        from nemo_gym.rollout_collection import _record_output_write
+        from nemo_gym.rollout_store import _record_output_write
 
         assert observer.driver_metrics() is None
         _record_output_write(time.perf_counter(), b"row")

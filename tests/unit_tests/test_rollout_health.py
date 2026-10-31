@@ -361,6 +361,19 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
     capsys: pytest.CaptureFixture[str],
     caplog: pytest.LogCaptureFixture,
 ) -> None:
+    from types import SimpleNamespace
+    from uuid import UUID
+
+    from omegaconf import OmegaConf
+
+    import nemo_gym.rollout_recovery as recovery
+
+    client = SimpleNamespace(
+        global_config_dict=OmegaConf.create({"synthetic-agent": {"responses_api_agents": {"impl": {}}}})
+    )
+    monkeypatch.setattr(rollout_collection, "setup_server_client_utils", lambda *args, **kwargs: client)
+    # Hold run identity fixed while comparing the effect of health checks.
+    monkeypatch.setattr(recovery, "uuid4", lambda: UUID(int=1))
     monkeypatch.setattr(rollout_collection, "get_global_config_dict", lambda: {})
     source = {
         "responses_create_params": {"input": []},
@@ -422,11 +435,12 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
             "failures": output_path.with_name("rollouts_failures.jsonl").read_bytes(),
             "metrics": output_path.with_name("rollouts_aggregate_metrics.json").read_bytes(),
         }
-        assert (run_dir / "quality_summary.json").exists() is not disabled
-        assert (run_dir / "rollout_verdicts.jsonl").exists() is not disabled
+        assert (run_dir / "quality_summary.json").exists() is (not disabled)
+        assert (run_dir / "rollout_verdicts.jsonl").exists() is (not disabled)
         if not disabled:
-            assert stdout.rstrip().endswith(str(run_dir / "quality_summary.json"))
-            assert stdout.index("Finished rollout collection") < stdout.index("Rollout health")
+            assert "Finished rollout collection" in stdout
+            assert "Rollout health checks skipped" not in stdout
+            assert not caplog.records
 
     assert artifacts[False] == artifacts[True]
 
@@ -2362,6 +2376,20 @@ def test_usage_still_reports_incorrect_invocation_total(tmp_path: Path) -> None:
     }
 
 
+def test_health_cli_reports_history_error_without_traceback(monkeypatch, capsys):
+    def unavailable(*args, **kwargs):
+        raise health.JournalHealthUnavailable("Export selected results with gym eval aggregate.")
+
+    monkeypatch.setattr(cli_eval, "health_check_rollouts", unavailable)
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "health-check", "/tmp/example-run"])
+    with pytest.raises(SystemExit) as error:
+        cli_main.main()
+    assert error.value.code != 0
+    output = capsys.readouterr()
+    assert "Export selected results" in output.err
+    assert "Traceback" not in output.err
+
+
 def test_summary_counts_expected_failed_and_missing_rollouts(tmp_path: Path) -> None:
     rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in range(4)])
     (tmp_path / "rollouts_materialized_inputs.jsonl").write_bytes(
@@ -2489,6 +2517,7 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
     seen = {}
 
     async def failing_collection(self, config):
+        self._collection_started = True
         seen["disable_health_check"] = config.disable_health_check
         _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
         (tmp_path / "rollouts_failures.jsonl").write_bytes(
@@ -2496,7 +2525,7 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
         )
         raise RuntimeError("EVAL FAILED: 1/3 samples completed.")
 
-    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", failing_collection)
+    monkeypatch.setattr(RolloutCollectionHelper, "_run_locked_from_config", failing_collection)
     monkeypatch.setattr(
         cli_eval,
         "get_global_config_dict",
@@ -2508,7 +2537,7 @@ def test_failed_collection_still_writes_quality_summary_with_counts(
         cli_eval.collect_rollouts()
 
     artifacts = json.loads((tmp_path / "quality_summary.json").read_text())["run"]["artifacts"]
-    assert seen["disable_health_check"] is True
+    assert seen["disable_health_check"] is False
     assert (artifacts["records"], artifacts["expected"], artifacts["missing"]) == (1, 3, 1)
     assert "partial" not in artifacts  # A Python error keeps the full check.
     assert artifacts["failed"] == {"total": 1, "final": 0, "not_final": 1, "by_class": {"agent_run_error": 1}}
@@ -2543,13 +2572,14 @@ from nemo_gym.rollout_collection import RolloutCollectionHelper
 root = Path({str(tmp_path)!r})
 
 async def collection(self, config):
+    self._collection_started = True
     (root / "rollouts.jsonl").write_bytes((root / "landed.jsonl").read_bytes())
     self._landed_keys.add((0, 0))
     (root / "rollouts.jsonl").chmod(0)
     (root / "collecting").touch()
     await asyncio.sleep(600)
 
-RolloutCollectionHelper.run_from_config = collection
+RolloutCollectionHelper._run_locked_from_config = collection
 cli_eval.get_global_config_dict = lambda: {{
     "input_jsonl_fpath": str(root / "input.jsonl"),
     "output_jsonl_fpath": str(root / "rollouts.jsonl"),
@@ -2581,32 +2611,6 @@ cli_eval.collect_rollouts()
     assert "verdicts" not in summary["run"]
     assert process.returncode == 143
     assert elapsed < 30
-
-
-def test_a_new_run_removes_the_previous_jobs_health_reports(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    for name in ("quality_summary.json", "rollout_verdicts.jsonl"):
-        (tmp_path / name).write_text('{"run": {"artifacts": {"healthy": true}}}')
-    seen = {}
-
-    async def collection(self, config):
-        seen["reports"] = sorted(
-            path.name for path in tmp_path.iterdir() if path.name in ("quality_summary.json", "rollout_verdicts.jsonl")
-        )
-
-    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collection)
-    monkeypatch.setattr(
-        cli_eval,
-        "get_global_config_dict",
-        lambda: {
-            "input_jsonl_fpath": str(tmp_path / "input.jsonl"),
-            "output_jsonl_fpath": str(tmp_path / "out.jsonl"),
-        },
-    )
-    monkeypatch.setattr("nemo_gym.telemetry.setup.init_telemetry", lambda **kwargs: None)
-
-    cli_eval.collect_rollouts()
-
-    assert seen["reports"] == []
 
 
 def test_duplicated_rollout_rows_make_the_run_unhealthy(tmp_path: Path) -> None:

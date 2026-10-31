@@ -46,6 +46,7 @@ from nemo_gym.config.config_types import (
     is_almost_server,
 )
 from nemo_gym.config.global_config import (
+    AGENT_SESSION_AGENT_TYPES,
     ALLOW_UNSUPPORTED_PAIRING_ENV_VAR_NAME,
     ALLOW_UNSUPPORTED_PAIRING_KEY_NAME,
     DEFAULT_HEAD_SERVER_PORT,
@@ -3429,6 +3430,73 @@ class TestComposeUnboundAgent:
         assert "max_steps" not in block
         assert OmegaConf.to_container(block["datasets"])[0]["num_repeats"] == 8
         assert "hermes_agent" not in resolved
+
+    def _session_environment_config(self, harness_type: str) -> DictConfig:
+        """The standard config with `harness_type` as the swap source and a single_agent_turn_legacy server."""
+        config = self._config()
+        config.pop(self.HARNESS_INSTANCE)
+        config[harness_type] = {
+            "responses_api_agents": {
+                harness_type: {
+                    "entrypoint": "app.py",
+                    "resources_server": {"type": "resources_servers", "name": "???"},
+                    "model_server": {"type": "responses_api_models", "name": "harness_model"},
+                }
+            }
+        }
+        config["gpqa_mcqa_environment_server"] = {
+            "environment_servers": {
+                "single_agent_turn_legacy": {
+                    "entrypoint": "app.py",
+                    "resources_server": {"type": "resources_servers", "name": "gpqa_mcqa_resources_server"},
+                    "agent_server": {"type": "responses_api_agents", "name": "gpqa_mcqa_simple_agent"},
+                    "resources_tool_transports": ["mcp"],
+                    "max_concurrent_episodes": 4,
+                    "queue_timeout_seconds": 60,
+                    "default_episode_timeout_seconds": 600,
+                    "cleanup_timeout_seconds": 30,
+                }
+            }
+        }
+        return config
+
+    @mark.parametrize("harness_type", ["opencode_sandboxed_agent", "non_executing_simple_agent"])
+    def test_swap_to_agent_without_sessions_falls_back_to_legacy_relay(self, harness_type: str) -> None:
+        config = self._session_environment_config(harness_type)
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
+        assert list(servers) == ["legacy_agent"]
+        assert OmegaConf.to_container(servers["legacy_agent"]) == {
+            "entrypoint": "app.py",
+            "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
+        }
+
+    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent"])
+    def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
+        config = self._session_environment_config(harness_type)
+        server_before = OmegaConf.to_container(
+            config["gpqa_mcqa_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+        )
+
+        GlobalConfigDictParser().compose_unbound_agent(config)
+
+        servers = config["gpqa_mcqa_environment_server"]["environment_servers"]
+        assert list(servers) == ["single_agent_turn_legacy"]
+        server_before["agent_server"]["name"] = f"gpqa_mcqa_{harness_type}"
+        assert OmegaConf.to_container(servers["single_agent_turn_legacy"]) == server_before
+
+    def test_agent_session_agent_types_match_the_agent_apps(self) -> None:
+        """Every agent app that seeds agent sessions is listed, and nothing else is."""
+        agents_root = Path(nemo_gym.config.global_config.__file__).parents[2] / "responses_api_agents"
+        implementing = {
+            app.parent.name
+            for app in agents_root.glob("*/app.py")
+            if "def _seed_agent_session_state(" in app.read_text(encoding="utf-8")
+        }
+
+        assert implementing == AGENT_SESSION_AGENT_TYPES
 
     def _cli_dict(self, config: dict) -> DictConfig:
         """A command line dict as Hydra hands it over: struct, so an undeclared key is an error."""

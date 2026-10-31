@@ -198,7 +198,10 @@ def test_config_matches_english_pipeline():
     assert dataset["prompt_config"] == english_dataset["prompt_config"]
     environment = config["indic_gpqa_diamond_environment_server"]
     assert environment["_inherit_from"] == english["gpqa_mcqa_environment_server"]["_inherit_from"]
-    assert environment["environment_servers"]["legacy_agent"]["agent_server"]["name"] == "indic_gpqa_diamond_agent"
+    assert (
+        environment["environment_servers"]["single_agent_turn_legacy"]["agent_server"]["name"]
+        == "indic_gpqa_diamond_agent"
+    )
     assert set(config) == {
         "config_paths",
         "indic_gpqa_diamond_resources_server",
@@ -233,7 +236,7 @@ def test_environment_routing_alone_and_with_english_gpqa(
     if "gpqa" in benchmarks:
         expected["gpqa_mcqa_environment_server"] = "gpqa_mcqa_simple_agent"
     environments = {
-        name: block["environment_servers"]["legacy_agent"]
+        name: block["environment_servers"]["single_agent_turn_legacy"]
         for name, block in resolved.items()
         if OmegaConf.is_dict(block) and "environment_servers" in block
     }

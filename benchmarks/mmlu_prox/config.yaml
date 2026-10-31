@@ -29,6 +29,6 @@ mmlu_prox_mcqa_simple_agent:
 mmlu_prox_mcqa_environment_server:
   _inherit_from: mcqa_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: mmlu_prox_mcqa_simple_agent

@@ -1269,10 +1269,9 @@ class TestValidate:
         out = capsys.readouterr().out
         assert (
             "'my_env' (environment_servers/single_agent_turn_legacy/app.py) does not match "
-            "SingleAgentTurnEnvironmentServerConfig:" in out
+            "SingleAgentTurnLegacyEnvironmentServerConfig:" in out
         )
         block_path = "my_env.environment_servers.single_agent_turn_legacy"
-        assert f"{block_path}.cleanup_timeout_seconds: Field required" in out
         assert f"{block_path}.resources_tool_transport: Extra inputs are not permitted" in out
         assert "Config is valid" not in out
 

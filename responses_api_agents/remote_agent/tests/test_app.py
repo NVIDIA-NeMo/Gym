@@ -936,6 +936,9 @@ class TestCollectorRoundTrip:
         assert len(sidecar_rows) == 1
         assert sidecar_rows[0][NG_FAILURE_CLASS_KEY] == REMOTE_AGENT_FAILURE_CLASS
         assert "HTTP 500" in sidecar_rows[0]["error"]
+        assert sidecar_rows[0]["failure_reason"] == sidecar_rows[0]["error"]
+        assert sidecar_rows[0]["_ng_failure_record"]["failure"]["failure_reason"] == sidecar_rows[0]["error"]
+        assert "reward" not in sidecar_rows[0]
 
 
 class TestReviewFindingPins:
@@ -945,6 +948,7 @@ class TestReviewFindingPins:
         "reward": 0.75,
         "response": {"stale": True},
         "error": "stale error",
+        "failure_reason": "stale failure reason",
         NG_FAILURE_CLASS_KEY: "stale_class",
         NG_NO_PERSIST_KEY: True,
         NG_TERMINAL_KEY: True,
@@ -962,6 +966,7 @@ class TestReviewFindingPins:
         assert result["reward"] == 0.0
         assert result["response"]["output"][0]["type"] == "message"
         assert "remote exploded" in result["error"]
+        assert result["failure_reason"] == result["error"]
         # Stale no-persist/terminal flags from the input row must not survive
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result
@@ -986,6 +991,7 @@ class TestReviewFindingPins:
         result = (await agent.run(make_request(), RemoteAgentRunRequest.model_validate(row))).model_dump()
 
         assert result["reward"] == 1.0
+        assert result["failure_reason"] is None
         assert NG_FAILURE_CLASS_KEY not in result
         assert NG_NO_PERSIST_KEY not in result
         assert NG_TERMINAL_KEY not in result

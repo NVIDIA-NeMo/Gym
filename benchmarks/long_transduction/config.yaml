@@ -22,6 +22,6 @@ long_transduction_agent:
 long_transduction_benchmark_environment_server:
   _inherit_from: long_transduction_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: long_transduction_agent

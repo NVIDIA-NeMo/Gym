@@ -83,6 +83,10 @@ MODEL_TRANSPORT_ERROR = "model_transport_error"
 # Explicit evidence that the model's context window was exceeded, not an HTTP status alone.
 MODEL_CONTEXT_LIMIT = "model_context_limit"
 
+# --- environment: one episode attempt ------------------------------------------------ #
+ENVIRONMENT_SERVER_FAILED = "environment_server_failed"
+ENVIRONMENT_PROTOCOL_VIOLATION = "environment_protocol_violation"
+
 # --- verifier and judge --------------------------------------------------------------- #
 # ``judge_failed`` is produced today by judge_failsafe and by reverification.
 JUDGE_FAILED = "judge_failed"
@@ -121,6 +125,8 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         AGENT_REQUEST_FAILED,
         AGENT_TIMEOUT,
         AGENT_COMMAND_NOT_ALLOWED,
+        ENVIRONMENT_SERVER_FAILED,
+        ENVIRONMENT_PROTOCOL_VIOLATION,
         AGENT_LIMIT,
         AGENT_INVALID_OUTPUT,
         MODEL_REQUEST_ERROR,

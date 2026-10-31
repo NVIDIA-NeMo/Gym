@@ -755,6 +755,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
             or AgentObservationBundle(source="codex", gaps=[ObservationGap(code="agent_activation_interrupted")]),
         )
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, CodexSandboxSession) else None
+
     async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CodexSandboxSession:
         # Match Hermes: session initialization owns the sandbox runtime setup,
         # with the same AgentSeedSessionRequest/SandboxAccess wire contracts.
@@ -1302,6 +1305,7 @@ class CodexAgent(SimpleResponsesAPIAgent):
             },
         )
 
+        response = self.report_rollout_stop(response, state.session)
         if graded_error:
             # Unclassified, so the Environment Server's outcome policy verifies it, as the setting asks.
             return response

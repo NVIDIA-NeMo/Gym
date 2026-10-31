@@ -16,6 +16,6 @@ indic_frontiermath_simple_agent:
 indic_frontiermath_environment_server:
   _inherit_from: frontiermath_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: indic_frontiermath_simple_agent

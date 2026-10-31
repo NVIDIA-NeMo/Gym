@@ -3,6 +3,7 @@
 
 import asyncio
 import json
+import time
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -340,6 +341,40 @@ async def test_agent_outcomes_still_collect_and_grade(fixture, monkeypatch, reas
     assert result.termination["reason"] == reason
     assert result.reward == 0.75 and result.evaluation_completed
     assert bool(result.infrastructure_error) == (reason == "infrastructure_error")
+    assert all(env.closed for env in f.envs)
+
+
+@pytest.mark.parametrize("reason", ["killed", "completed"])
+async def test_collection_past_the_deadline_keeps_a_kill(fixture, monkeypatch, reason):
+    """Slow artifact collection after the process ended makes any other outcome a verified timeout, but cannot turn
+    a kill into one."""
+    f = fixture
+    offset = [0.0]
+    monkeypatch.setattr(module, "monotonic", lambda: time.monotonic() + offset[0])
+    original = module.MiniSWEHarness
+
+    def harness(**kw):
+        h = original(**kw)
+
+        async def execute(budget):
+            offset[0] += budget
+            outcome = HarnessOutcome(reason=reason, exit_code=-9 if reason == "killed" else None)
+            return module.empty_response(kw["params"], "model"), outcome, {}
+
+        h.execute.side_effect = execute
+        return h
+
+    monkeypatch.setattr(module, "MiniSWEHarness", harness)
+    result = await f.agent.run(f.request, f.body)
+    assert result.evaluation_completed and not result.infrastructure_error
+    if reason == "killed":
+        assert result.termination["reason"] == "killed"
+        assert result.reward == 0.0
+        f.grade.assert_not_awaited()
+    else:
+        assert result.termination["reason"] == "timeout"
+        assert result.reward == 0.75
+        f.grade.assert_awaited_once()
     assert all(env.closed for env in f.envs)
 
 

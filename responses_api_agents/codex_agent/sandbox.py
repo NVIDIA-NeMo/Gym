@@ -136,10 +136,16 @@ class CodexSandboxSession(AgentSessionState):
 
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
+        if self.session.expired_before_launch:
+            return ""  # A rollout stop arrived before launch, so Codex never ran.
         started = time.monotonic()
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:
+            if self.session.expired and await self._events_absent():
+                # A rollout stop can end the worker after launch but before it opens its transcript.
+                LOG.warning("Codex wrote no events before a rollout stop ended it; keeping an empty transcript")
+                return ""
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Codex sandbox runner returned no valid result: {logs}") from error
         try:
@@ -173,3 +179,16 @@ class CodexSandboxSession(AgentSessionState):
         else:
             await self.copy_session_rollouts()
         return events
+
+    async def _events_absent(self) -> bool:
+        """Whether the session directory exists without events.jsonl; an unclear answer counts as present."""
+        directory = shlex.quote(self.session.session_dir)
+        events = shlex.quote(f"{self.session.session_dir}/events.jsonl")
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {events} ]; then echo present; elif [ -d {directory} ]; then echo absent; fi", timeout_s=10
+            )
+        except Exception:
+            LOG.warning("Could not check for Codex events after a rollout stop", exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "absent"

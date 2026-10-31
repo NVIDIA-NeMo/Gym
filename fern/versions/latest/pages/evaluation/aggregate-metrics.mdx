@@ -14,7 +14,27 @@ After rollout collection, NeMo Gym computes **aggregate metrics** for each agent
 3. **Call `/aggregate_metrics`** — for each agent, the stripped verify responses are POSTed to the agent's `/aggregate_metrics` endpoint.
 4. **Compute stats** — per-task and overall statistics (`mean`, `max`, `min`, `median`, `std`) are computed for every numeric field. If the resources server overrides `compute_metrics()` or `get_key_metrics()`, those are called to add additional metrics.
 5. **Compute variability stats** — when an agent has two or more repeats, eligible numeric per-repeat metrics are summarized across repeats. See [Repeat-Level Metrics](#repeat-level-metrics).
-6. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json`.
+6. **Write results** — all per-agent metrics are written to `<output>_aggregate_metrics.json` beside the resolved
+   output. For a file symlink, this is normally beside its target; an unambiguous legacy companion layout beside
+   the link is preserved.
+
+<Note>
+With `+merge_shards=false`, aggregation through a file symlink may update the target's reports only if that target
+does not yet exist or is the sole input. Otherwise Gym refuses before changing files. To deliberately replace an
+existing target's reports, pass its path directly; to keep those reports, choose a new output path.
+
+Earlier Gym versions could write aggregate metrics beside a symlink while comparison now reads beside its target.
+After upgrading, aggregate those outputs again before comparing them. Use a new output path to preserve earlier
+reports, and compare using that same output path. Do not assume an older link-side metrics file is selected.
+</Note>
+
+## Explicit failure scoring
+
+Failures are excluded from scores by default. `count_failure_classes_as_zero` explicitly includes selected failures
+as zero-valued metric inputs without changing saved outcomes. It matches either the canonical `_ng_failure_class`
+or the original producer name saved in `_ng_failure_legacy_class`, when present. For example, a GDPVal failure with
+kind `gdpval:reference_missing` still matches an existing `reference_missing` selection. Selecting both names counts
+the task once. Collection and offline aggregation use the same rule; see [evaluation resume](/main/evaluation/resume).
 
 ## Output Format
 
@@ -94,7 +114,11 @@ plus, for **every numeric field** (`reward`, token usage, and any numeric field 
 <Warning>
 `missing_count` is **not** measured against the expected task list. Its denominator is the set of tasks that completed in at least one repeat, so it only catches tasks that succeeded somewhere else and are absent here.
 
-A task that fails in *every* repeat never appears in any repeat, so it is counted nowhere and `missing_count` stays `0` for it. Those rollouts are in `<output>_failures.jsonl` — or, for `kill_shaped` failures (Slurm SIGTERM, Ray actor died, OOM) and rows the dispatch budget never started, nowhere at all, since the absence of a row is itself the signal. With `+record_omitted_rollouts=true` those two leave a sidecar row marked `_ng_omitted_rollout: true`; it records that no result exists and is not counted as a failure.
+A task that fails in *every* repeat never appears in any repeat, so `missing_count` stays `0` for it.
+The recovery collector saves reported failures, including `kill_shaped` failures (such as an interrupted worker),
+in `<output>_failures.jsonl`. A process death before an outcome is saved remains unknown in run coverage.
+A row the dispatch budget never started leaves no row; with `+record_omitted_rollouts=true` it leaves a sidecar row
+marked `_ng_omitted_rollout: true`, which records that it never ran and is not counted as a failure.
 
 To check real coverage, use the numbers that *are* measured against the materialized inputs: `expected_num_rollouts` and `missing_num_rollouts` in `group_level_metrics`, and the completion summary `gym eval profile` prints at the end of a run.
 </Warning>

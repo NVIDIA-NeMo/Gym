@@ -24,6 +24,6 @@ human_eval_evalplus_simple_agent:
 human_eval_evalplus_environment_server:
   _inherit_from: evalplus_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: human_eval_evalplus_simple_agent

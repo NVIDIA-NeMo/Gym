@@ -53,6 +53,26 @@ Set connection values through the provider config. The shipped config reads thes
 Sandbox, model, and image-registry credentials are separate. Keep secrets out of
 source control, issues, and resolved-config logs.
 
+### Multi-cell front ends
+
+A deployment can put several OpenSandbox servers ("cells") behind one front end,
+such as a cell router. Point `OPENSANDBOX_DOMAIN` at the front end; no other Gym
+setting changes:
+
+- Sandbox IDs carry the owning cell as a prefix (for example `c5-<uuid>`). Treat
+  them as opaque strings; later calls for that sandbox are routed by the prefix.
+- Keep `connection.use_server_proxy: true` (the default). Endpoint lookups then
+  return the owning cell's server-proxy URL, so commands, file transfers, and PTY
+  traffic go from Gym straight to the cell. The host that runs Gym must be able to
+  reach every cell's endpoint, not only the front end.
+- The cell's server proxy authenticates these direct calls with the same API key.
+  The provider sends `OPENSANDBOX_API_KEY` as a header on them. If you call the
+  OpenSandbox SDK directly, pass the key in `ConnectionConfig.headers` as well as
+  `api_key`: `api_key` alone covers only lifecycle calls, and execd requests get
+  `401`.
+- Compose collections stay on one cell; see
+  [Compose networking](/infrastructure/sandbox/compose#networking-and-shared-storage).
+
 ### Check access before allocating sandboxes
 
 From the Gym server's host or container:

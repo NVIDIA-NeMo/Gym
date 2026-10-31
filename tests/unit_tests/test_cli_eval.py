@@ -296,3 +296,46 @@ class TestEvalRunNoServeWithoutHeadServer:
         assert "Start it with: `gym env start`." in captured.out
         assert "Traceback" not in captured.out + captured.err
         assert "ValueError" not in captured.out + captured.err
+
+
+@pytest.mark.parametrize("retryable, expected_exit", [(1, 75), (0, 76)])
+@pytest.mark.parametrize("require_complete", [False, True])
+def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
+    tmp_path, monkeypatch, retryable, expected_exit, require_complete
+):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.telemetry import setup
+
+    output = tmp_path / "output.jsonl"
+    config = DictConfig(
+        {"input_jsonl_fpath": "input.jsonl", "output_jsonl_fpath": str(output), "require_complete": require_complete}
+    )
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    events = []
+    monkeypatch.setattr(setup, "configure_telemetry_env", lambda config: events.append("configure"))
+    monkeypatch.setattr(setup, "init_telemetry", lambda **kwargs: events.append("init"))
+    monkeypatch.setattr(setup, "shutdown_telemetry", lambda: events.append("shutdown"))
+
+    async def collect(self, config):
+        events.append("collect")
+        coverage_path_for(output).write_text(
+            json.dumps(
+                {
+                    "complete": False,
+                    "expected": 1,
+                    "successful": 0,
+                    "retryable": retryable,
+                    "outcomes_recorded": 1,
+                }
+            )
+        )
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collect)
+    if require_complete:
+        with pytest.raises(SystemExit) as error:
+            cli_eval.collect_rollouts()
+        assert error.value.code == expected_exit
+    else:
+        cli_eval.collect_rollouts()
+    assert events == ["configure", "init", "collect", "shutdown"]

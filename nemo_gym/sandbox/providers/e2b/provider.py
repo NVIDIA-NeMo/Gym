@@ -82,6 +82,9 @@ _API_PARAM_KEYS = (
     "proxy",
 )
 
+# ``create.network`` keys -> REST API field names.
+_NETWORK_API_KEYS = {"allow_out": "allowOut", "deny_out": "denyOut"}
+
 
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
@@ -186,6 +189,14 @@ class E2BCreateConfig:
     timeout_s: float | None = 3600.0
     allow_internet_access: bool = True
     secure: bool = True
+    # Outbound traffic rules, passed as the SDK's ``network`` option:
+    # ``allow_out``/``deny_out`` lists of CIDRs, IPs or hostnames. ``deny_out:
+    # [0.0.0.0/0]`` with an ``allow_out`` list permits only the listed hosts.
+    network: dict[str, list[str]] | None = None
+    # Deployment-specific create parameters, sent as the API's
+    # ``customExtensionParams`` (AgentEnv). The SDK cannot send this field, so
+    # setting it creates sandboxes through ``POST /sandboxes`` directly.
+    custom_extension_params: dict[str, Any] | None = None
     # Raise instead of warning when a spec requests resources E2B cannot apply
     # per sandbox (they are fixed when the template is built).
     strict_resources: bool = False
@@ -201,6 +212,19 @@ class E2BCreateConfig:
             if not isinstance(template, str) or not template.strip():
                 raise ValueError("create.template_map values must be non-empty template strings")
         _validate_optional_number("create.timeout_s", self.timeout_s, positive=True)
+        if self.network is not None:
+            if not isinstance(self.network, Mapping):
+                raise TypeError("create.network must be a mapping")
+            unknown = set(self.network) - set(_NETWORK_API_KEYS)
+            if unknown:
+                raise ValueError(
+                    f"Unknown create.network keys: {', '.join(sorted(unknown))}. Expected: allow_out, deny_out"
+                )
+            for key, rules in self.network.items():
+                if not isinstance(rules, (list, tuple)) or not all(isinstance(rule, str) for rule in rules):
+                    raise ValueError(f"create.network.{key} must be a list of strings")
+        if self.custom_extension_params is not None and not isinstance(self.custom_extension_params, Mapping):
+            raise TypeError("create.custom_extension_params must be a mapping")
 
 
 @dataclass(frozen=True)
@@ -445,16 +469,60 @@ class E2BProvider:
             kwargs["envs"] = {str(k): str(v) for k, v in spec.env.items()}
         if spec.metadata:
             kwargs["metadata"] = {str(k): str(v) for k, v in spec.metadata.items()}
+        if self._create.network:
+            kwargs["network"] = {key: list(rules) for key, rules in self._create.network.items()}
 
         e2b = _require_e2b_sdk()
         try:
             # Creating a sandbox is not idempotent. Retrying an ambiguous
             # transport failure can leak the first, billable sandbox.
-            sandbox = await e2b.AsyncSandbox.create(**kwargs)
+            if self._create.custom_extension_params is None:
+                sandbox = await e2b.AsyncSandbox.create(**kwargs)
+            else:
+                sandbox = await self._create_with_extension_params(e2b, kwargs)
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
+
+    async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
+        """Create through ``POST /sandboxes``, adding ``customExtensionParams``.
+
+        The POST goes through the SDK's own API client, so it gets the URL, auth
+        headers, proxy, timeout and HTTP transport of ``AsyncSandbox.create``,
+        and like it is never replayed. ``AsyncSandbox.connect`` then attaches;
+        it also returns the envd access token a secure sandbox needs.
+        """
+        config = e2b.ConnectionConfig(**{**self._api_params(), "request_timeout": kwargs.get("request_timeout")})
+        body: dict[str, Any] = {
+            "templateID": kwargs["template"],
+            "timeout": kwargs["timeout"],
+            "secure": kwargs["secure"],
+            "allow_internet_access": kwargs["allow_internet_access"],
+            "envVars": kwargs.get("envs", {}),
+            "metadata": kwargs.get("metadata", {}),
+            "customExtensionParams": self._create.custom_extension_params,
+        }
+        if "network" in kwargs:
+            body["network"] = {_NETWORK_API_KEYS[key]: rules for key, rules in kwargs["network"].items()}
+        client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
+        response = await client.post("/sandboxes", json=body)
+        if response.status_code >= 300:
+            raise E2BCreateError(f"POST /sandboxes returned HTTP {response.status_code}: {response.text[:500]}")
+        sandbox_id = response.json()["sandboxID"]
+        try:
+            # Pass the create timeout: connect otherwise applies the SDK default.
+            return await self._with_retries(
+                lambda: e2b.AsyncSandbox.connect(sandbox_id, timeout=kwargs["timeout"], **self._api_params()),
+                operation="connect",
+            )
+        except BaseException:
+            # The caller gets no handle to close this sandbox, so stop it here.
+            try:
+                await e2b.AsyncSandbox.kill(sandbox_id, **self._api_params())
+            except Exception as kill_exc:  # noqa: BLE001 - best effort; the sandbox TTL is the backstop
+                LOGGER.warning("Could not kill e2b sandbox %s after a failed connect: %s", sandbox_id, kill_exc)
+            raise
 
     async def serialize_handle(self, handle: SandboxHandle, *, scope: str | None = None) -> dict[str, Any]:
         """Return a descriptor for attaching to this sandbox from another process."""

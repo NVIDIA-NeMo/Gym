@@ -101,7 +101,7 @@ def test_native_config_routes_to_frontiermath_without_global_sampling_defaults()
         "indic_frontiermath_simple_agent",
         "indic_frontiermath_environment_server",
     }
-    environment = config.indic_frontiermath_environment_server.environment_servers.legacy_agent
+    environment = config.indic_frontiermath_environment_server.environment_servers.single_agent_turn_legacy
     assert environment.agent_server.name == "indic_frontiermath_simple_agent"
     agent = config.indic_frontiermath_simple_agent.responses_api_agents.simple_agent
     assert agent.resources_server.name == "frontiermath"

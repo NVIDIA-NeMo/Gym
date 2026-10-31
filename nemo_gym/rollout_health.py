@@ -11,6 +11,7 @@ and writes reports.
 from __future__ import annotations
 
 import hashlib
+import logging
 import os
 import warnings
 from collections import Counter, defaultdict
@@ -29,6 +30,7 @@ from nemo_gym.artifacts.run_files import (
     QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_VERDICTS_FILENAME,
 )
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -73,7 +75,17 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
+from nemo_gym.rollout_records import RUN_ID_KEY, resolve_rollout_path
+from nemo_gym.rollout_recovery import manifest_path_for
+from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
 from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
+
+
+logger = logging.getLogger(__name__)
+
+
+class JournalHealthUnavailable(ConfigError):
+    """This history contains superseded outcomes and requires an exported projection."""
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -283,7 +295,7 @@ def evaluate_record(
     )
 
 
-def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
+def _index_jsonl(paths: Sequence[Path], *, source_indices: Mapping[str, int] | None = None) -> list[_LineSlice]:
     slices: list[_LineSlice] = []
     ordinal = 0
     for source_index, path in enumerate(paths):
@@ -297,6 +309,14 @@ def _index_jsonl(paths: Sequence[Path]) -> list[_LineSlice]:
                 line_number += 1
                 if not line.strip():
                     continue
+                if source_indices is not None:
+                    try:
+                        record = orjson.loads(line)
+                        source_index = source_indices[record[RUN_ID_KEY]]
+                    except (ValueError, KeyError, TypeError) as error:
+                        raise ConfigError(
+                            f"Selected projection {path}:{line_number} must identify one of its source runs."
+                        ) from error
                 slices.append(
                     _LineSlice(
                         path=str(path),
@@ -539,60 +559,105 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
     return _Failures(rows=failed, owed=owed, any_sidecar=any_sidecar)
 
 
+def _landed_in(landed: set[tuple[Any, ...]], source_index: int) -> set[tuple[Any, ...]]:
+    """``landed`` keys of one input, keyed as ``_read_failures`` keys that input read alone."""
+    return {(0, *key[1:]) for key in landed if key[0] == source_index}
+
+
+def _last_failed_attempts(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> list[dict[str, Any]]:
+    """The selected failed attempt of every rollout that never landed.
+
+    A run with a manifest selects it from its run history, as its accounting does; a legacy output's sidecar row
+    that stands last is it.
+    """
+    rows: list[dict[str, Any]] = []
+    for source_index, path in enumerate(paths):
+        if manifest_path_for(path).exists():
+            rows += RolloutStore.read(path).selected("failure")
+        else:
+            rows += _read_failures(_landed_in(landed, source_index), [path]).rows.values()
+    return rows
+
+
 def _rollout_accounting(
     landed: set[tuple[Any, ...]],
-    failures: _Failures,
+    paths: Sequence[Path],
     *,
     limits: RunHealthLimits,
     limits_source: LimitsSource | Mapping[str, LimitsSource],
     duplicated: int,
+    run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
 ) -> dict[str, Any]:
-    """Count the rollouts each input owed against those that landed, failed or left no row, and judge the run.
+    """Project managed runs from selected history; preserve raw accounting for legacy runs.
 
-    ``landed`` holds ``(input index, task index, rollout index)`` of every persisted record. Failures come
-    from each input's ``_failures.jsonl`` sidecar, where the last attempt of a rollout stands; one that
-    later landed is not failed. A ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
+    Managed ``missing`` means reserved attempts with no outcome. Never-dispatched
+    work and intentional omissions have their own categories. Final failures include
+    exhausted budgets as well as terminal outcomes. A stopped collector supplies its
+    in-memory coverage so this path never reloads large rollout records on SIGTERM.
+    In a legacy sidecar, a ``record_omitted_rollouts`` row records no result: an interrupted attempt is the
     rollout's latest execution and leaves it missing, and a row never started is skipped.
-    ``is_terminal_failure`` splits them into
-    final ones, which are not retried, and not final ones, which are; the split says nothing of the cause. ``failed`` is null when no input has a sidecar.
-    ``expected``, ``missing`` and ``healthy`` need the ``_materialized_inputs.jsonl`` inventory and
-    are null when an input has none. A run is healthy when nothing is missing, no rollout is
-    recorded twice, and each kind of failure with a configured limit stays below it as a share of expected.
-    The limits are off (None) by default, so failures alone never make a run unhealthy unless configured.
     """
     # Lazy: rollout_collection imports this module, and health workers need none of its dependencies.
     from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
     from nemo_gym.rollout_collection import is_terminal_failure
 
-    failed, owed, any_sidecar = failures.rows, failures.owed, failures.any_sidecar
-    expected = None if owed is None else len(owed)
-    missing = None if owed is None else len(owed - landed - failed.keys())
-    final = sum(is_terminal_failure(row) for row in failed.values())
-    not_final = len(failed) - final
+    expected = missing = not_started = omitted = final = not_final = 0
+    by_class: Counter[str] = Counter()
+    inventory_known = True
+    any_sidecar = False
+    for source_index, path in enumerate(paths):
+        coverage = run_coverage[source_index] if run_coverage is not None else None
+        if coverage is None and manifest_path_for(path).exists():
+            coverage = RolloutStore.read(path).coverage()
+        if coverage is not None:
+            expected += coverage["expected"]
+            missing += coverage["missing"]
+            not_started += coverage["not_started"]
+            omitted += coverage["intentionally_omitted"]
+            final += coverage["failed_final"]
+            not_final += coverage["failed_not_final"]
+            by_class.update(coverage["failed_by_class"])
+            any_sidecar = True
+            continue
+
+        # Legacy outputs have no manifest from which to recover attempt selection.
+        landed_here = _landed_in(landed, source_index)
+        legacy = _read_failures(landed_here, [path])
+        any_sidecar = any_sidecar or legacy.any_sidecar
+        if legacy.owed is None:
+            inventory_known = False
+        else:
+            expected += len(legacy.owed)
+            missing += len(legacy.owed - landed_here - legacy.rows.keys())
+        final_here = sum(is_terminal_failure(row) for row in legacy.rows.values())
+        final += final_here
+        not_final += len(legacy.rows) - final_here
+        by_class.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in legacy.rows.values())
+
     reasons = []
-    if expected == 0:
-        reasons.append("no rollouts expected")
-    elif expected is not None:
-        if missing:
-            reasons.append(f"missing {missing} of {expected}")
-        if duplicated:
-            reasons.append(f"{duplicated} records share a rollout identity")
+    if inventory_known:
+        if expected == 0:
+            reasons.append("no rollouts expected")
+        else:
+            if missing or not_started:
+                reasons.append(f"missing {missing + not_started} of {expected}")
+            if duplicated:
+                reasons.append(f"{duplicated} records share a rollout identity")
     return {
-        "expected": expected,
+        "expected": expected if inventory_known else None,
         "failed": {
-            "total": len(failed),
+            "total": final + not_final,
             "final": final,
             "not_final": not_final,
-            "by_class": dict(
-                sorted(Counter(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in failed.values()).items())
-            ),
+            "by_class": dict(sorted(by_class.items())),
         }
         if any_sidecar
         else None,
-        "missing": missing,
-        "healthy": None if expected is None else not reasons,
+        "missing": missing if inventory_known else None,
+        "not_started": not_started if inventory_known else None,
+        "omitted": omitted,
+        "healthy": not reasons if inventory_known else None,
         "unhealthy_reasons": reasons,
-        # The limits the verdict was judged by, so a recheck reuses them and the decision can be reproduced.
         "limits": limits.summary(limits_source),
     }
 
@@ -761,22 +826,45 @@ def run_health_checks(
     ignored_checks: Sequence[str] = (),
     limits: RunHealthLimits = RunHealthLimits(),
     limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
+    run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
+    selected_projection: Path | None = None,
     model_call_capture_dirs: Sequence[Path] = (),
 ) -> HealthCheckResult:
     """Run the RFC's map/group/reduce pipeline and write both reports.
 
     ``model_call_capture_dirs`` are the run's model-call capture directories. A failed rollout's row carries no
     capture, so its timing in ``run.stats.timeouts`` is read from these instead.
+    ``selected_projection`` is the merged output of these managed runs, used when
+    their raw files contain superseded outcomes. Source histories still own failure
+    accounting; each projected row's run ID retains its source identity.
     """
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
-    paths = [rollout_paths] if isinstance(rollout_paths, Path) else list(rollout_paths)
+    paths = list([rollout_paths] if isinstance(rollout_paths, Path) else rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
+    needs_projection = any(not raw_outcomes_are_selected(path, artifacts=(path,)) for path in paths)
+    if needs_projection and selected_projection is None:
+        raise JournalHealthUnavailable(
+            "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
+            "Run health checks on a merged selected-result projection from `gym eval aggregate`."
+        )
     for path in paths:
         if not path.is_file():
             raise FileNotFoundError(f"Rollout JSONL not found: {path}")
 
-    lines = _index_jsonl(paths)
+    # A legacy run reached through a link keeps the link's name when its companions sit beside the link, as the
+    # aggregation that read it did; otherwise its companions are the ones beside the file the link resolves to.
+    paths = [resolve_rollout_path(path, read_only=True) for path in paths]
+    if needs_projection:
+        source_indices = {}
+        for index, path in enumerate(paths):
+            history = RolloutStore.read(path, import_legacy=False)
+            if history is None or history.manifest.run_id in source_indices:
+                raise JournalHealthUnavailable("A selected projection requires distinct manifest-backed source runs.")
+            source_indices[history.manifest.run_id] = index
+        lines = _index_jsonl([selected_projection], source_indices=source_indices)
+    else:
+        lines = _index_jsonl(paths)
     worker_inputs = [
         _WorkerInput(
             line=line,
@@ -823,19 +911,21 @@ def run_health_checks(
     summary = _reduce(digests, ignored)
     artifacts = summary["run"]["artifacts"]
     landed = {(line.source_index, d.task_index, d.rollout_index) for d, line in zip(digests, lines, strict=True)}
-    failures = _read_failures(landed, paths)
     artifacts.update(
         _rollout_accounting(
             landed,
-            failures,
+            paths,
             limits=limits,
             limits_source=limits_source,
             duplicated=summary["run"]["issues"]["rollout_duplicate_identity"],
+            run_coverage=run_coverage,
         )
     )
     # Every rollout's final record: its saved row, or the last failed attempt of one that never landed.
     timings = [digest.timing for digest in digests if digest.timing is not None]
-    timings += map(read_rollout_timing, _with_captured_calls(failures.rows.values(), model_call_capture_dirs))
+    timings += map(
+        read_rollout_timing, _with_captured_calls(_last_failed_attempts(landed, paths), model_call_capture_dirs)
+    )
     # Every failed attempt in the sidecars, so a limit or enforcer that only an earlier attempt named is sent as 0.
     attempts = (
         read_rollout_timing(row)
@@ -865,6 +955,7 @@ def write_provisional_summary(
     *,
     limits: RunHealthLimits = RunHealthLimits(),
     ignored_checks: Sequence[str] = (),
+    run_coverage: Mapping[str, Any] | None = None,
 ) -> Path:
     """Write the run accounting of a stopped run fast: ``rollouts.jsonl`` is not read, and the per-record checks
     are skipped.
@@ -876,10 +967,11 @@ def write_provisional_summary(
     landed_keys = {(0, task, rollout) for task, rollout in landed}
     artifacts = _rollout_accounting(
         landed_keys,
-        _read_failures(landed_keys, [rollout_path]),
+        [rollout_path],
         limits=limits,
         limits_source="config",
         duplicated=0,
+        run_coverage=[run_coverage],
     )
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     run_findings, run_coverage = _run_excessive_failures(artifacts, limits, ignored)
@@ -1045,6 +1137,7 @@ def health_check_run_dir(
     limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
         rollout_paths,
+        selected_projection=path / "rollouts.jsonl" if shards is not None else None,
         output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,
@@ -1067,3 +1160,73 @@ def health_check_run_dir(
     else:
         print(format_health_report(result))
     return result
+
+
+def _remove_health_reports(output_fpath: Path) -> None:
+    # A fresh run or a resume reports its own health; a report left by an earlier job must not stand for it.
+    for report in (QUALITY_SUMMARY_FILENAME, ROLLOUT_VERDICTS_FILENAME):
+        (output_fpath.parent / report).unlink(missing_ok=True)
+
+
+def _health_check_collected_rollouts(
+    output_fpath: Path,
+    config: Any,
+    landed_keys: set | None = None,
+    *,
+    coverage: dict | None = None,
+    terminated: bool = False,
+    model_call_capture_dirs: Sequence[Path] = (),
+) -> None:
+    """Write the quality summary for whatever a run collected; a run that never started collection has none.
+
+    After SIGTERM, Slurm kills the job once KillWait (120 s on some clusters) is over, and the full check can take
+    minutes on a large run. So a stopped run with ``landed_keys`` gets the provisional summary: the run
+    accounting only, without reading the rollouts.
+    """
+    if not output_fpath.exists():
+        return
+    from nemo_gym.health.timeouts import export_run_health_timeouts
+
+    if terminated and landed_keys is not None:
+        if aggregation_sources_path_for(output_fpath).is_file():
+            # A run drops the shard list with the first row it writes, so this run added none: the summary the
+            # aggregation wrote from its shards still holds, and the run accounting alone would replace it wrongly.
+            print("Shard-backed health was not recomputed after stopping; run `gym eval health-check` to check it.")
+            return
+        try:
+            summary_path = write_provisional_summary(
+                output_fpath,
+                landed_keys,
+                limits=config.run_health_limits,
+                ignored_checks=config.health_check_ignored_checks,
+                run_coverage=coverage,
+            )
+        except JournalHealthUnavailable as error:
+            print(f"Rollout health checks skipped: {error}")
+        except Exception:
+            logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")
+        else:
+            print(f"Provisional quality summary (run accounting only): {summary_path}")
+        return
+    try:
+        # An output `gym eval aggregate` merged shards into is checked from those shards, as the collector and a
+        # recheck check it: its own rows have none of their failures or inventories.
+        shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
+        health_result = run_health_checks(
+            shards if shards is not None else output_fpath,
+            selected_projection=output_fpath if shards is not None else None,
+            output_dir=output_fpath.parent,
+            workers=config.health_check_workers,
+            ignored_checks=config.health_check_ignored_checks,
+            limits=config.run_health_limits,
+            # This run's coverage describes its own rows; listed shards are checked with their own histories.
+            run_coverage=None if shards is not None else [coverage],
+            model_call_capture_dirs=model_call_capture_dirs,
+        )
+    except JournalHealthUnavailable as error:
+        print(f"Rollout health checks skipped: {error}")
+    except Exception:
+        logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
+    else:
+        print(format_health_report(health_result))
+        export_run_health_timeouts(health_result)

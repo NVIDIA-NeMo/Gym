@@ -1,10 +1,10 @@
 ---
 title: "OpenAI"
-description: "Use OpenAI (or any endpoint that natively serves the Responses API) with no conversion"
+description: "Connect to OpenAI or another Responses endpoint without translating between API formats"
 position: 2
 ---
 
-The `openai_model` server connects NeMo Gym to OpenAI. It forwards requests straight through with no conversion in either direction: a Responses request goes to OpenAI's [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and returns a Responses object, and a Chat Completions request goes to OpenAI's Chat Completions and returns a chat completion — OpenAI serves both natively.
+The `openai_model` server connects NeMo Gym to OpenAI without translating between API formats: a Responses request goes to OpenAI's [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and returns a Responses object, and a Chat Completions request goes to OpenAI's Chat Completions and returns a chat completion — OpenAI serves both natively.
 
 Because it is a pass-through, the Responses endpoint also works with any other backend that implements the Responses API natively — point `openai_base_url` at it. In practice that is rare: most hosted backends only expose Chat Completions and instead go through [Inference Providers](/model-server/inference-providers), which translates between the two formats.
 
@@ -19,6 +19,16 @@ This server exposes both endpoints and forwards each directly to the upstream en
 
 - **OpenAI Responses** — `/v1/responses`
 - **OpenAI Chat Completions** — `/v1/chat/completions`
+
+### Provider reasoning content
+
+Responses-compatible providers sometimes use `output_text` for a reasoning
+item's content. Before validating provider responses, this server changes that
+part's discriminator to `reasoning_text` only when it contains a string `text`
+and no other fields except optional empty `annotations: []`. Text, encrypted
+content, item order and other response fields are preserved without modifying
+the provider's response object. Unknown or malformed shapes still go through
+validation unchanged. Requests and continuation replay are unchanged.
 
 ## Set Your Credentials
 

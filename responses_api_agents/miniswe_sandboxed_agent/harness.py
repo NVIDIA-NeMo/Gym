@@ -414,6 +414,13 @@ for sig in (signal.SIGTERM, signal.SIGKILL):
                 termination = HarnessOutcome(reason="completed")
             elif status in {"LimitsExceeded", "RepeatedFormatError", "ContextWindowExceededError", "TimeExceeded"}:
                 termination = HarnessOutcome(reason="nonzero_exit", detail=status)
+            elif not status and native_trajectory is not None:
+                # mini-SWE saves the trajectory after every step and records an exit status whenever its loop
+                # ends, even on an exception, so a saved trajectory without one means the process was killed
+                # mid-run: by the agent's own command or by the per-process OOM killer.
+                termination = HarnessOutcome(
+                    reason="killed", exit_code=run_result.return_code, detail=termination.detail
+                )
             else:
                 termination = HarnessOutcome(
                     reason="infrastructure_error", detail=status or "mini-SWE produced no trajectory"

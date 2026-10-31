@@ -266,7 +266,7 @@ def test_native_config_reuses_prompt_agent_and_verifier():
     original["resources_server"]["name"] = "indic_mbpp_resources_server"
     assert original == translated
     assert indic.indic_mbpp_resources_server.resources_servers.scicodepile.subprocess_timeout == 120
-    relay = indic.indic_mbpp_environment_server.environment_servers.legacy_agent
+    relay = indic.indic_mbpp_environment_server.environment_servers.single_agent_turn_legacy
     assert relay.agent_server == {"type": "responses_api_agents", "name": "indic_mbpp_simple_agent"}
     assert {server.name for server in parser.filter_for_server_instance_configs(indic)} == {
         "policy_model",
@@ -313,7 +313,7 @@ def test_standalone_smoke_config_preserves_model_settings():
     assert dataset.num_repeats == 1
     assert dataset.type == "benchmark"
     assert dataset.jsonl_fpath == "benchmarks/indic/mbpp/data/review-smoke.jsonl"
-    relay = config.indic_mbpp_environment_server.environment_servers.legacy_agent
+    relay = config.indic_mbpp_environment_server.environment_servers.single_agent_turn_legacy
     assert relay.agent_server == {"type": "responses_api_agents", "name": "indic_mbpp_simple_agent"}
     assert {server.name for server in parser.filter_for_server_instance_configs(config)} == {
         "policy_model",

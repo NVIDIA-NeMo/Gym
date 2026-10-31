@@ -79,6 +79,12 @@ def _merge_provider_options(*layers: Mapping[str, Any]) -> dict[str, Any]:
     return merged
 
 
+# Every sandbox of one Compose project carries this label with the project name. Members
+# reach each other by pod IP and share storage, so a multi-cell front end (cell-router)
+# must place them together; it routes every create with the same value to one cell.
+PLACEMENT_GROUP_KEY = "nemo.nvidia.com/placement-group"
+
+
 def _seconds(value: str | int | float) -> float:
     if isinstance(value, (int, float)):
         return float(value)
@@ -519,6 +525,7 @@ class AsyncSandboxCompose:
                         **spec.metadata,
                         **(service.get("labels") or {}),
                         **self._runtime_metadata.get(name, {}),
+                        PLACEMENT_GROUP_KEY: self.project,
                     },
                     provider_options=_merge_provider_options(
                         spec.provider_options, self._service_options.get(name, {})
@@ -557,7 +564,7 @@ class AsyncSandboxCompose:
                     image=self.volume_init_image,
                     ttl_s=self.timeout_s + 3600,
                     entrypoint=["sh", "-c", "while :; do sleep 3600; done"],
-                    metadata=provider.shared_volume_metadata(),
+                    metadata={**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.project},
                     provider_options=provider.shared_volume_options(None, root),
                 ),
                 owns_provider=False,
@@ -575,7 +582,7 @@ class AsyncSandboxCompose:
             # shared storage, the copy-up seed (a sandbox of the service's own spec) and the mount options.
             provider = self._provider_for(name)
             volume_sources = self._volume_sources_for(name)
-            metadata = provider.shared_volume_metadata()
+            metadata = {**provider.shared_volume_metadata(), PLACEMENT_GROUP_KEY: self.project}
             helper = await self._volume_helper_for(provider, root)
             mounts = []
             for volume in service["volumes"]:

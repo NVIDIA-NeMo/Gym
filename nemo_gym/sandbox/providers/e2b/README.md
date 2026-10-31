@@ -73,7 +73,7 @@ provisioning the remaining images.
 | Section | Important fields |
 | --- | --- |
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
-| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, and `strict_resources`. |
+| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, `network` (`allow_out`/`deny_out`), `custom_extension_params` (AgentEnv `customExtensionParams`; creates through `POST /sandboxes`), and `strict_resources`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
 | `operations` | Retry count and exponential-backoff delays for safe, retryable operations. |
 

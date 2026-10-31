@@ -469,8 +469,10 @@ def test_validate_resume_rejects_changed_digest_and_preserves_unchanged_retries(
         return result(response={"metadata": {"oracle": "solved"}})
 
     oracle_collection.payload = payload
-    with pytest.raises(RuntimeError, match="None of the 1 dispatched rollouts produced a result"):
+    with pytest.raises(SystemExit) as exc:
         invoke()
+    assert exc.value.code == 75
+    assert "None of the 1 dispatched rollouts produced a result" in capsys.readouterr().out
     first_attempt = False
     invoke()
     assert len(dispatched) == 2 and dispatched[-1]["_ng_attempt_index"] == 1
@@ -521,12 +523,13 @@ def test_validate_resume_repairs_an_interrupted_final_record(tmp_path, monkeypat
     # Interrupted mid-append: one complete record and part of the next, cut one byte into 日, no newline.
     cut = second.encode().index("日".encode()) + 1
     rollouts.write_bytes(first.encode() + b"\n" + second.encode()[:cut])
-    invoke()
+    with pytest.warns(UserWarning, match="Removed .* bytes of incomplete final JSON"):
+        invoke()
     assert [_validation_key(row)[1] for row in dispatched[2:]] == [lost]
     rows = [json.loads(line) for line in rollouts.read_text().splitlines()]
     assert rows[0] == json.loads(first) and [row["_ng_task_id"]["task_id"] for row in rows] == [kept, lost]
     out = capsys.readouterr().out
-    assert "Dropped a truncated final line" in out and "oracle solved\t1.0" in out
+    assert "oracle solved\t1.0" in out
 
     # A complete final record without a newline is a result: nothing reruns.
     rollouts.write_text(rollouts.read_text().rstrip("\n"))

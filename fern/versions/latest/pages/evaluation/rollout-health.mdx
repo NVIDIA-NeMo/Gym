@@ -21,6 +21,14 @@ metrics, model servers, or agent behavior. It writes two additional report files
 
 ## When Health Checks Run
 
+<Note>
+Fresh runs, including those with a recovery manifest, support the checks below when every saved row still represents
+its task's selected attempt. Histories with superseded rows require a merged selected-result projection from
+`gym eval aggregate`; automatic checks print a skip message for those histories, and standalone checks explain
+how to export them. Reading and reporting those histories directly remains a follow-up to
+[evaluation resume](/main/evaluation/resume). These protections also apply through file symlinks.
+</Note>
+
 `gym eval run` runs health checks after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs health checks
 after aggregating the selected shards. Both commands print a short report:
 
@@ -300,17 +308,20 @@ as a number of calls.
 `run.artifacts` also counts the run against its `<output stem>_materialized_inputs.jsonl` inventory:
 
 - `expected`: rollouts in the inventory.
-- `failed`: the last failure row of each owed rollout in the `<output stem>_failures.jsonl` sidecar that did not later land, as `total`, `final`, `not_final` and `by_class`. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
-- `missing`: owed rollouts with neither a record nor a failure row.
-- `healthy`: false when a rollout is missing, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set. `unhealthy_reasons` names each cause.
+- `failed`: selected failures from the run manifest and saved history, as `total`, `final`, `not_final` and `by_class`. Intentional omissions are excluded; exhausted retry budgets count as final. For legacy runs without a manifest, this uses the last sidecar failure for each rollout that did not later land. `final` failures are ones a resume does not retry; `not_final` ones are still retryable. The split is by retry eligibility only and does not say whether the model or the infrastructure caused a failure. Null when there is no sidecar.
+- `missing`: for a run with a manifest, reserved executions with no outcome. Legacy runs use owed rollouts with neither a record nor a failure row.
+- `not_started`: tasks with no reserved execution in a managed run.
+- `omitted`: intentional omissions in a managed run; these do not count toward failure limits.
+- `healthy`: false when a rollout is missing or not started, two records share a rollout identity, or the final or non-final failures reach a configured limit as a share of `expected`. The failure limits are unset by default, so failures are counted but do not make the run unhealthy until a limit is set. `unhealthy_reasons` names each cause.
 - `limits`: the limits the run was judged by (`max_not_final_failure_fraction`, `max_final_failure_fraction`, null for no limit) and, in `source`, where each limit came from: `config` for the run's own settings, `persisted` when `gym eval health-check` reused it, `override` when its own limit flag replaced it. A flag value of `none` removes the limit, recorded as null with `override`.
 
-`expected`, `missing` and `healthy` are null without an inventory. The summary is also written when collection fails or Slurm stops the job with SIGTERM.
+`expected`, `missing` and `healthy` are null without an inventory. After collection starts, the summary is also written when collection fails or Slurm stops the job with SIGTERM. The built-in collector retains its run lock through reporting. A refused resume does not remove or replace reports from the saved run.
 
 ### Timeouts
 
 `run.stats.timeouts` counts the rollouts that ran out of time. It reads each rollout's final record: its row in the
-rollout file, or the last failure row of a rollout that never landed. `gym eval health-check` recomputes it from the
+rollout file, or the last failure row of a rollout that never landed. For a run with a manifest, that failure is
+the attempt the run history selects. `gym eval health-check` recomputes it from the
 same files, and from the run's model-call captures when given `--model-call-capture-dir` (see `time_split`). A
 recheck of a directory `gym eval aggregate` merged shards into reads the shards listed in `rollouts_sources.json`,
 with their failure rows, so it counts the same timeouts as the aggregation; a `--rollouts-file` path is counted alone.
@@ -394,7 +405,7 @@ such as `health/timeouts/timed_out` and `health/timeouts/by_evidence/typed`. A n
 enforcer that only an earlier failed attempt named is sent as 0, so a resumed tracking run does not keep its old
 count. A failed export is logged and does not stop the run.
 
-A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A stopped run exits with status 143, or with status 1 (`EVAL FAILED`) when `require_complete` is on, which is the default under `gym eval submit`.
+A run stopped by SIGTERM gets a provisional summary: the run accounting in `run.artifacts`, with `partial: true`, and no `run.verdicts` or `rollout_verdicts.jsonl`. It evaluates only `run_excessive_failures`, which needs no rollouts, and lists every other check in `run.artifacts.not_evaluated`. Its `healthy` is false when the accounting already has a reason and null otherwise. Run `gym eval health-check` on the run directory for the full summary; it judges the run by the limits the provisional summary recorded. A SIGTERM-stopped run exits with status 143. An interactive interruption with `require_complete` enabled reports `EVAL FAILED`.
 
 ### `rollout_verdicts.jsonl`
 
