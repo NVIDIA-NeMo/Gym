@@ -194,7 +194,7 @@ async def persisted(tmp_path, monkeypatch, case, reward, measured):
     assert verified.response == _agent_response()
     if case in ("healthy", "wrong", "native124", "artifact_timeout"):
         test = [k for c, k in sdk.commands if c.startswith("/tests/test.sh")]
-        assert test[0]["timeout_s"] == session.task.config.verifier.timeout_sec
+        assert 0 < test[0]["timeout_s"] <= session.task.config.verifier.timeout_sec
     if case == "artifact_timeout":
         assert verified.verifier_diagnostics
     if case == "original_failure":
@@ -337,3 +337,113 @@ def test_local_cleanup_failure_keeps_grade(tmp_path, monkeypatch):
     finally:
         for item in created:
             item.cleanup()
+
+
+def test_preparation_consumes_the_common_verifier_deadline(tmp_path):
+    async def check():
+        budget = 0.2
+
+        class SlowPreparation(Sandbox):
+            async def exec(self, command, **kwargs):
+                self.commands.append((command, kwargs))
+                if command.startswith("chmod"):
+                    await asyncio.sleep(0.12)
+                    return SandboxExecResult("", "", 0)
+                if command.startswith("/tests/test.sh"):
+                    self.tests += 1
+                    await asyncio.sleep(0.5)
+                raise AssertionError("No reward or optional transfer after unknown execution")
+
+        sdk = SlowPreparation("elapsed", 1)
+        env = environment(sdk, budget)
+        env.task = NS(config=NS(verifier=NS(timeout_sec=budget, env={}, user="root")))
+        diagnostics = []
+        start = asyncio.get_running_loop().time()
+        with pytest.raises(verifier.VerifierStatusUnknownError):
+            await verifier.run_verifier(env, tmp_path, diagnostics)
+        elapsed = asyncio.get_running_loop().time() - start
+        execution = [kwargs for command, kwargs in sdk.commands if command.startswith("/tests/test.sh")]
+        assert len(execution) == 1
+        assert 0 < execution[0]["timeout_s"] < 0.1
+        assert 0.18 <= elapsed < 0.28
+        assert diagnostics[-1]["operation"] == "verifier_execution"
+        assert [cause["exception_type"] for cause in diagnostics[-1]["causes"]] == ["TimeoutError", "CancelledError"]
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("transfer_phase", ["archive", "download", "cleanup"])
+def test_optional_transfer_uses_remaining_budget_and_retains_reward(tmp_path, transfer_phase):
+    async def check():
+        budget = 0.2
+
+        class SlowPreparation(Sandbox):
+            async def exec(self, command, **kwargs):
+                if command.startswith("chmod"):
+                    await asyncio.sleep(0.12)
+                if (transfer_phase == "archive" and command.startswith("tar ")) or (
+                    transfer_phase == "cleanup" and command.startswith("rm -f")
+                ):
+                    self.commands.append((command, kwargs))
+                    await asyncio.sleep(0.5)
+                return await super().exec(command, **kwargs)
+
+            async def download(self, remote, local):
+                if transfer_phase == "download" and not remote.endswith("reward.txt"):
+                    await asyncio.sleep(0.5)
+                return await super().download(remote, local)
+
+        sdk = SlowPreparation("elapsed", 1)
+        env = environment(sdk, budget)
+        env.task = NS(config=NS(verifier=NS(timeout_sec=budget, env={}, user="root")))
+        diagnostics = []
+        start = asyncio.get_running_loop().time()
+        result = await verifier.run_verifier(env, tmp_path, diagnostics)
+        elapsed = asyncio.get_running_loop().time() - start
+        assert result["rewards"] == {"reward": 1}
+        assert (tmp_path / "verifier/reward.txt").read_text() == "1"
+        assert sdk.tests == 1
+        assert 0.18 <= elapsed < 0.28
+        for _, kwargs in sdk.commands[1:]:
+            assert 0 < kwargs["timeout_s"] < 0.1
+        assert diagnostics[-1]["operation"] == "verifier_artifact_transfer"
+        if transfer_phase != "cleanup":
+            assert not any(command.startswith("rm -f") for command, _ in sdk.commands)
+
+    asyncio.run(check())
+
+
+@pytest.mark.parametrize("transfer_phase", ["lookup", "download"])
+def test_reward_transfer_cannot_restart_the_verifier_deadline(tmp_path, transfer_phase):
+    async def check():
+        budget = 0.2
+
+        class SlowPreparation(Sandbox):
+            async def exec(self, command, **kwargs):
+                if command.startswith("chmod"):
+                    await asyncio.sleep(0.12)
+                if command.startswith("if [ -f") and transfer_phase == "lookup":
+                    self.commands.append((command, kwargs))
+                    await asyncio.sleep(0.5)
+                return await super().exec(command, **kwargs)
+
+            async def download(self, remote, local):
+                if remote.endswith("reward.txt") and transfer_phase == "download":
+                    await asyncio.sleep(0.5)
+                return await super().download(remote, local)
+
+        sdk = SlowPreparation("elapsed", 1)
+        env = environment(sdk, budget)
+        env.task = NS(config=NS(verifier=NS(timeout_sec=budget, env={}, user="root")))
+        diagnostics = []
+        start = asyncio.get_running_loop().time()
+        with pytest.raises(verifier.VerifierStatusUnknownError):
+            await verifier.run_verifier(env, tmp_path, diagnostics)
+        elapsed = asyncio.get_running_loop().time() - start
+        assert 0.18 <= elapsed < 0.28
+        assert sdk.tests == 1
+        assert diagnostics[-1]["operation"] == "verifier_reward_transfer"
+        assert not (tmp_path / "verifier/reward.txt").exists()
+        assert not any(command.startswith("tar ") for command, _ in sdk.commands)
+
+    asyncio.run(check())

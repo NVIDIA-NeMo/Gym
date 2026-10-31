@@ -53,9 +53,10 @@ completed zero rewards remain scored. A client deadline or a sandbox result
 without a confirmed command outcome is inconclusive: neither proves that the
 submitted code exhausted the verifier's execution budget.
 
-The original task verifier budget is passed unchanged to the test command.
-Preparation and result transfer have separate bounded waits and cannot turn
-their infrastructure failure into a protocol zero. A confirmed completed command's
+Preparation, test execution, reward retrieval and optional log transfer share the
+original total task verifier deadline. Each command receives only the remaining
+allowance; no phase starts a fresh budget. Infrastructure failures do not become
+protocol zeros. A confirmed completed command's
 successfully retrieved authoritative reward survives failures while collecting
 optional logs or cleaning up local staging; those failures remain in
 `verifier_diagnostics`. No verifier command is repeated.

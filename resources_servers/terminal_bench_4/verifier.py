@@ -200,40 +200,43 @@ async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
     logs = Path(directory) / "verifier"
     logs.mkdir(parents=True, exist_ok=True)
     phase, rewards = "preparation", None
-    # Reuse existing bounds for infrastructure, without spending the test's scientific budget.
-    infrastructure_budget = min(timeout_sec, environment.config.default_exec_timeout_s)
+    # Preparation, execution and transfers share the original task verifier allowance.
+    deadline = asyncio.get_running_loop().time() + timeout_sec
+
+    def remaining():
+        value = deadline - asyncio.get_running_loop().time()
+        if value <= 0:
+            raise TimeoutError("The total verifier deadline has expired")
+        return value
+
     try:
-        async with asyncio.timeout(infrastructure_budget):
-            result = await environment.exec("chmod +x /tests/test.sh", user="root", timeout_sec=infrastructure_budget)
+        async with asyncio.timeout_at(deadline):
+            result = await environment.exec("chmod +x /tests/test.sh", user="root", timeout_sec=remaining())
             _require_command_outcome(result, "preparation")
             if result.return_code != 0:
                 raise VerifierStatusUnknownError("Verifier preparation command failed")
-        phase = "execution"
-        async with asyncio.timeout(timeout_sec):
+            phase = "execution"
             result = await environment.exec(
                 "/tests/test.sh > /logs/verifier/test-stdout.txt 2>&1",
                 env=resolve_env(settings.env),
                 user=settings.user,
-                timeout_sec=timeout_sec,
+                timeout_sec=remaining(),
             )
-        diagnostics.append(
-            {
-                "operation": "verifier_command",
-                "return_code": result.return_code,
-                "error_type": getattr(result, "error_type", None),
-            }
-        )
-        # A provider timeout can also mean cancelled status polling. Neither it nor rc124 proves a native deadline.
-        _require_command_outcome(result, "execution")
-        phase = "reward_transfer"
-        async with asyncio.timeout(infrastructure_budget) as transfer_deadline:
-
-            def remaining():
-                return max(0, transfer_deadline.when() - asyncio.get_running_loop().time())
-
+            diagnostics.append(
+                {
+                    "operation": "verifier_command",
+                    "return_code": result.return_code,
+                    "error_type": getattr(result, "error_type", None),
+                }
+            )
+            # A provider timeout can also mean cancelled status polling. Neither it nor rc124 proves a native deadline.
+            _require_command_outcome(result, "execution")
+            phase = "reward_transfer"
             rewards = await _download_reward(environment, logs, remaining, diagnostics)
             phase = "artifact_transfer"
-            await download_dir(environment.main, "/logs/verifier", logs, exclude=["reward.json", "reward.txt"])
+            await download_dir(
+                environment.main, "/logs/verifier", logs, exclude=["reward.json", "reward.txt"], deadline=deadline
+            )
     except Exception as error:
         _record_verifier_error(diagnostics, f"verifier_{phase}", error)
         if rewards is None:
