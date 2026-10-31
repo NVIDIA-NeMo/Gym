@@ -24,6 +24,7 @@ import re
 import shutil
 import subprocess
 import tempfile
+from collections.abc import Mapping
 from datetime import datetime
 from pathlib import Path
 
@@ -82,6 +83,7 @@ class KubernetesExecutor(BaseExecutor):
         *,
         keep_budget: bool = False,
         accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
     ) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 

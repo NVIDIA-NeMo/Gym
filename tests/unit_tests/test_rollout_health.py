@@ -1197,7 +1197,16 @@ _ACTIONABLE = {
         ]
     },
     "responses_answer": {"output": [{"type": "message", "content": [{"type": "output_text", "text": "cut off"}]}]},
-    "chat_tool_call": {"choices": [{"message": {"content": "", "tool_calls": [{"id": "t1", "type": "function"}]}}]},
+    "chat_tool_call": {
+        "choices": [
+            {
+                "message": {
+                    "content": "",
+                    "tool_calls": [{"id": "t1", "type": "function", "function": {"name": "run", "arguments": ""}}],
+                }
+            }
+        ]
+    },
     "messages_tool_use": {"content": [{"type": "thinking", "thinking": "partial"}, {"type": "tool_use", "id": "t1"}]},
 }
 
@@ -3528,4 +3537,46 @@ def test_response_population_keeps_supported_actionable_output(tmp_path: Path, r
     result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
 
     assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": []}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "calls",
+    [
+        [{"id": "", "type": "function", "function": {"name": "", "arguments": ""}}],
+        [{"id": "call-1", "type": "function"}],
+        [{"id": " ", "type": "function", "function": {"name": "lookup"}}],
+        [{"id": "call-1", "type": "function", "function": {"name": " "}}],
+        [{"id": 1, "type": "custom", "custom": {"name": "lookup"}}],
+        [{"id": "call-1", "type": "custom", "custom": {"name": None}}],
+        {"id": "call-1"},
+        "not-a-list",
+        1,
+    ],
+)
+def test_chat_tool_identity_is_required_in_persisted_response_population(tmp_path, calls):
+    response = {"choices": [{"finish_reason": "stop", "message": {"content": None, "tool_calls": calls}}]}
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response, finish_reason="stop")])])
+    before = path.read_bytes()
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": ["c1"]}
+    assert path.read_bytes() == before
+
+
+@pytest.mark.parametrize(
+    "message",
+    [
+        {"tool_calls": [{"id": "call-1", "type": "function", "function": {"name": "no_args", "arguments": ""}}]},
+        {"tool_calls": [{"id": "call-1", "type": "custom", "custom": {"name": "custom", "input": ""}}]},
+        {"content": "ordinary wrong answer"},
+        {"refusal": "I cannot help with this request"},
+    ],
+)
+@pytest.mark.parametrize("finish_reason", ["stop", "length"])
+def test_chat_actionable_output_and_length_fault_remain_distinct(tmp_path, message, finish_reason):
+    response = {"choices": [{"finish_reason": finish_reason, "message": message}]}
+    path = _write_fixture(tmp_path, [(_record(0, 0), [_call(response=response, finish_reason=finish_reason)])])
+    before = path.read_bytes()
+    result = run_health_checks(path, output_dir=tmp_path / "report", workers=1)
+    assert result.rollouts[0].responses == {"selected": ["c1"], "faulted": ["c1"] if finish_reason == "length" else []}
     assert path.read_bytes() == before

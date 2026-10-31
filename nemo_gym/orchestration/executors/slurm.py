@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import tempfile
+from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
@@ -182,9 +183,16 @@ def _remote_managed_evidence(
             "source_job_identity",
             "checkpoint_enabled",
         }
-        if selected.model_dump(exclude=allowed) != collected.model_dump(exclude=allowed):
+        # A pinned reader older than the accounting snapshot drops it; the host collection owns it either way.
+        compared = allowed | {"accounting_snapshot"}
+        if selected.model_dump(exclude=compared) != collected.model_dump(exclude=compared):
             raise ValueError("remote Store reader changed collection evidence")
-        return selected.model_copy(update={"source_job_identity": collected.source_job_identity})
+        return selected.model_copy(
+            update={
+                "source_job_identity": collected.source_job_identity,
+                "accounting_snapshot": collected.accounting_snapshot,
+            }
+        )
     except (RuntimeError, OSError, ValueError) as error:
         return collected.model_copy(
             update={
@@ -405,6 +413,10 @@ class SlurmExecutor(BaseExecutor):
             collected = CollectedEvidence.model_validate_json(
                 conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
             )
+            if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
+                raise RuntimeError(
+                    "saved submission config changed while collecting recovery evidence; collect it again"
+                )
             if collected.managed_store:
                 if isinstance(conn, LocalConnection):
                     collected = select_managed_evidence(collected, job_dir)
@@ -445,6 +457,11 @@ class SlurmExecutor(BaseExecutor):
                 except (RuntimeError, OSError, ValueError):
                     # Unavailable accounting cannot grant fresh walltime.
                     collected.accounted_walltime_s = None
+        if collected.accounting_snapshot is not None:
+            collected.accounting_snapshot = {
+                **collected.accounting_snapshot,
+                "resume_config": resume.model_dump_json(),
+            }
         decision = decide_from_collected(
             collected,
             max_infra_retries=resume.max_retries,
@@ -465,11 +482,14 @@ class SlurmExecutor(BaseExecutor):
         *,
         keep_budget: bool = False,
         accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
         With ``keep_budget`` (``--recover``) the job keeps the spent retry count, walltime and per-rollout attempts;
-        a job.sh rendered before that option would reset them, so it is refused.
+        a job.sh rendered before that option would reset them, so it is refused. ``accounting_snapshot`` is the
+        collected evidence's ``accounting_snapshot``; it is required with ``keep_budget`` and rechecked under the
+        resubmit lock before anything in the job dir changes, so a decision made on stale accounting is refused.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -488,6 +508,28 @@ class SlurmExecutor(BaseExecutor):
                 collector_path = shlex.quote(str(collector_config_path(job_dir)))
                 collector_update = [
                     f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+                ]
+            snapshot_check = []
+            if keep_budget:
+                stale = "run accounting changed since the recovery evidence was collected; collect it again"
+                if accounting_snapshot is None:
+                    raise RuntimeError(f"Resubmit of {benchmark} refused: no collected accounting snapshot")
+                resume = config.driver.benchmarks[benchmark].resume_config
+                files = {name: digest for name, digest in accounting_snapshot.items() if name != "resume_config"}
+                if accounting_snapshot.get("resume_config") != (resume.model_dump_json() if resume else None):
+                    raise RuntimeError(f"Resubmit of {benchmark} refused: {stale}")
+                check = (
+                    "import hashlib, json, os, sys\n"
+                    "def digest(name):\n"
+                    "    try:\n"
+                    "        with open(name, 'rb') as f: return hashlib.sha256(f.read()).hexdigest()\n"
+                    "    except FileNotFoundError: return None\n"
+                    "expected=json.loads(sys.argv[1])\n"
+                    "names=set(expected)|{n for n in os.listdir('.') if n.startswith('.gym_followup_queued.')}\n"
+                    "sys.exit(0 if {n: digest(n) for n in names}==expected else 1)\n"
+                )
+                snapshot_check = [
+                    f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(files))} || fail {shlex.quote(stale)}"
                 ]
             budget_update = []
             if keep_budget and accounted_walltime_s is not None:
@@ -532,6 +574,8 @@ class SlurmExecutor(BaseExecutor):
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
                         'fail "A job of this run is still pending or running in $PWD."; done',
+                        # Before any job.sh, collector, counter or sbatch change, under the same lock.
+                        *snapshot_check,
                         # An older chain retries FAILED, OUT_OF_MEMORY and DEADLINE as infrastructure failures.
                         # Refuse it before anything in the job dir changes.
                         f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "

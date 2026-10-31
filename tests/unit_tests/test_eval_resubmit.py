@@ -1065,3 +1065,66 @@ def test_started_worker_waits_for_real_resubmit_wrapper_acknowledgement(tmp_path
         assert all((job_dir / name).read_bytes() == value for name, value in before.items())
         assert (job_dir / ".gym_chain_incomplete").read_text().startswith("GYM_ACCOUNTING_UNKNOWN:")
     assert "4242" in (job_dir / ".gym_job_chain").read_text().split()
+
+
+@pytest.mark.parametrize(
+    "change", ["none", "chain", "claim", "retries", "walltime", "incomplete", "config", "offset", "config_before_lock"]
+)
+def test_recover_revalidates_the_collected_accounting_inside_the_resubmit_lock(
+    tmp_path: Path, slurm_bin: Path, monkeypatch: pytest.MonkeyPatch, change: str
+) -> None:
+    # An allocation can end between evidence collection and the locked resubmit: squeue no longer lists it,
+    # so only the accounting files it changed show that the collected decision is stale.
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir, _, _ = _resumable_run(tmp_path)
+    collect = SlurmExecutor.recovery_evidence
+
+    def collect_then_change(self, *args, **kwargs):
+        result = collect(self, *args, **kwargs)
+        if change == "chain":
+            (job_dir / ".gym_job_chain").write_text("100\n101\n102\n")
+        elif change == "claim":
+            (job_dir / ".gym_followup_queued.102").write_text("102\n")
+        elif change == "retries":
+            (job_dir / RETRY_FILE_NAME).write_text("3\n")
+        elif change == "walltime":
+            (job_dir / ".gym_accumulated_walltime").write_text("7300\n")
+        elif change == "incomplete":
+            (job_dir / ".gym_chain_incomplete").write_text("follow-up queued\n")
+        elif change == "config":
+            resolved = job_dir.parent / RESOLVED_CONFIG_NAME
+            resolved.write_text(resolved.read_text().replace("16:00:00", "17:00:00"))
+        elif change == "offset":
+            (job_dir / "artifacts" / "rollouts_resubmit_offset").write_text("5\n")
+        counters.update(
+            {name: (job_dir / name).read_bytes() for name in (RETRY_FILE_NAME, ".gym_accumulated_walltime")}
+        )
+        return result
+
+    original_run = LocalConnection.run
+
+    def run_with_late_config_change(self, commands, *args, **kwargs):
+        if change == "config_before_lock" and any(".gym_resubmit.lock" in command for command in commands):
+            resolved = job_dir.parent / RESOLVED_CONFIG_NAME
+            resolved.write_text(resolved.read_text().replace("16:00:00", "17:00:00"))
+        return original_run(self, commands, *args, **kwargs)
+
+    monkeypatch.setattr(LocalConnection, "run", run_with_late_config_change)
+    counters: dict[str, bytes] = {}
+    monkeypatch.setattr(SlurmExecutor, "recovery_evidence", collect_then_change)
+    job_sh = (job_dir / "job.sh").read_text()
+    if change == "none":
+        out = recover(*_handle(job_dir))
+        assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+        # The one eligible submit records the sacct-accounted chain walltime once.
+        assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+        return
+    with pytest.raises(RuntimeError, match="changed since the recovery evidence was collected"):
+        recover(*_handle(job_dir))
+    assert not (slurm_bin / "env").exists()
+    assert (job_dir / "job.sh").read_text() == job_sh
+    assert {name: (job_dir / name).read_bytes() for name in counters} == counters
+    assert not (job_dir / ".gym_resubmit.lock").exists()
+    assert (job_dir / ".gym_chain_incomplete").exists() == (change == "incomplete")
+    assert _record(job_dir).benchmark_job("gsm8k").job_id == "100"

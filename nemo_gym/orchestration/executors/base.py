@@ -14,7 +14,7 @@
 # limitations under the License.
 
 from abc import ABC, abstractmethod
-from collections.abc import Callable
+from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import ClassVar
 
@@ -96,6 +96,7 @@ class BaseExecutor(ABC):
         *,
         keep_budget: bool = False,
         accounted_walltime_s: float | None = None,
+        accounting_snapshot: Mapping[str, str | None] | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark` of `record` again, in place, and return its updated entry.
 

@@ -15,8 +15,8 @@ from nemo_gym.orchestration.recovery import (
 )
 
 
-def session_fixture():
-    value = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-trial-operations.json").read_text())
+def session_fixture(case="healthy"):
+    value = json.loads((Path(__file__).parent / f"fixtures/cpu-grading-mcqa-{case}.json").read_text())
     c = CollectedEvidence.model_validate(value)
     row = c.results[0]
     environment = c.quality["provenance"]["servers"][row["_ng_environment_server"]]
@@ -40,10 +40,10 @@ def health(c):
     return trial_health(d, c)[0]
 
 
-def test_session_consumer_boundary_keeps_ordinary_wrong_zero():
-    c = session_fixture()
-    assert health(c) is True
-    c.results[0]["reward"] = 0
+@pytest.mark.parametrize("case,reward", [("healthy", 1), ("wrong", 0)])
+def test_session_consumer_boundary_keeps_ordinary_wrong_zero(case, reward):
+    c = session_fixture(case)
+    assert c.results[0]["reward"] == reward
     assert health(c) is True
 
 
@@ -70,6 +70,7 @@ def test_session_consumer_boundary_keeps_ordinary_wrong_zero():
 )
 def test_session_trial_rejects_incomplete_or_contradictory_metadata(mutation):
     c = session_fixture()
+    assert health(c) is True
     row = c.results[0]
     t = row["ng_trial_observations"]
     if mutation == "checkpoint":

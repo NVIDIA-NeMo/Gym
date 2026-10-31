@@ -559,3 +559,41 @@ def test_recovery_counters_preserve_observed_mcqa_gate(counters, expected):
     assert trial_health(decision, collected)[0] is expected
     assert collected.quality["observed_upstream_recovery"] == counters
     assert decision.action.value == "noop"
+
+
+@pytest.mark.parametrize("reasons", [1, "malformed", {}, True, 0, ""])
+def test_nested_optional_quality_reasons_cannot_abort_saved_outcomes(tmp_path, reasons):
+    from nemo_gym.orchestration.recovery import quality_inputs
+
+    a, _ = setup(tmp_path)
+    summary_path = a / "quality_summary.json"
+    summary = json.loads(summary_path.read_text())
+    summary["run"]["artifacts"]["unhealthy_reasons"] = reasons
+    write_json(summary_path, summary)
+    c = collect(a)
+    before = snapshot(a)
+    decision, gate = evaluate(c)
+    validity, validity_reasons, health, health_reasons = quality_inputs(decision, c, max_unhealthy_fraction=0.02)
+    assert validity is None and health is None
+    assert validity_reasons == health_reasons == ["quality summary artifacts.unhealthy_reasons is malformed"]
+    assert decision.action.value == "noop" and decision.counts == {"scored": 2}
+    assert gate["status"] == "FAILED" and gate["score"] == 0.0
+    assert snapshot(a) == before
+
+
+@pytest.mark.parametrize("reasons", [None, [], ["diagnostic"]])
+def test_optional_quality_reason_list_and_null_remain_supported(tmp_path, reasons):
+    from nemo_gym.orchestration.recovery import quality_inputs
+
+    a, _ = setup(tmp_path)
+    path = a / "quality_summary.json"
+    summary = json.loads(path.read_text())
+    summary["run"]["artifacts"]["unhealthy_reasons"] = reasons
+    write_json(path, summary)
+    c = collect(a)
+    before = snapshot(a)
+    decision, gate = evaluate(c)
+    validity, _, health, _ = quality_inputs(decision, c, max_unhealthy_fraction=0.02)
+    assert validity is True and health is False
+    assert decision.action.value == "noop" and gate["score"] == 0.0
+    assert snapshot(a) == before

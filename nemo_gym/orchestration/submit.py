@@ -163,6 +163,7 @@ def recover(
             benchmark,
             keep_budget=True,
             accounted_walltime_s=collected.accounted_walltime_s if collected is not None else None,
+            accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
         )
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow

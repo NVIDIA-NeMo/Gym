@@ -875,6 +875,9 @@ def followup_snapshot():
         return None
 initial_followups = followup_snapshot()
 source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
+accounting_files = (".gym_infra_retries", ".gym_accumulated_walltime", ".gym_job_chain",
+                    ".gym_chain_incomplete", "../resolved-config.yaml", "artifacts/rollouts_resubmit_offset")
+accounting_snapshot = {name: sha256(os.path.join(d, name)) for name in accounting_files}
 chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
 unknown_accounting = accounting_unknown()
 mlflow = {"live_run_id": None, "receipt": None}
@@ -972,8 +975,13 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
 if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
     quality["source_matches"] = False
 stable_sources = (source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files}
+                  and accounting_snapshot == {name: sha256(os.path.join(d, name)) for name in accounting_files}
                   and initial_followups is not None and initial_followups == followup_snapshot())
 collected["source_digests"] = source_snapshot if stable_sources else None
+# The scheduler accounting a resubmit must find unchanged under its lock: counters, chain, marker and claims.
+collected["accounting_snapshot"] = (
+    accounting_snapshot | initial_followups[1]
+) if stable_sources else None
 # Do not upgrade a stale scheduler-state read into a fresh budget. The executor and generated job
 # recheck the durable unknown marker under the existing submission/admission boundary as well.
 if not stable_sources or accounting_unknown():
@@ -1001,6 +1009,8 @@ class CollectedEvidence(BaseModel):
     mlflow: dict[str, Any] | None = None
     managed_store: bool = False
     source_digests: dict[str, str | None] | None = None
+    # Job-dir accounting file -> sha256 (None when absent) at collection, plus the saved resume_config.
+    accounting_snapshot: dict[str, str | None] | None = None
     source_job_identity: tuple[str, int, int] | None = None
     managed_selection: list[ManagedRecoveryFact] | None = None
     managed_reader_error: str | None = None
@@ -1465,7 +1475,11 @@ def quality_inputs(
         reason = "quality summary is not bound to this run's sole rollouts.jsonl source"
         return None, [reason], None, [reason]
     artifacts = quality.get("artifacts") or {}
-    fe_reasons = [str(r) for r in artifacts.get("unhealthy_reasons") or []]
+    raw_reasons = artifacts.get("unhealthy_reasons")
+    if raw_reasons is not None and not isinstance(raw_reasons, list):
+        reason = "quality summary artifacts.unhealthy_reasons is malformed"
+        return None, [reason], None, [reason]
+    fe_reasons = [str(r) for r in raw_reasons or []]
     fe_valid = artifacts.get("healthy") if isinstance(artifacts.get("healthy"), bool) else None
     if artifacts.get("partial"):
         fe_valid, fe_reasons = None, fe_reasons + ["partial summary: per-record checks not evaluated"]

@@ -242,7 +242,7 @@ class FakeExecutor:
         FakeExecutor.calls.append("reverify")
         return RecoveryOutcome(decision=decision, ok=True, dispatched="reverify")
 
-    def resubmit(self, record, benchmark, *, keep_budget=False, accounted_walltime_s=None):
+    def resubmit(self, record, benchmark, *, keep_budget=False, accounted_walltime_s=None, accounting_snapshot=None):
         FakeExecutor.calls.append("resubmit" if keep_budget else "resubmit-resetting-budget")
         return type("Job", (), {"job_id": "4242"})()
 

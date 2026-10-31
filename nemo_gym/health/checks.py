@@ -493,6 +493,24 @@ def _call_locator(call: dict[str, Any], fallback: int) -> dict[str, int | str]:
     return {"call_id": str(call.get("model_call_id") or call.get("response_id") or fallback)}
 
 
+def _chat_has_usable_tool_call(calls: Any) -> bool:
+    if not isinstance(calls, list):
+        return False
+    for call in calls:
+        if not isinstance(call, dict) or call.get("type") not in ("function", "custom"):
+            continue
+        payload = call.get(call["type"])
+        if (
+            isinstance(call.get("id"), str)
+            and call["id"].strip()
+            and isinstance(payload, dict)
+            and isinstance(payload.get("name"), str)
+            and payload["name"].strip()
+        ):
+            return True
+    return False
+
+
 def _response_has_usable_output(response: Any) -> bool:
     """Whether a saved response holds something the agent can act on: answer text, a refusal or a tool call, in the
     Responses, Chat Completions or Messages shape. Reasoning alone, a summary of it included, is not usable."""
@@ -534,7 +552,7 @@ def _response_has_usable_output(response: Any) -> bool:
             _nonempty(choice.get("text"))
             or _nonempty(message.get("content"))
             or _nonempty(message.get("refusal"))
-            or message.get("tool_calls")
+            or _chat_has_usable_tool_call(message.get("tool_calls"))
         ):
             return True
     return False
