@@ -9,7 +9,7 @@ from tests.unit_tests.test_tool_trial_coverage import fixture
 
 
 def _judged(mutate):
-    """The actual healthy CPU trial fixture relabelled as judge-graded; used only for negative controls."""
+    """The actual healthy CPU trial fixture relabelled as judge-graded; used for explicit consumer-boundary controls."""
     collected = copy.deepcopy(fixture("healthy"))
     observed = collected.results[0]["ng_trial_observations"]
     grade = observed["verifier_invocations"][0]["grading_operations"][0]
@@ -196,3 +196,188 @@ def test_stdlib_collector_preserves_only_bounded_chat_completion_metadata(tmp_pa
     collected = collect(artifacts)
     projected = collected.results[0]["ng_trial_observations"]["model_calls"][0]["response_metadata"]
     assert (projected["dialect"], projected["finish_reason"]) == expected
+
+
+def _recovered_fixture():
+    collected = copy.deepcopy(fixture("healthy"))
+    observed = collected.results[0]["ng_trial_observations"]
+    grade = observed["verifier_invocations"][0]["grading_operations"][0]
+    grade["kind"] = "llm_judge"
+    call = _judge_call(observed)
+    _own(observed, call)
+    grade["dependencies"] = [_dep(call)]
+    meta = call["response_metadata"]
+    final = meta["model_operations"][0]
+    final.update(retry_wait_s=0, request_elapsed_ms=2)
+    failed = dict(
+        final,
+        operation_id="earlier-judge-op",
+        final_attempt_id="earlier-judge-attempt",
+        outcome="failed",
+        failure_id="judge-error",
+    )
+    meta["model_operations"].insert(0, failed)
+    event = dict(
+        event_id="judge-error",
+        boundary="model",
+        operation="model_request",
+        operation_id="earlier-judge-op",
+        attempt_id="earlier-judge-attempt",
+        cause_id=None,
+        failure_kind="model_request_error",
+        http_status=503,
+    )
+    meta["failure_report"]["events"] = {"judge-error": event}
+    collected.results[0]["_ng_failure_events"] = {"judge-error": dict(event)}
+    return collected, meta, grade
+
+
+def test_recovered_judge_counts_are_separate_and_do_not_change_score_or_denominator():
+    from nemo_gym.orchestration.recovery import trial_health
+
+    c, _, _ = _recovered_fixture()
+    before = copy.deepcopy(c.model_dump())
+    d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    counters = {}
+    assert _observed_trial_operations(d, c, judge_recovery=counters) is True
+    assert counters == {
+        "judge_recovered_attempts": 1,
+        "judge_recovered_operations": 1,
+        "observed_grading_attempt_errors": 1,
+        "observed_grading_failed_operations": 1,
+    }
+    assert trial_health(d, c)[0] is True
+    assert d.expected == 1 and d.action.value == "noop"
+    assert c.model_dump() == before
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        "omitted",
+        "selected",
+        "missing_event",
+        "orphan",
+        "cycle",
+        "wrong_operation",
+        "wrong_attempt",
+        "wrong_terminal",
+        "wrong_count",
+        "missing_elapsed",
+        "infinite_elapsed",
+        "negative_wait",
+        "missing_status",
+        "duplicate_operation",
+        "duplicate_attempt",
+        "final_failed",
+        "wrong_grade",
+        "missing_dependency",
+        "unrelated_row_event",
+    ],
+)
+def test_recovered_judge_missing_or_foreign_facts_cannot_accept(change):
+    from nemo_gym.orchestration.recovery import trial_health
+
+    c, meta, grade = _recovered_fixture()
+    report = meta["failure_report"]
+    event = report["events"]["judge-error"]
+    failed, final = meta["model_operations"]
+    if change == "omitted":
+        report["omitted"] = True
+    elif change == "selected":
+        report["failure_id"] = "judge-error"
+    elif change == "missing_event":
+        report["events"] = {}
+    elif change == "orphan":
+        report["events"]["orphan"] = dict(event, event_id="orphan", operation_id="foreign")
+    elif change == "cycle":
+        event["cause_id"] = "judge-error"
+    elif change == "wrong_operation":
+        event["operation_id"] = "foreign"
+    elif change == "wrong_attempt":
+        event["attempt_id"] = "foreign"
+    elif change == "wrong_terminal":
+        failed["failure_id"] = "foreign"
+    elif change == "wrong_count":
+        failed["http_attempts"] = 2
+    elif change == "missing_elapsed":
+        failed.pop("request_elapsed_ms")
+    elif change == "infinite_elapsed":
+        failed["request_elapsed_ms"] = float("inf")
+    elif change == "negative_wait":
+        failed["retry_wait_s"] = -1
+    elif change == "missing_status":
+        event["http_status"] = None
+    elif change == "duplicate_operation":
+        final["operation_id"] = failed["operation_id"]
+    elif change == "duplicate_attempt":
+        final["final_attempt_id"] = failed["final_attempt_id"]
+    elif change == "final_failed":
+        final["outcome"] = "failed"
+    elif change == "wrong_grade":
+        grade["result_binding_sha256"] = "0" * 64
+    elif change == "missing_dependency":
+        grade["dependencies"] = []
+    elif change == "unrelated_row_event":
+        c.results[0]["_ng_failure_events"]["unrelated"] = dict(event, event_id="unrelated")
+    d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    counters = {}
+    assert _observed_trial_operations(d, c, judge_recovery=counters) is False
+    assert counters == {}
+    assert trial_health(d, c)[0] is None
+
+
+def test_recovered_event_id_cannot_be_reused_by_another_judge_dependency():
+    c, meta, grade = _recovered_fixture()
+    observed = c.results[0]["ng_trial_observations"]
+    original = observed["model_calls"][-1]
+    extra = copy.deepcopy(original)
+    extra["model_call_id"] = "other-judge-call"
+    extra_meta = extra["response_metadata"]
+    extra_meta["response_id"] = "other-judge-response"
+    for operation in extra_meta["model_operations"]:
+        operation["operation_id"] += "-other"
+        operation["final_attempt_id"] += "-other"
+    event = extra_meta["failure_report"]["events"]["judge-error"]
+    event["operation_id"] += "-other"
+    event["attempt_id"] += "-other"
+    observed["model_calls"].append(extra)
+    _own(observed, extra)
+    grade["dependencies"].append(_dep(extra))
+    d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert _observed_trial_operations(d, c) is False
+
+
+@pytest.mark.parametrize(
+    "dialect,status,finish",
+    [
+        ("responses", "completed", None),
+        ("responses", "incomplete", None),
+        ("chat", None, "stop"),
+        ("chat", None, "length"),
+    ],
+)
+def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish):
+    from nemo_gym.orchestration.recovery import trial_health
+
+    c, meta, grade = _recovered_fixture()
+    grade["outcome"] = "unknown"
+    meta.update(dialect=dialect, response_status=status, finish_reason=finish)
+    before = copy.deepcopy(c.model_dump())
+    d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    counters, faults = {}, []
+    assert _observed_trial_operations(d, c, judge_recovery=counters, grading_failures=faults) is True
+    assert len(faults) == 1
+    assert counters == {
+        "judge_recovered_attempts": 0,
+        "judge_recovered_operations": 0,
+        "observed_grading_attempt_errors": 1,
+        "observed_grading_failed_operations": 1,
+    }
+    c.quality["observed_upstream_recovery"] = {"recovered_attempt_errors": 1, "recovered_operations": 1}
+    before = copy.deepcopy(c.model_dump())
+    assert trial_health(d, c)[0] is False
+    assert d.expected == 1 and d.action.value == "noop"
+    assert c.model_dump() == before
+    grade["dependencies"] = []
+    assert trial_health(d, c)[0] is None

@@ -730,13 +730,13 @@ def trial_metadata(value):
     result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
     operations = value.get("model_operations")
-    result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures")}
+    result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms")}
                                   if isinstance(operation, dict) else None for operation in operations] if isinstance(operations, list) else None
     report = value.get("failure_report")
     result["failure_report"] = None
     if isinstance(report, dict) and isinstance(report.get("events"), dict):
         result["failure_report"] = {"failure_id": report.get("failure_id"), "omitted": report.get("omitted"),
-            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id")}
+            "events": {event_id: {k: event.get(k) for k in ("event_id", "boundary", "operation", "operation_id", "attempt_id", "cause_id", "failure_kind", "http_status")}
                        if isinstance(event, dict) else None for event_id, event in report["events"].items()}}
     return result
 import hashlib
@@ -1874,11 +1874,19 @@ def trial_boundary(quality: Mapping[str, Any] | None) -> str:
     )
 
 
-def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> bool:
+def _observed_trial_operations(
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None,
+    *,
+    judge_recovery: dict[str, int] | None = None,
+    grading_failures: list[str] | None = None,
+) -> bool:
     """Join observed model/tool operations and the outer verifier invocation for every expected trial.
 
     A source-reviewed programmatic grading operation must bind the saved response and score. Empty captured
     model calls alone never establish grading coverage; old or uninstrumented verifiers remain unknown.
+    Recovered grading attempts are reported separately and do not count toward the trial-health threshold;
+    every failed attempt must join the same completed, result-bound grading dependency.
     """
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
@@ -1902,6 +1910,14 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
     input_task_ids = {_identity(item): item.get("_ng_collected_task_id") for item in collected.materialized or []}
     populations = (set(), set(), set(), set(), set())
     grading_ids = set()
+    recovered = {
+        "judge_recovered_attempts": 0,
+        "judge_recovered_operations": 0,
+        "observed_grading_attempt_errors": 0,
+        "observed_grading_failed_operations": 0,
+    }
+    recovered_events = {}
+    invalid_grades = []
 
     def nonempty(value):
         return isinstance(value, str) and bool(value.strip())
@@ -1919,7 +1935,7 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             and (ref.get("response_id") is None or ref["response_id"] == meta["response_id"])
         )
 
-    def completed_once(call):
+    def completed_once(call, *, judge=False, valid_grade=True):
         """One successful HTTP response with one completed physical attempt, ids unique in the run."""
         meta = call["response_metadata"]
         operations, report = meta["model_operations"], meta["failure_report"]
@@ -1934,13 +1950,118 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                     and meta.get("response_status") is None
                     and meta.get("finish_reason") == "stop"
                 )
+                or (
+                    judge
+                    and not valid_grade
+                    and (
+                        (meta.get("dialect") == "responses" and meta.get("response_status") == "incomplete")
+                        or (
+                            meta.get("dialect") == "chat"
+                            and meta.get("response_status") is None
+                            and meta.get("finish_reason") in ("length", "content_filter")
+                        )
+                    )
+                )
             )
-            or len(operations) != 1
+            or not isinstance(operations, list)
+            or not operations
             or not isinstance(report["events"], dict)
-            or report["events"]
             or report["omitted"] is not False
             or report["failure_id"] is not None
         ):
+            return False
+        if judge and (len(operations) > 1 or report["events"]):
+            events = report["events"]
+            used = set()
+            failed_operations = 0
+            for number, operation in enumerate(operations):
+                final = number == len(operations) - 1
+                op_id, attempt_id = operation.get("operation_id"), operation.get("final_attempt_id")
+                attempts = operation.get("http_attempts")
+                transport = operation.get("transport_failures")
+                if (
+                    not nonempty(op_id)
+                    or not nonempty(attempt_id)
+                    or op_id in populations[2]
+                    or attempt_id in populations[4]
+                    or operation.get("outcome") != ("completed" if final else "failed")
+                    or type(attempts) is not int
+                    or attempts < 1
+                    or type(transport) is not int
+                    or not 0 <= transport <= attempts
+                    or any(
+                        type(operation.get(key)) not in (int, float)
+                        or not math.isfinite(operation[key])
+                        or operation[key] < 0
+                        for key in ("retry_wait_s", "request_elapsed_ms")
+                    )
+                ):
+                    return False
+                owned = {
+                    key: event
+                    for key, event in events.items()
+                    if isinstance(event, dict) and event.get("operation_id") == op_id
+                }
+                if len(owned) != attempts - int(final):
+                    return False
+                ids = set()
+                for key, event in owned.items():
+                    eid = event.get("attempt_id")
+                    if (
+                        key != event.get("event_id")
+                        or not nonempty(key)
+                        or not nonempty(eid)
+                        or eid in ids
+                        or eid in populations[4]
+                        or key in used
+                        or key in recovered_events
+                        or event.get("boundary") != "model"
+                        or event.get("operation") != "model_request"
+                        or event.get("failure_kind") != "model_request_error"
+                        or event.get("cause_id") is not None
+                        or type(event.get("http_status")) is not int
+                        or not 400 <= event["http_status"] <= 599
+                    ):
+                        return False
+                    ids.add(eid)
+                    used.add(key)
+                if final:
+                    if operation.get("failure_id") is not None or attempt_id in ids:
+                        return False
+                elif (
+                    operation.get("failure_id") not in owned
+                    or owned[operation["failure_id"]].get("attempt_id") != attempt_id
+                ):
+                    return False
+                if owned:
+                    failed_operations += 1
+                populations[2].add(op_id)
+                populations[4].update(ids | {attempt_id})
+            if used != set(events):
+                return False
+            if not all(
+                nonempty(value)
+                for value in (
+                    call["model_call_id"],
+                    meta["model_ref"]["type"],
+                    meta["model_ref"]["name"],
+                    meta["response_id"],
+                )
+            ):
+                return False
+            identity = (meta["model_ref"]["type"], meta["model_ref"]["name"], meta["response_id"])
+            if call["model_call_id"] in populations[0] or identity in populations[1]:
+                return False
+            populations[0].add(call["model_call_id"])
+            populations[1].add(identity)
+            recovered_events.update(events)
+            recovered["observed_grading_attempt_errors"] += len(used)
+            recovered["observed_grading_failed_operations"] += failed_operations
+            if valid_grade:
+                recovered["judge_recovered_attempts"] += len(used)
+                recovered["judge_recovered_operations"] += failed_operations
+            return True
+        if len(operations) != 1 or report["events"]:
             return False
         operation = operations[0]
         if (
@@ -1979,6 +2100,7 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
 
     try:
         for row in rows:
+            prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
             resource = servers[agent["resources_server"]]
             environment = servers[row["_ng_environment_server"]]
@@ -1992,7 +2114,6 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                 or row.get(FAILURE_ID) is not None
                 or row.get("_ng_failure_events_omitted", False) is not False
                 or not isinstance(row.get(FAILURE_EVENTS, {}), dict)
-                or row.get(FAILURE_EVENTS, {})
             ):
                 return False
             observed = row["ng_trial_observations"]
@@ -2064,7 +2185,12 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
             binding = row.get("_ng_collected_grading_binding")
             if (
                 grade.get("kind") != ("programmatic_calculation" if judge_calls is None else "llm_judge")
-                or grade.get("outcome") != "completed"
+                or grade.get("outcome")
+                not in (
+                    ("completed", "unknown")
+                    if judge_calls is not None and grading_failures is not None
+                    else ("completed",)
+                )
                 or (judge_calls is None and grade.get("dependencies") != [])
                 or not nonempty(grade.get("operation_id"))
                 or grade["operation_id"] in grading_ids
@@ -2075,8 +2201,18 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                 return False
             grading_ids.add(grade["operation_id"])
             populations[3].add(verifier["invocation_id"])
-            if judge_calls is not None and not all(completed_once(call) for call in judge_calls):
+            if judge_calls is not None and not all(
+                completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed") for call in judge_calls
+            ):
                 return False
+            for event_id, event in row.get(FAILURE_EVENTS, {}).items():
+                if (
+                    event_id in prior_recovered_events
+                    or event_id not in recovered_events
+                    or not isinstance(event, dict)
+                    or any(event.get(key) != value for key, value in recovered_events[event_id].items())
+                ):
+                    return False
             ordered = []
             for number, turn in enumerate(turns, 1):
                 if (
@@ -2142,6 +2278,8 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                         return False
                 elif not emitted:
                     return False
+            if judge_calls is not None and grade["outcome"] == "unknown":
+                invalid_grades.append(_identity(row))
             saved_response = row.get("response")
             if (
                 set(requested) != set(tool_by_id)
@@ -2153,6 +2291,10 @@ def _observed_trial_operations(decision: RecoveryDecision, collected: CollectedE
                 return False
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
+    if judge_recovery is not None:
+        judge_recovery.update(recovered)
+    if grading_failures is not None:
+        grading_failures.extend(invalid_grades)
     return True
 
 
@@ -2183,17 +2325,27 @@ def trial_health(
         or any(_count(recovery.get(key)) is None for key in ("recovered_attempt_errors", "recovered_operations"))
     ):
         return None, "trial: recovered attempt/operation counters are malformed or incomplete"
-    if isinstance(recovery, dict) and any(
-        recovery[key] > 0 for key in ("recovered_attempt_errors", "recovered_operations")
+    judge_recovery: dict[str, int] = {}
+    invalid_grades: list[str] = []
+    covered = _observed_trial_operations(
+        decision, collected, judge_recovery=judge_recovery, grading_failures=invalid_grades
+    )
+    if isinstance(recovery, dict) and (
+        recovery["recovered_attempt_errors"] > judge_recovery.get("observed_grading_attempt_errors", 0)
+        or recovery["recovered_operations"] > judge_recovery.get("observed_grading_failed_operations", 0)
     ):
         return (
             None,
-            "trial: recovered attempt/operation failures are observed; their trial-health treatment is not defined",
+            "trial: recovered failures are not fully joined to a completed grading operation; treatment is not defined",
         )
-    if _observed_trial_operations(decision, collected):
+    if covered:
+        failed += len(invalid_grades)
+        rate = failed / decision.expected
         return (
-            True,
-            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); actual model/tool and bound grading operations cover every identity and repeat",
+            rate < limit,
+            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
+            f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; "
+            "actual model/tool and bound grading operations cover every identity and repeat",
         )
     return None, (
         f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "
@@ -2267,7 +2419,7 @@ def gate_summary_from_collected(
     )
     # The acceptance gate's response and trial health need their own counters and denominators; quality_summary's
     # verdicts are per rollout, so they are reported in warnings, never used as either. A positive trial gate
-    # requires source-bound operation evidence for the supported path; recovered failures remain unknown.
+    # requires source-bound operation evidence. Only recovered grading failures with complete joins are accepted.
     trial_passed, trial_reason = trial_health(decision, collected, limit=criteria.max_trial_failure_fraction)
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
@@ -2294,6 +2446,9 @@ def gate_summary_from_collected(
         health_reasons=health_reasons,
     )
     task["criteria"] = criteria.report()
+    judge_recovery: dict[str, int] = {}
+    _observed_trial_operations(decision, collected, judge_recovery=judge_recovery, grading_failures=[])
+    task["observed_grading_recovery"] = judge_recovery or None
     judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
     task["warnings"] = (
         task["warnings"]

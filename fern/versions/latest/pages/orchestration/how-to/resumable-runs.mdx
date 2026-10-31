@@ -26,6 +26,8 @@ To tune it, pass a mapping instead of `true`:
 
 Only executors that support it may set `resumable`, and Slurm does. The setting is per benchmark.
 
+Recovered grading attempts are reported separately and do not count toward the trial-health threshold when every observed attempt is joined to the same completed grading operation and its valid saved verdict. A completed grader that returns a bound result without a valid verdict counts as a trial fault; missing or unbound grading evidence remains unknown. The denominator remains the full expected trial inventory, including repeats.
+
 ## How it works
 
 The job script begins with a prologue that runs before any service starts. Each job in the chain receives its predecessor's Slurm job ID, looks at that job's final state with `sacct`, and decides whether to carry on. **Before doing any real work**, it queues its own successor with `sbatch --dependency=afternotok:<this job> --kill-on-invalid-dep=yes`, so the chain continues even if this job is killed mid-run.
