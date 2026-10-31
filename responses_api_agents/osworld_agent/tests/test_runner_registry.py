@@ -128,6 +128,16 @@ def test_nano_omni_profile_includes_model_transport_and_sandbox() -> None:
     assert server_config["max_trajectory_length"] == 3
 
 
+def test_nano_omni_profile_pins_truncated_history_reasoning() -> None:
+    config_path = BENCHMARK_CONFIG_DIR / "osworld_agent_nano_omni.yaml"
+    config = yaml.safe_load(config_path.read_text(encoding="utf-8"))
+
+    model_config = config["policy_model"]["responses_api_models"]["vllm_model"]
+    # Every reference score was measured with the template rendering earlier
+    # assistant turns without their reasoning.
+    assert model_config["chat_template_kwargs"] == {"truncate_history_thinking": True}
+
+
 @pytest.mark.parametrize(
     ("runner_name", "action_space", "observation_type"),
     [

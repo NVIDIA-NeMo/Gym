@@ -198,9 +198,94 @@ Docker daemon on the environment host validates that the device is available.
 
 ### Nemotron 3 Nano Omni with vLLM
 
-Start the checkpoint through the deployment layer on a model host with enough
-GPU memory. After its OpenAI-compatible endpoint is reachable from the Gym
-host, prepare the benchmark with the Nano Omni profile:
+This section applies to Nemotron 3 Nano Omni, the Omni v3 checkpoint
+`nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` at revision
+`24e67ea000b7c2837fc8f9488aa2008524fac8ba`. The `nano_omni` profile reproduces
+the tested benchmark only together with the serving configuration below. The
+profile fixes the agent side: the
+`NemotronV3NanoOmniAgent` prompt and response parser, 100 steps, the fixed
+three-image history, temperature 0.6, top_p 0.95, and a 4096-token output limit
+per step. The model server must use the same chat template and reasoning parser.
+
+#### Serve the checkpoint
+
+| Item | Value |
+| --- | --- |
+| Checkpoint | `nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16` at revision `24e67ea000b7c2837fc8f9488aa2008524fac8ba`, with its own tokenizer and processor |
+| vLLM | 0.23.0 |
+| Chat template | `chat_template.jinja` from `nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16`, SHA-256 `ab7813c3abdd9cb655905a410728b26c7884eca45ddfab8d9f931553485a7862` |
+| Reasoning parser | `nano_v3`, from `nano_v3_reasoning_parser.py` in the same repository, SHA-256 `aafb12208054504f619cbdd01837e1532a482ad937ed987bfe9a13fb812ae2b7` |
+| Chat template arguments | `truncate_history_thinking=true`, set in the profile's `chat_template_kwargs` |
+| Context length | 64,000 tokens |
+
+The checkpoint embeds this template in its `tokenizer_config.json`, but vLLM
+serves the checkpoint's separate `chat_template.jinja` (SHA-256
+`41428e0c65e312c359df2495ef5284769a9520b15a693deda4c34a1538208faa`) unless
+`--chat-template` is given. Do not replace `nano_v3` with vLLM's built-in
+`nemotron_v3` parser. Keep the checkpoint's own tokenizer: the text-only
+tokenizer in the 30B repository does not match the Omni processor's image
+placeholders.
+
+The tokenizer, chat template and reasoning parser belong to this checkpoint
+revision and change as the models evolve. A later revision of this checkpoint,
+or another Nemotron generation such as Nemotron 3.5 Super or Nemotron 4, ships
+its own tokenizer and chat template and may need a different reasoning parser.
+For example, the Nemotron 3.5 Super launchers in
+`benchmarks/nemotron_3.5_super/vllm_configs/` serve that checkpoint's own
+template with vLLM's `nemotron_v3` parser. Take each model's tokenizer, template
+and parser from its own checkpoint and model card, and record their digests as
+in the table above. Do not reuse this section's files, digests or reference
+scores for another model. Validate the `nano_omni` profile before using it with
+one: its `model_protocol_id` (`nano-omni-v3-osworld-v1`), prompt and response
+parser were validated on Omni v3 only.
+
+With the checkpoint's default template and the built-in parser, many responses
+put a literal `\n` before `## Action`. An agent with a strict action parser
+scored about 20% raw with that serving and about 48% with the configuration
+below. This profile's parser tolerates the escaped newline, but every reference
+score in this section uses the configuration below.
+
+`truncate_history_thinking=true` is the template's own default. With it, the
+template renders each earlier assistant message as an empty `<think></think>`
+followed by the turn's Action, so the image-backed history turns carry no
+reasoning. Turns folded into the text history still include their
+`## Thought`. Every reference score in this section was measured this way, and
+the profile sets the argument explicitly so that it cannot drift. Sending
+`truncate_history_thinking=false` keeps the reasoning in those turns. NVIDIA's
+[computer-use cookbook for this model](https://github.com/NVIDIA-NeMo/Nemotron/tree/main/usage-cookbook/Nemotron-3-Nano-Omni/computer-use-agent-with-omni)
+does that by default, but it changes the model input, so validate it as a
+separate recipe before comparing its scores with these.
+
+```bash
+hf download nvidia/NVIDIA-Nemotron-3-Nano-30B-A3B-BF16 \
+  chat_template.jinja nano_v3_reasoning_parser.py \
+  --revision cbd3fa9f933d55ef16a84236559f4ee2a0526848 \
+  --local-dir nano-v3-serving
+sha256sum nano-v3-serving/chat_template.jinja nano-v3-serving/nano_v3_reasoning_parser.py
+
+vllm serve nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16 \
+  --revision 24e67ea000b7c2837fc8f9488aa2008524fac8ba \
+  --served-model-name SERVED_NANO_OMNI_MODEL \
+  --trust-remote-code \
+  --tensor-parallel-size 8 \
+  --max-model-len 64000 \
+  --chat-template nano-v3-serving/chat_template.jinja \
+  --reasoning-parser-plugin nano-v3-serving/nano_v3_reasoning_parser.py \
+  --reasoning-parser nano_v3 \
+  --mamba-ssm-cache-dtype float32 \
+  --structured-outputs-config.backend=xgrammar \
+  --structured-outputs-config.enable_in_reasoning=false
+```
+
+The reference runs used tensor parallelism 8 on 8×H100; parallelism changes
+throughput, not the recipe. `tools/probe_model_endpoint.py` checks the served
+model name and a three-image request. It does not check the template or the
+parser, so compare the `vllm serve` arguments with the table above.
+
+#### Prepare and run
+
+After the endpoint is reachable from the Gym host, prepare the 361-task set
+described in [Datasets](#datasets) with the Nano Omni profile:
 
 ```bash
 cd benchmarks/osworld
@@ -208,12 +293,60 @@ python3 prepare.py \
   --profile nano_omni \
   --execution-backend gym_sandbox \
   --vm-path /absolute/path/to/Ubuntu.qcow2 \
+  --input /absolute/path/to/test_nogdrive.jsonl \
   --policy-base-url http://MODEL_HOST:8000/v1 \
   --policy-model-name SERVED_NANO_OMNI_MODEL
 ```
 
 Then use `tools/start_control.sh` and `tools/run_eval.sh` exactly as shown in
 the quickstart.
+
+`prepare.py` writes `--temperature`, `--top-p` and `--max-output-tokens` into
+`env.yaml` only when they are passed. A value written there overrides the
+profile for every request, so pass these flags only to change the recipe on
+purpose.
+
+#### Tune the output limit
+
+The per-step output limit is tunable. The profile uses 4096 tokens, and the
+AgentENV reference runs passed `--max-output-tokens 16384`. Both values
+produced the reference scores below; they were not compared in isolation.
+
+Reasoning tokens count against the limit. A response that reaches it ends with
+`finish_reason='length'`, and the agent rejects it as unfinished and samples
+again. A rollout whose retries also reach the limit ends with
+`termination_reason=model_output_truncated`. To choose a value:
+
+1. Run a representative sample of tasks with the profile's value.
+2. Count the model calls whose `finish_reason` is `length` and the rollouts
+   that end with `model_output_truncated`. Each rollout's trajectory record and
+   the [full model I/O log](#full-model-io) record `finish_reason` for every
+   model call.
+3. If more than a small share of calls stop at the limit, raise it with
+   `--max-output-tokens`. At 16384, one AgentENV run had 1 of its 15,565 model
+   calls stop at the limit.
+4. Keep the longest prompt plus the limit within the server's
+   `--max-model-len`. With three screenshots, prompts in the reference runs
+   reached about 38,000 tokens at most (P99 about 24,000), so 16384 fits in
+   64,000.
+5. Report the value with the results.
+
+#### Reference scores for Omni v3
+
+Use these Omni v3 results on the 361 tasks to check that a deployment follows
+the recipe. Repeated runs of one configuration have differed by 1.2 to 2.8
+points.
+
+| Backend | Proxy-required tasks | Output limit | Raw reward rate | Binary success rate |
+| --- | --- | ---: | ---: | ---: |
+| OpenSandbox Pool | proxy enabled | 4096 | 50.97% | 48.48% |
+| AgentENV | proxy disabled | 16384 | 44.61–48.13% (4 runs) | 42.66–45.98% |
+
+Both rows use the serving configuration and profile above with 100 steps, on
+Gym revisions from August to October 2026. The AgentENV runs passed
+`--max-output-tokens 16384`. The proxy and output-limit differences were not
+measured in isolation. A result several points below these ranges usually means
+a serving or sampling mismatch.
 
 The default overlay uses the explicit fixed policy and sends the current
 screenshot plus at most two historical screenshots, compacting older
@@ -357,6 +490,47 @@ metadata is included in the original create request, so keep a stable,
 run-unique `OSWORLD_RUN_ID` and run the exact-ID cleanup above after an abnormal
 exit or create timeout. Once the SDK returns a handle, Gym performs normal
 `kill()` and local `close()` cleanup directly.
+
+### AgentENV backend
+
+The `gym_agentenv` backend restores each task's desktop from an AgentENV
+(kvcache-ai/AgentENV) template and drives it through Gym's E2B provider, because
+AgentENV implements the E2B control-plane API. The template must contain the
+OSWorld guest, so there is no qcow2 to pass. `configs/osworld_agentenv.yaml`
+documents the provider settings, including the gateway routing
+(`connection.port_routing`) that `E2BProvider.endpoint()` uses to reach the
+guest's service ports.
+
+```bash
+export AGENTENV_URL=https://AGENTENV_CONTROL_PLANE
+export AGENTENV_API_KEY=YOUR_AGENTENV_API_KEY
+export AGENTENV_TEMPLATE=YOUR_OSWORLD_TEMPLATE
+
+cd benchmarks/osworld
+python3 prepare.py \
+  --profile nano_omni \
+  --execution-backend gym_agentenv \
+  --input /absolute/path/to/test_nogdrive.jsonl \
+  --output /absolute/run/root/results/rollouts.jsonl \
+  --server-venv-root /absolute/run/root/server-venvs \
+  --policy-base-url http://MODEL_HOST:8000/v1 \
+  --policy-model-name SERVED_NANO_OMNI_MODEL \
+  --force-env
+```
+
+- The reference runs used the E2B SDK 2.46.0, which creates sandboxes with
+  `POST /sandboxes`. Later SDK releases create them with `POST /v2/sandboxes`;
+  confirm that your deployment accepts that call before upgrading. Gym passes
+  an explicit `-c` when it builds server environments, and uv then ignores
+  `UV_CONSTRAINT`, so install a pinned SDK into the agent environment directly.
+- For a control plane whose certificate comes from a private CA, point
+  `SSL_CERT_FILE` at a bundle that includes the CA; the E2B SDK and aiohttp read
+  it. OSWorld's guest forwarder uses `requests` with `trust_env=False` and
+  verifies only against the agent environment's `certifi` bundle, so that
+  bundle needs the CA as well. Keep certificate verification enabled.
+- If the guests cannot reach your proxy, leave the proxy disabled, which is the
+  adapter default. The 45 proxy-required tasks then run direct and usually score
+  lower.
 
 ## Multi-environment runs
 
@@ -612,10 +786,13 @@ benchmark-local config.
 The [agent configuration reference](../../responses_api_agents/osworld_agent/README.md#configuration)
 documents the shared environment, runner, timeout, cache, proxy, evaluation,
 and sampling fields. Per-task `responses_create_params` override YAML sampling
-defaults, and explicit CLI overrides have the highest priority.
+defaults, and explicit CLI overrides have the highest priority. `prepare.py`
+writes `responses_create_params` into `env.yaml` only for the sampling flags
+passed to it, so a profile's own values apply otherwise.
 
-The Nano Omni overlay uses the tested three-image window, a 4096-token response
-limit, a five-second post-action wait, and parser retries. Optional parser-error
+The Nano Omni overlay, tested with the Omni v3 checkpoint, uses the
+three-image window, a 4096-token response limit, a five-second post-action
+wait, and parser retries. Optional parser-error
 feedback, repeated-action guidance, and a pre-DONE checklist are available in
 `agent_kwargs` without requiring another agent class.
 
@@ -623,7 +800,8 @@ Its `temperature=0.6` and `top_p=0.95` values follow NVIDIA's thinking-mode
 recommendation in the
 [checkpoint model card](https://huggingface.co/nvidia/Nemotron-3-Nano-Omni-30B-A3B-Reasoning-BF16/blob/24e67ea000b7c2837fc8f9488aa2008524fac8ba/README.md#model-parameters).
 The 4096-token output limit is the tested OSWorld agent setting rather than the
-model card's longer general-purpose reasoning budget; these values are
+model card's longer general-purpose reasoning budget, and it can be tuned as
+described in [Tune the output limit](#tune-the-output-limit); these values are
 model-specific and do not change defaults for other runners.
 
 ### Proxy-required tasks
@@ -736,6 +914,14 @@ raw reward preserves fractional evaluator credit. Both rates use the same
 completed-rollout denominator and are reported regardless of `reward_mode`,
 which continues to control the training reward returned by each rollout.
 
+An infeasible task scores only when the model itself ends the episode with
+`FAIL`; for Nano Omni that is `computer.terminate(status="failure")`. The
+adapter does not append `FAIL` when a rollout reaches `max_steps`, and it never
+turns a malformed response into `FAIL`. Some harnesses append `FAIL` at the step
+limit, which also credits infeasible tasks that ran out of steps. Rescoring
+three recent Nano Omni runs that way raised their raw rates by 0.55 to 2.77
+points, so compare results only under the same rule.
+
 ## Source composition and external capability patches
 
 The OSWorld integration branch contains only changes owned by that branch.
@@ -828,6 +1014,21 @@ The repository includes:
 Additional inputs may be supplied with `prepare.py --input`; each JSONL row
 must follow the same `verifier_metadata.osworld_task` contract as the committed
 examples. Generated full datasets are intentionally not committed.
+
+Nano Omni results in this README use the 361 tasks of OSWorld's
+`test_nogdrive` manifest: the 369 tasks of `test_all` without the 8 that need
+private Google Drive credentials. Build that input from the OSWorld revision
+pinned in `responses_api_agents/osworld_agent/requirements.txt`:
+
+```bash
+python3 benchmarks/osworld/tools/convert_osworld_tasks.py \
+  --osworld-root /absolute/path/to/JeffPengCoder-OSWorld \
+  --manifest test_nogdrive \
+  --output /absolute/path/to/test_nogdrive.jsonl
+```
+
+Report raw and binary rates over all 361 tasks. Rerun a task that was masked by
+an infrastructure failure instead of scoring it as zero or dropping it.
 
 ## Troubleshooting
 
