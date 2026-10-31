@@ -3526,3 +3526,108 @@ def test_native_errors_use_captured_attempt_facts(setup, attempt, message, expec
             OutcomeAction.VERIFY if attempt["status"] == 400 else OutcomeAction.RETRY
         )
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()
+
+
+@pytest.mark.parametrize("case", ["budget", "operator", "unknown_kill", "cleanup_failed"])
+async def test_stopped_response_keeps_its_outcome_through_collection_and_resume(setup, tmp_path, monkeypatch, case):
+    """An acknowledged stop marks the response; actual verification and failures still decide its outcome."""
+    from httpx import ASGITransport, AsyncClient
+
+    from environment_servers.single_agent_turn.tests.test_app import _environment_server, _request, _Response
+    from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
+    from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.rollout_store import RolloutStore
+    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+
+    agent, sandbox = setup
+    sandbox.blocked = True
+    sandbox.events = "\n".join(sandbox.events.splitlines()[:-1])
+    request, session_id, task = await activate(agent, sandbox)
+    reason = "operator" if case == "operator" else "budget"
+    stopped = await agent.stop_rollout(seed().episode_id.capture_key, RolloutStopRequest(reason=reason))
+    assert stopped.stopped
+    response = await task
+    assert response.status == "incomplete" and response.error is None
+    assert json.loads(response.metadata["ng_rollout_stop"]) == {"reason": reason}
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+    environment, dependency = _environment_server()
+    returned = response.model_dump(mode="json")
+    if case == "unknown_kill":
+        # A separate failed outcome remains a failure even if it also carries an operator marker.
+        returned.update(status="failed")
+        returned["metadata"][AGENT_OUTCOME_METADATA_KEY] = AgentOutcome(failure_kind="kill_shaped").model_dump_json()
+        del dependency.responses[4]  # No verifier response is available for an ungraded interruption.
+    else:
+        verified = json.loads(dependency.responses[4].body)
+        verified.update(response=returned, reward=0.0)
+        dependency.responses[4] = _Response(verified)
+    dependency.responses[2] = _Response(returned)
+    if case == "cleanup_failed":
+        dependency.responses[5] = ConnectionError("resources cleanup disconnected")
+        dependency.responses.append(ConnectionError("resources cleanup still disconnected"))
+
+    materialized = _request().task.model_dump(mode="json")
+    source = tmp_path / "input.jsonl"
+    source.write_text(json.dumps(materialized) + "\n")
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+        environment_server_routes={"test:source": "environment"},
+        disable_aggregation=True,
+        disable_health_check=True,
+        route_failures_to_sidecar=True,
+    )
+    run_calls = []
+    async with AsyncClient(
+        transport=ASGITransport(app=environment.setup_webserver()), base_url="http://environment"
+    ) as http:
+
+        async def post(*, server_name, url_path, json, **kwargs):
+            assert server_name == "environment" and url_path == "/run"
+            run_calls.append(json)
+            result = await http.post(url_path, json=json)
+            result.raise_for_status()
+            return FakeResponse(result.status_code, result.json())
+
+        collector = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        collector.global_config_dict = OmegaConf.create({"environment": {"environment_servers": {"custom": {}}}})
+        if case == "unknown_kill":
+            from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+            with pytest.raises(IncompleteEvaluationError, match="no score"):
+                await RolloutCollectionHelper().run_from_config(config)
+        else:
+            await RolloutCollectionHelper().run_from_config(config)
+        store = RolloutStore.read(Path(config.output_jsonl_fpath))
+        coverage = store.coverage()
+        if case == "unknown_kill":
+            assert coverage["successful"] == 0 and coverage.get("final_zeros", 0) == 0
+            assert len(store.failures()) == 1
+            assert "/verify" not in [path for _, path, _ in dependency.calls]
+        else:
+            assert coverage["successful"] == 1 and coverage.get("final_zeros", 0) == 0
+            rows = [json.loads(line) for line in Path(config.output_jsonl_fpath).read_text().splitlines()]
+            assert rows[0]["reward"] == 0.0
+            assert rows[0]["response"]["metadata"]["ng_rollout_stop"] == response.metadata["ng_rollout_stop"]
+            assert [path for _, path, _ in dependency.calls].count("/verify") == 1
+            if case == "cleanup_failed":
+                events = rows[0]["_ng_failure_events"]
+                cleanup_events = [event for event in events.values() if event["operation"] == "episode.cleanup"]
+                assert len(cleanup_events) == 2
+                assert {event["failure_kind"] for event in cleanup_events} == {"session_release_failed"}
+                assert {event["stage"] for event in cleanup_events} == {"cleanup"}
+                assert rows[0].get("_ng_failure_id") is None
+                assert all(
+                    event["foreign_error"]["exception_type"].endswith("ConnectionError") for event in cleanup_events
+                )
+        assert store.pending() == []
+        await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
+        if case == "unknown_kill":
+            assert RolloutStore.read(Path(config.output_jsonl_fpath)).coverage()["complete"] is False
+            with pytest.raises(RuntimeError, match="0/1"):
+                await RolloutCollectionHelper().run_from_config(
+                    config.model_copy(update={"resume_from_cache": True, "require_complete": True})
+                )
+        assert len(run_calls) == 1
+    sandbox.launch.assert_awaited_once()

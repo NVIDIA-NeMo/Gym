@@ -20,7 +20,7 @@ from typing_extensions import Self
 from nemo_gym.client.http_client import format_exception_with_response_body
 from nemo_gym.config.config_types import AggregateMetrics, AggregateMetricsRequest, BaseRunServerInstanceConfig
 from nemo_gym.core.episode import EpisodeId, rollout_context
-from nemo_gym.core.failure_kinds import EPISODE_FAILED, FailureStage
+from nemo_gym.core.failure_kinds import EPISODE_FAILED, SESSION_RELEASE_FAILED, FailureStage
 from nemo_gym.failure_transport import reply_failure_report, report_for_current_request
 from nemo_gym.server_runtime._checkpoint.control import CheckpointMode
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
@@ -36,7 +36,7 @@ from nemo_gym.server_runtime.episode_types import (
     FailureReport,
 )
 from nemo_gym.server_utils import SimpleServer
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
 
 LOGGER = logging.getLogger(__name__)
@@ -118,6 +118,7 @@ class CleanupContext:
     episode_id: EpisodeId
     cleanup_timeout_seconds: float
     _cleanups: list[_CleanupEntry] = field(default_factory=list)
+    failure_report: FailureReport = field(default_factory=FailureReport)
 
     def register_cleanup(self, name: str, callback: CleanupCallback) -> CleanupHandle:
         entry = _CleanupEntry(name=name, callback=callback)
@@ -129,11 +130,25 @@ class CleanupContext:
             try:
                 async with asyncio.timeout(self.cleanup_timeout_seconds):
                     await entry.close()
-            except TimeoutError:
+            except TimeoutError as error:
+                self._observe_failure(entry, error)
                 # The owner's expiry or reaping takes over; the earlier-registered callbacks still run.
                 LOGGER.error(f"Episode cleanup timed out: {entry.name} episode_id={self.episode_id}")
-            except Exception:
+            except Exception as error:
+                self._observe_failure(entry, error)
                 LOGGER.exception(f"Episode cleanup failed: {entry.name}")
+
+    def _observe_failure(self, entry: _CleanupEntry, error: Exception) -> None:
+        observed = NgFailureEvent(
+            boundary=FailureBoundary.ENVIRONMENT,
+            failure_kind=SESSION_RELEASE_FAILED,
+            failure_reason=f"Episode cleanup failed: {entry.name}"[:2000],
+            stage="cleanup",
+            operation="episode.cleanup",
+        )
+        observed.__cause__ = error
+        # Cleanup is an observation, never a replacement for the episode's result or primary failure.
+        self.failure_report = self.failure_report.merged(failure_report_for(observed))
 
 
 def handled_episode_failure(
@@ -380,6 +395,10 @@ class BaseEnvironmentServer(SimpleServer, Generic[EpisodeRequestT, EpisodeRespon
         if handled is not None:
             response = self.failure_response(request, handled)
         response = self.response_model.model_validate(response)
+        if cleanup.failure_report.events:
+            response = response.model_copy(
+                update={"failure_report": (response.failure_report or FailureReport()).merged(cleanup.failure_report)}
+            )
         self.validate_response_identity(request, response)
         return response
 
