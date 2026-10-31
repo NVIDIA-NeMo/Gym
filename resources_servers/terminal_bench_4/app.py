@@ -6,6 +6,7 @@
 import asyncio
 import hashlib
 import json
+import logging
 import re
 from collections import OrderedDict
 from contextlib import asynccontextmanager
@@ -19,6 +20,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
+from nemo_gym.agent_utils import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
@@ -32,6 +34,7 @@ from nemo_gym.server_runtime import (
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
+    observe_verifier_sandbox,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
@@ -48,6 +51,9 @@ from resources_servers.terminal_bench_4.models import (
     VerifierTestCounts,
 )
 from resources_servers.terminal_bench_4.task import PackageLoader
+
+
+logger = logging.getLogger(__name__)
 
 
 REPOSITORY = Path(__file__).resolve().parents[2]
@@ -499,6 +505,28 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             await lifecycle.finalize_session(
                 session, grade=body.agent_started and session.seed_response.termination is None
             )
+            # The resource owner retains the actual handles after cleanup. Bind these
+            # facts to the verify invocation, independently of the agent's bundle.
+            for environment, role in ((session.environment, "agent"), (session.verifier_environment, "verifier")):
+                if environment is None:
+                    continue
+                try:
+                    sandboxes = (
+                        tuple(environment.compose.services.values())
+                        if environment.uses_compose
+                        else (environment.main,)
+                    )
+                except Exception:
+                    logger.warning("Sandbox owner handles unavailable for verification observation")
+                    continue
+                for sandbox in sandboxes:
+                    try:
+                        observation = lifecycle_observation(sandbox, role=role)
+                        if observation is not None:
+                            observe_verifier_sandbox(observation)
+                    except Exception:
+                        # Observability must not replace a calculated grade or its original failure.
+                        logger.warning("Sandbox lifecycle observation unavailable")
             session.verified_response = self._verified_response(session, body.harness_metadata)
             session.persist()
         if session.resources_request is not None:

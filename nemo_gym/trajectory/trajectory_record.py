@@ -252,6 +252,12 @@ class VerifierInvocation(ObservationModel):
         exclude_if=lambda value: value is None,
     )
 
+    # Owner-observed lifecycle facts; these do not certify external grading dependencies.
+    sandbox_observations: list[SandboxObservation] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+
     @field_validator("failure_kind")
     @classmethod
     def validate_failure_kind(cls, value: Optional[str]) -> Optional[str]:
