@@ -32,9 +32,12 @@ from fastapi import Body, FastAPI, Request
 from fastapi.exceptions import RequestValidationError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.agent_utils.sandbox_observation import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
-from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
+from nemo_gym.core.episode import current_verifier_invocation_id
+from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
     ConnectableProvider,
@@ -61,6 +64,8 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -196,6 +201,9 @@ class SWEBenchProVerifyRequest(SWEBenchProInstanceRequest, BaseVerifyRequest):
 
 
 class SWEBenchProVerifyResponse(BaseVerifyResponse):
+    model_config = ConfigDict(serialize_by_alias=True)
+
+    verification_attempts: int | None = Field(default=None, exclude_if=lambda value: value is None)
     image_provenance: dict[str, Any] = Field(default_factory=dict)
     evaluation_completed: bool
     eval_timed_out: bool = False
@@ -209,6 +217,9 @@ class SWEBenchProVerifyResponse(BaseVerifyResponse):
     test_output: str
     error: str | None
     log_dir: str
+    # Lifecycle facts of the sandbox that produced this grade; the agent attaches it as a verifier SandboxObservation.
+    verifier_sandbox_observation: dict[str, Any] | None = None
+    verifier_sandbox_observations: list[dict[str, Any] | None] | None = None
 
 
 class SWEBenchProResourcesServer(SimpleResourcesServer):
@@ -556,7 +567,10 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
+        verifier_sandbox_observation = None
+        verifier_sandbox_observations = []
         for attempt in range(1, attempts + 1):
+            attempt_error: Exception | None = None
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
             try:
@@ -572,6 +586,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
+                attempt_error = exc
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
                 result = VerificationResult(
@@ -588,8 +603,36 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                             await eval_sandbox.stop()
                     except Exception:
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
+            # Observation is best effort and cannot replace the calculated grade or original error.
+            try:
+                verifier_sandbox_observation = lifecycle_observation(eval_sandbox, role="verifier")
+            except Exception:
+                print("Failed to observe verification sandbox", format_exc(), file=sys.stderr)
+                verifier_sandbox_observation = None
+            verifier_sandbox_observations.append(verifier_sandbox_observation)
 
             reason = inconclusive_reason(result)
+            if reason is not None:
+                # Record the actual failed attempt without selecting a retry or claiming a model failure.
+                # Only an exception before sandbox assignment identifies allocation as the failing operation.
+                allocation_failed = attempt_error is not None and eval_sandbox is None
+                operation_id = current_verifier_invocation_id()
+                observed = NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=(
+                        "Verifier sandbox allocation failed"
+                        if allocation_failed
+                        else "Verification produced no conclusive verdict"
+                    ),
+                    operation="verify.sandbox.allocate" if allocation_failed else "verify",
+                    operation_id=operation_id,
+                    attempt_id=f"{operation_id}:{attempt}" if operation_id is not None else None,
+                    stage="verification",
+                    exception_type=type(attempt_error).__name__ if attempt_error is not None else None,
+                )
+                observed.__cause__ = attempt_error
+                observe_failure(observed)
             if reason is not None and _budget_spent(deadline):
                 print(
                     f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
@@ -618,6 +661,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "mask_sample": False,
             "failure_kind": None,
             "failure_reason": None,
+            "verification_attempts": attempt,
             "evaluation_completed": result.completed and reason is None,
             "eval_timed_out": result.timed_out,
             "resolved": result.resolved,
@@ -630,7 +674,29 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "test_output": result.test_output,
             "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
+            # Older observation schemas forbid unknown fields; the plural field retains the full facts.
+            "verifier_sandbox_observation": {
+                key: value
+                for key, value in verifier_sandbox_observation.items()
+                if key not in {"observed_client_interval_s", "teardown_confirmed", "cleanup_errors"}
+            }
+            if verifier_sandbox_observation is not None
+            else None,
+            "verifier_sandbox_observations": verifier_sandbox_observations,
         }
+        if reason is not None:
+            # The saved patch has no conclusive verdict. A collection retry would run the agent again;
+            # this stateful verifier cannot yet reverify that patch through the public CLI.
+            response_data |= {
+                "mask_sample": True,
+                "failure_kind": VERIFIER_ERROR,
+                "failure_reason": result.error or reason,
+                "model_patch": model_patch,
+                "verification_attempts": attempt,
+            }
+        # The adapter supplies typed verifier facts; collector-owned routing markers cannot cross a native episode.
+        response_data.pop("_ng_failure_class", None)
+        response_data.pop("_ng_failure_judge_error", None)
         return SWEBenchProVerifyResponse.model_validate(response_data)
 
 

@@ -223,7 +223,10 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
 
     assert response.status_code == 200
     assert response.json()["evaluation_completed"] is False
-    assert response.json()["mask_sample"] is False
+    assert response.json()["mask_sample"] is True
+    assert response.json()["failure_kind"] == "verifier_error"
+    assert response.json()["verification_attempts"] == 3
+    assert response.json()["model_patch"] == request_body()["patch"]
     assert response.json()["reward"] == 0.0
     assert "sandbox unavailable" in response.json()["error"]
 
@@ -247,7 +250,7 @@ def test_verify_reports_sandbox_failure(monkeypatch: MonkeyPatch) -> None:
         ),
     ],
 )
-def test_verify_keeps_failures_unmasked_and_reports_error(
+def test_verify_masks_only_inconclusive_results_and_reports_error(
     monkeypatch: MonkeyPatch,
     test_output: str,
     extraction_error: str | None,
@@ -275,7 +278,8 @@ def test_verify_keeps_failures_unmasked_and_reports_error(
     response = client_with_task_sandbox(server).post("/verify", json=request_body())
     assert response.status_code == 200
     assert response.json()["reward"] == 0.0
-    assert response.json()["mask_sample"] is False
+    assert response.json()["mask_sample"] is not completed
+    assert response.json()["failure_kind"] == (None if completed else "verifier_error")
     assert response.json()["evaluation_completed"] is completed
     assert response.json()["error"] == expected_error
     assert response.json()["model_patch"] == (None if extraction_error else "agent patch")
@@ -649,8 +653,9 @@ def test_environment_server_episode_http_lifecycle_preserves_verdict_and_private
         assert response.status_code == 200
         result = response.json()
         assert result["reward"] == float(resolved)
-        # Completion diagnostics do not change whether SWE Pro includes the sample in scoring.
-        assert result["mask_sample"] is False
+        # An unavailable verdict cannot contribute a measured model score.
+        assert result["mask_sample"] is not completed
+        assert result["failure_kind"] == (None if completed else "verifier_error")
         assert result["evaluation_completed"] is completed
         assert result["resolved"] is resolved
         assert result["model_patch"] == "agent patch"
