@@ -103,7 +103,7 @@ def test_trial_coverage_from_actual_cpu_collector_metadata_fails_closed_when_evi
 
     from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
 
-    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-trial-operations.json").read_text())
+    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     collected = CollectedEvidence.model_validate(deepcopy(fixture))
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert trial_health(decision, collected)[0] is True
@@ -132,7 +132,7 @@ def test_trial_coverage_requires_whole_row_report_and_matching_turn():
 
     from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
 
-    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-trial-operations.json").read_text())
+    fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     baseline = CollectedEvidence.model_validate(fixture)
     decision = decide_from_collected(baseline, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert trial_health(decision, baseline)[0] is True
@@ -176,3 +176,30 @@ def test_recovered_observations_remain_unknown_and_keep_both_counters():
     assert passed is None and "not defined" in reason
     assert collected.quality["observed_upstream_recovery"] == counters
     assert decision.action.value == "noop"
+
+
+def test_historical_mcqa_without_grading_observation_stays_unknown():
+    import json
+    from pathlib import Path
+
+    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
+
+    fixtures = Path(__file__).parent / "fixtures"
+    historical = CollectedEvidence.model_validate_json((fixtures / "cpu-mcqa-trial-operations.json").read_text())
+    decision = decide_from_collected(historical, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert decision.action.value == "noop"
+    assert trial_health(decision, historical)[0] is None
+    assert all(
+        "grading_operations" not in verifier
+        for verifier in historical.results[0]["ng_trial_observations"]["verifier_invocations"]
+    )
+    # Fresh positive metadata came from the real programmatic scorer and collector, not a historical backfill.
+    current_text = (fixtures / "cpu-mcqa-programmatic-operations.json").read_text()
+    current = json.loads(current_text)
+    verifier = current["results"][0]["ng_trial_observations"]["verifier_invocations"][0]
+    assert (
+        verifier["grading_operations"][0]["result_binding_sha256"]
+        == current["results"][0]["_ng_collected_grading_binding"]
+    )
+    for raw_field in ('"text":', '"content":', '"question":', '"answer":'):
+        assert raw_field not in current_text
