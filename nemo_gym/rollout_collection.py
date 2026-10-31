@@ -1098,6 +1098,17 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 verifier_invocations.append(invocation)
             else:
                 existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+                for field in ("grading_operations", "sandbox_observations"):
+                    returned = getattr(invocation, field)
+                    if returned is None:
+                        continue
+                    observed = getattr(existing, field)
+                    if observed is None:
+                        setattr(existing, field, returned)
+                    elif observed != returned:
+                        # Contradictory returned facts cannot establish authoritative verifier coverage.
+                        gaps.append(ObservationGap(code=f"verifier_{field}_conflict"))
+                        setattr(existing, field, [])
                 if invocation.status != "unknown":
                     existing.status = invocation.status
                     existing.failure_kind = invocation.failure_kind
