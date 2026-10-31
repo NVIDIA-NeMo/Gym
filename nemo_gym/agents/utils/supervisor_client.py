@@ -109,7 +109,9 @@ class PauseAcknowledgement(TypedDict):
     """A supervisor's answer to pause or continue request ``seq``, from ``paused.json`` or ``continued.json``.
 
     ``mode`` is the supervisor's pause mode and ``identity`` its ``PID.START``, ``None`` before it launched;
-    acknowledgements written before either existed have neither.
+    acknowledgements written before either existed have neither. ``wall`` (epoch seconds) and ``uptime`` (seconds
+    since boot) are the sandbox's clocks when the acknowledgement was written; ``uptime`` is ``None`` without a
+    readable ``/proc/uptime``.
     """
 
     seq: int
@@ -118,6 +120,8 @@ class PauseAcknowledgement(TypedDict):
     error: str | None
     mode: NotRequired[Literal["stop", "hold"]]
     identity: NotRequired[str | None]
+    wall: NotRequired[float]
+    uptime: NotRequired[float | None]
 
 
 # How a supervisor pauses: ``stop`` sends SIGSTOP and SIGCONT to every process it reaches; ``hold`` sends nothing,

@@ -128,7 +128,8 @@ class HarnessPauseResult:
     and the launch will honour the request when it starts. ``finished``: the harness had already ended; its cleanup
     receipt answers instead. ``unconfirmed``: the supervisor did not confirm in time or reported ``error``.
     ``pids`` are the processes a pause stopped. ``identity`` is the answering supervisor's ``PID.START`` and
-    ``mode`` its pause mode, when it reported them.
+    ``mode`` its pause mode, when it reported them. ``wall`` and ``uptime`` are the sandbox's wall clock (epoch
+    seconds) and uptime (seconds since boot) when it answered.
     """
 
     status: Literal["confirmed", "finished", "unconfirmed"]
@@ -136,6 +137,8 @@ class HarnessPauseResult:
     error: str | None = None
     identity: str | None = None
     mode: PauseMode | None = None
+    wall: float | None = None
+    uptime: float | None = None
 
     @property
     def confirmed(self) -> bool:
@@ -154,6 +157,10 @@ class SandboxSessionCheckpoint(TypedDict):
     launch_started: bool
     pause_seq: NotRequired[int]
     supervisor_identity: NotRequired[str]
+    # The sandbox's wall clock and uptime when that pause was confirmed, for a restore that sets the wall clock back
+    # to where the snapshot left it.
+    pause_wall: NotRequired[float]
+    pause_uptime: NotRequired[float]
 
 
 _CHECKPOINT_STATE = TypeAdapter(SandboxSessionCheckpoint)
@@ -174,6 +181,8 @@ def _pause_result(
         error=acknowledgement["error"],
         identity=acknowledgement.get("identity"),
         mode=acknowledgement.get("mode"),
+        wall=acknowledgement.get("wall"),
+        uptime=acknowledgement.get("uptime"),
     )
 
 
@@ -253,6 +262,8 @@ class SandboxSession[Artifacts]:
     # The supervisor that confirmed pause ``_held_seq``, as ``PID.START``.
     _held_identity: str | None = field(default=None, init=False)
     _held_seq: int = field(default=0, init=False)
+    # The sandbox's wall clock and uptime when that supervisor confirmed pause ``_held_seq``.
+    _held_clocks: tuple[float, float] | None = field(default=None, init=False)
     # Holds the provider's polls of the launch's command while the harness is paused, so a sandbox being snapshotted
     # is not asked about it; released before anything else runs a command in the sandbox.
     _parked_polls: ExitStack | None = field(default=None, init=False, repr=False)
@@ -272,6 +283,8 @@ class SandboxSession[Artifacts]:
         if self.launch_started and self._held_identity is not None and self._continued_seq < self._held_seq:
             state["pause_seq"] = self._held_seq
             state["supervisor_identity"] = self._held_identity
+            if self._held_clocks is not None:
+                state["pause_wall"], state["pause_uptime"] = self._held_clocks
         return state
 
     @classmethod
@@ -480,6 +493,7 @@ class SandboxSession[Artifacts]:
         # The next launch has a fresh supervisor: nothing paused carries over.
         self._pause_seq = self._continue_seq = self._continued_seq = self._held_seq = 0
         self._held_identity = None
+        self._held_clocks = None
         self._release_parked_polls()
 
     async def pause_harness(self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT) -> HarnessPauseResult:
@@ -500,6 +514,9 @@ class SandboxSession[Artifacts]:
         result = _pause_result(outcome, acknowledgement)
         if result.confirmed and result.identity is not None:
             self._held_seq, self._held_identity = self._pause_seq, result.identity
+            self._held_clocks = None
+            if result.wall is not None and result.uptime is not None:
+                self._held_clocks = (result.wall, result.uptime)
         if result.confirmed and self.launch_started and self._parked_polls is None:
             # A no-op scope on providers that do not poll command status.
             self._parked_polls = ExitStack()

@@ -35,7 +35,9 @@
 # launch until it is continued. A stop requested while paused continues the processes first, so the
 # harness receives TERM and can save its state. The receipt, written when the harness ends, answers
 # any pause the supervisor never acknowledged. Every acknowledgement also names the pause mode and the
-# supervisor's identity, PID.START (its /proc start time), which marks the processes it launched.
+# supervisor's identity, PID.START (its /proc start time), which marks the processes it launched, and
+# records "wall" (epoch seconds) and "uptime" (seconds since boot, from /proc/uptime) at the moment it
+# was written.
 #
 # With --pause-mode hold, for a sandbox whose snapshot keeps its processes, a pause sends no signal: the
 # harness keeps running, the supervisor acknowledges at once and stops counting the deadline until the
@@ -224,10 +226,17 @@ request_seq() {
 
 # Write acknowledgement $1 for request $2 atomically.
 acknowledge() {
-    local named=null
+    local named=null wall uptime=null
     [[ -n ${identity-} ]] && named="\"$identity\""
-    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s}' \
-        "$2" "$3" "$4" "$5" "$pause_mode" "$named" >"$1.tmp" && mv -f "$1.tmp" "$1"
+    # The wall clock (epoch seconds) and uptime (seconds since boot) when the acknowledgement is written. A restore
+    # that keeps the processes but sets the wall clock to the host's can set it back to wall + (uptime now - uptime),
+    # as if the sandbox had not been stopped: uptime does not count the time a snapshot spent stopped.
+    wall=${EPOCHREALTIME-}
+    wall=${wall/,/.}
+    [[ -n $wall ]] || printf -v wall '%(%s)T' -1
+    read -r uptime _ </proc/uptime 2>/dev/null || uptime=null
+    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s, "wall": %s, "uptime": %s}' \
+        "$2" "$3" "$4" "$5" "$pause_mode" "$named" "$wall" "${uptime:-null}" >"$1.tmp" && mv -f "$1.tmp" "$1"
 }
 
 # Record in paused[PID]=START every process a pause reaches: what a stop would reach now, and
