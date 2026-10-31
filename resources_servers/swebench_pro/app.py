@@ -125,6 +125,10 @@ def _attempt_budget(attempt_timeout: float | None, deadline: float | None) -> fl
     return min(attempt_timeout, remaining)
 
 
+class PatchCaptureLostError(RuntimeError):
+    """The agent sandbox did not report how ``git diff`` ended or did not return its output, so the patch is unknown."""
+
+
 class SWEBenchProResourcesServerConfig(BaseResourcesServerConfig):
     is_verifying_golden_patch: bool = False
     apply_anti_cheating: bool = True
@@ -491,17 +495,27 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         pristine_untracked = self._session_id_to_pristine_untracked.get(session_id, frozenset())
         patch_path = f"/tmp/nemo-gym-swebench-pro-{uuid4().hex}.diff"
         try:
-            result = await original_sandbox.exec(
-                f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
-                f" > {quote(patch_path)}"
-            )
+            try:
+                result = await original_sandbox.exec(
+                    f"umask 077; git -C /app add -N . && git -C /app --no-pager diff {quote(base_commit)}"
+                    f" > {quote(patch_path)}"
+                )
+            except Exception as exc:
+                raise PatchCaptureLostError(f"git diff exec failed: {exc}") from exc
+            error_type = getattr(result, "error_type", None)
+            if error_type is not None:
+                raise PatchCaptureLostError(f"git diff exec reported no exit code ({error_type})")
             if result.return_code != 0:
                 raise RuntimeError(result.stderr or "git diff failed")
-            # Command logs can drop line endings; download the patch bytes instead.
-            with TemporaryDirectory(prefix="nemo-gym-swebench-pro-") as directory:
-                local_patch = Path(directory) / "model.diff"
-                await original_sandbox.download(patch_path, local_patch)
-                patch = local_patch.read_bytes().decode("utf-8", errors="replace")
+            # Command logs can drop line endings; download the patch bytes instead. A failed cleanup of the local copy
+            # must not discard bytes already read.
+            try:
+                with TemporaryDirectory(prefix="nemo-gym-swebench-pro-", ignore_cleanup_errors=True) as directory:
+                    local_patch = Path(directory) / "model.diff"
+                    await original_sandbox.download(patch_path, local_patch)
+                    patch = local_patch.read_bytes().decode("utf-8", errors="replace")
+            except Exception as exc:
+                raise PatchCaptureLostError(f"patch download failed: {exc}") from exc
             return drop_patch_sections(patch, pristine_untracked)
         finally:
             try:
@@ -524,34 +538,19 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         session_id = request.session[SESSION_ID_KEY]
         # A session with no task sandbox (an earlier verify consumed it, a close released it, or the server never held
         # it) has nothing left to grade: grading would score an empty patch as a policy that changed nothing, so the
-        # sample is masked. A failed patch extraction from a live sandbox stays an unmasked failure, since the agent
-        # can cause it.
+        # sample is masked. So is an extraction whose git diff exec reported no exit code. Any other failed extraction
+        # from a live sandbox stays an unmasked failure, since the agent can cause it.
         if not self.config.is_verifying_golden_patch and session_id not in self._session_id_to_sandbox:
-            return SWEBenchProVerifyResponse.model_validate(
-                body.model_dump()
-                | lost_session_verification("SWE-bench Pro task sandbox is no longer available")
-                | {
-                    "evaluation_completed": False,
-                    "eval_timed_out": False,
-                    "image_provenance": {},
-                    "resolved": False,
-                    "patch_applied": False,
-                    "eval_sandbox_start_time_taken": 0.0,
-                    "patch_verification_time_taken": 0.0,
-                    "instance_id": body.instance_id,
-                    "model_patch": None,
-                    "test_results": None,
-                    "test_output": "",
-                    "error": "SWE-bench Pro task sandbox is no longer available",
-                    "log_dir": "",
-                }
-            )
+            return _lost_session_response(body, "SWE-bench Pro task sandbox is no longer available")
         extraction_error = None
         if self.config.is_verifying_golden_patch:
             model_patch = body.patch
         else:
             try:
                 model_patch = await self._extract_model_patch(session_id, body.base_commit)
+            except PatchCaptureLostError as exc:
+                # Grading "" here would score a patch nobody captured as a policy that changed nothing.
+                return _lost_session_response(body, f"Failed to extract model patch: {exc}")
             except Exception as exc:
                 model_patch = ""
                 extraction_error = f"Failed to extract model patch: {exc}"
@@ -698,6 +697,29 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         response_data.pop("_ng_failure_class", None)
         response_data.pop("_ng_failure_judge_error", None)
         return SWEBenchProVerifyResponse.model_validate(response_data)
+
+
+def _lost_session_response(body: SWEBenchProVerifyRequest, reason: str) -> SWEBenchProVerifyResponse:
+    """A masked, unscored verify response for a rollout whose task sandbox state could not be read."""
+    return SWEBenchProVerifyResponse.model_validate(
+        body.model_dump()
+        | lost_session_verification(reason)
+        | {
+            "evaluation_completed": False,
+            "eval_timed_out": False,
+            "image_provenance": {},
+            "resolved": False,
+            "patch_applied": False,
+            "eval_sandbox_start_time_taken": 0.0,
+            "patch_verification_time_taken": 0.0,
+            "instance_id": body.instance_id,
+            "model_patch": None,
+            "test_results": None,
+            "test_output": "",
+            "error": reason,
+            "log_dir": "",
+        }
+    )
 
 
 if __name__ == "__main__":
