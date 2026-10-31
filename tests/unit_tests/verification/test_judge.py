@@ -19,6 +19,7 @@ import pytest
 from pydantic import BaseModel, ConfigDict
 
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
+from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.verification.judge import (
     JudgeError,
     call_judge,
@@ -78,12 +79,12 @@ class TestCallJudge:
     async def test_http_error_reported_as_http_not_validation_error(self) -> None:
         # A 401 body is not a valid _Verdict. Without the status check the failure
         # would surface as an opaque pydantic ValidationError on the error payload.
-        with pytest.raises(JudgeError, match="HTTP 401"):
+        with pytest.raises(NgFailureEvent, match="HTTP 401"):
             await _call(_client(status=401, body=b'{"error": {"code": "401"}}'))
 
     @pytest.mark.asyncio
     async def test_transport_error_becomes_judge_error(self) -> None:
-        with pytest.raises(JudgeError, match="judge unreachable"):
+        with pytest.raises(NgFailureEvent, match="judge unreachable"):
             await _call(MagicMock(post=AsyncMock(side_effect=ConnectionError("judge unreachable"))))
 
 
@@ -100,7 +101,7 @@ class TestRunJudge:
         async def boom():
             raise RuntimeError("judge timeout")
 
-        with pytest.raises(JudgeError, match="RuntimeError: judge timeout"):
+        with pytest.raises(NgFailureEvent, match="RuntimeError: judge timeout"):
             await reraise_judge_errors(boom())
 
 
@@ -159,9 +160,86 @@ class TestJudgeFailsafe:
         assert request.model_dump() == original
 
 
+async def test_failsafe_keeps_judge_boundary_above_typed_model_cause():
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    original = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="provider refused",
+        operation="model.request",
+        http_status=401,
+    )
+    original_events = failure_report_for(original).events
+    original_id = next(iter(original_events))
+
+    async def rejected():
+        raise original
+
+    @judge_failsafe
+    async def verify(body):
+        await reraise_judge_errors(rejected())
+
+    result = await verify(_Req(response={"saved": "answer"}))
+    data = orjson.loads(result.body)
+    assert data["failure_kind"] == "judge_failed"
+    assert data["_ng_failure_class"] == "judge_failed"
+    assert data["mask_sample"] is True
+    assert data["response"] == {"saved": "answer"}
+    events = data["_ng_failure_events"]
+    boundary = events[data["_ng_failure_id"]]
+    assert boundary.get("failure_kind") == "judge_failed" and boundary["boundary"] == "resources_server"
+    assert events[original_id]["http_status"] == 401
+    assert events[original_id]["failure_kind"] == "model_request_error"  # the cause keeps its own kind
+    assert events[original_id] == original_events[original_id].model_dump(mode="json")
+
+
+async def test_failsafe_preserves_specific_typed_judge_error_under_own_boundary():
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    original = NgFailureEvent(
+        boundary=FailureBoundary.RESOURCES_SERVER,
+        failure_kind="model_request_error",
+        failure_reason="provider refused",
+        operation="provider.request",
+    )
+    before = failure_report_for(original).events
+    original_id = next(iter(before))
+
+    @judge_failsafe
+    async def verify(body):
+        async def failed_call():
+            raise original
+
+        return await reraise_judge_errors(failed_call())
+
+    data = orjson.loads((await verify(_Req())).body)
+    assert data["failure_kind"] == "judge_failed"
+    events = data["_ng_failure_events"]
+    boundary = events[data["_ng_failure_id"]]
+    assert boundary["failure_kind"] == "judge_failed"
+    assert boundary["cause_id"] == original_id
+    assert events[original_id] == before[original_id].model_dump(mode="json")
+
+
+def test_judge_selector_does_not_swallow_other_canonical_failures():
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.verification.judge import is_judge_failure
+
+    for boundary, kind in [
+        (FailureBoundary.MODEL, "judge_failed"),
+        (FailureBoundary.RESOURCES_SERVER, "model_request_error"),
+    ]:
+        event = NgFailureEvent(boundary=boundary, failure_kind=kind, failure_reason="not a judge call")
+        assert not is_judge_failure(event)
+
+
 @pytest.mark.asyncio
 async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
     from nemo_gym.core.episode import verifier_invocation_context
+    from nemo_gym.verification.judge import is_judge_failure
 
     client = _client(status=200, body=b'{"verdict":"CORRECT"}')
     await _call(client)
@@ -174,8 +252,92 @@ async def test_judge_calls_use_enclosing_verifier_identity_even_on_failure():
             for call in client.post.call_args_list[1:]
         )
         failed = _client(status=400, body=b'{"error":"rejected"}')
-        with pytest.raises(JudgeError):
+        # #5072 raises the judge's typed failure in place of JudgeError.
+        with pytest.raises(NgFailureEvent, match="HTTP 400") as failure:
             await _call(failed)
+        assert is_judge_failure(failure.value)
         assert failed.post.call_args.kwargs["headers"] == {VERIFIER_INVOCATION_HEADER: "verify-one"}
     await _call(client)
     assert "headers" not in client.post.call_args.kwargs
+
+
+async def test_a_judge_failure_a_caller_retries_past_stays_an_observation():
+    """A consumer that retries after a judge failure and then succeeds still reports that failure, once."""
+    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.verification.judge import reraise_judge_errors
+
+    async def unreachable():
+        raise ConnectionError("judge unreachable")
+
+    async def verdict():
+        return "verdict"
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await reraise_judge_errors(unreachable())
+        # A canonical judge failure passed through again is the same event, not a second one.
+        with pytest.raises(NgFailureEvent):
+            await reraise_judge_errors(_raise(caught.value))
+        assert await reraise_judge_errors(verdict()) == "verdict"
+        report = log.reply_report(None)
+
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    assert report.failure_id is None  # the request succeeded
+    assert list(report.events) == [caught.value.event_id]
+
+
+async def test_a_recovered_judge_failure_keeps_its_model_cause_in_the_success_report():
+    """MODEL -> JUDGE: the observation a successful retry leaves names the model failure as the judge's cause."""
+    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.verification.judge import reraise_judge_errors
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL, failure_kind="model_request_error", failure_reason="model refused"
+    )
+
+    async def verdict():
+        return "verdict"
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(NgFailureEvent) as caught:
+            await reraise_judge_errors(_raise(model))
+        assert await reraise_judge_errors(verdict()) == "verdict"
+        report = log.reply_report(None)
+
+    judge = caught.value
+    assert judge is not model and judge.__cause__ is model
+    assert report.failure_id is None
+    assert set(report.events) == {judge.event_id, model.event_id}
+    assert report.events[judge.event_id].cause_id == model.event_id
+
+
+async def test_a_parser_judge_error_is_not_observed():
+    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.verification.judge import reraise_judge_errors
+
+    with RequestFailureLog.capture() as log:
+        with pytest.raises(JudgeError):
+            await reraise_judge_errors(_raise(JudgeError("no verdict tag")))
+        assert log.reply_report(None).events == {}
+
+
+async def _raise(error: BaseException):
+    raise error
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("explicit", [False, True])
+async def test_call_judge_preserves_optional_transport_timeout(explicit):
+    from aiohttp import ClientTimeout
+
+    client = _client(status=200, body=b'{"verdict": "CORRECT"}')
+    timeout = ClientTimeout(total=17) if explicit else None
+    await call_judge(
+        client, server_name="judge", url_path="/v1/responses", json={}, response_model=_Verdict, timeout=timeout
+    )
+    kwargs = client.post.call_args.kwargs
+    if explicit:
+        assert kwargs["timeout"] is timeout
+    else:
+        assert "timeout" not in kwargs

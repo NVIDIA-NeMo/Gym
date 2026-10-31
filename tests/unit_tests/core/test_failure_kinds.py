@@ -49,6 +49,9 @@ class TestNamingConvention:
             "session_",
             "cohort_",
             "persistence_",
+            "environment_",
+            "harness_",
+            "collection_",
         )
         lifecycle = {"cancelled", "kill_shaped", "shutdown"}
 

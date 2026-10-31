@@ -593,7 +593,7 @@ def test_sandbox_accepts_one_text_turn_with_optional_system_message(input):
 @pytest.mark.parametrize("confirmed", [True, False])
 async def test_close_distinguishes_borrowed_release_from_confirmed_termination(confirmed):
     from nemo_gym.agent_utils.sandbox_session import SandboxSession
-    from nemo_gym.agent_utils.supervisor_client import HarnessTerminationError
+    from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
 
     remote = SimpleNamespace(exec=AsyncMock(return_value=result()), disconnect=AsyncMock())
     session = SandboxSession(sandbox=remote, session_dir="/tmp/session", workdir="/app", harness="Claude Code")
@@ -607,7 +607,7 @@ async def test_close_distinguishes_borrowed_release_from_confirmed_termination(c
     if confirmed:
         session.cleanup = receipt
     else:
-        session.termination_error = HarnessTerminationError(harness="Claude Code", receipt=receipt)
+        session.termination_error = harness_termination_failure(harness="Claude Code", receipt=receipt)
     state = adapter.ClaudeCodeSandboxSession(request=seed(), runtime="/runtime", session=session)
     close = await agent()._close_agent_session_state(state)
     remote.disconnect.assert_awaited_once()

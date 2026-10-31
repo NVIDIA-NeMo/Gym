@@ -38,7 +38,7 @@ from nemo_gym.client import ServerClient
 from nemo_gym.config import AgentServerRef, ModelServerRef, ResourcesServerRef
 from nemo_gym.metrics import RewardProfiler
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
-from nemo_gym.server_runtime import BaseVerifyResponse
+from nemo_gym.server_runtime import BaseVerifyResponse, RolloutContextMiddleware
 from resources_servers.genrm_compare.app import GenRMCompareResourcesServer
 from resources_servers.genrm_compare.tests.test_cohort_lifecycle import member
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
@@ -75,13 +75,17 @@ def production_app(instance):
 
 
 @pytest.fixture
-async def services(config, monkeypatch):
+async def services(config, monkeypatch, request):
     # Each test owns the loop and the global client; restore any enclosing fixture.
     monkeypatch.setattr(http, "_GLOBAL_AIOHTTP_CLIENT", None)
     session = http.set_global_aiohttp_client(http.GlobalAIOHTTPAsyncClientConfig())
     client = ServerClient.model_construct(
         global_config_dict=OmegaConf.create(
             {
+                "observability_enabled": getattr(request, "param", False),
+                "resource": {"resources_servers": {"genrm_compare": {}}},
+                "policy": {"responses_api_models": {"openai_model": {}}},
+                "judge": {"responses_api_models": {"openai_model": {}}},
                 "agent": {"responses_api_agents": {"simple_agent": {}}},
                 "environment": {"environment_servers": {"legacy_agent": {"agent_server": {"name": "agent"}}}},
             }
@@ -96,6 +100,8 @@ async def services(config, monkeypatch):
         judge_calls=0,
         judge_status=200,
         judge_statuses=[],
+        judge_failure_events=[],
+        emit_failure_reports=False,
         judge_empty=False,
         judge_media_type="application/json",
         judge_texts=[],
@@ -104,6 +110,8 @@ async def services(config, monkeypatch):
     )
     state.judge_release.set()
     policy_app, judge_app = FastAPI(), FastAPI()
+    policy_app.add_middleware(RolloutContextMiddleware)
+    judge_app.add_middleware(RolloutContextMiddleware)
 
     @policy_app.post("/v1/responses")
     async def policy(request: Request):
@@ -129,7 +137,24 @@ async def services(config, monkeypatch):
         await state.judge_release.wait()
         status = state.judge_statuses.pop(0) if state.judge_statuses else state.judge_status
         if status != 200:
-            return JSONResponse({"error": "judge unavailable"}, status_code=status)
+            headers = {}
+            if state.emit_failure_reports:
+                from nemo_gym.failure_transport import FailureHeader
+                from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+                event = NgFailureEvent(
+                    boundary="model",
+                    failure_kind="provider_unavailable",
+                    failure_reason="synthetic judge outage",
+                    event_id=f"judge-http-{state.judge_calls}",
+                    operation="model_request",
+                    operation_id=f"judge-operation-{state.judge_calls}",
+                    attempt_id=f"judge-attempt-{state.judge_calls}",
+                    http_status=status,
+                )
+                state.judge_failure_events.append(event.event_id)
+                headers = FailureHeader.encode(failure_report_for(event))
+            return JSONResponse({"error": "judge unavailable"}, status_code=status, headers=headers)
         if state.truncated_judge_responses:
             state.truncated_judge_responses -= 1
             # Send successful headers and part of the body, then break the TCP response.
@@ -263,7 +288,13 @@ async def test_run_resampling_conflicts_while_exact_verify_replays(services):
 
 
 @pytest.mark.parametrize("during_judging", [False, True])
-async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, during_judging):
+@pytest.mark.parametrize("recovered", [False, True])
+async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, during_judging, recovered):
+    from nemo_gym.failure_transport import FailureHeader
+
+    services.emit_failure_reports = recovered
+    services.judge_statuses = [503] if recovered else []
+    reports = []
     services.judge_release.clear()
     payloads = []
     for i in range(4):
@@ -274,6 +305,7 @@ async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, du
 
     async def verify(i):
         response = await services.client.post(server_name="resource", url_path="/verify", json=payloads[i])
+        reports.append(FailureHeader.decode(response.headers))
         return response.status, await response.json()
 
     count = 4 if during_judging else 1
@@ -291,7 +323,13 @@ async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, du
     services.judge_release.set()
     results = await asyncio.gather(*requests)
     assert all(status == 200 and body["reward"] == 3.0 for status, body in results)
-    assert services.policy_calls == services.judge_calls == 4
+    assert services.policy_calls == 4 and services.judge_calls == 4 + int(recovered)
+    if recovered:
+        assert len(reports) == 4
+        assert all(
+            report is not None and set(services.judge_failure_events) <= set(report.events) for report in reports
+        )
+        assert all(report.failure_id is None for report in reports)
 
 
 async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
@@ -469,16 +507,30 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
     assert all(c.phase == "failed" for c in services.resource._verify_cohorts.values())
 
     services.judge_status = 200
-    judge_calls = services.judge_calls
+    judge_calls, policy_calls = services.judge_calls, services.policy_calls
+    from nemo_gym.rollout_store import RolloutStore
+
+    before = RolloutStore.read(output_path)
+    spent = before.coverage()["counted_failures"]
+    reservations = dict(before.manifest.next_attempt)
+    assert policy_calls == spent == 4
     config.resume_from_cache = True
-    with pytest.raises(RuntimeError, match="produced a result"):
-        await collection.RolloutCollectionHelper().run_from_config(config)
+    # A normal resume cannot regenerate the saved answers or restart the failed judge cohort.
+    await collection.RolloutCollectionHelper().run_from_config(config)
     assert not output_path.read_text().strip()
-    assert services.judge_calls == judge_calls
-    retried_failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
-    assert len(retried_failures) == 8
-    assert retried_failures[:4] == failures
-    assert all("fresh _ng_group_id" in row["_ng_failure_judge_error"] for row in retried_failures[4:])
+    assert (services.policy_calls, services.judge_calls) == (policy_calls, judge_calls)
+    retained_failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+    assert retained_failures == failures
+    after = RolloutStore.read(output_path)
+    assert after.pending() == []
+    assert after.coverage()["counted_failures"] == spent
+    assert after.manifest.next_attempt == reservations
+    # Partial-output mode does not claim completion; requiring it still fails without any new calls.
+    with pytest.raises(RuntimeError, match="EVAL FAILED: 0/4"):
+        await collection.RolloutCollectionHelper().run_from_config(
+            config.model_copy(update={"require_complete": True})
+        )
+    assert (services.policy_calls, services.judge_calls) == (policy_calls, judge_calls)
 
     # Recovery is explicitly coordinated as a fresh complete group, not a legacy-key restart.
     replacement_input = tmp_path / "replacement.jsonl"
@@ -499,11 +551,11 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
     assert {r["response"]["id"] for r in rows}.isdisjoint(r["response"]["id"] for r in failures)
     assert all("_ng_failure_class" not in row for row in rows)
     assert all(row["_ng_group_id"] == "replacement" for row in rows)
-    assert services.policy_calls == 12
+    assert services.policy_calls == 8
     judge_calls = services.judge_calls
     config.resume_from_cache = True
     await collection.RolloutCollectionHelper().run_from_config(config)
-    assert services.policy_calls == 12 and services.judge_calls == judge_calls
+    assert services.policy_calls == 8 and services.judge_calls == judge_calls
     assert [json.loads(line) for line in output_path.read_text().splitlines()] == rows
 
 
@@ -563,3 +615,78 @@ async def test_explicit_judge_failure_requires_new_shared_attempt_over_http(serv
         status == 200 and body["reward"] == 3.0 and "_ng_failure_class" not in body for status, body in recovered
     )
     assert services.judge_calls == calls + 4
+
+
+@pytest.mark.parametrize("services", [True], indirect=True)
+@pytest.mark.parametrize("mode", ["recovered", "one_failed", "all_failed"])
+async def test_cohort_failure_reports_survive_actual_collection_and_resume(services, tmp_path, monkeypatch, mode):
+    import nemo_gym.rollout_collection as collection
+    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.rollout_store import RolloutStore
+
+    monkeypatch.setattr(collection, "setup_server_client_utils", lambda *a, **k: services.client)
+    monkeypatch.setattr(collection, "get_global_config_dict", lambda: OmegaConf.create({}))
+    services.emit_failure_reports = True
+    recovers = mode == "recovered"
+    if mode != "all_failed":
+        services.judge_statuses = [503]
+    else:
+        services.judge_status = 503
+    if not recovers:
+        services.resource.config.genrm_parse_retries = 0
+    body = member(0).model_dump(mode="json", by_alias=True)
+    del body["response"]
+    body.pop("_ng_task_index", None)
+    body["agent_ref"] = {"name": "agent"}
+    inp, out = tmp_path / "input.jsonl", tmp_path / "output.jsonl"
+    inp.write_text(json.dumps(body) + "\n")
+    config = collection.RolloutCollectionConfig(
+        input_jsonl_fpath=str(inp),
+        output_jsonl_fpath=str(out),
+        num_repeats=4,
+        num_samples_in_parallel=4,
+        route_failures_to_sidecar=True,
+        disable_health_check=True,
+    )
+    if recovers:
+        await collection.RolloutCollectionHelper().run_from_config(config)
+        rows = [json.loads(line) for line in out.read_text().splitlines()]
+        assert len(rows) == 4 and all(row["reward"] == 3 for row in rows)
+        assert services.judge_calls == 5
+    else:
+        with pytest.raises(RuntimeError, match="produced a result"):
+            await collection.RolloutCollectionHelper().run_from_config(config)
+        rows = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+        assert len(rows) == 4 and all("reward" not in row for row in rows)
+    assert services.policy_calls == 4
+    assert services.judge_failure_events
+    if mode == "one_failed":
+        assert len(services.judge_failure_events) == 1
+    verifiers = [row["ng_trajectory"]["verifier_invocations"] for row in rows]
+    assert all(len(items) == 1 for items in verifiers)
+    assert len({items[0]["invocation_id"] for items in verifiers}) == 4
+    assert all(items[0]["status"] == ("completed" if recovers else "failed") for items in verifiers)
+    # The detached owner has no member-specific capture context. Preserving failure
+    # evidence does not invent judge model-call joins or grading coverage.
+    assert all(items[0]["model_calls"] == [] for items in verifiers)
+    reports = [FailureReportRow.report(row) for row in rows]
+    for report in reports:
+        assert set(services.judge_failure_events) <= set(report.events), report.model_dump()
+        if recovers:
+            assert report.failure_id is None
+        else:
+            current = report.failure_id
+            chain = []
+            while current is not None:
+                chain.append(current)
+                current = report.events[current].cause_id
+            assert any(event in chain for event in services.judge_failure_events)
+    store = RolloutStore.read(out)
+    before = (dict(store.manifest.next_attempt), store.coverage()["counted_failures"])
+    calls = (services.policy_calls, services.judge_calls)
+    await collection.RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
+    after = RolloutStore.read(out)
+    assert (services.policy_calls, services.judge_calls) == calls
+    assert (
+        after.pending() == [] and (dict(after.manifest.next_attempt), after.coverage()["counted_failures"]) == before
+    )

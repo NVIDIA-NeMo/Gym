@@ -36,7 +36,8 @@ from nemo_gym.core import (
 from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from nemo_gym.server_runtime import ReverifyMode
 from nemo_gym.telemetry.resources_operations import ResourcesOperation
-from nemo_gym.verification import JudgeError
+from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.math_with_judge.app import (
     JudgeEvaluation,
     LibraryJudgeMathResourcesServer,
@@ -949,8 +950,9 @@ class TestApp:
 
         response_mock.return_value = json.dumps({})
         # A body that isn't a valid Response is a broken judge call, not a wrong answer.
-        with raises(JudgeError, match="Field required"):
+        with raises(NgFailureEvent, match="Field required") as failure:
             await resources_server._generate_judge_evaluation("invalid_response", "invalid_1", "invalid_2")
+        assert is_judge_failure(failure.value)
 
         reasoning_item = NeMoGymResponseReasoningItem(id="reasoning_item", summary=[], type="reasoning")
         response_mock.return_value = json.dumps(self._create_response("reasoning_id", reasoning_item))

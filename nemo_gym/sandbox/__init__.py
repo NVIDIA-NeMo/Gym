@@ -115,7 +115,7 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
     from nemo_gym.sandbox.config import SandboxConfig
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
-    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
+    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
     from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
     from nemo_gym.sandbox.transfer import (
@@ -158,6 +158,7 @@ _PUBLIC_API = {
     "read_text": "utils",
     "remote_kind": "transfer",
     "resolve_compose": "compose_config",
+    "sandbox_credentials_rejected": "providers.base",
     "sandbox_platform": "compose_config",
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",

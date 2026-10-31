@@ -12,6 +12,7 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.testing.failure_assertions import raises_agent_failure
 from responses_api_agents.opencode_agent.runtime import OBSERVABILITY_PATCH
 from responses_api_agents.opencode_agent.sandbox import format_error_message
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import (
@@ -154,7 +155,7 @@ def test_execution_failure_keeps_cleanup_observations_and_diagnostics(setup, tmp
         session_id = created.json()["agent_session_id"]
         state = active_sessions(agent)[session_id]
         expected = TimeoutError if failure == "provider_timeout" else RuntimeError
-        with pytest.raises(expected) as error:
+        with raises_agent_failure(expected) as error:
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         if failure == "provider_timeout":
             assert state.session.artifacts == sandbox.events
@@ -218,7 +219,7 @@ def test_malformed_capture_never_replaces_provider_failure(setup, artifact):
         created.raise_for_status()
         session_id = created.json()["agent_session_id"]
         state = active_sessions(agent)[session_id]
-        with pytest.raises(TimeoutError):
+        with raises_agent_failure(TimeoutError):
             client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
         assert any(record.kind == "sandbox" for record in state.observations.records)
         client.post("/v1/agent_sessions/close", json=close_body(session_id)).raise_for_status()

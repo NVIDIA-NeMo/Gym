@@ -24,6 +24,7 @@ from asyncio import sleep
 from collections.abc import Mapping
 from datetime import datetime, timezone
 from email.utils import parsedate_to_datetime
+from time import monotonic
 from typing import (
     Any,
     Dict,
@@ -31,7 +32,7 @@ from typing import (
     Optional,
 )
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientError, ClientTimeout, ConnectionTimeoutError
 from pydantic import (
     BaseModel,
     Field,
@@ -49,7 +50,11 @@ from nemo_gym.client.http_client import (
     request,
 )
 from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.core.failure_kinds import MODEL_REQUEST_ERROR
+from nemo_gym.failure_transport import FailureHeader, observe_failure, observe_model_operation
+from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.server_utils import ClientResponseError
+from nemo_gym.typed_exceptions import NgFailureEvent, rebuild_failure, sdk_error_details
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors
@@ -86,6 +91,103 @@ def _retry_after_seconds(response: ClientResponse) -> Optional[float]:
     except ValueError:
         return None
     return (retry_at.replace(tzinfo=retry_at.tzinfo or timezone.utc) - datetime.now(timezone.utc)).total_seconds()
+
+
+MODEL_RESPONSE_TIMEOUT_REASON = "Model request timed out waiting for the response"
+"""The ``failure_reason`` of a model attempt that was sent and whose response did not arrive in time."""
+
+
+def _timed_out_waiting_for_response(error: BaseException) -> bool:
+    """Whether the traceback places a timeout in aiohttp response processing.
+
+    This alone does not establish a completed upload; the caller must require that evidence separately.
+
+    With only a total timeout, aiohttp raises the same ``TimeoutError`` while connecting or waiting for a pooled
+    connection, so where it fired decides. Any other shape is not a response timeout.
+    """
+    if not isinstance(error, TimeoutError) or isinstance(error, ConnectionTimeoutError):
+        return False
+    for raised in (error, error.__cause__):
+        traceback = getattr(raised, "__traceback__", None)
+        while traceback is not None:
+            if traceback.tb_frame.f_code is ClientResponse.start.__code__:
+                return True
+            traceback = traceback.tb_next
+    return False
+
+
+def _model_attempt_failure(
+    reason: str,
+    *,
+    operation_id: str,
+    attempt_id: str,
+    http_status: Optional[int] = None,
+    foreign_error: Optional[SdkErrorDetails] = None,
+    request_upload_complete: bool | None = None,
+) -> NgFailureEvent:
+    """The model boundary's failure for one HTTP attempt of a model call (``operation_id``)."""
+    return NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind=MODEL_REQUEST_ERROR,
+        failure_reason=reason,
+        operation="model_request",
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+        http_status=http_status,
+        request_upload_complete=request_upload_complete,
+        foreign_error=foreign_error,
+    )
+
+
+async def _raise_exhausted(
+    response: ClientResponse, content: Optional[bytes], last_failure: Optional[NgFailureEvent]
+) -> None:
+    """``raise_for_status`` for the last attempt; its error's explicit cause is that attempt's observed failure.
+
+    A cause ``raise_for_status`` set itself (a Gym server's rebuilt failure) is kept.
+    """
+    if last_failure is not None and last_failure.operation_id and response.status >= 400:
+        observe_model_operation(
+            operation_id=last_failure.operation_id,
+            outcome="failed",
+            final_attempt_id=last_failure.attempt_id,
+            failure_id=last_failure.event_id,
+        )
+    try:
+        await raise_for_status(response, content)
+    except ClientResponseError as error:
+        if last_failure is None or error.__cause__ is not None:
+            raise
+        raise error from last_failure
+    except (ClientError, TimeoutError) as error:
+        # raise_for_status read the error body itself; a failed read names the attempt that returned it.
+        cause = _body_read_cause(response, last_failure)
+        if cause is None:
+            raise
+        raise error from cause
+
+
+def _body_read_cause(response: ClientResponse, failure: Optional[NgFailureEvent]) -> Optional[NgFailureEvent]:
+    """The failure an error reply's failed body read is linked to: its observed attempt or the forwarded failure.
+
+    A forwarded Gym failure keeps its original ids; no local attempt is added for it.
+    """
+    if failure is None:
+        forwarded = FailureHeader.decode(getattr(response, "headers", None))
+        if forwarded is not None and forwarded.failure_id is not None:
+            return rebuild_failure(forwarded)
+    return failure
+
+
+async def _read_error_body(response: ClientResponse, failure: Optional[NgFailureEvent]) -> bytes:
+    """Read an error reply's body once; a failed read names the attempt that returned it as its explicit cause."""
+    try:
+        return await response.content.read()
+    except (ClientError, TimeoutError) as error:
+        cause = _body_read_cause(response, failure)
+        if cause is None:
+            raise
+        raise error from cause
 
 
 def _retry_wait_seconds(tries: int, response: ClientResponse) -> float:
@@ -233,7 +335,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
     # Spent-key/auth trip: (status, body, url). Later calls raise a fresh exception.
     _permanent_trip: Optional[tuple[int, bytes, str]] = PrivateAttr(default=None)
 
-    def _raise_permanent_error(self) -> None:
+    def _raise_permanent_error(self, cause: Optional[NgFailureEvent] = None) -> None:
         assert self._permanent_trip is not None
         status, body, url = self._permanent_trip
         snippet = body.decode("utf-8", errors="replace")[:200]
@@ -248,16 +350,28 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
             headers=None,
         )
         error.response_content = body
+        if cause is not None:
+            if cause.operation_id:
+                observe_model_operation(
+                    operation_id=cause.operation_id,
+                    outcome="failed",
+                    final_attempt_id=cause.attempt_id,
+                    failure_id=cause.event_id,
+                )
+            raise error from cause
         raise error
 
-    def _trip_permanent_error(self, status: int, content: bytes | str, url: Any) -> None:
+    def _trip_permanent_error(
+        self, status: int, content: bytes | str, url: Any, cause: Optional[NgFailureEvent] = None
+    ) -> None:
         body = content if isinstance(content, bytes) else content.encode("utf-8", errors="replace")
         self._permanent_trip = (status, body, str(url))
         print(
             f"[model_retry_stop url={url} status={status} error_msg={body.decode('utf-8', errors='replace')[:200]}]",
             flush=True,
         )
-        self._raise_permanent_error()
+        # Only the attempt that tripped it is the cause; later calls raise without one (no attempt was made).
+        self._raise_permanent_error(cause)
 
     async def _request(self, **request_kwargs: Dict) -> ClientResponse:
         if self._permanent_trip is not None:
@@ -290,26 +404,146 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         # A status response may follow generation too. Keep permanent-error detection,
         # but do not resend it; safe connection setup retries remain in the transport.
         max_num_tries = (self.max_num_tries or self.max_http_attempts) if resend else 1
+        request_started = monotonic()
         tries = 0
         waited = 0.0
+        # One logical model call; each HTTP attempt of it is observed under its own attempt id.
+        operation_id = uuid.uuid4().hex
+        transport_failures = 0
+        last_transport_failure: tuple[Exception, NgFailureEvent] | None = None
+
+        def observe_terminal(*, operation_id, outcome, final_attempt_id, failure_id=None) -> None:
+            # HTTP retry-loop observations, including time spent waiting; not inferred token usage.
+            observe_model_operation(
+                operation_id=operation_id,
+                outcome=outcome,
+                final_attempt_id=final_attempt_id,
+                failure_id=failure_id,
+                http_attempts=tries,
+                transport_failures=transport_failures,
+                retry_wait_s=waited,
+                request_elapsed_ms=(monotonic() - request_started) * 1000,
+            )
+
+        def observe_transport_failure(error: Exception, upload_complete: bool | None) -> None:
+            nonlocal transport_failures, last_transport_failure
+            transport_failures += 1
+            failure = _model_attempt_failure(
+                MODEL_RESPONSE_TIMEOUT_REASON
+                if upload_complete is True and _timed_out_waiting_for_response(error)
+                else "Model request transport failed",
+                operation_id=operation_id,
+                attempt_id=f"{operation_id}-transport-{transport_failures}",
+                request_upload_complete=upload_complete,
+                # The transport error is recorded by type only; its text may hold request data.
+                foreign_error=sdk_error_details(error),
+            )
+            last_transport_failure = (error, failure)
+            observe_failure(failure)
+
+        def observe_http_failure(response: ClientResponse) -> Optional[NgFailureEvent]:
+            # A Gym server's reply already forwards its own record; it is not recorded twice.
+            forwarded = FailureHeader.decode(getattr(response, "headers", None))
+            if forwarded is not None and forwarded.failure_id is not None:
+                return rebuild_failure(forwarded)
+            failure = _model_attempt_failure(
+                f"HTTP {response.status} from the model server",
+                operation_id=operation_id,
+                attempt_id=f"{operation_id}-{tries}",
+                http_status=response.status,
+            )
+            observe_failure(failure)
+            # Kept on this response, so the error a caller raises for it names this attempt as its cause.
+            response._ng_attempt_failure = failure
+            return failure
+
         while tries < max_num_tries:
             if self._permanent_trip is not None:
                 self._raise_permanent_error()
             tries += 1
-            response = await request(**request_kwargs)
+            try:
+                response = await request(_on_transport_failure=observe_transport_failure, **request_kwargs)
+            except Exception as error:
+                # As in _raise_exhausted, the raised error's explicit cause is the attempt it ended on.
+                if last_transport_failure is not None and last_transport_failure[0] is error:
+                    failed = last_transport_failure[1]
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=failed.attempt_id,
+                        failure_id=failed.event_id,
+                    )
+                    raise error from failed
+                raise
 
+            # The body is consumed by the public API method after headers arrive. Keep
+            # that read attached to this attempt, without replaying a delivered request.
+            def observe_body_failure(error: Exception, response=response, attempt=tries) -> NgFailureEvent:
+                failure = getattr(response, "_ng_attempt_failure", None)
+                if failure is None:
+                    failure = _model_attempt_failure(
+                        "Model response body read failed",
+                        operation_id=operation_id,
+                        attempt_id=f"{operation_id}-{attempt}",
+                        http_status=response.status,
+                        foreign_error=sdk_error_details(error),
+                    )
+                    response._ng_attempt_failure = failure
+                    observe_failure(failure)
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{attempt}",
+                    failure_id=failure.event_id,
+                )
+                return failure
+
+            response._ng_observe_body_failure = observe_body_failure
             if response.status in (401, 403):
-                content = await response.content.read()
+                failure = observe_http_failure(response)
+                content = await _read_error_body(response, failure)
                 if _error_body_is_permanent_auth(content):
-                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=f"{operation_id}-{tries}",
+                        failure_id=failure.event_id if failure else None,
+                    )
+                    self._trip_permanent_error(response.status, content, request_kwargs.get("url"), failure)
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{tries}",
+                    failure_id=failure.event_id if failure is not None else None,
+                )
                 return response
 
             if response.status not in RETRY_ERROR_CODES:
+                if response.status >= 400:
+                    # The caller raises or handles it; the status is still this call's last observed attempt.
+                    failure = observe_http_failure(response)
+                else:
+                    failure = None
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed" if response.status >= 400 else "completed",
+                    final_attempt_id=f"{operation_id}-{tries}",
+                    failure_id=failure.event_id if failure is not None else None,
+                )
                 return response
 
-            content = await response.content.read()
+            # Observed before this loop or a caller's own retry policy decides, so a later success still forwards
+            # the failed attempt. A Gym server's reply already forwards its own record; it is not recorded twice.
+            last_failure = observe_http_failure(response)
+            content = await _read_error_body(response, last_failure)
             if response.status == 429 and _error_body_is_permanent_quota(content):
-                self._trip_permanent_error(response.status, content, request_kwargs.get("url"))
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=f"{operation_id}-{tries}",
+                    failure_id=last_failure.event_id if last_failure else None,
+                )
+                self._trip_permanent_error(response.status, content, request_kwargs.get("url"), last_failure)
 
             wait = _retry_wait_seconds(tries, response)
             # Internal NeMo Gym servers extend max tries for retryable errors unless
@@ -326,13 +560,25 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
                 and self.max_rate_limit_wait_seconds > 0
             ):
                 if waited + wait > self.max_rate_limit_wait_seconds:
-                    await raise_for_status(response, content)
+                    observe_terminal(
+                        operation_id=operation_id,
+                        outcome="failed",
+                        final_attempt_id=last_failure.attempt_id if last_failure else f"{operation_id}-{tries}",
+                        failure_id=last_failure.event_id if last_failure else None,
+                    )
+                    await _raise_exhausted(response, content, last_failure)
                 max_num_tries = max(max_num_tries, tries + 1)
 
             # Preserve the final error body for raise_for_status and avoid sleeping
             # after the last attempt. Reading intermediate bodies releases sockets.
             if tries >= max_num_tries:
-                await raise_for_status(response, content)
+                observe_terminal(
+                    operation_id=operation_id,
+                    outcome="failed",
+                    final_attempt_id=last_failure.attempt_id if last_failure else f"{operation_id}-{tries}",
+                    failure_id=last_failure.event_id if last_failure else None,
+                )
+                await _raise_exhausted(response, content, last_failure)
 
             kind = "rate_limit" if response.status in RATE_LIMIT_ERROR_CODES else "http_error"
             print(
@@ -348,14 +594,23 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         if not response.ok and is_global_aiohttp_client_request_debug_enabled():
             print(f"Request kwargs: {json.dumps(request_kwargs)}")
 
-        await raise_for_status(response)
+        await _raise_exhausted(response, None, getattr(response, "_ng_attempt_failure", None))
+
+    async def _read_response_json(self, response: ClientResponse) -> Dict[str, Any]:
+        try:
+            return await get_response_json(response)
+        except (ClientError, TimeoutError) as error:
+            observer = getattr(response, "_ng_observe_body_failure", None)
+            if observer is not None:
+                raise error from observer(error)
+            raise
 
     async def create_models(self):
         request_kwargs = dict(url=f"{self.base_url}/models")
         response = await self._request(method="GET", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
         request_kwargs = dict(
@@ -367,7 +622,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_completion(self, **kwargs):
         request_kwargs = dict(
@@ -377,7 +632,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_response(self, **kwargs):
         request_kwargs = dict(
@@ -387,7 +642,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_tokenize(self, **kwargs):
         base_url = self.base_url.removesuffix("/v1")
@@ -398,7 +653,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
     async def create_embeddings(self, **kwargs):
         """POST ``{base_url}/embeddings`` with ``kwargs`` as the JSON body and return the parsed response dict."""
@@ -409,7 +664,7 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         response = await self._request(method="POST", **request_kwargs)
 
         await self._raise_for_status(response, request_kwargs)
-        return await get_response_json(response)
+        return await self._read_response_json(response)
 
 
 # Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.

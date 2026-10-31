@@ -32,6 +32,7 @@ from nemo_gym.server_runtime import (
     ResourcesSessionConflictError,
     ResourcesSessionFence,
     SimpleResourcesServer,
+    observe_programmatic_grading,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from nemo_gym.verification import VerifierFixture
@@ -52,6 +53,9 @@ class GetWeatherResponse(BaseModel):
 
 class SimpleWeatherVerifier:
     async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+        return observe_programmatic_grading(lambda: self._programmatic_score(body))
+
+    def _programmatic_score(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
         reward = float(
             any(item.type == "function_call" and item.name == "get_weather" for item in body.response.output)
         )

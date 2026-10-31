@@ -38,6 +38,8 @@ from nemo_gym.rollout_recovery import (
     RunManifest,
     _digest,
     _get_max_rollout_attempts,
+    has_saved_generation,
+    has_unclassified_execution_failure,
     is_terminal_failure,
     load_resubmit_offset,
     manifest_path_for,
@@ -173,6 +175,10 @@ class _Outcome:
     masked: bool
     has_reward: bool
     elapsed_seconds: float | None
+    final_zero: bool = False
+    interruption_cause_unknown: bool = False
+    saved_answer: bool = False
+    unclassified_execution_failure: bool = False
 
 
 def _indexed_records(path: Path, *, end_offset: int | None = None) -> Iterator[tuple[RolloutRecord, dict]]:
@@ -253,6 +259,22 @@ def is_interruption_failure(row: dict) -> bool:
     )
 
 
+def _holds_saved_answer(row: dict) -> bool:
+    """Use the same retained-generation facts as collection and recovery."""
+    return has_saved_generation(row)
+
+
+def _has_eligible_interruption_cause(row: dict) -> bool:
+    """Whether the saved interruption names a cause resume may act on: a request never sent or refused at admission."""
+    failure = row.get("_ng_failure_record")
+    return (
+        isinstance(failure, dict)
+        and not _holds_saved_answer(row)
+        and (failure.get("failure") or {}).get("stage") != "verification"
+        and (failure.get("delivery") == "not_sent" or (failure.get("failure") or {}).get("stage") == "admission")
+    )
+
+
 class RolloutRecords:
     def __init__(self, manifest: RunManifest, expected: list[dict]):
         self.manifest = manifest
@@ -269,6 +291,9 @@ class RolloutRecords:
         }
         self.payloads: dict[tuple[str, int], _Outcome] = {}
         self.omitted: set[tuple[str, int]] = set()
+        # An unanswered reservation cannot erase an earlier outcome's stop decision.
+        self.replay_blocked: set[str] = set()
+        self.unresolved_dispatches: set[str] = set()
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
 
     def _key(self, row: dict) -> tuple[str, int]:
@@ -347,7 +372,20 @@ class RolloutRecords:
             masked=bool(row.get("mask_sample")),
             has_reward=type(row.get("reward")) in (int, float),
             elapsed_seconds=observed_elapsed(row),
+            # The producer settled this rollout as a scored zero: final, so no policy reopens it.
+            final_zero=row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")),
+            interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
+            unclassified_execution_failure=has_unclassified_execution_failure(row),
+            saved_answer=row.get("_ng_failure_class") is not None and _holds_saved_answer(row),
         )
+        outcome = self.payloads[key]
+        if (
+            outcome.saved_answer
+            or outcome.final_zero
+            or outcome.interruption_cause_unknown
+            or outcome.unclassified_execution_failure
+        ):
+            self.replay_blocked.add(key[0])
 
     def outcome(self, row: dict, *, record: RolloutRecord) -> None:
         """Index an outcome after its JSONL record has been flushed."""
@@ -379,8 +417,16 @@ class RolloutRecords:
             for record, payload in _indexed_records(
                 path, end_offset=outcome_limits[path] if outcome_limits is not None else None
             ):
-                if payload.get("_ng_omitted_rollout") and payload.get("_ng_dispatch_drained"):
-                    # record_omitted_rollouts evidence for a row the dispatch budget never started: no execution.
+                if payload.get("_ng_omitted_rollout") and (
+                    payload.get("_ng_dispatch_drained") or payload.get("_ng_unrouted_run_error")
+                ):
+                    # Keep diagnostics out of outcome selection and scoring. An unresolved current dispatch,
+                    # however, cannot be replayed merely because its outcome was lost with the response.
+                    if payload.get("_ng_unrouted_run_error") and has_unclassified_execution_failure(payload):
+                        key = state._key(payload)
+                        state.check_run_identity(payload, legacy=import_legacy)
+                        if key[1] == manifest.next_attempt.get(key[0], 0) - 1:
+                            state.unresolved_dispatches.add(key[0])
                     continue
                 if import_legacy and RUN_ID_KEY not in payload:
                     identity = logical_rollout_id(payload)
@@ -448,6 +494,24 @@ class RolloutRecords:
     def _retryable(self, identity: str) -> bool:
         payload = self.payloads.get((identity, self.latest.get(identity)))
         terminal = payload.terminal if payload else False
+        if payload and payload.final_zero:
+            return False
+        if identity in self.unresolved_dispatches:
+            # The current dispatch is unresolved even if an older outcome still supplies score/history.
+            return False
+        if payload is None and identity in self.replay_blocked:
+            # A missing newer outcome does not reopen a retained answer, settled zero or unknown interruption.
+            return False
+        if payload and payload.unclassified_execution_failure:
+            # A route failure is evidence of an attempt, not permission to repeat an unknown execution.
+            return False
+        if payload and payload.saved_answer:
+            # A finished answer is re-judged by reverification, never regenerated by running the rollout again.
+            return False
+        if payload and payload.interruption_cause_unknown:
+            # An interruption with no recorded eligible cause stops automatic recovery; its history and the
+            # failures counted before it stay, and a saved answer is never regenerated.
+            return False
         if payload and self.retry_terminal_timeouts:
             terminal = is_terminal_failure(
                 {
@@ -465,9 +529,24 @@ class RolloutRecords:
         )
 
     def exhausted_count(self, max_attempts: int) -> int:
-        return sum(
-            self._retryable(identity) and self.failure_count(identity) >= max_attempts for identity in self.expected
-        )
+        exhausted = 0
+        for identity in self.expected:
+            outcome = self.payloads.get((identity, self.latest.get(identity)))
+            # Stopping an unclassified execution does not refund the failures already spent at its cap.
+            stopped_unknown = (
+                outcome is not None
+                and outcome.unclassified_execution_failure
+                and not (
+                    outcome.terminal
+                    or outcome.final_zero
+                    or outcome.saved_answer
+                    or outcome.interruption_cause_unknown
+                )
+            )
+            exhausted += (self._retryable(identity) or stopped_unknown) and self.failure_count(
+                identity
+            ) >= max_attempts
+        return exhausted
 
     def pending(self, max_attempts: int) -> list[dict]:
         pending = []
@@ -499,6 +578,8 @@ class RolloutRecords:
             if self.disposition(identity) == "success"
         )
         failures = self.selected_records("failure")
+        # Settled final zeros are complete and in the denominator, and still failures for health.
+        final_zeros = sum(self.payloads[key].final_zero for key in failures)
         failed_final = sum(
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
@@ -513,6 +594,7 @@ class RolloutRecords:
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
+            "final_zeros": final_zeros,
             "failed_not_final": len(failures) - failed_final,
             "failed_by_class": dict(sorted(Counter(self.payloads[key].failure_class for key in failures).items())),
             "intentionally_omitted": counts["omitted"],
@@ -528,8 +610,8 @@ class RolloutRecords:
             ),
             "max_rollout_attempts": max_attempts,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
-            "completion_fraction": counts["success"] / expected if expected else 1.0,
-            "complete": counts["success"] == expected,
+            "completion_fraction": (counts["success"] + final_zeros) / expected if expected else 1.0,
+            "complete": counts["success"] + final_zeros == expected,
             "reconciled": missing == 0,
             "identity_verified": not (self.manifest.legacy_import or self.manifest.identity_overridden),
         }

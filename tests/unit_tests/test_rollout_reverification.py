@@ -33,6 +33,7 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
     rollout_run_key,
 )
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
@@ -73,6 +74,7 @@ from nemo_gym.rollout_reverification import (
     summarize_cache_usage,
 )
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
+from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureEvent, FailureReport
 from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
@@ -1552,7 +1554,7 @@ class TestRunVerificationPayloads:
         rows = [self._make_row("agent_a", i) for i in range(3)]
         mock_client = MagicMock()
         mock_client.global_config_dict = {}
-        mock_client.post = AsyncMock(return_value=MagicMock())
+        mock_client.post = AsyncMock(return_value=MagicMock(headers={}))
         self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 0.5})
 
         results = await self._collect(_run_verification_payloads(rows))
@@ -1563,6 +1565,69 @@ class TestRunVerificationPayloads:
             assert row in returned_rows
         for _, resp in results:
             assert resp == {"reward": 0.5}
+
+    @staticmethod
+    def _attempt(status: int) -> FailureEvent:
+        return FailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason=f"HTTP {status} from the model server",
+            operation="model_request",
+            http_status=status,
+        )
+
+    async def test_a_recovered_verify_keeps_the_failures_its_reply_forwarded(self, monkeypatch) -> None:
+        # The judge answered 500, its retry succeeded: the reply forwards that attempt, with no failure_id.
+        attempt = self._attempt(500)
+        reply = FailureReport(events={attempt.event_id: attempt})
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers=FailureHeader.encode(reply)))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")]))
+
+        assert result["reward"] == 1.0
+        assert list(result["_ng_failure_events"]) == [attempt.event_id]
+        assert result["_ng_failure_events"][attempt.event_id]["http_status"] == 500
+        # Still a success: no failure class and no failure_id.
+        assert "_ng_failure_class" not in result and "_ng_failure_id" not in result
+
+    async def test_a_failed_verify_keeps_its_failure_and_each_forwarded_attempt_once(self, monkeypatch) -> None:
+        attempts = [self._attempt(503), self._attempt(503)]
+        judge = FailureEvent(
+            boundary=FailureBoundary.RESOURCES_SERVER,
+            failure_kind="judge_failed",
+            failure_reason="Judge call failed",
+            operation="judge.request",
+            cause_id=attempts[-1].event_id,
+        )
+        # judge_failsafe's body owns the judge failure and its cause; the header contains only model attempts.
+        body = {
+            "reward": 0.0,
+            "_ng_failure_class": "judge_failed",
+            "_ng_failure_id": judge.event_id,
+            "_ng_failure_events": {e.event_id: e.model_dump(mode="json") for e in (judge, attempts[-1])},
+        }
+        reply = FailureReport(events={e.event_id: e for e in attempts})
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers=FailureHeader.encode(reply)))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json=body)
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")]))
+
+        assert result["_ng_failure_class"] == "judge_failed" and result["_ng_failure_id"] == judge.event_id
+        assert sorted(result["_ng_failure_events"]) == sorted(e.event_id for e in (*attempts, judge))
+        assert result["_ng_failure_events"][judge.event_id] == judge.model_dump(mode="json")
+        assert result["_ng_failure_events"][judge.event_id]["cause_id"] == attempts[-1].event_id
+
+    async def test_an_omitted_reply_report_is_kept_as_omitted(self, monkeypatch) -> None:
+        mock_client = MagicMock(global_config_dict={})
+        mock_client.post = AsyncMock(return_value=MagicMock(headers=FailureHeader.encode(FailureReport(omitted=True))))
+        self._patch(monkeypatch, mock_client, {"agent_a": "rs_a"}, response_json={"reward": 1.0})
+
+        [(_, result)] = await self._collect(_run_verification_payloads([self._make_row("agent_a")]))
+
+        assert result == {"reward": 1.0, "_ng_failure_events_omitted": True}
 
     async def test_posts_to_resources_server_matching_agent(self, monkeypatch: pytest.MonkeyPatch) -> None:
         row_a = self._make_row("agent_a")
@@ -2645,7 +2710,7 @@ class TestRolloutReverificationRunFromConfig:
 
         async def capturing_post(server_name, url_path, json):  # noqa: ARG001
             verify_calls.append((server_name, json))
-            return MagicMock()
+            return MagicMock(headers={})
 
         mock_client.post = capturing_post
         monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: mock_client)

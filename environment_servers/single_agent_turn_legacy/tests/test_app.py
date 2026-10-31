@@ -599,3 +599,102 @@ async def test_legacy_rows_take_part_in_checkpoints() -> None:
     assert prepared.json()["phase"] == "prepared"
     assert record.boundary["next"] == "invoke_agent"
     assert result.json()["reward"] == 1.0
+
+
+def _chain_report(model_status: int):
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    model = NgFailureEvent(
+        boundary=FailureBoundary.MODEL,
+        failure_kind="model_request_error",
+        failure_reason="model body failed" if model_status == 200 else "model HTTP 503",
+        operation="model_request",
+        operation_id="op",
+        attempt_id="op-1",
+        http_status=model_status,
+    )
+    agent = NgFailureEvent(
+        boundary=FailureBoundary.AGENT, failure_kind="agent_route_failed", failure_reason="agent", operation="run"
+    )
+    environment = NgFailureEvent(
+        boundary=FailureBoundary.ENVIRONMENT,
+        failure_kind="environment_server_failed",
+        failure_reason="environment",
+        operation="activation",
+    )
+    agent.__cause__ = model
+    environment.__cause__ = agent
+    return failure_report_for(environment), environment, model
+
+
+@pytest.mark.parametrize("model_status", [200, 503])
+def test_the_flat_failure_reply_keeps_the_typed_reply_report(model_status: int) -> None:
+    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.rollout_recovery import has_unclassified_execution_failure
+    from nemo_gym.server_runtime import SingleAgentTurnResponse
+
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    report, environment, model = _chain_report(model_status)
+    response = SingleAgentTurnResponse.model_validate(
+        {
+            "episode_id": {"rollout_id": "r", "attempt": 1},
+            "task_id": {"taskset": "resources", "task_id": "t"},
+            "failure": {"failure_reason": "environment", "terminal": False, "stage": "agent"},
+            "failure_report": report.model_dump(mode="json"),
+        }
+    )
+    row = adapter._legacy_result(response)
+    assert row["_ng_failure_terminal"] is False and row["_ng_failure_stage"] == "agent"
+    assert FailureReportRow.report(row) == report
+    assert row[FailureReportRow.FAILURE_ID] == environment.event_id
+    assert row[FailureReportRow.EVENTS][model.event_id]["http_status"] == model_status
+    # A model body failure after successful headers keeps the agent from running again; a 503 stays retryable.
+    assert has_unclassified_execution_failure(row) is (model_status == 200)
+
+
+@pytest.mark.parametrize("own_failure", [False, True])
+def test_the_flat_result_keeps_its_reward_selection_and_cleanup_observations(own_failure: bool) -> None:
+    from nemo_gym.failure_transport import FailureReportRow
+    from nemo_gym.server_runtime import FailureReport, SingleAgentTurnResponse
+
+    environment_server, client = _environment_server()
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+
+    judge = failure_report_for(
+        NgFailureEvent(boundary=FailureBoundary.RESOURCES_SERVER, failure_kind="judge_failed", failure_reason="judge")
+    )
+    model = NgFailureEvent(boundary=FailureBoundary.AGENT, failure_kind="agent_route_failed", failure_reason="cleanup")
+    cleanup = FailureReport(events=failure_report_for(model).events)
+    result = {
+        "responses_create_params": {"input": "task"},
+        "response": {
+            "id": "resp",
+            "created_at": 0,
+            "model": "m",
+            "object": "response",
+            "output": [],
+            "parallel_tool_calls": False,
+            "tool_choice": "auto",
+            "tools": [],
+        },
+        "reward": 1.0,
+    }
+    if own_failure:
+        result |= FailureReportRow.fields(judge)
+    response = SingleAgentTurnResponse.model_validate(
+        {
+            "episode_id": {"rollout_id": "r", "attempt": 1},
+            "task_id": {"taskset": "resources", "task_id": "t"},
+            "result": result,
+            "failure_report": cleanup.model_dump(mode="json"),
+        }
+    )
+    row = adapter._legacy_result(response)
+    assert row["reward"] == 1.0
+    assert model.event_id in row[FailureReportRow.EVENTS]
+    # Cleanup diagnostics are observations: they select nothing, and a result's own selection wins.
+    assert row.get(FailureReportRow.FAILURE_ID) == (judge.failure_id if own_failure else None)

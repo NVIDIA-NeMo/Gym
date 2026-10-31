@@ -30,7 +30,7 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 from openai.types.shared import ReasoningEffort
-from pydantic import Field, PrivateAttr, TypeAdapter, ValidationError, model_validator
+from pydantic import Field, PositiveFloat, PrivateAttr, TypeAdapter, ValidationError, model_validator
 
 from nemo_gym.base_responses_api_model import (
     CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
@@ -58,8 +58,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.models import note_generation_backend, note_generation_request
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.openai_utils import MAX_NUM_TRIES, NeMoGymAsyncOpenAI
 from nemo_gym.responses_converter import (
     VLLMConverter,
     VLLMConverterResponsesToChatCompletionsState,  # noqa: F401
@@ -80,6 +81,7 @@ from nemo_gym.token_id_capture.external_capture import (
     validate_framework_context_options,
 )
 from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER, CaptureAdmissionError, CaptureInputError
+from nemo_gym.typed_exceptions import failure_report_for
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.tar_audio import TarAudioReader, resolve_archive_path, validate_relative_path
 
@@ -382,6 +384,12 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     request_prompt_and_generation_token_ids: bool = False
     propagate_context_overflow_errors: bool = False
 
+    max_http_attempts: int = Field(default=MAX_NUM_TRIES, ge=1)
+    max_num_tries: Optional[Literal[1]] = Field(
+        default=None,
+        description="Set to 1 when the caller owns retries, disabling both transport and HTTP-status retries.",
+    )
+
     uses_reasoning_parser: bool
     uses_interleaved_reasoning: bool = True
     # Which key(s) carry reasoning on an outgoing assistant message. "both" keeps
@@ -499,6 +507,10 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     # connection forever, so a dead endpoint never reaches the failure count that moves
     # sessions off it.
     endpoint_connection_retries: Optional[int] = 8
+
+    # Total time limit for each HTTP attempt to the engine, not for the whole call; None means no limit.
+    # A timed-out attempt is retried like any other transport error, so the call's attempt count is unchanged.
+    request_timeout_seconds: Optional[PositiveFloat] = None
 
     # Expose the Gym session (one per rollout) as the backend's conversation id.
     # ``conversation_params`` is a TensorRT-LLM extension outside the OpenAI Chat Completions
@@ -699,6 +711,7 @@ class VLLMModel(SimpleResponsesAPIModel):
                             }
                         },
                         status_code=error.status,
+                        headers=FailureHeader.encode(failure_report_for(error)),
                     )
                 raise
 
@@ -794,8 +807,11 @@ class VLLMModel(SimpleResponsesAPIModel):
                     if (self.config.endpoint_file or self.config.route_around_failing_endpoints)
                     else None
                 ),
+                request_timeout_seconds=self.config.request_timeout_seconds,
                 # The wait budget is for outside providers; a job must notice a down model server quickly.
                 max_rate_limit_wait_seconds=0,
+                max_http_attempts=self.config.max_http_attempts,
+                max_num_tries=self.config.max_num_tries,
             )
             for base_url in self.config.base_url
         ]
@@ -2230,6 +2246,9 @@ class VLLMModel(SimpleResponsesAPIModel):
                 default_headers=self.config.default_headers,
                 max_connection_retries=self.config.endpoint_connection_retries,
                 max_rate_limit_wait_seconds=0,
+                max_http_attempts=self.config.max_http_attempts,
+                max_num_tries=self.config.max_num_tries,
+                request_timeout_seconds=self.config.request_timeout_seconds,
             )
         ]
         # Every session re-resolves onto the new host.

@@ -54,6 +54,8 @@ from nemo_gym.config.global_config import (
     rollout_run_key,
     rollout_run_labels,
 )
+from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.rollout_collection import (
     NG_RESULT_TYPE_KEY,
     _coverage_report,
@@ -624,6 +626,13 @@ _IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
+    saved_patch_failure = _is_judge_failure(pair.rollout) or (
+        pair.rollout.get("failure_kind") == VERIFIER_ERROR and pair.rollout.get("evaluation_completed") is False
+    )
+    if saved_patch_failure and isinstance(pair.rollout.get("model_patch"), str):
+        # This projection only carries the response, not a saved workspace patch. Do not silently
+        # grade another patch (for example the task's reference patch) or ask the agent for a new one.
+        raise ConfigError("reverify: saved model_patch replay is unsupported; retain the original patch and failure")
     response = _rollout_response(pair.rollout)
     task_input = pair.input.get("task_input")
     if not isinstance(task_input, dict):
@@ -762,7 +771,13 @@ def _run_verification_payloads(
                         flush=True,
                     )
                 raise
-            return row, await get_response_json(res)
+            result = await get_response_json(res)
+            # As collection saves a dispatch reply's report: failures this /verify observed, such as a judge attempt
+            # a retry recovered from, are kept beside the result; a failed result keeps its own failure_id.
+            report = FailureHeader.decode(getattr(res, "headers", None))
+            if report is not None:
+                result = FailureReportRow.merged_into(result, report)
+            return row, result
 
     return tqdm.as_completed(
         map(_post_subroutine, payloads),

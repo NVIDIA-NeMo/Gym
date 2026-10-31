@@ -42,7 +42,7 @@ from uuid import uuid4
 
 import aiohttp
 import orjson
-from aiohttp import ClientError
+from aiohttp import ClientConnectorError, ClientError
 from omegaconf import DictConfig, ListConfig, OmegaConf
 from pydantic import BaseModel, Field, PrivateAttr, ValidationError, field_validator, model_validator
 from tqdm.asyncio import tqdm
@@ -96,12 +96,14 @@ from nemo_gym.config.global_config import (
 from nemo_gym.core.episode import EpisodeId, TaskId, maybe_rollout_id_from_run_body
 from nemo_gym.core.failure_kinds import (
     CANCELLED,
+    COLLECTION_DISPATCH_FAILED,
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
     JUDGE_FAILED,
     is_namespaced,
     is_registered,
 )
+from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
     await_model_call_capture_quiescence,
@@ -143,7 +145,12 @@ from nemo_gym.rollout_recovery import (
 )
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.episode_types import EpisodeFailure, is_materialized_task_row
+from nemo_gym.server_runtime.episode_types import (
+    EpisodeFailure,
+    FailureBoundary,
+    FailureReport,
+    is_materialized_task_row,
+)
 from nemo_gym.telemetry._fallbacks import is_span_group_enabled, managed_span
 from nemo_gym.telemetry.endpoints import ROLLOUT_ID_ATTRIBUTE
 from nemo_gym.telemetry.gym_metrics import (
@@ -174,7 +181,9 @@ from nemo_gym.trajectory.trajectory_record import (
     TrajectoryToolCall,
     TrajectoryTurn,
     VerifierInvocation,
+    failure_observations,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from nemo_gym.utils.path_utils import (
     aggregate_metrics_path_for,
     aggregation_sources_path_for,
@@ -300,7 +309,26 @@ def is_unstarted_rollout_row(row: Mapping[str, Any]) -> bool:
     return is_omitted_rollout_row(row) and bool(row.get(NG_DISPATCH_DRAINED_KEY))
 
 
+# Set only on the omitted-rollout row that keeps the evidence of a failed /run with route_failures_to_sidecar off.
+NG_UNROUTED_RUN_ERROR_KEY = "_ng_unrouted_run_error"
+
+
+def is_non_superseding_rollout_row(row: Mapping[str, Any]) -> bool:
+    """Whether readers skip a sidecar row before they pick a rollout's latest attempt.
+
+    A row never started is no execution. A failed /run kept as evidence with routing off is no new outcome: the
+    attempt it records stands no more than before it was kept, so an older failure still stands and a later attempt
+    still replaces it. An interrupted ``record_omitted_rollouts`` row is neither and still hides older failures.
+    """
+    return is_unstarted_rollout_row(row) or (
+        is_omitted_rollout_row(row) and row.get(NG_UNROUTED_RUN_ERROR_KEY) is True
+    )
+
+
 NG_TERMINAL_KEY = "_ng_failure_terminal"
+# Set by the producer of a final failure row that must be counted as a zero in the metrics, whatever
+# count_failure_classes_as_zero names (a rollout the evaluated model failed, for example).
+NG_FAILURE_COUNTS_AS_ZERO_KEY = "_ng_failure_counts_as_zero"
 # The attempt cap the collecting process ran with, stamped on each sidecar row: offline aggregation reads it
 # instead of its own environment. The `_ng_failure_` prefix keeps it out of the metrics of a counted row.
 NG_FAILURE_MAX_ATTEMPTS_KEY = "_ng_failure_max_attempts"
@@ -549,6 +577,7 @@ _LEGACY_RESULT_FIELDS = frozenset(
         "_ng_failure_partial_response",
         "_ng_failure_stage",
         "_ng_failure_judge_error",
+        NG_FAILURE_COUNTS_AS_ZERO_KEY,
         *NG_FAILURE_REPORT_KEYS,
         "_ng_agent_observations",
         "_ng_terminal_model_call_id",
@@ -589,6 +618,18 @@ def _task_data_provenance(row: Mapping[str, Any]) -> Dict[str, Any]:
     return {key: task_data[key] for key in PROVENANCE_KEYS if key in task_data}
 
 
+def _reply_failure_report(response: Mapping[str, Any]) -> tuple[FailureReport, ...]:
+    """The ``FailureReport`` an environment reply carries beside its outcome; an invalid one is omitted."""
+    report = response.get("failure_report")
+    if report is None:
+        return ()
+    try:
+        return (FailureReport.model_validate(report),)
+    except ValidationError:
+        logger.warning("Invalid failure report in an environment reply; its failure events are omitted")
+        return (FailureReport(omitted=True),)
+
+
 def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
     """Turn a ``BaseEpisodeResponse`` into the rollout record the collector stores.
 
@@ -625,8 +666,11 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
             record[NG_FAILURE_LEGACY_CLASS_KEY] = ENVIRONMENT_SERVER_FAILURE_CLASS
         if failure.get("stage") is not None:
             record["_ng_failure_stage"] = failure["stage"]
+        # Keep the diagnostic kind separate from the routing class above.
         if failure.get("failure_kind") is not None:
             record["failure_kind"] = failure["failure_kind"]
+            record["_ng_failure_kind"] = failure["failure_kind"]
+        record = FailureReportRow.merged_into(record, *_reply_failure_report(response))
         if failure.get("partial_response") is not None:
             record["_ng_failure_partial_response"] = failure["partial_response"]
         if failure.get("agent_observations") is not None:
@@ -649,13 +693,27 @@ def _episode_record(response: Dict[str, Any]) -> Dict[str, Any]:
         if result.get(NG_FAILURE_CLASS_KEY) == JUDGE_FAILED and isinstance(kind, str) and kind.startswith("judge_")
         else set()
     )
-    reserved = sorted(key for key in result if _is_collector_key(key) and key not in judge_markers)
+    # A producer that settles its rollout as a final zero marks it explicitly: a registered failure class, final,
+    # and the marker. Only that complete form may carry these collector keys; the marker alone reopens nothing.
+    final_zero_markers = (
+        {NG_FAILURE_CLASS_KEY, NG_TERMINAL_KEY, NG_FAILURE_COUNTS_AS_ZERO_KEY, *NG_FAILURE_REPORT_KEYS}
+        if result.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
+        and result.get(NG_TERMINAL_KEY) is True
+        and isinstance(result.get(NG_FAILURE_CLASS_KEY), str)
+        else set()
+    )
+    reserved = sorted(
+        key for key in result if _is_collector_key(key) and key not in judge_markers | final_zero_markers
+    )
     if reserved:
         raise ValueError(
             f"environment server result for task {task_id!r} uses keys reserved for rollout collection: {reserved}"
         )
     record = dict(result)
     record[NG_TASK_ID_KEY] = task_id
+    reply_report = _reply_failure_report(response)
+    if reply_report:
+        record = FailureReportRow.merged_into(record, *reply_report)
     return record
 
 
@@ -693,6 +751,26 @@ class _CompletedRollout:
     # The `/run` wall clock in seconds, success or failure; None for a row that never started.
     elapsed_s: Optional[float] = None
     dispatch_span_context: Optional["SpanContext"] = None
+    # The failure report the `/run` reply forwarded, or Collection's own for a failed dispatch. Only the writer
+    # saves it, so run_examples yields the same result as before.
+    failure_report: Optional[FailureReport] = None
+    # A failed `/run` with route_failures_to_sidecar off: the writer keeps evidence of it, then raises this error.
+    run_error: Optional[BaseException] = None
+
+
+def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
+    """Collection's own failure for a failed `/run` dispatch, caused by the dispatch error, with the report the
+    reply forwarded. Routing classes remain outcome metadata; this diagnostic has a registered collection kind."""
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.COLLECTION,
+        failure_kind=COLLECTION_DISPATCH_FAILED,
+        failure_reason=f"Rollout dispatch failed: {type(exc).__name__}",
+        operation="collection.run",
+    )
+    failure.__cause__ = exc
+    report = failure_report_for(failure)
+    received = FailureHeader.decode(headers)
+    return report.merged(received) if received is not None else report
 
 
 def _round_robin_by_agent(examples: List[Dict]) -> List[Dict]:
@@ -966,6 +1044,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "response_source",
                 "upstream_status_code",
                 "local_response_reason",
+                "failure_report",
+                "model_operations",
                 "error_category",
                 "latency_ttft_ms",
             )
@@ -1018,6 +1098,17 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 verifier_invocations.append(invocation)
             else:
                 existing.model_calls.extend(ref for ref in invocation.model_calls if ref not in existing.model_calls)
+                for field in ("grading_operations", "sandbox_observations"):
+                    returned = getattr(invocation, field)
+                    if returned is None:
+                        continue
+                    observed = getattr(existing, field)
+                    if observed is None:
+                        setattr(existing, field, returned)
+                    elif observed != returned:
+                        # Contradictory returned facts cannot establish authoritative verifier coverage.
+                        gaps.append(ObservationGap(code=f"verifier_{field}_conflict"))
+                        setattr(existing, field, [])
                 if invocation.status != "unknown":
                     existing.status = invocation.status
                     existing.failure_kind = invocation.failure_kind
@@ -1370,7 +1461,8 @@ class SharedRolloutCollectionConfig(
         description=(
             "Record a failed agent /run as a failures-sidecar row and keep going, instead of ending "
             "the run. The failed rollouts are then absent from the rollouts jsonl and from the "
-            "score, which is reported over fewer rollouts than were dispatched."
+            "score, which is reported over fewer rollouts than were dispatched. Off, the first failed "
+            "/run ends the run, after an omitted-rollout row records it (not scored, not an attempt)."
         ),
     )
     rollout_collection_driver: Optional[str] = Field(
@@ -1420,12 +1512,17 @@ class SharedRolloutCollectionConfig(
         intentionally_omitted: int = 0,
         retryable: bool,
         made_progress: bool,
+        final_zero_rows: Sequence[Mapping[str, Any]] = (),
     ) -> None:
         """Reject unfinished work; allow omissions alongside completed tasks.
 
         Drivers must supply whether any tasks can still be retried and whether
         this invocation saved outcomes that made progress (not just interruptions). Assuming either can cause endless
         automatic restarts when a driver has no work left or makes no progress.
+
+        ``final_zero_rows`` are failure rows that settle their rollout as a scored zero (see
+        ``_final_zero_failure_rows``): resume does not run them again, so they are completed samples. A caller that
+        passes ``completed`` has already counted them.
         """
         if not self.require_complete and not intentionally_omitted:
             return
@@ -1435,6 +1532,11 @@ class SharedRolloutCollectionConfig(
                     (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
                     for r in results
                     if r.get(NG_FAILURE_CLASS_KEY) is None and not r.get(NG_NO_PERSIST_KEY)
+                }
+                | {
+                    (r.get("stage_index"), r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])
+                    for r in final_zero_rows
+                    if r.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
                 }
             )
         if has_only_intentional_gaps(
@@ -2327,7 +2429,12 @@ def _agent_request_failure_row(exc: BaseException, status: Optional[int]) -> Dic
     """
     rollout_ran = status is not None and status not in _SERVER_DID_NOT_RUN_STATUSES
     body = getattr(exc, "response_content", None)
+    try:
+        observations = failure_observations(orjson.loads(body)) if body else {}
+    except (TypeError, ValueError):
+        observations = {}
     return {
+        **observations,
         NG_FAILURE_CLASS_KEY: (AGENT_RUN_ERROR_FAILURE_CLASS if rollout_ran else AGENT_REQUEST_FAILED_FAILURE_CLASS),
         "_ng_failure_type": type(exc).__name__,
         "_ng_failure_message": str(exc) or repr(exc),
@@ -2519,7 +2626,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
 
     An interrupted attempt that ``record_omitted_rollouts`` recorded is the rollout's latest execution but no
     failure: it hides any older failure, so the rollout is left out here and is missing. A row the dispatch budget
-    never started is no execution and is skipped.
+    never started, and the evidence of a failed /run with routing off, are skipped (``is_non_superseding_rollout_row``).
     """
     latest_by_key: Dict[Tuple[Any, Any], Dict[str, Any]] = {}
     for fpath in failures_fpaths:
@@ -2531,7 +2638,7 @@ def _latest_failure_rows(failures_fpaths: List[Path]) -> Dict[Tuple[Any, Any], D
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 key = row.get(TASK_INDEX_KEY_NAME), row.get(ROLLOUT_INDEX_KEY_NAME)
                 previous = latest_by_key.get(key)
@@ -2546,7 +2653,8 @@ def _matches_failure_class(row: Mapping[str, Any], failure_classes: Collection[s
 
 
 def _counted_failure_rows(rows: List[Dict], failure_classes: List[str]) -> List[Dict]:
-    return [_counted_failure_row(row) for row in rows if _matches_failure_class(row, failure_classes)]
+    wanted = set(failure_classes)
+    return [_counted_failure_row(row) for row in rows if _counts_as_zero(row, wanted)]
 
 
 def _failure_rows_counted_as_zero(
@@ -2561,15 +2669,39 @@ def _failure_rows_counted_as_zero(
     A row that already carries a ``reward`` is counted as it stands. A row that carries none
     records that no rollout happened, so it is counted as a zero here and only here: the score
     enters the metric input, never the sidecar or the rollouts jsonl, which keeps the artifacts
-    free of a verdict no verifier gave. A rollout that also succeeded is never counted.
+    free of a verdict no verifier gave. A rollout that also succeeded is never counted. A row its
+    producer marked with ``_ng_failure_counts_as_zero`` is counted whatever its class.
     """
-    if not failure_classes:
-        return []
-
     latest_by_key = _latest_failure_rows(failures_fpaths)
-    return _counted_failure_rows(
-        [row for key, row in latest_by_key.items() if key not in scored_keys], failure_classes
-    )
+    wanted = set(failure_classes)
+    return [
+        _counted_failure_row(row)
+        for key, row in latest_by_key.items()
+        if key not in scored_keys and _counts_as_zero(row, wanted)
+    ]
+
+
+def _final_zero_failure_rows(
+    failures_fpaths: List[Path], scored_keys: set, *, retry_terminal_timeouts: bool
+) -> List[Dict[str, Any]]:
+    """The latest failure rows that settle their rollout as a scored zero: final, and marked by their producer.
+
+    Resume does not run such a rollout again and the metrics count it as 0, so its work is done. A row counted only
+    because ``count_failure_classes_as_zero`` names its class is not settled: that option scores the metrics, and
+    resume may still run the rollout.
+    """
+    return [
+        row
+        for key, row in _latest_failure_rows(failures_fpaths).items()
+        if key not in scored_keys
+        and row.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
+        and is_terminal_failure(row, retry_terminal_timeouts=retry_terminal_timeouts)
+    ]
+
+
+def _counts_as_zero(row: Mapping[str, Any], wanted: set) -> bool:
+    """Whether a rollout's latest sidecar row enters the metrics as a zero: its class is wanted, or it is marked."""
+    return _matches_failure_class(row, wanted) or row.get(NG_FAILURE_COUNTS_AS_ZERO_KEY) is True
 
 
 def _counted_failure_row(row: Dict[str, Any]) -> Dict[str, Any]:
@@ -2797,7 +2929,7 @@ def _failure_export_metrics(
                 if not line:
                     continue
                 row = loads_jsonl_line(line, fpath, line_no)
-                if is_unstarted_rollout_row(row):
+                if is_non_superseding_rollout_row(row):
                     continue
                 latest[identity(row)] = row
                 if is_omitted_rollout_row(row):
@@ -3541,7 +3673,10 @@ class RolloutCollectionHelper(BaseModel):
         # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()
-        terminal_keys: set = set()
+        # A rollout is sidecar-terminal when its latest row is a terminal failure, picked by the rule scoring uses
+        # (`_latest_failure_rows`): a later interrupted attempt supersedes an older terminal failure, the evidence of
+        # an unrouted /run and a never-started row do not.
+        latest_by_key: Dict[Tuple, Dict[str, Any]] = {}
         elapsed_by_key: Dict[Tuple, float] = {}
         if failures_fpath.exists():
             with failures_fpath.open("rb") as f:
@@ -3550,17 +3685,17 @@ class RolloutCollectionHelper(BaseModel):
                     if not line:
                         continue
                     fr = orjson.loads(line)
-                    # A rollout that produced no result used no attempt; resume runs it again.
-                    if is_omitted_rollout_row(fr):
-                        continue
                     if TASK_INDEX_KEY_NAME not in fr or ROLLOUT_INDEX_KEY_NAME not in fr:
                         continue
                     k = (fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
+                    if not is_non_superseding_rollout_row(fr):
+                        latest_by_key[k] = fr
+                    # A rollout that produced no result used no attempt; resume runs it again.
+                    if is_omitted_rollout_row(fr):
+                        continue
                     attempts_by_key[k] += 1
                     if line_index >= resubmit_offset:
                         budget_used[k] += 1
-                    if is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts):
-                        terminal_keys.add(k)
                     # A failed attempt still tells us how long this task runs -
                     # the only duration signal available for a task that has not
                     # succeeded yet. Keep the longest attempt seen.
@@ -3568,9 +3703,22 @@ class RolloutCollectionHelper(BaseModel):
                     if observed is not None:
                         elapsed_by_key[k] = max(elapsed_by_key.get(k, 0.0), observed)
 
+        terminal_keys = {
+            k
+            for k, fr in latest_by_key.items()
+            if not is_omitted_rollout_row(fr)
+            and is_terminal_failure(fr, retry_terminal_timeouts=config.retry_terminal_timeouts)
+        }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        gated = successes_seen | terminal_keys | maxed_out
+        from nemo_gym.rollout_recovery import has_saved_generation, has_unclassified_execution_failure
+
+        unclassified = {
+            k
+            for k, row in latest_by_key.items()
+            if has_unclassified_execution_failure(row) or has_saved_generation(row)
+        }
+        gated = successes_seen | terminal_keys | maxed_out | unclassified
 
         input_rows = [row for row in original_input_rows if get_key(row) not in gated]
 
@@ -3964,6 +4112,10 @@ class RolloutCollectionHelper(BaseModel):
                 input_rows,
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
+                record_unrouted_failures=True,
+                # The persisted attempt and recovery selector own retries, including uncertain delivery.
+                retry_requests=False,
+                _max_num_tries=1,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
                 on_dispatch_batch=store.record_dispatches,
@@ -4077,6 +4229,8 @@ class RolloutCollectionHelper(BaseModel):
                     result[NG_ENVIRONMENT_SERVER_KEY] = row[NG_ENVIRONMENT_SERVER_KEY]
                 if completed.environment_server_type is not None:
                     result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
+                if completed.failure_report is not None:
+                    result = FailureReportRow.merged_into(result, completed.failure_report)
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -4092,7 +4246,11 @@ class RolloutCollectionHelper(BaseModel):
                 # Preserve failure captures even without observations. Explicit agent or verifier evidence also
                 # survives legacy no-persist markers, since reported failures are saved for recovery.
                 if capture_dirs and (
-                    not no_persist or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+                    not no_persist
+                    or NG_AGENT_OBSERVATIONS_KEY in result
+                    or NG_VERIFIER_INVOCATIONS_KEY in result
+                    or NG_TRAJECTORY_KEY in result
+                    or FailureReportRow.EVENTS in result
                 ):
                     # A cancelled call's capture write runs detached, so drain the claims this
                     # rollout still holds before snapshotting; otherwise a late row is lost.
@@ -4167,6 +4325,19 @@ class RolloutCollectionHelper(BaseModel):
                     upload_spool.write(orjson.dumps(_rollout_for_export(result)) + b"\n")
 
                 dispatch_name = self._dispatch_name(row)
+                if completed.run_error is not None:
+                    # route_failures_to_sidecar is off, so this failed /run ends the run. Its identity, cause and
+                    # report are kept as non-superseding evidence: they do not replace a score or earlier failure.
+                    # Admission still stops an unresolved possibly-delivered request from running the agent again.
+                    store.record_unstarted(omitted_rollout_record(result) | {NG_UNROUTED_RUN_ERROR_KEY: True})
+                    _record_rollout_outcome(result, "omitted", dispatch_name)
+                    print(
+                        "[rollout_collection] the run stops at a failed /run (route_failures_to_sidecar is off); "
+                        f"it is recorded in {failures_path_for(store.output)}. {len(input_rows) - completed_count + 1} "
+                        f"of {len(input_rows)} dispatched rollouts have no result; saved evidence governs resume admission.",
+                        flush=True,
+                    )
+                    raise completed.run_error
                 if not sources_dropped:
                     # The rows this run adds are not the merged ones an aggregation's shard list names. Every outcome
                     # below writes a row, so the list goes with the first; a run that writes none leaves it as it was.
@@ -4349,12 +4520,8 @@ class RolloutCollectionHelper(BaseModel):
         )
         # Explicitly counted failures can provide a score even when no rollout
         # succeeded. Select attempts before applying that scoring policy.
-        counted = (
-            await asyncio.to_thread(
-                lambda: _counted_failure_rows(store.failures(), config.count_failure_classes_as_zero)
-            )
-            if config.count_failure_classes_as_zero
-            else []
+        counted = await asyncio.to_thread(
+            lambda: _counted_failure_rows(store.failures(), config.count_failure_classes_as_zero)
         )
         missing = (
             await asyncio.to_thread(
@@ -4494,10 +4661,12 @@ Fully materialized inputs: {config.materialized_jsonl_fpath}
 Rollouts: {output_fpath}
 Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
+        # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
+        # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"],
+            completed=completion["successful"] + completion["final_zeros"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,
@@ -4946,10 +5115,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
+        _max_num_tries: Optional[Literal[1]] = None,
         run_timing: Optional[RunTimingReport] = None,
+        record_unrouted_failures: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
+
+        ``record_unrouted_failures`` returns a failed `/run` that ``route_failures_to_sidecar`` would route as a
+        failure row whose ``run_error`` holds the error, so the collection writer can keep evidence of it before it
+        raises the error. Other callers keep receiving the exception.
 
         When ``max_resident_tasks`` is set, at most that many rollout tasks are admitted
         at once. When unset, all examples are scheduled as before. The collection
@@ -5083,6 +5258,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             url_path="/run",
                             json=request_body,
                             **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                            **({"_max_num_tries": _max_num_tries} if _max_num_tries is not None else {}),
                         )
                     await raise_for_status(res)
                     stage = "response"
@@ -5118,6 +5294,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        failure_report=FailureHeader.decode(getattr(res, "headers", None)),
                     )
                 except Exception as e:
                     print(
@@ -5126,8 +5303,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         f"row={json.dumps(_rollout_request_debug_summary(row), sort_keys=True)}",
                         flush=True,
                     )
-                    if not (route_failures_to_sidecar or typed_outcomes) or not isinstance(
-                        e, (*_RUN_FAILURE_ERRORS, InvalidRolloutResult)
+                    unrouted = record_unrouted_failures and isinstance(e, _RUN_FAILURE_ERRORS)
+                    if not isinstance(e, (*_RUN_FAILURE_ERRORS, InvalidRolloutResult)) or not (
+                        route_failures_to_sidecar or typed_outcomes or unrouted
                     ):
                         if isinstance(e, StaleRolloutResult):
                             e.add_note(
@@ -5153,15 +5331,31 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     ):
                         failure[NG_FAILURE_CLASS_KEY] = ENVIRONMENT_PROTOCOL_VIOLATION
                         failure[NG_TERMINAL_KEY] = True
+                    failure_row = failure
+                    failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
+                    if (
+                        isinstance(failed_outcome, RolloutFailureRecord)
+                        and _max_num_tries == 1
+                        and isinstance(e, ClientConnectorError)
+                    ):
+                        # One failed connection attempt cannot have delivered /run. A final error after retries
+                        # cannot establish this fact about earlier attempts.
+                        failed_outcome = failed_outcome.model_copy(update={"delivery": "not_sent"})
                     return _CompletedRollout(
                         row=row,
-                        result=_failure_outcome(row, failure, stage) if typed_outcomes else failure,
+                        result=failed_outcome,
                         rollout_latency_ms=None,
                         diagnostics=_failure_diagnostics(failure),
                         environment_server=server_name,
                         environment_server_type=server_type,
                         elapsed_s=time.monotonic() - started,
                         dispatch_span_context=dispatch_span_context,
+                        failure_report=_collection_failure_report(
+                            e,
+                            failure_row[NG_FAILURE_CLASS_KEY],
+                            getattr(e, "headers", None) or getattr(res, "headers", None),
+                        ),
+                        run_error=None if route_failures_to_sidecar else e,
                     )
                 finally:
                     # Failed and timed-out tasks inform the adaptive margin too, but only by
@@ -5703,10 +5897,10 @@ class RolloutAggregationHelper(BaseModel):
         counted = [
             _counted_failure_row(row)
             for identity, row in latest_failures.items()
-            if identity not in result_ids
-            and _matches_failure_class(row, wanted)
-            and _routing_identity(row) is not None
+            if identity not in result_ids and _counts_as_zero(row, wanted) and _routing_identity(row) is not None
         ]
+        if config.count_failure_classes_as_zero or counted:
+            print(f"Counting {len(counted)} failure row(s) as scored zeros: {config.count_failure_classes_as_zero}")
         materialized_fpaths = [materialized_path_for(path) for path in legacy_paths]
         missing: List[Dict[str, Any]] = []
         if config.count_missing_rollouts_as_zero:
@@ -5770,7 +5964,7 @@ class RolloutAggregationHelper(BaseModel):
             row[NG_FAILURE_CLASS_KEY]
             for history in histories
             for row in history.failures()
-            if not _matches_failure_class(row, config.count_failure_classes_as_zero)
+            if not _counts_as_zero(row, wanted)
         )
         components = [history.coverage() for history in histories]
         inventory_known = not legacy_paths

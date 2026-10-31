@@ -68,6 +68,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymFunctionToolParam,
     NeMoGymResponseInputText,
 )
+from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.models._checkpoint import PolicyModelParticipant, generation_cut_requester
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
@@ -77,6 +78,7 @@ from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
+from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,
@@ -88,6 +90,7 @@ from nemo_gym.token_id_capture import (
 )
 from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
 from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
@@ -959,6 +962,14 @@ class TestApp:
         request_info = MagicMock(real_url="http://vllm.test/v1/chat/completions")
         error = ClientResponseError(request_info, (), status=400, message="Bad Request")
         error.response_content = error_content
+        model = NgFailureEvent(
+            boundary=FailureBoundary.MODEL,
+            failure_kind="model_request_error",
+            failure_reason="HTTP 400 from the model",
+            operation="model_request",
+            http_status=400,
+        )
+        error.__cause__ = model
         mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
         mock_client.create_chat_completion = AsyncMock(side_effect=error)
         mock_client.create_completion = AsyncMock(side_effect=error)
@@ -986,8 +997,12 @@ class TestApp:
                     "code": expected_code,
                 }
             }
+            # The refusal ends the request: the reply names the model failure that caused it.
+            report = FailureHeader.decode(response.headers)
+            assert report is not None and report.failure_id == model.event_id
         else:
             assert response.status_code == 200
+            assert FailureHeader.decode(response.headers) is None
             if responses_api:
                 assert response.json()["incomplete_details"] == {"reason": "max_output_tokens"}
                 assert response.json()["usage"]["input_tokens"] == 0
@@ -8436,3 +8451,23 @@ def test_streaming_sanitize_applies_the_configured_custom_tool_strategy() -> Non
     passthrough = VLLMModel(config=_custom_tool_config(), server_client=MagicMock(spec=ServerClient))
     cleaned, _ = passthrough._sanitize_streaming_responses_body(body())
     assert cleaned["tools"] == []
+
+
+@mark.parametrize("request_timeout_seconds", [None, 30.0])
+def test_request_timeout_reaches_every_engine_client(request_timeout_seconds) -> None:
+    """Unset keeps the engine request unbounded; a value bounds each HTTP attempt of every client."""
+    config = VLLMModelConfig(
+        host="0.0.0.0",
+        port=8081,
+        base_url=["http://engine-a/v1", "http://engine-b/v1"],
+        api_key="dummy_key",  # pragma: allowlist secret
+        model="dummy_model",
+        entrypoint="",
+        name="vllm_model",
+        return_token_id_information=False,
+        uses_reasoning_parser=False,
+        **({} if request_timeout_seconds is None else {"request_timeout_seconds": request_timeout_seconds}),
+    )
+    server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+
+    assert [client.request_timeout_seconds for client in server._clients] == [request_timeout_seconds] * 2

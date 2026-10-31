@@ -41,7 +41,8 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.verification import JudgeError, call_judge
+from nemo_gym.verification import call_judge
+from nemo_gym.verification.judge import JUDGE_FAILURES, is_judge_failure
 from resources_servers.text_to_sql.prompts import SQL_JUDGE_PROMPT_TEMPLATE, SQL_JUDGE_SYSTEM_MESSAGE
 
 
@@ -312,8 +313,13 @@ class TextToSqlResourcesServer(SimpleResourcesServer):
                     failure_reason = FailureCode.JUDGE_EVALUATION_FAILED
                     reward = 0.0
 
-        except JudgeError:
-            raise
+        except JUDGE_FAILURES as error:
+            if is_judge_failure(error):
+                raise
+            else:
+                failure_reason = FailureCode.UNKNOWN_ERROR
+                reward = 0.0
+                print(f"DEBUG: Unknown error in verify: {type(error).__name__} {error}", flush=True)
         except Exception as e:
             failure_reason = FailureCode.UNKNOWN_ERROR
             reward = 0.0

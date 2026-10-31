@@ -19,7 +19,11 @@ from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreami
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig
+from responses_api_agents.miniswe_sandboxed_agent.harness import (
+    HarnessContext,
+    MiniSWEConfig,
+    project_native_trajectory,
+)
 
 
 async def test_sandbox_calls_gym_model_capture_url_directly(tmp_path, runner_factory):
@@ -186,8 +190,24 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         directory=tmp_path,
         observability_enabled=True,
     )
+    # The simulated executor (ProcessSandbox) gets the identity a connected AsyncSandbox reports;
+    # "missing_details" keeps it unknown to show nothing is invented without one.
+    sandbox_id = None if scenario == "missing_details" else "sbx-agent-1"
+    if sandbox_id is not None:
+        harness.sandbox.sandbox_id = sandbox_id
     response, outcome, extra = await harness.execute(15)
     client.close()
+    records = extra["ng_agent_observations"]["records"]
+    sandboxes = [r for r in records if r["kind"] == "sandbox"]
+    if sandbox_id is None:
+        assert sandboxes == []
+    else:
+        # Identity only: the agent does not own the sandbox lifecycle, so its outcome stays unknown.
+        (sandbox,) = sandboxes
+        assert (sandbox["role"], sandbox["sandbox_id"], sandbox["outcome"]) == ("agent", sandbox_id, "unknown")
+        assert sandbox["sandbox_id"] != harness.context.session_id
+        assert all(sandbox[key] is None for key in ("exit_code", "wall_time_s", "cpu_time_s", "peak_memory_mib"))
+    assert {r.get("sandbox_id") for r in records if r["kind"] == "tool_call"} == {sandbox_id}
     record = {
         "_ng_task_index": 0,
         "_ng_rollout_index": 0,
@@ -198,6 +218,22 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
     merge_model_call_capture_into_record(record, [capture_dir], include_payloads=True)
     _attach_trajectory_record(record, record)
     trajectory = record["ng_trajectory"]
+    assert {call.get("sandbox_id") for call in trajectory["tool_calls"]} == {sandbox_id}
+    # Commands that ran, the submission included, carry the environment's own start, end and monotonic duration
+    # into the canonical record; a tool whose command never ran keeps them unknown.
+    executed = [call for call in trajectory["tool_calls"] if call.get("completed_at") is not None]
+    assert executed
+    for call in executed:
+        assert isinstance(call["started_at"], float) and call["started_at"] <= call["completed_at"]
+        assert isinstance(call["duration_ms"], float) and call["duration_ms"] >= 0
+        assert call["timing_source"] == "artifact"
+    for call in trajectory["tool_calls"]:
+        if call.get("completed_at") is None:
+            assert call.get("started_at") is None and call.get("duration_ms") is None
+    timing_gaps = {g["detail"] for g in trajectory["gaps"] if g["code"] == "tool_timing_unavailable"}
+    assert timing_gaps == {
+        call["tool_call_id"] for call in trajectory["tool_calls"] if call.get("duration_ms") is None
+    }
     invocations = trajectory["invocations"]
     assert len(invocations) == 1
     captured = record["ng_model_call_capture"]["calls"]
@@ -229,9 +265,10 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert response.usage.input_tokens_details.cached_tokens == 2
         assert trajectory["tool_calls"][0]["status"] == ("failed" if scenario == "tool_error" else "completed")
     if scenario != "http_error":
-        # Submission exits before saving the final tool observation.
+        # Submission exits before saving the final tool observation; its exit message keeps the command's timing.
         assert trajectory["tool_calls"][-1]["output"] is None
-        assert trajectory["tool_calls"][-1]["status"] == "incomplete"
+        assert trajectory["tool_calls"][-1]["status"] == "completed"
+        assert trajectory["tool_calls"][-1]["duration_ms"] is not None
     path = tmp_path / "evaluator_rollouts.jsonl"
     path.write_text(json.dumps(record) + "\n")
     result = run_health_checks(path, output_dir=tmp_path, workers=1)
@@ -247,3 +284,129 @@ async def test_captured_loop_preserves_evidence(tmp_path, runner_factory, scenar
         assert coverage[key]["evaluated"] == 1, (key, result.summary)
     if scenario == "http_error":
         assert result.summary["run"]["issues"]["rollout_ended_on_failed_model_call"] == 1
+
+
+@pytest.mark.parametrize("final", ["submitted", "limits_exceeded", "no_native_final"])
+@pytest.mark.parametrize("cleanup", ["confirmed", "provider_timeout"])
+async def test_unconfirmed_process_cleanup_is_a_typed_harness_failure(tmp_path, runner_factory, cleanup, final):
+    """A failed cleanup is the run's selected typed failure unless mini-SWE stopped at a native limit.
+
+    After a native limit the agent's result stands and the cleanup stays an unselected failure event; a
+    submission keeps the cleanup as its failure. A nonzero model command is always the agent's result.
+    """
+    from nemo_gym.failure_transport import FailureHeader, FailureReportRow, RequestFailureLog
+
+    app = FastAPI()
+    requests = []
+
+    @app.post("/v1/responses")
+    async def model(body: dict = Body()):
+        requests.append(body)
+        if final == "no_native_final" and len(requests) == 2:
+            return JSONResponse({"error": {"message": "controlled failure"}}, status_code=503)
+        command = "exit 7" if len(requests) == 1 else "echo COMPLETE_TASK_AND_SUBMIT_FINAL_OUTPUT"
+        return {
+            "id": f"response-{len(requests)}",
+            "object": "response",
+            "model": "controlled",
+            "created_at": 0,
+            "status": "completed",
+            "parallel_tool_calls": False,
+            "tools": [],
+            "tool_choice": "auto",
+            "output": [
+                {
+                    "type": "function_call",
+                    "call_id": f"tool-{len(requests)}",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": command}),
+                }
+            ],
+        }
+
+    client = TestClient(app)
+
+    async def query(params):
+        response = await asyncio.to_thread(client.post, "/v1/responses", json=params)
+        response.raise_for_status()
+        return NeMoGymResponse.model_validate(response.json())
+
+    harness = await runner_factory(
+        context=HarnessContext(session_id="invocation", task_id="0", rollout_id="0-0", instruction="run then submit"),
+        config=MiniSWEConfig(step_limit=1 if final == "limits_exceeded" else 3),
+        params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+        query=query,
+        model_name="model",
+        directory=tmp_path,
+        observability_enabled=True,
+    )
+    if cleanup == "provider_timeout":
+        execute_command = harness.sandbox.exec
+
+        async def exec_with_cleanup_timeout(command, **kwargs):
+            if "kill -TERM" in command:
+                raise TimeoutError("provider command timed out after 70s")
+            return await execute_command(command, **kwargs)
+
+        harness.sandbox.exec = exec_with_cleanup_timeout
+    with RequestFailureLog.capture() as log:
+        response, outcome, extra = await harness.execute(15)
+    client.close()
+    # The verify reply merges harness_metadata into the row; Collection then merges the reply header's report.
+    forwarded = FailureHeader.decode(FailureHeader.encode(log.reply_report(None)))
+    row = FailureReportRow.merged_into(
+        {"_ng_task_index": 0, "_ng_rollout_index": 0, **json.loads(json.dumps(extra))}, *filter(None, [forwarded])
+    )
+    tools = [r for r in extra["ng_agent_observations"]["records"] if r["kind"] == "tool_call"]
+    assert tools[0]["status"] == "failed"
+    native = ("nonzero_exit", "LimitsExceeded") if final == "limits_exceeded" else None
+    if native is not None:
+        # mini-SWE's own limit stands whether or not the cleanup was confirmed.
+        assert (outcome.reason, outcome.detail) == native
+        assert FailureReportRow.FAILURE_ID not in row
+    elif cleanup == "confirmed":
+        assert outcome.reason == ("completed" if final == "submitted" else "infrastructure_error")
+    else:
+        # A submission or a run without a native final status is not settled while its processes may live.
+        assert outcome.reason == "infrastructure_error"
+    if cleanup == "confirmed":
+        assert FailureReportRow.EVENTS not in row
+        assert not (outcome.detail or "").startswith("Process cleanup failed")
+        return
+    (event,) = row[FailureReportRow.EVENTS].values()
+    assert (event["boundary"], event["failure_kind"], event["operation"]) == (
+        "harness",
+        "harness_termination_unconfirmed",
+        "harness.terminate",
+    )
+    assert event["foreign_error"]["exception_type"] == "TimeoutError"
+    if native is None:
+        assert outcome.detail == "Process cleanup failed: provider command timed out after 70s"
+        assert row[FailureReportRow.FAILURE_ID] == event["event_id"]
+
+
+@pytest.mark.parametrize(
+    "exit_extra",
+    [
+        {"exit_status": "LimitsExceeded", "tool_call_id": "tool-1", "started_at": 1.0, "completed_at": 2.0},
+        {"tool_call_id": "tool-1", "started_at": 1.0, "completed_at": 2.0, "duration_ms": 1000.0},
+        {"exit_status": "Submitted", "started_at": 1.0, "completed_at": 2.0, "duration_ms": 1000.0},
+        {"exit_status": "Submitted", "tool_call_id": "other", "started_at": 1.0, "completed_at": 2.0},
+    ],
+)
+def test_only_a_submission_exit_completes_its_tool(exit_extra):
+    """An exit that is not mini-SWE's submission of this tool call leaves the call incomplete with unknown timing."""
+    trajectory = {
+        "messages": [
+            {
+                "object": "response",
+                "id": "response-1",
+                "output": [],
+                "extra": {"actions": [{"tool_call_id": "tool-1", "command": "echo hi"}], "timestamp": 0.5},
+            },
+            {"role": "exit", "content": "", "extra": exit_extra},
+        ]
+    }
+    _, (tool,) = project_native_trajectory(trajectory)
+    assert tool["status"] == "incomplete"
+    assert "started_at" not in tool and "completed_at" not in tool and "duration_ms" not in tool

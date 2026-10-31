@@ -26,6 +26,7 @@ from nemo_gym.sandbox import (
     agent_tools,
 )
 from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.testing.failure_assertions import raises_agent_failure
 from responses_api_agents.stirrup_agent import app, sandbox
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig
 from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app
@@ -179,7 +180,7 @@ def test_a_failed_episode_still_closes_with_its_evidence(agent, client, root, mo
     tool_access = _TOOL_ACCESS.model_copy(update={"base_url": resources.base_url})
     try:
         _seed(client, sandbox_access=_sandbox_access(str(root)), tool_accesses=[tool_access])
-        with pytest.raises(RuntimeError, match="500"):
+        with raises_agent_failure(RuntimeError, match="500"):
             client.post(
                 f"/ng-rollout/{_EPISODE.capture_key}/v1/responses",
                 json={"input": "Write the report.", "model": "policy", "tools": _TOOLS},
@@ -213,7 +214,7 @@ def test_a_remote_sandbox_needs_a_model_server_address_it_can_reach(client, monk
     monkeypatch.setattr(agent_tools, "get_server_url", lambda _: model_url)
     monkeypatch.setattr(AsyncSandbox, "connect", AsyncMock(side_effect=Connected))
 
-    with pytest.raises(Connected if reachable else ValueError):
+    with raises_agent_failure(Connected if reachable else ValueError):
         _seed(client, sandbox_access=_sandbox_access(), tool_accesses=[_TOOL_ACCESS])
 
 
@@ -493,7 +494,7 @@ def test_a_runner_that_leaves_no_valid_output_fails_the_activation(agent, client
     monkeypatch.setattr(StirrupAgentWrapper, "resolve_model_base_url", lambda *_: "http://policy.invalid/v1")
     _seed(client, sandbox_access=_sandbox_access(str(root)))
 
-    with pytest.raises(RuntimeError, match="Stirrup sandbox runner exited without output"):
+    with raises_agent_failure(RuntimeError, match="Stirrup sandbox runner exited without output"):
         _respond(client)
 
 
@@ -549,7 +550,7 @@ def test_a_session_whose_sandbox_cannot_be_prepared_is_released_and_fails_the_se
         lambda command: _ok(stderr="read-only file system", return_code=1) if "mkdir" in command else _ok()
     )
 
-    with pytest.raises(RuntimeError, match="read-only file system"):
+    with raises_agent_failure(RuntimeError, match="read-only file system"):
         _seed(client, sandbox_access=_sandbox_access())
 
     assert box.disconnected
@@ -569,7 +570,7 @@ def test_a_failed_runtime_install_fails_the_seed_and_releases_the_sandbox(client
 
     box, _ = borrow(answer)
 
-    with pytest.raises(RuntimeError, match="no network"):
+    with raises_agent_failure(RuntimeError, match="no network"):
         _seed(client, sandbox_access=_sandbox_access())
 
     assert any("pip install" in command for command in box.commands)
@@ -588,7 +589,7 @@ def test_a_seed_whose_cleanup_also_fails_keeps_the_session_for_a_close_retry(cli
 
     box, _ = borrow(answer)
 
-    with pytest.raises(RuntimeError, match="read-only file system"):
+    with raises_agent_failure(RuntimeError, match="read-only file system"):
         _seed(client, sandbox_access=_sandbox_access())
     assert not box.disconnected
 
@@ -607,7 +608,7 @@ def test_a_sandbox_that_cannot_be_reached_closes_the_provider(client, borrow, mo
 
     monkeypatch.setattr(AsyncSandbox, "connect", unreachable)
 
-    with pytest.raises(ConnectionError):
+    with raises_agent_failure(ConnectionError):
         _seed(client, sandbox_access=_sandbox_access())
 
     assert provider.closed

@@ -654,7 +654,9 @@ def _install_recording_post(monkeypatch):
 
     sent = []
 
-    async def post(server_name, url_path, json):
+    async def post(server_name, url_path, json, *, _resend_after_disconnect, _max_num_tries):
+        assert _resend_after_disconnect is False
+        assert _max_num_tries == 1
         headers: dict = {}
         inject_trace_context(headers)
         sent.append(

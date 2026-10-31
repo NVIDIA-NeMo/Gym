@@ -121,6 +121,9 @@ class TestApp:
             "peak_memory_mib": None,
             "resource_usage_source": None,
             "error_type": None,
+            "observed_client_interval_s": None,
+            "teardown_confirmed": None,
+            "cleanup_errors": [],
         }
 
     async def test_create_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:

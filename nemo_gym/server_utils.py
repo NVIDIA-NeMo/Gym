@@ -84,6 +84,7 @@ from nemo_gym.config.global_config import (
     get_global_config_dict,
 )
 from nemo_gym.core.episode import rollout_context
+from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.server_runtime.request_handling.rollout_context import ROUTED_PATH_STATE_KEY, scope_with_routed_path
 from nemo_gym.server_runtime.request_handling.session_routing import (
     SESSION_CLAIM_SCOPE_KEY,
@@ -105,6 +106,7 @@ from nemo_gym.telemetry.profiling import (
 from nemo_gym.telemetry.setup import is_trace_exporter_active
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.telemetry.startup import ServerStartupTimeline
+from nemo_gym.typed_exceptions import NgFailureEvent, route_reply_error
 from nemo_gym.utils.server_process import (
     _has_injected_global_config_env,
     is_nemo_gym_fastapi_worker,
@@ -1001,35 +1003,82 @@ class SimpleServer(BaseServer):
     def setup_exception_middleware(self, app: FastAPI) -> None:  # pragma: no cover
         @app.middleware("http")
         async def exception_handling_middleware(request: Request, call_next):
-            try:
-                return await call_next(request)
-            except ClientResponseError as e:
-                assert hasattr(e, "response_content"), (
-                    "Please use `nemo_gym.client.http_client.raise_for_status` for HTTP exceptions!"
-                )
+            with RequestFailureLog.capture() as failure_log:
+                error: BaseException | None = None
+                try:
+                    response = await call_next(request)
+                except BaseException as raised:
+                    error = raised
+                    # An agent route failure answers with its cause's body and status.
+                    reply_error = route_reply_error(raised)
+                    response = SimpleServer._failure_reply(self, reply_error)
+                    # These are the same typed observations a successful reply carries.
+                    # A raised route must not turn its actual partial observations into an escaped error string.
+                    from nemo_gym.trajectory.trajectory_record import failure_observations
 
-                response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
-                print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
-
-                return JSONResponse(content=response_content, status_code=500)
-            except CancelledError:
-                return JSONResponse(content="Request was cancelled", status_code=500)
-            except Exception as e:
-                print(
-                    f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
-Formatted exception: {format_exc()}
-repr(e): {repr(e)}"""
-                )
-                return JSONResponse(content=repr(e), status_code=500)
-            except:
-                print_exc()
-                print(
-                    f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
-                )
-                return JSONResponse(content="An unknown error occurred", status_code=500)
+                    observed = {}
+                    for slot, key in (
+                        ("nemo_gym_agent_observations", "ng_agent_observations"),
+                        ("nemo_gym_agent_trajectory", "ng_trajectory"),
+                    ):
+                        value = getattr(request.state, slot, None)
+                        if isinstance(value, BaseModel):
+                            observed.update(failure_observations({key: value.model_dump(mode="json")}))
+                    if observed:
+                        payload = json.loads(response.body)
+                        payload = payload if isinstance(payload, dict) else {"detail": payload}
+                        payload.update(observed)
+                        response = JSONResponse(
+                            payload,
+                            status_code=response.status_code,
+                            headers={k: v for k, v in response.headers.items() if k != "content-length"},
+                        )
+                # Success or failure, the reply forwards its own failure and those observed while serving it.
+                report = failure_log.reply_report(error)
+                # A nested layer of this middleware may have sent the report already; keep its failure_id.
+                inner = FailureHeader.decode(response.headers)
+                if inner is not None:
+                    report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
+                response.headers.update(FailureHeader.encode(report))
+                return response
 
         # Direct MCP dispatch handles exceptions in the /mcp request itself.
         exception_handling_middleware.skipped_on_direct_mcp_dispatch = True
+
+    def _failure_reply(self, e: BaseException) -> JSONResponse:  # pragma: no cover
+        """The reply for an exception the route did not handle."""
+        if isinstance(e, NgFailureEvent) and e.http_error is not None:
+            e = e.http_error
+        if isinstance(e, ClientResponseError):
+            assert hasattr(e, "response_content"), (
+                "Please use `nemo_gym.client.http_client.raise_for_status` for HTTP exceptions!"
+            )
+
+            response_content = f"Hit an exception in {self.get_session_middleware_key()} calling an inner server: {e.response_content}"
+            print(_format_upstream_error_log(self.get_session_middleware_key(), e), flush=True)
+
+            from nemo_gym.trajectory.trajectory_record import failure_observations
+
+            try:
+                observations = failure_observations(json.loads(e.response_content))
+            except (TypeError, ValueError):
+                observations = {}
+            content = {"detail": response_content, **observations} if observations else response_content
+            return JSONResponse(content=content, status_code=500)
+        if isinstance(e, CancelledError):
+            return JSONResponse(content="Request was cancelled", status_code=500)
+        if isinstance(e, Exception):
+            print(
+                f"""🚨 Caught an exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, the exception repr i.e. `repr(e)` is returned to the model. However, please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception
+Formatted exception: {format_exc()}
+repr(e): {repr(e)}"""
+            )
+            return JSONResponse(content=repr(e), status_code=500)
+        print_exc()
+        print(
+            f"""🚨 Caught an unknown exception printed above in {self.config.name} ({self.__class__.__name__}). If you expect this to be fed back into this model, nothing meaningful is returned to the model. Please make sure this exception is caught in your server and returned to the model as appropriate. See https://fastapi.tiangolo.com/tutorial/handling-errors/#use-httpexception"""
+        )
+        return JSONResponse(content="An unknown error occurred", status_code=500)
 
     def setup_cancellation_middleware(self, app: FastAPI) -> None:
         app.add_middleware(ClientDisconnectCancellationMiddleware)

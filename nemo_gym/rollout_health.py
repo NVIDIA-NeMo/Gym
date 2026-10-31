@@ -530,7 +530,7 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
     owed rollouts count: an unreadable record or a sidecar row outside the inventory is not one.
     """
     # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollout_collection import is_omitted_rollout_row, is_unstarted_rollout_row
+    from nemo_gym.rollout_collection import is_non_superseding_rollout_row, is_omitted_rollout_row
 
     failed: dict[tuple[Any, ...], dict[str, Any]] = {}
     any_sidecar = False
@@ -539,8 +539,9 @@ def _read_failures(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> _Fail
         if failures_path_for(path).is_file():
             any_sidecar = True
             for row in _jsonl_rows(failures_path_for(path)):
-                # Main's rule: a row the dispatch budget never started is no attempt and selects nothing.
-                if is_unstarted_rollout_row(row):
+                # Main's rule: a row the dispatch budget never started is no attempt and selects nothing; nor does
+                # the evidence of a failed /run with routing off.
+                if is_non_superseding_rollout_row(row):
                     continue
                 failed[(source_index, row.get(TASK_INDEX_KEY), row.get(ROLLOUT_INDEX_KEY))] = row
         if not materialized_path_for(path).is_file():
@@ -1103,9 +1104,18 @@ def format_health_report(result: HealthCheckResult) -> str:
     checked = sum(verdicts.values())
     ignored = result.summary["run"].get("ignored_checks", [])
     ignored_note = f" (ignored: {', '.join(ignored)})" if ignored else ""
+    responses = result.summary["run"].get("stats", {}).get("responses")
+    response_note = ""
+    if responses is not None:
+        response_note = (
+            f"Model responses: {responses['faulted']}/{responses['selected']} faulted; "
+            f"{responses['unknown']} rollout scopes unobserved; "
+            f"{responses['duplicated']} duplicate call IDs\n"
+        )
     return (
-        f"Rollout health: {checked} checked, {verdicts['healthy']} healthy, "
-        f"{verdicts['unhealthy']} unhealthy, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"Rollout checks: {checked} checked, {verdicts['healthy']} passed, "
+        f"{verdicts['unhealthy']} flagged, {verdicts['unobserved']} unobserved{ignored_note}\n"
+        f"{response_note}"
         f"Quality summary: {result.summary_path}"
     )
 
