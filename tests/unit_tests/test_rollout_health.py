@@ -1318,6 +1318,56 @@ def test_malformed_records_and_check_failures_become_findings(tmp_path: Path, mo
     assert not any(item.check == "record_unreadable" for item in checked.rollouts[0].findings)
 
 
+@pytest.mark.parametrize(
+    "phase,error_type",
+    [
+        ("construction", NotImplementedError),
+        ("construction", OSError),
+        ("iteration", health.BrokenProcessPool),
+        ("iteration", OSError),
+    ],
+)
+def test_process_pool_failure_preserves_serial_health_reports(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, phase: str, error_type: type[Exception]
+) -> None:
+    rollout_path = _write_fixture(
+        tmp_path,
+        [(_record(0, 0), [_call()]), (_record(1, 0, answer=""), [_call(tokens_out=0)])],
+    )
+    original_rows = rollout_path.read_bytes()
+    serial = run_health_checks(rollout_path, workers=1)
+    reports = {name: (tmp_path / name).read_bytes() for name in ("quality_summary.json", "rollout_verdicts.jsonl")}
+    calls = []
+
+    class FailedPool:
+        def __init__(self, *, max_workers):
+            assert max_workers == 2
+            calls.append("construction")
+            if phase == "construction":
+                raise error_type("worker pool unavailable")
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *args):
+            return False
+
+        def map(self, function, items, *, chunksize):
+            calls.append("iteration")
+            yield function(items[0])
+            raise error_type("worker pool stopped after one result")
+
+    monkeypatch.setattr(health, "ProcessPoolExecutor", FailedPool)
+    with pytest.warns(RuntimeWarning, match="running rollout health checks serially"):
+        recovered = run_health_checks(rollout_path, workers=2)
+
+    assert calls == (["construction"] if phase == "construction" else ["construction", "iteration"])
+    assert recovered.rollouts == serial.rollouts
+    assert recovered.summary == serial.summary
+    assert reports == {name: (tmp_path / name).read_bytes() for name in reports}
+    assert rollout_path.read_bytes() == original_rows
+
+
 def test_process_pool_success_path_and_explicit_rollout_file(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys
 ) -> None:

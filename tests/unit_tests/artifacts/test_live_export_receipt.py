@@ -813,3 +813,49 @@ def test_health_collision_refuses_before_artifact_or_backend_mutation(live, monk
     assert client.metrics["health/trial/passed"] == 123
     assert backend == (client.metrics, client.tags, client.artifacts)
     assert before == {str(p): p.read_bytes() for p in protected}
+
+
+@pytest.mark.parametrize("aggregate", [None, b"{invalid", b"null", b"{}"])
+def test_unreadable_aggregate_does_not_write_health_or_deliver_metrics(live, aggregate):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, client = live
+    path = artifacts.aggregate_metrics_json_fpath
+    if aggregate is None:
+        path.unlink()
+    else:
+        path.write_bytes(aggregate)
+    health = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+    before = health.read_bytes()
+    backend = (dict(client.metrics), dict(client.tags), dict(client.artifacts))
+
+    assert _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath) == {}
+
+    assert (path.read_bytes() if path.exists() else None) == aggregate
+    assert health.read_bytes() == before
+    assert backend == (client.metrics, client.tags, client.artifacts)
+    assert not artifacts.export_done_fpath("mlflow").exists()
+
+
+def test_live_health_delivery_cannot_certify_a_changed_summary(live, monkeypatch, caplog):
+    artifacts, exporter, client = live
+    health = artifacts.rollouts_jsonl_fpath.parent / "quality_summary.json"
+    rows = artifacts.rollouts_jsonl_fpath.read_bytes()
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    original = type(exporter).export_metrics
+
+    def change_summary(self, metrics):
+        original(self, metrics)
+        health.write_bytes(health.read_bytes() + b"\n")
+
+    monkeypatch.setattr(type(exporter), "export_metrics", change_summary)
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+
+    assert "Final run artifacts changed before live finalization" in caplog.text
+    assert not artifacts.export_done_fpath("mlflow").exists()
+    assert client.status == "RUNNING"
+    assert artifacts.rollouts_jsonl_fpath.read_bytes() == rows
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    assert client.metrics["agent/mean/reward"] == 0.5
