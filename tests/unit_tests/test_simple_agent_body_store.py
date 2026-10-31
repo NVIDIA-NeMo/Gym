@@ -21,9 +21,9 @@ from environment_servers.single_agent_turn.app import (
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig
-from nemo_gym.client import ServerClient
-from nemo_gym.config import BaseServerConfig
-from nemo_gym.core import NeMoGymResponse
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import BaseServerConfig
+from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.rollout_store import RolloutStore
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig
