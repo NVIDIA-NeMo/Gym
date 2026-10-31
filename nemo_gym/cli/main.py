@@ -736,7 +736,21 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 mlflow_run_id=getattr(args, "mlflow_run_id", None),
             )
             print(outcome.model_dump_json(exclude={"decision": {"evidence"}}))
-            if not outcome.ok:
+            requested_gate = any(
+                getattr(args, name, None) is not None
+                for name in (
+                    "score_key",
+                    "score_agent",
+                    "score_environment",
+                    "max_unhealthy_fraction",
+                    "max_response_failure_fraction",
+                    "max_trial_failure_fraction",
+                    "mlflow_status",
+                    "mlflow_run_id",
+                )
+            )
+            gate_failed = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
+            if not outcome.ok or gate_failed:
                 sys.exit(1)
             return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)

@@ -70,6 +70,7 @@ from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
     RecoveryAction,
     RecoveryDecision,
+    RecoveryOutcome,
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
@@ -474,6 +475,163 @@ class SlurmExecutor(BaseExecutor):
     def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
         """The decision of ``recovery_evidence`` without a score key."""
         return self.recovery_evidence(record, benchmark)[0]
+
+    def reverify_judge_failures(
+        self, record: SubmissionRecord, benchmark: str, decision: RecoveryDecision
+    ) -> RecoveryOutcome:
+        """Admit a saved-answer CPU rejudge using the original chain's remaining allowance.
+
+        Only an already CPU-only submission with no deployed model services is supported. This never
+        invents a new compute profile, starts a policy service, or turns an unavailable judge into a model run.
+        Other deployments remain explicitly unsupported until they supply a judge-only execution capability.
+        """
+        from nemo_gym.orchestration.executors.utils import flatten_run_args
+
+        def stopped(reason: str) -> RecoveryOutcome:
+            return RecoveryOutcome(
+                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+                ok=False,
+                dispatched=None,
+                unsupported=reason,
+            )
+
+        current, evidence = self.recovery_evidence(record, benchmark)
+        if current.action != RecoveryAction.REVERIFY or evidence is None:
+            return stopped("saved-answer rejudge admission changed; collect the current evidence")
+        job = record.benchmark_job(benchmark)
+        job_dir = Path(job.job_dir)
+        with get_connection(record.hostname) as conn:
+            config = self._saved_config(conn, Path(record.run_dir))
+            original = config.driver.benchmarks[benchmark]
+            resume = original.resume_config
+            compute = config.compute[record.cluster]
+            if not isinstance(compute, SlurmComputeConfig):
+                return stopped("saved rejudge compute is not Slurm")
+            if (
+                config.services
+                or config.driver.policy_model
+                or not compute.node_pools
+                or any(pool.gpus_per_node != 0 for pool in compute.node_pools.values())
+            ):
+                return stopped(
+                    "this submission has no existing CPU-only judge execution profile; policy services are not restarted"
+                )
+            install = config.driver.gym_install
+            if (
+                install is None
+                or install.ref != installed_gym_commit()
+                or not re.fullmatch(r"[0-9a-f]{40}", install.ref)
+            ):
+                return stopped("saved judge driver and installed recovery source must be the same immutable revision")
+            if resume is None or resume.max_walltime is None or evidence.accounting_snapshot is None:
+                return stopped("saved rejudge walltime or accounting owner is unknown")
+            used = evidence.accounted_walltime_s
+            retries = evidence.infra_retries_used
+            if (
+                used is None
+                or not math.isfinite(used)
+                or used < 0
+                or retries is None
+                or not math.isfinite(retries)
+                or retries < 0
+            ):
+                return stopped("actual chain walltime or retry accounting is unknown")
+            if retries > resume.max_retries or not evidence.job_chain or evidence.chain_incomplete:
+                return stopped("recorded chain is incomplete or exceeds its original retry allowance")
+            cap = _walltime_to_seconds(resume.max_walltime)
+            remaining = math.floor(cap - used)
+            if compute.walltime is not None:
+                remaining = min(remaining, _walltime_to_seconds(compute.walltime))
+            if remaining < 1:
+                return stopped("original walltime allowance is exhausted")
+            if evidence.accounting_snapshot.get("resume_config") != resume.model_dump_json():
+                return stopped("saved resume configuration changed since accounting")
+            # Use the original runtime/configuration. Only operational output/cache controls change.
+            run = dict(original.run)
+            for name in (
+                "output_jsonl_fpath",
+                "materialized_inputs_jsonl_fpath",
+                "resume_from_cache",
+                "resubmit",
+                "require_complete",
+            ):
+                run.pop(name, None)
+            nonce = new_gym_job_id(utc_now())
+            output = job_dir / "reverification" / nonce / "rollouts.jsonl"
+            command = " ".join(
+                [
+                    "gym eval reverify",
+                    "--judge-failed-only",
+                    "--settle-into-source",
+                    "--rollouts",
+                    shlex.quote(str(job_dir / "artifacts/rollouts.jsonl")),
+                    "--inputs",
+                    shlex.quote(str(job_dir / "artifacts/rollouts_materialized_inputs.jsonl")),
+                    "--output",
+                    shlex.quote(str(output)),
+                    *flatten_run_args(run),
+                ]
+            )
+            # No preparation, fresh model run, reset prologue, or afternotok successor.
+            bench = original.model_copy(update={"prepare": {}, "run": {}, "command": command, "resumable": False})
+            bounded_compute = compute.model_copy(
+                update={"walltime": f"{remaining // 3600:02}:{remaining % 3600 // 60:02}:{remaining % 60:02}"}
+            )
+            driver = config.driver.model_copy(update={"benchmarks": {benchmark: bench}})
+            bound = config.model_copy(update={"driver": driver, "compute": {record.cluster: bounded_compute}})
+            script = build_sbatch_script(bound, benchmark, bench, bounded_compute, job_dir)
+            script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
+            script_path = job_dir / f"reverify-{nonce}.sh"
+            expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
+            if evidence.source_digests is None:
+                return stopped("saved source snapshot is unavailable")
+            config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
+            config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
+            if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
+                return stopped("saved submission configuration digest is unknown")
+            check = (
+                "import hashlib,json,os,sys; from pathlib import Path\n"
+                "expected=json.loads(sys.argv[1])\n"
+                "def digest(n):\n"
+                " p=Path(n); return hashlib.sha256(p.read_bytes()).hexdigest() if p.exists() else None\n"
+                "names=set(expected)|{n for n in os.listdir('.') if n.startswith('.gym_followup_queued.')}\n"
+                f"source=json.loads({json.dumps(json.dumps(evidence.source_digests))})\n"
+                "if {n:digest('artifacts/'+n) for n in source} != source: raise ValueError('saved source changed')\n"
+                f"if digest({str(config_path)!r}) != {config_digest!r}: raise ValueError('saved configuration changed')\n"
+                "if {n:digest(n) for n in names} != expected: raise ValueError('stale accounting')\n"
+                f"p=Path('.gym_accumulated_walltime'); total=max(float(p.read_text()) if p.exists() else 0, {used!r})\n"
+                f"if not __import__('math').isfinite(total) or total < 0 or total >= {cap!r}: raise ValueError('spent walltime')\n"
+                "tmp=p.with_suffix('.tmp'); tmp.write_text(str(total)+'\\n'); os.replace(tmp,p)\n"
+            )
+            commands = _submission_exports(config) + [
+                'fail() { echo "Error: $*" >&2; exit 1; }',
+                f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
+                f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
+                "_gym_submit_started=0; _gym_submit_confirmed=0",
+                "_gym_release_rejudge_lock() { "
+                'if [[ "$_gym_submit_started" == 1 && "$_gym_submit_confirmed" != 1 ]]; then '
+                "printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge acknowledgement unknown' > .gym_chain_incomplete; fi; "
+                f"rm -f {_RESUBMIT_LOCK}; }}",
+                "trap _gym_release_rejudge_lock EXIT",
+                f"live=$(squeue --all --noheader -j {shlex.quote(','.join(evidence.job_chain))} --format=%A) || fail 'scheduler unknown'",
+                '[ -z "$live" ] || fail "an original allocation is still live"',
+                f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} || fail 'accounting changed or exhausted'",
+                "umask 077",
+                f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage judge driver'",
+                "_gym_submit_started=1",
+                _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
+                'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+                "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1); [[ $jid =~ ^[0-9]+$ ]] || { printf '%s\\n' 'GYM_ACCOUNTING_UNKNOWN: rejudge submission acknowledgement unknown' > .gym_chain_incomplete; fail 'unknown job identity'; }",
+                'printf "%s\\n" "$jid" >> .gym_job_chain || fail "cannot preserve judge allocation accounting"',
+                "_gym_submit_confirmed=1",
+            ]
+            results = _parse_sbatch_results(conn.run(commands))
+            job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
+            if job_id is None:
+                return stopped(f"saved-answer rejudge was not admitted: {error}")
+            updated = job.model_copy(update={"job_id": job_id, "error": None})
+            self.persist_record(record.with_benchmark(updated), conn.write_text)
+        return RecoveryOutcome(decision=current, ok=True, dispatched="reverify", job_id=job_id)
 
     def resubmit(
         self,
