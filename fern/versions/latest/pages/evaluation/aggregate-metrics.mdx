@@ -36,6 +36,8 @@ or the original producer name saved in `_ng_failure_legacy_class`, when present.
 kind `gdpval:reference_missing` still matches an existing `reference_missing` selection. Selecting both names counts
 the task once. Collection and offline aggregation use the same rule; see [evaluation resume](/main/evaluation/resume).
 
+When one `gym eval run` collects rollouts for several agents, an agent whose every expected rollout is scored is aggregated at once, without waiting for the other agents, and its entry is also written to `<output>_agent_complete/<agent>.json`. The file carries the agent's `expected_rollouts` and `completed_rollouts`, `completed_at`, `aggregation_status` and the same `aggregate` entry the run-wide file later holds. `<output>_aggregate_metrics.json` itself is written once, after every agent is done.
+
 ## Output Format
 
 The output file is a JSON array with one entry per agent:
