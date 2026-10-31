@@ -4,6 +4,11 @@
 
 set -euo pipefail
 
+if [[ "$#" -ne 0 && "$#" -ne 2 ]]; then
+    echo "usage: core_unit_tests.sh [SHARD_INDEX NUM_SHARDS]" >&2
+    exit 2
+fi
+
 ci_dir="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 readonly ci_dir
 repo_root="$(cd "${ci_dir}/../.." && pwd)"
@@ -25,6 +30,9 @@ source "${ci_dir}/setup_dev.sh"
 # extras must be present here.
 uv sync --extra dev --extra ray --extra telemetry --extra mlflow --extra wandb
 pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'
+if [[ "$#" -eq 2 ]]; then
+    pytest_addopts+=" --shard-id=$1 --num-shards=$2"
+fi
 if [[ -n "${GYM_CI_JUNIT_DIR:-}" ]]; then
     mkdir -p "${GYM_CI_JUNIT_DIR}"
     printf -v junit_xml_path '%q' "${GYM_CI_JUNIT_DIR%/}/core.xml"

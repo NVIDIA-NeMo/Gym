@@ -59,7 +59,8 @@ def test_nltk_cache_copies_shared_data_without_weakening_ownership_checks(shared
 @pytest.mark.parametrize(
     ("workflow", "job", "workload"),
     [
-        ("unit-tests.yml", "test", "Core + sandbox unit tests (coverage gate)"),
+        ("unit-tests.yml", "core-suite", "Core + sandbox unit tests"),
+        ("unit-tests.yml", "test", "Changed server tests"),
         ("unit-tests.yml", "server-suite", "Server tests (shard"),
         ("full-test-suite.yml", "server-suite", "Server tests (shard"),
     ],

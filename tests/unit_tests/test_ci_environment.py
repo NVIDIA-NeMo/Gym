@@ -180,13 +180,27 @@ def test_full_suite_retry_is_bounded_and_reruns_only_failed_jobs() -> None:
 
 
 def test_github_full_test_jobs_reclaim_disk_before_dependency_restore() -> None:
-    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 2)]:
+    for workflow_path, expected_jobs in [(FULL_TEST_WORKFLOW, 2), (UNIT_TEST_WORKFLOW, 3)]:
         workflow = workflow_path.read_text()
         assert workflow.count("run: ./scripts/ci/reclaim_runner_disk.sh") == expected_jobs
         assert workflow.count("Reclaim runner disk") == expected_jobs
         sections = workflow.split("- name: Reclaim runner disk")
         for section in sections[1:]:
             assert section.index("reclaim_runner_disk.sh") < section.index("Cache uv dependencies")
+
+
+@pytest.mark.parametrize("result", ["success", "failure", "cancelled", "skipped"])
+def test_core_shard_gate_rejects_unsuccessful_results(result: str) -> None:
+    workflow = yaml.safe_load(UNIT_TEST_WORKFLOW.read_text())
+    gate = next(step for step in workflow["jobs"]["test"]["steps"] if step["name"] == "Check shard results")
+    completed = subprocess.run(
+        ["bash", "-e", "-u", "-o", "pipefail", "-c", gate["run"]],
+        env={**os.environ, "CORE_RESULT": result},
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode == (0 if result == "success" else 1)
 
 
 def test_scheduled_cicd_runs_do_not_cancel_in_progress() -> None:
@@ -208,6 +222,51 @@ def test_coverage_gate_compares_fractional_percentages() -> None:
 
     assert coverage_report["precision"] == 2
     assert coverage_report["fail_under"] == 95.0
+
+
+@pytest.mark.parametrize("missing_source", [False, True])
+def test_combined_coverage_omits_discarded_uv_sources(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, missing_source: bool
+) -> None:
+    """Combine shard coverage after uv removes its temporary interpreter probes."""
+    from io import StringIO
+
+    from coverage import Coverage
+    from coverage.exceptions import NoSource
+
+    monkeypatch.chdir(tmp_path)
+    source = tmp_path / "module.py"
+    source.write_text("value = 42\n")
+    probe = tmp_path / "cache" / "uv" / ".tmp-probe" / "python" / "__init__.py"
+    probe.parent.mkdir(parents=True)
+    probe.write_text("interpreter_version = '3.13'\n")
+    config_file = str(REPO_ROOT / "pyproject.toml")
+    shard_dirs = []
+
+    for shard in range(4):
+        shard_file = tmp_path / f"shard-{shard}" / ".coverage"
+        shard_file.parent.mkdir()
+        coverage = Coverage(config_file=config_file, data_file=str(shard_file), source=[str(tmp_path)])
+        coverage.set_option("run:omit", [pattern for pattern in coverage.config.run_omit if pattern != "/tmp/*"])
+        coverage.start()
+        try:
+            for script in (source, probe):
+                exec(compile(script.read_text(), str(script), "exec"), {})
+        finally:
+            coverage.stop()
+            coverage.save()
+        shard_dirs.append(str(shard_file.parent))
+
+    shutil.rmtree(tmp_path / "cache")
+    combined = Coverage(config_file=config_file, data_file=str(tmp_path / ".coverage"))
+    combined.combine(shard_dirs)
+
+    if missing_source:
+        source.unlink()
+        with pytest.raises(NoSource, match="module.py"):
+            combined.report(file=StringIO())
+    else:
+        assert combined.report(file=StringIO()) == 100.0
 
 
 def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: Path) -> None:

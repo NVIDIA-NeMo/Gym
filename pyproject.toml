@@ -430,6 +430,8 @@ dev = [
     # pytest-asyncio: Apache 2.0 https://github.com/pytest-dev/pytest-asyncio/blob/66b9f8e31f5f3c3bcf124a52f316516e70c90b46/LICENSE
     "pytest-cov",
     "pytest-xdist",
+    # License: MIT https://github.com/AdamGleave/pytest-shard/blob/master/LICENSE
+    "pytest-shard==0.1.2",
     "pytest",
     "pytest-asyncio",
 
@@ -743,6 +745,7 @@ markers = [
 command_line = "-m pytest --durations=10"
 omit = [
     "tests/*",
+    "cache/*",
     "temp*",
     "results/*",
     "/tmp/*",
