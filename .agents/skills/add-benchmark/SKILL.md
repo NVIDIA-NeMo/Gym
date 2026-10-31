@@ -154,7 +154,7 @@ Key points:
 
 For multi-turn benchmarks, either use `proof_refinement_agent` or create a custom agent. See `references/patterns.md` § "Agent Patterns".
 
-For a coding harness in a task sandbox, pair the resources server with a session harness (`pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `hermes_agent`) through an environment server; see [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Do not wire a new benchmark to `opencode_sandboxed_agent`, `pi_sandboxed_agent` or `hermes_sandboxed_agent`, or to the `/run` path of `terminus_2_sandboxed_agent` or `miniswe_sandboxed_agent`: that legacy path is deprecated, even though older presets still use it.
+For a coding harness in a task sandbox, pair the resources server with a session harness (`pi_agent`, `codex_agent`, `opencode_agent`, `openclaw_agent`, `hermes_agent`) through an environment server; see [Integrate existing agents](../../../fern/versions/latest/pages/agent-server/integrate-existing-agents.mdx). Do not wire a new benchmark to `opencode_sandboxed_agent` or `pi_sandboxed_agent`, or to the `/run` path of `terminus_2_sandboxed_agent` or `miniswe_sandboxed_agent`: that legacy path is deprecated, even though older presets still use it.
 
 For `train`/`validation` datasets, add `gitlab_identifier` alongside `jsonl_fpath`:
 ```yaml
