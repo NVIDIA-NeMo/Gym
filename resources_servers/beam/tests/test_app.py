@@ -588,7 +588,7 @@ def test_compute_metrics_runs_keyed_by_rollout_index() -> None:
 
 async def test_task_group_keeps_unrelated_canonical_failures():
     """A failure that is not a judge failure leaves the task group as itself, not as a judge failure."""
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent
 
     unrelated = NgFailureEvent(
@@ -608,7 +608,7 @@ async def test_task_group_keeps_a_judge_failures_own_cause_and_cancels_siblings(
     import asyncio
 
     from nemo_gym.core import JUDGE_FAILED
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import failure_report_for
 
     model = NgFailureEvent(

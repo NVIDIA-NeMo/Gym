@@ -29,7 +29,7 @@ from nemo_gym.core import (
 from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
 from nemo_gym.failure_transport import FailureReportRow, report_for_current_request
 from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.server_runtime import FailureBoundary
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,

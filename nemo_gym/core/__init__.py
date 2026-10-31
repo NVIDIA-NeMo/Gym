@@ -25,6 +25,7 @@ if TYPE_CHECKING:
         EpisodeId,
         TaskId,
         current_rollout_id,
+        current_verifier_invocation_id,
         maybe_rollout_id_from_run_body,
         rollout_context,
         verifier_invocation_context,
@@ -86,6 +87,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "current_verifier_invocation_id": "episode",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
     "AGENT_LIMIT": "failure_kinds",
     "AGENT_ROUTE_FAILED": "failure_kinds",

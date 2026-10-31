@@ -90,6 +90,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     DirectHTTPToolAccess,
+    FailureBoundary,
     LegacyRun,
     MCPToolAccess,
     ResourcesCloseSessionRequest,
@@ -102,7 +103,6 @@ from nemo_gym.server_runtime import (
     seed_verify_step_type,
 )
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,

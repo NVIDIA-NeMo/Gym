@@ -602,7 +602,7 @@ async def test_legacy_rows_take_part_in_checkpoints() -> None:
 
 
 def _chain_report(model_status: int):
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
     model = NgFailureEvent(
@@ -661,7 +661,7 @@ def test_the_flat_result_keeps_its_reward_selection_and_cleanup_observations(own
 
     environment_server, client = _environment_server()
     adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
+    from nemo_gym.server_runtime import FailureBoundary
     from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
     judge = failure_report_for(

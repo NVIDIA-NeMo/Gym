@@ -115,6 +115,7 @@ from nemo_gym.server_runtime import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
     CleanupContext,
+    FailureBoundary,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
     SingleAgentTurnFailure,
@@ -123,7 +124,6 @@ from nemo_gym.server_runtime import (
     dependency_failure,
 )
 from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_handled_episode_failure
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.tasks.harbor import DIGEST_KEY, HarborTask, load_task
 from nemo_gym.tasks.harbor.cli import ORACLE_AGENT
 from nemo_gym.tasks.harbor.compose_overlay import ComposeOverlayError, HarborComposeOverlay, wrap_first_instruction

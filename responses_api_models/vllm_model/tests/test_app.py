@@ -72,13 +72,13 @@ from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.models._checkpoint import PolicyModelParticipant, generation_cut_requester
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
+from nemo_gym.server_runtime import FailureBoundary
 from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
 from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutInventory,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.token_id_capture import (
     CaptureContext,
     InMemoryLineageStore,

@@ -72,6 +72,7 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     BaseVerifyResponse,
     DirectHTTPToolAccess,
+    FailureBoundary,
     FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
@@ -87,7 +88,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
 )
 from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
 from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
-from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureEvent, SdkErrorDetails
+from nemo_gym.server_runtime.episode_types import FailureEvent, SdkErrorDetails
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.testing.failure_assertions import raises_agent_failure
 from nemo_gym.trajectory import TrajectoryRecord

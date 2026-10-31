@@ -77,9 +77,9 @@ from nemo_gym.server_runtime import (
     BaseEnvironmentServer,
     BaseEnvironmentServerConfig,
     CleanupContext,
+    FailureBoundary,
 )
 from nemo_gym.server_runtime.base_environment_server import handled_episode_failure
-from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
