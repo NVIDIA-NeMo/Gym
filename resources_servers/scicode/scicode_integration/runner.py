@@ -18,7 +18,8 @@
 
 A sub-step's accumulated solution is concatenated with the HDF5 target-loading and comparison
 helpers (ported verbatim from nemo-skills' scicode_utils.eval_prefix), then the sub-step's test
-assertions, and run in a subprocess. Exit code 0 means every assertion passed.
+assertions, and run in a subprocess. Passing requires exit code 0 and a completion sentinel
+written after the assertions.
 
 The only change from nemo-skills' eval_prefix is the test-data path: nemo-skills hardcodes
 H5PY_FILE = "/data/test_data.h5"; here it is injected from config.
@@ -27,6 +28,7 @@ H5PY_FILE = "/data/test_data.h5"; here it is injected from config.
 import json
 import os
 import re
+import secrets
 import subprocess
 import sys
 import tempfile
@@ -323,14 +325,25 @@ def run_substep(
     python_executable: str | None = None,
     output_tail_chars: int = DEFAULT_OUTPUT_TAIL_CHARS,
 ) -> dict:
-    """Run one sub-step program in a subprocess. Exit code 0 == all assertions passed.
+    """Run one sub-step program in a subprocess. It passes when it exits 0 after reaching its end.
 
-    Returns `passed`, the legacy `error` (the bounded stderr on failure, "timeout" on a timeout, the OS
+    The program starts with model code, which can end the process with status 0 before any
+    assertion runs (`raise SystemExit(0)`, `sys.exit()`, `os._exit(0)`). So the program is
+    followed by a statement that writes a random per-run sentinel line, and a pass also
+    requires that line on stdout.
+
+    Returns `passed`, the legacy `error` (the bounded stderr on failure, an early-exit message when
+    status 0 has no completion sentinel, "timeout" on a timeout, the OS
     error text when the interpreter could not be started, "" on a pass) and `infrastructure_error`, plus
     the execution details a caller may record: `returncode` (None when no process exit code exists),
     `timed_out`, `duration_s`, `exception_class` (see exception_class_from_stderr; read from the complete
     stderr, so a long exception message never hides the class) and the bounded `stdout_tail` /
     `stderr_tail` (the last `output_tail_chars` characters of each stream; 0 keeps none)."""
+    sentinel = f"scicode-substep-complete-{secrets.token_hex(16)}"
+    # Written straight to fd 1 on its own line, so replacing `sys.stdout` or printing
+    # without a trailing newline can't hide it from an honest run.
+    marker = f"\n{sentinel}\n"
+    program = f"{program}\n__import__('os').write(1, {marker.encode()!r})\n"
     # Passing a large generated solution through `python -c <program>` is
     # bounded by Linux's execve argument-size limit (ARG_MAX). SciCode's
     # accumulated solutions can exceed that late in a run. A temporary source
@@ -365,7 +378,7 @@ def run_substep(
             "timed_out": True,
             "duration_s": time.monotonic() - started,
             "exception_class": None,
-            "stdout_tail": _tail(expired.stdout, output_tail_chars),
+            "stdout_tail": _tail_text(_decode(expired.stdout).replace(marker, "", 1), output_tail_chars),
             "stderr_tail": _tail(expired.stderr, output_tail_chars),
         }
     except OSError as error:
@@ -387,8 +400,16 @@ def run_substep(
             except FileNotFoundError:
                 pass
     duration_s = time.monotonic() - started
-    passed = proc.returncode == 0
-    error = "" if passed else _bounded_stderr(proc.stderr)
+    stdout_text = _decode(proc.stdout)
+    completed = marker in stdout_text
+    stdout_text = stdout_text.replace(marker, "", 1)
+    passed = proc.returncode == 0 and completed
+    if passed:
+        error = ""
+    elif proc.returncode == 0:
+        error = "the program exited before its tests finished"
+    else:
+        error = _bounded_stderr(proc.stderr)
     stderr_text = _decode(proc.stderr)
     return {
         "passed": passed,
@@ -400,6 +421,6 @@ def run_substep(
         "duration_s": duration_s,
         # Classified from the whole stream: the tail may hold only the end of a long exception message.
         "exception_class": None if passed else exception_class_from_stderr(stderr_text),
-        "stdout_tail": _tail(proc.stdout, output_tail_chars),
+        "stdout_tail": _tail_text(stdout_text, output_tail_chars),
         "stderr_tail": _tail_text(stderr_text, output_tail_chars),
     }
