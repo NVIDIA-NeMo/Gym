@@ -13,6 +13,8 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import asyncio
+import json
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -105,12 +107,13 @@ def test_valid_wrong_zero_after_allocation_retry_is_still_graded(monkeypatch, te
     sandbox.stop.assert_awaited_once()
 
 
+@pytest.mark.parametrize("error_type", [OSError, TimeoutError, ValueError])
 @pytest.mark.parametrize("failures,completed", [(1, True), (2, True), (3, False)])
-def test_allocation_observations_survive_recovery_and_exhaustion(monkeypatch, failures, completed):
+def test_allocation_observations_survive_recovery_and_exhaustion(monkeypatch, failures, completed, error_type):
     server = make_server(golden=False, inconclusive_verification_retries=2)
     server.server_client.global_config_dict = {"observability_enabled": True}
     monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="saved policy patch"))
-    attempts = [OSError("allocation unavailable") for _ in range(failures)]
+    attempts = [error_type("allocation unavailable") for _ in range(failures)]
     if completed:
         attempts.append(SimpleNamespace(stop=AsyncMock()))
     create = AsyncMock(side_effect=attempts)
@@ -149,7 +152,7 @@ def test_allocation_observations_survive_recovery_and_exhaustion(monkeypatch, fa
         event.boundary == "resources_server"
         and event.failure_kind == "verifier_error"
         and event.stage == "verification"
-        and event.exception_type == "OSError"
+        and event.exception_type == error_type.__name__
         for event in report.events.values()
     )
     assert row["verification_attempts"] == create.await_count == failures + int(completed)
@@ -158,3 +161,114 @@ def test_allocation_observations_survive_recovery_and_exhaustion(monkeypatch, fa
     assert row["mask_sample"] is not completed
     assert row["reward"] == 0
     assert row["model_patch"] == "saved policy patch"
+
+
+@pytest.mark.parametrize("total_deadline", [False, True])
+def test_real_allocation_deadline_never_becomes_a_scored_zero(monkeypatch, total_deadline):
+    server = make_server(
+        golden=False,
+        inconclusive_verification_retries=2,
+        verification_attempt_timeout=1 if total_deadline else 0.01,
+        verification_total_timeout=0.01 if total_deadline else 1,
+    )
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="saved policy patch"))
+    monkeypatch.setattr(server, "_image_info", MagicMock(return_value={}))
+
+    async def allocate(*args, **kwargs):
+        await asyncio.sleep(1)
+        pytest.fail("allocation returned after its existing deadline")
+
+    create = AsyncMock(side_effect=allocate)
+    verify = AsyncMock(side_effect=AssertionError("verification cannot run before allocation"))
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    monkeypatch.setattr(swe, "run_verification", verify)
+    response = client_with_task_sandbox(server).post("/verify", json=request_body())
+    assert response.status_code == 200
+    row = response.json()
+    assert row["evaluation_completed"] is False
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert row["model_patch"] == "saved policy patch"
+    assert row["verification_attempts"] == create.await_count == (1 if total_deadline else 3)
+    verify.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "test_name,status,conclusive",
+    [("test_new", "FAILED", True), ("other", "FAILED", False), ("test_new", "PASSED", False)],
+)
+@pytest.mark.parametrize("raises_timeout", [False, True])
+def test_actual_test_timeout_with_required_failure_keeps_protocol_zero(
+    monkeypatch, raises_timeout, test_name, status, conclusive
+):
+    server = make_server(golden=False, inconclusive_verification_retries=0)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="saved policy patch"))
+    monkeypatch.setattr(server, "_image_info", MagicMock(return_value={}))
+    sandbox = SimpleNamespace(
+        stop=AsyncMock(),
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(return_code=0),
+                TimeoutError("test command deadline")
+                if raises_timeout
+                else SimpleNamespace(return_code=125, error_type="timeout", stdout="", stderr="deadline"),
+                SimpleNamespace(return_code=0),
+                SimpleNamespace(stdout="test output"),
+                SimpleNamespace(stdout=""),
+                SimpleNamespace(stdout="0"),
+                SimpleNamespace(stdout=json.dumps({"tests": [{"name": test_name, "status": status}]})),
+            ]
+        ),
+    )
+    create = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    body = request_body() | {"fail_to_pass": '["test_new"]', "pass_to_pass": "[]"}
+    response = client_with_task_sandbox(server).post("/verify", json=body)
+    assert response.status_code == 200
+    row = response.json()
+    assert row["eval_timed_out"] is True
+    assert row["evaluation_completed"] is conclusive
+    assert row["mask_sample"] is not conclusive
+    assert row["failure_kind"] == (None if conclusive else "verifier_error")
+    assert row["reward"] == 0
+    assert row["verification_attempts"] == create.await_count == 1
+
+
+@pytest.mark.parametrize("error_type", [TimeoutError, ValueError])
+def test_post_allocation_setup_exception_preserves_ungraded_patch(monkeypatch, error_type):
+    server = make_server(golden=False, inconclusive_verification_retries=2)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="saved policy patch"))
+    monkeypatch.setattr(server, "_image_info", MagicMock(return_value={}))
+    sandbox = SimpleNamespace(stop=AsyncMock(), exec=AsyncMock(side_effect=error_type("setup unavailable")))
+    create = AsyncMock(return_value=sandbox)
+    monkeypatch.setattr(server, "_create_sandbox", create)
+    response = client_with_task_sandbox(server).post("/verify", json=request_body())
+    assert response.status_code == 200
+    row = response.json()
+    assert row["evaluation_completed"] is False
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert row["model_patch"] == "saved policy patch"
+    assert row["verification_attempts"] == create.await_count == 3
+    assert sandbox.exec.await_count == 3  # Real run_verification stops at chmod, before task execution.
+    assert sandbox.stop.await_count == 3
+
+
+@pytest.mark.parametrize("completed,results", [(False, None), (True, None)])
+def test_returned_result_without_conclusive_verdict_is_ungraded(monkeypatch, completed, results):
+    server = make_server(golden=False, inconclusive_verification_retries=2)
+    monkeypatch.setattr(server, "_extract_model_patch", AsyncMock(return_value="saved policy patch"))
+    monkeypatch.setattr(server, "_image_info", MagicMock(return_value={}))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=SimpleNamespace(stop=AsyncMock())))
+    verify = AsyncMock(
+        return_value=swe.VerificationResult(
+            completed=completed, resolved=False, patch_applied=True, test_results=results
+        )
+    )
+    monkeypatch.setattr(swe, "run_verification", verify)
+    row = client_with_task_sandbox(server).post("/verify", json=request_body()).json()
+    assert row["evaluation_completed"] is False
+    assert row["mask_sample"] is True
+    assert row["failure_kind"] == "verifier_error"
+    assert row["model_patch"] == "saved policy patch"
+    assert row["verification_attempts"] == verify.await_count == 3
