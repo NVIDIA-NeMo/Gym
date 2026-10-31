@@ -2,15 +2,15 @@
 # SPDX-License-Identifier: Apache-2.0
 # Overlay on benchmarks/agentic_mme/config.yaml: text search through Exa, Google Lens through
 # SerpAPI (task images are uploaded to SerpAPI's own Image API; the image_id expires after 10 minutes).
-# Keys from the environment: EXA_API_KEY, SERPAPI_API_KEY. fetch_webpage uses Jina Reader (JINA_API_KEY if set; anonymous otherwise is rate-limited).
+# Keys from the environment: EXA_API_KEY, SERPAPI_API_KEY. fetch_webpage reads pages through Exa /contents too, so Exa is the only text provider (no Jina).
 agentic_mme_agent:
   responses_api_agents:
     agentic_mme_agent:
       retrieval:
         mode: live
         search_provider: exa
+        fetch_provider: exa
         lens_provider: serpapi
         exa_api_key: ${oc.env:EXA_API_KEY,""}
         serpapi_api_key: ${oc.env:SERPAPI_API_KEY,""}
         allow_image_upload: true
-        jina_api_key: ${oc.env:JINA_API_KEY,""}
