@@ -469,16 +469,30 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
     assert all(c.phase == "failed" for c in services.resource._verify_cohorts.values())
 
     services.judge_status = 200
-    judge_calls = services.judge_calls
+    judge_calls, policy_calls = services.judge_calls, services.policy_calls
+    from nemo_gym.rollout_store import RolloutStore
+
+    before = RolloutStore.read(output_path)
+    spent = before.coverage()["counted_failures"]
+    reservations = dict(before.manifest.next_attempt)
+    assert policy_calls == spent == 4
     config.resume_from_cache = True
-    with pytest.raises(RuntimeError, match="produced a result"):
-        await collection.RolloutCollectionHelper().run_from_config(config)
+    # A normal resume cannot regenerate the saved answers or restart the failed judge cohort.
+    await collection.RolloutCollectionHelper().run_from_config(config)
     assert not output_path.read_text().strip()
-    assert services.judge_calls == judge_calls
-    retried_failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
-    assert len(retried_failures) == 8
-    assert retried_failures[:4] == failures
-    assert all("fresh _ng_group_id" in row["_ng_failure_judge_error"] for row in retried_failures[4:])
+    assert (services.policy_calls, services.judge_calls) == (policy_calls, judge_calls)
+    retained_failures = [json.loads(line) for line in (tmp_path / "output_failures.jsonl").read_text().splitlines()]
+    assert retained_failures == failures
+    after = RolloutStore.read(output_path)
+    assert after.pending() == []
+    assert after.coverage()["counted_failures"] == spent
+    assert after.manifest.next_attempt == reservations
+    # Partial-output mode does not claim completion; requiring it still fails without any new calls.
+    with pytest.raises(RuntimeError, match="EVAL FAILED: 0/4"):
+        await collection.RolloutCollectionHelper().run_from_config(
+            config.model_copy(update={"require_complete": True})
+        )
+    assert (services.policy_calls, services.judge_calls) == (policy_calls, judge_calls)
 
     # Recovery is explicitly coordinated as a fresh complete group, not a legacy-key restart.
     replacement_input = tmp_path / "replacement.jsonl"
@@ -499,11 +513,11 @@ async def test_failed_legacy_collector_requires_fresh_explicit_group(services, t
     assert {r["response"]["id"] for r in rows}.isdisjoint(r["response"]["id"] for r in failures)
     assert all("_ng_failure_class" not in row for row in rows)
     assert all(row["_ng_group_id"] == "replacement" for row in rows)
-    assert services.policy_calls == 12
+    assert services.policy_calls == 8
     judge_calls = services.judge_calls
     config.resume_from_cache = True
     await collection.RolloutCollectionHelper().run_from_config(config)
-    assert services.policy_calls == 12 and services.judge_calls == judge_calls
+    assert services.policy_calls == 8 and services.judge_calls == judge_calls
     assert [json.loads(line) for line in output_path.read_text().splitlines()] == rows
 
 
