@@ -1483,3 +1483,57 @@ def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(tmp_pat
     bundle = parse_opencode_observations(db_path, "fallback")
 
     assert ("tool_timing_unavailable", "p1") in [(gap.code, gap.detail) for gap in bundle.gaps]
+
+
+@mark.parametrize("error", [TimeoutError("status read timed out"), OSError("provider unavailable")])
+async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(tmp_path, error):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=error), download=AsyncMock())
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(type(error)) as caught:
+        await server.responses(request, body)
+    assert caught.value is error
+    sandbox.exec.assert_awaited_once()
+    sandbox.download.assert_not_awaited()
+    assert "session" not in server._sandbox_id_to_run_result
+    server.server_client.post.assert_not_called()
+
+
+@mark.parametrize("error_type", ["UnknownError", None])
+async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
+    from nemo_gym.sandbox import SandboxExecResult
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            return_value=SandboxExecResult(
+                stdout="", stderr="unknown completion", return_code=-1, error_type=error_type
+            )
+        ),
+        download=AsyncMock(),
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request, body)
+    assert caught.value.failure_kind == "agent_route_failed"
+    assert caught.value.operation == "agent.sandbox_exec"
+    sandbox.exec.assert_awaited_once()
+    sandbox.download.assert_not_awaited()
+    server.server_client.post.assert_not_called()
