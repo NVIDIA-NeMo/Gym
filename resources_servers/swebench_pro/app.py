@@ -35,6 +35,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
+from nemo_gym.core.episode import current_verifier_invocation_id
+from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
     ConnectableProvider,
@@ -61,6 +63,8 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -558,9 +562,8 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
         patch_verification_time_taken = 0.0
         attempts = 1 + max(self.config.inconclusive_verification_retries, 0)
         deadline = _verification_deadline(self.config.verification_total_timeout)
-        allocation_error: Exception | None = None
         for attempt in range(1, attempts + 1):
-            allocation_error = None
+            attempt_error: Exception | None = None
             eval_sandbox: AsyncSandbox | None = None
             start_time = time()
             try:
@@ -576,8 +579,7 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                     )
                     patch_verification_time_taken = time() - verification_start
             except Exception as exc:
-                if eval_sandbox is None and isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
-                    allocation_error = exc
+                attempt_error = exc
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
                 result = VerificationResult(
@@ -596,6 +598,27 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
                         print("Failed to stop verification sandbox", format_exc(), file=sys.stderr)
 
             reason = inconclusive_reason(result)
+            if reason is not None:
+                # Record the actual failed attempt without selecting a retry or claiming a model failure.
+                # Only an exception before sandbox assignment identifies allocation as the failing operation.
+                allocation_failed = attempt_error is not None and eval_sandbox is None
+                operation_id = current_verifier_invocation_id()
+                observed = NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=(
+                        "Verifier sandbox allocation failed"
+                        if allocation_failed
+                        else "Verification produced no conclusive verdict"
+                    ),
+                    operation="verify.sandbox.allocate" if allocation_failed else "verify",
+                    operation_id=operation_id,
+                    attempt_id=f"{operation_id}:{attempt}" if operation_id is not None else None,
+                    stage="verification",
+                    exception_type=type(attempt_error).__name__ if attempt_error is not None else None,
+                )
+                observed.__cause__ = attempt_error
+                observe_failure(observed)
             if reason is not None and _budget_spent(deadline):
                 print(
                     f"Verification for {body.instance_id} gave up after {attempt} attempt(s): "
@@ -638,13 +661,13 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             "error": extraction_error or result.error or reason,
             "log_dir": str(run_log_dir),
         }
-        if allocation_error is not None:
-            # The saved patch was never graded. A collection retry would run the agent again;
+        if reason is not None:
+            # The saved patch has no conclusive verdict. A collection retry would run the agent again;
             # this stateful verifier cannot yet reverify that patch through the public CLI.
             response_data |= {
                 "mask_sample": True,
                 "failure_kind": VERIFIER_ERROR,
-                "failure_reason": result.error,
+                "failure_reason": result.error or reason,
                 "model_patch": model_patch,
                 "verification_attempts": attempt,
             }
