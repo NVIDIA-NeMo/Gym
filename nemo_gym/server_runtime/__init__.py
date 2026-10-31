@@ -73,6 +73,7 @@ if TYPE_CHECKING:
         BaseEpisodeRequest,
         BaseEpisodeResponse,
         EpisodeFailure,
+        FailureBoundary,
         FailureReport,
     )
     from nemo_gym.server_runtime.mcp_auto_exposure import MCPTool
@@ -101,6 +102,7 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "FailureBoundary": "episode_types",
     "Activation": "_checkpoint.agent",
     "ActivationOutOfOrderError": "_checkpoint.agent",
     "BaseEnvironmentServer": "base_environment_server",
