@@ -12,6 +12,14 @@
 #   setup      bash code run first, before env is applied
 #   unset_env  array of extglob patterns naming inherited variables to drop
 #   events     file receiving each JSON object line of stdout as [seen_at, object]
+#   MODEL_RELAY_PORT, MODEL_RELAY_ENDPOINT, MODEL_RELAY_STATUS, MODEL_RELAY_SCRIPT
+#              run model_relay.py (MODEL_RELAY_SCRIPT) on 127.0.0.1:MODEL_RELAY_PORT for the command's model calls,
+#              on the first Python 3.6+ found, restarted on the same port if it dies, and export
+#              NEMO_GYM_MODEL_RELAY=1. MODEL_RELAY_SESSION_DIR (default: the directory of PARAMS) holds the
+#              supervisor's pause and continue requests; MODEL_RELAY_PYTHONS (array) overrides the interpreters
+#              tried. Without a usable Python, or when the relay does not come up, the runner writes
+#              "unavailable" beside MODEL_RELAY_STATUS, exports MODEL_RELAY_FALLBACK_ENV (array of KEY=VALUE, such
+#              as a direct model URL) and runs the command without a relay.
 # Writes runtime.json beside PARAMS. Exits with the command's status, 125 when the runner fails before
 # starting it (including an exit from setup), or 126 or 127 when the command could not be started.
 
@@ -20,7 +28,8 @@ set +o errexit +o nounset +o pipefail
 IFS=$' \t\n'
 shopt -s extglob
 # Inherited variables with these names must not configure the runner or leak into the CLI.
-unset -v cwd command env stdin stdout stderr setup unset_env events
+unset -v cwd command env stdin stdout stderr setup unset_env events MODEL_RELAY_PORT MODEL_RELAY_ENDPOINT \
+    MODEL_RELAY_STATUS MODEL_RELAY_SCRIPT MODEL_RELAY_SESSION_DIR MODEL_RELAY_PYTHONS MODEL_RELAY_FALLBACK_ENV
 trap 'exit 125' EXIT
 source "$1" || exit
 printf '{"hostname": "%s", "pid": %d}\n' "$HOSTNAME" "$$" >"$(dirname "$1")/runtime.json"
@@ -32,6 +41,84 @@ for pattern in "${unset_env[@]}"; do
 done
 ((${#env[@]})) && export "${env[@]}"
 cd "$cwd" || exit
+
+# Whether process $1 runs: a zombie, which kill -0 still finds, does not.
+running() {
+    local stat=
+    IFS= read -r stat 2>/dev/null <"/proc/$1/stat" || return 1
+    stat=${stat##*) }
+    [[ ${stat:0:1} != [ZX] ]]
+}
+
+# The first interpreter that is Python 3.6 or later, as the binary it runs, in relay_python.
+find_relay_python() {
+    local candidates=(python3 python /usr/local/bin/python3 /usr/bin/python3 /usr/bin/python) candidate
+    ((${#MODEL_RELAY_PYTHONS[@]})) && candidates=("${MODEL_RELAY_PYTHONS[@]}")
+    for candidate in "${candidates[@]}"; do
+        command -v "$candidate" >/dev/null 2>&1 || continue
+        relay_python=$("$candidate" -I -c 'import os, sys; assert sys.version_info >= (3, 6); print(os.readlink("/proc/self/exe"))' 2>/dev/null) && [[ -n $relay_python ]] && return 0
+    done
+    return 1
+}
+
+# The port the relay's status file names, in port, when it names one.
+relay_status_port() {
+    local status=
+    IFS= read -r -d '' status 2>/dev/null <"$MODEL_RELAY_STATUS"
+    [[ $status =~ \"port\":\ ([1-9][0-9]*) ]] && port=${BASH_REMATCH[1]}
+}
+
+# Run the relay until the runner (or the command it became) ends, restarting it on the port it took first. Its
+# interpreter runs through a link with a neutral name, so python-matching kills in the task skip it.
+relay_watchdog() {
+    local port=$MODEL_RELAY_PORT relay
+    trap '[[ -n ${relay-} ]] && kill -TERM "$relay" 2>/dev/null; exit 0' TERM
+    while running "$runner"; do
+        rm -f "$MODEL_RELAY_STATUS"
+        "$relay_link" -I "$MODEL_RELAY_SCRIPT" --port "$port" --endpoint "$MODEL_RELAY_ENDPOINT" \
+            --session-dir "${MODEL_RELAY_SESSION_DIR:-$params_dir}" --status "$MODEL_RELAY_STATUS" >>"$relay_log" 2>&1 &
+        relay=$!
+        while running "$relay" && running "$runner"; do
+            ((port)) || relay_status_port
+            sleep 0.2
+        done
+        ((port)) || relay_status_port
+        running "$runner" || break
+        wait "$relay" 2>/dev/null
+        echo "model relay exited with status $?; restarting it on port $port" >>"$relay_log"
+        sleep 0.2
+    done
+    kill -TERM "$relay" 2>/dev/null
+}
+
+# Start the relay and wait until it listens; fails, leaving no relay, when it does not within 10 seconds.
+start_relay() {
+    local status= deadline=$((SECONDS + 10))
+    relay_log=$(dirname "$MODEL_RELAY_STATUS")/relay.log
+    relay_link=$(dirname "$MODEL_RELAY_STATUS")/gym-model-relay
+    find_relay_python && ln -sfn "$relay_python" "$relay_link" || return 1
+    rm -f "$MODEL_RELAY_STATUS"
+    relay_watchdog 2>>"$relay_log" &
+    watchdog=$!
+    while ((SECONDS <= deadline)) && running "$watchdog"; do
+        IFS= read -r -d '' status 2>/dev/null <"$MODEL_RELAY_STATUS"
+        [[ $status =~ \"port\":\ [1-9] ]] && return 0
+        sleep 0.05
+    done
+    kill -TERM "$watchdog" 2>/dev/null
+    return 1
+}
+
+if [[ -n ${MODEL_RELAY_PORT-} ]]; then
+    runner=$$
+    params_dir=$(dirname "$1")
+    if start_relay; then
+        export NEMO_GYM_MODEL_RELAY=1
+    else
+        : >"$(dirname "$MODEL_RELAY_STATUS")/unavailable"
+        ((${#MODEL_RELAY_FALLBACK_ENV[@]})) && export "${MODEL_RELAY_FALLBACK_ENV[@]}"
+    fi
+fi
 # A failed redirection does not end bash at exec; the CLI did not start.
 if [[ -z ${events-} ]]; then
     trap - EXIT
