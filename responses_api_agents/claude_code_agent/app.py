@@ -124,6 +124,8 @@ class ClaudeCodeAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_executable_sha256: str | None = Field(default=None, pattern=r"^[a-fA-F0-9]{64}$")
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
+    # Copy the stream-json output to this sandbox path after each turn, for task verifiers that read it.
+    sandbox_transcript_path: str | None = None
 
 
 class ClaudeCodeAgentRunRequest(BaseRunRequest):
@@ -604,6 +606,7 @@ class ClaudeCodeAgent(SimpleResponsesAPIAgent):
                 harness="Claude Code",
                 owns_sandbox=owns_sandbox,
             ),
+            transcript_path=self.config.sandbox_transcript_path,
         )
         try:
             async with asyncio.timeout(self.config.sandbox_install_timeout_seconds):

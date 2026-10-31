@@ -1,0 +1,32 @@
+name: posttrainbench
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: PostTrainBench v1.2, 24 Harbor tasks in which Claude Code post-trains a small base model on one H100
+  for 10 hours; scored by the weighted accuracy of the final model, with judge-flagged runs at the baseline.
+modality: text
+licensing: MIT
+authors:
+- NVIDIA NeMo Gym contributors
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+config_path: config.yaml
+resources_server: null
+agent_server: claude_code_agent
+datasets:
+- name: posttrainbench
+  type: benchmark
+  jsonl_fpath: benchmarks/posttrainbench/data/rows/posttrainbench/tasks.jsonl
+  prepare_script: benchmarks/posttrainbench/prepare.py
+  num_repeats: 1
+model_server: policy_model
+sandbox: opensandbox
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active
