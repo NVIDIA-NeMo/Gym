@@ -1375,3 +1375,52 @@ def test_current_unrouted_dispatch_gates_admission_without_replacing_history(pre
     reader = RolloutStore.read(output)
     assert any(item["_ng_task_index"] == 0 for item in reader.pending(3))
     assert reader.coverage()["counted_failures"] == 2
+
+
+@pytest.mark.parametrize("legacy_selector", [False, True])
+async def test_offline_dropped_summary_excludes_producer_and_selected_zeros(
+    tmp_path, monkeypatch, capsys, legacy_selector
+):
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper, RolloutCollectionHelper
+    from nemo_gym.rollout_records import coverage_path_for
+
+    output = tmp_path / "rollouts.jsonl"
+    inputs = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(3)]
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in inputs))
+    manifest = RunManifest.create(source, inputs, {}, {"agent": {"responses_api_agents": {"impl": {}}}})
+    with RolloutStore.start_or_resume(output, lambda: (inputs, manifest), resume=False) as store:
+        for row in store.pending():
+            store.record_dispatch(row)
+            payload = (
+                {"reward": 1.0, "response": {}}
+                if row["_ng_task_index"] == 0
+                else {
+                    "_ng_failure_class": "model_policy_response_timeout",
+                    "_ng_failure_legacy_class": "timeout_exceeded",
+                    "_ng_failure_terminal": True,
+                    "_ng_failure_counts_as_zero": not legacy_selector,
+                }
+                if row["_ng_task_index"] == 1
+                else {"_ng_failure_class": "judge_failed"}
+            )
+            store.record_outcome(row | payload)
+    before = snapshot(output)
+    metrics = AsyncMock(return_value=None)
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", metrics)
+    merged = tmp_path / "aggregate" / "merged.jsonl"
+    await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(output),
+            output_jsonl_fpath=str(merged),
+            count_failure_classes_as_zero=["timeout_exceeded"] if legacy_selector else [],
+            disable_health_check=True,
+        )
+    )
+    assert [row["reward"] for row in metrics.await_args.args[0]] == [1.0, 0.0]
+    report = orjson.loads(coverage_path_for(merged).read_bytes())
+    assert report["failures_counted_as_zero"] == 1
+    printed = capsys.readouterr().out
+    assert "1 judge_failed" in printed
+    assert "1 model_policy_response_timeout" not in printed
+    assert snapshot(output) == before

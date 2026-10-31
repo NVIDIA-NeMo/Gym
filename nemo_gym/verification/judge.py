@@ -20,14 +20,17 @@ issue judge calls through ``call_judge``, or wrap a bespoke call in
 judge failure becomes a row tagged ``_ng_failure_class="judge_failed"``, which
 rollout_collection routes to ``<output>_failures.jsonl`` — excluded from the
 aggregate metrics and from the file-based re-aggregation (``gym eval
-aggregate``), and retryable on resume.
+aggregate``), and retained on resume without regenerating its answer. Judge-only
+recovery requires a supported reverification path; manifest-backed runs currently
+reject reverification.
 
 Boundary: a failed *call* (transport/timeout/auth/HTTP) → ``judge_failed`` event → sidecar; a
 *received-but-unparseable* response is a legitimate wrong answer (let the parser
 score it, don't raise), unless the benchmark explicitly treats an invalid judge
 verdict as an unusable grade. FrontierScience Research uses that exception for
 missing/invalid final numeric rubric verdicts: retry through the judge-failure
-sidecar rather than assign zero points to the model answer. Completion checks
+sidecar rather than assign zero points to the model answer; ordinary resume does
+not regenerate that answer. Completion checks
 must still reject a partial evaluation. Empty output is a per-benchmark call,
 so servers differ.
 

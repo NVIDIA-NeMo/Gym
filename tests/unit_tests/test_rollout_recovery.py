@@ -2030,7 +2030,11 @@ async def test_health_reports_are_cleared_after_validation_and_written_under_run
     assert all(report.read_text() == "validated report" for report in reports)
 
 
-async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(runner_config, monkeypatch):
+@pytest.mark.parametrize("specific_kind", ["judge_timeout", "judge_failed", "judge_invalid"])
+@pytest.mark.parametrize("has_answer", [False, True])
+async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(
+    runner_config, monkeypatch, specific_kind, has_answer
+):
     from nemo_gym.rollout_reverification import _is_judge_failure, _rollout_response
 
     answer = {"output": [{"type": "message", "content": [{"type": "output_text", "text": "saved answer"}]}]}
@@ -2039,8 +2043,8 @@ async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(run
             200,
             {
                 "_ng_failure_class": "judge_failed",
-                "failure_kind": "judge_timeout",
-                "response": answer,
+                "failure_kind": specific_kind,
+                **({"response": answer} if has_answer else {}),
             },
         )
     )
@@ -2050,11 +2054,23 @@ async def test_judge_class_with_shared_kind_keeps_a_recoverable_saved_answer(run
     failures = RolloutStore.read(Path(runner_config.output_jsonl_fpath)).failures()
     assert len(failures) == 3
     for failure in failures:
-        assert failure["_ng_failure_class"] == "judge_timeout"
-        assert failure["_ng_failure_legacy_class"] == "judge_failed"
+        assert failure["_ng_failure_class"] == specific_kind
+        if specific_kind != "judge_failed":
+            assert failure["_ng_failure_legacy_class"] == "judge_failed"
         assert _is_judge_failure(failure)
-        assert _rollout_response(failure) == answer
+        if has_answer:
+            assert _rollout_response(failure) == answer
+        else:
+            with pytest.raises(ConfigError, match="has no `response`"):
+                _rollout_response(failure)
         assert "reward" not in failure
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).pending() == []
+    post.reset_mock()
+    try:
+        await RolloutCollectionHelper().run_from_config(runner_config.model_copy(update={"resume_from_cache": True}))
+    except RuntimeError:
+        pass
+    post.assert_not_called()
 
 
 async def test_timeout_retry_policy_survives_resume_until_explicitly_changed(runner_config, monkeypatch):
