@@ -304,9 +304,17 @@ def capture_observations(sandbox, tmp_path):
 
 
 @pytest.mark.parametrize("output_budget", [4096, 32000])
-def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budget):
+@pytest.mark.parametrize("model_call_timeout", [None, 1800000])
+def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, tmp_path, output_budget, model_call_timeout):
     agent, sandbox = setup
     agent.config.max_output_tokens = output_budget
+    if model_call_timeout is not None:
+        agent.config.opencode_model_call_timeout = model_call_timeout
+    export = json.loads(sandbox.events)
+    assistant = export["messages"][-1]
+    assistant["parts"] = [{"type": "step-start"}, *assistant["parts"], {"type": "step-finish"}]
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
     with TestClient(agent.setup_webserver()) as client:
         created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         assert created.status_code == 200, created.text
@@ -328,6 +336,9 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert payload["command"][0].endswith("nemo-gym-opencode-runtime-1.17.11/opencode")
         assert payload["env"]["HOME"] == f"{sandbox.directory}/home"
         config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["provider"]["nemo_gym"]["options"]["timeout"] == (
+            model_call_timeout if model_call_timeout is not None else False
+        )
         assert config["provider"]["nemo_gym"]["models"]["dummy_model"]["limit"] == {
             "context": 32000,
             "input": 32000,
@@ -342,11 +353,61 @@ def test_http_session_flow_runs_opencode_in_borrowed_sandbox(setup, output_budge
         assert client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"}).status_code == 409
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id))
         assert closed.status_code == 200, closed.text
+        trajectory = closed.json()["trajectory"]
+        assert trajectory["rollout_id"] == "opencode-smoke-a2"
+        answer = trajectory["turns"][0]["answer"]
+        assert [item["type"] for item in answer] == ["message", "function_call"]
+        assert trajectory["turns"][0]["reasoning_content"][0]["text"] == "Inspect"
+        assert answer[0]["content"][0]["text"] == "Fixed"
+        assert "cleanup_confirmed" not in closed.json()
     assert not active_sessions(agent)
     assert not any(path.startswith("/app/") for path in sandbox.files)
     sandbox.disconnect.assert_awaited_once()
     sandbox.stop.assert_not_awaited()
     agent.server_client.post.assert_not_called()
+
+
+@pytest.mark.parametrize(
+    "settings",
+    [
+        {"remote_opencode_binary_path": "/mounted/opencode"},
+        {"remote_opencode_install_script_path": "/mounted/install.sh"},
+        {"remote_opencode_musl_binary_path": "/mounted/opencode-musl"},
+        {
+            "remote_opencode_install_script_path": "/mounted/install.sh",
+            "remote_opencode_binary_path": "/mounted/opencode",
+            "sandbox_executable_path": "/verified/opencode",
+        },
+    ],
+)
+def test_invalid_cached_installer_is_rejected_before_connecting(setup, settings):
+    agent, sandbox = setup
+    for key, value in settings.items():
+        setattr(agent.config, key, value)
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+    assert response.status_code == 422, response.text
+    sandbox.exec.assert_not_awaited()
+
+
+def test_session_setup_forwards_cached_installer_paths(setup):
+    agent, sandbox = setup
+    agent.config.remote_opencode_install_script_path = "/mounted cache/install.sh"
+    agent.config.remote_opencode_binary_path = "/mounted cache/opencode"
+    agent.config.remote_opencode_musl_binary_path = "/mounted cache/opencode-musl"
+    with TestClient(agent.setup_webserver()) as client:
+        response = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert response.status_code == 200, response.text
+        install = next(
+            call.args[0] for call in sandbox.exec.call_args_list if "install_opencode_runtime.sh" in call.args[0]
+        )
+        assert shlex.split(install)[-3:] == [
+            agent.config.remote_opencode_install_script_path,
+            agent.config.remote_opencode_binary_path,
+            agent.config.remote_opencode_musl_binary_path,
+        ]
+        closed = client.post("/v1/agent_sessions/close", json=close_body(response.json()["agent_session_id"]))
+        assert closed.status_code == 200, closed.text
 
 
 @pytest.mark.parametrize("part_type", ["text", "reasoning"])
