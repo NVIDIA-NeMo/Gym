@@ -35,6 +35,8 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import get_global_config_dict
 from nemo_gym.core import VERIFIER_ERROR, EpisodeId, TaskId
+from nemo_gym.core.episode import current_verifier_invocation_id
+from nemo_gym.failure_transport import observe_failure
 from nemo_gym.sandbox import (
     AsyncSandbox,
     ConnectableProvider,
@@ -61,6 +63,8 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
     lost_session_verification,
 )
+from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.typed_exceptions import NgFailureEvent
 from resources_servers.swebench_pro.image_cache import digest_hex, verify_local_image
 from resources_servers.swebench_pro.verification import (
     DEFAULT_ENVIRONMENT_REPAIRS,
@@ -579,6 +583,21 @@ class SWEBenchProResourcesServer(SimpleResourcesServer):
             except Exception as exc:
                 if eval_sandbox is None and isinstance(exc, OSError) and not isinstance(exc, TimeoutError):
                     allocation_error = exc
+                    # Keep each observed allocation failure even when a later attempt grades the saved patch.
+                    # The whole verifier invocation supplies the final outcome; these observations select no retry.
+                    operation_id = current_verifier_invocation_id()
+                    observed = NgFailureEvent(
+                        boundary=FailureBoundary.RESOURCES_SERVER,
+                        failure_kind=VERIFIER_ERROR,
+                        failure_reason="Verifier sandbox allocation failed",
+                        operation="verify.sandbox.allocate",
+                        operation_id=operation_id,
+                        attempt_id=f"{operation_id}:{attempt}" if operation_id is not None else None,
+                        stage="verification",
+                        exception_type=type(exc).__name__,
+                    )
+                    observed.__cause__ = exc
+                    observe_failure(observed)
                 eval_sandbox_start_time_taken = time() - start_time
                 patch_verification_time_taken = 0.0
                 result = VerificationResult(
