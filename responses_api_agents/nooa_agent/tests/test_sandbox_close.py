@@ -48,7 +48,7 @@ async def test_close_releases_sandbox_before_returning_replayable_evidence(monke
     r.close.assert_awaited_once()
     assert first.agent_observations.source == "nooa"
     assert AgentCloseSessionResponse.model_validate(first.model_dump()) == first
-    assert set(first.model_dump()) == {"agent_session_id", "agent_observations", "resources_cookies"}
+    assert set(first.model_dump()) == {"agent_session_id", "agent_observations", "resources_cookies", "trajectory"}
     assert await instance.close_agent_session(req, close_body) == first
     with pytest.raises(HTTPException, match="closing|closed"):
         await instance.responses(req, body)

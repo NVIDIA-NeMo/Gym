@@ -17,8 +17,9 @@ async def test_embedded_close_replays_evidence_and_rejects_another_activation(mo
     await instance.responses(request, body)
     receipt = await close(instance)
     assert receipt.agent_observations.source == "nooa"
-    # Continuation-only fields stay absent from legacy receipts.
-    assert set(receipt.model_dump()) == {"agent_session_id", "agent_observations", "resources_cookies"}
+    # The receipt reports the run's turns; the cleanup receipt stays absent when no confirmation is reported.
+    assert set(receipt.model_dump()) == {"agent_session_id", "agent_observations", "resources_cookies", "trajectory"}
+    assert receipt.trajectory.rollout_id == "rollout-a2"
     assert await close(instance) == receipt
     with pytest.raises(HTTPException, match="closing|closed"):
         await instance.responses(request, body)

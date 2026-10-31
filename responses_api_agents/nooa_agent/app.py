@@ -294,6 +294,9 @@ class NOOAAgent(SimpleResponsesAPIAgent):
         return AgentCloseSessionResponse(
             agent_session_id=state.request.agent_session_id,
             agent_observations=observations,
+            # The run's own turns and model-call references. Without them collection has no producer turns:
+            # evaluation runs capture no model calls, so every row would report its turns as unavailable.
+            trajectory=state.result.trajectory if state.result is not None else None,
             resources_cookies=dict(
                 state.result.resource_cookies if state.result is not None else state.resources_cookies
             )
