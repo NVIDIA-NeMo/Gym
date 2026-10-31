@@ -10,7 +10,7 @@
 swemer_v1_resources_server:
   resources_servers:
     swemer_v1:
-      allowed_agents: [opencode_sandboxed_agent]
+      allowed_agents: [opencode_sandboxed_agent, claude_code_sandboxed_agent]
       entrypoint: app.py
       domain: coding
       verified: false
