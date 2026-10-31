@@ -17,7 +17,7 @@ from resources_servers.terminal_bench_4.verifier import (
     RewardFileEmptyError,
     RewardFileNotFoundError,
     VerifierOutputParseError,
-    VerifierTimeoutError,
+    VerifierStatusUnknownError,
     parse_reward,
     parse_test_counts,
     restore,
@@ -64,7 +64,13 @@ class FilesystemSandbox:
 def environment(tmp_path, cfg):
     main = FilesystemSandbox(tmp_path / "main")
     sidecar = FilesystemSandbox(tmp_path / "sidecar")
-    env = SimpleNamespace(main=main, task=SimpleNamespace(config=cfg), stopped=False, stop_main=None)
+    env = SimpleNamespace(
+        main=main,
+        config=SimpleNamespace(default_exec_timeout_s=64800),
+        task=SimpleNamespace(config=cfg),
+        stopped=False,
+        stop_main=None,
+    )
 
     def sandbox(service=None):
         return main if service in (None, "main") else sidecar
@@ -325,14 +331,16 @@ async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkey
     async def execute(*args, **kwargs):
         await asyncio.Event().wait()
 
-    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
     from resources_servers.terminal_bench_4 import verifier
 
     download = AsyncMock()
     monkeypatch.setattr(verifier, "download_dir", download)
-    with pytest.raises(VerifierTimeoutError):
+    with pytest.raises(VerifierStatusUnknownError, match="preparation"):
         await run_verifier(env, tmp_path, [])
-    download.assert_awaited_once()
+    download.assert_not_awaited()
 
 
 async def test_verifier_timeout_override_replaces_the_package_timeout(tmp_path, monkeypatch):
@@ -343,11 +351,13 @@ async def test_verifier_timeout_override_replaces_the_package_timeout(tmp_path, 
     async def execute(*args, **kwargs):
         await asyncio.Event().wait()
 
-    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
     from resources_servers.terminal_bench_4 import verifier
 
     monkeypatch.setattr(verifier, "download_dir", AsyncMock())
-    with pytest.raises(VerifierTimeoutError, match="after 0.01 seconds"):
+    with pytest.raises(VerifierStatusUnknownError, match="preparation"):
         await run_verifier(env, tmp_path, [], timeout_sec=0.01)
 
 
@@ -359,14 +369,17 @@ async def test_a_provider_timeout_within_the_budget_is_not_a_verifier_timeout(tm
     async def execute(*args, **kwargs):
         raise TimeoutError("provider RPC timed out")
 
-    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
     from resources_servers.terminal_bench_4 import verifier
 
     download = AsyncMock()
     monkeypatch.setattr(verifier, "download_dir", download)
-    with pytest.raises(TimeoutError, match="provider RPC timed out") as raised:
+    with pytest.raises(VerifierStatusUnknownError) as raised:
         await run_verifier(env, tmp_path, [])
-    assert not isinstance(raised.value, VerifierTimeoutError)
+    assert isinstance(raised.value.__cause__, TimeoutError)
+    assert str(raised.value.__cause__) == "provider RPC timed out"
     download.assert_not_awaited()
 
 
@@ -381,12 +394,14 @@ async def test_a_sandbox_without_a_command_outcome_is_not_a_missing_reward(tmp_p
             return SandboxExecResult(stdout=None, stderr="no command outcome", return_code=125, error_type="sandbox")
         return SandboxExecResult(stdout="", stderr="", return_code=0)
 
-    env = SimpleNamespace(task=SimpleNamespace(config=cfg), exec=execute, main=None)
+    env = SimpleNamespace(
+        config=SimpleNamespace(default_exec_timeout_s=64800), task=SimpleNamespace(config=cfg), exec=execute, main=None
+    )
     from resources_servers.terminal_bench_4 import verifier
 
     download = AsyncMock()
     monkeypatch.setattr(verifier, "download_dir", download)
-    with pytest.raises(RuntimeError, match="in the sandbox: sandbox: no command outcome"):
+    with pytest.raises(RuntimeError, match="no confirmed command outcome.*sandbox.*no command outcome"):
         await run_verifier(env, tmp_path, [])
     download.assert_not_awaited()
 
