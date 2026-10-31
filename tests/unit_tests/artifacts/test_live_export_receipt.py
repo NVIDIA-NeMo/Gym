@@ -635,6 +635,9 @@ def test_current_unknown_health_replaces_stale_healthy_metadata_without_changing
     values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
     assert values["health/trial/known"] == 0
     assert values["health/trial/passed"] == 0 and "health/trial/failure_rate" not in values
+    assert values["health/trial/expected"] == 2
+    assert values["health/trial/failed_lower_bound"] == 0
+    assert values["health/trial/failure_rate_lower_bound"] == 0
     changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
     changed[0].pop("_ng_run_health_metrics")
     assert changed == original

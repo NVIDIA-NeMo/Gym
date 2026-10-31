@@ -771,6 +771,16 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
                     / decision.expected,
                 }
             )
+        if trial is None and decision.expected > 0:
+            # A known terminal model failure remains a lower bound when other trial facts are unobserved.
+            lower_bound = decision.counts.get(IdentityState.MODEL_FINAL, 0)
+            metrics.update(
+                {
+                    "health/trial/expected": decision.expected,
+                    "health/trial/failed_lower_bound": lower_bound,
+                    "health/trial/failure_rate_lower_bound": lower_bound / decision.expected,
+                }
+            )
         upstream = (quality or {}).get("observed_upstream_recovery")
         upstream_keys = (
             "observed_attempt_errors",
