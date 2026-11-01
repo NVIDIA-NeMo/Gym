@@ -22,8 +22,11 @@ import pytest
 
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
+    STORE_DOES_NOT_REPLAY,
     CollectedEvidence,
+    ManagedRecoveryFact,
     RecoveryBudget,
+    RecoveryOutcomePolicyConfig,
     decide_from_collected,
     decide_recovery,
     select_managed_evidence,
@@ -37,13 +40,13 @@ _BUDGET = RecoveryBudget(max_infra_retries=2, infra_retries_used=0, walltime_use
 _KEPT = "the row kept an answer that a rerun would replace"
 
 
-def _decide(*failures, scored=1):
+def _decide(*failures, scored=1, budget=_BUDGET, **kwargs):
     """One scored row, then one standing sidecar row per failure, as saved without a rollout store."""
     total = scored + len(failures)
     materialized = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(total)]
     results = [{"_ng_task_index": i, "_ng_rollout_index": 0, "reward": 1.0} for i in range(scored)]
     rows = [{"_ng_task_index": scored + i, "_ng_rollout_index": 0, "_line": i} | f for i, f in enumerate(failures)]
-    return decide_recovery(materialized=materialized, results=results, failures=rows, budget=_BUDGET)
+    return decide_recovery(materialized=materialized, results=results, failures=rows, budget=budget, **kwargs)
 
 
 def _harbor_failed(**extra):
@@ -186,6 +189,40 @@ def test_the_three_protection_cases(row, action, label):
         assert decision.reason.endswith(
             f"retryable 0 (resumed), unknown 1 (1 {label}) (reported, not retried), retained 1 (saved rows kept)"
         )
+
+
+_INFRA_RETRY = {
+    "collection_dispatch_failed": _route_failure_row(),
+    "harness_termination_unconfirmed": _harness_unconfirmed(),
+}
+
+
+@pytest.mark.parametrize("kind", _INFRA_RETRY)
+def test_an_infrastructure_kind_retries_under_a_failing_default_and_spends_the_infra_retry_cap(kind):
+    # A partial override with a failing default: only the kind's own entry can still retry it.
+    policy = RecoveryOutcomePolicyConfig.model_validate(
+        {"default_action": "fail", "by_failure_kind": {"agent_timeout": "fail"}}
+    )
+    under = _decide(_INFRA_RETRY[kind], outcome_policy=policy)
+    assert under.action.value == "resubmit", under.reason
+    assert under.counts == {"scored": 1, "retryable": 1}
+    spent = _decide(
+        _INFRA_RETRY[kind], outcome_policy=policy, budget=_BUDGET.model_copy(update={"infra_retries_used": 2})
+    )
+    assert (spent.action.value, spent.reason) == ("stop", "the stored infra-retry budget is used (2 of 2)")
+
+
+@pytest.mark.parametrize("kind", _INFRA_RETRY)
+def test_a_retry_the_store_does_not_plan_stops_and_names_the_kind(kind):
+    # The Store reader of a run pinned at an older revision may refuse a replay this revision's policy allows.
+    fact = ManagedRecoveryFact(identity=(1, 0), attempts=1, max_attempts=3, pending=False, reserved=False)
+    decision = _decide(_INFRA_RETRY[kind], managed_selection=[fact])
+    assert decision.action.value == "stop"
+    assert decision.reason == (
+        f"1 failure(s) ({kind}) have no registered kind, no supported action or no rerun in the Store, so nobody owns "
+        f"them; retryable 0 (resumed), unknown 1 (1 {kind}: {STORE_DOES_NOT_REPLAY}) (reported, not retried), "
+        "retained 1 (saved rows kept)"
+    )
 
 
 def test_a_failure_with_no_kind_anywhere_stops_and_says_so():

@@ -2251,8 +2251,9 @@ def test_projected_broken_selected_chain_cannot_reopen_policy_work(tmp_path, cas
         }
     if mode == "terminal":
         row["_ng_failure_terminal"] = True
+    # The dispatch kind's own retry entry outranks a failing default, so failing it takes an entry as well.
     policy = (
-        RecoveryOutcomePolicyConfig(default_action="fail")
+        RecoveryOutcomePolicyConfig(default_action="fail", by_failure_kind={"collection_dispatch_failed": "fail"})
         if mode == "explicit_fail"
         else RecoveryOutcomePolicyConfig()
     )

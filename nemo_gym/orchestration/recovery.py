@@ -56,6 +56,8 @@ from nemo_gym.agent_outcome import (
 )
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
+    COLLECTION_DISPATCH_FAILED,
+    HARNESS_TERMINATION_UNCONFIRMED,
     JUDGE_FAILED,
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
@@ -86,6 +88,8 @@ Identity = tuple[int, int]
 ALLOCATION_CUT_STATES = frozenset({"TIMEOUT", "PREEMPTED", "NODE_FAIL", "CANCELLED"})
 # The kind a reservation without a saved outcome gets when no scheduler cut explains it.
 RESERVATION_WITHOUT_OUTCOME = "reservation_without_outcome"
+# Why a failure the policy retries is unknown: the Store does not select it as pending, so a resume never runs it.
+STORE_DOES_NOT_REPLAY = "the policy retries it but the run's Store does not plan it again"
 # Scheduler states of a job that still waits or runs: a chain job in one of them is a live continuation.
 LIVE_JOB_STATES = frozenset(
     {
@@ -228,7 +232,15 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
     Unsupported context/action combinations stop, and explicit-zero scoring is not supported here.
     """
 
-    by_failure_kind: dict[str, OutcomeAction] = Field(default_factory=lambda: {JUDGE_FAILED: OutcomeAction.VERIFY})
+    # Infrastructure failures retry whatever the default action is: overrides merge into these entries, and each
+    # retry still spends the identity's attempt cap and the run's infra-retry cap.
+    by_failure_kind: dict[str, OutcomeAction] = Field(
+        default_factory=lambda: {
+            JUDGE_FAILED: OutcomeAction.VERIFY,
+            COLLECTION_DISPATCH_FAILED: OutcomeAction.RETRY,
+            HARNESS_TERMINATION_UNCONFIRMED: OutcomeAction.RETRY,
+        }
+    )
     default_action: OutcomeAction = OutcomeAction.RETRY
 
     @model_validator(mode="after")
@@ -673,7 +685,11 @@ def decide_recovery(
                 item.state = IdentityState.UNKNOWN
                 item.failure_kind = item.failure_kind or RESERVATION_WITHOUT_OUTCOME
         elif item.state == IdentityState.RETRYABLE and not fact.pending:
-            item.state = IdentityState.EXHAUSTED if fact.attempts >= fact.max_attempts else IdentityState.UNKNOWN
+            if fact.attempts >= fact.max_attempts:
+                item.state = IdentityState.EXHAUSTED
+            else:
+                # The Store reader runs at the run's pinned Gym revision and applies that revision's replay rules.
+                item.state, item.reason = IdentityState.UNKNOWN, STORE_DOES_NOT_REPLAY
 
     by_state: dict[str, list[Identity]] = {}
     for item in evidence:
@@ -724,9 +740,15 @@ def decide_recovery(
             reserved = sum(item.failure_kind == RESERVATION_WITHOUT_OUTCOME for item in unknown)
             parts = []
             if len(unknown) > reserved:
+                kinds = Counter(
+                    item.failure_kind or "no kind"
+                    for item in unknown
+                    if item.failure_kind != RESERVATION_WITHOUT_OUTCOME
+                )
+                named = ", ".join(kind for kind, _ in kinds.most_common(3)) + (", ..." if len(kinds) > 3 else "")
                 parts.append(
-                    f"{len(unknown) - reserved} failure(s) have no registered kind or no supported action, so nobody "
-                    "owns them"
+                    f"{len(unknown) - reserved} failure(s) ({named}) have no registered kind, no supported action or "
+                    "no rerun in the Store, so nobody owns them"
                 )
             if reserved:
                 parts.append(
