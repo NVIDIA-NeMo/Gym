@@ -229,7 +229,8 @@ class ScaleSWEResourcesServer(RepoTaskOwnerResourcesServer):
 
         await self._ensure_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "scale_swe")
+            required = self.config.anti_cheat_required
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "scale_swe", required=required)
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "scale_swe")
 

@@ -31,6 +31,7 @@ A subclass describes its task: the instance model a typed seed's ``task_data`` m
 the agent's working directory, and the repository setup that runs before the agent gets the sandbox.
 """
 
+import dataclasses
 import logging
 import shlex
 from collections.abc import Iterable
@@ -69,6 +70,14 @@ class RepoTaskOwnerConfig(SandboxOwnerConfig):
     # "worktree" (diff of the working tree) or "committed" (committed work only); see swebench/patch_capture.py.
     patch_capture_mode: PatchCaptureMode = "worktree"
     sandbox_config: dict[str, Any]
+    # Fail a seed whose anti-cheat scrub did not complete instead of handing the agent a history that may hold the
+    # task's solution; the rollout is then retried. Off keeps the scrub best effort.
+    anti_cheat_required: bool = False
+    # A provider-neutral egress rule for the agent's sandbox only, e.g. {"defaultAction": "deny", "egress":
+    # [{"action": "allow", "target": "10.0.0.0/8"}]} to reach the model servers and nothing else. Grading sandboxes keep
+    # the spec's network. The rule is recorded with the sandbox, so a restore's fork gets it too: name targets that stay
+    # valid across jobs (an address range, not one job's model server).
+    agent_network_policy: dict[str, Any] | None = None
 
 
 class RepoTaskOwnerResourcesServer(SandboxOwnerResourcesServer):
@@ -134,6 +143,9 @@ class RepoTaskOwnerResourcesServer(SandboxOwnerResourcesServer):
             )
 
         spec = self._sandbox_spec(instance, files=self._session_files(instance) or None)
+        if self.config.agent_network_policy is not None:
+            options = {**(spec.provider_options or {}), "network_policy": dict(self.config.agent_network_policy)}
+            spec = dataclasses.replace(spec, provider_options=options)
         await self.start_session_sandbox(session_id, spec, setup)
 
     async def _set_up_typed_session(self, session_id: str, body: ResourcesSeedSessionRequest) -> None:

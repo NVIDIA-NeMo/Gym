@@ -30,6 +30,7 @@ from nemo_gym.testing.checkpoint_conformance import (
     check_sandbox_owner,
     checkpointing_config,
 )
+from resources_servers.swebench.anti_cheat import AntiCheatSetupError
 
 
 AUTH = {"Authorization": f"Bearer {TOKEN}"}
@@ -444,3 +445,51 @@ async def test_swe_next_links_testbed_in_the_agent_and_grading_sandboxes(case: C
     # The link comes before the repository is prepared in the agent's sandbox, and before grading in the other.
     assert agent_box["commands"][0] == "ln -sfn /workspace /testbed", agent_box["commands"][:3]
     assert "ln -sfn /workspace /testbed" in grading_box["commands"]
+
+
+class SpecRecordingProvider(FakeSnapshotProvider):
+    """Records the spec of every sandbox created from an image."""
+
+    def __init__(self, *args: Any, **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self.specs: list[Any] = []
+
+    async def create(self, spec: Any) -> Any:
+        self.specs.append(spec)
+        return await super().create(spec)
+
+
+AGENT_NETWORK = {"defaultAction": "deny", "egress": [{"action": "allow", "target": "10.0.0.0/8"}]}
+
+
+async def test_the_agent_network_policy_limits_the_agent_sandbox_but_not_grading(case: Case, tmp_path: Path) -> None:
+    provider = SpecRecordingProvider(git_results)
+    server = make_server(case, provider, checkpointing_config(tmp_path), agent_network_policy=AGENT_NETWORK)
+    async with http(server) as client:
+        await seed(client, typed_seed(case))
+        await client.post("/ng-rollout/r/verify", json=verify_body(case))
+
+    agent_spec, grading_spec = provider.specs
+    assert agent_spec.provider_options["network_policy"] == AGENT_NETWORK
+    assert "network_policy" not in (grading_spec.provider_options or {})
+
+
+async def test_a_required_scrub_that_fails_fails_the_seed_and_stops_the_sandbox(
+    case: Case, tmp_path: Path, monkeypatch: MonkeyPatch
+) -> None:
+    def failing(command: str) -> Optional[SandboxExecResult]:
+        if "anti_cheat_setup.sh" in command:
+            return SandboxExecResult(stdout="", stderr="cannot rewrite refs", return_code=1)
+        return git_results(command)
+
+    provider = FakeSnapshotProvider(failing)
+    server = make_server(case, provider, checkpointing_config(tmp_path), anti_cheat_required=True)
+    body = typed_seed(case)
+    async with http(server) as client:
+        # The test transport re-raises the server's error instead of answering 500 as the server would.
+        with pytest.raises(AntiCheatSetupError):
+            await client.post(
+                f"/ng-rollout/{body.episode_id.capture_key}/seed_session", json=body.model_dump(mode="json")
+            )
+
+    assert provider.live() == []
