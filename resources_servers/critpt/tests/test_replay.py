@@ -15,7 +15,7 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from resources_servers.critpt.app import _ALL_PROBLEM_IDS, CritPtRateLimitExceeded
+from resources_servers.critpt.app import _ALL_PROBLEM_IDS, CritPtAccessDenied, CritPtRateLimitExceeded
 from resources_servers.critpt.replay import (
     _call_api_with_rotation,
     _load_api_keys,
@@ -361,3 +361,35 @@ class TestReplayMainAsync:
         assert partial["pending_submissions"] == 2
         assert partial["scored_batches"] == 1
         assert partial["mean_accuracy_over_scored"] == 0.5
+
+    @pytest.mark.asyncio
+    async def test_access_denied_exits_4_and_keeps_scored_batches(self, tmp_path):
+        """A 403 exits 4, not 3: rerunning after the quota resets cannot fix it.
+
+        The recovery tool for a run killed by an unapproved key must not tell the
+        operator to wait. Batches scored before the denial still count.
+        """
+        _write_jsonl(
+            tmp_path / "submissions.jsonl",
+            [
+                _submission_row(0, "p1", "a=1"),
+                _submission_row(1, "p2", "b=2"),
+                _submission_row(2, "p1", "c=3"),
+                _submission_row(3, "p2", "d=4"),
+            ],
+        )
+        first_batch = {"accuracy": 0.5, "timeout_rate": 0.0, "judge_error_count": 0}
+
+        with patch("resources_servers.critpt.replay._call_api_with_rotation", new_callable=AsyncMock) as call_api:
+            call_api.side_effect = [
+                (first_batch, 0),
+                CritPtAccessDenied(body='{"error":"CritPt grading requires approved access."}'),
+            ]
+            exit_code = await main_async(_make_replay_args(tmp_path, batch_size=2), api_keys=["k0"])
+
+        assert exit_code == 4
+        assert call_api.await_count == 2
+
+        partial = json.loads((tmp_path / "partial_metrics.json").read_text())
+        assert partial["scored_submissions"] == 2
+        assert partial["scored_batches"] == 1
