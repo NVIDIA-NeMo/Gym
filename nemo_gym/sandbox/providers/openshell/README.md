@@ -133,12 +133,12 @@ a policy is passed at create time.
 
 - `network_access: model_only | model_and_tools` on the sandboxed agents resolves, for this provider,
   to a `SandboxPolicy` through `nemo_gym.sandbox.agent_tools.restricted_network_policy`. It has one rule that
-  allows exactly the model (and tool) `host:port` endpoints, for any binary (`binaries: [{path: "**"}]`), and
+  allows exactly the model (and tool) `host:port` endpoints, for any binary (`binaries: [{path: "/**"}]`), and
   nothing else. DNS and TLS use the OpenShell defaults: names are resolved by the sandbox supervisor, and
   the supervisor proxy terminates TLS with its own CA, which it installs in the sandbox.
-- IP-literal endpoints in private ranges (for example `10.x`) get `allowed_ips` for that address, because
-  OpenShell admits public addresses only by default. A hostname that resolves to a private address cannot be
-  detected when the policy is built; give those sandboxes an explicit `provider_options.policy`.
+- Exact hostnames may resolve to private addresses. Private IP-literal endpoints also get `allowed_ips` for that
+  address (a `/32` or `/128`), so the rule names the destination explicitly. Loopback, link-local and
+  metadata addresses stay blocked by OpenShell regardless.
 - An endpoint that cannot be expressed (loopback or wildcard host, or a URL with no derivable port) raises
   `ValueError` instead of producing a wider policy.
 - For anything else (extra hosts such as a package index, L7 rules), set `provider_options.policy` to a full

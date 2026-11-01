@@ -539,7 +539,7 @@ async def test_create_network_policy_builds_a_valid_sandbox_policy(make_provider
         ("10.1.2.3", 8000, ["10.1.2.3/32"]),
         ("model.example", 443, []),
     ]
-    assert [b.path for b in rule.binaries] == ["**"]
+    assert [b.path for b in rule.binaries] == ["/**"]
 
 
 def test_network_policy_and_policy_are_mutually_exclusive() -> None:

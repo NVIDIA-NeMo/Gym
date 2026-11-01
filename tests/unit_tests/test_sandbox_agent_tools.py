@@ -66,7 +66,7 @@ def test_openshell_network_policy_allows_only_named_endpoints():
     )
     rule = policy["network_policies"]["nemo_gym_endpoints"]
     assert policy["version"] == 1
-    assert rule["binaries"] == [{"path": "**"}]
+    assert rule["binaries"] == [{"path": "/**"}]
     assert rule["endpoints"] == [
         {"host": "10.1.2.3", "port": 8000, "allowed_ips": ["10.1.2.3/32"]},
         {"host": "model.example", "port": 443},

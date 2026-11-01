@@ -60,8 +60,8 @@ def _reachable_host(url: str) -> str:
     return target
 
 
-# OpenShell matches each connection's binary against a rule's ``binaries`` globs; "**" matches every path.
-OPENSHELL_ANY_BINARY = "**"
+# OpenShell matches each connection's binary against a rule's ``binaries`` globs; "/**" matches every absolute path.
+OPENSHELL_ANY_BINARY = "/**"
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
 
@@ -80,10 +80,9 @@ def restricted_network_policy(provider_name: str, urls: list[str]) -> dict[str, 
 def _openshell_network_policy(urls: list[str]) -> dict[str, object]:
     """Map endpoint URLs to an OpenShell ``SandboxPolicy`` with one allow rule for host:port pairs.
 
-    OpenShell decides on (binary, host, port) and denies everything a rule does not name. The default
-    address check admits public addresses only, so an IP-literal endpoint in a private range also needs
-    ``allowed_ips``. Hostnames that resolve to private addresses cannot be detected here; give those
-    sandboxes an explicit ``provider_options.policy``.
+    OpenShell decides on (binary, host, port) and denies everything a rule does not name. An exact
+    (non-wildcard) hostname may resolve to a private address. A private IP-literal endpoint gets ``allowed_ips``
+    for its own address so the rule states the destination explicitly.
     """
     endpoints: dict[tuple[str, int], dict[str, object]] = {}
     for url in urls:
