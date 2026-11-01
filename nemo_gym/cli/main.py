@@ -711,6 +711,13 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--repin and --repin-reason go together")
     if getattr(args, "extend_retries", None) is not None and not getattr(args, "recover", False):
         args._parser.error("--extend-retries needs --recover")
+    max_walltime, walltime_reason = getattr(args, "max_walltime", None), getattr(args, "walltime_reason", None)
+    if (max_walltime is not None or walltime_reason is not None) and (
+        not getattr(args, "recover", False) or inspect_only
+    ):
+        args._parser.error("--max-walltime and --walltime-reason need --recover and cannot be used with --inspect")
+    if (max_walltime is None) != (walltime_reason is None):
+        args._parser.error("--max-walltime and --walltime-reason go together")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -741,6 +748,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             extra = {} if repin is None else {"repin": repin, "repin_reason": repin_reason}
             if getattr(args, "extend_retries", None) is not None:
                 extra["extend_retries"] = args.extend_retries
+            if max_walltime is not None:
+                extra |= {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1772,6 +1781,21 @@ COMMANDS = {
                     help="With --recover: continue the run on this full Gym commit. The launcher must be that "
                     "revision; job.sh and resolved-config.yaml are rendered again with it, the old files are kept "
                     "beside them, and saved rows and budgets stay as they are.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--max-walltime",
+                    metavar="HH:MM:SS",
+                    help="With --recover: raise this run's Slurm walltime (never below the recorded one) and its "
+                    "chain cap to at least it; job.sh and the saved config are rendered again and journaled.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--walltime-reason",
+                    metavar="TEXT",
+                    help="Why --max-walltime raises the walltime; recorded in walltime-extension-journal.jsonl.",
                 ),
             ),
             Flag(

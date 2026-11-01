@@ -141,6 +141,8 @@ class BenchmarkJob(BaseModel):
     error: str | None = None
     # Set by a repinned recovery: the Gym commit this benchmark's job runs, when it differs from the submission's.
     gym_commit: str | None = None
+    # Set by a recovery that raised the walltime: the Slurm walltime this benchmark's job now runs with.
+    walltime: str | None = None
 
 
 class SubmissionTelemetry(BaseModel):

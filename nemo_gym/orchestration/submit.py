@@ -86,11 +86,14 @@ def recover(
     repin: str | None = None,
     repin_reason: str | None = None,
     extend_retries: int = 0,
+    max_walltime: str | None = None,
+    walltime_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
+    ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
     """
     return _recover(
         gym_job_id,
@@ -107,6 +110,8 @@ def recover(
         repin=repin,
         repin_reason=repin_reason,
         extend_retries=extend_retries,
+        max_walltime=max_walltime,
+        walltime_reason=walltime_reason,
     )
 
 
@@ -163,6 +168,8 @@ def _recover(
     repin: str | None = None,
     repin_reason: str | None = None,
     extend_retries: int = 0,
+    max_walltime: str | None = None,
+    walltime_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -272,6 +279,7 @@ def _recover(
             **({"accounting_reconciled": True} if collected is not None and collected.accounting_reconciled else {}),
             **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
             **({"extend_retries": extend_retries} if extend_retries else {}),
+            **({"max_walltime": max_walltime, "walltime_reason": walltime_reason} if max_walltime is not None else {}),
         )
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow

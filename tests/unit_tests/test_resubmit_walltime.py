@@ -1,0 +1,193 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""`gym eval resubmit --recover --max-walltime T --walltime-reason R`: an explicit, journaled walltime raise."""
+
+import json
+from pathlib import Path
+
+import pytest
+import yaml
+
+from nemo_gym.cli.main import build_parser
+from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import REPIN_JOURNAL_NAME, WALLTIME_JOURNAL_NAME, SlurmExecutor
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
+from tests.unit_tests.test_eval_resubmit import _handle
+from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
+from tests.unit_tests.test_resubmit_repin import NEW, OLD, _digests
+from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
+
+
+def _timed_run(tmp_path: Path) -> Path:
+    """One benchmark with a 4 h Slurm walltime and a 16 h chain cap, one saved row, one missing, spent budgets."""
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "a", "hostname": None, "walltime": "04:00:00"}},
+            "driver": {
+                "container": "python:3.12",
+                "gym_install": {"repo": "https://example.invalid/gym", "ref": OLD},
+                "benchmarks": {
+                    "gsm8k": {"resumable": ResumeConfig(max_retries=3, max_walltime="16:00:00").model_dump()}
+                },
+            },
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"enabled": False},
+        }
+    )
+    run_dir = tmp_path / "gym-job-x"
+    job_dir = run_dir / "gsm8k"
+    (job_dir / "artifacts").mkdir(parents=True)
+    record = SubmissionRecord(
+        gym_job_id=run_dir.name,
+        gym_version="0",
+        submitted_at="2026-01-01T00:00:00Z",
+        run_dir=str(run_dir),
+        cluster="cluster",
+        executor="slurm",
+        submitted_by="someone",
+        benchmarks=[BenchmarkJob(benchmark="gsm8k", job_dir=str(job_dir), job_id="100")],
+    )
+    SlurmExecutor().persist(record, config, LocalConnection().write_text)
+    compute = next(iter(config.compute.values()))
+    (job_dir / "job.sh").write_text(
+        build_sbatch_script(config, "gsm8k", config.driver.benchmarks["gsm8k"], compute, job_dir)
+    )
+    rows = [{"_ng_task_index": t, "_ng_rollout_index": 0} for t in range(2)]
+    (job_dir / "artifacts" / "rollouts_materialized_inputs.jsonl").write_text(
+        "".join(json.dumps(r) + "\n" for r in rows)
+    )
+    (job_dir / "artifacts" / "rollouts.jsonl").write_text(json.dumps(rows[0] | {"reward": 1.0}) + "\n")
+    (job_dir / ".gym_job_chain").write_text("100\n101\n")
+    (job_dir / ".gym_infra_retries").write_text("2\n")
+    (job_dir / ".gym_accumulated_walltime").write_text("7200\n")
+    return job_dir
+
+
+@pytest.mark.parametrize("raise_to,cap", [("12:00:00", "16:00:00"), ("20:00:00", "20:00:00")])
+def test_a_walltime_raise_renders_the_run_again_and_keeps_rows_and_budgets(tmp_path, slurm_bin, raise_to, cap):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _timed_run(tmp_path)
+    run_dir = job_dir.parent
+    before = _digests(job_dir)
+    old_script = (job_dir / "job.sh").read_text()
+    out = recover(*_handle(job_dir), max_walltime=raise_to, walltime_reason="slow but healthy policy")
+    assert out.dispatched == "resubmit", out.decision.reason
+
+    assert f"#SBATCH --time={raise_to}" in (job_dir / "job.sh").read_text()
+    [kept_script] = job_dir.glob("job.sh.pre-walltime-*")
+    assert kept_script.read_text() == old_script and "#SBATCH --time=04:00:00" in old_script
+    saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
+    assert saved["compute"]["cluster"]["walltime"] == raise_to
+    # The chain cap is at least the new segment walltime; every other field is as saved.
+    assert saved["driver"]["benchmarks"]["gsm8k"]["resumable"] == {"max_retries": 3, "max_walltime": cap}
+    [kept_config] = run_dir.glob("resolved-config.yaml.pre-walltime-*")
+    assert yaml.safe_load(kept_config.read_text())["compute"]["cluster"]["walltime"] == "04:00:00"
+    [entry] = [json.loads(line) for line in (run_dir / WALLTIME_JOURNAL_NAME).read_text().splitlines()]
+    assert {k: entry[k] for k in ("benchmark", "from", "to", "max_walltime_from", "max_walltime_to", "reason")} == {
+        "benchmark": "gsm8k",
+        "from": "04:00:00",
+        "to": raise_to,
+        "max_walltime_from": "16:00:00",
+        "max_walltime_to": cap,
+        "reason": "slow but healthy policy",
+    }
+    assert entry["actor"] and entry["at"]
+    [job] = json.loads((run_dir / "gym-job.json").read_text())["benchmarks"]
+    assert (job["job_id"], job["walltime"], job["gym_commit"]) == ("4242", raise_to, None)
+    # Saved rows and the retry counter are untouched; the walltime keeps its terminal accounting (7200 + 60).
+    assert _digests(job_dir) == before
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "7260\n"
+    assert not (run_dir / REPIN_JOURNAL_NAME).exists()
+
+
+@pytest.mark.parametrize(
+    "value,reason,error",
+    [
+        ("02:00:00", "x", "below the recorded walltime 04:00:00"),
+        ("twelve hours", "x", "needs a Slurm duration"),
+        ("12:00:00", " ", "needs a nonempty --walltime-reason"),
+    ],
+)
+def test_a_walltime_raise_is_refused_before_anything_changes(tmp_path, slurm_bin, value, reason, error):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _timed_run(tmp_path)
+    files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
+    with pytest.raises((RuntimeError, ValueError), match=error):
+        recover(*_handle(job_dir), max_walltime=value, walltime_reason=reason)
+    assert {path: path.read_bytes() for path in files} == files
+    assert not (slurm_bin / "env").exists()
+    assert not (job_dir.parent / WALLTIME_JOURNAL_NAME).exists()
+
+
+def test_a_walltime_raise_whose_job_is_not_queued_restores_both_files(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _timed_run(tmp_path)
+    files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
+    (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
+    with pytest.raises(RuntimeError, match="the run keeps its recorded walltime"):
+        recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="reason")
+    assert {path: path.read_bytes() for path in files} == files
+    assert not (job_dir.parent / WALLTIME_JOURNAL_NAME).exists()
+
+
+def test_a_repin_and_a_walltime_raise_render_once_and_journal_both(tmp_path, slurm_bin, launcher_at):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _timed_run(tmp_path)
+    run_dir = job_dir.parent
+    out = recover(
+        *_handle(job_dir), repin=NEW, repin_reason="fixed revision", max_walltime="12:00:00", walltime_reason="slow"
+    )
+    assert out.dispatched == "resubmit", out.decision.reason
+    script = (job_dir / "job.sh").read_text()
+    assert NEW in script and OLD not in script and "#SBATCH --time=12:00:00" in script
+    saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
+    assert (saved["driver"]["gym_install"]["ref"], saved["compute"]["cluster"]["walltime"]) == (NEW, "12:00:00")
+    assert len(list(job_dir.glob("job.sh.pre-repin-*"))) == len(list(job_dir.glob("job.sh.pre-walltime-*"))) == 1
+    assert json.loads((run_dir / REPIN_JOURNAL_NAME).read_text())["to"] == NEW
+    assert json.loads((run_dir / WALLTIME_JOURNAL_NAME).read_text())["to"] == "12:00:00"
+    [job] = json.loads((run_dir / "gym-job.json").read_text())["benchmarks"]
+    assert (job["gym_commit"], job["walltime"]) == (NEW, "12:00:00")
+
+
+@pytest.mark.parametrize(
+    "argv,error",
+    [
+        (["--max-walltime", "12:00:00", "--walltime-reason", "x"], "need --recover"),
+        (
+            ["--recover", "--inspect", "--max-walltime", "12:00:00", "--walltime-reason", "x"],
+            "cannot be used with --inspect",
+        ),
+        (["--recover", "--max-walltime", "12:00:00"], "go together"),
+    ],
+)
+def test_the_resubmit_help_lists_the_walltime_flags_and_refuses_them_out_of_place(capsys, argv, error):
+    from nemo_gym.cli.main import _eval_resubmit
+
+    parser = build_parser()
+    with pytest.raises(SystemExit):
+        parser.parse_args(["eval", "resubmit", "--help"])
+    assert "--max-walltime" in capsys.readouterr().out
+    args = parser.parse_args(["eval", "resubmit", "job", "bench", *argv])
+    with pytest.raises(SystemExit):
+        _eval_resubmit(args, [])
+    assert error in capsys.readouterr().err

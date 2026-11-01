@@ -154,6 +154,8 @@ print("__GYM_MANAGED:" + json.dumps(projection))
 RETRY_EXTENSION_JOURNAL_NAME = "retry-extension-journal.jsonl"
 # Appended in the run dir when `gym eval resubmit --recover --repin` moves a benchmark to another Gym commit.
 REPIN_JOURNAL_NAME = "repin-journal.jsonl"
+# Appended in the run dir when `gym eval resubmit --recover --max-walltime` raises a benchmark's walltime.
+WALLTIME_JOURNAL_NAME = "walltime-extension-journal.jsonl"
 
 
 def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitConfig:
@@ -176,6 +178,21 @@ def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitCo
         }
     )
     return config.model_copy(update={"driver": driver})
+
+
+def _walltime_config(config: SubmitConfig, cluster: str, benchmark: str, walltime: str) -> SubmitConfig:
+    """``config`` with the Slurm walltime ``walltime`` and a chain cap of at least that; every other field as saved."""
+    bench = config.driver.benchmarks[benchmark]
+    resume = bench.resume_config
+    update = {}
+    if resume is not None and resume.max_walltime is not None:
+        cap = max(resume.max_walltime, walltime, key=_walltime_to_seconds)
+        update["resumable"] = resume.model_copy(update={"max_walltime": cap})
+    driver = config.driver.model_copy(
+        update={"benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update=update)}}
+    )
+    compute = {**config.compute, cluster: config.compute[cluster].model_copy(update={"walltime": walltime})}
+    return config.model_copy(update={"driver": driver, "compute": compute})
 
 
 def _reconcile_requeued_chain(
@@ -859,6 +876,8 @@ class SlurmExecutor(BaseExecutor):
         repin: str | None = None,
         repin_reason: str | None = None,
         extend_retries: int = 0,
+        max_walltime: str | None = None,
+        walltime_reason: str | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -876,6 +895,9 @@ class SlurmExecutor(BaseExecutor):
         ``extend_retries`` (with ``keep_budget``) adds that many infra retries to the recorded extension that the
         job's prologue adds to the configured cap; it is written just before sbatch, restored if the job is not
         queued, and journaled once queued. The spent retry count is never reset.
+        ``max_walltime`` (with ``keep_budget`` and ``walltime_reason``) raises the Slurm walltime the same way a repin
+        moves the commit, in the same render: ``compute.<cluster>.walltime`` becomes it, the chain cap becomes at least
+        it, and a value below the recorded walltime is refused. The run dir's walltime journal records the raise.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -885,10 +907,19 @@ class SlurmExecutor(BaseExecutor):
         job_dir = Path(job.job_dir)
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
-            repin_commands, repin_journal = (
-                self._repin_commands(record, benchmark, config, repin, repin_reason, keep_budget=keep_budget)
-                if repin is not None
-                else ([], None)
+            repin_commands, journals = (
+                self._rerender_commands(
+                    record,
+                    benchmark,
+                    config,
+                    keep_budget=keep_budget,
+                    repin=repin,
+                    repin_reason=repin_reason,
+                    max_walltime=max_walltime,
+                    walltime_reason=walltime_reason,
+                )
+                if repin is not None or max_walltime is not None
+                else ([], {})
             )
             exports = _submission_exports(config)
             # A resubmit can lose access to the remote token. Refresh only this benchmark's
@@ -1056,17 +1087,20 @@ class SlurmExecutor(BaseExecutor):
                 raise RuntimeError(
                     f"Resubmit of {benchmark} failed: {error}"
                     + ("; the run stays on its recorded Gym commit" if repin is not None else "")
+                    + ("; the run keeps its recorded walltime" if max_walltime is not None else "")
                 )
             job = job.model_copy(
-                update={"job_id": job_id, "error": None} | ({"gym_commit": repin} if repin is not None else {})
+                update={"job_id": job_id, "error": None}
+                | ({"gym_commit": repin} if repin is not None else {})
+                | ({"walltime": max_walltime} if max_walltime is not None else {})
             )
             if extend_retries:
                 entry = shlex.quote(json.dumps({"by": extend_retries, "at": utc_timestamp(utc_now())}))
                 journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
                 conn.run([f"printf '%s\\n' {entry} >> {journal}"])
-            if repin_journal is not None:
-                journal = Path(record.run_dir) / REPIN_JOURNAL_NAME
-                conn.run([f"printf '%s\\n' {shlex.quote(repin_journal)} >> {shlex.quote(str(journal))}"])
+            for name, entry in journals.items():
+                journal = Path(record.run_dir) / name
+                conn.run([f"printf '%s\\n' {shlex.quote(entry)} >> {shlex.quote(str(journal))}"])
             self.persist_record(record.with_benchmark(job), conn.write_text)
         return job
 
@@ -1089,63 +1123,109 @@ class SlurmExecutor(BaseExecutor):
             "|| fail 'cannot record the retry extension'",
         ]
 
-    def _repin_commands(
+    def _rerender_commands(
         self,
         record: SubmissionRecord,
         benchmark: str,
         config: SubmitConfig,
-        repin: str,
-        repin_reason: str | None,
         *,
         keep_budget: bool,
-    ) -> tuple[list[str], str]:
-        """The locked shell steps that move one benchmark's run to ``repin``, and its journal entry."""
+        repin: str | None = None,
+        repin_reason: str | None = None,
+        max_walltime: str | None = None,
+        walltime_reason: str | None = None,
+    ) -> tuple[list[str], dict[str, str]]:
+        """The locked shell steps that render one benchmark's job.sh and saved config again, with a repin, a walltime
+        raise or both, and the journal entries to append once its job is queued."""
         install = config.driver.gym_install
-        if not keep_budget:
-            raise RuntimeError("--repin needs --recover: the run continues with its spent budgets")
-        if re.fullmatch(r"[0-9a-f]{40}", repin) is None:
-            raise ValueError(f"--repin needs a full 40-character commit hash, not {repin!r}")
-        if not (repin_reason or "").strip():
-            raise ValueError("--repin needs a nonempty --repin-reason")
-        if install is None:
-            raise RuntimeError(
-                "the submission installs no Gym revision (driver.gym_install), so it cannot be repinned"
-            )
-        if installed_gym_commit() != repin:
-            raise RuntimeError(
-                f"this launcher is Gym {installed_gym_commit()}, not the repin target {repin}; "
-                "install that revision and resubmit with it"
-            )
         if len(record.benchmarks) != 1:
-            raise RuntimeError("repin of a submission with several benchmarks is unsupported: they share one config")
-        repinned = _repinned_config(config, benchmark, repin)
-        validate_gym_install_ref(repinned)
+            raise RuntimeError("repin or walltime raise of a submission with several benchmarks is unsupported")
+        target, journals = config, {}
+        stamp = utc_timestamp(utc_now()).replace(":", "")
+        if repin is not None:
+            if not keep_budget:
+                raise RuntimeError("--repin needs --recover: the run continues with its spent budgets")
+            if re.fullmatch(r"[0-9a-f]{40}", repin) is None:
+                raise ValueError(f"--repin needs a full 40-character commit hash, not {repin!r}")
+            if not (repin_reason or "").strip():
+                raise ValueError("--repin needs a nonempty --repin-reason")
+            if install is None:
+                raise RuntimeError(
+                    "the submission installs no Gym revision (driver.gym_install), so it cannot be repinned"
+                )
+            if installed_gym_commit() != repin:
+                raise RuntimeError(
+                    f"this launcher is Gym {installed_gym_commit()}, not the repin target {repin}; "
+                    "install that revision and resubmit with it"
+                )
+            target = _repinned_config(target, benchmark, repin)
+            validate_gym_install_ref(target)
+            journals[REPIN_JOURNAL_NAME] = json.dumps(
+                {"benchmark": benchmark, "from": install.ref, "to": repin, "reason": repin_reason, "at": stamp},
+                sort_keys=True,
+            )
+        if max_walltime is not None:
+            if not keep_budget:
+                raise RuntimeError("--max-walltime needs --recover: the run continues with its spent budgets")
+            if not (walltime_reason or "").strip():
+                raise ValueError("--max-walltime needs a nonempty --walltime-reason")
+            try:
+                seconds = _walltime_to_seconds(max_walltime)
+            except ValueError as error:
+                raise ValueError(
+                    f"--max-walltime needs a Slurm duration such as 12:00:00, not {max_walltime!r}"
+                ) from error
+            recorded = config.compute[record.cluster].walltime
+            if recorded is not None and seconds < _walltime_to_seconds(recorded):
+                raise ValueError(f"--max-walltime {max_walltime} is below the recorded walltime {recorded}")
+            resume = config.driver.benchmarks[benchmark].resume_config
+            target = _walltime_config(target, record.cluster, benchmark, max_walltime)
+            raised = target.driver.benchmarks[benchmark].resume_config
+            journals[WALLTIME_JOURNAL_NAME] = json.dumps(
+                {
+                    "benchmark": benchmark,
+                    "from": recorded,
+                    "to": max_walltime,
+                    "max_walltime_from": resume.max_walltime if resume else None,
+                    "max_walltime_to": raised.max_walltime if raised else None,
+                    "reason": walltime_reason,
+                    "actor": getpass.getuser(),
+                    "at": stamp,
+                },
+                sort_keys=True,
+            )
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
         run_dir = Path(record.run_dir)
         script = build_sbatch_script(
-            repinned, benchmark, repinned.driver.benchmarks[benchmark], repinned.compute[record.cluster], job_dir
+            target, benchmark, target.driver.benchmarks[benchmark], target.compute[record.cluster], job_dir
         )
-        resolved = yaml.safe_dump(repinned.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False)
-        stamp = utc_timestamp(utc_now()).replace(":", "")
+        resolved = yaml.safe_dump(target.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False)
         old_config = shlex.quote(str(run_dir / RESOLVED_CONFIG_NAME))
-        kept_config = shlex.quote(str(run_dir / f"{RESOLVED_CONFIG_NAME}.pre-repin-{stamp}"))
-        kept_script = f"job.sh.pre-repin-{stamp}"
-        restore = f"mv -f {kept_script} job.sh 2>/dev/null; mv -f {kept_config} {old_config} 2>/dev/null"
+        kinds = [
+            kind for kind, wanted in (("repin", repin is not None), ("walltime", max_walltime is not None)) if wanted
+        ]
+        kept = [
+            (f"job.sh.pre-{kind}-{stamp}", shlex.quote(str(run_dir / f"{RESOLVED_CONFIG_NAME}.pre-{kind}-{stamp}")))
+            for kind in kinds
+        ]
+        restore = f"mv -f {kept[0][0]} job.sh 2>/dev/null; mv -f {kept[0][1]} {old_config} 2>/dev/null"
         commands = [
-            f"cp -p job.sh {kept_script} || fail 'cannot keep the job script before repin'",
-            f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before repin'",
+            *(
+                command
+                for kept_script, kept_config in kept
+                for command in (
+                    f"cp -p job.sh {kept_script} || fail 'cannot keep the job script before it is rendered again'",
+                    f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before it is rendered again'",
+                )
+            ),
             # Restored by the exit trap below unless sbatch confirms the queued job.
             f'_gym_restore_repin() {{ [[ "$_gym_submit_confirmed" == 1 ]] || {{ {restore}; }}; }}',
             f"(umask 077; printf %s {shlex.quote(script)} > job.sh.repin) && mv -f job.sh.repin job.sh "
-            "|| fail 'cannot write the repinned job script'",
+            "|| fail 'cannot write the rendered job script'",
             f"printf %s {shlex.quote(resolved)} > {old_config}.repin && mv -f {old_config}.repin {old_config} "
-            "|| fail 'cannot write the repinned resolved config'",
+            "|| fail 'cannot write the rendered resolved config'",
         ]
-        entry = json.dumps(
-            {"benchmark": benchmark, "from": install.ref, "to": repin, "reason": repin_reason, "at": stamp},
-            sort_keys=True,
-        )
-        return commands, entry
+        return commands, journals
 
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
