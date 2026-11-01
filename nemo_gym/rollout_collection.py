@@ -1416,7 +1416,10 @@ class SharedRolloutCollectionConfig(
     )
     disable_health_check: bool = Field(
         default=False,
-        description="Skip post-aggregation rollout quality verification and report writing.",
+        description=(
+            "Skip post-aggregation rollout quality verification. The quality summary then records only that the "
+            "check was disabled."
+        ),
     )
     health_check_workers: Optional[int] = Field(
         default=None,
@@ -3824,7 +3827,7 @@ class RolloutCollectionHelper(BaseModel):
             try:
                 return await self._run_locked_from_config(config)
             finally:
-                if self._collection_started and not config.disable_aggregation and not config.disable_health_check:
+                if self._collection_started and not config.disable_aggregation:
                     from nemo_gym.rollout_health import _health_check_collected_rollouts
 
                     terminated = self._termination_requested() if self._termination_requested is not None else False
@@ -3837,6 +3840,7 @@ class RolloutCollectionHelper(BaseModel):
                         coverage=self._store.coverage() if self._store is not None else None,
                         model_call_capture_dirs=self._health_capture_dirs,
                         terminated=terminated,
+                        disabled=config.disable_health_check,
                     )
                     if terminated:
                         report()  # The small provisional summary must finish within Slurm's KillWait.
