@@ -683,6 +683,8 @@ def _record_resume_drift(path: Path, saved: "RunManifest", current: "RunManifest
     }
     with resume_drift_path_for(path).open("a", encoding="utf-8") as journal:
         journal.write(json.dumps(entry, sort_keys=True) + "\n")
+    if not keys:
+        return
     message = (
         f"Resuming across operational configuration drift in {', '.join(keys)}; "
         f"recorded in {resume_drift_path_for(path).name}."
@@ -875,7 +877,8 @@ def validate_resume(
                 # The same configuration: save its identity now, so a later resume of this run can name any drift.
                 atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[current.config_digest])
         if not mismatches:
-            if operational_drift:
+            if operational_drift or resume_drift_path_for(path).exists():
+                # Once a run has drifted, every later resume adds a line, so the last one is the latest resume's.
                 _record_resume_drift(path, saved, current, operational_drift)
             return saved
         problem = "Cannot resume with incompatible " + ", ".join(mismatches) + "."

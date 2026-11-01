@@ -1387,6 +1387,20 @@ def operator_epoch():
         return None
     return {"chain_length": length, "walltime_s": walltime} if walltime >= 0 else None
 collected["operator_epoch"] = operator_epoch()
+def resume_drift_keys():
+    # The operational settings the latest resume crossed (the drift journal's last line), keys only and bounded.
+    try:
+        with open(os.path.join(a, "rollouts_manifest.resume-drift.jsonl"), "rb") as fh:
+            fh.seek(0, 2)
+            fh.seek(max(0, fh.tell() - 65536))
+            lines = [line for line in fh.read().splitlines() if line.strip()]
+        keys = json.loads(lines[-1])["operational_keys"]
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+    if not isinstance(keys, list):
+        return None
+    return [key[:200] for key in keys if isinstance(key, str)][:200] or None
+collected["resume_drift_keys"] = resume_drift_keys()
 print(json.dumps(collected))
 """
 )
@@ -1437,6 +1451,8 @@ class CollectedEvidence(BaseModel):
     collector_fallback_reason: str | None = None
     reader_host: str | None = None
     reader_fallback_reason: str | None = None
+    # The operational settings the run's latest resume crossed (its resume-drift journal), None when it crossed none.
+    resume_drift_keys: list[str] | None = None
 
 
 # The host sets the reader placement; a reader neither receives it nor replaces it.
@@ -1726,7 +1742,29 @@ def _operator_continuation(
     return decision.model_copy(update={"reason": f"{decision.reason}; {summary}", "operator_continuation": record})
 
 
-def decide_from_collected(
+# At most this many drifted settings are named in a decision reason.
+_DRIFT_KEYS_SHOWN = 20
+
+
+def resume_drift_note(keys: list[str] | None) -> str | None:
+    """The sentence a decision reason carries when the run's latest resume crossed operational drift."""
+    if not keys:
+        return None
+    shown = sorted(set(keys))
+    more = len(shown) - _DRIFT_KEYS_SHOWN
+    listed = ", ".join(shown[:_DRIFT_KEYS_SHOWN]) + (f" and {more} more" if more > 0 else "")
+    return f"resumed across operational drift: {listed}"
+
+
+def decide_from_collected(collected: CollectedEvidence, **options: Any) -> RecoveryDecision:
+    """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed, so
+    an inspection, a recovery and a chain continuation all say it (see ``resume_drift_note``)."""
+    decision = _decide_from_collected(collected, **options)
+    note = resume_drift_note(collected.resume_drift_keys)
+    return decision if note is None else decision.model_copy(update={"reason": f"{decision.reason}; {note}"})
+
+
+def _decide_from_collected(
     collected: CollectedEvidence,
     *,
     max_infra_retries: int | None,
