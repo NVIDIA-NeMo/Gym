@@ -32,6 +32,7 @@ sandbox:
       # tls_ca_path: /path/to/ca.pem
       # tls_cert_path: /path/to/client.pem
       # tls_key_path: /path/to/client-key.pem
+      # Per-RPC deadline. A DeleteSandbox that exceeds it is treated as in progress (see operations).
       request_timeout_s: 30
     create:
       # Provisioning can include an image pull on the gateway host.
@@ -65,7 +66,8 @@ sandbox:
       # Backoff between probe attempts against the remote gateway.
       stable_delay_s: 1.0
     operations:
-      # After delete, poll until the gateway reports the sandbox gone.
+      # close() deletes in the background (DeleteSandbox blocks ~31s on the pod grace period);
+      # aclose() drains pending deletes. After delete, poll until the gateway reports the sandbox gone.
       close_wait_deleted: true
       close_timeout_s: 60
       poll_interval_s: 1.0

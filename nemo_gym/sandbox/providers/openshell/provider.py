@@ -32,6 +32,7 @@ import math
 import posixpath
 import shlex
 import threading
+import time
 import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
@@ -53,6 +54,9 @@ LOGGER = logging.getLogger(__name__)
 
 # OpenShell includes sandbox names in service-routing hostnames and accepts at most 19 characters.
 MAX_SANDBOX_NAME_LENGTH = 19
+# Allowed shortfall between the elapsed time and the timeout (clock and integer-second rounding).
+EXEC_TIMEOUT_SLACK_S = 0.5
+EXEC_TIMEOUT_SLACK_FRACTION = 0.1
 SANDBOX_NAME_PREFIX = "ng-"
 SANDBOX_NAME_RANDOM_HEX_LENGTH = MAX_SANDBOX_NAME_LENGTH - len(SANDBOX_NAME_PREFIX)
 SANDBOX_LABEL = "nemo-gym.sandbox"
@@ -122,6 +126,15 @@ def _phase_to_status_map() -> dict[int, SandboxStatus]:
         openshell_pb2.SANDBOX_PHASE_COMPLETED: SandboxStatus.STOPPED,
         openshell_pb2.SANDBOX_PHASE_UNKNOWN: SandboxStatus.UNKNOWN,
     }
+
+
+def _format_conditions(ref: Any) -> str:
+    """The sandbox's reported conditions as a message suffix (the gateway's own reason, e.g. a pull failure)."""
+    parts = [
+        f"{c.type}={c.status}" + (f" ({c.reason}: {c.message})" if c.reason or c.message else "")
+        for c in getattr(ref, "conditions", ())
+    ]
+    return f"; conditions: {'; '.join(parts)}" if parts else ""
 
 
 def _phase(name: str) -> int:
@@ -214,6 +227,17 @@ class OpenShellConnectionConfig:
             raise ValueError("connection.request_timeout_s must be > 0")
         if bool(self.tls_cert_path) != bool(self.tls_key_path):
             raise ValueError("connection.tls_cert_path and connection.tls_key_path must be set together")
+
+
+def _killed_at_timeout(return_code: int, elapsed_s: float | None, timeout_s: int | None) -> bool:
+    """Whether the gateway killed the command at the ``timeout_seconds`` the provider passed it.
+
+    The 0.1.x exec stream reports the kill as exit code 124 with no timeout flag. Only elapsed time
+    tells it from a command that exits 124 on its own, so a quick ``exit 124`` is not a timeout.
+    """
+    if not timeout_s or return_code != 124 or elapsed_s is None:
+        return False
+    return elapsed_s >= timeout_s - min(EXEC_TIMEOUT_SLACK_S, EXEC_TIMEOUT_SLACK_FRACTION * timeout_s)
 
 
 @dataclass(frozen=True)
@@ -427,6 +451,9 @@ class OpenShellProvider:
         _require_openshell()
         self._shared = _acquire_shared_client(self._connection, self._exec_config.concurrency)
         self._closed = False
+        # Background deletes keyed by sandbox name. DeleteSandbox blocks for the pod's termination grace
+        # period (~31s on cell-8), so close() schedules it here; aclose() drains whatever is still running.
+        self._pending_deletes: dict[str, asyncio.Task[None]] = {}
 
     @property
     def _client(self) -> Any:
@@ -582,10 +609,12 @@ class OpenShellProvider:
         loop = asyncio.get_running_loop()
         deadline = loop.time() + timeout_s
         last_phase: int | None = None
+        conditions = ""
         while True:
             try:
                 ref = await self._call(self._client.get, inst.name, workspace=inst.workspace)
                 last_phase = ref.phase
+                conditions = _format_conditions(ref)
             except Exception as e:
                 if not _is_runtime_failure(e):
                     raise
@@ -594,14 +623,16 @@ class OpenShellProvider:
                 if ref.phase == _phase("SANDBOX_PHASE_READY"):
                     return
                 if ref.phase == _phase("SANDBOX_PHASE_ERROR"):
-                    raise OpenShellCreateError(f"sandbox {inst.name!r} entered the ERROR phase while provisioning")
+                    raise OpenShellCreateError(
+                        f"sandbox {inst.name!r} entered the ERROR phase while provisioning{conditions}"
+                    )
                 if ref.phase in (_phase("SANDBOX_PHASE_DELETING"), _phase("SANDBOX_PHASE_STOPPED")):
                     raise OpenShellCreateError(
                         f"sandbox {inst.name!r} is being deleted or stopped while provisioning (phase={ref.phase})"
                     )
             if loop.time() >= deadline:
                 raise OpenShellCreateError(
-                    f"sandbox {inst.name!r} was not READY within {timeout_s:g}s (last phase={last_phase})"
+                    f"sandbox {inst.name!r} was not READY within {timeout_s:g}s (last phase={last_phase}){conditions}"
                 )
             await asyncio.sleep(self._create_config.poll_interval_s)
 
@@ -639,13 +670,7 @@ class OpenShellProvider:
                 await asyncio.sleep(probe.stable_delay_s)
 
     async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
-        inst = handle.raw
-        try:
-            await self._call(self._client.delete, inst.name, workspace=inst.workspace)
-        except Exception as e:
-            LOGGER.warning(
-                f"Failed to delete half-created OpenShell sandbox {inst.name!r}; it may be leaked on the gateway: {e}"
-            )
+        self._schedule_delete(handle.raw)
 
     async def exec(
         self,
@@ -677,8 +702,8 @@ class OpenShellProvider:
         timeout_seconds = max(1, math.ceil(effective_timeout)) if effective_timeout is not None else None
         workdir = cwd if cwd is not None else inst.workdir
         try:
-            result = await self._call(
-                self._client.exec,
+            result, elapsed_s = await self._call(
+                self._timed_exec,
                 inst.name,
                 [self._exec_config.exec_shell, "-c", command],
                 workspace=inst.workspace,
@@ -697,7 +722,17 @@ class OpenShellProvider:
                     stdout=None, stderr=str(e), return_code=SANDBOX_RUNTIME_RETURN_CODE, error_type="sandbox"
                 )
             raise
+        if _killed_at_timeout(result.exit_code, elapsed_s, timeout_seconds):
+            note = f"Command timed out after {timeout_seconds}s; the OpenShell gateway killed it"
+            stderr = f"{result.stderr}\n{note}" if result.stderr else note
+            return SandboxExecResult(stdout=result.stdout, stderr=stderr, return_code=124, error_type="timeout")
         return SandboxExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code)
+
+    def _timed_exec(self, *args: Any, **kwargs: Any) -> tuple[Any, float]:
+        """Run the SDK exec and time it inside the worker thread, so executor queueing is not counted."""
+        started = time.monotonic()
+        result = self._client.exec(*args, **kwargs)
+        return result, time.monotonic() - started
 
     async def upload_file(self, handle: SandboxHandle, source_path: Path, target_path: str) -> None:
         """Upload one local file by streaming its bytes through exec stdin (creates the parent dir).
@@ -758,18 +793,53 @@ class OpenShellProvider:
         return _phase_to_status_map().get(ref.phase, SandboxStatus.UNKNOWN)
 
     async def close(self, handle: SandboxHandle) -> None:
+        """Start deleting the sandbox in the background and return without waiting for the gateway.
+
+        DeleteSandbox blocks until the sandbox pod's termination grace period ends, so the delete
+        (and the wait until GetSandbox reports NOT_FOUND) runs in a task the provider tracks.
+        Failures are logged with the sandbox name; a later ``close()`` of the same handle retries.
+        Call ``aclose()`` to wait for pending deletes before the process exits.
+        """
+        self._schedule_delete(handle.raw)
+
+    def _schedule_delete(self, inst: _OpenShellSandbox) -> None:
+        pending = self._pending_deletes.get(inst.name)
+        if pending is not None and not pending.done():
+            return
+        task = asyncio.create_task(self._delete_and_log(inst), name=f"openshell-delete-{inst.name}")
+        self._pending_deletes[inst.name] = task
+        task.add_done_callback(lambda done, name=inst.name: self._forget_delete(name, done))
+
+    def _forget_delete(self, name: str, task: asyncio.Task[None]) -> None:
+        if self._pending_deletes.get(name) is task:
+            del self._pending_deletes[name]
+
+    async def _delete_and_log(self, inst: _OpenShellSandbox) -> None:
+        try:
+            await self._delete_and_wait(inst)
+        except asyncio.CancelledError:
+            LOGGER.error(f"openshell delete of {inst.name!r} was cancelled; the sandbox may be leaked on the gateway")
+            raise
+        except Exception as e:
+            LOGGER.error(f"openshell delete of {inst.name!r} failed; the sandbox may be leaked on the gateway: {e}")
+
+    async def _delete_and_wait(self, inst: _OpenShellSandbox) -> None:
         """Delete the sandbox (already-gone counts as success), then wait until it is fully gone."""
-        inst = handle.raw
+        from openshell.mutations import DeletionOutcome
+
         try:
             result = await self._call(self._client.delete, inst.name, workspace=inst.workspace)
         except Exception as e:
             if _is_not_found(e):
                 return
+            if _is_grpc_timeout(e):
+                # The gateway keeps deleting after the RPC deadline; GetSandbox says when it is gone.
+                LOGGER.info(f"DeleteSandbox for {inst.name!r} hit its deadline; polling until it is gone.")
+                await self._wait_deleted(inst)
+                return
             if _is_runtime_failure(e):
                 raise RuntimeError(f"openshell delete failed for {inst.name!r}: {e}") from e
             raise
-        from openshell.mutations import DeletionOutcome
-
         if result.outcome == DeletionOutcome.ALREADY_ABSENT:
             return
         if result.outcome not in (DeletionOutcome.COMPLETED, DeletionOutcome.ACCEPTED):
@@ -799,9 +869,22 @@ class OpenShellProvider:
                 )
             await asyncio.sleep(self._operations.poll_interval_s)
 
+    async def _drain_deletes(self) -> None:
+        """Wait for pending deletes, bounded by the delete deadline plus the deletion-wait timeout."""
+        pending = {name: task for name, task in self._pending_deletes.items() if not task.done()}
+        if not pending:
+            return
+        bound = self._connection.request_timeout_s + self._operations.close_timeout_s
+        _, unfinished = await asyncio.wait(pending.values(), timeout=bound)
+        for name, task in pending.items():
+            if task in unfinished:
+                LOGGER.error(f"openshell delete of {name!r} did not finish within {bound:g}s; it may be leaked")
+                task.cancel()
+
     async def aclose(self) -> None:
         """Release the shared client/pool (closed for real when the last provider releases it)."""
         if self._closed:
             return
         self._closed = True
+        await self._drain_deletes()
         await asyncio.to_thread(_release_shared_client, self._shared)

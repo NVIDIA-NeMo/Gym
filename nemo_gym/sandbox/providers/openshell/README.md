@@ -75,7 +75,20 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
   rather than large archives. Because uploads run as the sandbox default user, target paths
   must be writable by that user (e.g. under `/tmp` or the user's home in the default image).
 - Exec timeouts are enforced by the gateway (`timeout_seconds`); the SDK extends its gRPC
-  deadline past the command timeout automatically.
+  deadline past the command timeout automatically. The 0.1.x exec stream has no timeout flag:
+  the gateway kill arrives as exit code 124. The provider reports `error_type="timeout"` (code 124)
+  only when the command exited 124 after running for about the full timeout, so a command that
+  exits 124 on its own, quickly, stays a plain exit code.
+- `close()` does not block: `DeleteSandbox` takes about as long as the sandbox pod's termination
+  grace period (~31s on the cell-8 gateway), so the delete and the wait until `GetSandbox` reports
+  NOT_FOUND run in a background task. A delete RPC that hits its deadline counts as in progress and
+  is confirmed by polling. Failures are logged with the sandbox name, and a later `close()` of the
+  same handle retries. Call `await provider.aclose()` before the process exits: it waits for pending
+  deletes (bounded by `connection.request_timeout_s + operations.close_timeout_s`) and logs any that
+  did not finish. A failed `create()` cleans up the same way.
+- A sandbox that never becomes READY (for example an unpullable image) fails after `create.ready_timeout_s`.
+  The SDK exposes no pull-specific signal, so the provider does not guess; the error message includes the
+  conditions the gateway reports (`SandboxStatus.conditions`) for diagnosis.
 - Transient `CreateSandbox` failures (`UNAVAILABLE`, `RESOURCE_EXHAUSTED`, ...) are retried
   with backoff (`create.retries`); an attempt that actually committed is recovered via
   `ALREADY_EXISTS` -> `GetSandbox`. Exec is deliberately not retried: commands are not
