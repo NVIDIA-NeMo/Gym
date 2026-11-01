@@ -6,15 +6,17 @@ import shutil
 import signal
 import subprocess
 import sys
+import tempfile
 import time
 import uuid
 from pathlib import Path
 
 import pytest
 
+import nemo_gym.orchestration.executors.connection as connection
 import nemo_gym.orchestration.executors.slurm as slurm
 from nemo_gym.cli.main import _raise_keyboard_interrupt_on_sigterm
-from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.connection import LocalConnection, SSHConnection
 
 
 SLEEPER = [sys.executable, "-c", "import time; time.sleep(300)"]
@@ -84,3 +86,70 @@ def test_stopping_by_token_kills_only_the_processes_that_carry_it() -> None:
         for process in (in_environment, in_arguments, another):
             process.kill()
             process.wait()
+
+
+class _FakeSubprocess:
+    """Stands in for ``subprocess`` in the connection module: records every ssh call, starts nothing."""
+
+    PIPE = subprocess.PIPE
+
+    def __init__(self, *, master_running: bool) -> None:
+        self.calls: list[list[str]] = []
+        self.master_running = master_running
+        self.terminated = False
+
+    def Popen(self, command: list[str], **kwargs) -> "_FakeSubprocess":
+        self.calls.append(command)
+        return self
+
+    def poll(self) -> int | None:
+        return None if self.master_running and not self.terminated else 0
+
+    def terminate(self) -> None:
+        self.terminated = True
+
+    def wait(self) -> int:
+        return 0
+
+    def run(self, command: list[str], **kwargs) -> subprocess.CompletedProcess:
+        self.calls.append(command)
+        return subprocess.CompletedProcess(command, 0, "", "")
+
+
+def _closed(calls: list[list[str]], socket: Path) -> bool:
+    return any(call[-3:-1] == ["-O", "exit"] and f"ControlPath={socket}" in call for call in calls)
+
+
+def test_an_interrupted_reader_closes_the_ssh_master_and_its_socket_stays_under_tmpdir(
+    monkeypatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(tempfile, "tempdir", None)
+    monkeypatch.setenv("TMPDIR", str(tmp_path))
+    fake = _FakeSubprocess(master_running=False)
+    monkeypatch.setattr(connection, "subprocess", fake)
+    monkeypatch.setattr(SSHConnection, "_wait_for_socket", lambda self: None)
+
+    with pytest.raises(slurm.RemoteReaderInterrupted):
+        with SSHConnection("login-host") as conn:
+            raise slurm.RemoteReaderInterrupted("remote Store reader interrupted by SIGTERM")
+
+    assert conn._socket.parent == tmp_path
+    assert _closed(fake.calls, conn._socket)
+
+
+def test_a_signal_while_the_master_starts_closes_it_and_stops_the_foreground_ssh(monkeypatch) -> None:
+    fake = _FakeSubprocess(master_running=True)
+    monkeypatch.setattr(connection, "subprocess", fake)
+
+    def interrupted(self) -> None:
+        raise KeyboardInterrupt("SIGTERM")
+
+    monkeypatch.setattr(SSHConnection, "_wait_for_socket", interrupted)
+    conn = SSHConnection("login-host")
+
+    with pytest.raises(KeyboardInterrupt):
+        with conn:
+            raise AssertionError("the with body must not run")
+
+    assert _closed(fake.calls, conn._socket)
+    assert fake.terminated

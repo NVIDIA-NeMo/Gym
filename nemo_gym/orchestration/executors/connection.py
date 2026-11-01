@@ -92,7 +92,12 @@ class SSHConnection(Connection):
             ],
             stderr=subprocess.PIPE,
         )
-        self._wait_for_socket()
+        try:
+            self._wait_for_socket()
+        except BaseException:
+            # __exit__ does not run for a failed or interrupted __enter__; nothing else would close this master.
+            self.close()
+            raise
         return self
 
     def _wait_for_socket(self) -> None:
@@ -164,6 +169,10 @@ class SSHConnection(Connection):
         )
         self._socket.unlink(missing_ok=True)
         if self._master:
+            # The master detaches into the background once it is up; a foreground ssh still running was stopped
+            # before that, and would detach later with nothing left to close it.
+            if self._master.poll() is None:
+                self._master.terminate()
             self._master.wait()
 
 
