@@ -747,6 +747,16 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--max-walltime and --walltime-reason need --recover and cannot be used with --inspect")
     if (max_walltime is None) != (walltime_reason is None):
         args._parser.error("--max-walltime and --walltime-reason go together")
+    allow_unsafe, unsafe_reason = (
+        getattr(args, "allow_unsafe_resume", False),
+        getattr(args, "unsafe_resume_reason", None),
+    )
+    if (allow_unsafe or unsafe_reason is not None) and (not getattr(args, "recover", False) or inspect_only):
+        args._parser.error("--allow-unsafe-resume needs --recover and cannot be used with --inspect")
+    if allow_unsafe and not (unsafe_reason or "").strip():
+        args._parser.error("--allow-unsafe-resume needs a nonempty --unsafe-resume-reason")
+    if unsafe_reason is not None and not allow_unsafe:
+        args._parser.error("--unsafe-resume-reason goes with --allow-unsafe-resume")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -779,6 +789,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 extra["extend_retries"] = args.extend_retries
             if max_walltime is not None:
                 extra |= {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
+            if allow_unsafe:
+                extra["unsafe_resume_reason"] = unsafe_reason
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1845,6 +1857,21 @@ COMMANDS = {
                     "--walltime-reason",
                     metavar="TEXT",
                     help="Why --max-walltime raises the walltime; recorded in walltime-extension-journal.jsonl.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--allow-unsafe-resume",
+                    action="store_true",
+                    help="With --recover: resume even where the saved run identity refuses it (allow_unsafe_resume "
+                    "for the job). Needs --unsafe-resume-reason; recorded in unsafe-resume-journal.jsonl.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--unsafe-resume-reason",
+                    metavar="TEXT",
+                    help="Why --allow-unsafe-resume overrides the run identity check; recorded with who asked.",
                 ),
             ),
             Flag(

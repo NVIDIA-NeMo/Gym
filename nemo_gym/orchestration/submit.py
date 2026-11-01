@@ -92,12 +92,15 @@ def recover(
     extend_retries: int = 0,
     max_walltime: str | None = None,
     walltime_reason: str | None = None,
+    unsafe_resume_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
+    ``unsafe_resume_reason`` resumes the job with ``allow_unsafe_resume``, past a refused run identity check; the
+    reason and the user are journaled.
     For a run whose chain accounting is unknown, the two are also an operator's explicit budget: the run continues
     as an OPERATOR-CONTINUATION with ``extend_retries`` (one when not given) infra retries remaining, recorded in the
     decision and the job dir's operator journal (see ``decide_from_collected``).
@@ -120,6 +123,7 @@ def recover(
         extend_retries=extend_retries,
         max_walltime=max_walltime,
         walltime_reason=walltime_reason,
+        unsafe_resume_reason=unsafe_resume_reason,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -180,6 +184,7 @@ def _recover(
     extend_retries: int = 0,
     max_walltime: str | None = None,
     walltime_reason: str | None = None,
+    unsafe_resume_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -319,6 +324,7 @@ def _recover(
             # Under an operator continuation, N is the allowance its record fills, not a recorded extension.
             **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
             **({"max_walltime": max_walltime, "walltime_reason": walltime_reason} if max_walltime is not None else {}),
+            **({"unsafe_resume_reason": unsafe_resume_reason} if unsafe_resume_reason is not None else {}),
             **({"operator_continuation": operator} if operator is not None else {}),
         )
         if gate_task["status"] == "PLANNED":

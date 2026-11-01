@@ -494,47 +494,186 @@ _REMOVED_NULL_DEFAULTS: dict[tuple[str, str], tuple[str, ...]] = {
 }
 
 
-def _server_settings(identity: dict) -> Iterator[tuple[str, str, dict]]:
-    for block in identity["servers"].values():
+def _server_settings(identity: dict) -> Iterator[tuple[str, str, str, dict]]:
+    """Each server block's settings with its concrete path: server name, kind and implementation."""
+    for name, block in identity["servers"].items():
         for kind in _SERVER_KINDS:
             implementations = block.get(kind) if isinstance(block, dict) else None
             for implementation, settings in (implementations or {}).items():
                 if isinstance(settings, dict):
-                    yield kind, implementation, settings
+                    yield name, kind, implementation, settings
 
 
 def _without_null_settings(identity: dict) -> dict:
     """The identity with each server's None-valued settings dropped: a null setting and an absent one are the same."""
     normalized = json.loads(json.dumps(identity))
-    for _, _, settings in _server_settings(normalized):
+    for _, _, _, settings in _server_settings(normalized):
         for key in [key for key, value in settings.items() if value is None]:
             del settings[key]
     return normalized
 
 
 # Each configuration digest this process recorded, mapped to the digests an earlier Gym recorded for the same
-# configuration. Deterministic: configurations that share a digest differ only by null settings.
-_LEGACY_CONFIG_DIGESTS: dict[str, frozenset[str]] = {}
+# configuration, each with the server settings it had as removed null defaults. Deterministic: configurations that
+# share a digest differ only by null settings.
+_LEGACY_CONFIG_DIGESTS: dict[str, dict[str, tuple[str, ...]]] = {}
+# Above this many absent defaults, only the variant with all of them restored is tried, not every subset.
+_LEGACY_SUBSET_LIMIT = 10
 
 
-def _legacy_config_digests(identity: dict) -> frozenset[str]:
-    """Digests an earlier Gym recorded for this configuration: as resolved, and with removed null defaults restored."""
-    digests = {_digest(identity)}
+def _legacy_config_digests(identity: dict) -> dict[str, tuple[str, ...]]:
+    """Digests an earlier Gym recorded for this configuration, with the settings each restored as null defaults.
+
+    Restoration is per concrete server path: a removed default is added only to a server that lacks it, never over a
+    value another server of the same implementation sets.
+    """
+    digests: dict[str, tuple[str, ...]] = {_digest(identity): ()}
     absent = sorted(
         {
-            (kind, implementation, key)
-            for kind, implementation, settings in _server_settings(identity)
+            (name, kind, implementation, key)
+            for name, kind, implementation, settings in _server_settings(identity)
             for key in _REMOVED_NULL_DEFAULTS.get((kind, implementation), ())
             if key not in settings
         }
     )
-    for size in range(1, len(absent) + 1):
+    sizes = range(1, len(absent) + 1) if len(absent) <= _LEGACY_SUBSET_LIMIT else (len(absent),)
+    for size in sizes:
         for restored in combinations(absent, size):
             variant = json.loads(json.dumps(identity))
-            for kind, implementation, settings in _server_settings(variant):
-                settings.update({key: None for k, i, key in restored if (k, i) == (kind, implementation)})
-            digests.add(_digest(variant))
-    return frozenset(digests)
+            for name, kind, implementation, settings in _server_settings(variant):
+                for server, k, i, key in restored:
+                    if (server, k, i) == (name, kind, implementation) and key not in settings:
+                        settings[key] = None
+            digests.setdefault(
+                _digest(variant), tuple(f"servers.{server}.{k}.{i}.{key}" for server, k, i, key in restored)
+            )
+    return digests
+
+
+# The normalized identity behind each configuration digest this process recorded (deterministic: digest of identity).
+_CONFIG_IDENTITIES: dict[str, dict] = {}
+
+
+def config_identity_path_for(manifest_path: Path) -> Path:
+    """The normalized configuration identity a manifest's ``config_digest`` was taken from, saved beside it."""
+    return manifest_path.with_suffix(".identity.json")
+
+
+def resume_drift_path_for(manifest_path: Path) -> Path:
+    """One line per resume that proceeded across operational configuration drift, naming the keys."""
+    return manifest_path.with_suffix(".resume-drift.jsonl")
+
+
+# Settings that change what is measured. A difference in any of them, anywhere in the identity, refuses a resume.
+_SEMANTIC_KEYS = frozenset(
+    {
+        # dataset, split and task limits
+        "split",
+        "dataset",
+        "datasets",
+        "limit",
+        "task_ids",
+        "num_repeats",
+        "num_repeats_add_seed",
+        # agent and policy model identity, and its served window
+        "agent_name",
+        "agent_map",
+        "fan_out",
+        "model",
+        "model_name",
+        "served_model_name",
+        "max_model_len",
+        "max_context_length",
+        "context_window",
+        # sampling
+        "responses_create_params",
+        "temperature",
+        "top_p",
+        "top_k",
+        "min_p",
+        "presence_penalty",
+        "frequency_penalty",
+        "repetition_penalty",
+        "max_output_tokens",
+        "max_tokens",
+        "max_completion_tokens",
+        "max_new_tokens",
+        "seed",
+        "sampling_overrides",
+        "extra_body",
+        "chat_template_kwargs",
+    }
+)
+# A setting named like this is operational (timeouts, retries, transport, ports, concurrency, health, paths, tracking),
+# unless a segment above already made its key semantic.
+_OPERATIONAL_SETTING = re.compile(
+    r"(^|_)(timeout|timeouts|deadline|retry|retries|attempts|backoff|wait|interval|port|ports|host|hostname|url|urls"
+    r"|endpoint|concurrency|parallel|parallelism|workers|semaphore|pool|transport|version|log|logging|verbose|debug"
+    r"|dir|path|fpath|cache|health|heartbeat|keepalive|tracking|mlflow|wandb|otel|telemetry|canary)(_|$)|_(s|ms)$"
+)
+# Any other key under a segment naming grading or the model is semantic: a judge, verifier, reward or prompt setting.
+_SEMANTIC_PARTS = ("judge", "grad", "verif", "reward", "scor", "rubric", "metric", "prompt", "model", "sampling")
+
+
+def _is_semantic(key: str) -> bool:
+    segments = key.split(".")
+    # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
+    if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
+        return True
+    if _OPERATIONAL_SETTING.search(segments[-1]):
+        return False
+    return any(part in segment for segment in segments for part in _SEMANTIC_PARTS)
+
+
+def _differing_keys(saved: Any, current: Any, prefix: str = "") -> list[str]:
+    """Dotted keys whose values differ between two identities; a list is one value."""
+    if isinstance(saved, dict) and isinstance(current, dict):
+        keys = []
+        for key in sorted(set(saved) | set(current), key=str):
+            dotted = f"{prefix}.{key}" if prefix else str(key)
+            if key not in saved or key not in current:
+                keys.append(dotted)
+            else:
+                keys.extend(_differing_keys(saved[key], current[key], dotted))
+        return keys
+    return [] if saved == current else [prefix or "<root>"]
+
+
+def _configuration_drift(
+    path: Path, saved: "RunManifest", current: "RunManifest"
+) -> tuple[list[str], list[str]] | None:
+    """The semantic and operational keys that differ from the saved identity, or None when it was not saved.
+
+    The saved identity counts only when it is the one the manifest's ``config_digest`` was taken from.
+    """
+    try:
+        identity = json.loads(config_identity_path_for(path).read_bytes())
+    except (OSError, ValueError):
+        return None
+    if current.config_digest not in _CONFIG_IDENTITIES or _digest(identity) != saved.config_digest:
+        return None
+    keys = _differing_keys(identity, _CONFIG_IDENTITIES[current.config_digest])
+    return [key for key in keys if _is_semantic(key)], [key for key in keys if not _is_semantic(key)]
+
+
+def _record_resume_drift(path: Path, saved: "RunManifest", current: "RunManifest", keys: list[str]) -> None:
+    from datetime import datetime, timezone
+
+    entry = {
+        "at": datetime.now(timezone.utc).isoformat(timespec="seconds"),
+        "run_id": saved.run_id,
+        "saved_config_digest": saved.config_digest,
+        "current_config_digest": current.config_digest,
+        "operational_keys": keys,
+    }
+    with resume_drift_path_for(path).open("a", encoding="utf-8") as journal:
+        journal.write(json.dumps(entry, sort_keys=True) + "\n")
+    message = (
+        f"Resuming across operational configuration drift in {', '.join(keys)}; "
+        f"recorded in {resume_drift_path_for(path).name}."
+    )
+    logger.warning(message)
+    warnings.warn(message, stacklevel=3)
 
 
 def _file_digest(path: Path) -> str:
@@ -610,10 +749,10 @@ class RunManifest(BaseModel):
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
         identity = _configuration_identity(config, global_config, rows)
         config_digest = _digest(_without_null_settings(identity))
-        _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(
-            config_digest, frozenset()
-        ) | _legacy_config_digests(identity)
-        return cls(
+        _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(config_digest, {}) | _legacy_config_digests(
+            identity
+        )
+        manifest = cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
             retry_terminal_timeouts=config.get("retry_terminal_timeouts", False),
@@ -621,10 +760,12 @@ class RunManifest(BaseModel):
             materialized_digest=_digest(rows),
             config_digest=config_digest,
         )
+        _CONFIG_IDENTITIES[config_digest] = _without_null_settings(identity)
+        return manifest
 
     def matches_config(self, saved_digest: str) -> bool:
         """Whether a saved configuration digest names this configuration, in this or an earlier recorded form."""
-        return saved_digest == self.config_digest or saved_digest in _LEGACY_CONFIG_DIGESTS.get(self.config_digest, ())
+        return saved_digest == self.config_digest or saved_digest in _LEGACY_CONFIG_DIGESTS.get(self.config_digest, {})
 
     def write(self, path: Path) -> None:
         # Publish a complete manifest, or leave the previous one intact. An empty pending_rejudge is omitted so a
@@ -633,6 +774,10 @@ class RunManifest(BaseModel):
         if not value["pending_rejudge"]:
             del value["pending_rejudge"]
         atomic_write_json(path, value)
+        # The identity behind config_digest, so a later resume can name the settings that differ. Readers trust it only
+        # while its digest is the manifest's config_digest.
+        if self.config_digest in _CONFIG_IDENTITIES:
+            atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[self.config_digest])
 
     @classmethod
     def import_legacy(cls, rows: list[dict]) -> "RunManifest":
@@ -655,6 +800,12 @@ def validate_resume(
 ) -> RunManifest | None:
     """Reject unknown or incompatible saved work before any output is modified.
 
+    A configuration that differs from the saved one is compared on the identity saved beside the manifest: a
+    difference only in operational settings (timeouts, retries, transport, ports, concurrency, health, paths,
+    tracking) resumes, with a warning and a line in the resume-drift journal; a difference in a semantic setting
+    (dataset, task limits, repeats, agent and model identity, sampling, judge and grading) refuses and names it. A
+    manifest saved without that identity can only be compared by digest, as before.
+
     ``allow_unsafe`` is an explicit compatibility escape hatch for legacy artifacts or
     deliberate identity overrides. Unsupported/corrupt manifests remain errors.
     """
@@ -669,6 +820,7 @@ def validate_resume(
         except (ValidationError, ValueError, OSError) as error:
             raise ConfigError(f"Cannot read recovery manifest {path} or materialized inputs: {error}") from error
         mismatches = []
+        operational_drift: list[str] = []
         if saved.legacy_import:
             mismatches.append("unverified legacy run identity")
         if saved.identity_overridden:
@@ -685,8 +837,31 @@ def validate_resume(
                 if getattr(saved, field) != getattr(current, field):
                     mismatches.append(description)
             if not current.matches_config(saved.config_digest):
-                mismatches.append("resolved configuration")
+                drift = _configuration_drift(path, saved, current)
+                if drift is None:
+                    mismatches.append(
+                        "resolved configuration (this run saved only a digest of its configuration, so the "
+                        "settings that differ cannot be named)"
+                    )
+                elif drift[0]:
+                    mismatches.append(f"resolved configuration (semantic settings differ: {', '.join(drift[0])})")
+                else:
+                    operational_drift = drift[1]
+            elif current.config_digest != saved.config_digest:
+                # Matched as an earlier Gym recorded it: name the removed null defaults it still had, if any.
+                operational_drift = list(
+                    _LEGACY_CONFIG_DIGESTS.get(current.config_digest, {}).get(saved.config_digest, ())
+                )
+            elif (
+                current.config_digest == saved.config_digest
+                and current.config_digest in _CONFIG_IDENTITIES
+                and not config_identity_path_for(path).exists()
+            ):
+                # The same configuration: save its identity now, so a later resume of this run can name any drift.
+                atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[current.config_digest])
         if not mismatches:
+            if operational_drift:
+                _record_resume_drift(path, saved, current, operational_drift)
             return saved
         problem = "Cannot resume with incompatible " + ", ".join(mismatches) + "."
     if not allow_unsafe:

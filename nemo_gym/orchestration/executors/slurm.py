@@ -193,6 +193,8 @@ RETRY_EXTENSION_JOURNAL_NAME = "retry-extension-journal.jsonl"
 REPIN_JOURNAL_NAME = "repin-journal.jsonl"
 # Appended in the run dir when `gym eval resubmit --recover --max-walltime` raises a benchmark's walltime.
 WALLTIME_JOURNAL_NAME = "walltime-extension-journal.jsonl"
+# Appended in the run dir when `gym eval resubmit --recover --allow-unsafe-resume` overrides the run identity check.
+UNSAFE_RESUME_JOURNAL_NAME = "unsafe-resume-journal.jsonl"
 
 
 def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitConfig:
@@ -213,6 +215,16 @@ def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitCo
             "gym_install": install.model_copy(update={"ref": ref}) if install is not None else None,
             "benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update={"run": run})},
         }
+    )
+    return config.model_copy(update={"driver": driver})
+
+
+def _unsafe_resume_config(config: SubmitConfig, benchmark: str) -> SubmitConfig:
+    """``config`` with the benchmark's job resuming past a refused run identity check; every other field as saved."""
+    bench = config.driver.benchmarks[benchmark]
+    run = {**bench.run, "allow_unsafe_resume": True}
+    driver = config.driver.model_copy(
+        update={"benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update={"run": run})}}
     )
     return config.model_copy(update={"driver": driver})
 
@@ -1390,6 +1402,7 @@ class SlurmExecutor(BaseExecutor):
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         operator_continuation: Mapping[str, Any] | None = None,
+        unsafe_resume_reason: str | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -1410,6 +1423,9 @@ class SlurmExecutor(BaseExecutor):
         ``max_walltime`` (with ``keep_budget`` and ``walltime_reason``) raises the Slurm walltime the same way a repin
         moves the commit, in the same render: ``compute.<cluster>.walltime`` becomes it, the chain cap becomes at least
         it, and a value below the recorded walltime is refused. The run dir's walltime journal records the raise.
+        ``unsafe_resume_reason`` (with ``keep_budget``) renders the job with ``allow_unsafe_resume`` the same way, so
+        its resume proceeds past a refused run identity check; the run dir's unsafe-resume journal records the reason
+        and the user once the job is queued.
         ``operator_continuation`` (with ``keep_budget``) is a decision's OPERATOR-CONTINUATION record for a run whose
         accounting is unknown: under the lock it fills the counters the record names, replaces the unknown-accounting
         marker with a note and keeps the readable counters; each step is undone unless the job is queued, and the job
@@ -1440,8 +1456,9 @@ class SlurmExecutor(BaseExecutor):
                     repin_reason=repin_reason,
                     max_walltime=max_walltime,
                     walltime_reason=walltime_reason,
+                    unsafe_resume_reason=unsafe_resume_reason,
                 )
-                if repin is not None or max_walltime is not None
+                if repin is not None or max_walltime is not None or unsafe_resume_reason is not None
                 else ([], {})
             )
             exports = _submission_exports(config)
@@ -1719,6 +1736,7 @@ class SlurmExecutor(BaseExecutor):
         repin_reason: str | None = None,
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
+        unsafe_resume_reason: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """The locked shell steps that render one benchmark's job.sh and saved config again, with a repin, a walltime
         raise or both, and the journal entries to append once its job is queued."""
@@ -1779,6 +1797,16 @@ class SlurmExecutor(BaseExecutor):
                 },
                 sort_keys=True,
             )
+        if unsafe_resume_reason is not None:
+            if not keep_budget:
+                raise RuntimeError("--allow-unsafe-resume needs --recover: the run continues with its spent budgets")
+            if not unsafe_resume_reason.strip():
+                raise ValueError("--allow-unsafe-resume needs a nonempty --unsafe-resume-reason")
+            target = _unsafe_resume_config(target, benchmark)
+            journals[UNSAFE_RESUME_JOURNAL_NAME] = json.dumps(
+                {"benchmark": benchmark, "reason": unsafe_resume_reason, "actor": getpass.getuser(), "at": stamp},
+                sort_keys=True,
+            )
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
         run_dir = Path(record.run_dir)
         script = build_sbatch_script(
@@ -1787,7 +1815,13 @@ class SlurmExecutor(BaseExecutor):
         resolved = yaml.safe_dump(target.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False)
         old_config = shlex.quote(str(run_dir / RESOLVED_CONFIG_NAME))
         kinds = [
-            kind for kind, wanted in (("repin", repin is not None), ("walltime", max_walltime is not None)) if wanted
+            kind
+            for kind, wanted in (
+                ("repin", repin is not None),
+                ("walltime", max_walltime is not None),
+                ("unsafe-resume", unsafe_resume_reason is not None),
+            )
+            if wanted
         ]
         kept = [
             (f"job.sh.pre-{kind}-{stamp}", shlex.quote(str(run_dir / f"{RESOLVED_CONFIG_NAME}.pre-{kind}-{stamp}")))
