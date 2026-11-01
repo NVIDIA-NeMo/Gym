@@ -2583,13 +2583,68 @@ def _observed_trial_operations(
     return True
 
 
+def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
+    """Scored identities whose rollout ended on a failed policy request and was scored zero, with the failure kind.
+
+    The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
+    recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
+    has no selectable response, and it is counted once, in the trial family.
+    """
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    found: dict[Identity, str] = {}
+    for row in (collected.results or []) if collected is not None else []:
+        observed = row.get("ng_trial_observations")
+        reward = row.get("reward")
+        if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
+            continue
+        invocations = observed.get("invocations") if isinstance(observed, dict) else None
+        if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
+            continue
+        refs, calls = invocations[0].get("model_calls"), observed.get("model_calls")
+        if not isinstance(refs, list) or not refs or not isinstance(refs[-1], dict) or not isinstance(calls, list):
+            continue
+        ref = refs[-1]
+        last = [
+            call
+            for call in calls
+            if isinstance(call, dict)
+            and isinstance(call.get("response_metadata"), dict)
+            and (
+                call.get("model_call_id") == ref["model_call_id"]
+                if ref.get("model_call_id")
+                else ref.get("response_id") is not None
+                and call["response_metadata"].get("response_id") == ref["response_id"]
+                and call["response_metadata"].get("model_ref") == ref.get("model_ref")
+            )
+        ]
+        meta = last[0]["response_metadata"] if len(last) == 1 else None
+        operations = meta.get("model_operations") if isinstance(meta, dict) else None
+        report = meta.get("failure_report") if isinstance(meta, dict) else None
+        if not isinstance(operations, list) or not operations or not isinstance(operations[-1], dict):
+            continue
+        final = operations[-1]
+        events = report.get("events") if isinstance(report, dict) else None
+        event = events.get(final.get("failure_id")) if isinstance(events, dict) else None
+        if (
+            final.get("outcome") == "failed"
+            and isinstance(event, dict)
+            and event.get("boundary") == "model"
+            and event.get("operation") == "model_request"
+            and event.get("operation_id") == final.get("operation_id")
+            and isinstance(event.get("failure_kind"), str)
+        ):
+            found[_identity(row)] = event["failure_kind"]
+    return found
+
+
 def trial_health(
     decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
 ) -> tuple[bool | None, str]:
     """The trial gate's known failures: settled zero-scored failures over the expected trials, including repeats.
 
     A failure counts when rollout collection settled it as a scored zero (MODEL_FINAL: marked counts-as-zero by its
-    producer and terminal), so it is recorded as incorrect under the benchmark protocol. The denominator is the full
+    producer and terminal), or when a scored row's rollout ended on a failed policy request and was scored zero
+    (``final_zero_trials``), so it is recorded as incorrect under the benchmark protocol. The denominator is the full
     materialized inventory. A run that is not complete has unaccounted trials, so the gate is not evaluated. Other
     terminal trial failures (a judge, verifier or harness error scored as a zero in the main output) carry no failure
     record and cannot be ruled out, so their count is a lower bound. At or above the limit it fails; below it the
@@ -2597,8 +2652,10 @@ def trial_health(
     """
     if not decision.complete or decision.expected <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})"
-    failed = decision.counts.get(IdentityState.MODEL_FINAL, 0)
+    final_zero = final_zero_trials(decision, collected)
+    failed = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero)
     kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
+    kinds.update(final_zero.values())
     rate = failed / decision.expected
     counts = f"{failed} settled zero-scored failure(s) of {decision.expected} expected trials ({rate:.2%})"
     detail = f", kinds {dict(sorted(kinds.items(), key=lambda kv: str(kv[0])))}" if kinds else ""

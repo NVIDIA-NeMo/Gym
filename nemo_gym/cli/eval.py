@@ -699,6 +699,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         IdentityState,
         _observed_trial_operations,
         decide_from_collected,
+        final_zero_trials,
         response_health,
         select_managed_evidence,
         trial_health,
@@ -756,10 +757,11 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
                     "health/response/failure_rate": counts["faulted"] / counts["selected"],
                 }
             )
+        settled = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero_trials(decision, collected))
         if trial is not None:
             failures = []
             exact = _observed_trial_operations(decision, collected, grading_failures=failures)
-            failed = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(failures)
+            failed = settled + len(failures)
             metrics.update(
                 {
                     "health/trial/known": 1,
@@ -773,7 +775,7 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
             )
         if trial is None and decision.expected > 0:
             # A known terminal model failure remains a lower bound when other trial facts are unobserved.
-            lower_bound = decision.counts.get(IdentityState.MODEL_FINAL, 0)
+            lower_bound = settled
             metrics.update(
                 {
                     "health/trial/expected": decision.expected,

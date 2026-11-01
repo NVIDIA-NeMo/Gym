@@ -12,10 +12,11 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""The trial gate's treatment of recovered policy requests.
+"""The trial gate's treatment of recovered policy requests and of rollouts that ended on a failed policy request.
 
 A policy request retried inside one completed operation (a timeout, then an answer) is a recovered attempt, not a
-trial failure, when each failed attempt joins that operation.
+trial failure, when each failed attempt joins that operation. A scored row whose rollout ended on a failed policy
+request and was scored zero is a settled trial failure, counted once in the trial family.
 """
 
 from pathlib import Path
@@ -25,6 +26,7 @@ import pytest
 from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
     decide_from_collected,
+    final_zero_trials,
     gate_summary_from_collected,
     trial_health,
 )
@@ -149,3 +151,58 @@ def test_a_recovery_that_does_not_join_one_completed_policy_operation_stays_unkn
     passed, reason = trial_health(_decide(collected), collected)
     assert passed is None, reason
     assert "treatment is not defined" in reason
+
+
+def _end_on_a_failed_request(collected: CollectedEvidence, *, reward: float = 0.0, recorded: bool = True) -> None:
+    """The only policy request failed (HTTP 400) and the rollout ended there; the verifier scored the row."""
+    meta = _policy_call(collected)["response_metadata"]
+    [operation] = meta["model_operations"]
+    operation["outcome"], operation["failure_id"] = "failed", "request-failure-1"
+    meta["response_status"], meta["error_category"] = "incomplete", "context_length_exceeded"
+    event = {
+        "event_id": "request-failure-1",
+        "boundary": "model",
+        "operation": "model_request",
+        "operation_id": operation["operation_id"],
+        "attempt_id": operation["final_attempt_id"],
+        "cause_id": None,
+        "failure_kind": "model_request_error",
+        "http_status": 400,
+    }
+    meta["failure_report"]["events"] = {event["event_id"]: event} if recorded else {}
+    collected.results[0]["reward"] = reward
+    collected.quality["observed_upstream_recovery"] = {
+        "observed_attempt_errors": 1,
+        "observed_failed_operations": 1,
+        "recovered_attempt_errors": 0,
+        "recovered_operations": 0,
+        "operations_without_terminal_observation": 0,
+    }
+
+
+def test_a_rollout_that_ended_on_a_failed_policy_request_and_scored_zero_is_a_settled_trial_failure():
+    collected = _collected()
+    _end_on_a_failed_request(collected)
+    decision = _decide(collected)
+    assert decision.counts == {"scored": 1}  # the decision and the score are unchanged
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_request_error"}
+    passed, reason = trial_health(decision, collected)
+    assert passed is False
+    assert reason == (
+        "trial: 1 settled zero-scored failure(s) of 1 expected trials (100.00%) is not below 2%, "
+        "kinds {'model_request_error': 1}"
+    )
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
+    assert task["status"] == "FAILED"
+    assert any(e.startswith("response/trial health failed:") for e in task["errors"]), task["errors"]
+
+
+@pytest.mark.parametrize("change", [{"reward": 1.0}, {"recorded": False}])
+def test_a_failed_last_request_without_a_zero_score_or_its_event_is_not_counted(change):
+    collected = _collected()
+    _end_on_a_failed_request(collected, **change)
+    decision = _decide(collected)
+    assert final_zero_trials(decision, collected) == {}
+    passed, reason = trial_health(decision, collected)
+    assert passed is None
+    assert "0 settled zero-scored failure(s) of 1" in reason
