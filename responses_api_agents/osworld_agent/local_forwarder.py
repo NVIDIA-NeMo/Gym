@@ -17,6 +17,7 @@ not a workstation proxy.
 
 from __future__ import annotations
 
+import os
 import re
 import socket
 import ssl
@@ -151,6 +152,7 @@ def start_forwarder(
             try:
                 with requests.Session() as session:
                     session.trust_env = False
+                    session.verify = os.environ.get("REQUESTS_CA_BUNDLE") or os.environ.get("SSL_CERT_FILE") or True
                     upstream = session.request(
                         self.command,
                         base + self.path,
