@@ -18,6 +18,7 @@ from nemo_gym.orchestration.recovery import (
 from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_resubmit import _handle, _provider_failures, _resumable_run, _sbatch_env
+from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_rollout_recovery import runner_config as runner_config
 

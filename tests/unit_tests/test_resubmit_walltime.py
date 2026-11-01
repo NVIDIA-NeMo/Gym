@@ -27,6 +27,7 @@ from nemo_gym.orchestration.executors.slurm import REPIN_JOURNAL_NAME, WALLTIME_
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord
 from tests.unit_tests.test_eval_resubmit import _handle
+from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_resubmit_repin import NEW, OLD, _digests
 from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
