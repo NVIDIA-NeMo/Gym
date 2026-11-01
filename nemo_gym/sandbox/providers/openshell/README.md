@@ -51,7 +51,7 @@ When `spec.image` is unset, the gateway's configured default image is used
 |---|---|
 | `image` | `SandboxTemplate.image` (unset -> gateway default image) |
 | `env` | `SandboxSpec.environment`, also re-applied per exec |
-| `metadata` | gateway sandbox labels |
+| `metadata` | gateway sandbox labels (values sanitized to valid Kubernetes label values: invalid characters become `_`, at most 63 characters; keys pass through) |
 | `workdir` | default `workdir` for every exec (no create-time equivalent) |
 | `resources.gpu` | `ResourceRequirements.gpu.count` |
 | `resources.cpu/memory_mib/disk_gib/gpu_type` | not mapped by this provider; OpenShell exposes driver-specific limits through `SandboxTemplate.resources` — pass `provider_options.template_resources` (a warning notes the redirection) |
@@ -100,3 +100,14 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
 For OIDC gateways set `connection.bearer_token` (e.g. via `OPENSHELL_BEARER_TOKEN`); for
 TLS/mTLS set `connection.tls_ca_path` / `tls_cert_path` / `tls_key_path`. All unset means a
 plaintext channel, matching the local compose gateway (`disable_tls = true`).
+
+## Attribution labels
+
+Every sandbox also gets job attribution labels (`team`, `user`, `workload`, `run`), prefixed by
+`attribution.key_prefix` (default `nemo-gym.nvidia.com/`), so sandboxes can be listed or cleaned up per
+run, for example `kubectl get pods -l nemo-gym.nvidia.com/run=<id>`. Unset fields auto-detect from
+`NEMO_GYM_*` / Slurm environment variables; see `nemo_gym.sandbox.attribution.AttributionConfig`.
+Explicit `SandboxSpec.metadata` keys win over attribution keys, and the `nemo-gym.sandbox=1` marker
+label is always set. Set `attribution.enabled: false` to turn attribution off. The OpenShell SDK
+and protos expose no label validation of their own; labels are sanitized client-side because the
+gateway stores them as Kubernetes labels.

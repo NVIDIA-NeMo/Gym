@@ -337,8 +337,72 @@ def test_generated_sandbox_names_fit_routable_name_limit() -> None:
     assert all(re.fullmatch(rf"{re.escape(SANDBOX_NAME_PREFIX)}[0-9a-f]+", name) for name in names)
 
 
-async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) -> None:
+def _create_labels(fake_client: FakeClient) -> dict[str, str]:
+    return fake_client.create_calls[0]["labels"]
+
+
+async def test_create_adds_attribution_labels_with_spec_keys_winning(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TEAM", "team-a")
+    monkeypatch.setenv("NEMO_GYM_USER", "alice")
+    monkeypatch.setenv("NEMO_GYM_WORKLOAD", "bench")
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run-1")
     provider = make_provider()
+    await provider.create(SandboxSpec(metadata={"nemo-gym.nvidia.com/team": "explicit", "task": "demo"}))
+    assert _create_labels(fake_client) == {
+        "nemo-gym.nvidia.com/team": "explicit",
+        "nemo-gym.nvidia.com/user": "alice",
+        "nemo-gym.nvidia.com/workload": "bench",
+        "nemo-gym.nvidia.com/run": "run-1",
+        "task": "demo",
+        SANDBOX_LABEL: "1",
+    }
+
+
+async def test_create_attribution_disabled_adds_nothing(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_TEAM", "team-a")
+    provider = make_provider(attribution={"enabled": False})
+    await provider.create(SandboxSpec(metadata={"task": "demo"}))
+    assert _create_labels(fake_client) == {"task": "demo", SANDBOX_LABEL: "1"}
+
+
+async def test_create_attribution_custom_prefix_and_run_key_present(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.delenv("NEMO_GYM_RUN_ID", raising=False)
+    provider = make_provider(attribution={"key_prefix": "", "team": "t"})
+    await provider.create(SandboxSpec())
+    labels = _create_labels(fake_client)
+    assert labels["team"] == "t"
+    assert labels["run"]  # generated per process when NEMO_GYM_RUN_ID is unset
+
+
+async def test_create_labels_are_valid_kubernetes_label_values(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_WORKLOAD", "responses_api_agents/mini_swe_agent_2/configs/mini_swe_agent_2.yaml")
+    provider = make_provider()
+    await provider.create(SandboxSpec(metadata={"task": "x" * 200, "odd": " /weird value/ "}))
+    labels = _create_labels(fake_client)
+    value_re = re.compile(r"[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?")
+    assert labels
+    for key, value in labels.items():
+        assert len(value) <= 63 and value_re.fullmatch(value), (key, value)
+    assert labels["nemo-gym.nvidia.com/workload"].startswith("responses_api_agents_mini_swe_agent_2")
+    assert labels["task"] == "x" * 63
+    assert labels["odd"] == "weird_value"
+
+
+def test_attribution_invalid_key_prefix_rejected() -> None:
+    with pytest.raises(ValueError, match="key_prefix"):
+        OpenShellProvider(attribution={"key_prefix": "Bad Prefix/"})
+
+
+async def test_create_success_maps_spec(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider(attribution={"enabled": False})
     spec = SandboxSpec(
         image="docker://python:3.12-slim",
         env={"FOO": "bar"},

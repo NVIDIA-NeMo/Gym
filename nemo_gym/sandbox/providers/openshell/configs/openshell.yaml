@@ -71,3 +71,10 @@ sandbox:
       close_wait_deleted: true
       close_timeout_s: 60
       poll_interval_s: 1.0
+    # Job attribution labels merged into every sandbox's metadata (explicit
+    # sandbox_spec.metadata and default_metadata keys win). Unset team/user/workload/run
+    # auto-detect from NEMO_GYM_* / Slurm env vars; `run` is generated per process.
+    attribution:
+      enabled: true
+      # Kubernetes prefixed-key namespace for the injected label keys; "" for bare keys.
+      key_prefix: nemo-gym.nvidia.com/

@@ -40,6 +40,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+from nemo_gym.sandbox.attribution import AttributionConfig, sanitize_label_value
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -442,12 +443,14 @@ class OpenShellProvider:
         exec: OpenShellExecConfig | Mapping[str, Any] | None = None,
         probe: OpenShellProbeConfig | Mapping[str, Any] | None = None,
         operations: OpenShellOperationsConfig | Mapping[str, Any] | None = None,
+        attribution: AttributionConfig | Mapping[str, Any] | None = None,
     ) -> None:
         self._connection = _coerce_config(connection, OpenShellConnectionConfig)
         self._create_config = _coerce_config(create, OpenShellCreateConfig)
         self._exec_config = _coerce_config(exec, OpenShellExecConfig)
         self._probe = _coerce_config(probe, OpenShellProbeConfig)
         self._operations = _coerce_config(operations, OpenShellOperationsConfig)
+        self._attribution = _coerce_config(attribution, AttributionConfig)
         _require_openshell()
         self._shared = _acquire_shared_client(self._connection, self._exec_config.concurrency)
         self._closed = False
@@ -571,8 +574,12 @@ class OpenShellProvider:
         options = OpenShellProviderOptions.from_mapping(spec.provider_options)
         pb_spec = self._build_sandbox_spec(spec, image, options)
         name = _generate_sandbox_name()
-        # Marker label goes last so user metadata cannot clobber it.
-        labels = {**{str(k): str(v) for k, v in spec.metadata.items()}, SANDBOX_LABEL: "1"}
+        # Explicit spec keys win over attribution keys; the marker label goes last so nothing clobbers it.
+        # Label values must be valid Kubernetes label values (at most 63 characters), so sanitize them all.
+        labels = {
+            str(key): sanitize_label_value(value)
+            for key, value in {**self._attribution.metadata(), **spec.metadata, SANDBOX_LABEL: "1"}.items()
+        }
 
         try:
             ref = await self._create_sandbox_with_retries(pb_spec, name, labels)
