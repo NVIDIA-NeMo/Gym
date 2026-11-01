@@ -91,12 +91,16 @@ async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_sav
             disable_aggregation=True,
             disable_health_check=True,
         )
-        async with tcp, ClientSession(timeout=ClientTimeout(total=0.08)) as session:
-            monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
+        # Only the lost reply of the timeout case races a short client timeout; a disconnect and the rerun get a long
+        # one, so a slow runner cannot turn a dropped connection into a timeout or fail the rerun.
+        short = ClientTimeout(total=0.08 if lost_response == "timeout" else 30)
+        async with tcp, ClientSession(timeout=short) as first, ClientSession(timeout=ClientTimeout(total=30)) as rerun:
+            monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: first)
             expected_error = IncompleteEvaluationError if routed else (aiohttp.ClientError, asyncio.TimeoutError)
             with pytest.raises(expected_error):
                 await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=5)
             # The episode's whole response was lost and the row keeps none: a second invocation runs it afresh.
+            monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: rerun)
             try:
                 await asyncio.wait_for(
                     RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True})),
