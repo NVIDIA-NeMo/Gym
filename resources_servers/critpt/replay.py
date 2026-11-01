@@ -28,10 +28,12 @@ API keys are read from $ARTIFICIAL_ANALYSIS_API_KEY.  # pragma: allowlist secret
     # comma-separated; whitespace ok):
     ARTIFICIAL_ANALYSIS_API_KEY="[aa-key-A,aa-key-B,aa-key-C]"  # pragma: allowlist secret
 
-Rotation is always on when more than one key is configured: every 429
-advances to the next key. When every configured key 429s on the same batch
-(one full cycle), the tool exits with code 3; already-scored batches stay
-in aa_responses.jsonl, so simply rerun after the AA daily quota resets.
+Rotation is always on when more than one key is configured: every 429 (quota)
+and every 403 (account not approved) advances to the next key. When every
+configured key fails the same batch (one full cycle), the tool exits with
+code 3 for quota and code 4 for access denial; already-scored batches stay in
+aa_responses.jsonl either way. Exit 3 is fixed by rerunning after the AA daily
+quota resets; exit 4 is not fixed by waiting and needs an approved key.
 
 Example:
     ARTIFICIAL_ANALYSIS_API_KEY="[k1,k2,k3]" python -m resources_servers.critpt.replay \\  # pragma: allowlist secret
@@ -57,6 +59,7 @@ from typing import Dict, List, Tuple
 
 from resources_servers.critpt.app import (
     _ALL_PROBLEM_IDS,
+    CritPtAccessDenied,
     CritPtRateLimitExceeded,
     _call_api,
     refresh_partial_metrics,
@@ -146,12 +149,17 @@ async def _call_api_with_rotation(
                 backoff_seconds=backoff_seconds,
             )
             return response, current
-        except CritPtRateLimitExceeded as exc:
+        except (CritPtRateLimitExceeded, CritPtAccessDenied) as exc:
             last_exc = exc
             remaining = n - (attempt + 1)
             if remaining > 0:
                 next_idx = (current + 1) % n
-                print(f"  rate-limited on key {current + 1}/{n}; rotating to key {next_idx + 1}/{n}")
+                reason = (
+                    "rate-limited"
+                    if isinstance(exc, CritPtRateLimitExceeded)
+                    else "denied (403, account not approved)"
+                )
+                print(f"  {reason} on key {current + 1}/{n}; rotating to key {next_idx + 1}/{n}")
     if last_exc is None:
         raise RuntimeError("_call_api_with_rotation invoked with no api_keys")
     raise last_exc
@@ -301,6 +309,22 @@ async def main_async(args: argparse.Namespace, api_keys: List[str]) -> int:
             if rejudged > 0:
                 refresh_partial_metrics(args.cache_dir)
             return 3
+        except CritPtAccessDenied:
+            # Distinct exit code from quota exhaustion (3): waiting fixes a 429,
+            # but a 403 needs a key whose AA account is approved for CritPt.
+            # Replay is the recovery path for a run that died this way, so it must
+            # not tell the operator to "wait for the quota to reset".
+            print(
+                f"AA denied access on all {len(api_keys)} key(s) (HTTP 403). None of these "
+                f"accounts is approved for CritPt grading; no quota was consumed and waiting "
+                f"will not help. Re-run with $ARTIFICIAL_ANALYSIS_API_KEY set to an approved "
+                f"key, or request approval at critpt@artificialanalysis.ai. Cached submissions "
+                f"are preserved, so nothing needs to be re-inferred.",
+                file=sys.stderr,
+            )
+            if rejudged > 0:
+                refresh_partial_metrics(args.cache_dir)
+            return 4
 
         with aa_responses_path.open("a") as fh:
             fh.write(
