@@ -202,6 +202,30 @@ def _reconcile_requeued_chain(
     )
 
 
+def _remote_reader_bound_s() -> int:
+    """Seconds the remote Store reader may spend on bootstrap plus selection on the login host.
+
+    The default covers large saved stores (several GB of rollout files); ``NEMO_GYM_REMOTE_READER_TIMEOUT_S``
+    overrides it for an inspect of an unusually large run. The value is clamped to [300, 14400].
+    """
+    raw = os.environ.get("NEMO_GYM_REMOTE_READER_TIMEOUT_S", "")
+    try:
+        bound = int(raw) if raw else 1800
+    except ValueError:
+        bound = 1800
+    return min(max(bound, 300), 14400)
+
+
+def _remote_reader_error_text(error: BaseException) -> str:
+    """Name the reader failure with its cause, not only the exception type."""
+    detail = " ".join(str(error).split())
+    if not detail:
+        return f"remote Store reader unavailable: {type(error).__name__}"
+    if len(detail) > 300:
+        detail = detail[:300] + "..."
+    return f"remote Store reader unavailable: {type(error).__name__}: {detail}"
+
+
 def _remote_managed_reader_script() -> str:
     """The reader with the caller's metadata helper defined after its imports, sent as one script."""
     head, body = _REMOTE_MANAGED_READER.split("job, expected_ref", 1)
@@ -232,7 +256,7 @@ def _remote_managed_evidence(
         output = conn.run(
             [
                 "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
-                f"timeout --kill-after=10s 300s {entrypoint} 3<<'GYM_MANAGED_INPUT'\n"
+                f"timeout --kill-after=10s {_remote_reader_bound_s()}s {entrypoint} 3<<'GYM_MANAGED_INPUT'\n"
                 + collected.model_dump_json()
                 + "\nGYM_MANAGED_INPUT",
             ]
@@ -269,7 +293,7 @@ def _remote_managed_evidence(
         return collected.model_copy(
             update={
                 "managed_selection": None,
-                "managed_reader_error": f"remote Store reader unavailable: {type(error).__name__}",
+                "managed_reader_error": _remote_reader_error_text(error),
             }
         )
 
