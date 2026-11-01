@@ -674,7 +674,9 @@ class SlurmExecutor(BaseExecutor):
                         accounted_chain_walltime(
                             collected.job_chain,
                             "\n".join(f"{job_id}|{state}|{elapsed}" for job_id, state, elapsed, _ in rows),
-                            stored_walltime_s=collected.walltime_used_s or 0,
+                            stored_walltime_s=None
+                            if collected.walltime_state == "absent"
+                            else collected.walltime_used_s or 0,
                         )
                         if rows is not None
                         else None

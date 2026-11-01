@@ -1623,6 +1623,18 @@ def decide_from_collected(
             + (f" + {extend_retries} requested now" if extend_retries else "")
         )
         decision = decision.model_copy(update={"reason": f"{decision.reason} ({extension})"})
+    if (
+        max_walltime_s is not None
+        and walltime is not None
+        and len(collected.job_chain) > 1
+        and collected.walltime_state == "absent"
+        and not decision.scheduler_live
+    ):
+        derived = (
+            f"the used walltime {walltime:g} s is the sum of the chain's {len(collected.job_chain)} scheduler "
+            "records, as no allocation stored it"
+        )
+        decision = decision.model_copy(update={"reason": f"{decision.reason}; {derived}"})
     return decision
 
 
@@ -1821,9 +1833,13 @@ def accounted_chain_walltime(
     job_chain: list[str],
     accounting: str,
     *,
-    stored_walltime_s: float = 0,
+    stored_walltime_s: float | None = 0,
 ) -> float | None:
-    """Elapsed seconds of all recorded allocations, only when each has one terminal accounting row."""
+    """Elapsed seconds of all recorded allocations, only when each has one terminal accounting row.
+
+    ``stored_walltime_s`` None means no allocation stored a walltime: the prologue that accounts the previous
+    allocation stopped first (after an operator's cancel, for one). The records' sum is the used walltime then.
+    """
     terminal = {
         "COMPLETED",
         "FAILED",
@@ -1857,7 +1873,7 @@ def accounted_chain_walltime(
     total = sum(elapsed.values())
     # The prologue records predecessors. A stopped guard may already have accounted for the last job too.
     # Other values cannot identify the budget epoch (e.g. an intentional manual reset in an old chain).
-    if stored_walltime_s not in (total - elapsed[job_chain[-1]], total):
+    if stored_walltime_s is not None and stored_walltime_s not in (total - elapsed[job_chain[-1]], total):
         return None
     return float(total)
 
