@@ -1912,7 +1912,29 @@ def _empty_response(
 
 
 if __name__ == "__main__":
-    from responses_api_agents.osworld_agent.runtime_dependencies import require_optional_runtime_dependencies
+    import subprocess
+
+    from responses_api_agents.osworld_agent.runtime_dependencies import (
+        require_optional_runtime_dependencies,
+        validate_optional_runtime_dependencies,
+    )
+
+    # Opt-in: with OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS=1 the agent runs its own
+    # explicit installer once when the optional runtime dependencies are missing, then
+    # re-executes itself so the fresh packages are imported. Without the opt-in the
+    # behaviour is unchanged: a missing dependency fails startup with the remediation
+    # command. The marker env var prevents a loop if the installer leaves a gap.
+    _install_flag = "OSWORLD_AGENT_INSTALL_OPTIONAL_RUNTIME_DEPS"
+    _attempt_marker = "_OSWORLD_AGENT_OPTIONAL_RUNTIME_DEPS_ATTEMPTED"
+    if os.environ.get(_install_flag) == "1" and os.environ.get(_attempt_marker) != "1":
+        if validate_optional_runtime_dependencies():
+            installer = Path(__file__).resolve().with_name("install_optional_runtime_deps.sh")
+            print(
+                f"[osworld_agent] optional runtime dependencies missing; running {installer} on {sys.prefix}",
+                flush=True,
+            )
+            subprocess.run(["bash", str(installer), sys.prefix], check=True)
+            os.execve(sys.executable, [sys.executable, *sys.argv], {**os.environ, _attempt_marker: "1"})
 
     require_optional_runtime_dependencies()
     OSWorldAgent.run_webserver()
