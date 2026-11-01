@@ -127,6 +127,28 @@ def test_a_scheduler_cut_is_not_applied_while_a_job_of_the_run_is_live(tmp_path)
     assert decision.counts["unknown"] == 2
 
 
+def test_a_live_job_is_reported_before_rows_nobody_owns(tmp_path):
+    from nemo_gym.orchestration.recovery import gate_task_summary
+
+    _cut_run(tmp_path, masked=1)
+    _, decision = _decide(tmp_path, allocation_cut=False, live_job=True)
+    assert (decision.action.value, decision.scheduler_live) == ("stop", True)
+    assert decision.reason == "a job of this run is still pending or running; it is not queued twice"
+    gate = gate_task_summary(
+        decision, score=None, summary_valid=None, summary_reasons=[], health_passed=None, health_reasons=[]
+    )
+    assert gate["status"] == "RUNNING"
+
+
+def test_a_pending_job_that_has_not_written_its_inventory_is_reported_as_live():
+    collected = CollectedEvidence(materialized=None, results=None, failures=[])
+    pending = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=True)
+    assert (pending.action.value, pending.scheduler_live) == ("stop", True)
+    assert pending.reason == "a job of this run is still pending or running; it is not queued twice"
+    ended = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
+    assert (ended.reason, ended.scheduler_live) == ("the run has no materialized inventory to recover against", False)
+
+
 def test_unknown_rows_a_resume_never_reruns_do_not_block_never_started_rows(tmp_path):
     _cut_run(tmp_path, scored=1, in_flight=0, not_started=3, masked=2)
     _, decision = _decide(tmp_path, allocation_cut=False)

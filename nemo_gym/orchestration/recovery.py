@@ -626,6 +626,10 @@ def decide_recovery(
             duplicate_results=duplicates,
         )
 
+    # A live job is still writing the files read above, whatever they show now: classify nothing from them.
+    if budget.live_job:
+        live = decision(RecoveryAction.STOP, "a job of this run is still pending or running; it is not queued twice")
+        return live.model_copy(update={"scheduler_live": True})
     if invalid_inventory or len(expected) != len(expected_set) or not expected_set:
         return decision(
             RecoveryAction.STOP, "the materialized inventory is empty, has invalid or duplicate identities"
@@ -657,10 +661,6 @@ def decide_recovery(
                 + (f" and a resume would run {len(rerun)} of them again" if needs_policy and rerun else "")
                 + f"; {populations}",
             )
-    # A live job is still writing the files read above, whatever they show now.
-    if budget.live_job:
-        live = decision(RecoveryAction.STOP, "a job of this run is still pending or running; it is not queued twice")
-        return live.model_copy(update={"scheduler_live": True})
     if policy_stopped:
         return decision(
             RecoveryAction.STOP,
@@ -1424,13 +1424,17 @@ def decide_from_collected(
             evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
         )
     if collected.materialized is None:
+        live = live_job is True
         return RecoveryDecision(
             action=RecoveryAction.STOP,
-            reason="the run has no materialized inventory to recover against",
+            reason="a job of this run is still pending or running; it is not queued twice"
+            if live
+            else "the run has no materialized inventory to recover against",
             expected=0,
             counts={},
             identities={},
             evidence=[],
+            scheduler_live=live,
         )
     decision = decide_recovery(
         materialized=collected.materialized,
