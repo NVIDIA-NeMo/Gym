@@ -151,7 +151,9 @@ from nemo_gym.token_id_capture.protocols import LineageResolution, TokenCaptureS
 from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 from nemo_gym.utils.path_utils import aggregation_sources_path_for, failures_path_for, materialized_path_for
-from tests.unit_tests.telemetry.test_sandbox_active import collected_metrics  # noqa: F401 - fixture
+
+# Not from a telemetry test module: its module-level importorskip would skip this whole module without the OTel SDK.
+from tests.unit_tests.telemetry.in_memory_meter import collected_metrics  # noqa: F401 - fixture
 
 
 def _environment_server_config() -> DictConfig:
