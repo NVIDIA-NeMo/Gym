@@ -1221,7 +1221,9 @@ def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_bel
     if failed:
         assert health.startswith("response/trial health failed") and f"trial: {rate} is not below 2%" in health
     else:
-        assert health.startswith("response/trial health unknown") and "known failures are a lower bound" in health
+        # These rows carry no grading observation: the trial gate stays unknown and says why, with the count.
+        assert health.startswith("response/trial health unknown")
+        assert f"trial: UNOBSERVED {100 - final_zeros} of 100 expected trials" in health
     assert not any(w.startswith("health gate within") and "trial" in w for w in task["warnings"])
 
 
@@ -1287,7 +1289,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
     d, task = gate_of(job, quality=quality)
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
-    assert "known failures are a lower bound" in health and "route_failures_to_sidecar None" in health
+    assert "trial: UNOBSERVED 99 of 100 expected trials" in health and "route_failures_to_sidecar None" in health
     assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
     assert "open for the benchmark PIC" in health
     assert "verification_skipped {'true': 0, 'false': 0, 'absent': 100}" in health
@@ -2577,3 +2579,60 @@ def test_cli_outcome_names_the_reader_token(tmp_path, fake_executor, capsys, mon
     fake_executor.job_dir = write_job_dir(tmp_path / "job", n=1, results=[ident(0, reward=1.0)], failures=[])
     code, out = run_cli(["eval", "resubmit", "gym-job-t", "bench", "--recover", "--inspect"], capsys)
     assert out["reader_token"] == "caller-token"
+
+
+def _graded(task: int) -> dict:
+    """A scored row whose verifier recorded one programmatic grading operation."""
+    verifier = {
+        "invocation_id": f"verify-{task}",
+        "status": "completed",
+        "grading_operations": [{"operation_id": f"grade-{task}", "kind": "programmatic", "outcome": "completed"}],
+    }
+    return ident(task, reward=1.0, ng_trajectory={"verifier_invocations": [verifier]})
+
+
+def _quality_naming(server: str, expected: int) -> dict:
+    agent = {"kind": "responses_api_agents", "implementation": "demo_agent", "resources_server": server}
+    return unit_quality(
+        expected=expected,
+        provenance={"resolved_config": "read", "route_failures_to_sidecar": None, "servers": {"agent": agent}},
+    )
+
+
+def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_a_reason(tmp_path) -> None:
+    """Full score and coverage, but nothing observed the grading: unverified, never silent and never healthy."""
+    job = gate_job(tmp_path, expected=6, final_zeros=0)
+    d, task = gate_of(job, quality=_quality_naming("demo_verifier", 6))
+
+    assert d.action == RecoveryAction.NOOP and d.complete
+    assert task["trial_counts"] == {
+        "observed_healthy": 0,
+        "unhealthy": 0,
+        "unobserved": 6,
+        "unobserved_reason": "no grading operation was recorded by the verifier (demo_verifier)",
+    }
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert health.startswith("response/trial health unknown")
+    assert (
+        "trial: UNOBSERVED 6 of 6 expected trials: no grading operation was recorded by the verifier "
+        "(demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0" in health
+    )
+    assert task["status"] == "FAILED"
+
+
+def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tmp_path) -> None:
+    results = [_graded(t) for t in range(49)] + [ident(t, reward=1.0) for t in range(49, 99)]
+    job = write_job_dir(tmp_path / "job", n=100, results=results, failures=[final_model_zero(99, 0)])
+    (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 0.5}}))
+    write_postrun_receipt(job)
+
+    _, task = gate_of(job, quality=_quality_naming("demo_verifier", 100))
+
+    assert {key: task["trial_counts"][key] for key in ("observed_healthy", "unhealthy", "unobserved")} == {
+        "observed_healthy": 49,
+        "unhealthy": 1,
+        "unobserved": 50,
+    }
+    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert "trial: UNOBSERVED 50 of 100 expected trials" in health
+    assert "observed healthy 49, unhealthy 1" in health

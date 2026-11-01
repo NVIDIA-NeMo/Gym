@@ -2847,6 +2847,60 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     return found
 
 
+def _graded(row: Mapping[str, Any]) -> bool:
+    """Whether the row's verifier recorded at least one programmatic grading operation for it."""
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, dict) else None
+    return isinstance(verifiers, list) and any(
+        isinstance(item, dict) and isinstance(item.get("grading_operations"), list) and item["grading_operations"]
+        for item in verifiers
+    )
+
+
+def _verifying_servers(collected: CollectedEvidence) -> str:
+    """The resources servers the run's agents name, from the run provenance, for an unobserved-trial reason."""
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
+    names = sorted(
+        {
+            str(fact["resources_server"])
+            for fact in (servers.values() if isinstance(servers, dict) else ())
+            if isinstance(fact, dict) and fact.get("kind") == "responses_api_agents" and fact.get("resources_server")
+        }
+    )
+    return ", ".join(names) if names else "a resources server the run provenance does not name"
+
+
+def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any] | None:
+    """Acceptance's trial counts: observed healthy, unhealthy and unobserved, over the expected trials.
+
+    ``unhealthy`` are the known failures the trial gate counts. ``unobserved`` are the other scored trials whose
+    verifier recorded no grading operation: nothing observed their grading, so they are unverified, never healthy.
+    ``observed_healthy`` are the rest. None until the run is complete.
+    """
+    trials = decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
+    if not decision.complete or trials <= 0 or collected is None:
+        return None
+    final_zero = final_zero_trials(decision, collected)
+    unhealthy = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero)
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    unobserved = sum(
+        1
+        for row in collected.results or []
+        if _identity(row) in scored and _identity(row) not in final_zero and not _graded(row)
+    )
+    counts: dict[str, Any] = {
+        "observed_healthy": trials - unhealthy - unobserved,
+        "unhealthy": unhealthy,
+        "unobserved": unobserved,
+    }
+    if unobserved:
+        counts["unobserved_reason"] = (
+            f"no grading operation was recorded by the verifier ({_verifying_servers(collected)})"
+        )
+    return counts
+
+
 def trial_health(
     decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
 ) -> tuple[bool | None, str]:
@@ -2917,6 +2971,13 @@ def trial_health(
             f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
             f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; {retried}"
             "actual model/tool and bound grading operations cover every identity and repeat",
+        )
+    observed = trial_counts(decision, collected)
+    if observed is not None and observed["unobserved"]:
+        return None, (
+            f"trial: UNOBSERVED {observed['unobserved']} of {trials} expected trials: "
+            f"{observed['unobserved_reason']}, so the run is unverified, not healthy; observed healthy "
+            f"{observed['observed_healthy']}, unhealthy {observed['unhealthy']}{detail}"
         )
     return None, (
         f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "
@@ -3017,6 +3078,7 @@ def gate_summary_from_collected(
         health_reasons=health_reasons,
     )
     task["criteria"] = criteria.report()
+    task["trial_counts"] = trial_counts(decision, collected)
     judge_recovery: dict[str, int] = {}
     _observed_trial_operations(decision, collected, judge_recovery=judge_recovery, grading_failures=[])
     task["observed_grading_recovery"] = judge_recovery or None
