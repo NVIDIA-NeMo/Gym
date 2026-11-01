@@ -17,6 +17,12 @@ import base64
 import re
 import shlex
 
+from nemo_gym.core.failure_kinds import DRIVER_INSTALL_FAILED
+
+
+# The driver step's environment names the file, <job dir>/.gym_driver_failure.<allocation>, where a driver failure
+# that the next segment would repeat leaves its registered kind (see the guard in resume_script.py).
+DRIVER_FAILURE_ENV = "GYM_DRIVER_FAILURE_FILE"
 
 _RAY_PRELUDE = """\
 # Resolve the head node IP for multi-node vLLM services (spanning nodes via Ray).
@@ -202,6 +208,7 @@ def render_driver_entrypoint(
     *,
     extras: tuple[str, ...] = (),
     cleanup: bool = False,
+    record_install_failure: bool = False,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -217,7 +224,18 @@ def render_driver_entrypoint(
     is where `telemetry` has to be installed for any server to have it. `ray` is
     always added: `gym` needs Ray to start a server that declares `ray_enabled = True`,
     and an extra the checkout does not define only makes uv warn.
+
+    `record_install_failure` writes `driver_install_failed` to the file named by `$GYM_DRIVER_FAILURE_FILE` when
+    the install exits with a failure status (1 to 128; a signal is not an install failure), for the guard of the
+    next segment. It replaces the EXIT trap, so it cannot be combined with `cleanup`.
     """
+    if record_install_failure and cleanup:
+        raise ValueError("record_install_failure and cleanup both need the EXIT trap")
+    on_exit = (
+        f'_gym_rc=$?; if (( _gym_rc > 0 && _gym_rc <= 128 )) && [[ -n "${{{DRIVER_FAILURE_ENV}:-}}" ]]; then '
+        f'echo {DRIVER_INSTALL_FAILED} > "${DRIVER_FAILURE_ENV}"; fi'
+    )
+    record_failure = [f"trap {shlex.quote(on_exit)} EXIT"] if record_install_failure else []
     preamble: list[str] = []
     # Double quotes: the whole preamble ends up inside a single-quoted `bash -c` block.
     install_target = f'".[{",".join((*extras, "ray"))}]"'
@@ -229,6 +247,7 @@ def render_driver_entrypoint(
         # jsonl_fpath resolve against cwd; the driver's output path is absolute,
         # so nothing depends on the clone being reachable afterwards.
         preamble += [
+            *record_failure,
             "curl -LsSf https://astral.sh/uv/install.sh | sh",
             # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
             # the directory is already on PATH, and the file only does this export anyway.
@@ -244,6 +263,7 @@ def render_driver_entrypoint(
             "uv venv --seed .venv",
             "source .venv/bin/activate",
             f"uv pip install -e {install_target}",
+            *(["trap - EXIT"] if record_failure else []),
         ]
 
     if prepare_cmd:

@@ -78,7 +78,7 @@ from nemo_gym.config.global_config import (
     _find_open_port_using_range,
     get_global_config_dict,
 )
-from nemo_gym.core.failure_kinds import SERVER_START_FAILED
+from nemo_gym.core.failure_kinds import SERVER_SPINUP_TIMEOUT, SERVER_START_FAILED
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -522,6 +522,8 @@ class TestConfig(RunConfig):
 
 class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
+
+    failure_kind = SERVER_SPINUP_TIMEOUT
 
 
 class ServerStartFailedError(RuntimeError):

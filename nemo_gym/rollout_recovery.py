@@ -40,6 +40,7 @@ from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.core.failure_kinds import COLLECTION_RESUME_REFUSED
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
@@ -808,6 +809,12 @@ class RunManifest(BaseModel):
         )
 
 
+class ResumeRefusedError(ConfigError):
+    """Saved rollouts whose identity does not verify against the current run are not resumed."""
+
+    failure_kind = COLLECTION_RESUME_REFUSED
+
+
 def validate_resume(
     path: Path,
     current: RunManifest | None,
@@ -883,7 +890,7 @@ def validate_resume(
             return saved
         problem = "Cannot resume with incompatible " + ", ".join(mismatches) + "."
     if not allow_unsafe:
-        raise ConfigError(problem + " Start a fresh run or explicitly set allow_unsafe_resume=true.")
+        raise ResumeRefusedError(problem + " Start a fresh run or explicitly set allow_unsafe_resume=true.")
     warnings.warn(problem + " Continuing because allow_unsafe_resume=true; saved inputs will be reused.", stacklevel=2)
     return saved.model_copy(update={"identity_overridden": True}) if saved is not None else None
 

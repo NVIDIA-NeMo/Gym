@@ -128,6 +128,14 @@ SERVER_START_FAILED = "server_start_failed"
 PERSISTENCE_FAILED = "persistence_failed"
 COHORT_INCOMPLETE = "cohort_incomplete"
 
+# --- run startup: before rollout collection runs anything ------------------------------------ #
+# The server supervisor waited longer than ``server_spinup_timeout_seconds`` for the Gym servers to become ready.
+SERVER_SPINUP_TIMEOUT = "server_spinup_timeout"
+# The driver step of an orchestrated job could not install Gym (the uv installer, the checkout or the package install).
+DRIVER_INSTALL_FAILED = "driver_install_failed"
+# Collection refused to resume saved rollouts whose input and configuration identity does not verify.
+COLLECTION_RESUME_REFUSED = "collection_resume_refused"
+
 # --- producer labels older than the layer-prefix rule ------------------------------------------ #
 # Shipped producers write these today: the Harbor agent's failed trial, and the terminal-bench sidecar class of an
 # agent or sandbox failure. They are registered so saved rows have an owner; new producers use a prefixed name.
@@ -169,6 +177,9 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         SERVER_START_FAILED,
         PERSISTENCE_FAILED,
         COHORT_INCOMPLETE,
+        SERVER_SPINUP_TIMEOUT,
+        DRIVER_INSTALL_FAILED,
+        COLLECTION_RESUME_REFUSED,
         AGENT_ROUTE_FAILED,
         HARNESS_TERMINATION_UNCONFIRMED,
         EPISODE_FAILED,

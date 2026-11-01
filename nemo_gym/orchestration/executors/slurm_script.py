@@ -50,12 +50,14 @@ from nemo_gym.orchestration.executors.otel import (
     vllm_traces_flag,
 )
 from nemo_gym.orchestration.executors.resume_script import (
+    DRIVER_FAILURE_NAME,
     KEEP_BUDGET_ENV,
     RESUBMIT_ENV,
     _walltime_to_seconds,
     render_resume_prologue,
 )
 from nemo_gym.orchestration.executors.script_templates import (
+    DRIVER_FAILURE_ENV,
     ENSURE_RAY_INSTALLED,
     bash_var,
     escape_for_single_quoted_block,
@@ -1147,6 +1149,7 @@ def build_sbatch_script(
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
+        record_install_failure=resume is not None,
         extras=tuple(
             dict.fromkeys(
                 ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
@@ -1158,6 +1161,12 @@ def build_sbatch_script(
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
+    # Where this allocation's driver leaves the kind of a failure the next segment would repeat (see resume_script).
+    failure_file = (
+        f'{DRIVER_FAILURE_ENV}={shlex.quote(str(remote_bench_dir / DRIVER_FAILURE_NAME))}."$SLURM_JOB_ID" '
+        if resume
+        else ""
+    )
     driver_node_flags = (
         f' --nodelist="${{gym_nodes[{driver_node}]}}" --nodes=1 --ntasks=1' if driver_node is not None else ""
     )
@@ -1173,7 +1182,7 @@ def build_sbatch_script(
     driver_mounts = [*config.driver.mounts, f"{remote_bench_dir}:{remote_bench_dir}"]
     driver_mounts_flag = f" --container-mounts={','.join(shlex.quote(m) for m in driver_mounts)}"
     driver_srun = (
-        f"{driver_env_prefix}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
+        f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
         f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
     )

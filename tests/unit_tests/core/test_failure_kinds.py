@@ -54,6 +54,8 @@ class TestNamingConvention:
             "collection_",
             # Gym's server supervisor, which starts every server of a run.
             "server_",
+            # The driver step of an orchestrated job, before collection runs anything.
+            "driver_",
         )
         lifecycle = {"cancelled", "kill_shaped", "shutdown"}
         # Registered for saved rows of shipped producers; the rule binds every name added after them.

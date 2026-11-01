@@ -44,7 +44,7 @@ What the next job does with the previous job's state:
 | `CANCELLED...` | Stops the chain. |
 | `TIMEOUT` | Continues the planned allocation segments within the remaining `max_walltime`. A segment that ended before the task inventory was written stops the chain: nothing can be resumed, and the stop names the fresh-restart command. This scheduler state does not classify a model response timeout. |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Resumes only with remaining retry and walltime budgets; records one admitted retry before work. |
-| `FAILED`, `OUT_OF_MEMORY`, `DEADLINE` | Preserves known elapsed time and stops. These states alone do not establish a retryable infrastructure cause. |
+| `FAILED`, `OUT_OF_MEMORY`, `DEADLINE` | Preserves known elapsed time and stops. These states alone do not establish a retryable infrastructure cause. A driver that failed with `server_spinup_timeout`, `driver_install_failed` or `collection_resume_refused` stops the chain at once, before saved state is read, and the stop names that kind. |
 | unknown, malformed or nonterminal accounting | Stops without dispatching more work. |
 
 Preemption and node failure count against `max_retries`; `max_retries: 0` admits no retry after either. Scheduler allocation timeouts retain the planned-segment behavior, bounded by `max_walltime`. Unknown elapsed time cannot grant a fresh allowance. A generic `FAILED` state can represent invalid configuration or an application failure; the chain never classifies it as infrastructure failure from its exit code or log text. Saved-evidence recovery remains subject to the checks below.
@@ -61,6 +61,7 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
 | `.gym_infra_retries` | Count of infrastructure retries so far. |
 | `.gym_followup_queued.<job ID>` | The observed successor job ID, or an unresolved submission claim. An unresolved claim cannot authorize another submission. |
+| `.gym_driver_failure.<job ID>` | The failure kind that job's driver left when it failed in a way the next job would repeat. |
 
 ## Recover from saved evidence
 

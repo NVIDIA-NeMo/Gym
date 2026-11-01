@@ -25,7 +25,16 @@ Slurm cancels it on its own -- the chain needs no explicit "we're done" step
 on the success path.
 """
 
+import logging
+import os
+from pathlib import Path
+
+from nemo_gym.core.failure_kinds import COLLECTION_RESUME_REFUSED, DRIVER_INSTALL_FAILED, SERVER_SPINUP_TIMEOUT
 from nemo_gym.orchestration.api import ResumeConfig
+from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
+
+
+logger = logging.getLogger(__name__)
 
 
 # `_stage` in slurm.py always writes this benchmark's script to exactly this
@@ -67,6 +76,18 @@ ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
 # Why the chain ends after a segment that timed out before Gym wrote the task inventory.
 PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
+# Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
+DRIVER_FAILURE_NAME = ".gym_driver_failure"
+SPINUP_TIMEOUT_REASON = (
+    f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
+    "the chain does not retry it; raise the limit"
+)
+RESUME_REFUSED_REASON = (
+    f"{COLLECTION_RESUME_REFUSED}: the saved rollouts do not verify against this run's inputs and configuration; "
+    "the chain does not retry it; start a fresh run or set allow_unsafe_resume=true"
+)
+# The installer's first error line (else its last line) is cut to this many characters.
+INSTALL_ERROR_MAX_CHARS = 200
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -245,6 +266,23 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _gym_stop_accounting_unknown "Previous job elapsed accounting is unknown or malformed."
     _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed + _gym_sentinel_debit))
     echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
+    # A driver that failed before collection ran anything left its kind; the next segment would fail the same way.
+    _gym_failure_kind=""
+    _gym_failure_file="$OUTPUT_DIR/{driver_failure_name}.$_prev_slurm_job_id"
+    [[ ! -e "$_gym_failure_file" ]] || _gym_failure_kind=$(head -n 1 "$_gym_failure_file") || _gym_failure_kind=""
+    case "$_gym_failure_kind" in
+        {server_spinup_timeout})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {spinup_timeout_reason}" ;;
+        {driver_install_failed})
+            # The install ran before Gym, so its output is all the driver log holds.
+            _gym_driver_log="$OUTPUT_DIR/logs/driver-$_prev_slurm_job_id.log"
+            _gym_install_error=$(grep -m 1 -iE 'error|fatal' "$_gym_driver_log" 2>/dev/null || tail -n 1 "$_gym_driver_log" 2>/dev/null)
+            _gym_install_error=$(printf '%s' "$_gym_install_error" | tr -d '\\000-\\037')
+            [[ -n "$_gym_install_error" ]] || _gym_install_error="the install printed nothing"
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {driver_install_failed}: ${{_gym_install_error:0:{install_error_max_chars}}}; the chain does not retry it; see logs/driver-$_prev_slurm_job_id.log" ;;
+        {collection_resume_refused})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {resume_refused_reason}" ;;
+    esac
     # A segment that timed out before Gym wrote the task inventory saved nothing to resume, and the next one would
     # repeat the same startup under the same walltime: the chain ends and names the fresh restart instead.
     if [[ "$_prev_state" == TIMEOUT && ! -e "$OUTPUT_DIR/artifacts/rollouts_materialized_inputs.jsonl" ]]; then
@@ -468,4 +506,27 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         pre_inventory_reason=PRE_INVENTORY_REASON,
         # The job dir is <output_path>/<gym_job_id>/<benchmark>: the command names both from the directory it runs in.
         fresh_restart_command=fresh_restart_command("${_gym_run_dir##*/}", "${OUTPUT_DIR##*/}"),
+        driver_failure_name=DRIVER_FAILURE_NAME,
+        server_spinup_timeout=SERVER_SPINUP_TIMEOUT,
+        spinup_timeout_reason=SPINUP_TIMEOUT_REASON,
+        driver_install_failed=DRIVER_INSTALL_FAILED,
+        install_error_max_chars=INSTALL_ERROR_MAX_CHARS,
+        collection_resume_refused=COLLECTION_RESUME_REFUSED,
+        resume_refused_reason=RESUME_REFUSED_REASON,
     )
+
+
+def record_failure_kind(error: BaseException) -> None:
+    """Leave the registered kind ``error`` carries in the failure file the driver step names, for the next guard.
+
+    The driver step of a resumable job names the file in ``DRIVER_FAILURE_ENV``; elsewhere this does nothing.
+    """
+    kind = getattr(error, "failure_kind", None)
+    path = os.environ.get(DRIVER_FAILURE_ENV)
+    if not isinstance(kind, str) or not path:
+        return
+    try:
+        Path(path).write_text(kind + "\n")
+    except OSError as write_error:
+        # The next segment then reads the saved state as it would without the kind.
+        logger.warning("Cannot record failure kind %s in %s: %s", kind, path, write_error)

@@ -21,10 +21,16 @@ import hashlib
 import json
 import subprocess
 import sys
+from pathlib import Path
 
 import pytest
 
-from nemo_gym.orchestration.api import ResumeConfig
+from nemo_gym.cli.env import ServerSpinupTimeoutError
+from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
+from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
@@ -33,7 +39,7 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
-from nemo_gym.rollout_recovery import RunManifest
+from nemo_gym.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
@@ -329,6 +335,140 @@ def test_a_preemption_before_the_task_inventory_still_spends_an_infra_retry(tmp_
     assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
     assert (job / ".gym_infra_retries").read_text() == "1\n"
     assert not (job / ".gym_chain_incomplete").exists()
+
+
+# A saved-state reader that would continue the chain: only the driver's failure kind can stop it before.
+_ADMISSION_THAT_CONTINUES = "touch admission_ran; echo __GYM_CONTINUATION:retry"
+_INSTALL_LOG = (
+    "Cloning into '/tmp/gym-install-x/gym'...\n"
+    "fatal: unable to access 'https://example.invalid/gym.git/': Could not resolve host: example.invalid\n"
+    "error: No pyproject.toml found in the current directory\n"
+)
+_DRIVER_FAILURE_STOPS = {
+    "server_spinup_timeout": (
+        "Previous job 100 ended FAILED: server_spinup_timeout: the Gym servers did not become ready within "
+        "server_spinup_timeout_seconds; the chain does not retry it; raise the limit"
+    ),
+    "driver_install_failed": (
+        "Previous job 100 ended FAILED: driver_install_failed: fatal: unable to access "
+        "'https://example.invalid/gym.git/': Could not resolve host: example.invalid; the chain does not retry it; "
+        "see logs/driver-100.log"
+    ),
+    "collection_resume_refused": (
+        "Previous job 100 ended FAILED: collection_resume_refused: the saved rollouts do not verify against this "
+        "run's inputs and configuration; the chain does not retry it; start a fresh run or set "
+        "allow_unsafe_resume=true"
+    ),
+}
+
+
+@pytest.mark.parametrize("kind", sorted(_DRIVER_FAILURE_STOPS))
+def test_a_driver_failure_the_next_segment_would_repeat_ends_the_chain_at_once(tmp_path, kind):
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "logs").mkdir(parents=True)
+    (job / "logs" / "driver-100.log").write_text(_INSTALL_LOG)
+    (job / ".gym_driver_failure.100").write_text(kind + "\n")
+    result = _run_prologue(
+        job, ResumeConfig(max_retries=2), "FAILED", elapsed="300", admission_command=_ADMISSION_THAT_CONTINUES
+    )
+    stop = _DRIVER_FAILURE_STOPS[kind]
+    assert (result.returncode, "REACHED_WORK" in result.stdout) == (1, False), result.stdout + result.stderr
+    assert stop in result.stdout
+    assert (job / ".gym_chain_incomplete").read_text() == stop + "\n"
+    # Saved state is not read, no retry is spent and no successor is queued; the elapsed time is kept.
+    assert not (job / "admission_ran").exists()
+    assert not (job / ".gym_infra_retries").exists()
+    assert not (job / "sbatch_calls").exists()
+    assert (job / ".gym_accumulated_walltime").read_text() == "300\n"
+
+
+def test_the_guard_reads_only_the_kind_its_previous_allocation_left(tmp_path):
+    """A kind an earlier allocation (99) left does not stop the chain after allocation 100."""
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    job.mkdir(parents=True)
+    (job / ".gym_driver_failure.99").write_text("collection_resume_refused\n")
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "FAILED", admission_command=_ADMISSION_THAT_CONTINUES)
+    assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert (job / "admission_ran").exists()
+
+
+def test_a_failed_install_leaves_its_kind_and_the_guard_names_its_error_line(tmp_path):
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "logs").mkdir(parents=True)
+    fake_bin = tmp_path / "fake-bin"
+    fake_bin.mkdir()
+    (fake_bin / "curl").write_text(
+        "#!/bin/bash\necho 'curl: (6) Could not resolve host: example.invalid' >&2\nexit 6\n"
+    )
+    (fake_bin / "curl").chmod(0o755)
+    entrypoint = render_driver_entrypoint("https://example.invalid/gym.git", "main", None, record_install_failure=True)
+    (tmp_path / "driver.sh").write_text(f"GYM_CMD=(true)\n{entrypoint}\n")
+    driver = subprocess.run(
+        ["bash", str(tmp_path / "driver.sh")],
+        env={
+            "PATH": f"{fake_bin}:/usr/bin:/bin",
+            "HOME": str(tmp_path),
+            "GYM_DRIVER_FAILURE_FILE": str(job / ".gym_driver_failure.100"),
+        },
+        capture_output=True,
+        text=True,
+    )
+    assert driver.returncode == 6, driver.stdout + driver.stderr
+    assert (job / ".gym_driver_failure.100").read_text() == "driver_install_failed\n"
+    # srun --output keeps both streams in the driver log. No line says error or fatal, so the last one is named.
+    (job / "logs" / "driver-100.log").write_text(driver.stdout + driver.stderr)
+    result = _run_prologue(
+        job, ResumeConfig(max_retries=2), "FAILED", exit_code="6:0", admission_command=_ADMISSION_THAT_CONTINUES
+    )
+    stop = (
+        "Previous job 100 ended FAILED: driver_install_failed: curl: (6) Could not resolve host: example.invalid; "
+        "the chain does not retry it; see logs/driver-100.log"
+    )
+    assert (job / ".gym_chain_incomplete").read_text() == stop + "\n", result.stdout + result.stderr
+    assert not (job / "admission_ran").exists()
+
+
+def test_a_resumable_driver_step_names_its_failure_file_and_traps_only_its_own_install():
+    config = SubmitConfig.model_validate(
+        {
+            "services": {"vllm_model": {"type": "vllm", "container": "vllm:latest", "model": "org/model"}},
+            "compute": {"cluster": {"type": "slurm", "account": "my-account", "hostname": "login.example.invalid"}},
+            "driver": {
+                "gym_install": {"repo": "https://example.invalid/gym.git", "ref": "main"},
+                "benchmarks": {"gsm8k": {"resumable": {"max_retries": 2}}},
+            },
+            "job": {"output_path": "/remote/jobs"},
+        }
+    )
+    compute = next(iter(config.compute.values()))
+    job_dir = Path("/remote/jobs/gym-job-x/gsm8k")
+    script = build_sbatch_script(config, "gsm8k", config.driver.benchmarks["gsm8k"], compute, job_dir)
+    driver_line = next(line for line in script.splitlines() if "--output=logs/driver-$SLURM_JOB_ID.log" in line)
+    assert (
+        'GYM_DRIVER_FAILURE_FILE=/remote/jobs/gym-job-x/gsm8k/.gym_driver_failure."$SLURM_JOB_ID" srun ' in driver_line
+    )
+    # The saved-state reader installs the same checkout; its own failure already stops the chain.
+    assert script.count("echo driver_install_failed") == 1
+
+
+@pytest.mark.parametrize("raised", ["spinup", "refusal", "other config error"])
+def test_the_driver_records_the_kind_of_a_failure_the_next_segment_would_repeat(tmp_path, monkeypatch, raised):
+    record = tmp_path / ".gym_driver_failure.100"
+    monkeypatch.setenv("GYM_DRIVER_FAILURE_FILE", str(record))
+
+    @exit_cleanly_on_config_error
+    def driver():
+        if raised == "spinup":
+            raise ServerSpinupTimeoutError("Timed out after 600s waiting for Gym servers to become ready")
+        if raised == "refusal":
+            # Saved rollouts without a run manifest: their identity cannot be verified.
+            validate_resume(tmp_path / "rollouts_manifest.json", None, tmp_path / "rollouts_materialized_inputs.jsonl")
+        raise ConfigError("config_paths is missing")
+
+    with pytest.raises(ServerSpinupTimeoutError if raised == "spinup" else SystemExit):
+        driver()
+    expected = {"spinup": "server_spinup_timeout\n", "refusal": "collection_resume_refused\n"}.get(raised)
+    assert (record.read_text() if record.exists() else None) == expected
 
 
 _REQUEUE_MARKER = (
