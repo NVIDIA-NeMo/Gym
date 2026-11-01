@@ -156,6 +156,9 @@ A harness merges only when it passes these checks. Put the evidence in the PR.
 | Real pairing | Each claimed pairing produces rewards on a real model and tasks; the agent closes before verification; cleanup runs. | `rollouts.jsonl`, failures sidecar, server logs |
 | TB 2.1 full evaluation | A new harness or upgrade claiming TB 2.1 support completes the [full evaluation](../../../fern/versions/latest/pages/agent-server/add-or-update-a-harness.mdx#terminal-bench-21-full-evaluation), at every capability level. | Full run artifacts, per-task results, aggregate score, coverage and failure counts; before/after results for upgrades. |
 | Health | Every `unhealthy` rollout has a stated cause in the PR: a harness limit, an infrastructure failure, or a bug that was fixed and rerun. Every `unobserved` count is explained by the capability level or a named missing input. | `quality_summary.json`, `gym eval health-check` |
+
+To run an evaluation with the harness as a submitted job on a cluster (submit, resume, recover, acceptance gates),
+follow the [gym-eval](../gym-eval/SKILL.md) skill.
 | Evidence | From the Observability level up, the saved rollouts pass the evidence check. At the Evaluation level they fail it by design: record the result and the gaps the close bundle declares. | `scripts/inspect_harness_conformance.py` |
 | Composition | A second pairing works through configuration alone. | Its run folder |
 | Pairing declared | Where a paired benchmark's Resources Server declares `allowed_agents`, the harness is in it, reviewed by the benchmark's owner. | Resources Server config diff |

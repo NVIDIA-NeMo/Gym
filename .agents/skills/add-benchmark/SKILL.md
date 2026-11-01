@@ -215,6 +215,9 @@ A benchmark merges only when it passes these checks. Put the evidence in the PR.
 | Health | Very few rollouts are unhealthy. | `gym eval run` writes `quality_summary.json` into the run folder. `gym eval health-check <run_dir>` reruns the checks. Read the counts: it does not fail the run for you. `unobserved` means Gym has no model-call record to judge by. It is not unhealthy. |
 | Evidence | Every rollout passes the `gym-p0/v1` evidence gate. Harness work only. | `python scripts/inspect_harness_conformance.py --bundle <run_dir>/rollouts.jsonl --output <dir>`. Exit 0 pass, 1 evidence failure, 2 checker error. |
 | Score | The score matches the reference score, inside the tolerance, on one current frontier model. | `gym eval compare` |
+
+To run the finished benchmark as a submitted evaluation on a cluster (submit, resume, recover, acceptance gates),
+follow the [gym-eval](../gym-eval/SKILL.md) skill.
 | Config | The resolved Gym config is saved with the result. | `resolved-config.yaml` is in the run folder. |
 
 Run on one benchmark and harness pair. Read the rollouts, not the exit code: an exit of 0, an empty failures file and a rising rollout count prove nothing. List every health check you ignore (`--health-check-ignore`) in the PR, with the reason.
