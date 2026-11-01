@@ -77,8 +77,20 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def holds_response(row: Mapping[str, Any]) -> bool:
+    """Whether the row keeps a full or partial response object, usable as an answer or not."""
+    return any(
+        isinstance(row.get(key), Mapping)
+        for key in ("response", "_ng_failure_response", "_ng_failure_partial_response")
+    )
+
+
 def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
-    """A selected route failure names no owned cause that permits running the agent again."""
+    """A selected route failure names no owned cause that permits running the agent again.
+
+    A request that was possibly delivered permits a fresh run only while the row keeps no full or partial
+    response: then no saved answer can be duplicated or replaced.
+    """
     if matches_failure_class(row, {"judge_failed", "judge_invalid"}):
         return True  # Verification recovery may reuse an answer; it never reruns the agent.
     record = row.get("_ng_failure_record")
@@ -86,12 +98,21 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
     not_sent = isinstance(record, Mapping) and (
         record.get("delivery") == "not_sent" or isinstance(failure, Mapping) and failure.get("stage") == "admission"
     )
-    if row.get("_ng_unrouted_run_error") is True and not not_sent:
+    possibly_delivered = (
+        isinstance(record, Mapping)
+        and record.get("source") == "collector"
+        and record.get("delivery") == "possibly_delivered"
+        and not not_sent
+    )
+    if (
+        row.get("_ng_unrouted_run_error") is True
+        and not not_sent
+        and not (possibly_delivered and not holds_response(row))
+    ):
         # An aborted collection retains this attempt as diagnostic history, not a replacement outcome.
         return True
-    if isinstance(record, Mapping) and record.get("source") == "collector":
-        if record.get("delivery") == "possibly_delivered" and not not_sent:
-            return True
+    if possibly_delivered and holds_response(row):
+        return True
     if row.get("_ng_failure_events_omitted"):
         # Missing causal evidence cannot authorize another agent execution.
         return True
