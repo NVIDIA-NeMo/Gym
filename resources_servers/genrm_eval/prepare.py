@@ -9,7 +9,7 @@ from pathlib import Path
 from tempfile import NamedTemporaryFile, TemporaryDirectory
 from typing import Any, TextIO
 
-from nemo_gym.base_resources_server import BaseRunRequest
+from nemo_gym.server_runtime import BaseRunRequest
 
 
 # Shared by benchmark preparation scripts to build Gym evaluation inputs.
@@ -54,7 +54,7 @@ def download_prepared_dataset(
     validate_metadata: Callable[[dict[str, Any]], None] | None = None,
 ) -> Path:
     """Fetch preprocessed Gym tasks from the private GitLab registry."""
-    from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig
+    from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
     from nemo_gym.gitlab_utils import download_jsonl_dataset
 
     output = Path(output_fpath)

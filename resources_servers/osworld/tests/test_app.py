@@ -7,7 +7,7 @@ from unittest.mock import AsyncMock, MagicMock
 
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.osworld.app import OSWorldResourcesServer
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 

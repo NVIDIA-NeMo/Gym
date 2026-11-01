@@ -145,6 +145,29 @@ def test_specs_keep_resource_units_and_task_deployment(tmp_path, monkeypatch, ag
         assert role.build_spec().metadata["nemo-gym.nvidia.com/resource-pool"] == pool
 
 
+@pytest.mark.parametrize("requests", ["limits", {"cpu": 1}, None])
+def test_min_disk_raises_the_limit_but_not_the_request(tmp_path, monkeypatch, requests):
+    options = {} if requests is None else {"resource_requests": requests}
+    config = {"sandbox_min_disk_gib": 100, "sandbox_provider_options": options}
+    env, *_ = make_environment(tmp_path, monkeypatch, config=config)
+    spec = env.build_spec()
+    assert (spec.resources.cpu, spec.resources.memory_mib, spec.resources.disk_gib) == (2, 4096, 100)
+    # "limits" would also reserve 100 GiB, so the request becomes the declared resources.
+    expected = {"cpu": 2, "memory_mib": 4096, "disk_gib": 15} if requests == "limits" else requests
+    assert spec.provider_options.get("resource_requests") == expected
+    assert env.config.sandbox_provider_options == options
+
+    # The verifier declares no storage, so it stays unlimited; larger declarations are kept.
+    assert Environment(env.task, env.config, "verify", tmp_path, verifier=True).build_spec().resources.disk_gib is None
+    large, *_ = make_environment(
+        tmp_path, monkeypatch, config=config, task_config={"environment": {"storage_mb": 200 * 1024}}
+    )
+    assert large.build_spec().resources.disk_gib == 200
+    assert large.build_spec().provider_options.get("resource_requests") == requests
+    unset, *_ = make_environment(tmp_path, monkeypatch, config={"sandbox_provider_options": options})
+    assert unset.build_spec().resources.disk_gib == 15
+
+
 @pytest.mark.parametrize("from_agent", [False, True])
 def test_resource_less_verifiers_can_inherit_agent_resources(tmp_path, monkeypatch, from_agent):
     env, *_ = make_environment(
@@ -340,6 +363,18 @@ async def test_failures_are_visible_and_preserve_cleanup_identities(tmp_path, mo
         assert env.cleanup_errors[0]["resources"][0]["sandbox_id"] == "owned-box"
     else:
         await env.stop()
+
+
+async def test_failed_stop_is_retried_and_a_successful_one_is_not(tmp_path, monkeypatch):
+    env, box, _, _ = make_environment(tmp_path, monkeypatch)
+    await env.start()
+    box.stop.side_effect = [RuntimeError("delete failed"), None]
+    with pytest.raises(RuntimeError, match="delete failed"):
+        await env.stop()
+    assert not env.closed
+    await env.stop()
+    await env.stop()
+    assert box.stop.await_count == 2 and env.closed
 
 
 async def test_readiness_success_and_failure(tmp_path, monkeypatch):

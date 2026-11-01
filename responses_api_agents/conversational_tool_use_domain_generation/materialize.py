@@ -26,7 +26,7 @@ from collections.abc import Iterable, Iterator
 from pathlib import Path
 from typing import Any, Literal
 
-from nemo_gym.global_config import (
+from nemo_gym.config import (
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     TASK_INDEX_KEY_NAME,

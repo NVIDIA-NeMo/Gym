@@ -11,7 +11,7 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.pi_agent.tests.test_sandbox import _pinned_pi_package
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
 

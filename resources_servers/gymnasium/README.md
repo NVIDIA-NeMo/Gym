@@ -10,7 +10,7 @@ from resources_servers.gymnasium import GymnasiumServer
 
 ```python
 from resources_servers.gymnasium import GymnasiumServer
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 
 class MyEnv(GymnasiumServer):
     async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:

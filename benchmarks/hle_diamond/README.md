@@ -22,6 +22,7 @@ of the `test` split and downloads it at run time. Nothing from the dataset is co
 | `hle_diamond/text` | 728 (no image) | `prompts/default.yaml` at rollout time | text-only policy models |
 | `hle_diamond/opencode`, `hle_diamond/pi` | 728 | `prompts/opencode.yaml` | sandboxed code tools, no search |
 | `hle_diamond/opencode_search`, `hle_diamond/pi_search` | 728 | `prompts/opencode.yaml` | sandboxed code tools plus Tavily search |
+| `hle_diamond/opencode_reference` | 728 | `prompts/opencode.yaml` | `opencode_search` on the reference sandbox image (upstream's Python 3.11.16 environment) under upstream's egress policy; needs the OpenSandbox provider (see Reference preset) |
 
 Two composable overrides live next to the presets and are not benchmarks (no dataset, not listed by
 `gym list benchmarks`): [`judge_openai.yaml`](judge_openai.yaml) (dedicated judge, see Scoring) and
@@ -39,7 +40,8 @@ turn (`input_text` parts only), so image questions cannot be sent through them. 
 run the 728 text rows, as `benchmarks/hle`'s presets do, and with-tools numbers from them cover
 728/1000 questions. The search presets are selectable with `--benchmark` but, exactly like
 `hle/opencode_search` and `hle/pi_search`, do not appear in `gym list benchmarks` because they extend
-the code-only presets without redeclaring the dataset.
+the code-only presets without redeclaring the dataset; `hle_diamond/opencode_reference` restates it
+(its header says why) and is listed.
 
 Dropped at prepare time: `rationale`, `author_name`, `canary`, `image_preview`, `rationale_image`.
 The `image` data URI appears only inside the materialized `input_image` block of the default set.
@@ -377,7 +379,9 @@ multipleChoice):
   egress) the agent can search and fetch from bash around it, and Tavily pre-filters at most 150 of
   the 220 excluded domains, the rest being enforced locally (Sandboxed agents (with tools), Search
   exclusions). A reproduction-grade with-tools run needs the OpenSandbox provider with
-  `network_access: model_and_tools`.
+  `network_access: model_and_tools`; `opencode_reference.yaml` requests exactly that and refuses the
+  Docker override unless the run is acknowledged as egress-unrestricted (Reference preset), but no
+  OpenSandbox run of it exists yet.
 - Gateway timeout: the LiteLLM gateway used for the pilot enforces a 360 s per-attempt limit
   (HTTP 408, `litellm.Timeout ... Timeout passed=360.0`) and the model server (`litellm_model`
   inherits `openai_model`'s retry layer) retries a 408 with a fresh generation, so an answer that
@@ -403,7 +407,7 @@ Commands that were run from the repository root with `hf_token`, `policy_base_ur
 ```bash
 gym eval prepare --benchmark hle_diamond        # Wrote 1000 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark.jsonl (272 with an image)
 gym eval prepare --benchmark hle_diamond/text   # Wrote 728 problems to benchmarks/hle_diamond/data/hle_diamond_benchmark_text.jsonl (skipped 272 image questions)
-gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text, hle_diamond/opencode, hle_diamond/pi
+gym list benchmarks | grep hle_diamond          # hle_diamond, hle_diamond/text, hle_diamond/opencode, hle_diamond/pi, hle_diamond/opencode_reference
 ```
 
 `cais/hle-diamond` is gated: request access on the dataset page and put the token in `env.yaml` as
@@ -521,6 +525,32 @@ gym eval run --benchmark hle_diamond/opencode --split benchmark --model-type lit
   `docker ps -a --filter label=nemo-gym.sandbox` after every run.
 - The first run builds per-server `uv` virtual environments and needs PyPI access from the host.
 - The search presets additionally need `TAVILY_API_KEY`.
+- `hle_diamond/opencode_reference` is refused by this override until the run is acknowledged as
+  egress-unrestricted: without `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted` the
+  agent's `network_access` resolves to a refusal string and the agent server stops at start with
+  `Input should be 'inherit', 'model_only' or 'model_and_tools' [... input_value='refused - ...']`
+  (verified 2026-10-26; no rollout was written). With it the reference agent runs on local Docker
+  with `network_access: inherit`, the reference image and a note that says egress is not restricted,
+  so the pilot is labelled by construction. Set `OPENCODE_REFERENCE_SANDBOX_IMAGE` (default
+  `gym-opencode-hle-reference:local`), not `OPENCODE_SANDBOX_IMAGE`:
+
+  ```bash
+  export HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted
+  export OPENCODE_REFERENCE_SANDBOX_IMAGE=gym-opencode-hle-reference:local
+  gym eval run --benchmark hle_diamond/opencode_reference --split benchmark --model-type litellm_model \
+      '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' \
+      --num-repeats 1 --limit 5 --concurrency 5 \
+      ++policy_model_name=<gateway model id> \
+      ++responses_create_params.reasoning.effort=high \
+      ++observability_enabled=true ++model_call_capture_dir=/abs/path/model-calls \
+      ++route_failures_to_sidecar=true \
+      ++use_absolute_ip=false ++sandbox_docker.docker.create.network=host \
+      --output results/hle_diamond_opencode_reference_pilot.jsonl
+  ```
+
+  The last override pair is the host-networking form described above, written as overrides instead
+  of editing the file (`use_absolute_ip=false` is correct only because the container shares the
+  host's network namespace). Reference preset below records the run.
 
 ### Reading sandboxed results
 
@@ -653,6 +683,7 @@ support a **comparison, not a reproduction**, of that column:
 - Sandbox: the `gym-*-science` images carry Python 3.13 with SageMath and Lean/Mathlib preinstalled,
   and the environment note tells the model so; upstream requires Python 3.11.16 with pinned
   requirements and forbids specialist solvers, chess engines, OCR and other task libraries.
+  `opencode_reference.yaml` closes this one departure with the reference image (Reference preset).
 - Web tools: Tavily search and page tools with up to 200,000 cached page characters and 2,000-word
   scrolling, instead of exactly `web_search` (at most 20 results) and `web_fetch` (Markdown capped
   at 60,000 characters, no media).
@@ -674,6 +705,54 @@ with-tools result; the same run exposed the search-engine result-page gap that t
 close. No search-preset number from the committed code exists yet. Before reading any statistic from
 the next pilot, confirm in the Tavily server log that `web_search` returns results: one cap warning
 at start and no `Tavily HTTP 400`.
+
+### Reference preset
+
+`opencode_reference.yaml` is `opencode_search.yaml` with two of the departures above removed, so
+that the remaining ones can be measured one at a time:
+
+- Sandbox: the
+  [reference image](../../responses_api_agents/opencode_sandboxed_agent/hle_reference_image/README.md)
+  (`OPENCODE_REFERENCE_SANDBOX_IMAGE`, default `gym-opencode-hle-reference:local`) carries upstream's
+  Python 3.11.16, a shell, the twelve packages of upstream's `docs/requirements-tools.txt` (copied
+  verbatim, SHA-256 pinned in `tests/test_hle_reference_image.py`) and the same OpenCode 1.17.11 install
+  as the science image, nothing else; the environment note names exactly those packages and no
+  SageMath, Lean or `/opt/science/README.md`.
+- Egress: `network_access: model_and_tools`, upstream's "no direct internet access" (section 1 of
+  `docs/evaluation-with-tools.md`). Only the OpenSandbox provider enforces it, and the agent fails
+  closed on any other; the preset renames the agent (`hle_diamond_opencode_reference_agent`) so that
+  `sandbox_docker_local.yaml` cannot lift the policy silently and refuses unless the run is
+  acknowledged with `HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted` (Sandboxed presets on
+  a local Docker host).
+
+What stays, and belongs next to every number: the OpenCode harness and its system prompt, the Tavily
+search and page tools in place of exactly `web_search` and `web_fetch` (the preset will switch to the
+`hle_web_tools` server when it exists; the note names neither), the weaker leakage policy (Search
+exclusions), 728/1000 text rows, and the judge alias. The preset restates the dataset block because
+Gym's `_inherit_from` is a single-step rename (a chained `_inherit_from` leaves the agent without an
+entrypoint), which is also why it appears in `gym list benchmarks`; a test holds its agent equal to
+`opencode_search`'s apart from the image and the note.
+
+**OpenSandbox gate: open.** No OpenSandbox run of this preset or image exists; the only run is the
+acknowledged local Docker pilot below, whose egress was not restricted. The reference image has been
+verified offline (`--network=none`) but not under a provider network policy.
+
+**Acknowledged Docker pilot, 2026-10-26** (the command of Sandboxed presets on a local Docker host
+with `--model-type openai_model`, GPT-6 Astra `azure/openai/gpt-6-astra`, judge `azure/openai/o3-mini`,
+5 text rows, concurrency 5, host networking; label: "local Docker; egress not restricted; comparison
+infrastructure only"). Exit 0, 242 s wall, 0 sidecar rows, 0 containers left. OpenCode started inside
+the 785 MB reference image and finished on 5/5 rows (`opencode_finished` 5/5, `opencode_failed` 0/5,
+exit code 0, export found); 5/5 scored 1.0 (all five rows were `reasoning` rows). Tool use: 29 calls
+in all (per row 2, 2, 9, 2, 14): 10 `bash` calls, every one running `python` against the pinned stack
+(SymPy, NumPy, SciPy), plus `tavily_web_search` and `tavily_find_in_page`; the Tavily log carried the
+one 70-domain cap warning and no `Tavily HTTP 400`. Every captured OpenCode request carried
+`reasoning_effort: high` (5/5 capture files). No image-related failure: no missing binary, no
+`ModuleNotFoundError`, no download attempt by OpenCode's own tools. The same run shows why the gate
+matters: with egress unrestricted, one row fetched SageMath source from `raw.githubusercontent.com`
+and called `sagecell.sagemath.org` from `bash` with `requests` (3 such commands), reaching a host the
+exclusion list blocks for the Tavily tools and a service the reference sandbox must not have; under
+`network_access: model_and_tools` on OpenSandbox those calls fail. The same command without
+`HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS` stopped at agent start with the refusal (no rollout written).
 
 See the shared
 [OpenCode and Pi setup guide](../../responses_api_agents/opencode_sandboxed_agent/README.md#offline-scientific-evaluation-with-opencode-or-pi)
@@ -808,9 +887,11 @@ new `serp_url_patterns` regex is reported as dropped until `SERP_PATTERN_SUBSTRI
 ## Tests
 
 ```bash
-pytest tests/unit_tests/test_hle_diamond.py tests/unit_tests/test_hle_diamond_search_exclusions.py \
+pytest resources_servers/equivalence_llm_judge/tests/test_hle_diamond.py \
+    resources_servers/tavily_search/tests/test_hle_diamond_search_exclusions.py \
     resources_servers/equivalence_llm_judge/tests/test_app.py \
-    resources_servers/tavily_search/tests/test_search_policy.py
+    resources_servers/tavily_search/tests/test_search_policy.py \
+    responses_api_agents/opencode_sandboxed_agent/tests/test_hle_reference_image.py
 ```
 
 ## Licensing

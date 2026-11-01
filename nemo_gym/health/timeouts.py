@@ -106,7 +106,7 @@ LEGACY_TIMEOUT_SIGNALS = (
     LegacySignal(
         "_ng_failure_message",
         "Episode timed out",
-        "nemo_gym/base_environment_server.py",
+        "nemo_gym/server_runtime/base_environment_server.py",
         'failure_reason="Episode timed out"',
     ),
     LegacySignal("agent_timed_out", None, "responses_api_agents/codex_agent/app.py", '"agent_timed_out": timed_out}'),
@@ -474,7 +474,7 @@ def export_run_health_timeouts(health: "HealthCheckResult") -> None:
     in reading the section or in exporting it, is logged and never stops the run.
     """
     # Imported here: health-check workers load this module and need none of the exporters.
-    from nemo_gym.exporters import export_metrics
+    from nemo_gym.artifacts.exporters import export_metrics
 
     try:
         export_metrics(export_keys(health.summary["run"]["stats"]["timeouts"]))
