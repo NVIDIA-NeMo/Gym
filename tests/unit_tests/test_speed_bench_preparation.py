@@ -4,9 +4,7 @@
 
 import importlib
 import json
-import sys
 from pathlib import Path
-from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -20,7 +18,7 @@ from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParse
 
 
 PREPARE = importlib.import_module("benchmarks.speed-bench.prepare")
-COMMON = importlib.import_module("_prepare_common")
+COMMON = PREPARE
 ROOT = Path(__file__).resolve().parents[2]
 SPLITS = COMMON.ALL_CONFIGS
 
@@ -76,7 +74,7 @@ def test_prepare_sources_and_repeat_overwrite(monkeypatch, tmp_path, split, repo
     monkeypatch.setattr("datasets.load_dataset", loader)
     monkeypatch.setattr(COMMON, "DATA_DIR", tmp_path)
     resolver = Mock(side_effect=AssertionError("resolved inputs must not resolve external sources"))
-    monkeypatch.setitem(sys.modules, "_resolve_external_data", SimpleNamespace(_resolve_external_data=resolver))
+    monkeypatch.setattr(COMMON, "_resolve_external_data", resolver)
     kwargs = {} if repo == COMMON.DEFAULT_DATASET_REPO else {"dataset_repo": repo, "dataset_revision": revision}
     path = PREPARE.prepare(split, **kwargs)
     assert path == tmp_path / f"speed_bench_{split}_benchmark.jsonl"
@@ -104,7 +102,7 @@ def test_placeholders_use_local_resolver_and_must_be_resolved(monkeypatch, tmp_p
     monkeypatch.setattr("datasets.load_dataset", Mock(return_value=unresolved))
     monkeypatch.setattr(COMMON, "DATA_DIR", tmp_path)
     resolve = Mock(return_value=Dataset.from_list(source_rows("qualitative")))
-    monkeypatch.setitem(sys.modules, "_resolve_external_data", SimpleNamespace(_resolve_external_data=resolve))
+    monkeypatch.setattr(COMMON, "_resolve_external_data", resolve)
     PREPARE.prepare()
     resolve.assert_called_once_with(unresolved, "qualitative")
     resolve.return_value = unresolved
@@ -115,7 +113,7 @@ def test_placeholders_use_local_resolver_and_must_be_resolved(monkeypatch, tmp_p
 @pytest.mark.parametrize("turns", [[], [""], "not a list"])
 def test_invalid_turns_are_rejected(turns):
     with pytest.raises(ValueError, match="nonempty text turns"):
-        COMMON._row_to_gym({"turns": turns}, "qualitative")
+        COMMON._convert_row({"turns": turns}, "qualitative")
 
 
 def test_unknown_split_fails_before_download(monkeypatch):
