@@ -43,6 +43,23 @@ On first startup each SQLite database is written to Parquet under
 `db_id`. Requires a JDK 17 plus `pyspark`, `sqlglot`, `pandas` and `pyarrow` (see
 `benchmarks/birdbench/README.md`); the default SQLite dialect needs none of them.
 
+## PostgreSQL dialect (experimental)
+
+Set `dialect: postgres` for a model that writes PostgreSQL. Its query runs on a PostgreSQL
+server that holds one schema per `db_id`, while the BIRD gold query still runs, untouched,
+on the original SQLite database; only the two result sets are compared, as for Spark. No
+gold SQL is transpiled. The model's query runs as a single prepared statement (so
+`COMMIT; ...` cannot leave the transaction) in a read-only transaction as a read-only role,
+with a server-side `statement_timeout`. A connection or server failure is scored as
+`unknown_error`, not as the model's mistake.
+
+The grader connects with `postgres_dsn`, a read-only role. When `postgres_admin_dsn` is set,
+startup loads any missing `db_id` from the SQLite files (Spark's column typing; text columns
+use the `"C"` collation so ordering matches SQLite) and creates that role from
+`postgres_dsn`'s user and password. Without it, startup only checks that the data is
+loaded. Requires `psycopg` and `pandas` (see `benchmarks/birdbench/README.md`); the default
+SQLite dialect needs neither.
+
 ## Example usage
 
 ### Running servers

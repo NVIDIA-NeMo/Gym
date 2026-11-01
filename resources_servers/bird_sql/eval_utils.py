@@ -189,6 +189,74 @@ async def execute_spark_async(
             return None
 
 
+# SQLSTATE classes that mean the server or connection failed, not the query: connection exception, insufficient
+# resources, operator intervention (except 57014, a statement timeout), system error, internal error.
+_POSTGRES_INFRA_SQLSTATE_CLASSES = ("08", "53", "57", "58", "XX")
+
+
+async def _run_postgres(dsn: str, db_id: str, sql: str, timeout_s: float) -> Optional[ResultSet]:
+    """Run one query as a single prepared statement in a read-only transaction with ``search_path`` set to ``db_id``.
+
+    A prepared statement cannot hold more than one command, so ``COMMIT; ...`` cannot leave the read-only
+    transaction. The server's ``statement_timeout`` raises ``TimeoutError``; any other error caused by the query
+    returns ``None``. Connection and server failures raise, so they are not scored as the model's mistake.
+
+    Parallel query is off: a parallel float ``SUM`` adds in a different order on every run (BIRD dev id 1476 gave 10
+    different values in 10 runs), which would make the same answer pass or fail at random. It also keeps one rollout
+    from taking several cores while hundreds run at once.
+    """
+    import psycopg
+
+    conn = await psycopg.AsyncConnection.connect(dsn)
+    try:
+        await conn.set_read_only(True)
+        async with conn.transaction():
+            await conn.execute(
+                "SELECT set_config('statement_timeout', %s, true), set_config('search_path', %s, true),"
+                " set_config('max_parallel_workers_per_gather', '0', true)",
+                (f"{int(timeout_s * 1000)}ms", psycopg.sql.Identifier(db_id).as_string(conn)),
+            )
+            cur = await conn.execute(sql, prepare=True)
+            if cur.description is None:  # e.g. SET: no result set to compare
+                return None
+            return normalize_rows(await cur.fetchall())
+    except psycopg.errors.QueryCanceled:
+        raise TimeoutError(f"PostgreSQL query exceeded {timeout_s}s") from None
+    except psycopg.Error as e:
+        if e.sqlstate is None or e.sqlstate[:2] in _POSTGRES_INFRA_SQLSTATE_CLASSES:
+            raise
+        return None
+    except asyncio.CancelledError:
+        await conn.cancel_safe()
+        raise
+    finally:
+        await conn.close()
+
+
+async def execute_postgres_async(
+    dsn: str,
+    db_id: str,
+    sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 30.0,
+    raise_on_timeout: bool = False,
+) -> Optional[ResultSet]:
+    """Execute SQL on PostgreSQL schema ``db_id``, bounded by semaphore.
+
+    Returns ``None`` on timeout (unless ``raise_on_timeout`` is True) or query error. ``timeout_s`` is enforced by the
+    server (``statement_timeout``); the outer ``wait_for`` is a backstop that also cancels the server-side query.
+    """
+    async with semaphore:
+        try:
+            return await asyncio.wait_for(
+                _run_postgres(dsn, db_id, sql, timeout_s), timeout=timeout_s + _OUTER_TIMEOUT_BUFFER_S
+            )
+        except (asyncio.TimeoutError, TimeoutError):
+            if raise_on_timeout:
+                raise asyncio.TimeoutError from None
+            return None
+
+
 Runner = Callable[[str], Awaitable[Optional[ResultSet]]]
 
 
@@ -247,5 +315,29 @@ async def execute_and_compare_spark(
 
     async def run_pred(sql: str) -> Optional[ResultSet]:
         return await execute_spark_async(session, sql, semaphore, timeout_s, raise_on_timeout=True)
+
+    return await _compare(run_gold, run_pred, gold_sql, pred_sql)
+
+
+async def execute_and_compare_postgres(
+    db_path: Path,
+    dsn: str,
+    db_id: str,
+    gold_sql: str,
+    pred_sql: str,
+    semaphore: asyncio.Semaphore,
+    timeout_s: float = 30.0,
+) -> tuple[bool, Optional[ResultSet], Optional[ResultSet], Optional[str]]:
+    """Run the BIRD gold SQL on SQLite and the model's PostgreSQL on PostgreSQL, then compare. Same return as above.
+
+    No gold transpilation: the gold stays the original SQLite query and only its result set is compared.
+    """
+
+    async def run_gold(sql: str) -> Optional[ResultSet]:
+        rows = await execute_sqlite_async(db_path, sql, semaphore, timeout_s, raise_on_timeout=True)
+        return None if rows is None else normalize_rows(rows)
+
+    async def run_pred(sql: str) -> Optional[ResultSet]:
+        return await execute_postgres_async(dsn, db_id, sql, semaphore, timeout_s, raise_on_timeout=True)
 
     return await _compare(run_gold, run_pred, gold_sql, pred_sql)
