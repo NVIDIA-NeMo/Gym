@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import getpass
 import hashlib
 import json
 import math
@@ -26,6 +27,7 @@ from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.orchestration.recovery import (
     GateCriteria,
+    OperatorBudget,
     RecoveryAction,
     RecoveryOutcome,
     RecoveryOutcomePolicyConfig,
@@ -94,6 +96,9 @@ def recover(
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
+    For a run whose chain accounting is unknown, the two are also an operator's explicit budget: the run continues
+    as an OPERATOR-CONTINUATION with ``extend_retries`` (one when not given) infra retries remaining, recorded in the
+    decision and the job dir's operator journal (see ``decide_from_collected``).
     The outcome names the ``reader_token`` its login-host Store readers carry.
     """
     outcome = _recover(
@@ -217,6 +222,17 @@ def _recover(
     if executor_cls is None:
         raise ValueError(f"Submission {gym_job_id} was made by unknown executor {record.executor!r}.")
     executor = executor_cls()
+    # Used only when the chain accounting is unknown: the walltime with its reason and N retries remaining from now.
+    operator_budget = (
+        OperatorBudget(
+            max_walltime=max_walltime,
+            reason=walltime_reason,
+            retries=extend_retries or 1,
+            user=getpass.getuser(),
+        )
+        if max_walltime is not None and (walltime_reason or "").strip() and not inspect_only
+        else None
+    )
     decision, collected = executor.recovery_evidence(
         record,
         benchmark,
@@ -229,6 +245,7 @@ def _recover(
         **({"extend_retries": extend_retries} if extend_retries else {}),
         # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
         **({"max_walltime": max_walltime} if max_walltime is not None else {}),
+        **({"operator_budget": operator_budget} if operator_budget is not None else {}),
     )
     gate_task = (
         gate_summary_from_collected(
@@ -284,6 +301,7 @@ def _recover(
             gate_task = {**gate_task, "status": "RESUMING"}
         return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
     if decision.action == RecoveryAction.RESUBMIT:
+        operator = decision.operator_continuation
         job = executor.resubmit(
             record,
             benchmark,
@@ -293,8 +311,10 @@ def _recover(
             # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.
             **({"accounting_reconciled": True} if collected is not None and collected.accounting_reconciled else {}),
             **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
-            **({"extend_retries": extend_retries} if extend_retries else {}),
+            # Under an operator continuation, N is the allowance its record fills, not a recorded extension.
+            **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
             **({"max_walltime": max_walltime, "walltime_reason": walltime_reason} if max_walltime is not None else {}),
+            **({"operator_continuation": operator} if operator is not None else {}),
         )
         if gate_task["status"] == "PLANNED":
             gate_task = {**gate_task, "status": "RESUMING"}

@@ -27,6 +27,7 @@ from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
+from typing import Any
 
 import yaml
 
@@ -55,6 +56,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     ALLOCATION_ACCOUNTING_MARKER,
     BOUNDED_BUDGET_MARKER,
+    INCOMPLETE_MARKER_NAME,
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
     REQUEUE_RECONCILED_NOTE,
@@ -78,10 +80,16 @@ from nemo_gym.orchestration.jobs import (
     utc_timestamp,
 )
 from nemo_gym.orchestration.recovery import (
+    ACCUMULATED_WALLTIME_FILE,
     CHAIN_ACCOUNTING_FORMAT,
     COLLECT_SCRIPT,
     FOLLOWUP_ACCOUNTING_FORMAT,
+    INFRA_RETRIES_FILE,
+    INFRA_RETRY_EXTENSION_FILE,
+    OPERATOR_CONTINUATION_JOURNAL_NAME,
+    OPERATOR_CONTINUATION_NOTE,
     CollectedEvidence,
+    OperatorBudget,
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcome,
@@ -152,6 +160,29 @@ if raw.get("source_job_identity") != identity():
     raise ValueError("reader job directory changed")
 print("__GYM_MANAGED:" + json.dumps(projection))
 """
+
+
+def _epoch_walltime(collected: CollectedEvidence, rows: list[tuple[str, str, int, int]] | None) -> float | None:
+    """The used walltime of a chain after an operator continuation: its baseline plus every allocation since.
+
+    The continuation filled or kept the counter as the baseline, so the allocations before it are not accounted again.
+    None when the records since then are incomplete or the counter does not match them.
+    """
+    epoch = collected.operator_epoch
+    stored = None if collected.walltime_state == "absent" else collected.walltime_used_s or 0
+    if epoch is None or stored is None or stored < epoch.walltime_s:
+        return None
+    since = collected.job_chain[epoch.chain_length :]
+    if not since:
+        return epoch.walltime_s if stored == epoch.walltime_s else None
+    if rows is None:
+        return None
+    accounted = accounted_chain_walltime(
+        since,
+        "\n".join(f"{job_id}|{state}|{elapsed}" for job_id, state, elapsed, _ in rows if job_id in since),
+        stored_walltime_s=stored - epoch.walltime_s,
+    )
+    return None if accounted is None else epoch.walltime_s + accounted
 
 
 # Appended in the job dir when `gym eval resubmit --recover --extend-retries` records an extension.
@@ -697,11 +728,14 @@ class SlurmExecutor(BaseExecutor):
         reader_ref: str | None = None,
         extend_retries: int = 0,
         max_walltime: str | None = None,
+        operator_budget: OperatorBudget | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
 
         ``reader_ref`` runs the Store reader at that full commit instead of the saved one: a repinned run resumes there.
         ``max_walltime`` is a walltime raise the resubmit will render: the plan checks the chain cap it renders.
+        ``operator_budget`` lets a run whose chain accounting is unknown continue (see ``decide_from_collected``); with
+        it, a failed scheduler query is a stop that names it instead of an error.
         """
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
         with get_connection(record.hostname) as conn:
@@ -762,7 +796,12 @@ class SlurmExecutor(BaseExecutor):
                             outcome_policy=outcome_policy,
                             extend_retries=extend_retries,
                         ), collected
-            workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
+            try:
+                workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
+            except (RuntimeError, OSError):
+                if operator_budget is None:
+                    raise
+                workdirs = None  # the operator continuation stops and names the failed query
             allocation_cut = False
             rows = None
             stopped = None
@@ -776,14 +815,16 @@ class SlurmExecutor(BaseExecutor):
                     rows = None
             # A continuation of the chain that still waits or runs is live, wherever the scheduler runs it from.
             live_job_name = live_chain_job(rows, collected.job_chain)
-            if collected.job_chain and str(job_dir) not in workdirs and live_job_name is None:
+            if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
                     allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
                     collected = _reconcile_requeued_chain(collected, rows)
                 if resume.max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
                     collected.accounted_walltime_s = (
-                        accounted_chain_walltime(
+                        _epoch_walltime(collected, rows)
+                        if collected.operator_epoch is not None
+                        else accounted_chain_walltime(
                             collected.job_chain,
                             "\n".join(f"{job_id}|{state}|{elapsed}" for job_id, state, elapsed, _ in rows),
                             stored_walltime_s=None
@@ -814,11 +855,12 @@ class SlurmExecutor(BaseExecutor):
             collected,
             max_infra_retries=resume.max_retries,
             max_walltime_s=cap_s,
-            live_job=str(job_dir) in workdirs or live_job_name is not None,
+            live_job=True if live_job_name is not None else None if workdirs is None else str(job_dir) in workdirs,
             outcome_policy=outcome_policy,
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
             live_job_name=live_job_name,
+            operator_budget=operator_budget,
         )
         if stopped is not None:
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {stopped}"})
@@ -1018,6 +1060,7 @@ class SlurmExecutor(BaseExecutor):
         extend_retries: int = 0,
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
+        operator_continuation: Mapping[str, Any] | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -1038,6 +1081,10 @@ class SlurmExecutor(BaseExecutor):
         ``max_walltime`` (with ``keep_budget`` and ``walltime_reason``) raises the Slurm walltime the same way a repin
         moves the commit, in the same render: ``compute.<cluster>.walltime`` becomes it, the chain cap becomes at least
         it, and a value below the recorded walltime is refused. The run dir's walltime journal records the raise.
+        ``operator_continuation`` (with ``keep_budget``) is a decision's OPERATOR-CONTINUATION record for a run whose
+        accounting is unknown: under the lock it fills the counters the record names, replaces the unknown-accounting
+        marker with a note and keeps the readable counters; each step is undone unless the job is queued, and the job
+        dir's operator journal records the queued continuation.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -1045,6 +1092,9 @@ class SlurmExecutor(BaseExecutor):
         """
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
+        if operator_continuation is not None and (not keep_budget or extend_retries):
+            raise RuntimeError("an operator continuation needs --recover and sets its own infra-retry allowance")
+        operator_commands = self._operator_commands(operator_continuation) if operator_continuation is not None else []
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
             repin_commands, journals = (
@@ -1095,7 +1145,7 @@ class SlurmExecutor(BaseExecutor):
                     f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(files))} || fail {shlex.quote(stale)}"
                 ]
             budget_update = []
-            if keep_budget and accounted_walltime_s is not None:
+            if keep_budget and accounted_walltime_s is not None and operator_continuation is None:
                 # This is terminal accounting of the complete recorded chain, not a new allowance.
                 if not math.isfinite(accounted_walltime_s) or accounted_walltime_s < 0:
                     raise ValueError("accounted walltime must be finite and non-negative")
@@ -1135,8 +1185,9 @@ class SlurmExecutor(BaseExecutor):
                         f"printf '%s\\n' {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' Resubmit acknowledgement was not confirmed.')} "
                         "> .gym_chain_incomplete || return; fi; "
                         f"rm -f {_RESUBMIT_LOCK}; }}",
-                        "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }",
-                        "trap '_gym_restore_extension; _gym_restore_repin; _gym_release_resubmit_lock' EXIT",
+                        "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }; _gym_restore_operator() { :; }",
+                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_repin; "
+                        "_gym_release_resubmit_lock' EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
@@ -1162,15 +1213,22 @@ class SlurmExecutor(BaseExecutor):
                         f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
                         f"&& ! grep -qxF -- {shlex.quote(ALLOCATION_ACCOUNTING_MARKER)} job.sh; then "
                         'fail "job.sh predates durable allocation accounting; stage a new compatible script"; fi',
-                        (
+                        *(
                             # Only the marker the evidence reconciled; its digest is also in the snapshot above.
-                            f"grep -qxF -- {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' ' + REQUEUE_UNKNOWN_REASON)} "
-                            ".gym_chain_incomplete || fail 'the reconciled requeue marker changed; collect it again'"
-                        )
-                        if reconciled
-                        else f"if grep -q -- {shlex.quote('^' + ACCOUNTING_UNKNOWN_PREFIX)} .gym_chain_incomplete "
-                        '2>/dev/null; then fail "allocation accounting is unknown; reconcile every allocation before '
-                        'resubmission"; fi',
+                            [
+                                f"grep -qxF -- {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' ' + REQUEUE_UNKNOWN_REASON)} "
+                                ".gym_chain_incomplete || fail 'the reconciled requeue marker changed; collect it again'"
+                            ]
+                            if reconciled
+                            # An operator continuation replaces the unknown marker below; the snapshot pins it.
+                            else []
+                            if operator_continuation is not None
+                            else [
+                                f"if grep -q -- {shlex.quote('^' + ACCOUNTING_UNKNOWN_PREFIX)} .gym_chain_incomplete "
+                                '2>/dev/null; then fail "allocation accounting is unknown; reconcile every allocation '
+                                'before resubmission"; fi'
+                            ]
+                        ),
                         'for claim in .gym_followup_queued.*; do [ -e "$claim" ] || continue; '
                         'claimed=$(cat "$claim") || fail "follow-up claim unreadable"; '
                         '[[ "$claimed" =~ ^[0-9]+$ ]] || fail "follow-up submission identity unknown"; done',
@@ -1211,6 +1269,7 @@ class SlurmExecutor(BaseExecutor):
                             if reconciled
                             else []
                         ),
+                        *operator_commands,
                         *(self._extension_commands(extend_retries, keep_budget=keep_budget) if extend_retries else []),
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
@@ -1241,11 +1300,50 @@ class SlurmExecutor(BaseExecutor):
                 entry = shlex.quote(json.dumps({"by": extend_retries, "at": utc_timestamp(utc_now())}))
                 journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
                 conn.run([f"printf '%s\\n' {entry} >> {journal}"])
+            if operator_continuation is not None:
+                entry = {**operator_continuation, "job_id": job_id, "at": utc_timestamp(utc_now())}
+                journal = shlex.quote(str(job_dir / OPERATOR_CONTINUATION_JOURNAL_NAME))
+                conn.run([f"printf '%s\\n' {shlex.quote(json.dumps(entry, sort_keys=True))} >> {journal}"])
             for name, entry in journals.items():
                 journal = Path(record.run_dir) / name
                 conn.run([f"printf '%s\\n' {shlex.quote(entry)} >> {shlex.quote(str(journal))}"])
             self.persist_record(record.with_benchmark(job), conn.write_text)
         return job
+
+    @staticmethod
+    def _operator_commands(continuation: Mapping[str, Any]) -> list[str]:
+        """The locked steps of an operator continuation: fill the counters it names and replace the unknown marker.
+
+        Each file is kept aside first and put back unless the job is queued; a readable counter is never named.
+        """
+        writes = continuation.get("writes") or {}
+        if not set(writes) <= {INFRA_RETRIES_FILE, ACCUMULATED_WALLTIME_FILE, INFRA_RETRY_EXTENSION_FILE} or any(
+            type(write.get("value")) is not int or write["value"] < 0 for write in writes.values()
+        ):
+            raise ValueError("an operator continuation fills only the chain's counters, each with a whole number")
+        names = [*sorted(writes), INCOMPLETE_MARKER_NAME]
+        kept = " ".join(f"{name}.operator-previous" for name in names)
+        restore = "; ".join(
+            f"if [[ -e {name}.operator-previous ]]; then mv -f {name}.operator-previous {name}; else rm -f {name}; fi"
+            for name in names
+        )
+        unknown = shlex.quote("^" + ACCOUNTING_UNKNOWN_PREFIX)
+        return [
+            f"rm -f {kept}",
+            *(
+                f"if [[ -e {name} ]]; then cp -p {name} {name}.operator-previous || fail 'cannot keep {name}'; fi"
+                for name in names
+            ),
+            f'_gym_restore_operator() {{ if [[ "$_gym_submit_confirmed" == 1 ]]; then rm -f {kept}; else {restore}; fi; }}',
+            *(
+                f"printf '%s\\n' {writes[name]['value']} > {name}.tmp && mv -f {name}.tmp {name} "
+                f"|| fail 'cannot fill {name}'"
+                for name in sorted(writes)
+            ),
+            f"if grep -q -- {unknown} {INCOMPLETE_MARKER_NAME} 2>/dev/null; then "
+            f"printf '%s\\n' {shlex.quote(OPERATOR_CONTINUATION_NOTE)} > {INCOMPLETE_MARKER_NAME} "
+            "|| fail 'cannot record the operator continuation'; fi",
+        ]
 
     @staticmethod
     def _extension_commands(extend_retries: int, *, keep_budget: bool) -> list[str]:

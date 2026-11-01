@@ -57,10 +57,12 @@ def test_the_chain_records_give_the_used_walltime_when_no_allocation_stored_it(t
 def test_unavailable_chain_records_still_stop(tmp_path, slurm_bin):
     # Nothing in flight, so the walltime check is the one that decides.
     decision = _inspect_unstored_chain(tmp_path, slurm_bin, None, in_flight=0)
-    assert (decision.action.value, decision.reason) == (
+    reason, _, hint = decision.reason.partition("\n")
+    assert (decision.action.value, reason) == (
         "stop",
         "the run caps its walltime but the used walltime is unavailable",
     )
+    assert "--recover --max-walltime HH:MM:SS --walltime-reason TEXT" in hint
 
 
 def test_a_derived_walltime_at_the_cap_stops_and_says_where_it_came_from(tmp_path, slurm_bin):

@@ -142,6 +142,51 @@ class ManagedRecoveryFact(BaseModel):
     reserved: bool
 
 
+# The chain's accounting counters in the job dir (see resume_script); an operator continuation fills unknown ones.
+INFRA_RETRIES_FILE = ".gym_infra_retries"
+ACCUMULATED_WALLTIME_FILE = ".gym_accumulated_walltime"
+INFRA_RETRY_EXTENSION_FILE = ".gym_infra_retry_extension"
+# The planner's stops when the chain accounting is unknown; an operator continuation may lift them (see below).
+UNKNOWN_BUDGET_REASON = "the job chain or scheduler state is unavailable, so the budget is unknown"
+UNKNOWN_WALLTIME_REASON = "the run caps its walltime but the used walltime is unavailable"
+UNKNOWN_BUDGET_HINT = (
+    "An operator may continue it with an explicit budget: gym eval resubmit --recover --max-walltime HH:MM:SS "
+    "--walltime-reason TEXT [--extend-retries N]."
+)
+# Why COLLECT_SCRIPT reads the accounting as unknown when a follow-up claim, not the marker, is the cause.
+UNOBSERVED_CLAIM_REASON = "a follow-up submission claim is unobserved"
+UNREADABLE_CLAIM_REASON = "the chain marker or a follow-up claim is unreadable"
+OPERATOR_CONTINUATION = "OPERATOR-CONTINUATION"
+# Appended in the job dir when an operator continuation is queued: who, why, the budget, every value it wrote with its
+# previous state, and the epoch (chain length and walltime baseline) a later recovery accounts the chain from.
+OPERATOR_CONTINUATION_JOURNAL_NAME = "operator-continuation-journal.jsonl"
+# Written over the unknown-accounting marker just before the continuation is queued; it has no unknown prefix.
+OPERATOR_CONTINUATION_NOTE = f"Operator continuation: an explicit budget filled the unknown accounting; see {OPERATOR_CONTINUATION_JOURNAL_NAME}."
+
+
+class OperatorBudget(BaseModel):
+    """An operator's explicit budget for a run whose chain accounting is unknown.
+
+    ``retries`` infra retries remain from now (``--extend-retries``, one by default) and ``max_walltime`` is the
+    walltime cap (``--max-walltime``, raised as a recovery raises it). It only fills counters that are unknown: a
+    readable counter is never lowered or reset.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    max_walltime: str
+    reason: str = Field(min_length=1)
+    retries: int = Field(default=1, ge=1, le=1000)
+    user: str
+
+
+class OperatorEpoch(BaseModel):
+    """Where the last operator continuation started the chain's accounting: its chain length and walltime baseline."""
+
+    chain_length: int = Field(ge=0)
+    walltime_s: float = Field(ge=0, allow_inf_nan=False)
+
+
 class RecoveryBudget(BaseModel):
     """The run's stored infra-retry and walltime budget and what its job chain used, as the chain files record them.
 
@@ -199,6 +244,9 @@ class RecoveryDecision(BaseModel):
     evidence: list[IdentityEvidence]
     duplicate_results: list[Identity] = Field(default_factory=list)
     scheduler_live: bool = False
+    # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
+    # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
+    operator_continuation: dict[str, Any] | None = None
 
     @property
     def complete(self) -> bool:
@@ -823,9 +871,7 @@ def decide_recovery(
             "saved judge answers and policy work need separate recovery; mixed recovery is unsupported",
         )
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
-        return decision(
-            RecoveryAction.STOP, "the job chain or scheduler state is unavailable, so the budget is unknown"
-        )
+        return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         return decision(
@@ -834,7 +880,7 @@ def decide_recovery(
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
-            return decision(RecoveryAction.STOP, "the run caps its walltime but the used walltime is unavailable")
+            return decision(RecoveryAction.STOP, UNKNOWN_WALLTIME_REASON)
         if budget.walltime_used_s >= budget.max_walltime_s:
             return decision(
                 RecoveryAction.STOP,
@@ -889,6 +935,9 @@ COLLECT_SCRIPT = (
     + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
     + "\n"
+    + f"UNOBSERVED_CLAIM_REASON = {UNOBSERVED_CLAIM_REASON!r}\n"
+    + f"UNREADABLE_CLAIM_REASON = {UNREADABLE_CLAIM_REASON!r}\n"
+    + f"OPERATOR_CONTINUATION_JOURNAL_NAME = {OPERATOR_CONTINUATION_JOURNAL_NAME!r}\n"
     + r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
@@ -1097,10 +1146,10 @@ def accounting_unknown_reason():
             if name.startswith(".gym_followup_queued."):
                 value = open(os.path.join(d, name)).read().strip()
                 if not value.isascii() or not value.isdecimal():
-                    return "a follow-up submission claim is unobserved"
+                    return UNOBSERVED_CLAIM_REASON
         text = open(marker).read() if os.path.exists(marker) else ""
     except (OSError, ValueError):
-        return "the chain marker or a follow-up claim is unreadable"
+        return UNREADABLE_CLAIM_REASON
     if text.startswith(ACCOUNTING_UNKNOWN_PREFIX):
         return (text[len(ACCOUNTING_UNKNOWN_PREFIX):].strip().splitlines() or ["no reason recorded"])[0][:300]
     return None
@@ -1312,6 +1361,17 @@ collected["counter_states"] = {"infra_retries": num(".gym_infra_retries")[1],
                                "walltime": num(".gym_accumulated_walltime")[1]} if stable_sources else None
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 collected["followup_claims"] = followup_claims()
+def operator_epoch():
+    # The last operator continuation's epoch; None when no continuation was journaled or its entry is unreadable.
+    try:
+        epoch = json.loads(open(os.path.join(d, OPERATOR_CONTINUATION_JOURNAL_NAME)).read().splitlines()[-1])["epoch"]
+        length, walltime = epoch["chain_length"], epoch["walltime_s"]
+    except (OSError, ValueError, KeyError, IndexError, TypeError):
+        return None
+    if type(length) is not int or length < 0 or type(walltime) not in (int, float) or not math.isfinite(walltime):
+        return None
+    return {"chain_length": length, "walltime_s": walltime} if walltime >= 0 else None
+collected["operator_epoch"] = operator_epoch()
 print(json.dumps(collected))
 """
 )
@@ -1354,6 +1414,8 @@ class CollectedEvidence(BaseModel):
     infra_retry_extension_state: str = "absent"
     # The follow-up job id each allocation of the chain claimed (.gym_followup_queued.<allocation>).
     followup_claims: dict[str, str] = Field(default_factory=dict)
+    # The last operator continuation's epoch (OPERATOR_CONTINUATION_JOURNAL_NAME): the chain is accounted after it.
+    operator_epoch: OperatorEpoch | None = None
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -1556,6 +1618,89 @@ def live_chain_job(rows: list[tuple[str, str, int, int]] | None, job_chain: list
     return None
 
 
+def _operator_continuation(
+    stopped: RecoveryDecision,
+    collected: CollectedEvidence,
+    inputs: dict[str, Any],
+    operator: OperatorBudget,
+    *,
+    configured_retries: int | None,
+    max_walltime_s: float | None,
+) -> RecoveryDecision:
+    """Decide again under the operator's explicit budget, or keep the stop when continuing could be unsafe.
+
+    The caller has checked that the scheduler answered and shows no live or pending job of the run. It fills only
+    unreadable counters: an unknown spent-retry count so that ``operator.retries`` retries remain under the cap, an
+    unknown used walltime with zero, so the walltime cap is fresh for this continuation, and an unknown extension with
+    zero. A readable counter keeps its value. Saved rows are classified as for any decision and never changed.
+    """
+
+    def stop(why: str) -> RecoveryDecision:
+        return stopped.model_copy(update={"reason": f"{stopped.reason}; {why}"})
+
+    if collected.accounting_unknown_reason in (UNOBSERVED_CLAIM_REASON, UNREADABLE_CLAIM_REASON):
+        return stop("a follow-up claim names no job, so an operator continuation cannot rule out a queued follow-up")
+    states = collected.counter_states
+    if states is None:
+        return stop("the chain's accounting files changed while they were read, so an operator continuation waits")
+    if configured_retries is None:
+        return stop("the run configures no infra-retry cap, so an operator continuation has no budget to fill")
+    unknown: list[str] = []
+    writes: dict[str, dict[str, Any]] = {}
+    if collected.infra_retry_extension_state in ("absent", "ok"):
+        extension = int(collected.infra_retry_extension or 0)
+    else:
+        extension = 0
+        unknown.append("infra_retry_extension")
+        writes[INFRA_RETRY_EXTENSION_FILE] = {"previous": "unknown", "value": 0}
+    cap = configured_retries + extension
+    if states.get("infra_retries") in ("absent", "ok"):
+        used = int(collected.infra_retries_used or 0)
+    else:
+        used = max(cap - operator.retries, 0)
+        unknown.append("infra_retries_used")
+        writes[INFRA_RETRIES_FILE] = {"previous": "unknown", "value": used}
+    if states.get("walltime") in ("absent", "ok"):
+        walltime = float(collected.walltime_used_s or 0)
+    else:
+        walltime = 0.0
+        unknown.append("walltime_used_s")
+        writes[ACCUMULATED_WALLTIME_FILE] = {"previous": "unknown", "value": 0}
+    budget = RecoveryBudget(
+        max_infra_retries=cap,
+        infra_retries_used=used,
+        max_walltime_s=max_walltime_s,
+        walltime_capped=max_walltime_s is not None,
+        walltime_used_s=walltime,
+        live_job=False,
+        job_chain=collected.job_chain,
+    )
+    decision = decide_recovery(**inputs, budget=budget)
+    remaining = max(cap - used, 0)
+    summary = (
+        f"{OPERATOR_CONTINUATION} by {operator.user} ({operator.reason}): {remaining} infra "
+        f"retr{'y' if remaining == 1 else 'ies'} remain and the walltime cap is {operator.max_walltime}; it fills "
+        f"{', '.join(sorted(writes)) or 'no counter'} and keeps every readable counter"
+    )
+    if decision.action != RecoveryAction.RESUBMIT:
+        return decision.model_copy(update={"reason": f"{decision.reason}; {summary}, but nothing is resubmitted"})
+    record = {
+        "kind": OPERATOR_CONTINUATION,
+        "user": operator.user,
+        "reason": operator.reason,
+        "budget": {
+            "infra_retries_remaining": remaining,
+            "infra_retries_requested": operator.retries,
+            "max_walltime": operator.max_walltime,
+        },
+        "unknown": unknown,
+        "accounting_unknown_reason": collected.accounting_unknown_reason,
+        "writes": writes,
+        "epoch": {"chain_length": len(collected.job_chain), "walltime_s": walltime},
+    }
+    return decision.model_copy(update={"reason": f"{decision.reason}; {summary}", "operator_continuation": record})
+
+
 def decide_from_collected(
     collected: CollectedEvidence,
     *,
@@ -1567,8 +1712,12 @@ def decide_from_collected(
     allocation_cut: bool = False,
     extend_retries: int = 0,
     live_job_name: str | None = None,
+    operator_budget: OperatorBudget | None = None,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision.
+
+    When the chain accounting is unknown, ``operator_budget`` may continue the run instead (see
+    ``_operator_continuation``); without it, the stop names the options that allow that.
 
     ``allocation_cut`` (see ``decide_recovery``) applies only with no live job. The infra-retry cap is the configured
     one plus the run's recorded extension plus ``extend_retries`` that this recovery asks to record.
@@ -1635,17 +1784,17 @@ def decide_from_collected(
             evidence=[],
             scheduler_live=live,
         )
-    decision = decide_recovery(
+    inputs = dict(
         materialized=collected.materialized,
         results=collected.results or [],
         failures=collected.failures,
-        budget=budget,
         resubmit_offset=collected.resubmit_offset,
         outcome_policy=outcome_policy,
         managed_selection=collected.managed_selection,
         planned_missing_continuation=planned_missing_continuation,
         allocation_cut=allocation_cut and live_job is False,
     )
+    decision = decide_recovery(**inputs, budget=budget)
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(
             update={
@@ -1653,6 +1802,40 @@ def decide_from_collected(
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
             }
         )
+    unknown = decision.action == RecoveryAction.STOP and decision.reason in (
+        UNKNOWN_BUDGET_REASON,
+        UNKNOWN_WALLTIME_REASON,
+    )
+    if operator_budget is not None:
+        # An operator continuation needs the scheduler's answer that no job of the run waits or runs.
+        accounting_unknown = (
+            budget.max_infra_retries is None
+            or budget.infra_retries_used is None
+            or (budget.walltime_capped and budget.walltime_used_s is None)
+        )
+        if live_job is None:
+            why = "the scheduler query failed, so an operator continuation cannot rule out a live or pending job"
+            return decision.model_copy(
+                update={
+                    "action": RecoveryAction.STOP,
+                    "reason": f"{decision.reason}; {why}" if decision.action == RecoveryAction.STOP else why,
+                }
+            )
+        if decision.scheduler_live and accounting_unknown:
+            job = f"continuation {live_job_name}" if live_job_name else "a job of this run"
+            why = f"the chain accounting is unknown and {job} is still pending or running"
+            return decision.model_copy(
+                update={"action": RecoveryAction.STOP, "reason": f"{why}, so an operator continuation is refused"}
+            )
+        if unknown:
+            return _operator_continuation(
+                decision,
+                collected,
+                inputs,
+                operator_budget,
+                configured_retries=configured,
+                max_walltime_s=max_walltime_s,
+            )
     if max_infra_retries is not None and max_infra_retries != configured:
         extension = (
             f"infra-retry cap {max_infra_retries}: {configured} configured + {int(recorded or 0)} recorded extension"
@@ -1671,6 +1854,8 @@ def decide_from_collected(
             "records, as no allocation stored it"
         )
         decision = decision.model_copy(update={"reason": f"{decision.reason}; {derived}"})
+    if unknown:
+        decision = decision.model_copy(update={"reason": f"{decision.reason}\n{UNKNOWN_BUDGET_HINT}"})
     return decision
 
 
