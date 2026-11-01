@@ -3313,9 +3313,6 @@ class RolloutCollectionHelper(BaseModel):
     _store: RolloutStore | None = PrivateAttr(default=None)
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
-        if config.limit:
-            print(f"Limiting the number of tasks to {config.limit}")
-
         # Load prompt config if specified
         prompt_cfg = None
         if config.prompt_config:
@@ -3344,7 +3341,14 @@ class RolloutCollectionHelper(BaseModel):
             validate_prompt_compatibility([row for _, _, row in raw_rows], prompt_cfg)
             raw_rows = [(idx, s, apply_prompt_to_row(row, prompt_cfg)) for idx, s, row in raw_rows]
 
-        return RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+        rows = RolloutCollectionHelper._preprocess_raw_rows(raw_rows, config)
+        if config.limit:
+            # Operators read --limit as rows; it counts tasks, each with every saved copy and num_repeats.
+            tasks = len({row_str for _, row_str, _ in raw_rows})
+            print(
+                f"Limiting to {tasks} tasks ({len(rows)} rows with their repeats); --limit={config.limit} counts tasks"
+            )
+        return rows
 
     def preprocess_examples(
         self,

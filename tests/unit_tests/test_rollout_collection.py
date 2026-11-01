@@ -4415,6 +4415,26 @@ class TestRolloutCollection:
         ]
         assert {row["responses_create_params"]["input"] for row in result} == {"question a", "question b"}
 
+    def test_preprocess_rows_limit_logs_tasks_and_resulting_rows(self, tmp_path: Path, capsys) -> None:
+        """The --limit line names the tasks kept and the rows they become, since operators read --limit as rows."""
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text(
+            "".join(json.dumps({"responses_create_params": {"input": f"question {name}"}}) + "\n" for name in "aabbcc")
+        )
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            limit=2,
+            num_repeats=3,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        # Two tasks, each saved twice and repeated three times.
+        assert len(result) == 12
+        assert "Limiting to 2 tasks (12 rows with their repeats); --limit=2 counts tasks" in capsys.readouterr().out
+
     def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
         """prompt_config preserves other responses_create_params fields like tools."""
         prompt_path = tmp_path / "prompt.yaml"
