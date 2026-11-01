@@ -419,6 +419,15 @@ def _walltime_to_seconds(duration: str) -> int:
     return days * 86400 + hours * 3600 + minutes * 60 + seconds
 
 
+def fresh_restart_command(gym_job_id: str, benchmark: str) -> str:
+    """The command that queues a run with no task inventory again, as a fresh run with a longer walltime.
+
+    Submission ids and benchmark names are shell-safe by construction (see `new_gym_job_id` and the executor's
+    benchmark name check), so the command needs no quoting.
+    """
+    return f"gym eval resubmit {gym_job_id} {benchmark} --recover --max-walltime HH:MM:SS --walltime-reason TEXT"
+
+
 def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "false") -> str:
     """Render the auto-resume prologue for one benchmark's sbatch script."""
     max_walltime_check = ""

@@ -87,6 +87,7 @@ from nemo_gym.orchestration.recovery import (
     FOLLOWUP_ACCOUNTING_FORMAT,
     INFRA_RETRIES_FILE,
     INFRA_RETRY_EXTENSION_FILE,
+    NO_INVENTORY,
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
     READER_PLACEMENT_FIELDS,
@@ -1403,6 +1404,7 @@ class SlurmExecutor(BaseExecutor):
         walltime_reason: str | None = None,
         operator_continuation: Mapping[str, Any] | None = None,
         unsafe_resume_reason: str | None = None,
+        fresh_restart: bool = False,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -1430,11 +1432,18 @@ class SlurmExecutor(BaseExecutor):
         accounting is unknown: under the lock it fills the counters the record names, replaces the unknown-accounting
         marker with a note and keeps the readable counters; each step is undone unless the job is queued, and the job
         dir's operator journal records the queued continuation.
+        ``fresh_restart`` (with ``max_walltime``, ``walltime_reason`` and ``accounting_snapshot``, without
+        ``keep_budget``) queues a run that has no task inventory again as a fresh run: a fresh retry and walltime
+        budget, a walltime longer than the recorded one, the snapshot rechecked under the lock. Its walltime journal
+        entry, the receipt, carries ``plan`` FRESH-RESTART and ``why``; ``.gym_chain_incomplete`` names the restart
+        and both walltimes until the queued job continues the chain.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
         fresh and delete them. A `command` benchmark's job.sh runs its own command, so it is not refused.
         """
+        if fresh_restart and (keep_budget or max_walltime is None):
+            raise ValueError("a fresh restart starts a fresh budget and needs --max-walltime")
         job = record.benchmark_job(benchmark)
         job_dir = Path(job.job_dir)
         if operator_continuation is not None and (not keep_budget or extend_retries):
@@ -1457,6 +1466,7 @@ class SlurmExecutor(BaseExecutor):
                     max_walltime=max_walltime,
                     walltime_reason=walltime_reason,
                     unsafe_resume_reason=unsafe_resume_reason,
+                    fresh_restart=fresh_restart,
                 )
                 if repin is not None or max_walltime is not None or unsafe_resume_reason is not None
                 else ([], {})
@@ -1473,7 +1483,7 @@ class SlurmExecutor(BaseExecutor):
                 ]
             snapshot_check = []
             reconciled = keep_budget and accounting_reconciled and accounted_walltime_s is not None
-            if keep_budget:
+            if keep_budget or fresh_restart:
                 stale = "run accounting changed since the recovery evidence was collected; collect it again"
                 if accounting_snapshot is None:
                     raise RuntimeError(f"Resubmit of {benchmark} refused: no collected accounting snapshot")
@@ -1516,6 +1526,14 @@ class SlurmExecutor(BaseExecutor):
                     "os.replace(p.with_suffix('.tmp'), p)\n"
                 )
                 budget_update = [f"python3 -c {shlex.quote(update)} || fail 'cannot preserve accounted walltime'"]
+            restart_note = (
+                [
+                    f"printf '%s\\n' {shlex.quote(self._fresh_restart_note(config, record, max_walltime))} "
+                    "> .gym_chain_incomplete || fail 'cannot record the fresh restart'"
+                ]
+                if fresh_restart
+                else []
+            )
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
             # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
@@ -1621,6 +1639,7 @@ class SlurmExecutor(BaseExecutor):
                         ),
                         *operator_commands,
                         *(self._extension_commands(extend_retries, keep_budget=keep_budget) if extend_retries else []),
+                        *restart_note,
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
@@ -1707,6 +1726,12 @@ class SlurmExecutor(BaseExecutor):
         ]
 
     @staticmethod
+    def _fresh_restart_note(config: SubmitConfig, record: SubmissionRecord, max_walltime: str) -> str:
+        """The chain marker a fresh restart writes: why, the recorded walltime and the new one."""
+        recorded = config.compute[record.cluster].walltime or "the cluster default"
+        return f"FRESH-RESTART: {NO_INVENTORY}; walltime {recorded} -> {max_walltime}"
+
+    @staticmethod
     def _extension_commands(extend_retries: int, *, keep_budget: bool) -> list[str]:
         """The locked steps that record ``extend_retries`` more infra retries, restored unless the job is queued."""
         if not keep_budget:
@@ -1737,9 +1762,11 @@ class SlurmExecutor(BaseExecutor):
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         unsafe_resume_reason: str | None = None,
+        fresh_restart: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
         """The locked shell steps that render one benchmark's job.sh and saved config again, with a repin, a walltime
-        raise or both, and the journal entries to append once its job is queued."""
+        raise or both, and the journal entries to append once its job is queued. A fresh restart raises the walltime
+        above the recorded one without ``keep_budget``."""
         install = config.driver.gym_install
         if len(record.benchmarks) != 1:
             raise RuntimeError("repin or walltime raise of a submission with several benchmarks is unsupported")
@@ -1768,7 +1795,7 @@ class SlurmExecutor(BaseExecutor):
                 sort_keys=True,
             )
         if max_walltime is not None:
-            if not keep_budget:
+            if not keep_budget and not fresh_restart:
                 raise RuntimeError("--max-walltime needs --recover: the run continues with its spent budgets")
             if not (walltime_reason or "").strip():
                 raise ValueError("--max-walltime needs a nonempty --walltime-reason")
@@ -1779,6 +1806,8 @@ class SlurmExecutor(BaseExecutor):
                     f"--max-walltime needs a Slurm duration such as 12:00:00, not {max_walltime!r}"
                 ) from error
             recorded = config.compute[record.cluster].walltime
+            if fresh_restart and recorded is not None and seconds <= _walltime_to_seconds(recorded):
+                raise ValueError(f"--max-walltime {max_walltime} is not longer than the recorded walltime {recorded}")
             if recorded is not None and seconds < _walltime_to_seconds(recorded):
                 raise ValueError(f"--max-walltime {max_walltime} is below the recorded walltime {recorded}")
             resume = config.driver.benchmarks[benchmark].resume_config
@@ -1794,7 +1823,8 @@ class SlurmExecutor(BaseExecutor):
                     "reason": walltime_reason,
                     "actor": getpass.getuser(),
                     "at": stamp,
-                },
+                }
+                | ({"plan": "FRESH-RESTART", "why": NO_INVENTORY} if fresh_restart else {}),
                 sort_keys=True,
             )
         if unsafe_resume_reason is not None:

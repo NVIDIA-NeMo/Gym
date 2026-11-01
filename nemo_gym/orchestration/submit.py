@@ -23,6 +23,7 @@ from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
+from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.orchestration.recovery import (
@@ -192,9 +193,12 @@ def _recover(
     chain's stored budget; ``decide_recovery`` picks one action, which runs here: ``noop`` dispatches nothing;
     ``reverify`` re-judges saved answers through the executor (never the policy) or reports that the executor cannot;
     ``resubmit`` queues the run with the existing ``resubmit`` keeping its spent budget (retries, walltime and
-    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``stop`` dispatches nothing and says why. Every outcome carries the acceptance gate task entry: per-rollout
-    health is judged against ``max_unhealthy_fraction`` and reported in its warnings; response/trial health is evaluated
-    separately, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is unchanged.
+    per-rollout attempts), and its Gym resume runs only missing and retryable identities; ``fresh-restart`` (no task
+    inventory) queues the run again as a fresh run with the explicit, longer ``max_walltime``, and without one names
+    the command; ``stop`` dispatches nothing and says why. Every outcome carries the acceptance gate task entry:
+    per-rollout health is judged against ``max_unhealthy_fraction`` and reported in its warnings; response/trial
+    health is evaluated separately, and MLflow delivery is checked by ``mlflow_errors``. Plain ``resubmit`` is
+    unchanged.
     """
     if score_key is not None and (
         not isinstance(score_key, list)
@@ -254,6 +258,9 @@ def _recover(
         **({"max_walltime": max_walltime} if max_walltime is not None else {}),
         **({"operator_budget": operator_budget} if operator_budget is not None else {}),
     )
+    if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is None:
+        command = fresh_restart_command(gym_job_id, benchmark)
+        decision = decision.model_copy(update={"reason": f"{decision.reason}; --max-walltime is required: {command}"})
     gate_task = (
         gate_summary_from_collected(
             decision,
@@ -331,6 +338,27 @@ def _recover(
             gate_task = {**gate_task, "status": "RESUMING"}
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow
+        )
+    if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is not None:
+        if repin is not None or extend_retries:
+            raise ValueError("a fresh restart takes only --max-walltime and --walltime-reason")
+        job = executor.resubmit(
+            record,
+            benchmark,
+            fresh_restart=True,
+            accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
+            max_walltime=max_walltime,
+            walltime_reason=walltime_reason,
+        )
+        if gate_task["status"] == "PLANNED":
+            gate_task = {**gate_task, "status": "RESUMING"}
+        return RecoveryOutcome(
+            decision=decision,
+            ok=True,
+            dispatched=RecoveryAction.FRESH_RESTART.value,
+            job_id=job.job_id,
+            gate_task=gate_task,
+            mlflow=mlflow,
         )
     return RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=gate_task, mlflow=mlflow)
 

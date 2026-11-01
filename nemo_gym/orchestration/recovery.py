@@ -33,6 +33,8 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
 
 The run-level action follows: ``stop`` for a spent or unknown resubmit budget, or for an unknown identity that a resume
 would run again; ``noop`` when nothing is left to do, ``reverify`` when only judge failures remain, else ``resubmit``.
+A run that ended before its inventory was written has nothing to recover: ``fresh-restart`` queues it again as a fresh
+run with a longer walltime.
 An unknown identity that a resume never runs again (the Store or the saved result holds it) does not block the
 missing and retryable ones: the decision reports it apart from what is retried and what is retained. A decision never
 reports a run as complete while an identity is terminal, missing or unknown.
@@ -129,7 +131,14 @@ class RecoveryAction(StrEnum):
     NOOP = "noop"
     REVERIFY = "reverify"
     RESUBMIT = "resubmit"
+    # The run has no task inventory, so nothing to recover: it is queued again as a fresh run with a longer walltime.
+    FRESH_RESTART = "fresh-restart"
     STOP = "stop"
+
+
+# Gym writes the task inventory before any rollout runs: a run that ended before it saved nothing a resume keeps.
+NO_INVENTORY = "the run ended before the task inventory was written"
+FRESH_RESTART_REASON = f"nothing to recover: {NO_INVENTORY}; resubmit it as a fresh run with a longer walltime"
 
 
 class ManagedRecoveryFact(BaseModel):
@@ -1730,13 +1739,14 @@ def decide_from_collected(
     live_job_name: str | None = None,
     operator_budget: OperatorBudget | None = None,
 ) -> RecoveryDecision:
-    """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision.
+    """Decide from what ``COLLECT_SCRIPT`` read; a missing result file stops the decision.
 
     When the chain accounting is unknown, ``operator_budget`` may continue the run instead (see
     ``_operator_continuation``); without it, the stop names the options that allow that.
 
-    ``allocation_cut`` (see ``decide_recovery``) applies only with no live job. The infra-retry cap is the configured
-    one plus the run's recorded extension plus ``extend_retries`` that this recovery asks to record.
+    A run with no inventory and no saved row is a fresh restart once no job of it is live. ``allocation_cut`` (see
+    ``decide_recovery``) applies only with no live job. The infra-retry cap is the configured one plus the run's
+    recorded extension plus ``extend_retries`` that this recovery asks to record.
     """
     recorded = {"absent": 0, "ok": collected.infra_retry_extension}.get(collected.infra_retry_extension_state)
     configured = max_infra_retries
@@ -1790,6 +1800,15 @@ def decide_from_collected(
             evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
         )
     if collected.materialized is None:
+        if live_job is False and not collected.results and not collected.failures:
+            return RecoveryDecision(
+                action=RecoveryAction.FRESH_RESTART,
+                reason=FRESH_RESTART_REASON,
+                expected=0,
+                counts={},
+                identities={},
+                evidence=[],
+            )
         live = live_job is True
         return RecoveryDecision(
             action=RecoveryAction.NOOP if live else RecoveryAction.STOP,
@@ -2190,7 +2209,7 @@ def gate_task_summary(
         warnings.append(omission_summary(decision.evidence))
     if decision.scheduler_live:
         status = "RUNNING"
-    elif decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
+    elif decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY, RecoveryAction.FRESH_RESTART):
         # A plan, not a dispatch: only the caller that dispatches it reports RESUMING.
         status = "PLANNED"
     elif decision.action == RecoveryAction.NOOP and decision.complete and not errors:

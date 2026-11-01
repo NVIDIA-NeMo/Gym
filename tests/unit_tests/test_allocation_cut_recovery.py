@@ -166,8 +166,25 @@ def test_a_pending_job_that_has_not_written_its_inventory_is_reported_as_live():
     pending = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=True)
     assert (pending.action.value, pending.scheduler_live) == ("noop", True)
     assert pending.reason == "a job of this run is still pending or running; nothing to decide, it is not queued twice"
+    named = decide_from_collected(
+        collected, max_infra_retries=2, max_walltime_s=None, live_job=True, live_job_name="101 (RUNNING)"
+    )
+    assert (named.action.value, named.reason) == ("noop", "continuation 101 (RUNNING) live; nothing to decide")
+
+
+def test_a_run_that_ended_before_its_inventory_is_a_fresh_restart():
+    collected = CollectedEvidence(materialized=None, results=None, failures=[])
     ended = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
-    assert (ended.reason, ended.scheduler_live) == ("the run has no materialized inventory to recover against", False)
+    assert (ended.action.value, ended.scheduler_live, ended.expected) == ("fresh-restart", False, 0)
+    assert ended.reason == (
+        "nothing to recover: the run ended before the task inventory was written; "
+        "resubmit it as a fresh run with a longer walltime"
+    )
+    # Rows saved without an inventory did not end before it, and a fresh run does not start over them.
+    saved = collected.model_copy(update={"results": [{"_ng_task_index": 0, "_ng_rollout_index": 0}]})
+    stopped = decide_from_collected(saved, max_infra_retries=2, max_walltime_s=None, live_job=False)
+    assert stopped.action.value == "stop"
+    assert stopped.reason == "the run has no materialized inventory to recover against"
 
 
 def test_masked_results_are_retained_and_do_not_block_never_started_rows(tmp_path):

@@ -181,11 +181,11 @@ def test_walltime_cap_and_unknown_cap_both_stop(tmp_path) -> None:
     )
 
 
-def test_missing_inventory_stops(tmp_path) -> None:
+def test_missing_inventory_is_a_fresh_restart(tmp_path) -> None:
     job = tmp_path / "job"
     (job / "artifacts").mkdir(parents=True)
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
-    assert d.action == RecoveryAction.STOP and "inventory" in d.reason
+    assert d.action == RecoveryAction.FRESH_RESTART and "inventory" in d.reason
 
 
 class FakeExecutor:

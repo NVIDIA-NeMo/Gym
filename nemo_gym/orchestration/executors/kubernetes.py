@@ -90,6 +90,7 @@ class KubernetesExecutor(BaseExecutor):
         extend_retries: int = 0,
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
+        fresh_restart: bool = False,
     ) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 
