@@ -932,7 +932,10 @@ def test_recovery_never_queues_unaccounted_or_exhausted_chain(tmp_path, slurm_bi
     (slurm_bin / "accounting").write_text(accounting)
     before = (job_dir / ".gym_accumulated_walltime").read_bytes()
     out = recover(*_handle(job_dir))
-    assert out.decision.action == "stop" and out.dispatched is None
+    # A chain job that still runs is a live continuation: nothing to decide, and nothing is queued beside it.
+    live = "RUNNING" in accounting
+    assert (out.decision.action, out.decision.scheduler_live) == (("noop", True) if live else ("stop", False))
+    assert out.dispatched is None
     assert not (slurm_bin / "env").exists()
     assert (job_dir / ".gym_accumulated_walltime").read_bytes() == before
 

@@ -214,7 +214,9 @@ def test_unavailable_budget_evidence_stops_instead_of_resubmitting() -> None:
 
 def test_a_live_job_stops_a_second_queue() -> None:
     live = RecoveryBudget(max_infra_retries=3, infra_retries_used=0, live_job=True)
-    assert decide_recovery(materialized=inventory(1), results=[], failures=[], budget=live).action == "stop"
+    decision = decide_recovery(materialized=inventory(1), results=[], failures=[], budget=live)
+    # Nothing to decide while a job of the run waits or runs, so nothing is queued beside it.
+    assert (decision.action, decision.scheduler_live) == ("noop", True)
 
 
 def test_duplicate_or_foreign_result_rows_stop_rather_than_inflate_the_denominator() -> None:

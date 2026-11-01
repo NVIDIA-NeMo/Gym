@@ -123,7 +123,7 @@ def test_without_a_scheduler_cut_reservations_stay_unknown_and_the_stop_names_th
 def test_a_scheduler_cut_is_not_applied_while_a_job_of_the_run_is_live(tmp_path):
     _cut_run(tmp_path)
     _, decision = _decide(tmp_path, allocation_cut=True, live_job=True)
-    assert decision.action.value == "stop"
+    assert (decision.action.value, decision.scheduler_live) == ("noop", True)
     assert decision.counts["unknown"] == 2
 
 
@@ -132,8 +132,10 @@ def test_a_live_job_is_reported_before_rows_nobody_owns(tmp_path):
 
     _cut_run(tmp_path, masked=1)
     _, decision = _decide(tmp_path, allocation_cut=False, live_job=True)
-    assert (decision.action.value, decision.scheduler_live) == ("stop", True)
-    assert decision.reason == "a job of this run is still pending or running; it is not queued twice"
+    assert (decision.action.value, decision.scheduler_live) == ("noop", True)
+    assert (
+        decision.reason == "a job of this run is still pending or running; nothing to decide, it is not queued twice"
+    )
     gate = gate_task_summary(
         decision, score=None, summary_valid=None, summary_reasons=[], health_passed=None, health_reasons=[]
     )
@@ -143,8 +145,8 @@ def test_a_live_job_is_reported_before_rows_nobody_owns(tmp_path):
 def test_a_pending_job_that_has_not_written_its_inventory_is_reported_as_live():
     collected = CollectedEvidence(materialized=None, results=None, failures=[])
     pending = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=True)
-    assert (pending.action.value, pending.scheduler_live) == ("stop", True)
-    assert pending.reason == "a job of this run is still pending or running; it is not queued twice"
+    assert (pending.action.value, pending.scheduler_live) == ("noop", True)
+    assert pending.reason == "a job of this run is still pending or running; nothing to decide, it is not queued twice"
     ended = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
     assert (ended.reason, ended.scheduler_live) == ("the run has no materialized inventory to recover against", False)
 
@@ -229,7 +231,11 @@ def test_the_guard_stop_names_the_three_populations_when_the_cut_is_not_the_stor
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", prev_job_id="100")
     assert "REACHED_WORK" not in result.stdout
     marker = (tmp_path / ".gym_chain_incomplete").read_text()
-    assert marker.startswith("Saved recovery evidence has no eligible retries; 2 failure(s) have no registered kind")
+    assert marker.startswith(
+        "Saved recovery evidence has no eligible retries; 2 reservation(s) have no saved outcome and the allocation "
+        "that made them was not cut by the scheduler, so whether they ran is unknown"
+    )
+    assert "nobody owns them" not in marker
     assert "retryable 2 (resumed), unknown 2 (2 reservation_without_outcome)" in marker
     assert marker.rstrip().endswith("(previous job 100 ended TIMEOUT)")
 
@@ -333,6 +339,51 @@ def test_an_incomplete_or_other_unknown_accounting_is_not_reconciled(tmp_path, s
 
     job, _, _ = _requeued_run(tmp_path, slurm_bin, accounting, marker=marker, stored_walltime=stored)
     result = recover(*_handle(job))
-    assert result.decision.action.value == "stop" and result.dispatched is None
+    # A requeued incarnation that still runs is a live continuation: nothing to decide, nothing queued.
+    live = "RUNNING" in accounting
+    assert result.decision.action.value == ("noop" if live else "stop") and result.dispatched is None
     assert not (slurm_bin / "env").exists()
     assert (job / ".gym_chain_incomplete").read_text() == marker
+
+
+def _inspected_cut(tmp_path, slurm_bin, accounting):
+    """A cut allocation 100 of a chain 100, 101, inspected the way the operator's login host does it."""
+    from nemo_gym.orchestration.submit import inspect_recovery
+
+    job, _, _ = _resumable_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job / "artifacts" / name).unlink()
+    _cut_run(job, scored=2, in_flight=2, not_started=2, chain=False)
+    (job / ".gym_job_chain").write_text("100\n101\n")
+    (slurm_bin / "accounting").write_text(accounting)
+    return job, inspect_recovery(*_handle(job))
+
+
+@pytest.mark.parametrize("state", ["PENDING", "RUNNING"])
+def test_the_inspect_reports_a_live_continuation_of_the_chain_and_decides_nothing(tmp_path, slurm_bin, state):
+    job, inspected = _inspected_cut(tmp_path, slurm_bin, f"100|TIMEOUT|7200|0\n101|{state}|0|0\n")
+    decision = inspected.decision
+    assert (decision.action.value, decision.scheduler_live) == ("noop", True), decision.reason
+    assert decision.reason == f"continuation 101 ({state}) live; nothing to decide"
+    assert inspected.gate_task["status"] == "RUNNING" and inspected.dispatched is None
+    assert not (slurm_bin / "env").exists()
+
+
+def test_the_inspect_and_the_guard_classify_a_cut_allocation_the_same_way(tmp_path, slurm_bin):
+    job, inspected = _inspected_cut(tmp_path, slurm_bin, "100|TIMEOUT|7200|0\n101|FAILED|60|0\n")
+    assert inspected.decision.action.value == "resubmit", inspected.decision.reason
+    assert inspected.decision.counts == {"scored": 2, "missing": 4}
+    assert inspected.decision.reason.startswith("4 identity(ies) need the policy again")
+    # The in-allocation guard of the next job, on the same saved files, sees the same four.
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", prev_job_id="100")
+    assert "Saved recovery evidence: 4 identity(ies) need the policy again" in result.stdout, result.stdout
+
+
+def test_reservations_without_a_cut_never_read_as_failures_nobody_owns(tmp_path, slurm_bin):
+    _, inspected = _inspected_cut(tmp_path, slurm_bin, "100|FAILED|7200|0\n101|FAILED|60|0\n")
+    reason = inspected.decision.reason
+    assert inspected.decision.action.value == "stop"
+    assert reason.startswith(
+        "2 reservation(s) have no saved outcome and the allocation that made them was not cut by the scheduler"
+    )
+    assert "nobody owns them" not in reason

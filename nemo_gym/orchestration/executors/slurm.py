@@ -90,6 +90,7 @@ from nemo_gym.orchestration.recovery import (
     allocation_cut_from_accounting,
     chain_accounting,
     decide_from_collected,
+    live_chain_job,
     select_managed_evidence,
 )
 
@@ -632,7 +633,8 @@ class SlurmExecutor(BaseExecutor):
                         ), collected
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
             allocation_cut = False
-            if collected.job_chain and str(job_dir) not in workdirs:
+            rows = None
+            if collected.job_chain:
                 try:
                     chain = ",".join(collected.job_chain)
                     rows = chain_accounting(
@@ -640,6 +642,9 @@ class SlurmExecutor(BaseExecutor):
                     )
                 except (RuntimeError, OSError):
                     rows = None
+            # A continuation of the chain that still waits or runs is live, wherever the scheduler runs it from.
+            live_job_name = live_chain_job(rows, collected.job_chain)
+            if collected.job_chain and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
                     allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
                     collected = _reconcile_requeued_chain(collected, rows)
@@ -663,10 +668,11 @@ class SlurmExecutor(BaseExecutor):
             collected,
             max_infra_retries=resume.max_retries,
             max_walltime_s=_walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None,
-            live_job=str(job_dir) in workdirs,
+            live_job=str(job_dir) in workdirs or live_job_name is not None,
             outcome_policy=outcome_policy,
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
+            live_job_name=live_job_name,
         )
         return decision, collected
 

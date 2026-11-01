@@ -84,6 +84,25 @@ Identity = tuple[int, int]
 # Scheduler states that end an allocation from outside the run: its in-flight requests died with it and saved nothing.
 # An operator's cancel counts only for an explicit `gym eval resubmit --recover`: the in-job guard never continues it.
 ALLOCATION_CUT_STATES = frozenset({"TIMEOUT", "PREEMPTED", "NODE_FAIL", "CANCELLED"})
+# The kind a reservation without a saved outcome gets when no scheduler cut explains it.
+RESERVATION_WITHOUT_OUTCOME = "reservation_without_outcome"
+# Scheduler states of a job that still waits or runs: a chain job in one of them is a live continuation.
+LIVE_JOB_STATES = frozenset(
+    {
+        "PENDING",
+        "RUNNING",
+        "CONFIGURING",
+        "COMPLETING",
+        "SUSPENDED",
+        "REQUEUED",
+        "REQUEUE_HOLD",
+        "REQUEUE_FED",
+        "RESIZING",
+        "STOPPED",
+        "SIGNALING",
+        "STAGE_OUT",
+    }
+)
 
 
 class IdentityState(StrEnum):
@@ -130,6 +149,7 @@ class RecoveryBudget(BaseModel):
     walltime_capped: bool = Field(default=False, description="Whether resume_config sets max_walltime.")
     walltime_used_s: float | None = Field(default=None, ge=0)
     live_job: bool | None = Field(default=None, description="A job runs or waits in this job dir.")
+    live_job_name: str | None = Field(default=None, description="The live chain job, as 'id (STATE)', when known.")
     job_chain: list[str] = Field(default_factory=list, description="Job ids already run in this job dir.")
 
 
@@ -647,7 +667,7 @@ def decide_recovery(
             # cut the allocation that held it: then no row of that attempt exists and the Store runs it again.
             if not (allocation_cut and fact.reserved and fact.pending):
                 item.state = IdentityState.UNKNOWN
-                item.failure_kind = item.failure_kind or "reservation_without_outcome"
+                item.failure_kind = item.failure_kind or RESERVATION_WITHOUT_OUTCOME
         elif item.state == IdentityState.RETRYABLE and not fact.pending:
             item.state = IdentityState.EXHAUSTED if fact.attempts >= fact.max_attempts else IdentityState.UNKNOWN
 
@@ -670,7 +690,7 @@ def decide_recovery(
 
     # A live job is still writing the files read above, whatever they show now: classify nothing from them.
     if budget.live_job:
-        live = decision(RecoveryAction.STOP, "a job of this run is still pending or running; it is not queued twice")
+        live = decision(RecoveryAction.NOOP, _live_reason(budget.live_job_name))
         return live.model_copy(update={"scheduler_live": True})
     if invalid_inventory or len(expected) != len(expected_set) or not expected_set:
         return decision(
@@ -696,10 +716,22 @@ def decide_recovery(
             and (managed[item.identity].pending if item.identity in managed else item.identity not in result_rows)
         ]
         if not needs_policy or rerun:
+            unknown = [item for item in evidence if item.state == IdentityState.UNKNOWN]
+            reserved = sum(item.failure_kind == RESERVATION_WITHOUT_OUTCOME for item in unknown)
+            parts = []
+            if len(unknown) > reserved:
+                parts.append(
+                    f"{len(unknown) - reserved} failure(s) have no registered kind or no supported action, so nobody "
+                    "owns them"
+                )
+            if reserved:
+                parts.append(
+                    f"{reserved} reservation(s) have no saved outcome and the allocation that made them was not cut "
+                    "by the scheduler, so whether they ran is unknown"
+                )
             return decision(
                 RecoveryAction.STOP,
-                f"{counts[IdentityState.UNKNOWN]} failure(s) have no registered kind or no supported action, so "
-                "nobody owns them"
+                "; ".join(parts)
                 + (f" and a resume would run {len(rerun)} of them again" if needs_policy and rerun else "")
                 + f"; {populations}",
             )
@@ -1429,6 +1461,24 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
         return collected.model_copy(update={"managed_selection": None, "managed_reader_error": str(error)})
 
 
+def _live_reason(live_job_name: str | None) -> str:
+    if live_job_name:
+        return f"continuation {live_job_name} live; nothing to decide"
+    return "a job of this run is still pending or running; nothing to decide, it is not queued twice"
+
+
+def live_chain_job(rows: list[tuple[str, str, int, int]] | None, job_chain: list[str]) -> str | None:
+    """The chain job that still waits or runs, as 'id (STATE)' from its latest incarnation; None when none does."""
+    latest: dict[str, tuple[int, str]] = {}
+    for job_id, state, _, restarts in rows or []:
+        if job_id not in latest or restarts >= latest[job_id][0]:
+            latest[job_id] = (restarts, state)
+    for job_id in reversed(job_chain):
+        if job_id in latest and latest[job_id][1] in LIVE_JOB_STATES:
+            return f"{job_id} ({latest[job_id][1]})"
+    return None
+
+
 def decide_from_collected(
     collected: CollectedEvidence,
     *,
@@ -1439,6 +1489,7 @@ def decide_from_collected(
     planned_missing_continuation: bool = False,
     allocation_cut: bool = False,
     extend_retries: int = 0,
+    live_job_name: str | None = None,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision.
 
@@ -1477,6 +1528,7 @@ def decide_from_collected(
         walltime_capped=max_walltime_s is not None,
         walltime_used_s=walltime,
         live_job=live_job,
+        live_job_name=live_job_name,
         job_chain=collected.job_chain,
     )
     if collected.managed_store and collected.managed_selection is None:
@@ -1498,10 +1550,8 @@ def decide_from_collected(
     if collected.materialized is None:
         live = live_job is True
         return RecoveryDecision(
-            action=RecoveryAction.STOP,
-            reason="a job of this run is still pending or running; it is not queued twice"
-            if live
-            else "the run has no materialized inventory to recover against",
+            action=RecoveryAction.NOOP if live else RecoveryAction.STOP,
+            reason=_live_reason(live_job_name) if live else "the run has no materialized inventory to recover against",
             expected=0,
             counts={},
             identities={},

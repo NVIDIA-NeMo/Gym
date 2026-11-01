@@ -367,7 +367,9 @@ def test_recover_does_not_queue_beside_a_live_job(tmp_path, fake_executor) -> No
     fake_executor.job_dir = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
     fake_executor.live = True
     out = submit.recover("gym-job-e", "bench")
-    assert not out.ok and "still pending or running" in out.decision.reason and fake_executor.calls == ["decide"]
+    # Nothing to decide while a job of the run waits or runs: no error, and nothing is queued beside it.
+    assert out.ok and out.dispatched is None and "still pending or running" in out.decision.reason
+    assert out.decision.action == RecoveryAction.NOOP and fake_executor.calls == ["decide"]
 
 
 def test_recover_stops_on_unknown_ownership(tmp_path, fake_executor) -> None:
@@ -678,7 +680,8 @@ def test_live_scheduler_job_is_running_not_success_or_failure(tmp_path, fake_exe
     )
     fake_executor.live = True
     out = submit.recover("gym-job-n", "bench")
-    assert out.gate_task["status"] == "RUNNING" and fake_executor.calls == ["decide"] and not out.ok
+    assert out.gate_task["status"] == "RUNNING" and fake_executor.calls == ["decide"]
+    assert out.ok and out.dispatched is None
 
 
 def test_a_live_mlflow_run_is_unverified_delivery_not_an_unfinished_export(tmp_path, fake_executor) -> None:
