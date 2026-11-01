@@ -132,6 +132,22 @@ def test_a_failure_that_kept_an_answer_stops_and_names_the_rule(row, label):
     )
 
 
+@pytest.mark.parametrize(
+    "graded,action,counts",
+    [(False, "resubmit", {"scored": 1, "retryable": 1}), (True, "stop", {"scored": 1, "unknown": 1})],
+    ids=["no-answer-no-grade-retried", "no-answer-graded-kept"],
+)
+def test_a_failure_with_no_answer_is_retried_only_when_no_grade_was_recorded(graded, action, counts):
+    decision = _decide(_harness_unconfirmed(evaluation_completed=graded))
+    assert decision.action.value == action, decision.reason
+    assert decision.counts == counts
+    if graded:
+        label = "harness_termination_unconfirmed: the verifier recorded a grade that a rerun would replace"
+        assert decision.reason.endswith(
+            f"retryable 0 (resumed), unknown 1 (1 {label}) (reported, not retried), retained 1 (saved rows kept)"
+        )
+
+
 def test_a_failure_with_no_kind_anywhere_stops_and_says_so():
     decision = _decide({"_ng_failure_class": "unowned_class"})
     assert decision.action.value == "stop"

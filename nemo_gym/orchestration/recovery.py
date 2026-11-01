@@ -348,10 +348,12 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
 
 def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
-    from nemo_gym.rollout_recovery import has_saved_generation, has_unclassified_execution_failure
+    from nemo_gym.rollout_recovery import has_recorded_grade, has_saved_generation, has_unclassified_execution_failure
 
     if has_saved_generation(row) or _saved_answer(row):
         return "the row kept an answer that a rerun would replace"
+    if has_recorded_grade(row):
+        return "the verifier recorded a grade that a rerun would replace"
     if has_unclassified_execution_failure(row):
         return "its recorded cause does not permit another agent run"
     chain = _cause_chain(row)
