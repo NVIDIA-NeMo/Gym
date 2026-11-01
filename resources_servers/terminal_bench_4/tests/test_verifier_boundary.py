@@ -171,14 +171,14 @@ async def produce(tmp_path, monkeypatch, case, reward):
         ("healthy", 1, True),
         ("wrong", 0, True),
         ("native124", 0, True),
-        ("preparation", 0, False),
-        ("unknown_status", 0, False),
+        ("preparation", 0, True),
+        ("unknown_status", 0, True),
         ("provider_timeout", 0, False),
         ("typed_timeout", 0, False),
         ("reward_transfer", 0, False),
         ("artifact_timeout", 1, True),
         ("original_failure", 0, False),
-        ("legacy_unknown_status", 0, False),
+        ("legacy_unknown_status", 0, True),
         ("legacy_reward_transfer", 0, False),
     ],
 )
@@ -359,7 +359,7 @@ def test_preparation_consumes_the_common_verifier_deadline(tmp_path):
         env.task = NS(config=NS(verifier=NS(timeout_sec=budget, env={}, user="root")))
         diagnostics = []
         start = asyncio.get_running_loop().time()
-        with pytest.raises(verifier.VerifierStatusUnknownError):
+        with pytest.raises(verifier.VerifierTimeoutError):
             await verifier.run_verifier(env, tmp_path, diagnostics)
         elapsed = asyncio.get_running_loop().time() - start
         execution = [kwargs for command, kwargs in sdk.commands if command.startswith("/tests/test.sh")]
@@ -437,7 +437,7 @@ def test_reward_transfer_cannot_restart_the_verifier_deadline(tmp_path, transfer
         env.task = NS(config=NS(verifier=NS(timeout_sec=budget, env={}, user="root")))
         diagnostics = []
         start = asyncio.get_running_loop().time()
-        with pytest.raises(verifier.VerifierStatusUnknownError):
+        with pytest.raises(verifier.VerifierTimeoutError):
             await verifier.run_verifier(env, tmp_path, diagnostics)
         elapsed = asyncio.get_running_loop().time() - start
         assert 0.18 <= elapsed < 0.28

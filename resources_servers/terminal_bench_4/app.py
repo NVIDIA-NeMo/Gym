@@ -97,7 +97,7 @@ def atomic_json(path, value):
 # Verifier outcomes that Terminal-Bench never retries and counts as a 0: Harbor excludes them from retries and counts a
 # trial without a reward as 0. They are scored zeros here too, so the task stays in the pass-rate denominator.
 _ZERO_SCORED_VERIFIER_FAILURES = frozenset(
-    {"RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"}
+    {"VerifierTimeoutError", "RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"}
 )
 
 
