@@ -420,6 +420,38 @@ def validate_question(args: dict[str, Any], config: FinanceTaskTreeSdgConfig) ->
     return question
 
 
+PHRASINGS = ("filing_terms", "analyst_terms")
+MAX_COMPONENTS = 6
+
+
+def _folded(text: str) -> str:
+    return " ".join(text.split()).casefold()
+
+
+def validate_question_metadata(args: dict[str, Any], question: str) -> dict[str, Any]:
+    """Hidden ``submit_question`` fields used to label the question's phrasing after the run."""
+    metric = _non_empty_str(args, "target_metric")
+    if metric is None:
+        raise ToolError("target_metric is required and must be a non-empty string")
+    if _folded(metric) not in _folded(question):
+        raise ToolError("target_metric must be copied exactly from the question")
+    components = args.get("components")
+    if not isinstance(components, list) or not 1 <= len(components) <= MAX_COMPONENTS:
+        raise ToolError(f"components must be a list of 1 to {MAX_COMPONENTS} items")
+    cleaned = []
+    for index, component in enumerate(components):
+        if not isinstance(component, dict):
+            raise ToolError(f"components[{index}] must be an object")
+        line_item, url = _non_empty_str(component, "line_item"), _non_empty_str(component, "url")
+        if line_item is None or url is None:
+            raise ToolError(f"components[{index}] needs a non-empty line_item and url")
+        cleaned.append({"line_item": line_item, "url": url})
+    phrasing = args.get("phrasing_used")
+    if phrasing not in PHRASINGS:
+        raise ToolError(f"phrasing_used must be one of {list(PHRASINGS)}")
+    return {"target_metric": metric, "components": cleaned, "phrasing_used": phrasing}
+
+
 def validate_rejection(args: dict[str, Any]) -> dict[str, str]:
     code = args.get("reason_code")
     if code not in REJECTION_CODES:
@@ -633,7 +665,10 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
             validate_match(args, session.sdg.get("choices") or {})
             return "Match submitted."
         if name == "submit_question":
-            validate_question(args, self.config)
+            question = validate_question(args, self.config)
+            # Rows sampled before phrasing existed do not carry the hidden fields.
+            if "phrasing" in session.sdg:
+                validate_question_metadata(args, question)
             return "Question submitted."
         if name == "submit_rejection":
             validate_rejection(args)
@@ -775,6 +810,8 @@ class FinanceTaskTreeSdgServer(SimpleResourcesServer):
                 result.update(status="rejected", rejection=validate_rejection(args), trace=trace)
                 return self._respond(body, 0.0, result)
             result.update(question=validate_question(args, self.config), trace=trace)
+            if "phrasing" in body.sdg:
+                result["question_metadata"] = validate_question_metadata(args, result["question"])
         elif stage == "leak_proposal":
             result["proposal"] = validate_leak_proposal(args, str(body.sdg.get("question", "")))
         elif stage == "leak_removal":

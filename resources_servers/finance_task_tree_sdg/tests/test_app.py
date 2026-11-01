@@ -41,6 +41,7 @@ from resources_servers.finance_task_tree_sdg.app import (
     validate_leak_proposal,
     validate_match,
     validate_probe,
+    validate_question_metadata,
     validate_relation,
     validate_revised_question,
     validate_verdict,
@@ -479,6 +480,53 @@ def test_submit_tools_validate_against_the_seeded_row() -> None:
         assert bad.headers["x-nemo-gym-tool-error"] == "true"
         assert "verbatim" in bad.text
         assert client.post("/edgar_search", json={"ticker": "AAPL"}).status_code == 404
+
+
+_URL = "https://www.sec.gov/Archives/edgar/data/320193/000032019323000106/aapl-20230930.htm"
+_METADATA = {
+    "target_metric": "ratio of operating income to net sales",
+    "components": [{"line_item": "Operating income", "url": _URL}, {"line_item": "Total net sales", "url": _URL}],
+    "phrasing_used": "filing_terms",
+}
+
+
+def test_question_metadata_must_match_the_question() -> None:
+    assert validate_question_metadata(_METADATA, _QUESTION) == _METADATA
+    spaced = {**_METADATA, "target_metric": "  Ratio of  operating income\nto net sales "}
+    assert validate_question_metadata(spaced, _QUESTION)["target_metric"] == "Ratio of  operating income\nto net sales"
+    with pytest.raises(ToolError, match="copied exactly"):
+        validate_question_metadata({**_METADATA, "target_metric": "net take rate"}, _QUESTION)
+    with pytest.raises(ToolError, match="components"):
+        validate_question_metadata({**_METADATA, "components": []}, _QUESTION)
+    with pytest.raises(ToolError, match=r"components\[0\]"):
+        validate_question_metadata({**_METADATA, "components": [{"line_item": "Operating income"}]}, _QUESTION)
+    with pytest.raises(ToolError, match="phrasing_used"):
+        validate_question_metadata({**_METADATA, "phrasing_used": "plain"}, _QUESTION)
+
+
+def test_submit_question_checks_metadata_only_for_phrased_rows() -> None:
+    server = _server("question_gen")
+    for sdg, ok in (({}, "false"), ({"phrasing": "analyst_terms"}, "true")):
+        with TestClient(server.setup_webserver()) as client:
+            seed = {
+                "responses_create_params": {"input": [{"role": "user", "content": "task"}]},
+                "sdg": {"sample_id": "s", "as_of_date": "2023-11-03", **sdg},
+            }
+            assert client.post("/seed_session", json=seed).status_code == 200
+            reply = client.post("/submit_question", json={"question": _QUESTION})
+            assert reply.headers["x-nemo-gym-tool-error"] == ok
+            reply = client.post("/submit_question", json={"question": _QUESTION, **_METADATA})
+            assert reply.headers["x-nemo-gym-tool-error"] == "false"
+
+
+async def test_question_gen_verify_keeps_question_metadata(tmp_path: Path) -> None:
+    server = _server("question_gen", tmp_path)
+    server.server_client.post = AsyncMock(return_value=_judge_reply('{"verdict": "pass"}'))
+    response = _response(_call("submit_question", {"question": _QUESTION, **_METADATA}))
+    result = await server.verify(MagicMock(session={}), _request(response, {"phrasing": "filing_terms"}))
+    assert result.sdg_result["question_metadata"] == _METADATA
+    legacy = await server.verify(MagicMock(session={}), _request(response))
+    assert "question_metadata" not in legacy.sdg_result
 
 
 async def test_question_gen_verify_returns_only_the_verdict(tmp_path: Path) -> None:
