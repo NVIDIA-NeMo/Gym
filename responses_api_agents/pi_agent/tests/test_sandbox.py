@@ -28,9 +28,8 @@ from pydantic import ValidationError
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
@@ -255,6 +254,7 @@ def test_http_session_flow_runs_pi_in_borrowed_sandbox(setup):
             assert body["usage"]["total_tokens"] == 22
             assert body["usage"]["input_tokens_details"]["cached_tokens"] is None
             assert body["metadata"]["harness_execution"] == "sandbox"
+            assert "stop_reason" not in body["metadata"]
             assert "_ng_agent_observations" not in body
             payload = staged(sandbox)
             assert payload["prompt"] == "Fix the code"
@@ -603,16 +603,35 @@ async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
-async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup):
+@pytest.mark.parametrize(
+    "grants,left_out",
+    [
+        ([mcp_grant("resources"), mcp_grant("resources.mcp", required=False)], {"resources.mcp": _UNUSABLE_NAME}),
+        # A grant name of 62 characters still fits gym_mcp.mjs' 64 with `_` and a one-letter tool name.
+        ([mcp_grant("r" * 62), mcp_grant("s" * 63, required=False)], {"s" * 63: _UNUSABLE_NAME}),
+        # The required grant keeps the tools; the optional one that overlaps it is left out.
+        (
+            [mcp_grant("resources"), mcp_grant("resources_v2", required=False)],
+            {"resources_v2": f"{_OVERLAP} resources"},
+        ),
+        # Neither of two overlapping optional grants is used.
+        (
+            [mcp_grant("resources"), mcp_grant("web", required=False), mcp_grant("web_v2", required=False)],
+            {"web": f"{_OVERLAP} web_v2", "web_v2": f"{_OVERLAP} web"},
+        ),
+        # Only a `_` joins a grant name to its tool names, so `web-extra_search` cannot be a tool of `web`.
+        ([mcp_grant("web"), mcp_grant("web-extra", required=False)], {}),
+    ],
+)
+async def test_optional_mcp_grant_that_pi_cannot_use_is_left_out(setup, grants, left_out):
     agent, sandbox = setup
-    name, problem = "resources.mcp", _UNUSABLE_NAME
-    body = seed_with_tools(mcp_grant("resources"), mcp_grant(name, required=False))
-    request, session_id, task = await activate(agent, sandbox, body)
+    request, session_id, task = await activate(agent, sandbox, seed_with_tools(*grants))
     assert (await task).status == "completed"
-    assert list(json.loads(sandbox.files[f"{sandbox.directory}/mcp-servers.json"])) == ["resources"]
+    servers = json.loads(sandbox.files[f"{sandbox.directory}/mcp-servers.json"])
+    assert list(servers) == [grant["name"] for grant in grants if grant["name"] not in left_out]
     close = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
-    gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps]
-    assert ("mcp_server_skipped", f"{name}: {problem}") in gaps
+    gaps = [(gap.code, gap.detail) for gap in close.agent_observations.gaps if gap.code == "mcp_server_skipped"]
+    assert gaps == [("mcp_server_skipped", f"{name}: {problem}") for name, problem in left_out.items()]
 
 
 async def test_no_mcp_grant_stages_no_tool_extension(setup):
@@ -708,6 +727,7 @@ async def test_finish_tool_ends_the_run_and_output_uses_gym_mcp_names(setup):
     response = await task
     assert response.status == "completed"
     assert response.error is None
+    assert "stop_reason" not in response.metadata
     # The granted prefix becomes Gym's MCP naming, and Pi's own tools keep their names.
     assert [item.name for item in response.output if item.type == "function_call"] == [
         "bash",
@@ -736,6 +756,131 @@ async def test_run_ending_on_other_tool_calls_is_not_a_result(setup, details, is
     request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
     with pytest.raises(RuntimeError, match="Pi ended without a terminal assistant result"):
         await task
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+def deadline_events(case):
+    """What Pi recorded before the deadline stopped it, in each case."""
+    finish = {"type": "toolCall", "id": "tool-1", "name": "resources_finish", "arguments": {"paths": ["/r.docx"]}}
+    bash = {"type": "toolCall", "id": "tool-2", "name": "bash", "arguments": {"command": "sleep 600"}}
+    usage = {"input": 5, "output": 2, "cacheRead": 0}
+
+    def reply(stop_reason, *content, error=None):
+        message = {"role": "assistant", "responseId": "call-1", "content": list(content), "usage": usage}
+        return {"type": "message_end", "message": {**message, "stopReason": stop_reason, "errorMessage": error}}
+
+    def finish_end(succeeded):
+        result = {"content": [{"type": "text", "text": "done"}], "details": {"terminal": True} if succeeded else {}}
+        return {"type": "tool_execution_end", "toolCallId": "tool-1", "result": result, "isError": not succeeded}
+
+    if case in ("finish-recorded", "finish-refused"):
+        # Pi records the turn's tool results only once the slower bash call ends too.
+        recorded = [reply("toolUse", finish, bash), finish_end(case == "finish-recorded")]
+    elif case == "finish-then-more":
+        # That turn's bash call ended too, and the run went on to another turn.
+        results = [
+            {"role": "toolResult", "toolCallId": call["id"], "toolName": call["name"], "content": [], "isError": False}
+            for call in (finish, bash)
+        ]
+        recorded = [
+            reply("toolUse", finish, bash),
+            finish_end(True),
+            *({"type": "message_end", "message": result} for result in results),
+            reply("toolUse", bash),
+        ]
+    elif case in ("ended", "ended-at-output-limit", "ended-over-the-window"):
+        # The run is over; the deadline stops the compaction call Pi makes after it. Above the configured window, Pi
+        # compacts for an overflow, but it does not retry a `stop` reply.
+        result = {"role": "toolResult", "toolCallId": "tool-2", "toolName": "bash", "content": [], "isError": False}
+        last = reply("length" if case == "ended-at-output-limit" else "stop", {"type": "text", "text": "Done"})
+        compaction = {"type": "compaction_start"}
+        if case == "ended-over-the-window":
+            compaction["reason"] = "overflow"
+        recorded = [
+            reply("toolUse", bash),
+            {"type": "message_end", "message": result},
+            last,
+            {"type": "agent_end", "messages": [last["message"]]},
+            compaction,
+        ]
+    elif case == "overflow-at-output-limit":
+        # An empty `length` reply at a full context is an overflow to Pi, which compacts to retry it (Pi 0.80.2 then
+        # exits with code 1).
+        last = reply("length")
+        recorded = [
+            last,
+            {"type": "agent_end", "messages": [last["message"]], "willRetry": False},
+            {"type": "compaction_start", "reason": "overflow"},
+        ]
+    elif case == "stop-with-tool-call":
+        # Some providers report `stop` for a reply with tool calls, and Pi runs them.
+        recorded = [reply("stop", bash)]
+    elif case == "retrying-after-compaction":
+        # Pi compacted after an overflow and retried; that call failed too, and Pi waits to retry it.
+        overflow = reply("error", error="400 maximum context length exceeded")
+        failed = reply("error", error="503 Service Unavailable")
+        recorded = [
+            overflow,
+            {"type": "agent_end", "messages": [overflow["message"]], "willRetry": False},
+            {"type": "compaction_start", "reason": "overflow"},
+            {"type": "compaction_end", "reason": "overflow", "result": {"summary": "s", "tokensBefore": 9}},
+            failed,
+            {"type": "agent_end", "messages": [failed["message"]], "willRetry": True},
+        ]
+    else:
+        assert case == "retrying", case
+        last = reply("error", error="503 Service Unavailable")
+        recorded = [last, {"type": "agent_end", "messages": [last["message"]], "willRetry": True}]
+    return "\n".join(json.dumps([float(i), event]) for i, event in enumerate(recorded))
+
+
+@pytest.mark.parametrize(
+    "case,stop_reason",
+    [
+        # A submission is judged, as Stirrup's runs that end on finish are.
+        ("finish-recorded", None),
+        ("finish-then-more", None),
+        ("finish-refused", "wall_time"),
+        ("ended", None),
+        ("ended-at-output-limit", None),
+        ("ended-over-the-window", None),
+        ("overflow-at-output-limit", "wall_time"),
+        ("stop-with-tool-call", "wall_time"),
+        ("retrying", "wall_time"),
+        ("retrying-after-compaction", "wall_time"),
+    ],
+)
+async def test_timeout_reports_wall_time_for_a_run_that_was_still_working(setup, case, stop_reason):
+    agent, sandbox = setup
+    sandbox.events = deadline_events(case)
+    sandbox.result["timed_out"] = True
+    request, session_id, task = await activate(agent, sandbox, seed_with_tools(mcp_grant("resources")))
+    response = await task
+    assert (response.status, response.metadata.get("stop_reason")) == ("incomplete", stop_reason)
+    await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+
+
+@pytest.mark.parametrize("deadline,captured", [(True, True), (False, True), (True, False)])
+async def test_supervisor_overrun_after_the_deadline_is_still_a_timeout(setup, deadline, captured):
+    agent, sandbox = setup
+    sandbox.events = deadline_events("finish-refused")
+    sandbox.result["timed_out"] = deadline
+    run = sandbox.run
+
+    async def overrun(command, **kwargs):
+        await run(command, **kwargs)
+        if not captured:
+            del sandbox.files[f"{sandbox.directory}/events.jsonl"]
+        return SimpleNamespace(return_code=None, error_type="timeout", stdout="", stderr="")
+
+    sandbox.launch.side_effect = overrun
+    request, session_id, task = await activate(agent, sandbox)
+    if deadline and captured:
+        response = await task
+        assert (response.status, response.metadata.get("stop_reason")) == ("incomplete", "wall_time")
+    else:
+        with pytest.raises(TimeoutError):
+            await task
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
 
 
@@ -1201,10 +1346,10 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         SingleAgentTurnEnvironmentServer,
         SingleAgentTurnEnvironmentServerConfig,
     )
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.server_runtime import SingleAgentTurnRequest
     from nemo_gym.server_utils import BaseServerConfig
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
 
     agent, sandbox = setup
     root = Path(__file__).parents[3]
@@ -1853,7 +1998,16 @@ async def test_pinned_pi_ends_the_run_on_finish(setup, tmp_path, monkeypatch, ca
 
     async with _pinned_pi_activation(setup, tmp_path, monkeypatch, grants=grants, replies=replies) as run:
         response = await run.activation
+        events = [
+            json.loads(line)[1]
+            for line in setup[0]._session_records["pi-session"].state.session.artifacts.split("\n")
+            if line
+        ]
     assert response.status == "completed", response.error
+    # The timeout rule counts a finish call as a submission from the result Pi reports when the call ends.
+    assert {"terminal": True} in [
+        event["result"]["details"] for event in events if event["type"] == "tool_execution_end"
+    ]
     assert "resources_finish" in [tool["function"]["name"] for tool in run.requests[0]["tools"]]
     # The server records only the complete finish call, and no model call follows it.
     assert run.calls == [{"paths": paths}]
@@ -2025,7 +2179,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.rollout_observability import join_agent_model_calls
+        from nemo_gym.trajectory.trajectory_record import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -2458,7 +2612,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
     from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}

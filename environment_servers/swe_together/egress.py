@@ -13,8 +13,8 @@ from environment_servers.swe_together.egress_policy import (
     workspace_packages_script,
 )
 from environment_servers.swe_together.runtime import PYTHON
-from nemo_gym.server_utils import raise_for_status
-from nemo_gym.server_utils import request as http_request
+from nemo_gym.client import raise_for_status
+from nemo_gym.client import request as http_request
 
 
 CA_PATH = "/tmp/gym-swet-dependency-ca.pem"

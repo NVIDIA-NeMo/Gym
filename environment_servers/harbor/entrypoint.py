@@ -26,8 +26,7 @@ from typing import Any
 
 from environment_servers.harbor.overlay import OVERLAY_OUTPUT_TAIL, _output_tail, overlay_workdir_command
 from environment_servers.harbor.users import _exec_as_root_user, _is_root
-from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.sandbox.transfer import download_path, exec_as_root
+from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, download_path, exec_as_root
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.dockerfile import DEFAULT_SHELL
 from nemo_gym.tasks.harbor.models import HarborHealthcheck

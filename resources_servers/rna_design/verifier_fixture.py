@@ -18,7 +18,7 @@ the server's own routes, so the cases exercise the same path as a rollout."""
 from typing import Any
 from unittest.mock import MagicMock
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 def create_server():

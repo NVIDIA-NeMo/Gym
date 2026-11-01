@@ -11,12 +11,12 @@ from fastapi.exceptions import RequestValidationError
 from pydantic import ValidationError
 
 from nemo_gym.base_responses_api_model import _orjson_dispatch_response
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_models.vllm_model.app import VLLMModel
 
 
