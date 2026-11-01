@@ -49,6 +49,8 @@ BOUNDED_BUDGET_MARKER = "# --- Bounded resume budgets v1 ---"
 SCHEDULER_CAUSE_MARKER = "# --- Scheduler-cause retry admission v1 ---"
 RESUBMIT_LOCK_NAME = ".gym_resubmit.lock"
 ACCOUNTING_UNKNOWN_PREFIX = "GYM_ACCOUNTING_UNKNOWN:"
+# The line prefix the installed continuation reader prints its decision reason with.
+CONTINUATION_REASON_PREFIX = "__GYM_CONTINUATION_REASON:"
 ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
 
@@ -206,10 +208,14 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
         {runtime_admission_marker}
         _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "Installed recovery runtime failed."
         _gym_admission=$(printf '%s\n' "$_gym_admission_output" | grep '^__GYM_CONTINUATION:' || true)
+        # The installed reader's own decision, when it gives one, replaces the scheduler-state guess above.
+        _gym_admission_reason=$(printf '%s\n' "$_gym_admission_output" | grep -m 1 '^{continuation_reason_prefix}' || true)
+        _gym_admission_reason=${{_gym_admission_reason#{continuation_reason_prefix}}}
         case "$_gym_admission" in
-            __GYM_CONTINUATION:segment) _gym_needs_retry=0 ;;
-            __GYM_CONTINUATION:retry) _gym_needs_retry=1 ;;
-            *) _gym_stop_incomplete "Saved recovery evidence has no eligible retries; $_gym_stop_reason" ;;
+            __GYM_CONTINUATION:segment|__GYM_CONTINUATION:retry)
+                [[ "$_gym_admission" == __GYM_CONTINUATION:retry ]] && _gym_needs_retry=1 || _gym_needs_retry=0
+                [[ -z "$_gym_admission_reason" ]] || echo "Saved recovery evidence: $_gym_admission_reason" ;;
+            *) _gym_stop_incomplete "Saved recovery evidence has no eligible retries; ${{_gym_admission_reason:-$_gym_stop_reason}}${{_gym_admission_reason:+ (previous job $_prev_slurm_job_id ended $_prev_state)}}" ;;
         esac
     else
         _gym_stop_incomplete "$_gym_stop_reason"
@@ -373,4 +379,5 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
             RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"
         ),
         admission_command=admission_command,
+        continuation_reason_prefix=CONTINUATION_REASON_PREFIX,
     )

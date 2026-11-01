@@ -74,6 +74,7 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
+    allocation_cut_from_accounting,
     decide_from_collected,
     select_managed_evidence,
 )
@@ -184,14 +185,15 @@ def _remote_managed_evidence(
             "source_job_identity",
             "checkpoint_enabled",
         }
-        # A pinned reader older than the accounting snapshot drops it; the host collection owns it either way.
-        compared = allowed | {"accounting_snapshot"}
+        # A pinned reader older than these host-collected fields drops them; the host collection owns them either way.
+        compared = allowed | {"accounting_snapshot", "coverage_allocation_id"}
         if selected.model_dump(exclude=compared) != collected.model_dump(exclude=compared):
             raise ValueError("remote Store reader changed collection evidence")
         return selected.model_copy(
             update={
                 "source_job_identity": collected.source_job_identity,
                 "accounting_snapshot": collected.accounting_snapshot,
+                "coverage_allocation_id": collected.coverage_allocation_id,
             }
         )
     except (RuntimeError, OSError, ValueError) as error:
@@ -449,20 +451,29 @@ class SlurmExecutor(BaseExecutor):
                             outcome_policy=outcome_policy,
                         ), collected
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
-            if resume.max_walltime is not None and collected.job_chain and str(job_dir) not in workdirs:
+            allocation_cut = False
+            if collected.job_chain and str(job_dir) not in workdirs:
                 try:
                     chain = ",".join(collected.job_chain)
                     accounting = conn.run(
                         [f"sacct -n -P -X -j {shlex.quote(chain)} --format=JobIDRaw,State,ElapsedRaw"]
                     )
-                    collected.accounted_walltime_s = accounted_chain_walltime(
-                        collected.job_chain,
-                        accounting,
-                        stored_walltime_s=collected.walltime_used_s or 0,
-                    )
-                except (RuntimeError, OSError, ValueError):
-                    # Unavailable accounting cannot grant fresh walltime.
-                    collected.accounted_walltime_s = None
+                except (RuntimeError, OSError):
+                    accounting = None
+                if accounting is not None:
+                    allocation_cut = allocation_cut_from_accounting(accounting, collected.coverage_allocation_id)
+                if resume.max_walltime is not None:
+                    try:
+                        collected.accounted_walltime_s = (
+                            accounted_chain_walltime(
+                                collected.job_chain, accounting, stored_walltime_s=collected.walltime_used_s or 0
+                            )
+                            if accounting is not None
+                            else None
+                        )
+                    except ValueError:
+                        # Unavailable accounting cannot grant fresh walltime.
+                        collected.accounted_walltime_s = None
         if collected.accounting_snapshot is not None:
             collected.accounting_snapshot = {
                 **collected.accounting_snapshot,
@@ -474,6 +485,7 @@ class SlurmExecutor(BaseExecutor):
             max_walltime_s=_walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None,
             live_job=str(job_dir) in workdirs,
             outcome_policy=outcome_policy,
+            allocation_cut=allocation_cut,
         )
         return decision, collected
 

@@ -27,9 +27,11 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
 - ``missing``: no row at all (interrupted or never started); a resume restarts its input.
 - ``unknown``: a failure whose kind is unregistered or absent, or a row whose identity is invalid; nobody owns it.
 
-The run-level action follows: ``stop`` for any unknown identity or a spent or unknown resubmit budget, ``noop`` when
-nothing is left to do, ``reverify`` when only judge failures remain, else ``resubmit``. A decision never reports a run
-as complete while an identity is terminal, missing or unknown.
+The run-level action follows: ``stop`` for a spent or unknown resubmit budget, or for an unknown identity that a resume
+would run again; ``noop`` when nothing is left to do, ``reverify`` when only judge failures remain, else ``resubmit``.
+An unknown identity that a resume never runs again (the Store or the saved result holds it) does not block the
+missing and retryable ones: the decision reports it apart from what is retried and what is retained. A decision never
+reports a run as complete while an identity is terminal, missing or unknown.
 """
 
 import hashlib
@@ -61,7 +63,7 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
 )
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX
+from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, CONTINUATION_REASON_PREFIX
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.task_materialization import TASK_ID_FIELDS
 
@@ -76,6 +78,9 @@ FAILURE_EVENTS = "_ng_failure_events"
 FAILURE_ID = "_ng_failure_id"
 
 Identity = tuple[int, int]
+
+# Scheduler states that end an allocation from outside the run: its in-flight requests died with it and saved nothing.
+ALLOCATION_CUT_STATES = frozenset({"TIMEOUT", "PREEMPTED"})
 
 
 class IdentityState(StrEnum):
@@ -375,6 +380,7 @@ def decide_recovery(
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     managed_selection: list[ManagedRecoveryFact] | None = None,
     planned_missing_continuation: bool = False,
+    allocation_cut: bool = False,
 ) -> RecoveryDecision:
     """Classify every materialized identity and choose the run-level action.
 
@@ -382,6 +388,10 @@ def decide_recovery(
     standing row of a rollout is chosen as rollout collection chooses it (``_latest_failure_rows``): rows that
     ``is_non_superseding_rollout_row`` names are skipped, and an interrupted omitted row means the rollout is missing.
     Only rows at or after ``resubmit_offset`` count towards the attempt cap. The rows are only read.
+
+    ``allocation_cut`` says that the scheduler ended the allocation that last wrote the Store (one of
+    ``ALLOCATION_CUT_STATES``) and no allocation of the run is live: a reservation with no saved row was in flight at
+    the cut, so it is not started for recovery purposes and the Store runs it again.
     """
     from nemo_gym.rollout_collection import (
         NG_UNROUTED_RUN_ERROR_KEY,
@@ -590,8 +600,11 @@ def decide_recovery(
         if item.state == IdentityState.JUDGE_RECOVERABLE and fact.attempts >= fact.max_attempts:
             item.state = IdentityState.EXHAUSTED
         elif item.state == IdentityState.MISSING and (fact.reserved or not fact.pending):
-            # A reservation without an outcome is not proof that work never reached the agent.
-            item.state = IdentityState.UNKNOWN
+            # A reservation without an outcome is not proof that work never reached the agent, unless the scheduler
+            # cut the allocation that held it: then no row of that attempt exists and the Store runs it again.
+            if not (allocation_cut and fact.reserved and fact.pending):
+                item.state = IdentityState.UNKNOWN
+                item.failure_kind = item.failure_kind or "reservation_without_outcome"
         elif item.state == IdentityState.RETRYABLE and not fact.pending:
             item.state = IdentityState.EXHAUSTED if fact.attempts >= fact.max_attempts else IdentityState.UNKNOWN
 
@@ -622,11 +635,27 @@ def decide_recovery(
             f"{unknown_rows} saved row(s) outside the inventory or invalid, "
             f"{len(duplicates)} duplicated result identity(ies)",
         )
+    # Only what rollout collection would run again: a resume keeps the per-rollout attempts, so it gates an
+    # exhausted identity (`_load_from_cache` maxed_out) and queueing for it alone runs nothing.
+    needs_policy = sum(counts.get(s, 0) for s in (IdentityState.MISSING, IdentityState.RETRYABLE))
+    populations = _populations(counts, evidence)
     if counts.get(IdentityState.UNKNOWN):
-        return decision(
-            RecoveryAction.STOP,
-            f"{counts[IdentityState.UNKNOWN]} failure(s) have no registered kind or no supported action, so nobody owns them",
-        )
+        # A resume never runs an identity the Store does not select as pending, nor a saved result row (both
+        # collection paths gate it); any other unknown identity would run again without an owner.
+        rerun = [
+            item.identity
+            for item in evidence
+            if item.state == IdentityState.UNKNOWN
+            and (managed[item.identity].pending if item.identity in managed else item.identity not in result_rows)
+        ]
+        if not needs_policy or rerun:
+            return decision(
+                RecoveryAction.STOP,
+                f"{counts[IdentityState.UNKNOWN]} failure(s) have no registered kind or no supported action, so "
+                "nobody owns them"
+                + (f" and a resume would run {len(rerun)} of them again" if needs_policy and rerun else "")
+                + f"; {populations}",
+            )
     # A live job is still writing the files read above, whatever they show now.
     if budget.live_job:
         live = decision(RecoveryAction.STOP, "a job of this run is still pending or running; it is not queued twice")
@@ -636,9 +665,6 @@ def decide_recovery(
             RecoveryAction.STOP,
             "the policy stops an ungraded failure; mixed dispatch cannot enforce separate task decisions",
         )
-    # Only what rollout collection would run again: a resume keeps the per-rollout attempts, so it gates an
-    # exhausted identity (`_load_from_cache` maxed_out) and queueing for it alone runs nothing.
-    needs_policy = sum(counts.get(s, 0) for s in (IdentityState.MISSING, IdentityState.RETRYABLE))
     if not needs_policy:
         if counts.get(IdentityState.JUDGE_RECOVERABLE):
             return decision(
@@ -684,7 +710,21 @@ def decide_recovery(
             )
     return decision(
         RecoveryAction.RESUBMIT,
-        f"{needs_policy} identity(ies) need the policy again: a Gym resume runs only missing and retryable ones",
+        f"{needs_policy} identity(ies) need the policy again: a Gym resume runs only missing and retryable ones"
+        + (f"; {populations}" if counts.get(IdentityState.UNKNOWN) else ""),
+    )
+
+
+def _populations(counts: Mapping[str, int], evidence: list[IdentityEvidence]) -> str:
+    """What a resume runs, what nobody owns (by kind, largest first) and the saved rows kept as they are."""
+    retryable = counts.get(IdentityState.MISSING, 0) + counts.get(IdentityState.RETRYABLE, 0)
+    retained = counts.get(IdentityState.SCORED, 0) + counts.get(IdentityState.MODEL_FINAL, 0)
+    kinds = Counter(item.failure_kind or "no kind" for item in evidence if item.state == IdentityState.UNKNOWN)
+    detail = ", ".join(f"{n} {kind}" for kind, n in kinds.most_common(3))
+    return (
+        f"retryable {retryable} (resumed), unknown {counts.get(IdentityState.UNKNOWN, 0)}"
+        + (f" ({detail}{', ...' if len(kinds) > 3 else ''})" if detail else "")
+        + f" (reported, not retried), retained {retained} (saved rows kept)"
     )
 
 
@@ -1067,13 +1107,21 @@ if len(sys.argv) > 2:
         score = value if isinstance(value, (int, float)) and not isinstance(value, bool) and math.isfinite(value) else None
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
+coverage_allocation_id = None
+try:
+    # The allocation that last opened the Store for writing; only its id leaves the run host.
+    value = json.load(open(os.path.join(a, "rollouts_coverage.json"))).get("allocation_id")
+    coverage_allocation_id = value if isinstance(value, str) and value.isascii() and value.isdecimal() else None
+except (OSError, ValueError, AttributeError):
+    pass
 collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
                   "failures": rows("rollouts_failures.jsonl") or [], "resubmit_offset": offset, "infra_retries_used": num(".gym_infra_retries")[0],
                   "infra_retries_state": "unknown" if unknown_accounting else num(".gym_infra_retries")[1],
                   "walltime_used_s": num(".gym_accumulated_walltime")[0],
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
-                  "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store)}
+                  "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
+                  "coverage_allocation_id": coverage_allocation_id}
 if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
     quality["source_matches"] = False
 stable_sources = (source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files}
@@ -1118,6 +1166,8 @@ class CollectedEvidence(BaseModel):
     managed_reader_error: str | None = None
     # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
+    # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
+    coverage_allocation_id: str | None = None
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -1305,8 +1355,12 @@ def decide_from_collected(
     live_job: bool | None,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     planned_missing_continuation: bool = False,
+    allocation_cut: bool = False,
 ) -> RecoveryDecision:
-    """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision."""
+    """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision.
+
+    ``allocation_cut`` (see ``decide_recovery``) applies only with no live job.
+    """
     # resume_script creates .gym_infra_retries on the first infra retry, so its absence means none ran; it adds every
     # previous hop to .gym_accumulated_walltime, so after a follow-up hop that file must exist. Malformed is unknown.
     retries = {"absent": 0, "ok": collected.infra_retries_used}.get(collected.infra_retries_state)
@@ -1371,6 +1425,7 @@ def decide_from_collected(
         outcome_policy=outcome_policy,
         managed_selection=collected.managed_selection,
         planned_missing_continuation=planned_missing_continuation,
+        allocation_cut=allocation_cut and live_job is False,
     )
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(
@@ -1401,6 +1456,10 @@ def continuation_admission(
 
     job = Path(job_dir)
     if exit_code == "76:0":
+        print(
+            f"{CONTINUATION_REASON_PREFIX}the previous driver exited 76: none of its saved failures is eligible for "
+            "another attempt; `gym eval resubmit --recover --inspect` names each identity's state"
+        )
         return "stop"
     try:
         raw = subprocess.run(
@@ -1411,9 +1470,11 @@ def continuation_admission(
         )
         collected = CollectedEvidence.model_validate_json(raw.stdout)
         if not collected.managed_store:
+            print(f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from")
             return "stop"
         collected = select_managed_evidence(collected, job)
         if collected.walltime_state != "ok":
+            print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
             return "stop"
         collected.accounted_walltime_s = collected.walltime_used_s
         # A completed outcome plus untouched pending inputs establishes planned segment work. Actual failed
@@ -1442,6 +1503,10 @@ def continuation_admission(
                     and all(report.get(key) == value for key, value in store.coverage().items())
                 )
         if select_managed_evidence(collected, job).managed_selection is None:
+            print(
+                f"{CONTINUATION_REASON_PREFIX}the Store could not verify the saved artifacts: "
+                f"{collected.managed_reader_error or 'no authoritative selection'}"
+            )
             return "stop"
         decision = decide_from_collected(
             collected,
@@ -1449,13 +1514,29 @@ def continuation_admission(
             max_walltime_s=max_walltime_s,
             live_job=False,
             planned_missing_continuation=segment,
+            # The cut allocation must be the one that last wrote the Store: an older allocation's reservations
+            # keep their own, unknown, ending.
+            allocation_cut=previous_state in ALLOCATION_CUT_STATES
+            and bool(previous_job_id)
+            and collected.coverage_allocation_id == previous_job_id,
         )
-        print(decision.reason, file=sys.stderr)
+        print(CONTINUATION_REASON_PREFIX + decision.reason)
         if decision.action != RecoveryAction.RESUBMIT:
             return "stop"
         return "segment" if segment and not decision.counts.get(IdentityState.RETRYABLE) else "retry"
-    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError):
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
         return "stop"
+
+
+def allocation_cut_from_accounting(accounting: str, allocation_id: str | None) -> bool:
+    """Whether ``sacct -X -P --format=JobIDRaw,State,ElapsedRaw`` rows end ``allocation_id`` in a cut state."""
+    states = {
+        parts[0]: parts[1].split()[0].rstrip("+") if parts[1].split() else ""
+        for parts in (line.strip().split("|") for line in accounting.splitlines())
+        if len(parts) == 3
+    }
+    return allocation_id is not None and states.get(allocation_id) in ALLOCATION_CUT_STATES
 
 
 def accounted_chain_walltime(
