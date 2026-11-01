@@ -41,10 +41,11 @@ sandbox:
       # the pod is allocated, so an unplaceable pod fails within one ready timeout.
       request_timeout_s: 1200
       # Bounds one create attempt as configured (the request plus the readiness
-      # wait, which starts once the request returns). Unset, it defaults to the
-      # capped request timeout plus the spec's ready_timeout_s plus 30 s; a value
-      # below that sum is respected and logged once per configuration.
-      timeout_s: 1500
+      # wait, which starts once the request returns). Unset (null), it defaults to
+      # the capped request timeout plus the spec's ready_timeout_s plus 30 s, so a
+      # slow but healthy create is not abandoned before its own readiness wait ends;
+      # a value below that sum is respected and logged once per configuration.
+      timeout_s: null
       # A create whose sandbox is still Pending at the timeout is deleted and
       # retried (Pending also covers a full cluster and an image still pulling).
       # Set true to report it once instead when the specs are known placeable.
