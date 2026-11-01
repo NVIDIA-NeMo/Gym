@@ -181,13 +181,8 @@ def _identity(row: Mapping[str, Any]) -> Identity | None:
     return None
 
 
-# Labels that shipped producers write as the failure kind outside the shared vocabulary, whose naming rule they do
-# not follow: the Harbor agent's failed trial and the terminal-bench sidecar class of an agent or sandbox failure.
-PRODUCER_FAILURE_LABELS = frozenset({"harbor_failed", "infrastructure_error"})
-
-
 def _known_kind(kind: Any) -> bool:
-    return isinstance(kind, str) and (is_registered(kind) or is_namespaced(kind) or kind in PRODUCER_FAILURE_LABELS)
+    return isinstance(kind, str) and (is_registered(kind) or is_namespaced(kind))
 
 
 def _events(row: Mapping[str, Any]) -> list[tuple[str | None, str | None, str | None, str | None, str | None]]:
