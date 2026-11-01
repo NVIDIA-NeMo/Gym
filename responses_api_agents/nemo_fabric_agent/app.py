@@ -470,8 +470,8 @@ class NeMoFabricAgentConfig(BaseResponsesAPIAgentConfig):
     cwd: Optional[str] = None
     harness_settings: dict[str, Any] = Field(default_factory=dict)
     fabric_config: dict[str, Any] = Field(default_factory=dict)
-    # Record each run with NeMo Relay. The response is then built from Relay's ATIF trajectory, the same shape for
-    # every adapter that supports Relay, and fabric_result carries the trajectory as relay_atif.
+    # Record each run with NeMo Relay. The response is then built from Relay's ATIF trajectory unless the adapter's own
+    # output is fuller, and fabric_result carries the trajectory as relay_atif.
     relay: bool = False
     # Adapters whose model schema has no base_url (Factory Droid reads custom endpoints from its own settings)
     # reject a config that sets it. False leaves models.default.base_url out.
