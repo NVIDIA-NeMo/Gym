@@ -22,7 +22,9 @@ from tests.single_agent_turn_helpers import _environment_server, _request
 
 @pytest.mark.parametrize("routed", [False, True])
 @pytest.mark.parametrize("lost_response", ["disconnect", "timeout"])
-async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, monkeypatch, lost_response, routed):
+async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_saved_no_response(
+    tmp_path, monkeypatch, lost_response, routed
+):
     environment, dependencies = _environment_server()
     dependencies.responses.extend(list(dependencies.responses))
     requests, results = [], []
@@ -92,7 +94,7 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
             expected_error = IncompleteEvaluationError if routed else (aiohttp.ClientError, asyncio.TimeoutError)
             with pytest.raises(expected_error):
                 await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=5)
-            # A second normal collection invocation must not regenerate the completed but lost episode.
+            # The episode's whole response was lost and the row keeps none: a second invocation runs it afresh.
             try:
                 await asyncio.wait_for(
                     RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True})),
@@ -105,11 +107,12 @@ async def test_persisted_collection_never_replays_a_completed_episode(tmp_path, 
     agent_calls = [call for call in dependencies.calls if call[1].endswith("/v1/responses")]
     seeds = [call[2]["json"]["agent_session_id"] for call in dependencies.calls if call[1] == "/v1/agent_sessions"]
     # Session seeding is idempotent only for the same ID. A replay creates fresh handles.
-    assert len(requests) == len(agent_calls) == len(seeds) == 1
+    assert len(requests) == len(agent_calls) == len(seeds) == len(set(seeds)) == 2
     store = RolloutStore.read(output)
-    assert store.coverage()["measured"] == 0
-    assert store.coverage()["attempts"] == 1
-    assert store.manifest.next_attempt["0-0"] == 1
+    assert [row["_ng_attempt_index"] for row in store.selected("success")] == [1]
+    assert store.coverage()["measured"] == 1
+    assert store.coverage()["attempts"] == 2
+    assert store.manifest.next_attempt["0-0"] == 2
     assert store.coverage()["max_rollout_attempts"] == 3
     assert store.pending() == []
     failures = [json.loads(line) for line in output.with_name("rollouts_failures.jsonl").read_text().splitlines()]
