@@ -90,6 +90,8 @@ async def services(config, monkeypatch):
     config.num_rollouts_per_prompt = 4
     config.cohort_collection_timeout_s = 3
     config.cohort_evaluation_timeout_s = 3
+    # Real TCP lifecycle tests need enough scheduling headroom on loaded CI runners.
+    config.judge_request_timeout_s = 2
     resource = GenRMCompareResourcesServer(config=config, server_client=client)
     state = SimpleNamespace(
         policy_calls=0,
@@ -295,6 +297,7 @@ async def test_verify_disconnect_allows_exact_reattachment_over_tcp(services, du
 
 
 async def test_closed_judge_port_is_bounded_despite_transport_retries(services):
+    services.resource.config.judge_request_timeout_s = 0.2
     sock = socket.socket()
     sock.bind(("127.0.0.1", 0))
     # Keep the unlistening port reserved so another service cannot reuse it.
