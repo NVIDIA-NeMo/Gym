@@ -151,10 +151,17 @@ def has_unclassified_execution_failure(row: Mapping[str, Any]) -> bool:
             return True
         cause = event.get("cause_id")
         if cause is None:
-            return event.get("failure_kind") == "agent_route_failed" or (
+            # A route failure with no deeper cause: the agent run returned no answer. It runs again fresh, within
+            # the attempt cap, unless the row kept an answer; a legacy /run error other than 5xx stays refused.
+            if event.get("failure_kind") == "agent_route_failed":
+                return has_saved_generation(row)
+            if (
                 event.get("failure_kind") == "collection_dispatch_failed"
                 and row.get("_ng_failure_class") == "agent_run_error"
-            )
+            ):
+                status = row.get("_ng_failure_http_status")
+                return not (type(status) is int and 500 <= status <= 599) or has_saved_generation(row)
+            return False
         selected = cause
     return False
 

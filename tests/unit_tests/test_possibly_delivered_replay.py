@@ -92,3 +92,47 @@ def test_the_store_resumes_a_lost_connection_row_within_its_attempt_cap(tmp_path
                 assert [pending["_ng_attempt_index"] for pending in store.pending()] == [1]
     # The second lost connection spends the cap of two: nothing is retried without budget.
     assert RolloutStore.read(output).pending() == []
+
+
+def _route_failure_row(**extra):
+    """A legacy /run that answered 500 after the agent's sandbox ended: collection event caused by the agent's."""
+    return {
+        "_ng_failure_class": "agent_run_error",
+        "_ng_failure_http_status": 500,
+        "_ng_failure_record": {"source": "collector", "delivery": "delivered", "failure": {"terminal": False}},
+        "_ng_failure_events": {
+            "agent": {"boundary": "agent", "failure_kind": "agent_route_failed", "operation": "agent.run"},
+            "dispatch": {
+                "boundary": "collection",
+                "failure_kind": "collection_dispatch_failed",
+                "operation": "collection.run",
+                "cause_id": "agent",
+            },
+        },
+        "_ng_failure_id": "dispatch",
+        **extra,
+    }
+
+
+_ANSWER = {
+    "object": "response",
+    "id": "resp-answer",
+    "status": "completed",
+    "output": [{"type": "message", "role": "assistant", "status": "completed", "content": []}],
+}
+
+
+def test_a_route_failure_that_kept_no_answer_may_run_again():
+    assert not has_unclassified_execution_failure(_route_failure_row())
+
+
+def test_a_route_failure_that_kept_an_answer_never_runs_again():
+    assert has_unclassified_execution_failure(_route_failure_row(_ng_failure_response=_ANSWER))
+
+
+@pytest.mark.parametrize("status,refused", [(500, False), (503, False), (400, True), (None, True)])
+def test_a_legacy_run_error_without_an_agent_event_reruns_only_after_a_5xx(status, refused):
+    row = _route_failure_row(_ng_failure_http_status=status)
+    del row["_ng_failure_events"]["agent"]
+    del row["_ng_failure_events"]["dispatch"]["cause_id"]
+    assert has_unclassified_execution_failure(row) is refused
