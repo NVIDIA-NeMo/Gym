@@ -35,7 +35,7 @@ from yarl import URL
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
-from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
