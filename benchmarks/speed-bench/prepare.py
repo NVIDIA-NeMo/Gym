@@ -758,6 +758,7 @@ def prepare_one_config(
     dataset_repo: str = DEFAULT_DATASET_REPO,
     dataset_revision: str | None = None,
     output_format: OutputFormat = "gym",
+    output_dir: Path = DATA_DIR,
 ) -> Path:
     """Download and resolve a single speed-bench config, write raw or Gym JSONL.
 
@@ -772,7 +773,6 @@ def prepare_one_config(
 
     from datasets import load_dataset  # imported lazily
 
-    output_dir = DATA_DIR
     output_dir.mkdir(parents=True, exist_ok=True)
     suffix = "raw" if output_format == "raw" else "benchmark"
     output_path = output_dir / f"speed_bench_{speed_config}_{suffix}.jsonl"
@@ -803,7 +803,10 @@ def prepare_cli() -> None:
     parser.add_argument("--config", choices=(*ALL_CONFIGS, "all"), default="qualitative")
     parser.add_argument("--dataset-repo", default=DEFAULT_DATASET_REPO)
     parser.add_argument("--dataset-revision", default=DEFAULT_DATASET_REVISION)
-    parser.add_argument("--format", choices=OUTPUT_FORMATS, default="gym", help="Output JSONL format (default: gym)")
+    parser.add_argument(
+        "--format", choices=OUTPUT_FORMATS, default="gym", help="Output JSONL format (default: %(default)s)"
+    )
+    parser.add_argument("--output-dir", default=DATA_DIR, type=Path, help="Output directory (default: %(default)s)")
     args = parser.parse_args()
     logging.basicConfig(level=logging.INFO)
     configs = ALL_CONFIGS if args.config == "all" else (args.config,)
@@ -813,6 +816,7 @@ def prepare_cli() -> None:
             dataset_repo=args.dataset_repo,
             dataset_revision=args.dataset_revision,
             output_format=args.format,
+            output_dir=args.output_dir,
         )
 
 
