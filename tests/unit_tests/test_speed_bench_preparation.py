@@ -72,11 +72,10 @@ def test_prepare_sources_and_repeat_overwrite(monkeypatch, tmp_path, split, repo
     rows = source_rows(split)
     loader = Mock(return_value=Dataset.from_list(rows))
     monkeypatch.setattr("datasets.load_dataset", loader)
-    monkeypatch.setattr(COMMON, "DATA_DIR", tmp_path)
     resolver = Mock(side_effect=AssertionError("resolved inputs must not resolve external sources"))
     monkeypatch.setattr(COMMON, "_resolve_external_data", resolver)
     kwargs = {} if repo == COMMON.DEFAULT_DATASET_REPO else {"dataset_repo": repo, "dataset_revision": revision}
-    path = PREPARE.prepare(split, **kwargs)
+    path = PREPARE.prepare(split, output_dir=tmp_path, **kwargs)
     assert path == tmp_path / f"speed_bench_{split}_benchmark.jsonl"
     prepared = [json.loads(line) for line in path.read_text().splitlines()]
     for original, row in zip(rows, prepared, strict=True):
@@ -91,7 +90,7 @@ def test_prepare_sources_and_repeat_overwrite(monkeypatch, tmp_path, split, repo
             "sub_category": "test",
         }
     original = path.read_bytes()
-    PREPARE.prepare(split, **kwargs)
+    PREPARE.prepare(split, output_dir=tmp_path, **kwargs)
     assert path.read_bytes() == original
     loader.assert_called_with(repo, split, split="test", revision=revision)
     resolver.assert_not_called()
@@ -100,14 +99,13 @@ def test_prepare_sources_and_repeat_overwrite(monkeypatch, tmp_path, split, repo
 def test_placeholders_use_local_resolver_and_must_be_resolved(monkeypatch, tmp_path):
     unresolved = Dataset.from_list([{"turns": [COMMON.TURNS_PLACEHOLDER], "src_id": "one"}])
     monkeypatch.setattr("datasets.load_dataset", Mock(return_value=unresolved))
-    monkeypatch.setattr(COMMON, "DATA_DIR", tmp_path)
     resolve = Mock(return_value=Dataset.from_list(source_rows("qualitative")))
     monkeypatch.setattr(COMMON, "_resolve_external_data", resolve)
-    PREPARE.prepare()
+    PREPARE.prepare(output_dir=tmp_path)
     resolve.assert_called_once_with(unresolved, "qualitative")
     resolve.return_value = unresolved
     with pytest.raises(ValueError, match="Unresolved SPEED-Bench placeholder"):
-        PREPARE.prepare()
+        PREPARE.prepare(output_dir=tmp_path)
 
 
 @pytest.mark.parametrize("turns", [[], [""], "not a list"])
@@ -157,7 +155,6 @@ def test_every_split_resolves_and_manifest_matches(tmp_path, splits, model_type)
 @pytest.mark.parametrize("arguments", [{}, {"dataset_repo": "other/repo", "dataset_revision": "pinned"}])
 def test_selected_wrappers_receive_global_source_arguments(monkeypatch, tmp_path, splits, arguments):
     monkeypatch.setattr("nemo_gym.cli.eval._install_prepare_dependencies", lambda _: None)
-    monkeypatch.setattr(COMMON, "DATA_DIR", tmp_path)
     downloads = []
 
     def load(repo, name, **kwargs):
@@ -168,7 +165,7 @@ def test_selected_wrappers_receive_global_source_arguments(monkeypatch, tmp_path
     datasets = _datasets_to_prepare(resolve_splits(splits))
     for benchmark, split in zip(datasets, splits, strict=True):
         benchmark.dataset.jsonl_fpath = tmp_path / f"speed_bench_{split}_benchmark.jsonl"
-    _prepare_datasets(datasets, PrepareBenchmarkConfig(prepare_script_args=arguments))
+    _prepare_datasets(datasets, PrepareBenchmarkConfig(prepare_script_args={**arguments, "output_dir": tmp_path}))
     assert downloads == [
         (
             arguments.get("dataset_repo", COMMON.DEFAULT_DATASET_REPO),

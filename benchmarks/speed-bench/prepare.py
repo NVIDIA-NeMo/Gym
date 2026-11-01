@@ -826,10 +826,15 @@ def prepare(
     dataset_repo: str = DEFAULT_DATASET_REPO,
     dataset_revision: str | None = None,
     output_format: OutputFormat = "gym",
+    output_dir: Path = DATA_DIR,
 ) -> Path:
     """Prepare a split from the selected HF repository and return its Gym JSONL path."""
     return prepare_one_config(
-        speed_config, dataset_repo=dataset_repo, dataset_revision=dataset_revision, output_format=output_format
+        speed_config,
+        dataset_repo=dataset_repo,
+        dataset_revision=dataset_revision,
+        output_format=output_format,
+        output_dir=output_dir,
     )
 
 
