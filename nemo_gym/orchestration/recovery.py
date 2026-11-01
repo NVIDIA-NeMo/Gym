@@ -2126,13 +2126,16 @@ def _observed_trial_operations(
     *,
     judge_recovery: dict[str, int] | None = None,
     grading_failures: list[str] | None = None,
+    policy_recovery: dict[str, int] | None = None,
 ) -> bool:
     """Join observed model/tool operations and the outer verifier invocation for every expected trial.
 
     A source-reviewed programmatic grading operation must bind the saved response and score. Empty captured
     model calls alone never establish grading coverage; old or uninstrumented verifiers remain unknown.
     Recovered grading attempts are reported separately and do not count toward the trial-health threshold;
-    every failed attempt must join the same completed, result-bound grading dependency.
+    every failed attempt must join the same completed, result-bound grading dependency. A policy request retried
+    inside one completed operation is recovered the same way (``policy_recovery`` receives its counts): each failed
+    attempt is an event of that operation and of the row, and the answer is the final attempt's.
     """
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
@@ -2162,6 +2165,7 @@ def _observed_trial_operations(
         "observed_grading_attempt_errors": 0,
         "observed_grading_failed_operations": 0,
     }
+    recovered_policy = {"policy_recovered_attempts": 0, "policy_recovered_operations": 0}
     recovered_events = {}
     invalid_grades = []
 
@@ -2307,16 +2311,20 @@ def _observed_trial_operations(
                 recovered["judge_recovered_attempts"] += len(used)
                 recovered["judge_recovered_operations"] += failed_operations
             return True
-        if len(operations) != 1 or report["events"]:
+        if len(operations) != 1:
             return False
         operation = operations[0]
+        events = report["events"]
+        attempts, transport = operation["http_attempts"], operation["transport_failures"]
         if (
             operation["outcome"] != "completed"
             or operation["failure_id"] is not None
-            or type(operation["http_attempts"]) is not int
-            or operation["http_attempts"] != 1
-            or type(operation["transport_failures"]) is not int
-            or operation["transport_failures"] != 0
+            or type(attempts) is not int
+            or attempts < 1
+            or type(transport) is not int
+            or transport < 0
+            # Every failed attempt before the final one is its own recorded event of this operation.
+            or len(events) != attempts - 1 + transport
             or not all(
                 nonempty(value)
                 for value in (
@@ -2330,6 +2338,30 @@ def _observed_trial_operations(
             )
         ):
             return False
+        # A policy request retried inside one completed operation (a timeout, a reset or a 5xx, then an answer) is a
+        # recovered attempt, not a trial failure: each failed attempt must join this operation exactly once.
+        failed_ids = set()
+        for key, event in events.items():
+            status = event.get("http_status") if isinstance(event, dict) else None
+            if (
+                not isinstance(event, dict)
+                or key != event.get("event_id")
+                or not nonempty(event.get("attempt_id"))
+                or event["attempt_id"] in failed_ids
+                or event["attempt_id"] in populations[4]
+                or event["attempt_id"] == operation["final_attempt_id"]
+                or key in recovered_events
+                or event.get("boundary") != "model"
+                or event.get("operation") != "model_request"
+                or event.get("operation_id") != operation["operation_id"]
+                or event.get("failure_kind") != "model_request_error"
+                or event.get("cause_id") is not None
+                or not (status is None or (type(status) is int and 400 <= status <= 599))
+            ):
+                return False
+            failed_ids.add(event["attempt_id"])
+        if sum(event.get("http_status") is None for event in events.values()) != transport:
+            return False
         if operation["final_attempt_id"] in populations[4]:
             return False
         populations[4].add(operation["final_attempt_id"])
@@ -2342,6 +2374,10 @@ def _observed_trial_operations(
             return False
         for value, seen in zip(values, populations):
             seen.add(value)
+        populations[4].update(failed_ids)
+        recovered_events.update(events)
+        recovered_policy["policy_recovered_attempts"] += len(events)
+        recovered_policy["policy_recovered_operations"] += bool(events)
         return True
 
     try:
@@ -2451,14 +2487,6 @@ def _observed_trial_operations(
                 completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed") for call in judge_calls
             ):
                 return False
-            for event_id, event in row.get(FAILURE_EVENTS, {}).items():
-                if (
-                    event_id in prior_recovered_events
-                    or event_id not in recovered_events
-                    or not isinstance(event, dict)
-                    or any(event.get(key) != value for key, value in recovered_events[event_id].items())
-                ):
-                    return False
             ordered = []
             for number, turn in enumerate(turns, 1):
                 if (
@@ -2524,6 +2552,15 @@ def _observed_trial_operations(
                         return False
                 elif not emitted:
                     return False
+            # Every failure event the row saved is a recovered attempt of one of its own completed operations.
+            for event_id, event in row.get(FAILURE_EVENTS, {}).items():
+                if (
+                    event_id in prior_recovered_events
+                    or event_id not in recovered_events
+                    or not isinstance(event, dict)
+                    or any(event.get(key) != value for key, value in recovered_events[event_id].items())
+                ):
+                    return False
             if judge_calls is not None and grade["outcome"] == "unknown":
                 invalid_grades.append(_identity(row))
             saved_response = row.get("response")
@@ -2541,6 +2578,8 @@ def _observed_trial_operations(
         judge_recovery.update(recovered)
     if grading_failures is not None:
         grading_failures.extend(invalid_grades)
+    if policy_recovery is not None:
+        policy_recovery.update(recovered_policy)
     return True
 
 
@@ -2572,25 +2611,42 @@ def trial_health(
     ):
         return None, "trial: recovered attempt/operation counters are malformed or incomplete"
     judge_recovery: dict[str, int] = {}
+    policy_recovery: dict[str, int] = {}
     invalid_grades: list[str] = []
     covered = _observed_trial_operations(
-        decision, collected, judge_recovery=judge_recovery, grading_failures=invalid_grades
+        decision,
+        collected,
+        judge_recovery=judge_recovery,
+        grading_failures=invalid_grades,
+        policy_recovery=policy_recovery,
     )
+    # A recovered attempt is no trial failure only when it joins a completed policy or grading operation.
+    recovered_policy = policy_recovery.get("policy_recovered_attempts", 0)
     if isinstance(recovery, dict) and (
-        recovery["recovered_attempt_errors"] > judge_recovery.get("observed_grading_attempt_errors", 0)
-        or recovery["recovered_operations"] > judge_recovery.get("observed_grading_failed_operations", 0)
+        recovery["recovered_attempt_errors"]
+        > judge_recovery.get("observed_grading_attempt_errors", 0) + recovered_policy
+        or recovery["recovered_operations"]
+        > judge_recovery.get("observed_grading_failed_operations", 0)
+        + policy_recovery.get("policy_recovered_operations", 0)
     ):
         return (
             None,
-            "trial: recovered failures are not fully joined to a completed grading operation; treatment is not defined",
+            "trial: recovered failures are not fully joined to a completed policy or grading operation; "
+            "treatment is not defined",
         )
     if covered:
         failed += len(invalid_grades)
         rate = failed / decision.expected
+        retried = (
+            f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "
+            "(recovered, no trial failure); "
+            if recovered_policy
+            else ""
+        )
         return (
             rate < limit,
             f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
-            f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; "
+            f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; {retried}"
             "actual model/tool and bound grading operations cover every identity and repeat",
         )
     return None, (
