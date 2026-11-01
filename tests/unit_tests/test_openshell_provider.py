@@ -964,7 +964,7 @@ async def test_close_twice_schedules_one_delete(make_provider, fake_client: Fake
 
 
 async def test_close_delete_deadline_exceeded_reissues_delete(make_provider, fake_client: FakeClient, caplog) -> None:
-    # A client deadline cancels the gateway's delete before it commits (e2e saw the sandbox stay READY),
+    # A client deadline cancels the gateway's delete before it commits (observed live: the sandbox stays READY),
     # so DEADLINE_EXCEEDED must trigger another DeleteSandbox, not just polling.
     provider = make_provider()
     fake_client.delete_results = [

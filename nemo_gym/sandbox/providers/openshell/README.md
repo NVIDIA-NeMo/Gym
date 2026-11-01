@@ -81,7 +81,7 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
   only when the command exited 124 after running for about the full timeout, so a command that
   exits 124 on its own, quickly, stays a plain exit code.
 - `close()` does not block. `DeleteSandbox` only commits after the sandbox pod's termination grace
-  period (~31s on the cell-8 gateway), and a client deadline that ends first cancels the delete (the sandbox
+  period (~31s on a Kubernetes-backed gateway), and a client deadline that ends first cancels the delete (the sandbox
   stays READY). So `close()` hands one blocking delete function to a delete worker thread and returns. The
   worker deletes on its own client with a long deadline (`operations.delete_rpc_timeout_s`, default 120s),
   re-issues the delete with `allow_missing` on a deadline (up to 3 attempts), then polls until NOT_FOUND

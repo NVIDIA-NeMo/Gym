@@ -311,7 +311,7 @@ class OpenShellProbeConfig:
 
 @dataclass(frozen=True)
 class OpenShellOperationsConfig:
-    # DeleteSandbox only commits after the sandbox pod's termination grace period (~31s on cell-8) and a
+    # DeleteSandbox only commits after the sandbox pod's termination grace period (~31s on a Kubernetes-backed gateway) and a
     # client deadline that ends first cancels it, so deletes run on their own client with a long deadline.
     delete_rpc_timeout_s: float = 120
     close_wait_deleted: bool = True
@@ -584,7 +584,7 @@ class OpenShellProvider:
         _require_openshell()
         self._shared = _acquire_shared_client(self._connection, self._exec_config.concurrency)
         self._closed = False
-        # DeleteSandbox blocks for the pod's termination grace period (~31s on cell-8), so close() hands it to a
+        # DeleteSandbox blocks for the pod's termination grace period (~31s on a Kubernetes-backed gateway), so close() hands it to a
         # delete worker (see _DELETE_STATES) and returns; aclose() never waits for it.
         self._delete_shared = _delete_state(
             dataclasses.replace(self._connection, request_timeout_s=self._operations.delete_rpc_timeout_s),
