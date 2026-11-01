@@ -424,6 +424,21 @@ def test_relay_config_enables_atif_under_the_relay_directory(tmp_path: Path) -> 
     assert config["relay"]["observability"]["atif"]["output_directory"] == atif_dir
 
 
+def test_relay_keeps_a_configured_artifacts_root(tmp_path: Path) -> None:
+    agent = _agent(relay=True, fabric_config={"runtime": {"artifacts": str(tmp_path / "kept")}})
+    config = agent._fabric_config(
+        model_base_url="http://model/v1",
+        workspace=tmp_path / "workspace",
+        system_prompt=None,
+        mcp_servers={},
+        skills=[],
+        relay_dir=tmp_path / "relay",
+    ).to_mapping()
+
+    assert config["runtime"]["artifacts"] == str(tmp_path / "kept")
+    assert config["relay"]["output_dir"] == str(tmp_path / "relay" / "atif")
+
+
 def test_relay_off_leaves_telemetry_unset(tmp_path: Path) -> None:
     config = (
         _agent()

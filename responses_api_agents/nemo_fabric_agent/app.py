@@ -581,9 +581,11 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             },
         }
         if relay_dir is not None:
-            # Relay only runs with an artifacts root, and only writes ATIF when observability enables it.
+            # Relay only runs with an artifacts root, and only writes ATIF when observability enables it. Keep a
+            # configured artifacts root, since relay_dir is removed after the run.
             atif_dir = str(relay_dir / "atif")
-            generated["runtime"]["artifacts"] = str(relay_dir / "artifacts")
+            if not (authored.get("runtime") or {}).get("artifacts"):
+                generated["runtime"]["artifacts"] = str(relay_dir / "artifacts")
             generated["telemetry"] = {"providers": {"relay": {}}}
             generated["relay"] = {
                 "project": "nemo-gym",
