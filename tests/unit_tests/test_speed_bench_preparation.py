@@ -120,7 +120,7 @@ def test_unknown_split_fails_before_download(monkeypatch):
     loader = Mock()
     monkeypatch.setattr("datasets.load_dataset", loader)
     with pytest.raises(ValueError, match="Unknown speed-bench config"):
-        PREPARE.prepare("throughput_100k")
+        PREPARE.prepare("throughput_128k")
     loader.assert_not_called()
 
 
