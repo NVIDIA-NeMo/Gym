@@ -75,6 +75,41 @@ def test_an_explicit_bound_overrides_the_size(tmp_path, monkeypatch):
     assert "(the 2400 s bound for 5.0 GB of rollout files)" in result.managed_reader_error
 
 
+def test_a_reader_killed_before_its_bound_is_named_with_its_exit_code_and_not_retried(tmp_path, monkeypatch):
+    monkeypatch.delenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", raising=False)
+    job = _job(tmp_path)
+    marker = tmp_path / "attempts"
+    _install(monkeypatch, f"echo x >> {shlex.quote(str(marker))}; echo 'reading rows' >&2; kill -9 $$")
+    result = slurm._remote_managed_evidence(LocalConnection(), _collected(job), job, config())
+    assert marker.read_text().count("x") == 1
+    assert result.managed_reader_error.startswith(
+        "remote Store reader unavailable: killed (SIGKILL; OOM or external kill) after "
+    )
+    assert result.managed_reader_error.endswith(
+        "below the 900 s bound for 0.0 GB of rollout files, exit code 137; stderr: reading rows"
+    )
+
+
+@pytest.mark.parametrize(
+    "rc,elapsed,cause,retry",
+    [
+        ("124", 3, "timed out after 3 s (the 2 s bound), exit code 124", True),
+        ("137", 12, "timed out after 12 s (the 2 s bound), exit code 137", True),
+        ("137", 1, "killed (SIGKILL; OOM or external kill) after 1 s, below the 2 s bound, exit code 137", False),
+        ("2", 1, "exited 2 after 1 s (the 2 s bound)", False),
+    ],
+    ids=["timeout", "killed-after-the-grace-period", "killed-before-the-bound", "error"],
+)
+def test_only_a_reached_deadline_is_a_timeout_and_every_cause_keeps_the_exit_code_and_stderr(
+    rc, elapsed, cause, retry
+):
+    output = f"__GYM_READER_BOUND:2\n__GYM_READER_RC:{rc}\n__GYM_READER_ERR:last line\n"
+    assert slurm._reader_failure(output, elapsed) == (
+        f"remote Store reader unavailable: {cause}; stderr: last line",
+        retry,
+    )
+
+
 def test_a_timeout_is_retried_once_with_twice_the_bound(tmp_path, monkeypatch):
     monkeypatch.delenv("NEMO_GYM_REMOTE_READER_TIMEOUT_S", raising=False)
     monkeypatch.setattr(slurm, "_READER_FLOOR_S", 1)

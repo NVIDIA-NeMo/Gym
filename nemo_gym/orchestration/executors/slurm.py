@@ -287,7 +287,8 @@ def _reader_command(entrypoint: str, job_dir: Path, payload: str, *, bound_s: in
 
 
 def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
-    """The reader failure named from its report, and whether it timed out; (None, False) when it exited 0."""
+    """The reader failure named from its report with its exit code and stderr, and whether it reached its deadline
+    (the only failure retried with twice the bound); (None, False) when it exited 0."""
     facts = {}
     for line in output.splitlines():
         for name in ("BOUND", "RC", "ERR"):
@@ -299,12 +300,15 @@ def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
     bound, _, size = facts.get("BOUND", "").partition(" ")
     gb = int(size) / 2**30 if size.isdigit() else None
     scope = f"the {bound} s bound for {gb:.1f} GB of rollout files" if gb is not None else f"the {bound} s bound"
-    timed_out = rc in (124, 137)
-    cause = (
-        f"timed out after {elapsed_s:.0f} s ({scope})"
-        if timed_out
-        else f"exited {rc if rc is not None else 'without an exit code'} after {elapsed_s:.0f} s ({scope})"
-    )
+    # timeout(1) exits 124 at the deadline, and 137 when it SIGKILLs the reader after the grace period. A 137 before
+    # the deadline is no timeout: something else killed the reader, so another attempt is not retried.
+    timed_out = rc == 124 or (rc == 137 and bound.isdigit() and elapsed_s >= int(bound))
+    if timed_out:
+        cause = f"timed out after {elapsed_s:.0f} s ({scope}), exit code {rc}"
+    elif rc == 137:
+        cause = f"killed (SIGKILL; OOM or external kill) after {elapsed_s:.0f} s, below {scope}, exit code 137"
+    else:
+        cause = f"exited {rc if rc is not None else 'without an exit code'} after {elapsed_s:.0f} s ({scope})"
     stderr = facts.get("ERR", "")
     if len(stderr) > 400:
         stderr = "..." + stderr[-400:]
