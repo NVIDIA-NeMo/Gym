@@ -64,6 +64,7 @@ async def persist_producer_result(job, monkeypatch, result):
 
 
 def response(output=None):
+    """A saved answer: a typed response its producer finished (an empty status-less one is a placeholder)."""
     return NeMoGymResponse(
         id="resp_saved",
         object="response",
@@ -73,6 +74,7 @@ def response(output=None):
         parallel_tool_calls=False,
         tool_choice="auto",
         tools=[],
+        status="completed",
     ).model_dump(mode="json")
 
 
@@ -86,6 +88,8 @@ def test_retained_generation_is_structural_not_placeholder_presence(slot):
         {"error": "failed"},
         {"output": []},
         {"status": "failed", "output": []},
+        # A typed response object with no output and no status: an agent that never ran.
+        response() | {"status": None},
         response() | {"status": "failed", "error": {"code": "server_error", "message": "diagnostic only"}},
     ):
         assert not has_saved_generation({slot: placeholder})

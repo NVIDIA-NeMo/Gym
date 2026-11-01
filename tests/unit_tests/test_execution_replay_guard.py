@@ -13,7 +13,8 @@ from nemo_gym.rollout_store import RolloutStore
 @pytest.mark.parametrize(
     "case,expected_pending",
     [
-        ("unowned_route", 0),
+        # A route failure with no deeper cause and no kept answer reruns fresh within the attempt cap.
+        ("unowned_route", 1),
         ("known_infra", 1),
         ("no_report_legacy", 1),
         ("dangling_cause", 0),

@@ -104,7 +104,8 @@ def test_mixed_saved_judge_and_missing_never_runs_agent(tmp_path):
             | {
                 "_ng_failure_class": "judge_failed",
                 "failure_kind": "judge_failed",
-                "response": {"status": "completed", "output": []},
+                # A saved answer the judge failed on: a typed, finished response (an untyped one is no saved answer).
+                "response": {"object": "response", "id": "resp_saved", "status": "completed", "output": []},
             }
         )
     result = _run_prologue(tmp_path, ResumeConfig(), "FAILED", exit_code="75:0")
