@@ -25,6 +25,8 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
 - ``exhausted``: the last sidecar row is non-terminal and at its attempt cap: only a resubmit gives it a fresh budget.
 - ``terminal``: a terminal sidecar row that is not a scored zero; excluded, and the run cannot become complete.
 - ``missing``: no row at all (interrupted or never started); a resume restarts its input.
+- ``masked``: a result row the producer masked or did not evaluate. Collection keeps it as completed and never runs it
+  again, so it is retained, but it is not measured and the run is not complete.
 - ``unknown``: a failure whose kind is unregistered or absent, or a row whose identity is invalid; nobody owns it.
 
 The run-level action follows: ``stop`` for a spent or unknown resubmit budget, or for an unknown identity that a resume
@@ -92,6 +94,7 @@ class IdentityState(StrEnum):
     EXHAUSTED = "exhausted"
     TERMINAL = "terminal"
     MISSING = "missing"
+    MASKED = "masked"
     UNKNOWN = "unknown"
 
 
@@ -472,9 +475,15 @@ def decide_recovery(
             judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
-            if not judge and (
-                not graded or row.get("mask_sample") is True or row.get("evaluation_completed") is False
-            ):
+            if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
+                # Collection reuses a masked result as completed: it is retained, never run again, and not measured.
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity, state=IdentityState.MASKED, failure_kind=row.get("failure_kind")
+                    )
+                )
+                continue
+            if not judge and not graded:
                 evidence.append(
                     IdentityEvidence(
                         identity=identity,
@@ -711,6 +720,12 @@ def decide_recovery(
                 f"{counts[IdentityState.EXHAUSTED]} identity(ies) used every attempt since the last resubmit, so a "
                 "resume would run nothing; the run is not complete",
             )
+        if counts.get(IdentityState.MASKED):
+            return decision(
+                RecoveryAction.STOP,
+                f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
+                f"resume would run nothing; the run is not complete; {populations}",
+            )
         return decision(RecoveryAction.NOOP, "every identity is scored or a final model failure")
     if counts.get(IdentityState.JUDGE_RECOVERABLE):
         return decision(
@@ -738,7 +753,7 @@ def decide_recovery(
     return decision(
         RecoveryAction.RESUBMIT,
         f"{needs_policy} identity(ies) need the policy again: a Gym resume runs only missing and retryable ones"
-        + (f"; {populations}" if counts.get(IdentityState.UNKNOWN) else ""),
+        + (f"; {populations}" if counts.get(IdentityState.UNKNOWN) or counts.get(IdentityState.MASKED) else ""),
     )
 
 
@@ -755,10 +770,12 @@ def _populations(counts: Mapping[str, int], evidence: list[IdentityEvidence]) ->
     retained = counts.get(IdentityState.SCORED, 0) + counts.get(IdentityState.MODEL_FINAL, 0)
     kinds = Counter(_unknown_label(item) for item in evidence if item.state == IdentityState.UNKNOWN)
     detail = ", ".join(f"{n} {kind}" for kind, n in kinds.most_common(3))
+    masked = counts.get(IdentityState.MASKED, 0)
     return (
         f"retryable {retryable} (resumed), unknown {counts.get(IdentityState.UNKNOWN, 0)}"
         + (f" ({detail}{', ...' if len(kinds) > 3 else ''})" if detail else "")
         + f" (reported, not retried), retained {retained} (saved rows kept)"
+        + (f", masked {masked} (completed, not measured, kept)" if masked else "")
     )
 
 
@@ -1718,6 +1735,7 @@ def gate_task_summary(
         (IdentityState.EXHAUSTED, "failures with spent attempts"),
         (IdentityState.TERMINAL, "terminal unscored failures"),
         (IdentityState.MISSING, "identities with no row"),
+        (IdentityState.MASKED, "masked results, completed but not measured"),
         (IdentityState.UNKNOWN, "failures nobody owns"),
     ):
         if states.get(state):

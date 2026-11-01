@@ -149,15 +149,15 @@ def test_a_pending_job_that_has_not_written_its_inventory_is_reported_as_live():
     assert (ended.reason, ended.scheduler_live) == ("the run has no materialized inventory to recover against", False)
 
 
-def test_unknown_rows_a_resume_never_reruns_do_not_block_never_started_rows(tmp_path):
+def test_masked_results_are_retained_and_do_not_block_never_started_rows(tmp_path):
     _cut_run(tmp_path, scored=1, in_flight=0, not_started=3, masked=2)
     _, decision = _decide(tmp_path, allocation_cut=False)
     assert decision.action.value == "resubmit"
-    assert decision.counts == {"scored": 1, "unknown": 2, "missing": 3}
+    assert decision.counts == {"scored": 1, "masked": 2, "missing": 3}
     assert decision.reason == (
         "3 identity(ies) need the policy again: a Gym resume runs only missing and retryable ones; "
-        "retryable 3 (resumed), unknown 2 (2 result_without_usable_grade) (reported, not retried), "
-        "retained 1 (saved rows kept)"
+        "retryable 3 (resumed), unknown 0 (reported, not retried), retained 1 (saved rows kept), "
+        "masked 2 (completed, not measured, kept)"
     )
 
 
@@ -169,14 +169,24 @@ def test_unknown_failures_a_resume_would_rerun_still_stop(tmp_path):
     assert "unknown 1 (1 unregistered kind not_registered)" in decision.reason
 
 
-def test_only_unknown_rows_left_stop_with_the_populations(tmp_path):
+def test_only_masked_results_left_stop_and_say_they_are_kept(tmp_path):
+    from nemo_gym.orchestration.recovery import gate_task_summary
+
     _cut_run(tmp_path, scored=1, in_flight=0, not_started=0, masked=2)
     _, decision = _decide(tmp_path, allocation_cut=True)
     assert decision.action.value == "stop"
-    assert decision.reason.endswith(
-        "retryable 0 (resumed), unknown 2 (2 result_without_usable_grade) (reported, not retried), "
-        "retained 1 (saved rows kept)"
+    assert decision.reason == (
+        "2 completed result(s) are masked and not measured: they are kept and a resume would run nothing; the run "
+        "is not complete; retryable 0 (resumed), unknown 0 (reported, not retried), retained 1 (saved rows kept), "
+        "masked 2 (completed, not measured, kept)"
     )
+    assert not decision.complete
+    gate = gate_task_summary(
+        decision, score=1.0, summary_valid=True, summary_reasons=[], health_passed=True, health_reasons=[]
+    )
+    assert gate["status"] == "FAILED"
+    assert gate["errors"][0] == "2 masked results, completed but not measured: [(1, 0), (2, 0)]"
+    assert all("nobody owns" not in error for error in gate["errors"])
 
 
 @pytest.mark.parametrize(

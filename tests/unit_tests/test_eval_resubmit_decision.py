@@ -846,19 +846,19 @@ def test_a_lost_or_malformed_budget_counter_stops_and_is_never_reset(tmp_path, f
     assert d.action == action, d.reason
 
 
-@pytest.mark.parametrize(
-    "row",
-    [
-        dict(),
-        dict(reward="1"),
-        dict(reward=1.0, mask_sample=True),
-        dict(reward=0.0, evaluation_completed=False),
-    ],
-)
+@pytest.mark.parametrize("row", [dict(), dict(reward="1")])
 def test_a_result_without_a_usable_grade_is_unknown_not_scored(tmp_path, row) -> None:
     job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0), ident(1, **row)], failures=[], retries=0)
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert d.identities.get("unknown") == [(1, 0)] and d.action == RecoveryAction.STOP
+
+
+@pytest.mark.parametrize("row", [dict(reward=1.0, mask_sample=True), dict(reward=0.0, evaluation_completed=False)])
+def test_a_masked_result_is_retained_but_not_scored(tmp_path, row) -> None:
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0), ident(1, **row)], failures=[], retries=0)
+    d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert d.identities.get("masked") == [(1, 0)] and "unknown" not in d.counts
+    assert d.action == RecoveryAction.STOP and not d.complete
 
 
 def test_a_legitimate_model_zero_grade_stays_scored(tmp_path) -> None:
