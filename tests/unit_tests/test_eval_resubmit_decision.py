@@ -2743,7 +2743,8 @@ def test_a_complete_earlier_pin_run_is_certified_on_coverage_with_the_note(tmp_p
 
 def test_a_current_pin_run_with_uncovered_operations_stays_unknown(tmp_path) -> None:
     _, (passed, reason) = _trial_gate_of(tmp_path, expected=50, final_zeros=0, operations_field=True)
-    assert passed is None and "known failures are a lower bound" in reason
+    # A current pin records operations, so its ungraded trials are unobserved, never certified on coverage.
+    assert passed is None and "trial: UNOBSERVED 50 of 50 expected trials" in reason
     assert "earlier pin" not in reason
 
 
