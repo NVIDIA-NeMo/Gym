@@ -21,6 +21,9 @@ collection writes nothing for them, so their absence is the only evidence. With
 ``_ng_omitted_rollout``. No reader counts that row as a failure or an attempt, so scoring and the
 resume attempt count are unchanged and resume still runs the rollout. When readers pick a rollout's
 latest attempt, an interrupted one counts and hides older failures; one never started is skipped.
+
+Rollout collection with a run manifest writes this row only for a row never started: it saves an interrupted
+attempt as a ``kill_shaped`` failure in the run history, so a second row would record the interruption twice.
 """
 
 from typing import Any, Dict, Mapping

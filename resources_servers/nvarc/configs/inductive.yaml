@@ -8,6 +8,7 @@ nvarc_inductive_resources_server:
       value: Improve ARC-AGI puzzle-solving by inducing executable transformation programs
       agent_mode: inductive
       python_timeout_seconds: 30
+      python_max_concurrency: 32
 
 nvarc_inductive_simple_agent:
   responses_api_agents:

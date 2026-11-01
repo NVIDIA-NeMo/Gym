@@ -40,7 +40,7 @@ from aiohttp import ClientSession, DummyCookieJar, UnixConnector
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.testclient import TestClient
 from httpx import Response
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.base_responses_api_agent import (
     AGENT_SESSION_COOKIE_KEY,
@@ -341,10 +341,45 @@ class _SessionAgent(SimpleResponsesAPIAgent):
         return AgentCloseSessionResponse(agent_session_id=f"{state.request.agent_session_id}@{self.label}")
 
 
+class _FakeSandboxSession:
+    """Records each expiry's reason; the first ends the harness, and later ones find it already ending."""
+
+    def __init__(self) -> None:
+        self.reasons: list[Optional[str]] = []
+
+    async def expire(self, *, timeout: float, reason: Optional[str] = None) -> bool:
+        self.reasons.append(reason)
+        return len(self.reasons) == 1
+
+
+class _StoppableSessionAgent(_SessionAgent):
+    """Runs its harness in a fake sandbox session, so it supports rollout stops; ``seed_gate`` holds its seeds."""
+
+    _sandbox: _FakeSandboxSession = PrivateAttr(default_factory=_FakeSandboxSession)
+    _seed_gate: Optional[threading.Event] = PrivateAttr(default=None)
+    _seeding: threading.Event = PrivateAttr(default_factory=threading.Event)
+
+    async def _seed_agent_session_state(self, body) -> AgentSessionState:
+        self._seeding.set()
+        if self._seed_gate is not None:
+            await asyncio.to_thread(self._seed_gate.wait, 10)
+        return await super()._seed_agent_session_state(body)
+
+    def _rollout_sandbox_session(self, state: AgentSessionState):
+        return self._sandbox
+
+
 class AgentWorker:
     """One worker of an agent server, wired as run_webserver wires it; no socket directory means one worker."""
 
-    def __init__(self, label: str, socket_dir: Optional[str], *, close_window_seconds: float = 300) -> None:
+    def __init__(
+        self,
+        label: str,
+        socket_dir: Optional[str],
+        *,
+        close_window_seconds: float = 300,
+        agent_class: type[_SessionAgent] = _SessionAgent,
+    ) -> None:
         config = BaseResponsesAPIAgentConfig(
             host="",
             port=0,
@@ -353,7 +388,7 @@ class AgentWorker:
             num_workers=2 if socket_dir is not None else 1,
             session_close_retry_window_seconds=close_window_seconds,
         )
-        self.agent = _SessionAgent(config=config, server_client=MagicMock(spec=ServerClient), label=label)
+        self.agent = agent_class(config=config, server_client=MagicMock(spec=ServerClient), label=label)
         self.app = self.agent.setup_webserver()
         self.cookie_name = self.agent.get_session_middleware_key()
         self.socket_dir = socket_dir
@@ -391,6 +426,14 @@ def _agent_seed_body(agent_session_id: str) -> dict:
 @pytest.fixture
 def agent_workers(socket_dir: str) -> Iterator[tuple[AgentWorker, AgentWorker]]:
     a, b = AgentWorker("a", socket_dir), AgentWorker("b", socket_dir)
+    with a.client, b.client:
+        yield a, b
+
+
+@pytest.fixture
+def stoppable_agent_workers(socket_dir: str) -> Iterator[tuple[AgentWorker, AgentWorker]]:
+    a = AgentWorker("a", socket_dir, agent_class=_StoppableSessionAgent)
+    b = AgentWorker("b", socket_dir, agent_class=_StoppableSessionAgent)
     with a.client, b.client:
         yield a, b
 
@@ -469,6 +512,92 @@ class TestTheSessionIdSources:
         # A later request with that cookie names the same session.
         assert a.post("/store", json={"value": 1}, cookie=seeded.cookies[b.cookie_name]).json() == {"worker": "b"}
         assert b.server.store == {"typed": 1}
+
+
+def _stop(worker: AgentWorker, rollout_id: str = "r", reason: Optional[str] = None) -> Response:
+    """A stop as an external budget controller sends it: no session cookie, only the rollout."""
+    worker.client.cookies.clear()
+    return worker.client.post(f"/rollouts/{rollout_id}/stop", json={"reason": reason} if reason else None)
+
+
+class TestRolloutStops:
+    """A rollout stop names only the rollout, and reaches the worker running it without the session cookie."""
+
+    def test_a_stop_through_another_worker_reaches_the_rollouts_worker(self, stoppable_agent_workers) -> None:
+        a, b = stoppable_agent_workers
+        assert a.seed().status_code == 200
+        assert _claimant(a.socket_dir, "/rollouts/r") == a.routing_id
+
+        first = _stop(b, reason="budget")
+        repeated_through_b, repeated_through_a = _stop(b, reason="operator"), _stop(a)
+
+        assert first.status_code == 200, first.text
+        assert first.json() == {"rollout_id": "r", "stopped": True}
+        assert repeated_through_b.json() == repeated_through_a.json() == {"rollout_id": "r", "stopped": False}
+        # Every stop reached a's harness; its sandbox session keeps the first reason (see test_sandbox_session).
+        assert a.agent._sandbox.reasons == ["budget", "operator", None] and b.agent._sandbox.reasons == []
+
+    def test_a_stop_during_the_seed_on_another_worker_ends_the_harness_at_launch(
+        self, stoppable_agent_workers
+    ) -> None:
+        a, b = stoppable_agent_workers
+        gate = a.agent._seed_gate = threading.Event()
+        with ThreadPoolExecutor(1) as pool:
+            seeding = pool.submit(a.seed)
+            assert a.agent._seeding.wait(10)
+
+            stopped = _stop(b, reason="budget")
+            expired_while_seeding = list(a.agent._sandbox.reasons)
+            gate.set()
+            seeded = seeding.result()
+
+        assert stopped.json() == {"rollout_id": "r", "stopped": True}
+        assert expired_while_seeding == []
+        assert seeded.status_code == 200, seeded.text
+        assert a.agent._sandbox.reasons == ["budget"]
+
+    def test_a_closed_rollout_is_unknown_on_every_worker(self, stoppable_agent_workers) -> None:
+        a, b = stoppable_agent_workers
+        assert a.seed().status_code == 200
+        assert b.close().status_code == 200
+
+        assert _stop(a).status_code == 404 and _stop(b).status_code == 404
+        assert _claimant(a.socket_dir, "/rollouts/r") is None
+        assert a.agent._sandbox.reasons == [] and b.agent._sandbox.reasons == []
+
+    def test_a_failed_seed_releases_the_rollout(self, socket_dir: str) -> None:
+        a = AgentWorker("a", socket_dir, agent_class=_StoppableSessionAgent)
+        b = AgentWorker("b", socket_dir, agent_class=_StoppableSessionAgent)
+        a.agent.fail_seed = True
+        with a.client, b.client:
+            assert a.seed().status_code == 500
+            # The failed seed's state waits for the caller's close, but there is no harness left to stop.
+            assert _stop(b).status_code == 404
+
+        assert _claimant(socket_dir, "/rollouts/r") is None
+
+    def test_a_stop_for_an_unknown_rollout_creates_no_claim(self, stoppable_agent_workers) -> None:
+        a, b = stoppable_agent_workers
+
+        assert _stop(b, rollout_id="unknown").status_code == 404
+        assert _claimant(a.socket_dir, "/rollouts/unknown") is None
+        assert not a.agent._session_records and not b.agent._session_records
+
+    def test_an_agent_without_rollout_stops_answers_501_through_either_worker(self, agent_workers) -> None:
+        a, b = agent_workers
+        assert a.seed().status_code == 200
+
+        assert _stop(b).status_code == 501 and _stop(a).status_code == 501
+        assert _stop(b, rollout_id="unknown").status_code == 501
+
+    def test_the_session_cookie_still_routes_a_stop(self, stoppable_agent_workers) -> None:
+        a, b = stoppable_agent_workers
+        seeded = a.seed()
+
+        stopped = b.client.post("/rollouts/r/stop", cookies={a.cookie_name: seeded.cookies[a.cookie_name]})
+
+        assert stopped.json() == {"rollout_id": "r", "stopped": True}
+        assert a.agent._sandbox.reasons == [None]
 
 
 class TestClaimCreation:

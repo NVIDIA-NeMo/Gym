@@ -690,8 +690,8 @@ def _input(tmp_path: Path, count: int) -> Path:
 
 
 _REPLIES = [
-    {"reward": 1.0},
-    {"reward": 0.0, "timeouts": [event(limit="default_episode_timeout_seconds", configured_s=60)]},
+    {"response": {}, "reward": 1.0},
+    {"response": {}, "reward": 0.0, "timeouts": [event(limit="default_episode_timeout_seconds", configured_s=60)]},
     {NG_FAILURE_CLASS_KEY: "timeout_exceeded", "error": "agent ran out of time"},
 ]
 
@@ -749,7 +749,8 @@ async def test_offline_aggregation_writes_the_same_section(
     (tmp_path / QUALITY_SUMMARY_FILENAME).unlink()
 
     await RolloutAggregationHelper().run_from_config(
-        RolloutAggregationConfig(input_glob=str(output), output_jsonl_fpath=str(output))
+        # A run is never merged onto itself; its metrics are recomputed in place.
+        RolloutAggregationConfig(input_glob=str(output), output_jsonl_fpath=str(output), merge_shards=False)
     )
 
     assert orjson.loads((tmp_path / QUALITY_SUMMARY_FILENAME).read_bytes())["run"]["stats"]["timeouts"] == after_run
@@ -773,7 +774,8 @@ _HEALTH_CONFIG = SimpleNamespace(
 def test_gym_eval_run_exports_the_section_after_its_health_check(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """`gym eval run` computes health after its servers stop, outside rollout collection, and exports from there."""
+    """A custom collection driver's run gets its health from `gym eval run`, outside rollout collection, and exports
+    from there."""
     export_metrics = MagicMock()
     monkeypatch.setattr(nemo_gym.artifacts.exporters, "export_metrics", export_metrics)
 
