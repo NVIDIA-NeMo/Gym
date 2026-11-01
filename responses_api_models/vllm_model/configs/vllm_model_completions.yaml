@@ -16,5 +16,3 @@ policy_model:
       # The caller's messages must be either a single user message or
       # [system, user] — anything else (tools, multi-turn, audio) is rejected.
       use_completions_api: true
-      chat_template_kwargs: null
-      extra_body: null

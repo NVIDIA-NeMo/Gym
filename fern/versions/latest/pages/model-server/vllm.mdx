@@ -168,8 +168,6 @@ policy_model:
       uses_reasoning_parser: false   # /v1/completions does not run vLLM's reasoning parser
       uses_interleaved_reasoning: false
       use_completions_api: true      # drives vLLM /v1/completions
-      chat_template_kwargs: null
-      extra_body: null
 ```
 
 ### Render modes
@@ -283,6 +281,10 @@ extra_body:
   min_tokens: 10
   repetition_penalty: 1.1
 ```
+
+The shipped `vllm_model` configs leave `chat_template_kwargs`, `sampling_overrides`, and `extra_body` unset, so
+a value a benchmark or environment config sets for `policy_model` survives `--model-type vllm_model`, whose
+config merges after the benchmark's. A `null` there would replace it.
 
 ## Use VLLMModel with multiple replicas of a model endpoint
 
