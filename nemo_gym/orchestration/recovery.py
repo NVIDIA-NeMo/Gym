@@ -1070,6 +1070,18 @@ def accounting_unknown_reason():
     return None
 def accounting_unknown():
     return accounting_unknown_reason() is not None
+def followup_claims():
+    # The follow-up job id each allocation claimed, keyed by that allocation; only decimal ids leave the run host.
+    claims = {}
+    try:
+        for name in os.listdir(d):
+            if name.startswith(".gym_followup_queued."):
+                value = open(os.path.join(d, name)).read().strip()
+                if value.isascii() and value.isdecimal():
+                    claims[name[len(".gym_followup_queued."):]] = value
+    except (OSError, ValueError):
+        return {}
+    return claims
 def sha256(path):
     # Two bounded passes: stat identity misses a same-size in-place rewrite within one timestamp tick, the bytes
     # of a second read do not. This doubles source reads; it does not make a reader atomic against ABA writes.
@@ -1263,6 +1275,7 @@ collected["infra_retry_extension"], collected["infra_retry_extension_state"] = n
 collected["counter_states"] = {"infra_retries": num(".gym_infra_retries")[1],
                                "walltime": num(".gym_accumulated_walltime")[1]} if stable_sources else None
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
+collected["followup_claims"] = followup_claims()
 print(json.dumps(collected))
 """
 )
@@ -1303,6 +1316,8 @@ class CollectedEvidence(BaseModel):
     # Infra retries an explicit recovery added to the configured cap (.gym_infra_retry_extension), and its state.
     infra_retry_extension: float | None = None
     infra_retry_extension_state: str = "absent"
+    # The follow-up job id each allocation of the chain claimed (.gym_followup_queued.<allocation>).
+    followup_claims: dict[str, str] = Field(default_factory=dict)
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -1721,6 +1736,38 @@ def chain_accounting(accounting: str) -> list[tuple[str, str, int, int]] | None:
         state = parts[1].split()[0].rstrip("+") if parts[1].split() else ""
         rows.append((parts[0], state, int(parts[2]), int(parts[3])))
     return rows
+
+
+FOLLOWUP_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,ExitCode"
+# Terminal states of a follow-up that started; a follow-up its dependency cancelled never starts (no elapsed time).
+_FOLLOWUP_ENDED_STATES = frozenset(
+    {"FAILED", "CANCELLED", "NODE_FAIL", "BOOT_FAIL", "PREEMPTED", "OUT_OF_MEMORY", "TIMEOUT", "DEADLINE"}
+)
+
+
+def stopped_followup(job_id: str, accounting: str) -> str | None:
+    """Why the chain stopped when the follow-up ``job_id`` that its last allocation claimed is not in the chain.
+
+    ``accounting`` is ``sacct -D -X -n -P --format=FOLLOWUP_ACCOUNTING_FORMAT -j job_id``. The prologue records an
+    allocation in the chain before anything else, so a follow-up that started and ended without that entry ran no
+    work. None when the records do not show that: the follow-up never started, is live, or its record is ambiguous.
+    """
+    rows = [line.strip().split("|") for line in accounting.splitlines() if line.strip()]
+    if len(rows) != 1 or len(rows[0]) != 4 or rows[0][0] != job_id or not rows[0][2].isdecimal():
+        return None
+    _, state, elapsed, exit_code = rows[0]
+    state = state.split()[0].rstrip("+") if state.split() else ""
+    if state not in _FOLLOWUP_ENDED_STATES or int(elapsed) == 0:
+        return None
+    code, _, signal = exit_code.partition(":")
+    detail = f" with signal {signal}" if signal not in ("", "0") else f" with exit code {code}" if code != "0" else ""
+    # A signal that ended the job, not a person's cancel, or a scheduler state that names the infrastructure.
+    killed = signal not in ("", "0") and state != "CANCELLED"
+    cause = "on infrastructure" if killed or state in {"NODE_FAIL", "BOOT_FAIL", "PREEMPTED"} else ""
+    return (
+        f"the chain stopped{' ' + cause if cause else ''}: its follow-up {job_id} ended {state}{detail} after "
+        f"{elapsed} s, before it recorded itself in the chain, so no job continued the run"
+    )
 
 
 def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], allocation_id: str | None) -> bool:

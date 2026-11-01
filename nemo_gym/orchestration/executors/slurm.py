@@ -79,6 +79,7 @@ from nemo_gym.orchestration.jobs import (
 from nemo_gym.orchestration.recovery import (
     CHAIN_ACCOUNTING_FORMAT,
     COLLECT_SCRIPT,
+    FOLLOWUP_ACCOUNTING_FORMAT,
     CollectedEvidence,
     RecoveryAction,
     RecoveryDecision,
@@ -92,6 +93,7 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     live_chain_job,
     select_managed_evidence,
+    stopped_followup,
 )
 
 
@@ -651,6 +653,7 @@ class SlurmExecutor(BaseExecutor):
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
             allocation_cut = False
             rows = None
+            stopped = None
             if collected.job_chain:
                 try:
                     chain = ",".join(collected.job_chain)
@@ -676,6 +679,18 @@ class SlurmExecutor(BaseExecutor):
                         if rows is not None
                         else None
                     )
+                # A follow-up the last allocation queued that ended before it recorded itself continued nothing.
+                followup = collected.followup_claims.get(collected.job_chain[-1])
+                if followup is not None and followup not in collected.job_chain:
+                    try:
+                        stopped = stopped_followup(
+                            followup,
+                            conn.run(
+                                [f"sacct -D -n -P -X -j {shlex.quote(followup)} --format={FOLLOWUP_ACCOUNTING_FORMAT}"]
+                            ),
+                        )
+                    except (RuntimeError, OSError):
+                        stopped = None
         if collected.accounting_snapshot is not None:
             collected.accounting_snapshot = {
                 **collected.accounting_snapshot,
@@ -691,6 +706,8 @@ class SlurmExecutor(BaseExecutor):
             extend_retries=extend_retries,
             live_job_name=live_job_name,
         )
+        if stopped is not None:
+            decision = decision.model_copy(update={"reason": f"{decision.reason}; {stopped}"})
         return decision, collected
 
     def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
