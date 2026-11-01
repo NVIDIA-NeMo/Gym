@@ -79,13 +79,15 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
   the gateway kill arrives as exit code 124. The provider reports `error_type="timeout"` (code 124)
   only when the command exited 124 after running for about the full timeout, so a command that
   exits 124 on its own, quickly, stays a plain exit code.
-- `close()` does not block: `DeleteSandbox` takes about as long as the sandbox pod's termination
-  grace period (~31s on the cell-8 gateway), so the delete and the wait until `GetSandbox` reports
-  NOT_FOUND run in a background task. A delete RPC that hits its deadline counts as in progress and
-  is confirmed by polling. Failures are logged with the sandbox name, and a later `close()` of the
-  same handle retries. Call `await provider.aclose()` before the process exits: it waits for pending
-  deletes (bounded by `connection.request_timeout_s + operations.close_timeout_s`) and logs any that
-  did not finish. A failed `create()` cleans up the same way.
+- `close()` does not block. `DeleteSandbox` only commits after the sandbox pod's termination grace
+  period (~31s on the cell-8 gateway), and a client deadline that ends first cancels the delete (the sandbox
+  stays READY). So the delete runs in a background task on its own client with a long deadline
+  (`operations.delete_rpc_timeout_s`, default 120s); a deadline anyway re-issues the delete (up to 3
+  attempts), then `GetSandbox` is polled until NOT_FOUND (`operations.close_wait_deleted`,
+  `operations.close_timeout_s`). Failures are logged with the sandbox name, and a later `close()` of the same
+  handle retries. `aclose()` does not wait for pending deletes: it releases the gateway clients once they
+  finish, so `AsyncSandbox.stop()` returns immediately. A process that exits right after `close()` still
+  finishes the delete RPC (the worker thread outlives the event loop) but cannot log the outcome.
 - A sandbox that never becomes READY (for example an unpullable image) fails after `create.ready_timeout_s`.
   The SDK exposes no pull-specific signal, so the provider does not guess; the error message includes the
   conditions the gateway reports (`SandboxStatus.conditions`) for diagnosis.

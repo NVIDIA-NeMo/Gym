@@ -66,8 +66,10 @@ sandbox:
       # Backoff between probe attempts against the remote gateway.
       stable_delay_s: 1.0
     operations:
-      # close() deletes in the background (DeleteSandbox blocks ~31s on the pod grace period);
-      # aclose() drains pending deletes. After delete, poll until the gateway reports the sandbox gone.
+      # close() deletes in a background task (DeleteSandbox only commits after the ~31s pod grace
+      # period, and a shorter client deadline cancels it), on a client with this deadline.
+      # aclose() does not wait for pending deletes. After delete, poll until the gateway reports it gone.
+      delete_rpc_timeout_s: 120
       close_wait_deleted: true
       close_timeout_s: 60
       poll_interval_s: 1.0
