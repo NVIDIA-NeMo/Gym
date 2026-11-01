@@ -16,6 +16,7 @@
 import asyncio
 import base64
 import builtins
+import concurrent.futures
 import dataclasses
 import inspect
 import re
@@ -106,6 +107,8 @@ class FakeClient:
         self.exec_calls: list[dict[str, Any]] = []
         self.get_calls: list[dict[str, Any]] = []
         self.delete_calls: list[dict[str, Any]] = []
+        self.list_calls: list[dict[str, Any]] = []
+        self.list_results: list[Any] = [[]]
         self.close_calls = 0
         self.create_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_PROVISIONING)]
         self.get_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_READY)]
@@ -138,8 +141,8 @@ class FakeClient:
         self.get_calls.append({"name": sandbox_name, "workspace": workspace})
         return self._next(self.get_results)
 
-    def delete(self, sandbox_name: str, *, workspace: str) -> Any:
-        self.delete_calls.append({"name": sandbox_name, "workspace": workspace})
+    def delete(self, sandbox_name: str, *, workspace: str, allow_missing: bool = False) -> Any:
+        self.delete_calls.append({"name": sandbox_name, "workspace": workspace, "allow_missing": allow_missing})
         if self.delete_gate is not None:
             self.delete_gate.wait(timeout=5)
         if self.delete_gate is not None:
@@ -173,6 +176,10 @@ class FakeClient:
             time.sleep(self.exec_delay_s)
         return self._next(self.exec_results)
 
+    def list_all(self, *, workspace: str, label_selector: str | None = None, **_: Any) -> list[Any]:
+        self.list_calls.append({"workspace": workspace, "label_selector": label_selector})
+        return self._next(self.list_results)
+
     def close(self) -> None:
         self.close_calls += 1
 
@@ -187,6 +194,19 @@ def clear_shared_clients() -> Any:
 @pytest.fixture
 def fake_client() -> FakeClient:
     return FakeClient()
+
+
+@pytest.fixture(autouse=True)
+def reset_delete_state():
+    """Delete workers and the live/pending registries are process-wide; isolate each test."""
+    yield
+    for future in list(openshell_provider._PENDING_DELETES.values()):
+        concurrent.futures.wait([future], timeout=5)
+    for state in openshell_provider._DELETE_STATES.values():
+        state.executor.shutdown(wait=True)
+    openshell_provider._DELETE_STATES.clear()
+    openshell_provider._LIVE_SANDBOXES.clear()
+    openshell_provider._PENDING_DELETES.clear()
 
 
 @pytest.fixture
@@ -340,11 +360,19 @@ def test_generated_sandbox_names_fit_routable_name_limit() -> None:
     assert all(re.fullmatch(rf"{re.escape(SANDBOX_NAME_PREFIX)}[0-9a-f]+", name) for name in names)
 
 
+async def _drain_deletes_only() -> None:
+    while openshell_provider._PENDING_DELETES:
+        pending = [f for f in openshell_provider._PENDING_DELETES.values() if not f.cancelled()]
+        done, _ = await asyncio.to_thread(concurrent.futures.wait, pending, 5)
+        await asyncio.sleep(0)
+
+
 async def _drain(provider: OpenShellProvider) -> None:
-    """Wait for the provider's background deletes, then release it (aclose itself does not wait)."""
-    pending = [task for task in provider._pending_deletes.values() if not task.done()]
-    if pending:
-        await asyncio.wait(pending)
+    """Wait for every delete handed to a worker, then release the provider."""
+    while openshell_provider._PENDING_DELETES:
+        pending = list(openshell_provider._PENDING_DELETES.values())
+        await asyncio.to_thread(concurrent.futures.wait, pending)
+        await asyncio.sleep(0)
     await provider.aclose()
 
 
@@ -867,23 +895,28 @@ async def test_close_deletes_and_waits(make_provider, fake_client: FakeClient) -
     ]
     await provider.close(_make_handle(name="nemo-gym-x", workspace="team-a"))
     await _drain(provider)
-    assert fake_client.delete_calls == [{"name": "nemo-gym-x", "workspace": "team-a"}]
+    assert [(c["name"], c["workspace"], c["allow_missing"]) for c in fake_client.delete_calls] == [
+        ("nemo-gym-x", "team-a", True)
+    ]
     assert [call["name"] for call in fake_client.get_calls] == ["nemo-gym-x", "nemo-gym-x"]
 
 
-async def test_close_returns_before_slow_delete_and_aclose_drains(make_provider, fake_client: FakeClient) -> None:
+async def test_close_returns_while_delete_is_blocked_on_the_gateway(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
-    fake_client.delete_gate = threading.Event()
+    gate = fake_client.delete_gate = threading.Event()
     fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
     await provider.close(_make_handle(name="nemo-gym-x"))
-    await asyncio.sleep(0.05)
-    # close() returned while DeleteSandbox is still blocked on the gateway.
+    # The delete is already on a worker: close() returned and the gateway call has been (or is being) issued.
+    for _ in range(100):
+        if fake_client.delete_calls:
+            break
+        await asyncio.sleep(0.01)
     assert fake_client.delete_calls and not fake_client.get_calls
-    assert not provider._pending_deletes["nemo-gym-x"].done()
-    fake_client.delete_gate.set()
+    assert not openshell_provider._PENDING_DELETES[("default", "nemo-gym-x")].done()
+    gate.set()
     await _drain(provider)
     assert [call["name"] for call in fake_client.get_calls] == ["nemo-gym-x"]
-    assert not provider._pending_deletes
+    assert not openshell_provider._PENDING_DELETES
 
 
 async def test_close_twice_schedules_one_delete(make_provider, fake_client: FakeClient) -> None:
@@ -983,7 +1016,7 @@ async def test_close_delete_failure_is_logged_and_retryable(make_provider, fake_
     handle = _make_handle(name="nemo-gym-x")
     with caplog.at_level("ERROR"):
         await provider.close(handle)
-        await asyncio.wait(list(provider._pending_deletes.values()))
+        await asyncio.to_thread(concurrent.futures.wait, list(openshell_provider._PENDING_DELETES.values()))
         assert "'nemo-gym-x' failed" in caplog.text
         # The failed delete is forgotten, so a later close() retries it.
         await provider.close(handle)
@@ -991,32 +1024,115 @@ async def test_close_delete_failure_is_logged_and_retryable(make_provider, fake_
     assert len(fake_client.delete_calls) == 2
 
 
-async def test_aclose_does_not_wait_for_pending_delete_and_releases_clients_after(
-    make_provider, fake_client: FakeClient
-) -> None:
+async def test_aclose_does_not_wait_for_or_cancel_a_pending_delete(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
-    gate = threading.Event()
-    fake_client.delete_gate = gate
+    gate = fake_client.delete_gate = threading.Event()
     fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
     await provider.close(_make_handle(name="nemo-gym-x"))
-    await asyncio.sleep(0.05)
-    # stop()-style close + aclose returns at once although DeleteSandbox is still blocked on the gateway.
-    await asyncio.wait_for(provider.aclose(), timeout=1)
-    assert fake_client.close_calls == 0  # the clients stay open while the delete is in flight
+    await asyncio.wait_for(provider.aclose(), timeout=1)  # returns although DeleteSandbox is still blocked
+    assert not openshell_provider._PENDING_DELETES[("default", "nemo-gym-x")].done()
+    assert fake_client.close_calls == 1  # the main client; the delete worker and its client are not released
     gate.set()
-    for _ in range(200):
-        if fake_client.close_calls == 2:
-            break
-        await asyncio.sleep(0.01)
-    assert fake_client.close_calls == 2  # delete client and main client, closed after the delete finished
+    await _drain(provider)
+    # The queued delete ran to the end (delete, then the wait for NOT_FOUND) after the provider was released.
     assert [call["name"] for call in fake_client.get_calls] == ["nemo-gym-x"]
+
+
+def test_delete_completes_after_the_event_loop_is_gone(make_provider, fake_client: FakeClient, caplog) -> None:
+    provider = make_provider()
+    gate = fake_client.delete_gate = threading.Event()
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+
+    async def stop_and_exit() -> None:
+        await provider.close(_make_handle(name="nemo-gym-x"))
+        await provider.aclose()
+
+    with caplog.at_level("INFO"):
+        asyncio.run(stop_and_exit())  # like `stop()` right before the process ends: the loop closes here
+        assert not openshell_provider._PENDING_DELETES[("default", "nemo-gym-x")].done()
+        gate.set()
+        concurrent.futures.wait(list(openshell_provider._PENDING_DELETES.values()), timeout=5)
+    assert [call["name"] for call in fake_client.delete_calls] == ["nemo-gym-x"]
+    assert "'nemo-gym-x' deleted" in caplog.text
+
+
+async def test_close_tracks_live_sandboxes(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    handle = await provider.create(SandboxSpec())
+    assert ("default", handle.raw.name) in openshell_provider._LIVE_SANDBOXES
+    await provider.close(handle)
+    assert ("default", handle.raw.name) not in openshell_provider._LIVE_SANDBOXES
+    await _drain(provider)
+
+
+async def test_aclose_sweeps_untracked_sandboxes_of_this_run(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "run 1/x")
+    provider = make_provider()
+    fake_client.list_results = [
+        [
+            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="leftover"),
+            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="pending"),
+        ]
+    ]
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    in_flight: concurrent.futures.Future[None] = concurrent.futures.Future()  # a delete already handed to a worker
+    openshell_provider._PENDING_DELETES[("default", "pending")] = in_flight
+    await provider.aclose()
+    in_flight.set_result(None)
+    openshell_provider._PENDING_DELETES.pop(("default", "pending"))
+    await _drain_deletes_only()
+    assert fake_client.list_calls == [
+        {"workspace": "default", "label_selector": f"nemo-gym.nvidia.com/run=run_1_x,{SANDBOX_LABEL}=1"}
+    ]
+    assert [call["name"] for call in fake_client.delete_calls] == ["leftover"]
+
+
+async def test_aclose_sweep_skips_sandboxes_still_live_in_this_process(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    fake_client.list_results = [[make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="live")]]
+    openshell_provider._LIVE_SANDBOXES.add(("default", "live"))
+    await provider.aclose()
+    # Another sandbox of this process is still live, so no sweep happens at all (it could not tell whose is whose).
+    assert not fake_client.list_calls and not fake_client.delete_calls
+
+
+async def test_sweep_never_deletes_a_live_sandbox_of_this_run(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    fake_client.list_results = [
+        [
+            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="live"),
+            make_ref(openshell_pb2.SANDBOX_PHASE_READY, name="leftover"),
+        ]
+    ]
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    openshell_provider._LIVE_SANDBOXES.add(("default", "live"))
+    await provider._sweep_leftovers()
+    await _drain_deletes_only()
+    assert [call["name"] for call in fake_client.delete_calls] == ["leftover"]
+    await provider.aclose()
+
+
+async def test_sweep_skipped_without_attribution(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider(attribution={"enabled": False})
+    await provider.aclose()
+    assert not fake_client.list_calls
+
+
+async def test_sweep_list_failure_is_logged_not_raised(make_provider, fake_client: FakeClient, caplog) -> None:
+    provider = make_provider()
+    fake_client.list_results = [FakeRpcError(grpc.StatusCode.UNAVAILABLE)]
+    with caplog.at_level("WARNING"):
+        await provider.aclose()
+    assert "Could not list leftover" in caplog.text
 
 
 async def test_aclose_idempotent(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
     await provider.aclose()
     await provider.aclose()
-    assert fake_client.close_calls == 2  # main and delete clients
+    assert fake_client.close_calls == 1
 
 
 async def test_shared_client_released_on_last_aclose(make_provider, fake_client: FakeClient) -> None:
@@ -1029,7 +1145,7 @@ async def test_shared_client_released_on_last_aclose(make_provider, fake_client:
     assert fake_client.close_calls == 0  # provider_b still holds the shared client
 
     await provider_b.aclose()
-    assert fake_client.close_calls == 2  # main and delete clients
+    assert fake_client.close_calls == 1
     assert not openshell_provider._SHARED_CLIENTS
 
 

@@ -36,12 +36,12 @@ import threading
 import time
 import uuid
 from collections.abc import Mapping
-from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import Future, ThreadPoolExecutor
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.sandbox.attribution import AttributionConfig, sanitize_label_value
+from nemo_gym.sandbox.attribution import RUN_KEY, AttributionConfig, resolve_run_id, sanitize_label_value
 from nemo_gym.sandbox.providers.base import (
     SandboxCreateError,
     SandboxCreateVerificationError,
@@ -391,8 +391,14 @@ class _SharedClientState:
 
 _SHARED_CLIENTS: dict[tuple[Any, ...], _SharedClientState] = {}
 _SHARED_CLIENTS_LOCK = threading.Lock()
-# Strong references to the tasks that release clients after pending deletes (the loop holds only weak ones).
-_RELEASE_TASKS: set[asyncio.Task[None]] = set()
+
+# Deletes run on process-lifetime workers that are never released: CPython runs queued work items and joins
+# the (non-daemon) worker threads at interpreter exit, so a delete handed to a worker finishes even after the
+# event loop is gone. The SDK fixes one deadline per client, hence a separate long-deadline client for deletes.
+_DELETE_STATES: dict[tuple[Any, ...], _SharedClientState] = {}
+# Sandboxes this process created and has not closed, and deletes handed to a worker, by (workspace, name).
+_LIVE_SANDBOXES: set[tuple[str, str]] = set()
+_PENDING_DELETES: dict[tuple[str, str], Future[None]] = {}
 
 
 def _build_client(connection: OpenShellConnectionConfig) -> Any:
@@ -428,6 +434,20 @@ def _acquire_shared_client(connection: OpenShellConnectionConfig, concurrency: i
         return state
 
 
+def _delete_state(connection: OpenShellConnectionConfig, concurrency: int) -> _SharedClientState:
+    key = (connection, concurrency)
+    with _SHARED_CLIENTS_LOCK:
+        state = _DELETE_STATES.get(key)
+        if state is None:
+            state = _SharedClientState(
+                key=key,
+                client=_build_client(connection),
+                executor=ThreadPoolExecutor(max_workers=concurrency, thread_name_prefix="openshell-delete"),
+            )
+            _DELETE_STATES[key] = state
+        return state
+
+
 def _release_shared_client(state: _SharedClientState) -> None:
     with _SHARED_CLIENTS_LOCK:
         state.refcount -= 1
@@ -437,6 +457,78 @@ def _release_shared_client(state: _SharedClientState) -> None:
     # Stop the workers before closing the channel so queued futures don't run against a dead channel.
     state.executor.shutdown(wait=False, cancel_futures=True)
     state.client.close()
+
+
+def _forget_delete(key: tuple[str, str], future: Future[None]) -> None:
+    with _SHARED_CLIENTS_LOCK:
+        if _PENDING_DELETES.get(key) is future:
+            del _PENDING_DELETES[key]
+
+
+def _delete_sandbox(client: Any, inst: _OpenShellSandbox, operations: OpenShellOperationsConfig) -> None:
+    """Delete one sandbox and (optionally) wait until it is gone, logging the outcome; runs in a worker thread.
+
+    A client deadline cancels the gateway's delete before it commits (the sandbox stays READY), so a deadline
+    re-issues the delete; ``allow_missing`` makes that idempotent. The total is bounded by
+    ``MAX_DELETE_ATTEMPTS * operations.delete_rpc_timeout_s`` plus ``operations.close_timeout_s``.
+    """
+    try:
+        _delete_and_wait(client, inst, operations)
+    except Exception as e:
+        LOGGER.error(f"openshell delete of {inst.name!r} failed; the sandbox may be leaked on the gateway: {e}")
+    else:
+        LOGGER.info(f"openshell sandbox {inst.name!r} deleted")
+
+
+def _delete_and_wait(client: Any, inst: _OpenShellSandbox, operations: OpenShellOperationsConfig) -> None:
+    from openshell.mutations import DeletionOutcome
+
+    for attempt in range(1, MAX_DELETE_ATTEMPTS + 1):
+        try:
+            result = client.delete(inst.name, workspace=inst.workspace, allow_missing=True)
+            break
+        except Exception as e:
+            if _is_not_found(e):
+                return
+            if _is_grpc_timeout(e):
+                LOGGER.warning(
+                    f"DeleteSandbox for {inst.name!r} hit its deadline (attempt {attempt}/{MAX_DELETE_ATTEMPTS})"
+                )
+                continue
+            if _is_runtime_failure(e):
+                raise RuntimeError(f"DeleteSandbox failed for {inst.name!r}: {e}") from e
+            raise
+    else:
+        raise RuntimeError(
+            f"DeleteSandbox for {inst.name!r} hit its deadline {MAX_DELETE_ATTEMPTS} times "
+            f"(operations.delete_rpc_timeout_s={operations.delete_rpc_timeout_s:g})"
+        )
+    if result.outcome == DeletionOutcome.ALREADY_ABSENT:
+        return
+    if result.outcome not in (DeletionOutcome.COMPLETED, DeletionOutcome.ACCEPTED):
+        LOGGER.warning(
+            f"DeleteSandbox returned outcome={result.outcome!r} for {inst.name!r}; skipping the deletion wait."
+        )
+        return
+    if operations.close_wait_deleted:
+        _wait_deleted(client, inst, operations)
+
+
+def _wait_deleted(client: Any, inst: _OpenShellSandbox, operations: OpenShellOperationsConfig) -> None:
+    """Poll GetSandbox until NOT_FOUND (transient RPC failures keep polling until the deadline)."""
+    deadline = time.monotonic() + operations.close_timeout_s
+    while True:
+        try:
+            client.get(inst.name, workspace=inst.workspace)
+        except Exception as e:
+            if _is_not_found(e):
+                return
+            if not _is_runtime_failure(e):
+                raise
+            LOGGER.debug(f"GetSandbox failed while waiting for {inst.name!r} to be deleted: {e}")
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"sandbox {inst.name!r} was not deleted within {operations.close_timeout_s:g}s")
+        time.sleep(operations.poll_interval_s)
 
 
 class OpenShellProvider:
@@ -463,12 +555,9 @@ class OpenShellProvider:
         _require_openshell()
         self._shared = _acquire_shared_client(self._connection, self._exec_config.concurrency)
         self._closed = False
-        # Background deletes keyed by sandbox name. DeleteSandbox blocks for the pod's termination grace
-        # period (~31s on cell-8), so close() schedules it here and returns. aclose() does not wait for it:
-        # the shared clients are released once the pending deletes finish.
-        self._pending_deletes: dict[str, asyncio.Task[None]] = {}
-        # The SDK fixes one deadline per client, so DeleteSandbox gets a client with its own.
-        self._delete_shared = _acquire_shared_client(
+        # DeleteSandbox blocks for the pod's termination grace period (~31s on cell-8), so close() hands it to a
+        # delete worker (see _DELETE_STATES) and returns; aclose() never waits for it.
+        self._delete_shared = _delete_state(
             dataclasses.replace(self._connection, request_timeout_s=self._operations.delete_rpc_timeout_s),
             self._exec_config.concurrency,
         )
@@ -476,10 +565,6 @@ class OpenShellProvider:
     @property
     def _client(self) -> Any:
         return self._shared.client
-
-    async def _call_delete(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
-        loop = asyncio.get_running_loop()
-        return await loop.run_in_executor(self._delete_shared.executor, functools.partial(func, *args, **kwargs))
 
     async def _call(self, func: Any, /, *args: Any, **kwargs: Any) -> Any:
         loop = asyncio.get_running_loop()
@@ -608,6 +693,7 @@ class OpenShellProvider:
             raise OpenShellCreateError(f"CreateSandbox failed for image={image!r}: {e}") from e
 
         workspace = getattr(ref, "workspace", "") or self._connection.workspace
+        _LIVE_SANDBOXES.add((workspace, ref.name))
         handle = SandboxHandle(
             sandbox_id=ref.id,
             provider_name=self.name,
@@ -696,7 +782,7 @@ class OpenShellProvider:
                 await asyncio.sleep(probe.stable_delay_s)
 
     async def _cleanup_failed_create_handle(self, handle: SandboxHandle) -> None:
-        self._schedule_delete(handle.raw)
+        self._submit_delete(handle.raw)
 
     async def exec(
         self,
@@ -819,111 +905,57 @@ class OpenShellProvider:
         return _phase_to_status_map().get(ref.phase, SandboxStatus.UNKNOWN)
 
     async def close(self, handle: SandboxHandle) -> None:
-        """Start deleting the sandbox in the background and return without waiting for the gateway.
+        """Hand the sandbox's delete to a worker thread and return without waiting for the gateway.
 
-        DeleteSandbox blocks until the sandbox pod's termination grace period ends, so the delete
-        (and the wait until GetSandbox reports NOT_FOUND) runs in a task the provider tracks.
-        Failures are logged with the sandbox name; a later ``close()`` of the same handle retries.
-        ``aclose()`` does not wait for pending deletes; the clients are released when they finish.
+        The worker deletes (re-issuing on a deadline), then waits until the sandbox is gone when
+        ``operations.close_wait_deleted`` is set. It is already queued when this returns and runs to
+        completion at interpreter exit even if the event loop is gone. Every outcome is logged with the
+        sandbox name; a failed delete is forgotten, so a later ``close()`` of the same handle retries.
         """
-        self._schedule_delete(handle.raw)
+        self._submit_delete(handle.raw)
 
-    def _schedule_delete(self, inst: _OpenShellSandbox) -> None:
-        pending = self._pending_deletes.get(inst.name)
-        if pending is not None and not pending.done():
+    def _submit_delete(self, inst: _OpenShellSandbox) -> None:
+        key = (inst.workspace, inst.name)
+        _LIVE_SANDBOXES.discard(key)
+        with _SHARED_CLIENTS_LOCK:
+            pending = _PENDING_DELETES.get(key)
+            if pending is not None and not pending.done():
+                return
+            future = self._delete_shared.executor.submit(
+                _delete_sandbox, self._delete_shared.client, inst, self._operations
+            )
+            _PENDING_DELETES[key] = future
+        future.add_done_callback(lambda done, key=key: _forget_delete(key, done))
+
+    async def _sweep_leftovers(self) -> None:
+        """Delete this run's sandboxes that the process no longer tracks (for example a create that was cancelled
+        after the gateway committed it). Needs attribution: the run label is what scopes the listing."""
+        if not self._attribution.enabled:
             return
-        task = asyncio.create_task(self._delete_and_log(inst), name=f"openshell-delete-{inst.name}")
-        self._pending_deletes[inst.name] = task
-        task.add_done_callback(lambda done, name=inst.name: self._forget_delete(name, done))
-
-    def _forget_delete(self, name: str, task: asyncio.Task[None]) -> None:
-        if self._pending_deletes.get(name) is task:
-            del self._pending_deletes[name]
-
-    async def _delete_and_log(self, inst: _OpenShellSandbox) -> None:
+        run = sanitize_label_value(resolve_run_id(self._attribution.run))
+        selector = f"{self._attribution.key_prefix}{RUN_KEY}={run},{SANDBOX_LABEL}=1"
+        workspace = self._connection.workspace
         try:
-            await self._delete_and_wait(inst)
-        except asyncio.CancelledError:
-            LOGGER.error(f"openshell delete of {inst.name!r} was cancelled; the sandbox may be leaked on the gateway")
-            raise
+            refs = await self._call(self._client.list_all, workspace=workspace, label_selector=selector)
         except Exception as e:
-            LOGGER.error(f"openshell delete of {inst.name!r} failed; the sandbox may be leaked on the gateway: {e}")
-
-    async def _delete_and_wait(self, inst: _OpenShellSandbox) -> None:
-        """Delete the sandbox (already-gone counts as success), then wait until it is fully gone."""
-        from openshell.mutations import DeletionOutcome
-
-        for attempt in range(1, MAX_DELETE_ATTEMPTS + 1):
-            try:
-                result = await self._call_delete(
-                    self._delete_shared.client.delete, inst.name, workspace=inst.workspace
-                )
-                break
-            except Exception as e:
-                if _is_not_found(e):
-                    return
-                if _is_grpc_timeout(e):
-                    # A client deadline cancels the delete before it commits (the sandbox stays READY), so the
-                    # delete is issued again; it is idempotent (an already-deleted sandbox is NOT_FOUND).
-                    LOGGER.warning(
-                        f"DeleteSandbox for {inst.name!r} hit its deadline (attempt {attempt}/{MAX_DELETE_ATTEMPTS})"
-                    )
-                    continue
-                if _is_runtime_failure(e):
-                    raise RuntimeError(f"openshell delete failed for {inst.name!r}: {e}") from e
-                raise
-        else:
-            raise RuntimeError(
-                f"openshell delete of {inst.name!r} hit its deadline {MAX_DELETE_ATTEMPTS} times "
-                f"(operations.delete_rpc_timeout_s={self._operations.delete_rpc_timeout_s:g})"
-            )
-        if result.outcome == DeletionOutcome.ALREADY_ABSENT:
+            LOGGER.warning(f"Could not list leftover OpenShell sandboxes ({selector}): {e}")
             return
-        if result.outcome not in (DeletionOutcome.COMPLETED, DeletionOutcome.ACCEPTED):
-            LOGGER.warning(
-                f"DeleteSandbox returned outcome={result.outcome!r} for {inst.name!r}; skipping the deletion wait."
-            )
-            return
-        if self._operations.close_wait_deleted:
-            await self._wait_deleted(inst)
-
-    async def _wait_deleted(self, inst: _OpenShellSandbox) -> None:
-        """Poll GetSandbox until NOT_FOUND (transient RPC failures keep polling until the deadline)."""
-        loop = asyncio.get_running_loop()
-        deadline = loop.time() + self._operations.close_timeout_s
-        while True:
-            try:
-                await self._call(self._client.get, inst.name, workspace=inst.workspace)
-            except Exception as e:
-                if _is_not_found(e):
-                    return
-                if not _is_runtime_failure(e):
-                    raise
-                LOGGER.debug(f"GetSandbox failed while waiting for {inst.name!r} to be deleted: {e}")
-            if loop.time() >= deadline:
-                raise RuntimeError(
-                    f"openshell sandbox {inst.name!r} was not deleted within {self._operations.close_timeout_s:g}s"
-                )
-            await asyncio.sleep(self._operations.poll_interval_s)
-
-    async def _release_after(self, pending: list[asyncio.Task[None]]) -> None:
-        await asyncio.wait(pending)
-        await self._release_clients()
-
-    async def _release_clients(self) -> None:
-        await asyncio.to_thread(_release_shared_client, self._delete_shared)
-        await asyncio.to_thread(_release_shared_client, self._shared)
+        for ref in refs:
+            key = (ref.workspace or workspace, ref.name)
+            if key in _LIVE_SANDBOXES or key in _PENDING_DELETES:
+                continue
+            LOGGER.warning(f"Deleting leftover OpenShell sandbox {ref.name!r} of this run ({selector}).")
+            self._submit_delete(_OpenShellSandbox(name=ref.name, sandbox_id=ref.id, workspace=key[0], image=None))
 
     async def aclose(self) -> None:
-        """Release the shared client/pool (closed for real when the last provider releases it)."""
+        """Release the shared client/pool (closed for real when the last provider releases it).
+
+        Does not wait for deletes: they run on their own workers. When no sandbox of this process is still
+        live, it first deletes this run's leftovers (see ``_sweep_leftovers``).
+        """
         if self._closed:
             return
         self._closed = True
-        pending = [task for task in self._pending_deletes.values() if not task.done()]
-        if pending:
-            # Closing the clients now would abort in-flight deletes; release them once the deletes finish.
-            release = asyncio.create_task(self._release_after(pending), name="openshell-release-clients")
-            _RELEASE_TASKS.add(release)
-            release.add_done_callback(_RELEASE_TASKS.discard)
-            return
-        await self._release_clients()
+        if not _LIVE_SANDBOXES:
+            await self._sweep_leftovers()
+        await asyncio.to_thread(_release_shared_client, self._shared)

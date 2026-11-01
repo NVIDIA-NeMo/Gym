@@ -81,13 +81,21 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
   exits 124 on its own, quickly, stays a plain exit code.
 - `close()` does not block. `DeleteSandbox` only commits after the sandbox pod's termination grace
   period (~31s on the cell-8 gateway), and a client deadline that ends first cancels the delete (the sandbox
-  stays READY). So the delete runs in a background task on its own client with a long deadline
-  (`operations.delete_rpc_timeout_s`, default 120s); a deadline anyway re-issues the delete (up to 3
-  attempts), then `GetSandbox` is polled until NOT_FOUND (`operations.close_wait_deleted`,
-  `operations.close_timeout_s`). Failures are logged with the sandbox name, and a later `close()` of the same
-  handle retries. `aclose()` does not wait for pending deletes: it releases the gateway clients once they
-  finish, so `AsyncSandbox.stop()` returns immediately. A process that exits right after `close()` still
-  finishes the delete RPC (the worker thread outlives the event loop) but cannot log the outcome.
+  stays READY). So `close()` hands one blocking delete function to a delete worker thread and returns. The
+  worker deletes on its own client with a long deadline (`operations.delete_rpc_timeout_s`, default 120s),
+  re-issues the delete with `allow_missing` on a deadline (up to 3 attempts), then polls until NOT_FOUND
+  (`operations.close_wait_deleted`, `operations.close_timeout_s`). Every outcome is logged with the sandbox
+  name, and a failed delete is forgotten so a later `close()` of the same handle retries.
+  - The delete workers live for the whole process and `aclose()` never waits for them or cancels them.
+    CPython runs already-queued work and joins non-daemon worker threads at interpreter exit, so the delete
+    finishes after `sys.exit()`, after the event loop is gone, and after a normal `asyncio.run()` end. Exit is
+    delayed by at most the delete in flight: `3 x delete_rpc_timeout_s + close_timeout_s` in the worst case,
+    about 35s normally. Only a hard kill (SIGKILL, `os._exit`) skips the delete and leaks the sandbox, since
+    OpenShell has no TTL.
+  - At `aclose()`, when this process has no live sandbox left, it also deletes this run's leftovers: it
+    lists the gateway sandboxes labelled `nemo-gym.nvidia.com/run=<this run>` and `nemo-gym.sandbox=1`
+    (needs `attribution.enabled`) and deletes those it no longer tracks (for example a create that was
+    cancelled after the gateway committed it).
 - A sandbox that never becomes READY (for example an unpullable image) fails after `create.ready_timeout_s`.
   The SDK exposes no pull-specific signal, so the provider does not guess; the error message includes the
   conditions the gateway reports (`SandboxStatus.conditions`) for diagnosis.
