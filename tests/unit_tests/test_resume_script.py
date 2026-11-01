@@ -284,6 +284,14 @@ def _job_dir(tmp_path) -> str:
     return os.path.realpath(tmp_path)
 
 
+def _write_inventory(tmp_path) -> None:
+    """The task inventory a segment writes before any rollout: after it, a timed-out segment is continued."""
+    (tmp_path / "artifacts").mkdir(exist_ok=True)
+    (tmp_path / "artifacts" / "rollouts_materialized_inputs.jsonl").write_text(
+        '{"_ng_task_index": 0, "_ng_rollout_index": 0}\n'
+    )
+
+
 def _sbatch_calls(tmp_path) -> list[str]:
     calls = tmp_path / "sbatch_calls"
     return calls.read_text().splitlines() if calls.exists() else []
@@ -293,6 +301,7 @@ def _sbatch_calls(tmp_path) -> list[str]:
 @pytest.mark.parametrize("prev_state", [None, "TIMEOUT"])
 def test_a_requeued_job_does_not_queue_a_second_follow_up(tmp_path, prev_state):
     """Slurm reruns job.sh under the same job id on a requeue (node failure, preemption with --requeue)."""
+    _write_inventory(tmp_path)
     first = _run_prologue(tmp_path, ResumeConfig(), prev_state)
     requeued = _run_prologue(tmp_path, ResumeConfig(), prev_state)
 
@@ -373,6 +382,7 @@ def test_a_claim_is_kept_when_squeue_fails(tmp_path):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_each_resumed_segment_still_queues_its_own_follow_up(tmp_path):
+    _write_inventory(tmp_path)
     _run_prologue(tmp_path, ResumeConfig(), None, job_id="200")
     _run_prologue(tmp_path, ResumeConfig(), None, job_id="200")  # requeue of the first segment
     resumed = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", job_id="999", prev_job_id="200")
@@ -398,6 +408,7 @@ def test_failed_submission_uncertainty_survives_a_later_invocation(tmp_path):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_chain_stopped_at_the_walltime_cap_exits_non_zero_and_marks_the_run_incomplete(tmp_path):
+    _write_inventory(tmp_path)
     (tmp_path / ".gym_accumulated_walltime").write_text("3590")
 
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="01:00:00"), "TIMEOUT")
@@ -438,6 +449,7 @@ def test_a_chain_whose_previous_job_completed_still_exits_zero(tmp_path):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_chain_that_continues_clears_an_earlier_incomplete_marker(tmp_path):
+    _write_inventory(tmp_path)
     (tmp_path / INCOMPLETE_MARKER_NAME).write_text("stopped earlier")
 
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="10:00:00"), "TIMEOUT")
@@ -591,6 +603,7 @@ def test_unknown_accounting_cannot_run_or_change_counters(tmp_path, state, elaps
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 @pytest.mark.parametrize("state", ["TIMEOUT", "BOOT_FAIL", "PREEMPTED", "NODE_FAIL"])
 def test_remaining_walltime_shortens_four_hour_allocation(tmp_path, state):
+    _write_inventory(tmp_path)
     (tmp_path / ".gym_accumulated_walltime").write_text("3600\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), state, elapsed="3630")
     assert result.returncode == 0 and "REACHED_WORK" in result.stdout
@@ -608,6 +621,7 @@ def test_all_failure_states_obey_exhausted_walltime(tmp_path, state):
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_remaining_walltime_never_increases_existing_allocation(tmp_path):
+    _write_inventory(tmp_path)
     result = _run_prologue(tmp_path, ResumeConfig(max_walltime="04:00:00"), "TIMEOUT", time_limit="00:30:00")
     assert result.returncode == 0
     assert "update" not in (tmp_path / "scontrol_calls").read_text()
@@ -862,6 +876,7 @@ def _sentinel_of(followup_elapsed: str, **extra: str) -> dict[str, str]:
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_sentinel_takes_the_place_of_a_follow_up_that_died_before_it_recorded_itself(tmp_path):
+    _write_inventory(tmp_path)
     (tmp_path / ".gym_job_chain").write_text("100\n")
     result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("14"))
 
@@ -882,6 +897,7 @@ def test_a_sentinel_takes_the_place_of_a_follow_up_that_died_before_it_recorded_
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_dead_follow_up_is_debited_once_and_stays_in_the_chain_for_the_next_hop(tmp_path):
+    _write_inventory(tmp_path)
     (tmp_path / ".gym_job_chain").write_text("100\n")
     (tmp_path / ".gym_accumulated_walltime").write_text("1000\n")
     taken_over = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("14"))
@@ -932,6 +948,7 @@ def test_a_sentinel_that_cannot_read_its_follow_up_stops_with_unknown_accounting
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
 def test_a_sentinel_stops_at_the_infra_retry_cap_so_dying_follow_ups_cannot_loop(tmp_path):
+    _write_inventory(tmp_path)
     (tmp_path / ".gym_job_chain").write_text("100\n")
     (tmp_path / ".gym_infra_retries").write_text("2\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "TIMEOUT", extra_env=_sentinel_of("14"))

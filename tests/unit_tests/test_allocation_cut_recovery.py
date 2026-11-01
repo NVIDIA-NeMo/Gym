@@ -304,6 +304,33 @@ def test_the_guard_never_continues_after_an_operator_cancel(tmp_path):
     )
 
 
+def test_the_guard_ends_the_chain_after_a_timeout_before_the_task_inventory(tmp_path):
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "artifacts").mkdir(parents=True)
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", elapsed="14400")
+    stop = (
+        "Previous job 100 ended TIMEOUT: the segment ended before the task inventory was written; nothing can be "
+        "resumed; fresh restart: gym eval resubmit gym-job-x gsm8k --recover --max-walltime HH:MM:SS "
+        "--walltime-reason TEXT"
+    )
+    assert (result.returncode, "REACHED_WORK" in result.stdout) == (1, False)
+    assert stop in result.stdout
+    assert (job / ".gym_chain_incomplete").read_text() == stop + "\n"
+    # No successor is queued, and the segment's elapsed time is kept with the spent history.
+    assert not (job / "sbatch_calls").exists()
+    assert (job / ".gym_accumulated_walltime").read_text() == "14400\n"
+    # After the inventory a timeout still continues: test_the_guard_continues_a_cut_allocation_from_its_saved_rows.
+
+
+def test_a_preemption_before_the_task_inventory_still_spends_an_infra_retry(tmp_path):
+    job = tmp_path / "gym-job-x" / "gsm8k"
+    (job / "artifacts").mkdir(parents=True)
+    result = _run_prologue(job, ResumeConfig(max_retries=2), "PREEMPTED", exit_code="0:15")
+    assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert (job / ".gym_infra_retries").read_text() == "1\n"
+    assert not (job / ".gym_chain_incomplete").exists()
+
+
 _REQUEUE_MARKER = (
     "GYM_ACCOUNTING_UNKNOWN: Requeued allocation elapsed time is unknown; "
     "recover only after complete terminal accounting.\n"

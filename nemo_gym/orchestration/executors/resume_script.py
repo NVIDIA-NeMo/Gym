@@ -65,6 +65,8 @@ REQUEUE_RECONCILED_NOTE = (
 )
 ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
+# Why the chain ends after a segment that timed out before Gym wrote the task inventory.
+PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -243,6 +245,12 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _gym_stop_accounting_unknown "Previous job elapsed accounting is unknown or malformed."
     _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed + _gym_sentinel_debit))
     echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
+    # A segment that timed out before Gym wrote the task inventory saved nothing to resume, and the next one would
+    # repeat the same startup under the same walltime: the chain ends and names the fresh restart instead.
+    if [[ "$_prev_state" == TIMEOUT && ! -e "$OUTPUT_DIR/artifacts/rollouts_materialized_inputs.jsonl" ]]; then
+        _gym_run_dir="${{OUTPUT_DIR%/*}}"
+        _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended TIMEOUT: {pre_inventory_reason}; fresh restart: {fresh_restart_command}"
+    fi
 elif [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" == 1 ]]; then
     # Recovery is another allocation, not a fresh allowance. A plain manual resubmit reset above is explicit.
     _gym_needs_retry=1
@@ -423,7 +431,7 @@ def fresh_restart_command(gym_job_id: str, benchmark: str) -> str:
     """The command that queues a run with no task inventory again, as a fresh run with a longer walltime.
 
     Submission ids and benchmark names are shell-safe by construction (see `new_gym_job_id` and the executor's
-    benchmark name check), so the command needs no quoting.
+    benchmark name check), so the command needs no quoting, and the prologue renders it with shell expansions of both.
     """
     return f"gym eval resubmit {gym_job_id} {benchmark} --recover --max-walltime HH:MM:SS --walltime-reason TEXT"
 
@@ -457,4 +465,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         retry_extension_marker=RETRY_EXTENSION_MARKER,
         retry_extension_name=RETRY_EXTENSION_NAME,
         requeue_unknown_reason=REQUEUE_UNKNOWN_REASON,
+        pre_inventory_reason=PRE_INVENTORY_REASON,
+        # The job dir is <output_path>/<gym_job_id>/<benchmark>: the command names both from the directory it runs in.
+        fresh_restart_command=fresh_restart_command("${_gym_run_dir##*/}", "${OUTPUT_DIR##*/}"),
     )

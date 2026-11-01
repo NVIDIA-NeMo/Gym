@@ -42,7 +42,7 @@ What the next job does with the previous job's state:
 | state not yet visible to `sacct` | Retries the lookup for about a minute, then stops if accounting is still unavailable. |
 | `COMPLETED` | Exits successfully. |
 | `CANCELLED...` | Stops the chain. |
-| `TIMEOUT` | Continues the planned allocation segments within the remaining `max_walltime`. This scheduler state does not classify a model response timeout. |
+| `TIMEOUT` | Continues the planned allocation segments within the remaining `max_walltime`. A segment that ended before the task inventory was written stops the chain: nothing can be resumed, and the stop names the fresh-restart command. This scheduler state does not classify a model response timeout. |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Resumes only with remaining retry and walltime budgets; records one admitted retry before work. |
 | `FAILED`, `OUT_OF_MEMORY`, `DEADLINE` | Preserves known elapsed time and stops. These states alone do not establish a retryable infrastructure cause. |
 | unknown, malformed or nonterminal accounting | Stops without dispatching more work. |
