@@ -281,7 +281,10 @@ def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
             trajectories.append(json.loads(Path(artifact["path"]).read_text(encoding="utf-8")))
         except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
             LOG.warning("Could not read Relay ATIF trajectory %s (%s)", artifact["path"], type(error).__name__)
-    return trajectories
+    # Relay names the files by session id, so order the trajectories by their first step's timestamp.
+    return sorted(
+        trajectories, key=lambda trajectory: str(_mapping((trajectory.get("steps") or [{}])[0]).get("timestamp"))
+    )
 
 
 def _emitted_arguments(value: Any, call_id: str) -> Optional[str]:

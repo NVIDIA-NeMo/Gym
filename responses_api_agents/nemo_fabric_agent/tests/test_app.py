@@ -997,6 +997,19 @@ def test_fabric_runs_python_adapters_on_the_agent_interpreter(preset: str | None
     assert seen == [preset or sys.executable]
 
 
+def test_atif_trajectories_are_ordered_by_their_first_step(tmp_path: Path) -> None:
+    artifacts = []
+    # Relay names each file by session id, so the file order says nothing about when the session ran.
+    for name, step, timestamp in [("aaa", "second", "2026-01-01T00:00:02Z"), ("zzz", "first", "2026-01-01T00:00:01Z")]:
+        path = tmp_path / f"trajectory-{name}.atif.json"
+        path.write_text(json.dumps({"steps": [{"source": "agent", "message": step, "timestamp": timestamp}]}))
+        artifacts.append({"kind": "atif", "path": str(path)})
+
+    trajectories = _atif_trajectories({"relay_artifacts": artifacts})
+
+    assert [trajectory["steps"][0]["message"] for trajectory in trajectories] == ["first", "second"]
+
+
 def test_atif_trajectories_skips_partial_or_undecodable_artifacts(tmp_path: Path) -> None:
     # Relay can leave a partial ATIF file, cut inside a multi-byte character or mid-JSON. Each one is skipped with a
     # warning so the rollout falls back to Fabric's own output, and a readable file is still returned.
