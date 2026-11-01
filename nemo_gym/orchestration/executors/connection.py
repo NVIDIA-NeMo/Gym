@@ -18,6 +18,7 @@ import shutil
 import socket
 import subprocess
 import tempfile
+import threading
 import time
 from abc import ABC, abstractmethod
 from pathlib import Path
@@ -44,6 +45,12 @@ class Connection(ABC):
 
 
 class LocalConnection(Connection):
+    # run_with_input_held keeps the shell's stdin open until it exits (see _checked_holding_input).
+    holds_input = True
+
+    def run_with_input_held(self, commands: list[str]) -> str:
+        return _checked_holding_input(["bash", "-s"], input="\n".join(commands) + "\n", context="local commands")
+
     def copy(self, local: Path, remote: Path) -> None:
         if remote.exists():
             shutil.rmtree(remote)
@@ -68,6 +75,8 @@ class SSHConnection(Connection):
 
     _OPTS = ["-o", "StrictHostKeyChecking=accept-new", "-o", "BatchMode=yes"]
     _MASTER_TIMEOUT = 10  # seconds to wait for the control socket to appear
+    # run_with_input_held keeps the remote shell's stdin open until it exits (see _checked_holding_input).
+    holds_input = True
 
     def __init__(self, hostname: str) -> None:
         self._hostname = hostname
@@ -146,6 +155,13 @@ class SSHConnection(Connection):
             context=f"ssh commands on {self._hostname}",
         )
 
+    def run_with_input_held(self, commands: list[str]) -> str:
+        return _checked_holding_input(
+            ["ssh", *self._ssh_opts(), self._hostname, "bash", "-s"],
+            input="\n".join(commands) + "\n",
+            context=f"ssh commands on {self._hostname}",
+        )
+
     def write_text(self, remote: Path, content: str, *, private: bool = False) -> None:
         # A quoted heredoc delimiter: the payload reaches the file byte for byte,
         # with no parameter or command substitution applied to it on the way.
@@ -184,6 +200,40 @@ def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> 
             f"Command failed{label} with exit code {result.returncode}:\n  {' '.join(cmd)}\n{result.stderr.strip()}"
         )
     return result.stdout
+
+
+def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> str:
+    """Like ``_checked``, but stdin stays open until the command exits, so its EOF on the far end means that this
+    process or its connection is gone. The commands must end the remote shell themselves (``exit``)."""
+    with subprocess.Popen(
+        cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    ) as process:
+        output: dict[str, str] = {}
+        readers = [
+            threading.Thread(
+                target=lambda name=name, stream=stream: output.__setitem__(name, stream.read()), daemon=True
+            )
+            for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+        ]
+        for reader in readers:
+            reader.start()
+        try:
+            process.stdin.write(input)
+            process.stdin.flush()
+            for reader in readers:
+                reader.join()
+            returncode = process.wait()
+        except BaseException:
+            process.kill()
+            raise
+        finally:
+            process.stdin.close()
+    if returncode != 0:
+        label = f" ({context})" if context else ""
+        raise RuntimeError(
+            f"Command failed{label} with exit code {returncode}:\n  {' '.join(cmd)}\n{output.get('stderr', '').strip()}"
+        )
+    return output.get("stdout", "")
 
 
 def get_connection(hostname: str | None) -> Connection:

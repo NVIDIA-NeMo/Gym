@@ -7,6 +7,7 @@ import signal
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 import uuid
 from pathlib import Path
@@ -153,3 +154,96 @@ def test_a_signal_while_the_master_starts_closes_it_and_stops_the_foreground_ssh
 
     assert _closed(fake.calls, conn._socket)
     assert fake.terminated
+
+
+def _token_processes(token: str) -> list[int]:
+    """This user's processes that carry the token as GYM_READER_TOKEN in their environment."""
+    found = []
+    for proc in Path("/proc").iterdir():
+        if not proc.name.isdigit():
+            continue
+        try:
+            environ = (proc / "environ").read_bytes()
+        except OSError:
+            continue
+        if f"GYM_READER_TOKEN={token}".encode() in environ.split(b"\0"):
+            found.append(int(proc.name))
+    return found
+
+
+def _wait_until(predicate, timeout_s: float) -> bool:
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if predicate():
+            return True
+        time.sleep(0.1)
+    return bool(predicate())
+
+
+needs_setsid = pytest.mark.skipif(
+    shutil.which("setsid") is None or shutil.which("timeout") is None, reason="util-linux setsid or timeout missing"
+)
+
+
+@needs_setsid
+def test_the_watched_reader_reports_as_before_over_a_held_input(tmp_path: Path) -> None:
+    command = slurm._reader_command(
+        "printenv GYM_READER_TOKEN", tmp_path, "{}", bound_s=300, factor=1, token="watched-token", watchdog=True
+    )
+    result: dict[str, str] = {}
+    runner = threading.Thread(target=lambda: result.update(output=LocalConnection().run_with_input_held(command)))
+    runner.start()
+    runner.join(timeout=30)
+
+    assert not runner.is_alive(), "the reader with its watcher did not end the shell"
+    assert "watched-token" in result["output"].splitlines()
+    assert "__GYM_READER_RC:0" in result["output"]
+
+
+@needs_setsid
+def test_the_watcher_stops_a_sleeping_reader_when_the_shell_input_closes(tmp_path: Path) -> None:
+    token = f"token-{uuid.uuid4().hex}"
+    command = slurm._reader_command(
+        f"{sys.executable} -c 'import time; time.sleep(300)'",
+        tmp_path,
+        "{}",
+        bound_s=300,
+        factor=1,
+        token=token,
+        watchdog=True,
+    )
+    shell = subprocess.Popen(
+        ["bash", "-s"], stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
+    )
+    try:
+        shell.stdin.write("\n".join(command) + "\n")
+        shell.stdin.flush()
+        assert _wait_until(lambda: _token_processes(token), 15), "the reader never started"
+
+        shell.stdin.close()  # The client, or its SSH connection, is gone.
+        output, _ = shell.communicate(timeout=30)
+
+        assert _wait_until(lambda: not _token_processes(token), 15), "the reader outlived the closed input"
+        assert "__GYM_READER_RC:" in output
+    finally:
+        shell.kill()
+        for pid in _token_processes(token):
+            os.kill(pid, signal.SIGKILL)
+
+
+def test_a_connection_that_holds_its_input_runs_the_reader_with_it_held() -> None:
+    calls: list[str] = []
+
+    class HeldConnection:
+        holds_input = True
+
+        def run(self, commands: list[str]) -> str:
+            calls.append("run")
+            return ""
+
+        def run_with_input_held(self, commands: list[str]) -> str:
+            calls.append("held")
+            return "__GYM_READER_RC:0\n"
+
+    assert slurm._run_reader(HeldConnection(), ["the reader"], "token") == "__GYM_READER_RC:0\n"
+    assert calls == ["held"]

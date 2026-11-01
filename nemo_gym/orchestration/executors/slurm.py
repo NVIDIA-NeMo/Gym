@@ -349,9 +349,13 @@ def _kill_reader_command(token: str) -> list[str]:
 
 def _run_reader(conn: Connection, command: list[str], token: str) -> str:
     """Run the reader. A signal on the client (raised as ``KeyboardInterrupt``) leaves the remote reader running,
-    since ``ssh bash -s`` has no terminal to hang up, so it is stopped by its token before the error unwinds."""
+    since ``ssh bash -s`` has no terminal to hang up, so it is stopped by its token before the error unwinds.
+
+    A connection that ``holds_input`` keeps the remote shell's stdin open while the reader runs, and the command's
+    watcher (``_reader_command(..., watchdog=True)``) stops the reader when that stdin ends.
+    """
     try:
-        return conn.run(command)
+        return conn.run_with_input_held(command) if getattr(conn, "holds_input", False) else conn.run(command)
     except KeyboardInterrupt as interrupt:
         try:
             report = conn.run(_kill_reader_command(token)).strip()
@@ -365,13 +369,26 @@ def _run_reader(conn: Connection, command: list[str], token: str) -> str:
 
 
 def _reader_command(
-    entrypoint: str, job_dir: Path, payload: str, *, bound_s: int | None, factor: int, token: str | None = None
+    entrypoint: str,
+    job_dir: Path,
+    payload: str,
+    *,
+    bound_s: int | None,
+    factor: int,
+    token: str | None = None,
+    watchdog: bool = False,
 ) -> list[str]:
     """The login-host steps: size the bound from the rollout files, run the reader, report its exit code and stderr.
 
     The reader's own failure is reported on stdout (``__GYM_READER_*`` lines) so a timeout, a MemoryError or a
     failed bootstrap reaches the decision with its exit code and the end of its stderr; only SSH itself fails the
     command. With ``token``, the reader runs with it as ``GYM_READER_TOKEN`` in its environment.
+
+    With ``watchdog``, for a connection that holds the shell's stdin open while it runs: the reader runs in its own
+    session (``setsid``), and a watcher in its own session waits for EOF on the shell's stdin, which comes when the
+    client process or its SSH connection ends, then kills the reader's process group (TERM, KILL after 10 s). It is
+    an EOF loop, not a hangup: without a terminal nothing sends SIGHUP. The steps run as one function that exits the
+    shell, so the watcher never reads a line of the script itself.
     """
     artifacts = job_dir / "artifacts"
     sources = " ".join(shlex.quote(str(artifacts / name)) for name in ("rollouts.jsonl", "rollouts_failures.jsonl"))
@@ -379,7 +396,29 @@ def _reader_command(
         size_bound = f"$(( ({_READER_FLOOR_S} + _gym_bytes * {_READER_S_PER_GB} / 1073741824) * {factor} ))"
     else:
         size_bound = str(bound_s * factor)
-    return [
+    if watchdog:
+        run_reader = [
+            # A background command's stdin is /dev/null, so the watcher reads the shell's stdin through FD 4.
+            "exec 4<&0",
+            f'setsid timeout --kill-after=10s "${{_gym_bound}}s" {entrypoint} 3<<\'GYM_MANAGED_INPUT\' 2>"$_gym_err" </dev/null 4<&- &\n'
+            + payload
+            + "\nGYM_MANAGED_INPUT",
+            "_gym_reader=$!",
+            'setsid bash -c \'cat <&4 >/dev/null; kill -TERM -- -"$1" 2>/dev/null; sleep 10; kill -KILL -- -"$1" 2>/dev/null\' '
+            '_ "$_gym_reader" >/dev/null 2>&1 &',
+            "_gym_watcher=$!",
+            'wait "$_gym_reader"',
+            "_gym_rc=$?",
+            'kill -- -"$_gym_watcher" 2>/dev/null',
+        ]
+    else:
+        run_reader = [
+            f'timeout --kill-after=10s "${{_gym_bound}}s" {entrypoint} 3<<\'GYM_MANAGED_INPUT\' 2>"$_gym_err"\n'
+            + payload
+            + "\nGYM_MANAGED_INPUT",
+            "_gym_rc=$?",
+        ]
+    steps = [
         "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
         *([f"export {READER_TOKEN_ENV}={shlex.quote(token)}"] if token is not None else []),
         f"_gym_bytes=$(stat -c %s -- {sources} 2>/dev/null | awk '{{s += $1}} END {{print s + 0}}')",
@@ -387,14 +426,15 @@ def _reader_command(
         f"(( _gym_bound > {_READER_CEILING_S} )) && _gym_bound={_READER_CEILING_S}",
         'echo "__GYM_READER_BOUND:$_gym_bound $_gym_bytes"',
         "_gym_err=$(mktemp)",
-        f'timeout --kill-after=10s "${{_gym_bound}}s" {entrypoint} 3<<\'GYM_MANAGED_INPUT\' 2>"$_gym_err"\n'
-        + payload
-        + "\nGYM_MANAGED_INPUT",
-        "_gym_rc=$?",
+        *run_reader,
         'echo "__GYM_READER_RC:$_gym_rc"',
         "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\n' ' ')\"",
         'rm -f -- "$_gym_err"',
     ]
+    if not watchdog:
+        return steps
+    # One function, called by the last line: bash has read the whole script before the watcher reads its stdin.
+    return ["_gym_read() {", *steps, "exit 0", "}", "_gym_read"]
 
 
 def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
@@ -467,6 +507,7 @@ def _remote_managed_evidence(
                         bound_s=_remote_reader_bound_s(),
                         factor=attempt,
                         token=reader_token(),
+                        watchdog=getattr(conn, "holds_input", False),
                     ),
                     reader_token(),
                 )
