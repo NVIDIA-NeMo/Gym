@@ -1771,6 +1771,22 @@ def _compose_for_validation(*, allow_job_time_values: bool, supplied: List[str])
     raise ConfigError(f"composition still needs values after {len(supplied)} job-time stand-ins")
 
 
+def _composition_failure(error: BaseException) -> Dict[str, str]:
+    """Why the config did not compose, and the key whose value did not resolve when the error names one.
+
+    A failing resolver (for example ``oc.decode`` given an int) is reported at its key with the resolver's own
+    message. Gym's own explanation, such as the override that supplies a missing key, is kept as it reads.
+    """
+    resolution = error if isinstance(error, OmegaConfBaseException) else error.__cause__
+    full_key = getattr(resolution, "full_key", None)
+    if not isinstance(resolution, OmegaConfBaseException) or not isinstance(full_key, str) or not full_key:
+        return {"why": f"{type(error).__name__}: {error}"}
+    # OmegaConf appends the key and the node type to its own message; the path field carries the key.
+    message = resolution.msg.split("\n    full_key:", 1)[0]
+    why = message if str(error) == str(resolution) else f"{type(error).__name__}: {error}"
+    return {"path": full_key, "why": why}
+
+
 def _validate_server_types(command_dict: DictConfig) -> int:
     """`gym env validate --server-types`: print one finding per line; return 0, 1, 2, or 3 for a crash."""
     # Importing entrypoints must write nothing into the checkout.
@@ -1797,7 +1813,7 @@ def _validate_server_types(command_dict: DictConfig) -> int:
                 allow_job_time_values=allow_job_time_values, supplied=supplied
             )
         except (ConfigError, OmegaConfBaseException) as error:
-            emit({"kind": "uncomposed", "why": f"{type(error).__name__}: {error}", "supplied": supplied})
+            emit({"kind": "uncomposed", **_composition_failure(error), "supplied": supplied})
             return 2
         invalid = 0
         server_types = command_dict.server_types

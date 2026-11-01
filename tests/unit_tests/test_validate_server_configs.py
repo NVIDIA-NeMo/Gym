@@ -192,3 +192,56 @@ def test_the_help_lists_the_flags_a_caller_probes_for(monkeypatch, capsys) -> No
     out = capsys.readouterr().out
     assert exit_info.value.code == 0
     assert all(flag in out for flag in ("--server-types", "--allow-job-time-values", "--ignore-input-containing"))
+
+
+def test_a_value_that_does_not_resolve_is_reported_at_its_full_path(checkout, monkeypatch, capsys) -> None:
+    """An int reaching oc.decode names its key and the resolver's message, not OmegaConf's raw report."""
+    _benchmark(checkout, max_turns="${oc.decode:${turns}}")
+    (checkout / "turns.yaml").write_text("turns: 3\n")
+    run_args = "+config_paths=[benchmark.yaml,turns.yaml]"
+    assert _validate(monkeypatch, capsys, run_args, *_SERVER_TYPES) == (
+        2,
+        [
+            {
+                "kind": "uncomposed",
+                "path": "agent.responses_api_agents.demo_agent.max_turns",
+                "why": "TypeError raised while resolving interpolation: `oc.decode` can only take strings or None "
+                "as input, but `3` is of type int",
+                "supplied": [],
+            }
+        ],
+    )
+
+
+_OSWORLD_AGENT_CONFIG = Path(__file__).parents[2] / "responses_api_agents/osworld_agent/configs/osworld_agent.yaml"
+
+
+def _osworld_transport_version_line() -> str:
+    config = yaml.safe_load(_OSWORLD_AGENT_CONFIG.read_text())
+    [agent] = config["osworld_simple_agent"]["responses_api_agents"].values()
+    return agent["exact_trace_transport_version"]
+
+
+@pytest.mark.parametrize(
+    "resolver",
+    ["built-in", "stand-in returning its default as is"],
+)
+@pytest.mark.parametrize(("variable", "expected"), [(None, 3), ("2", 2), ("3", 3)])
+def test_the_osworld_transport_version_resolves_to_an_int_under_any_oc_env(
+    monkeypatch: pytest.MonkeyPatch, resolver: str, variable: str | None, expected: int
+) -> None:
+    from omegaconf import OmegaConf
+    from omegaconf.resolvers.oc import env as oc_env
+
+    if variable is None:
+        monkeypatch.delenv("OSWORLD_EXACT_TRACE_TRANSPORT_VERSION", raising=False)
+    else:
+        monkeypatch.setenv("OSWORLD_EXACT_TRACE_TRANSPORT_VERSION", variable)
+    stand_in = lambda key, default="stand-in": __import__("os").environ.get(key, default)  # noqa: E731
+    OmegaConf.register_new_resolver("oc.env", oc_env if resolver == "built-in" else stand_in, replace=True)
+    try:
+        value = OmegaConf.create({"version": _osworld_transport_version_line()}).version
+    finally:
+        OmegaConf.register_new_resolver("oc.env", oc_env, replace=True)
+
+    assert value == expected and type(value) is int
