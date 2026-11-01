@@ -117,6 +117,26 @@ def test_a_walltime_raise_renders_the_run_again_and_keeps_rows_and_budgets(tmp_p
     assert not (run_dir / REPIN_JOURNAL_NAME).exists()
 
 
+def test_a_walltime_raise_lets_a_chain_that_spent_its_old_cap_plan_again(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _timed_run(tmp_path)
+    # 16 h of the 16 h chain cap are spent: 57600 s stored before job 101, which ran 60 s more.
+    (job_dir / ".gym_accumulated_walltime").write_text("57600\n")
+    (slurm_bin / "accounting").write_text("100|TIMEOUT|57600|0\n101|FAILED|60|0\n")
+    script = (job_dir / "job.sh").read_text()
+    kept = recover(*_handle(job_dir))
+    assert (kept.dispatched, kept.decision.reason) == (None, "the stored walltime budget is used (57660 of 57600 s)")
+    assert (job_dir / "job.sh").read_text() == script and not (slurm_bin / "env").exists()
+
+    out = recover(*_handle(job_dir), max_walltime="20:00:00", walltime_reason="slow but healthy policy")
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert out.decision.reason.endswith("; walltime cap raised from 16:00:00 to 20:00:00 for this plan")
+    assert "#SBATCH --time=20:00:00" in (job_dir / "job.sh").read_text()
+    # The used walltime is accounted as before and checked against the raised cap: it is not reset.
+    assert (job_dir / ".gym_accumulated_walltime").read_text() == "57660\n"
+
+
 @pytest.mark.parametrize(
     "value,reason,error",
     [

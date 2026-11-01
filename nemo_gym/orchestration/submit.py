@@ -224,6 +224,8 @@ def _recover(
         # A repinned run resumes on the target's Store: its reader decides what that Store would run.
         **({"reader_ref": repin} if repin is not None else {}),
         **({"extend_retries": extend_retries} if extend_retries else {}),
+        # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
+        **({"max_walltime": max_walltime} if max_walltime is not None else {}),
     )
     gate_task = (
         gate_summary_from_collected(

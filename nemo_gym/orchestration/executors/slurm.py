@@ -593,10 +593,12 @@ class SlurmExecutor(BaseExecutor):
         outcome_policy: RecoveryOutcomePolicyConfig | None = None,
         reader_ref: str | None = None,
         extend_retries: int = 0,
+        max_walltime: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
 
         ``reader_ref`` runs the Store reader at that full commit instead of the saved one: a repinned run resumes there.
+        ``max_walltime`` is a walltime raise the resubmit will render: the plan checks the chain cap it renders.
         """
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
         with get_connection(record.hostname) as conn:
@@ -612,6 +614,15 @@ class SlurmExecutor(BaseExecutor):
                     evidence=[],
                 )
                 return stop, None
+            cap_s = _walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None
+            raised_cap = None
+            if max_walltime is not None and cap_s is not None:
+                try:
+                    # The raise renders the chain cap as at least the new walltime (see _walltime_config).
+                    if _walltime_to_seconds(max_walltime) > cap_s:
+                        raised_cap, cap_s = max_walltime, _walltime_to_seconds(max_walltime)
+                except ValueError:
+                    pass  # the resubmit refuses the value with its own reason before anything changes
             selector = {k: v for k, v in (("agent", score_agent), ("environment", score_environment)) if v is not None}
             args = [shlex.quote(str(job_dir))]
             if score_key:
@@ -643,9 +654,7 @@ class SlurmExecutor(BaseExecutor):
                         return decide_from_collected(
                             collected,
                             max_infra_retries=resume.max_retries,
-                            max_walltime_s=_walltime_to_seconds(resume.max_walltime)
-                            if resume.max_walltime is not None
-                            else None,
+                            max_walltime_s=cap_s,
                             live_job=None,
                             outcome_policy=outcome_policy,
                             extend_retries=extend_retries,
@@ -701,7 +710,7 @@ class SlurmExecutor(BaseExecutor):
         decision = decide_from_collected(
             collected,
             max_infra_retries=resume.max_retries,
-            max_walltime_s=_walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None,
+            max_walltime_s=cap_s,
             live_job=str(job_dir) in workdirs or live_job_name is not None,
             outcome_policy=outcome_policy,
             allocation_cut=allocation_cut,
@@ -710,6 +719,9 @@ class SlurmExecutor(BaseExecutor):
         )
         if stopped is not None:
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {stopped}"})
+        if raised_cap is not None:
+            raised = f"walltime cap raised from {resume.max_walltime} to {raised_cap} for this plan"
+            decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})
         return decision, collected
 
     def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
@@ -980,6 +992,9 @@ class SlurmExecutor(BaseExecutor):
                     raise ValueError("accounted walltime must be finite and non-negative")
                 resume = config.driver.benchmarks[benchmark].resume_config
                 cap = _walltime_to_seconds(resume.max_walltime) if resume and resume.max_walltime else None
+                if cap is not None and max_walltime is not None:
+                    # The raise renders the chain cap as at least the new walltime (see _walltime_config).
+                    cap = max(cap, _walltime_to_seconds(max_walltime))
                 update = (
                     "import math, os\nfrom pathlib import Path\n"
                     "p=Path('.gym_accumulated_walltime')\n"

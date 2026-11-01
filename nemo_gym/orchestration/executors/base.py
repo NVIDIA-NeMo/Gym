@@ -71,6 +71,7 @@ class BaseExecutor(ABC):
         outcome_policy: RecoveryOutcomePolicyConfig | None = None,
         reader_ref: str | None = None,
         extend_retries: int = 0,
+        max_walltime: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
         return self.recovery_decision(record, benchmark), None
