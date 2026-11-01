@@ -107,6 +107,16 @@ def _peak(read):
         tracemalloc.stop()
 
 
+def test_the_coverage_a_continuation_checks_is_the_same_without_the_skipped_values(tmp_path, monkeypatch):
+    # The in-job admission compares this coverage with rollouts_coverage.json before it continues a segment.
+    output = _store(tmp_path, rows=4, trajectory_bytes=2 << 20)
+    monkeypatch.setattr(records, "PROJECTED_ROW_BYTES", 1 << 20)
+    full = RolloutStore.read(output, import_legacy=False)
+    projected = RolloutStore.read(output, import_legacy=False, skip_keys=STORE_SKIP_KEYS)
+    assert projected.coverage() == full.coverage()
+    assert full.coverage()["expected"] == 4
+
+
 def test_a_large_store_selects_the_same_outcomes_with_bounded_memory(tmp_path, monkeypatch):
     output = _store(tmp_path, rows=4, trajectory_bytes=12 << 20)
     full, full_peak = _peak(lambda: RolloutStore.read(output, import_legacy=False))

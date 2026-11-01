@@ -1691,7 +1691,9 @@ def continuation_admission(
                 "rollouts_coverage.json"
             ) == _managed_source_digest(report_path):
                 report = json.loads(report_path.read_text())
-                store = RolloutStore.read(job / "artifacts" / "rollouts.jsonl", import_legacy=False)
+                store = RolloutStore.read(
+                    job / "artifacts" / "rollouts.jsonl", import_legacy=False, skip_keys=STORE_SKIP_KEYS
+                )
                 progress = report.get("progress_outcomes_recorded")
                 segment = (
                     store is not None
