@@ -365,6 +365,53 @@ def test_an_incomplete_or_other_unknown_accounting_is_not_reconciled(tmp_path, s
     assert (job / ".gym_chain_incomplete").read_text() == marker
 
 
+_TWICE_REQUEUED = "100|PREEMPTED|15000|0\n100|FAILED|14|1\n101|FAILED|16|0\n102|PREEMPTED|16455|0\n102|FAILED|13|1\n103|FAILED|12|0\n"
+
+
+def _twice_requeued_run(tmp_path, slurm_bin, *, stored_walltime):
+    """100's requeue was reconciled and the chain went on; 102 ran the Store, was preempted and requeued."""
+    job, script, resume = _resumable_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job / "artifacts" / name).unlink()
+    _cut_run(job, scored=3, in_flight=2, not_started=0, allocation="102", chain=False)
+    (job / ".gym_job_chain").write_text("100\n101\n102\n103\n")
+    (job / ".gym_infra_retries").write_text("1\n")
+    (job / ".gym_accumulated_walltime").write_text(f"{stored_walltime}\n")
+    (job / ".gym_chain_incomplete").write_text(_REQUEUE_MARKER)
+    (job / ".gym_followup_queued.102").write_text("103\n")
+    (slurm_bin / "accounting").write_text(_TWICE_REQUEUED)
+    return job
+
+
+def test_a_second_requeue_is_reconciled_from_every_allocation_and_named(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.executors.resume_script import REQUEUE_RECONCILED_NOTE
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    # Stored before 102 ran: both incarnations of 100 and the 16 s of 101.
+    job = _twice_requeued_run(tmp_path, slurm_bin, stored_walltime=15030)
+    decision = inspect_recovery(*_handle(job)).decision
+    assert decision.action.value == "resubmit", decision.reason
+    assert decision.counts == {"scored": 3, "missing": 2}
+    assert decision.reason.endswith("; job 102 was preempted and requeued; its 2 allocations account for 16468 s")
+
+    result = recover(*_handle(job))
+    assert result.dispatched == "resubmit"
+    # Every allocation of the chain is charged once: 15030 + 16455 + 13 + 12 seconds.
+    assert (job / ".gym_accumulated_walltime").read_text() == "31510\n"
+    assert (job / ".gym_chain_incomplete").read_text() == REQUEUE_RECONCILED_NOTE + "\n"
+
+
+def test_a_second_requeue_whose_stored_walltime_does_not_match_is_not_reconciled(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    # 15000 leaves out the 14 s and 16 s before 102: which allocations it covers is unknown.
+    job = _twice_requeued_run(tmp_path, slurm_bin, stored_walltime=15000)
+    result = recover(*_handle(job))
+    assert (result.decision.action.value, result.dispatched) == ("stop", None)
+    assert "requeued" not in result.decision.reason
+    assert (job / ".gym_chain_incomplete").read_text() == _REQUEUE_MARKER
+
+
 def _inspected_cut(tmp_path, slurm_bin, accounting):
     """A cut allocation 100 of a chain 100, 101, inspected the way the operator's login host does it."""
     from nemo_gym.orchestration.submit import inspect_recovery

@@ -92,6 +92,7 @@ from nemo_gym.orchestration.recovery import (
     chain_accounting,
     decide_from_collected,
     live_chain_job,
+    requeue_note,
     select_managed_evidence,
     stopped_followup,
 )
@@ -733,6 +734,12 @@ class SlurmExecutor(BaseExecutor):
         )
         if stopped is not None:
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {stopped}"})
+        if (
+            collected.accounting_reconciled
+            and rows is not None
+            and (requeued := requeue_note(collected.job_chain, rows))
+        ):
+            decision = decision.model_copy(update={"reason": f"{decision.reason}; {requeued}"})
         if raised_cap is not None:
             raised = f"walltime cap raised from {resume.max_walltime} to {raised_cap} for this plan"
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})

@@ -1801,8 +1801,9 @@ def accounted_requeued_chain_walltime(
     """Elapsed seconds of every incarnation of a chain with a requeued allocation, when the records are complete.
 
     Every chain job needs terminal records numbered 0..n by restarts, and some job a requeue (n > 0). The stored
-    counter must equal the elapsed time of the jobs before the first requeued one: the requeued incarnation stops
-    before it adds anything, and so does every later allocation. Otherwise the budget epoch is unknown.
+    counter must equal the elapsed time of every incarnation of the jobs before the last requeued one: an earlier
+    requeue was reconciled and stored before the chain went on, and the last requeued incarnation stops before it
+    adds anything, as does every later allocation. Otherwise the budget epoch is unknown.
     """
     terminal = {
         "COMPLETED",
@@ -1827,10 +1828,23 @@ def accounted_requeued_chain_walltime(
     requeued = [index for index, job_id in enumerate(job_chain) if len(restarts[job_id]) > 1]
     if not requeued:
         return None
-    before = set(job_chain[: requeued[0]])
+    before = set(job_chain[: requeued[-1]])
     if stored_walltime_s != sum(elapsed for job_id, _, elapsed, _ in rows if job_id in before):
         return None
     return float(sum(elapsed for _, _, elapsed, _ in rows))
+
+
+def requeue_note(job_chain: list[str], rows: list[tuple[str, str, int, int]]) -> str | None:
+    """The last requeued job of a chain and what its allocations account for, as a decision states it."""
+    requeued = [job_id for job_id in job_chain if sum(row[0] == job_id for row in rows) > 1]
+    if not requeued:
+        return None
+    incarnations = sorted((row for row in rows if row[0] == requeued[-1]), key=lambda row: row[3])
+    cut = "was preempted" if incarnations[0][1] == "PREEMPTED" else f"ended {incarnations[0][1]}"
+    return (
+        f"job {requeued[-1]} {cut} and requeued; its {len(incarnations)} allocations account for "
+        f"{sum(row[2] for row in incarnations)} s"
+    )
 
 
 def accounted_chain_walltime(
