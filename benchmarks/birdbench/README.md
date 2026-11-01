@@ -4,7 +4,7 @@ Execution-based text-to-SQL on BIRD, bound to the `bird_sql` resource server. Tw
 
 | Choice | Values | What it controls |
 |---|---|---|
-| **dialect** | `sqlite` (default), `spark` | the SQL the model writes, the prompt, and the engine that runs it |
+| **dialect** | `sqlite` (default), `spark`, `postgres` | the SQL the model writes, the prompt, and the engine that runs it |
 | **split** | `dev` (default), `train` | the questions and databases: `dev` is the 1534-task benchmark, `train` is BIRD's train split (not an evaluation set) |
 
 Reward is binary: unordered result-set equality between the model's query and BIRD's gold query. Metrics are overall
@@ -50,13 +50,25 @@ On macOS: `brew install openjdk@17`, then `export JAVA_HOME="$(brew --prefix ope
 
 Spark runs in local mode inside the server process; no cluster is needed.
 
+**PostgreSQL dialect** needs a PostgreSQL server, plus `psycopg` and `pandas` in both the server's venv and the one
+you run `gym` from (`prepare` renders the column types the loader will create, without connecting). `BIRD_PG_DSN` is
+the grader's DSN: a read-only role that the loader creates. `BIRD_PG_ADMIN_DSN` (optional) is a role that can create
+schemas and roles; when it is set, the server loads any missing `db_id` on startup (dev takes about 20 s).
+
+```bash
+docker run -d --name bird-pg -p 127.0.0.1:5432:5432 -e POSTGRES_USER=bird -e POSTGRES_PASSWORD=<admin password> postgres:16
+export BIRD_PG_ADMIN_DSN=postgresql://bird:<admin password>@127.0.0.1:5432/bird
+export BIRD_PG_DSN=postgresql://bird_reader:<reader password>@127.0.0.1:5432/bird
+uv pip install --python resources_servers/bird_sql/.venv/bin/python "psycopg[binary]>=3.2" pandas
+```
+
 ## Dialects and splits
 
-| | sqlite | spark |
-|---|---|---|
-| Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` |
-| `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types |
-| Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) |
+| | sqlite | spark | postgres |
+|---|---|---|---|
+| Prompt | `prompts/default_sqlite.yaml` | `prompts/default_spark.yaml` | `prompts/default_postgres.yaml` |
+| `sql_context` rendered as | SQLite schema | Spark schema: `` `db_id`.`table` `` names, backtick-quoted identifiers, Spark column types | PostgreSQL schema: `"db_id"."table"` names, double-quoted identifiers, the loaded column types |
+| Model's SQL runs on | the SQLite databases | a local PySpark copy (Parquet under `resources_servers/bird_sql/.bird_sql/spark_warehouse[_train]/`, built on first start) | a PostgreSQL server you provide (one schema per `db_id`, loaded on first start when `BIRD_PG_ADMIN_DSN` is set) |
 
 | | dev | train |
 |---|---|---|
@@ -65,13 +77,19 @@ Spark runs in local mode inside the server process; no cluster is needed.
 | `difficulty` | simple / moderate / challenging | `null` |
 | BM25 corpus scan | every distinct value | at most 2000 per column (the databases are multi-GB; only a few example values per column are shown anyway) |
 
-- **Gold SQL is never transpiled.** In both dialects it runs on the original SQLite database; only the two result sets
+- **Gold SQL is never transpiled.** In every dialect it runs on the original SQLite database; only the two result sets
   are compared (floats rounded to 6 places, dates compared as strings).
 - **Spark execution.** ANSI mode is on, as in Spark 4 / Databricks (invalid casts and divide-by-zero raise errors). Only
   a single `SELECT`/`WITH` query is executed; anything else scores as an execution error. Spark has 4 local cores, so
   use a lower server `max_concurrency` than SQLite's 32
   (`+birdbench_bird_sql_resources_server.resources_servers.bird_sql.max_concurrency=8`). A numeric column whose data
   is not cleanly numeric, and date/datetime columns, are `STRING`.
+- **PostgreSQL execution.** One schema per `db_id` in one database, with the Spark typing rules; text columns use the
+  `"C"` collation so ordering matches SQLite. The model's query runs as one prepared statement (so `COMMIT; ...` cannot
+  leave the transaction) in a read-only transaction as the read-only role, with `statement_timeout`, `search_path` set
+  to the `db_id`, and parallel query off (a parallel float `SUM` changes from run to run). Identifiers keep BIRD's
+  original case, so the model must double-quote mixed-case names. `postgres_gold_check.py` grades sqlglot transpiles of
+  the golds: 91% match after three mechanical fixes (identifier case, double-quoted strings, `REAL`).
 - **Caveat.** Because the gold is the answer under SQLite semantics, a correct Spark query can differ from it when the
   gold relies on SQLite behavior (bare `GROUP BY` columns, integer division, case-insensitive `LIKE`, loose
   text/number comparison). `spark_gold_check.py` estimates about 8% of dev (121 of 1534) are affected.
@@ -84,6 +102,7 @@ databases first if needed:
 ```bash
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare                                  # dev,   sqlite (the defaults)
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --dialect spark                  # dev,   spark
+uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --dialect postgres               # dev,   postgres (no server needed)
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --split train                    # train, sqlite
 uv run --project benchmarks/birdbench python -m benchmarks.birdbench.prepare --split train --dialect spark    # train, spark
 ```
@@ -128,6 +147,7 @@ model, `--model-url` its base URL (e.g. `http://localhost:8000/v1`) and `--model
 ```bash
 ./benchmarks/birdbench/eval.sh --model <name>                                 # dev,   sqlite (the defaults)
 ./benchmarks/birdbench/eval.sh --model <name> --dialect spark                 # dev,   spark
+./benchmarks/birdbench/eval.sh --model <name> --dialect postgres              # dev,   postgres
 ./benchmarks/birdbench/eval.sh --model <name> --split train                   # train, sqlite
 ./benchmarks/birdbench/eval.sh --model <name> --split train --dialect spark   # train, spark
 ```
