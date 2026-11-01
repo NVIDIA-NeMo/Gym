@@ -42,6 +42,7 @@ from nemo_gym.rollout_recovery import (
     has_saved_generation,
     has_unclassified_execution_failure,
     is_terminal_failure,
+    keeps_partial_response,
     load_resubmit_offset,
     manifest_path_for,
     matches_failure_class,
@@ -377,9 +378,10 @@ class RolloutRecords:
             final_zero=row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")),
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
-            # A recorded grade is retained like a kept answer: a fresh run would replace it.
+            # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
+            # replace it.
             saved_answer=row.get("_ng_failure_class") is not None
-            and (_holds_saved_answer(row) or has_recorded_grade(row)),
+            and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
         )
         outcome = self.payloads[key]
         if (

@@ -89,9 +89,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
         with pytest.raises(IncompleteEvaluationError):
             await RolloutCollectionHelper().run_from_config(config)
         store = RolloutStore.read(output)
-        # An empty partial response (no output, no status) is no kept answer, and no grade was recorded: it
-        # is retried fresh. A partial response with output is kept and never regenerated.
-        assert [row["_ng_attempt_index"] for row in store.pending()] == ([1] if empty_output else [])
+        assert store.pending() == []
         failure = store.failures()[0]
         assert "_ng_failure_partial_response" in failure
         assert has_actual_generation(failure) is not empty_output
@@ -99,7 +97,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
             await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
         except IncompleteEvaluationError:
             pass
-        assert client.post.await_count == (2 if empty_output else 1)
+        assert client.post.await_count == 1
         assert len([call for call in dependencies.calls if call[1].endswith("/v1/responses")]) == 1
 
 

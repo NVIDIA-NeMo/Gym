@@ -3717,12 +3717,16 @@ class RolloutCollectionHelper(BaseModel):
             has_recorded_grade,
             has_saved_generation,
             has_unclassified_execution_failure,
+            keeps_partial_response,
         )
 
         unclassified = {
             k
             for k, row in latest_by_key.items()
-            if has_unclassified_execution_failure(row) or has_saved_generation(row) or has_recorded_grade(row)
+            if has_unclassified_execution_failure(row)
+            or has_saved_generation(row)
+            or has_recorded_grade(row)
+            or keeps_partial_response(row)
         }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 
