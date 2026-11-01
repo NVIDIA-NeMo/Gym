@@ -2414,7 +2414,10 @@ def test_a_guest_start_timeout_is_reported_as_a_sandbox_start_failure(monkeypatc
 
     def start_fails(self, **kwargs):
         timeout = OSWorldGuestStartTimeoutError(
-            f"OSWorld guest did not become ready within 900s: {last_reply}", provider="docker", http_status=http_status
+            f"OSWorld guest did not become ready within 900s: {last_reply}",
+            provider="docker",
+            http_status=http_status,
+            sandbox_id="sbx-1",
         )
         raise RuntimeError("environment start failed") from timeout  # the OSWorld environment may wrap it
 
@@ -2436,6 +2439,7 @@ def test_a_guest_start_timeout_is_reported_as_a_sandbox_start_failure(monkeypatc
         "provider": "docker",
         "http_status": http_status,
         "message": f"OSWorld guest did not become ready within 900s: {last_reply}",
+        "sandbox_id": "sbx-1",
     }
     assert result.sandbox_start_failure == (expected if reported else None)
     # The score and the runtime mask do not change.

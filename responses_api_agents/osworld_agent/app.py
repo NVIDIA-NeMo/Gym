@@ -1867,8 +1867,8 @@ def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, An
     """Report a sandbox guest that never became ready as a retryable ``infrastructure_error``.
 
     The row goes to the failures sidecar, so recovery runs the task again within the run's retry budget. Its reward
-    stays 0.0 and it stays masked, so no score changes. The event carries the guest's last HTTP status, and the
-    reason names the sandbox provider.
+    stays 0.0 and it stays masked, so no score changes. The event carries the guest's last HTTP status and the
+    sandbox id (its operation id), and the reason names the sandbox provider.
     """
     provider = str(failure.get("provider") or "unknown")
     status = failure.get("http_status")
@@ -1880,12 +1880,14 @@ def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, An
     else:
         cause = lines[0] if lines else "the guest did not become ready"
     reason = f"OSWorld sandbox start failed on provider={provider}: {cause}"[:2000]
+    sandbox_id = failure.get("sandbox_id") if isinstance(failure.get("sandbox_id"), str) else None
     event = NgFailureEvent(
         boundary="agent",
         failure_kind="infrastructure_error",
         failure_reason=reason,
         http_status=http_status,
         operation="osworld.sandbox_start",
+        operation_id=sandbox_id[:128] if sandbox_id else None,
         stage="agent",
     )
     return {
@@ -1893,6 +1895,7 @@ def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, An
         "failure_reason": reason,
         "sandbox_provider": provider,
         "sandbox_http_status": http_status,
+        "sandbox_id": sandbox_id,
         "_ng_failure_class": "infrastructure_error",
         **FailureReportRow.fields(failure_report_for(event)),
     }

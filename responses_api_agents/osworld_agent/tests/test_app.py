@@ -2377,6 +2377,7 @@ def _start_timeout_result(http_status: Optional[int] = 502) -> Dict[str, Any]:
             "provider": "docker",
             "http_status": http_status,
             "message": f"OSWorld guest did not become ready within 900s: HTTP {http_status}, bytes=0",
+            "sandbox_id": "sbx-1",
         },
     }
 
@@ -2389,8 +2390,9 @@ def test_a_sandbox_start_timeout_is_a_typed_infrastructure_error_row() -> None:
 
     assert (row["failure_kind"], row["_ng_failure_class"]) == ("infrastructure_error", "infrastructure_error")
     assert (row["reward"], row["mask_sample"], row["evaluation_completed"]) == (0.0, True, False)  # no score change
-    assert (row["sandbox_provider"], row["sandbox_http_status"]) == ("docker", 502)
+    assert (row["sandbox_provider"], row["sandbox_http_status"], row["sandbox_id"]) == ("docker", 502, "sbx-1")
     event = row["_ng_failure_events"][row["_ng_failure_id"]]
+    assert event["operation_id"] == "sbx-1"
     assert (event["boundary"], event["failure_kind"], event["operation"], event["http_status"]) == (
         "agent",
         "infrastructure_error",

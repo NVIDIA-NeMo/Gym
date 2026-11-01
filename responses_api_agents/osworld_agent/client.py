@@ -159,7 +159,7 @@ class RolloutResult:
     # from request-owned sampling parameters and infrastructure provenance.
     agent_contract: Optional[Dict[str, Any]] = None
     # Set when the sandbox guest never became ready for an infrastructure reason:
-    # {"provider": str, "http_status": int | None, "message": str}. The agent reports it as a
+    # {"provider", "http_status", "message", "sandbox_id"}. The agent reports it as a
     # retryable infrastructure_error instead of a masked result.
     sandbox_start_failure: Optional[Dict[str, Any]] = None
 
@@ -2579,6 +2579,7 @@ def run_osworld_task(
                 "provider": start_timeout.provider,
                 "http_status": start_timeout.http_status,
                 "message": str(start_timeout),
+                "sandbox_id": start_timeout.sandbox_id,
             }
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
