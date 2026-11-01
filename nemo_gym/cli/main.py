@@ -233,6 +233,21 @@ JSON = Flag(
     translate_to_hydra=lambda args: ["+json=true"] if getattr(args, "json", False) else [],
 )
 
+# `gym env validate --server-types`: text a caller put in the run args as a stand-in, so an error on it is not real.
+IGNORE_INPUT_CONTAINING = Flag(
+    register=lambda p: p.add_argument(
+        "--ignore-input-containing",
+        action="append",
+        metavar="TEXT",
+        help="With --server-types: report no error whose input contains TEXT. Repeatable.",
+    ),
+    translate_to_hydra=lambda args: (
+        [f"+ignore_input_containing=[{','.join(_hydra_quote(text) for text in args.ignore_input_containing)}]"]
+        if args.ignore_input_containing
+        else []
+    ),
+)
+
 # `gym list <type> [<name>]`: an optional component name. When given, the listing command inspects that one
 # component (surfaced as the reserved `component_name` config key) instead of listing all.
 NAME = Flag(
@@ -1325,6 +1340,23 @@ COMMANDS = {
             _bool_flag("sync", "sync", "Synchronize composition mirrors after validation."),
             _bool_flag("strict", "strict", "Fail instead of warning when model values are left undefined."),
             JSON,
+            _comma_list_flag(
+                "server-types",
+                "server_types",
+                "Check each block of these server types (resources_servers, responses_api_agents, "
+                "responses_api_models, environment_servers) against its server's config class, composing the "
+                "config from the run args as `gym eval run` does. Prints one finding per line (JSON with --json): "
+                "invalid, unchecked or uncomposed. Exits 0 with no invalid finding, 1 with one, 2 when the config "
+                "does not compose.",
+                metavar="TYPE[,TYPE...]",
+            ),
+            _bool_flag(
+                "allow-job-time-values",
+                "allow_job_time_values",
+                "With --server-types: read an unset ${oc.env:X} without a default and an unset ++key=<value> as "
+                "a job-time stand-in, and report no error whose input holds one.",
+            ),
+            IGNORE_INPUT_CONTAINING,
             CONFIG,
             BENCHMARK,
             ENVIRONMENT,
