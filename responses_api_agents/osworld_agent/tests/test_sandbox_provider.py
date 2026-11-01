@@ -525,7 +525,10 @@ def test_local_forwarder_maps_proxy_path_headers_and_cdp_url(monkeypatch) -> Non
 @pytest.mark.parametrize(
     ("env", "expected"),
     [
-        ({"REQUESTS_CA_BUNDLE": "/certs/gateway-ca.pem", "SSL_CERT_FILE": "/certs/other.pem"}, "/certs/gateway-ca.pem"),
+        (
+            {"REQUESTS_CA_BUNDLE": "/certs/gateway-ca.pem", "SSL_CERT_FILE": "/certs/other.pem"},
+            "/certs/gateway-ca.pem",
+        ),
         ({"SSL_CERT_FILE": "/certs/gateway-ca.pem"}, "/certs/gateway-ca.pem"),
         ({}, True),
     ],
