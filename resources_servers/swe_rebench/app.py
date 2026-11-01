@@ -223,7 +223,13 @@ class SWERebenchResourcesServer(RepoTaskSessionResourcesServer):
 
     async def _prepare_repository(self, sandbox: AsyncSandbox, body: SWERebenchInstanceRequest) -> None:
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, repo_directory(body.repo), body.instance_id, "swe_rebench")
+            await apply_anti_cheat_setup(
+                sandbox,
+                repo_directory(body.repo),
+                body.instance_id,
+                "swe_rebench",
+                required=self.config.anti_cheat_required,
+            )
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, repo_directory(body.repo), "swe_rebench")
 

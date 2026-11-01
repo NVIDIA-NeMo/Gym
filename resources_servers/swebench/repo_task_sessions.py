@@ -72,6 +72,14 @@ class RepoTaskSessionConfig(SandboxCheckpointFields, BaseResourcesServerConfig):
     patch_capture_mode: PatchCaptureMode = "worktree"
     sandbox_provider: str
     sandbox_config: dict[str, Any]
+    # Fail a seed whose anti-cheat scrub did not complete instead of handing the agent a history that may hold the
+    # task's solution; the rollout is then retried. Off keeps the scrub best effort.
+    anti_cheat_required: bool = False
+    # A provider-neutral egress rule for the agent's sandbox only, e.g. {"defaultAction": "deny", "egress":
+    # [{"action": "allow", "target": "10.0.0.0/8"}]} to reach the model servers and nothing else. Grading sandboxes keep
+    # the spec's network. The rule is recorded with the sandbox, so a restore's fork gets it too: name targets that stay
+    # valid across jobs (an address range, not one job's model server).
+    agent_network_policy: dict[str, Any] | None = None
 
 
 class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
@@ -162,6 +170,9 @@ class RepoTaskSessionResourcesServer(CheckpointedSandboxSessionResourcesServer):
             self._session_id_to_pristine_untracked[session_id] = await self._pristine_untracked_files(sandbox, workdir)
 
         spec = self._sandbox_spec(task, files=self._session_files(task) or None)
+        if self.config.agent_network_policy is not None:
+            options = {**(spec.provider_options or {}), "network_policy": dict(self.config.agent_network_policy)}
+            spec = dataclasses.replace(spec, provider_options=options)
         await self.new_task_sandbox(session_id, spec).start_with_setup(spec, setup)
         return workdir
 

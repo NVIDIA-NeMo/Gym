@@ -227,7 +227,8 @@ class SwemerV1ResourcesServer(RepoTaskSessionResourcesServer):
     async def _prepare_repository(self, sandbox: AsyncSandbox, body: SwemerV1InstanceRequest) -> None:
         await self._ensure_git_repo(sandbox, body.workdir)
         if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1")
+            required = self.config.anti_cheat_required
+            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1", required=required)
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swemer_v1")
 
