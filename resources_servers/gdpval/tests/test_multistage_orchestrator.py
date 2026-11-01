@@ -51,6 +51,7 @@ from nemo_gym.server_runtime import lost_session_verification
 from nemo_gym.utils import aggregation_sources_path_for, failures_path_for
 from resources_servers.gdpval.multistage_elo import PartialStagePolicy
 from resources_servers.gdpval.multistage_orchestrator import (
+    ACCEPTED_STAGE_OMISSION_KEY,
     ACCEPTED_STAGE_ROW_COUNT_KEY,
     MultiStageRunConfig,
     StageResume,
@@ -3687,6 +3688,21 @@ class TestCompletionContract:
         assert [len(outcomes[index]["omitted_keys"]) for index in (0, 1)] == [1, 1]
         rows = self._rows(tmp_path / "rollouts.jsonl")
         assert [sum(row["stage_index"] == index for row in rows) for index in (0, 1)] == [9, 19]
+        # The planned inputs mark exactly the rows each accepted stage omitted, so recovery never plans them again.
+        from nemo_gym.rollout_records import materialized_path_for
+
+        inputs = self._rows(materialized_path_for(tmp_path / "rollouts.jsonl"))
+        marked = {
+            (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[ACCEPTED_STAGE_OMISSION_KEY]
+            for row in inputs
+            if row.get(ACCEPTED_STAGE_OMISSION_KEY)
+        }
+        # Each mark names the stage that omitted the row and its policy's tolerate_unresolved, for the gate text.
+        assert marked == {
+            tuple(key): {"stage_index": index, "tolerate_unresolved": True}
+            for index in (0, 1)
+            for key in outcomes[index]["omitted_keys"]
+        }
 
     async def test_a_stage_left_open_with_retryable_rows_fails_the_run(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch

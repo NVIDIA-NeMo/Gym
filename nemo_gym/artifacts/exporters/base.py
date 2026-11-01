@@ -27,7 +27,7 @@ from pydantic import TypeAdapter, ValidationError
 
 from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.artifacts.exporters.metrics import flatten_aggregate_metrics, health_source_artifacts
-from nemo_gym.artifacts.run_artifacts import RunArtifacts
+from nemo_gym.artifacts.run_artifacts import RunArtifacts, accepted_stage_omission
 from nemo_gym.config.config_types import DEPRECATED_UPLOAD_ROLLOUTS_KEY, RunExportConfig, UploadRolloutsConfigMixin
 from nemo_gym.config.secret_utils import hide_secrets_in_container
 from nemo_gym.utils.path_utils import exporter_run_id_path_for
@@ -108,6 +108,15 @@ def _write_marker_atomically(marker: Path, run_id: str) -> None:
         temporary.replace(marker)
     finally:
         temporary.unlink(missing_ok=True)
+
+
+def _accepted_stage_omissions(materialized_inputs: Path) -> int:
+    """How many planned rows an accepted partial stage omitted: the number recovery's acceptance gate states."""
+    if not materialized_inputs.is_file():
+        return 0
+    with materialized_inputs.open("rb") as lines:
+        rows = (orjson.loads(line) for line in lines if line.strip())
+        return sum(isinstance(row, dict) and accepted_stage_omission(row) is not None for row in rows)
 
 
 def _artifact_version(artifacts: RunArtifacts) -> dict[str, Optional[str]]:
@@ -483,6 +492,8 @@ class BaseExporter(Exporter):
                 if rollouts is not None:
                     self._log_rollouts(rollouts)
             run_id = self._pending_run_id
+            # Read before the version check below, so the count describes the inputs the receipt's digest names.
+            omitted = _accepted_stage_omissions(artifacts.materialized_inputs_jsonl_fpath)
             if not run_id:
                 # The marker records which backend run holds this export, and a skipped repeat reports it. A backend
                 # that never reports one is a bug in the exporter, and it shows on the first export.
@@ -508,6 +519,8 @@ class BaseExporter(Exporter):
                 "uploaded_rollouts": rollouts is not None,
                 "rollout_projection_version": 1,
             }
+            if omitted:
+                receipt["accepted_stage_omissions"] = omitted
             _write_marker_atomically(marker, orjson.dumps(receipt).decode())
         except Exception as exc:
             logger.warning(f"Exporter {self.name} failed to export {artifacts.rollouts_jsonl_fpath}", exc_info=True)

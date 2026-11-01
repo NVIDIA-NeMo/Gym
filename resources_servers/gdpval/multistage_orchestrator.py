@@ -235,6 +235,9 @@ _REVERIFIABLE_FAILURE_CLASSES = frozenset({_REFERENCE_MISSING_FAILURE_CLASS, _TR
 # Stamped on every row of a stage accepted by its partial-completion policy, so
 # aggregation can tell an accepted partial final stage from a degraded one.
 ACCEPTED_STAGE_ROW_COUNT_KEY = "accepted_stage_row_count"
+# Stamped on each planned row an accepted partial stage omitted, with that stage and its policy, so recovery counts
+# the row as omitted (complete by the stage's policy) and never plans it again.
+ACCEPTED_STAGE_OMISSION_KEY = "accepted_stage_omission"
 
 
 def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
@@ -1900,6 +1903,11 @@ def write_materialized_inputs(
             row["expected_stage_row_count"] = len(stage_rows)
             if outcome.get("status") == "partial_complete":
                 row[ACCEPTED_STAGE_ROW_COUNT_KEY] = len(outcome["included_keys"])
+                if _stage_key(row) in _recorded_key_set(outcome, "omitted_keys"):
+                    row[ACCEPTED_STAGE_OMISSION_KEY] = {
+                        "stage_index": index,
+                        "tolerate_unresolved": (outcome.get("policy") or {}).get("tolerate_unresolved") is True,
+                    }
         rows.extend(stage_rows)
     path = materialized_path_for(Path(output_fpath))
     path.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))

@@ -27,6 +27,8 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
 - ``missing``: no row at all (interrupted or never started); a resume restarts its input.
 - ``masked``: a result row the producer masked or did not evaluate. Collection keeps it as completed and never runs it
   again, so it is retained, but it is not measured and the run is not complete.
+- ``omitted``: a planned row that a staged collection's accepted partial stage omitted. It is retained, never
+  planned again and not measured, and the run is complete without it.
 - ``unknown``: a failure whose kind is unregistered or absent, or a row whose identity is invalid; nobody owns it.
 
 The run-level action follows: ``stop`` for a spent or unknown resubmit budget, or for an unknown identity that a resume
@@ -54,6 +56,7 @@ from nemo_gym.agent_outcome import (
     OutcomePolicyConfig,
     choose_action,
 )
+from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
     COLLECTION_DISPATCH_FAILED,
@@ -118,6 +121,7 @@ class IdentityState(StrEnum):
     TERMINAL = "terminal"
     MISSING = "missing"
     MASKED = "masked"
+    OMITTED = "omitted"
     UNKNOWN = "unknown"
 
 
@@ -196,9 +200,8 @@ class RecoveryDecision(BaseModel):
 
     @property
     def complete(self) -> bool:
-        return (
-            self.counts.get(IdentityState.SCORED, 0) + self.counts.get(IdentityState.MODEL_FINAL, 0) == self.expected
-        )
+        settled = (IdentityState.SCORED, IdentityState.MODEL_FINAL, IdentityState.OMITTED)
+        return sum(self.counts.get(state, 0) for state in settled) == self.expected
 
 
 def _identity(row: Mapping[str, Any]) -> Identity | None:
@@ -474,6 +477,7 @@ def decide_recovery(
     managed = {fact.identity: fact for fact in managed_selection or []}
 
     expected: list[Identity] = []
+    omitted: dict[Identity, str] = {}
     invalid_inventory = 0
     for row in materialized:
         identity = _identity(row)
@@ -481,6 +485,8 @@ def decide_recovery(
             invalid_inventory += 1
         else:
             expected.append(identity)
+            if label := accepted_stage_omission(row):
+                omitted[identity] = label
     expected_set = set(expected)
 
     result_rows: dict[Identity, Mapping[str, Any]] = {}
@@ -544,6 +550,17 @@ def decide_recovery(
                     failure_kind=row.get("failure_kind") if judge else None,
                     failure_id=row.get(FAILURE_ID) if isinstance(row.get(FAILURE_ID), str) else None,
                     events=_events(row),
+                )
+            )
+            continue
+        if identity in omitted:
+            # Its stage was accepted without it, so collection never runs it again: neither scored nor a failure.
+            evidence.append(
+                IdentityEvidence(
+                    identity=identity,
+                    state=IdentityState.OMITTED,
+                    failure_kind=ACCEPTED_STAGE_OMISSION,
+                    reason=omitted[identity],
                 )
             )
             continue
@@ -791,6 +808,12 @@ def decide_recovery(
                 f"{counts[IdentityState.MASKED]} completed result(s) are masked and not measured: they are kept and a "
                 f"resume would run nothing; the run is not complete; {populations}",
             )
+        if counts.get(IdentityState.OMITTED):
+            return decision(
+                RecoveryAction.NOOP,
+                f"every identity is scored, a final model failure or omitted by an accepted partial stage: "
+                f"{omission_summary(evidence)}",
+            )
         return decision(RecoveryAction.NOOP, "every identity is scored or a final model failure")
     if counts.get(IdentityState.JUDGE_RECOVERABLE):
         return decision(
@@ -822,6 +845,12 @@ def decide_recovery(
     )
 
 
+def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
+    """The omitted identities by stage and policy, e.g. "1 omitted by an accepted partial stage (1, tolerate_unresolved)"."""
+    stages = Counter(item.reason for item in evidence if item.state == IdentityState.OMITTED)
+    return ", ".join(f"{n} omitted by an accepted partial stage {stage}" for stage, n in sorted(stages.items()))
+
+
 def _unknown_label(item: IdentityEvidence) -> str:
     """The kind of an unknown identity with the rule that refused it, without naming the kind twice."""
     if item.reason and item.failure_kind and item.failure_kind not in item.reason:
@@ -841,6 +870,11 @@ def _populations(counts: Mapping[str, int], evidence: list[IdentityEvidence]) ->
         + (f" ({detail}{', ...' if len(kinds) > 3 else ''})" if detail else "")
         + f" (reported, not retried), retained {retained} (saved rows kept)"
         + (f", masked {masked} (completed, not measured, kept)" if masked else "")
+        + (
+            f", omitted {omitted} (accepted partial stage, not run again)"
+            if (omitted := counts.get(IdentityState.OMITTED, 0))
+            else ""
+        )
     )
 
 
@@ -867,7 +901,7 @@ a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
-        "mask_sample", "evaluation_completed", "_ng_failure_http_status")
+        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.
@@ -1948,6 +1982,9 @@ def gate_task_summary(
             f"{states[IdentityState.MODEL_FINAL]} final evaluated-model failures scored zero: "
             f"{decision.identities[IdentityState.MODEL_FINAL.value][:5]}"
         )
+    if states.get(IdentityState.OMITTED):
+        # Complete by the stage's own policy: stated, never folded into the scored or failed counts.
+        warnings.append(omission_summary(decision.evidence))
     if decision.scheduler_live:
         status = "RUNNING"
     elif decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
@@ -1960,6 +1997,7 @@ def gate_task_summary(
         "status": status,
         "expected_samples": decision.expected,
         "scored_samples": states.get(IdentityState.SCORED, 0) + states.get(IdentityState.MODEL_FINAL, 0),
+        "omitted_samples": states.get(IdentityState.OMITTED, 0),
         "score": score,
         "errors": errors,
         "warnings": warnings,
@@ -2819,14 +2857,16 @@ def trial_health(
     record and cannot be ruled out, so their count is a lower bound. At or above the limit it fails; below it the
     gate remains unknown unless actual per-identity operation outcomes cover the observed model/tool and programmatic grading path.
     """
-    if not decision.complete or decision.expected <= 0:
+    # A row an accepted partial stage omitted is no trial: it is neither in the numerator nor the denominator.
+    trials = decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
+    if not decision.complete or trials <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})"
     final_zero = final_zero_trials(decision, collected)
     failed = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero)
     kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
     kinds.update(final_zero.values())
-    rate = failed / decision.expected
-    counts = f"{failed} settled zero-scored failure(s) of {decision.expected} expected trials ({rate:.2%})"
+    rate = failed / trials
+    counts = f"{failed} settled zero-scored failure(s) of {trials} expected trials ({rate:.2%})"
     detail = f", kinds {dict(sorted(kinds.items(), key=lambda kv: str(kv[0])))}" if kinds else ""
     if rate >= limit:
         return False, f"trial: {counts} is not below {_percent(limit)}{detail}"
