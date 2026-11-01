@@ -158,6 +158,13 @@ def exit_cleanly_on_config_error(fn):
             # escape() so '[...]' in the message (e.g. config_paths examples) isn't eaten as rich markup.
             rich.print(f"[red]Error:[/red] {escape(str(e))}")
             raise SystemExit(1)
+        except RuntimeError as e:
+            # A typed stop (for example a head server that never answered): exit with its code, not a traceback.
+            code = getattr(e, "stop_exit_code", None)
+            if code is None:
+                raise
+            rich.print(f"[red]Stopped:[/red] {escape(str(e))}")
+            raise SystemExit(code) from None
 
     return wrapper
 
