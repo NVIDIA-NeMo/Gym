@@ -34,7 +34,6 @@ from contextvars import ContextVar
 from dataclasses import dataclass
 from datetime import timedelta
 from difflib import get_close_matches
-from itertools import repeat
 from math import isfinite
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
@@ -513,6 +512,15 @@ def _episode_request_body(row: Mapping[str, Any]) -> dict[str, Any]:
             "task_input": row["task_input"],
         },
     }
+
+
+def _rows_of_first_tasks(numbered_rows: Iterable[tuple[int, str]], limit: int) -> Iterator[tuple[int, str]]:
+    """Yield the rows of the first ``limit`` tasks. Identical rows are one task, as in the task index."""
+    tasks: set[str] = set()
+    for line_no, row_str in numbered_rows:
+        if row_str in tasks or len(tasks) < limit:
+            tasks.add(row_str)
+            yield line_no, row_str
 
 
 def _reject_attempt_qualified_rollout_ids(rows: Iterable[Mapping[str, Any]], fpath: Path) -> None:
@@ -1995,7 +2003,11 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
         description="The input data source to use to collect rollouts, in the form of a file path to a jsonl file."
     )
     limit: Optional[int] = Field(
-        default=None, description="Maximum number of examples to load and take from the input dataset."
+        default=None,
+        description=(
+            "Maximum number of tasks to take from the input dataset. Identical rows are one task (a prepared "
+            "benchmark writes its num_repeats copies in a row), so every copy of each kept task is kept."
+        ),
     )
     num_repeats: Union[int, Dict[str, int]] = Field(
         default=1,
@@ -3298,10 +3310,8 @@ class RolloutCollectionHelper(BaseModel):
     _store: RolloutStore | None = PrivateAttr(default=None)
 
     def _preprocess_rows_from_config(self, config: RolloutCollectionConfig) -> List[Dict]:
-        range_iterator = repeat(0)
         if config.limit:
-            range_iterator = range(config.limit)
-            print(f"Limiting the number of rows to {config.limit}")
+            print(f"Limiting the number of tasks to {config.limit}")
 
         # Load prompt config if specified
         prompt_cfg = None
@@ -3317,10 +3327,12 @@ class RolloutCollectionHelper(BaseModel):
             )
         with open(_input_path) as input_file:
             rows_iterator: Iterator[str] = tqdm(input_file, desc="Reading rows")
-            rows_iterator: Iterator[tuple[int, str]] = zip(range_iterator, rows_iterator)
+            numbered_rows: Iterator[tuple[int, str]] = enumerate(rows_iterator, 1)
+            if config.limit:
+                numbered_rows = _rows_of_first_tasks(numbered_rows, config.limit)
             raw_rows = [
                 (row_idx, row_str, loads_jsonl_line(row_str, _input_path, line_no))
-                for line_no, (row_idx, row_str) in enumerate(rows_iterator, 1)
+                for row_idx, (line_no, row_str) in enumerate(numbered_rows)
             ]
         _reject_attempt_qualified_rollout_ids([row for _, _, row in raw_rows], _input_path)
 
