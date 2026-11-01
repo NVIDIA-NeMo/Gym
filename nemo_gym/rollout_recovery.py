@@ -611,8 +611,23 @@ _OPERATIONAL_SETTING = re.compile(
     r"|endpoint|concurrency|parallel|parallelism|workers|semaphore|pool|transport|version|log|logging|verbose|debug"
     r"|dir|path|fpath|cache|health|heartbeat|keepalive|tracking|mlflow|wandb|otel|telemetry|canary)(_|$)|_(s|ms)$"
 )
-# Any other key under a segment naming grading or the model is semantic: a judge, verifier, reward or prompt setting.
-_SEMANTIC_PARTS = ("judge", "grad", "verif", "reward", "scor", "rubric", "metric", "prompt", "model", "sampling")
+# Any other key under a segment naming grading or the model is semantic: a judge, grader, verifier, reward, rubric,
+# reference-answer or prompt setting.
+_SEMANTIC_PARTS = (
+    "judge",
+    "grad",
+    "verif",
+    "reward",
+    "scor",
+    "rubric",
+    "metric",
+    "prompt",
+    "model",
+    "sampling",
+    "eval_",
+    "answer",
+    "reference",
+)
 
 
 def _is_semantic(key: str) -> bool:
