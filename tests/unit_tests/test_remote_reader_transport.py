@@ -139,6 +139,21 @@ def test_a_reader_that_answers_on_the_retry_is_used(tmp_path, monkeypatch):
     assert result.managed_reader_error is None
 
 
+def test_a_field_the_pinned_reader_does_not_know_is_not_a_change_but_a_known_one_is(tmp_path, monkeypatch):
+    """A Store reader at an older Gym drops the fields its model lacks; only the fields it reports are compared."""
+    job = _job(tmp_path)
+    collected = _collected(job).model_copy(update={"followup_claims": {"100": "101"}})
+    older = "__GYM_MANAGED:" + collected.model_dump_json(exclude={"followup_claims"})
+    _install(monkeypatch, f"cat <&3 >/dev/null; echo {shlex.quote(older)}")
+    kept = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    assert (kept.managed_reader_error, kept.followup_claims) == (None, {"100": "101"})
+
+    changed = "__GYM_MANAGED:" + collected.model_copy(update={"resubmit_offset": 5}).model_dump_json()
+    _install(monkeypatch, f"cat <&3 >/dev/null; echo {shlex.quote(changed)}")
+    refused = slurm._remote_managed_evidence(LocalConnection(), collected, job, config())
+    assert "remote Store reader changed collection evidence" in refused.managed_reader_error
+
+
 class _Hop(Connection):
     """A login-host hop whose SSH fails ``failures`` times with exit code 255, then runs the steps locally."""
 

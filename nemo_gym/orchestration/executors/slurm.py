@@ -370,7 +370,10 @@ def _remote_managed_evidence(
         ]
         if len(lines) != 1:
             raise ValueError("remote Store reader returned no unique projection")
-        selected = CollectedEvidence.model_validate_json(lines[0])
+        projection = json.loads(lines[0])
+        if not isinstance(projection, dict):
+            raise ValueError("remote Store reader returned no evidence object")
+        selected = CollectedEvidence.model_validate(projection)
         if selected.source_job_identity is not None and selected.source_job_identity != collected.source_job_identity:
             raise ValueError("remote Store reader changed job identity")
         if selected.source_digests != collected.source_digests:
@@ -384,8 +387,15 @@ def _remote_managed_evidence(
             "source_job_identity",
             "checkpoint_enabled",
         }
-        # A pinned reader older than these host-collected fields drops them; the host collection owns them either way.
-        host_owned = ("accounting_snapshot", "coverage_allocation_id", "accounting_unknown_reason", "counter_states")
+        # A pinned reader older than a host-collected field drops it on its own model (the reader's projection then
+        # lacks the key); the host collection owns such fields, and these named ones, either way.
+        host_owned = (
+            "accounting_snapshot",
+            "coverage_allocation_id",
+            "accounting_unknown_reason",
+            "counter_states",
+            *sorted(set(CollectedEvidence.model_fields) - set(projection)),
+        )
         compared = allowed | set(host_owned) | {"accounting_reconciled"}
         if selected.model_dump(exclude=compared) != collected.model_dump(exclude=compared):
             raise ValueError("remote Store reader changed collection evidence")
