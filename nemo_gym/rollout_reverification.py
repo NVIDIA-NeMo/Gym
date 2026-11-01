@@ -45,6 +45,7 @@ from nemo_gym.config.config_types import (
 )
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
     ENVIRONMENT_SERVER_STAMP_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
     SKILLS_REF_KEY_NAME,
@@ -64,6 +65,7 @@ from nemo_gym.rollout_collection import (
     matches_failure_class,
 )
 from nemo_gym.rollout_records import (
+    RUN_ID_KEY,
     coverage_path_for,
     journal_path_for,
     materialized_path_for,
@@ -618,9 +620,8 @@ def _rollout_response(rollout: Dict[str, Any]) -> Any:
     return rollout["response"]
 
 
-# Collection's stamps naming the Environment Server and its result type: kept on the re-verified row, never sent
-# to /verify.
-_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY)
+# Collection identity is retained for grouping and cache resume, never sent to /verify.
+_IDENTITY_KEYS = (ENVIRONMENT_SERVER_STAMP_KEY_NAME, NG_RESULT_TYPE_KEY, RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME)
 
 
 def _build_verify_payload(pair: InputRolloutPair) -> Dict:
@@ -645,8 +646,8 @@ def _build_verify_payload(pair: InputRolloutPair) -> Dict:
     for key in ("deliverables_dir", "reference_ids"):
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
-    # The Environment Server that ran the rollout routes the row and groups its result as in the run; the
-    # materialized input never carries it. It is not sent to /verify (see _IDENTITY_KEYS).
+    # Outcome identity belongs to the collected attempt, not the materialized input.
+    # Keep it for aggregation and resume without sending it to /verify (see _IDENTITY_KEYS).
     for key in _IDENTITY_KEYS:
         if key in pair.rollout:
             payload[key] = pair.rollout[key]
