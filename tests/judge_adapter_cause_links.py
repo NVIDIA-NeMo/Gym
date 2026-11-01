@@ -16,6 +16,11 @@ from nemo_gym.typed_exceptions import NgFailureEvent
 async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tmp_path, monkeypatch, adapter):
     multiple = adapter == "rolemrc_multi"
     adapter = "rolemrc" if multiple else adapter
+    # call_judge retries a failed judge call before masking the row; no backoff in tests.
+    from nemo_gym.verification import judge as judge_module
+
+    attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
+    monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
     module = import_module(f"resources_servers.{adapter}.app")
     fixtures = import_module(f"resources_servers.{adapter}.tests.test_app")
     model_error = NgFailureEvent(
@@ -40,7 +45,7 @@ async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tm
             attempt_id="second-model-attempt",
             http_status=503,
         )
-        client.post = AsyncMock(side_effect=[model_error, second_error])
+        client.post = AsyncMock(side_effect=[model_error] * attempts + [second_error] * attempts)
         monkeypatch.setattr(
             module, "_build_judge_prompts", lambda *args: [("first", "first prompt"), ("second", "second prompt")]
         )
@@ -92,7 +97,7 @@ async def assert_real_verifier_reply_preserves_the_original_judge_model_cause(tm
         selected = report.events[selected].cause_id
     assert model_error.event_id in chain
     assert sum(event.event_id == model_error.event_id for event in report.events.values()) == 1
-    assert client.post.await_count == (2 if multiple else 1)
+    assert client.post.await_count == attempts * (2 if multiple else 1)
     if multiple:
         assert second_error.event_id in report.events and second_error.event_id not in chain
         assert "first" in reply.json()["_ng_failure_judge_error"]
@@ -157,8 +162,18 @@ async def assert_browsecomp_received_unparseable_verdict_keeps_zero_and_transpor
         http_status=503,
     )
     received = FakeResponse(200, factory._create_judge_response("received without a usable verdict"))
+    # call_judge retries the 503 inside one judge call (no backoff in tests), so the error no longer
+    # uses up one of the server's two verdict attempts: the server still asks twice in total.
+    from nemo_gym.verification import judge as judge_module
+
+    attempts = judge_module.JUDGE_CALL_MAX_ATTEMPTS
+    monkeypatch.setattr(judge_module, "_judge_retry_wait_s", lambda attempt: 0)
+    if error_first:
+        side_effect, expected_posts = [model_error, received, received], 3
+    else:
+        side_effect, expected_posts = [received] + [model_error] * attempts, 1 + attempts
     client = MagicMock(spec=ServerClient)
-    client.post = AsyncMock(side_effect=[model_error, received] if error_first else [received, model_error])
+    client.post = AsyncMock(side_effect=side_effect)
     server = module.TavilySearchResourcesServer(config=config, server_client=client)
     monkeypatch.setattr(type(server), "JUDGE_MAX_ATTEMPTS", 2)
     monkeypatch.setattr(module, "sleep", AsyncMock())
@@ -185,4 +200,4 @@ async def assert_browsecomp_received_unparseable_verdict_keeps_zero_and_transpor
     assert report is not None and report.failure_id is None
     assert model_error.event_id in report.events
     assert sum(event.event_id == model_error.event_id for event in report.events.values()) == 1
-    assert client.post.await_count == 2
+    assert client.post.await_count == expected_posts
