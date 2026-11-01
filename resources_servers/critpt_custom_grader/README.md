@@ -126,9 +126,12 @@ whatever the outcome. A failed check refuses to serve and names one of seven cat
 - `provider_exec`: only the `id -u` or the import-check command raised, or the host's bounded wait on it expired.
 
 `score_comparator_uncertain_as_incorrect: true` opts into scoring completed answers
-with `comparator_uncertain` as zero, while retaining that category for separate reporting.
-Those rows are unmasked and do not trigger regeneration on resume. The default is false;
-reference faults and provider failures remain unscored in either mode.
+with `comparator_uncertain` as zero only after successful reference preflight and a completed
+candidate comparison reporting undecided symbolic/unordered equivalence or an exhausted
+per-case proof budget. The category is retained for separate reporting. Those rows are
+unmasked and do not trigger regeneration on resume. The default is false; reference/preflight
+uncertainty, invalid expectations, unsupported observations, comparator errors, and provider
+failures remain unscored in either mode. Unknown uncertainty reasons also remain unscored.
 Record this option in the evaluation protocol when comparing results.
 
 `startup_probe: false` skips the startup sandbox and its checks, but not the `image_missing` check. Gym gives every
