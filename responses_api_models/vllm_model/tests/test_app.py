@@ -2776,6 +2776,66 @@ class TestApp:
         data = response_2_2.json()
         assert data["output"][0]["content"][0]["text"] == routed_output_2
 
+    @mark.parametrize("reasoning_field", ["reasoning_content", "reasoning"])
+    @mark.parametrize("format_type", ["json_schema", "json_object"])
+    def test_structured_responses_preserve_literal_tags_and_judge_schema(
+        self, monkeypatch, reasoning_field, format_type
+    ):
+        server = self._setup_server(monkeypatch)
+        server.config.uses_reasoning_parser = server._converter.uses_reasoning_parser = True
+        verdict = {"coverage_outcome": "fulfilled", "justification": "Literal <think>text</think> stays"}
+        final = json.dumps(verdict)
+        upstream = AsyncMock(
+            return_value={
+                "id": "judge",
+                "model": "test",
+                "created": 0,
+                "object": "chat.completion",
+                "choices": [
+                    {
+                        "index": 0,
+                        "finish_reason": "stop",
+                        "message": {
+                            "role": "assistant",
+                            "content": final,
+                            reasoning_field: "Check the claim",
+                        },
+                    }
+                ],
+            }
+        )
+        server._clients = [MagicMock(create_chat_completion=upstream)]
+        schema = {
+            "type": "object",
+            "properties": {"coverage_outcome": {"type": "string"}, "justification": {"type": "string"}},
+            "required": ["coverage_outcome", "justification"],
+            "additionalProperties": False,
+        }
+        format_config = {"type": format_type}
+        if format_type == "json_schema":
+            format_config.update(name="verdict", schema=schema, strict=True)
+        with TestClient(server.setup_webserver()) as client:
+            response = client.post(
+                "/v1/responses",
+                json={
+                    "input": [{"role": "user", "content": "Judge this claim"}],
+                    "text": {"format": format_config},
+                    "temperature": 0,
+                    "max_output_tokens": 2048,
+                },
+            )
+        assert response.status_code == 200
+        output = response.json()["output"]
+        assert [item["type"] for item in output] == ["reasoning", "message"]
+        assert output[0]["summary"][0]["text"] == "Check the claim"
+        assert output[1]["content"][0]["text"] == final
+        sent = upstream.await_args.kwargs
+        expected = {"type": format_type}
+        if format_type == "json_schema":
+            expected["json_schema"] = {"name": "verdict", "schema": schema, "strict": True}
+        assert sent["response_format"] == expected
+        assert sent["temperature"] == 0 and sent["max_tokens"] == 2048
+
     def test_responses_reasoning_parser(self, monkeypatch: MonkeyPatch):
         server = self._setup_server(monkeypatch)
         server.config.uses_reasoning_parser = True
