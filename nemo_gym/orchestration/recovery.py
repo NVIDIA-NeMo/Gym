@@ -1032,13 +1032,19 @@ def trial_items(value, key, fields):
         return None
     return [{k: item[k] for k in fields if k in item} if isinstance(item, dict) else None
             for item in value[key]]
+# Parsed sources whose parsed bytes differ from the opening snapshot: like a changed closing snapshot, unstable.
+changed_while_reading = set()
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
         return None
     out = []
+    # The parse hashes every byte it reads: it must read exactly the opening snapshot's bytes. This catches a rewrite
+    # before or during the parse, an ABA one included, without a separate hashing pass.
+    read = hashlib.sha256()
     with open(p, "rb") as fh:
         for i, line in enumerate(fh):
+            read.update(line)
             if i < skip or not line.strip():
                 continue
             try:
@@ -1122,6 +1128,8 @@ def rows(name, skip=0):
                     if key in r:
                         selected[key] = r[key]
             out.append(selected)
+    if read.hexdigest() != source_snapshot[name]:
+        changed_while_reading.add(name)
     return out
 def num(name):
     # (value, state): "absent" when the chain never wrote the file, "malformed" when it cannot be read as a number.
@@ -1169,30 +1177,24 @@ def followup_claims():
         return {}
     return claims
 def sha256(path):
-    # Two bounded passes: stat identity misses a same-size in-place rewrite within one timestamp tick, the bytes
-    # of a second read do not. This doubles source reads; it does not make a reader atomic against ABA writes.
+    # One bounded pass with stable stat identity. A same-size in-place rewrite within one timestamp tick keeps the
+    # identity: the opening and closing snapshots compare bytes, and rows() checks the bytes it parses against the
+    # opening snapshot, so such a rewrite of a parsed source is caught even when it is undone before closing.
     identity = lambda stat: (stat.st_dev, stat.st_ino, stat.st_size, stat.st_mtime_ns, stat.st_ctime_ns)
-    first = None
-    for _ in range(2):
-        try:
-            source = open(path, "rb")
-        except FileNotFoundError:
-            if first is None:
-                return None
-            raise RuntimeError("run artifact changed while hashing")
-        h = hashlib.sha256()
-        with source:
-            before = os.fstat(source.fileno())
-            for block in iter(lambda: source.read(1 << 20), b""):
-                h.update(block)
-            after = os.fstat(source.fileno())
-        current = os.stat(path)
-        if identity(before) != identity(after) or identity(after) != identity(current):
-            raise RuntimeError("run artifact changed while hashing")
-        if first is not None and first != (identity(before), h.hexdigest()):
-            raise RuntimeError("run artifact changed while hashing")
-        first = (identity(before), h.hexdigest())
-    return first[1]
+    try:
+        source = open(path, "rb")
+    except FileNotFoundError:
+        return None
+    h = hashlib.sha256()
+    with source:
+        before = os.fstat(source.fileno())
+        for block in iter(lambda: source.read(1 << 20), b""):
+            h.update(block)
+        after = os.fstat(source.fileno())
+    current = os.stat(path)
+    if identity(before) != identity(after) or identity(after) != identity(current):
+        raise RuntimeError("run artifact changed while hashing")
+    return h.hexdigest()
 # The live exporter's run id file, and the post-run export receipt checked against the same files as its version.
 RECEIPT_FILES = {"rollouts_jsonl_fpath": "rollouts.jsonl", "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
                  "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
@@ -1343,9 +1345,9 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "coverage_allocation_id": coverage_allocation_id}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
-if quality is not None and source_snapshot != closing_snapshot:
+if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):
     quality["source_matches"] = False
-stable_sources = (source_snapshot == closing_snapshot
+stable_sources = (not changed_while_reading and source_snapshot == closing_snapshot
                   and accounting_snapshot == {name: sha256(os.path.join(d, name)) for name in accounting_files}
                   and initial_followups is not None and initial_followups == followup_snapshot())
 collected["source_digests"] = source_snapshot if stable_sources else None

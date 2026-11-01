@@ -475,9 +475,11 @@ def test_managed_terminal_infrastructure_is_not_a_model_zero(tmp_path):
 
 
 @pytest.mark.parametrize("age", ["fresh", "aged"])
-@pytest.mark.parametrize("reader", ["managed", "collector"])
+@pytest.mark.parametrize("reader", ["managed"])
 def test_a_same_tick_in_place_rewrite_is_refused_when_stat_cannot_see_it(tmp_path, monkeypatch, reader, age):
     # Coarse filesystem timestamps: freeze every stat result, so only the bytes show the rewrite.
+    # The collector hashes each snapshot in one pass and checks the bytes it parses against the opening snapshot
+    # instead: see test_collector_source_reads.py.
     import builtins
     import os
 
