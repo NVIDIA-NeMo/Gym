@@ -392,7 +392,11 @@ def test_a_chain_stopped_at_the_walltime_cap_exits_non_zero_and_marks_the_run_in
 
     assert result.returncode == 1, result.stdout
     assert "REACHED_WORK" not in result.stdout
-    assert "walltime cap with rollouts missing; resubmit to continue" in result.stdout
+    assert (
+        "walltime cap with rollouts missing; continue with gym eval resubmit --recover --max-walltime HH:MM:SS "
+        "above the cap: the retry and walltime budgets carry over." in result.stdout
+    )
+    assert "resubmit to continue" not in result.stdout
     assert "walltime cap" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
     assert not (tmp_path / "sbatch_calls").exists()
 
@@ -404,7 +408,10 @@ def test_a_chain_stopped_after_a_cancel_exits_non_zero_and_marks_the_run_incompl
 
     assert result.returncode == 1, result.stdout
     assert "REACHED_WORK" not in result.stdout
-    assert "was cancelled. Chain stopped with rollouts missing; resubmit to continue." in result.stdout
+    assert (
+        "was cancelled. Chain stopped with rollouts missing; continue with gym eval resubmit --recover, which "
+        "carries the retry and walltime budgets over." in result.stdout
+    )
     assert (tmp_path / INCOMPLETE_MARKER_NAME).exists()
 
 

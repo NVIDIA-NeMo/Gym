@@ -134,8 +134,8 @@ if (( 10#$_gym_restart_count > 0 )); then
     _gym_stop_accounting_unknown "{requeue_unknown_reason}"
 fi
 
-# A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
-# stopped at the walltime cap says "resubmit to continue". One queued by `--recover` keeps both. The variables
+# A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget. One queued by
+# `--recover` keeps both, so a stopped chain points to `--recover`, which carries the budgets over. The variables
 # are read once and unset, so the follow-up queued below (which inherits this environment) is an ordinary hop.
 _gym_resubmit="${{{resubmit_env}:-}}"
 _gym_keep_budget="${{{keep_budget_env}:-}}"
@@ -192,7 +192,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
             exit 0 ;;
         CANCELLED)
-            _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; resubmit to continue." ;;
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; continue with gym eval resubmit --recover, which carries the retry and walltime budgets over." ;;
         TIMEOUT)
             # Scheduler allocation timeout continues the planned segments. This is not a model timeout.
             ;;
@@ -304,7 +304,7 @@ fi
 
 _MAX_WALLTIME_CHECK_TEMPLATE = """\
 if (( _gym_accumulated >= {seconds} )); then
-    _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; resubmit to continue."
+    _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; continue with gym eval resubmit --recover --max-walltime HH:MM:SS above the cap: the retry and walltime budgets carry over."
 fi
 # Slurm rounds time limits up to minutes. Round the remaining allowance down instead, never granting extra time.
 _gym_remaining_minutes=$((({seconds} - _gym_accumulated) / 60))

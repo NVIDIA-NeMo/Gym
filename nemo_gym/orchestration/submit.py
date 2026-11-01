@@ -252,6 +252,14 @@ def _recover(
         "observed_run_id": mlflow_run_id,
     }
     if inspect_only:
+        if gate_task["status"] == "PLANNED":
+            gate_task = {
+                **gate_task,
+                "warnings": [
+                    *gate_task["warnings"],
+                    f"PLANNED (NOT DISPATCHED): --inspect reports the {decision.action.value} decision and runs nothing",
+                ],
+            }
         return RecoveryOutcome(
             decision=decision,
             ok=decision.action != RecoveryAction.STOP,
@@ -269,6 +277,8 @@ def _recover(
                 "status": "FAILED",
                 "errors": [*gate_task["errors"], outcome.unsupported or "saved-answer rejudgment was not dispatched"],
             }
+        elif gate_task["status"] == "PLANNED":
+            gate_task = {**gate_task, "status": "RESUMING"}
         return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
     if decision.action == RecoveryAction.RESUBMIT:
         job = executor.resubmit(
@@ -283,6 +293,8 @@ def _recover(
             **({"extend_retries": extend_retries} if extend_retries else {}),
             **({"max_walltime": max_walltime, "walltime_reason": walltime_reason} if max_walltime is not None else {}),
         )
+        if gate_task["status"] == "PLANNED":
+            gate_task = {**gate_task, "status": "RESUMING"}
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow
         )

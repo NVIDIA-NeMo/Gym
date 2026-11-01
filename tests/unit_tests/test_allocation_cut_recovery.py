@@ -282,7 +282,8 @@ def test_the_guard_never_continues_after_an_operator_cancel(tmp_path):
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "CANCELLED", exit_code="0:15", prev_job_id="100")
     assert "REACHED_WORK" not in result.stdout
     assert (tmp_path / ".gym_chain_incomplete").read_text() == (
-        "Previous job 100 was cancelled. Chain stopped with rollouts missing; resubmit to continue.\n"
+        "Previous job 100 was cancelled. Chain stopped with rollouts missing; continue with gym eval resubmit "
+        "--recover, which carries the retry and walltime budgets over.\n"
     )
 
 

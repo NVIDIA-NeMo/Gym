@@ -659,6 +659,37 @@ def test_cli_recover_queues_missing_work_through_the_existing_resubmit(tmp_path,
     assert out["gate_task"]["status"] == "RESUMING"
 
 
+def test_inspect_reports_a_planned_resubmit_as_planned_not_dispatched(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[], retries=0
+    )
+    out = submit.inspect_recovery("gym-job-p", "bench")
+    assert out.decision.action == RecoveryAction.RESUBMIT and out.dispatched is None
+    assert fake_executor.calls == ["decide"]
+    assert out.gate_task["status"] == "PLANNED"
+    assert out.gate_task["warnings"][-1] == (
+        "PLANNED (NOT DISPATCHED): --inspect reports the resubmit decision and runs nothing"
+    )
+
+
+def test_inspect_reports_a_planned_rejudgment_as_planned_and_recovery_dispatches_it(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = write_job_dir(
+        tmp_path / "job",
+        n=2,
+        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed", response=SAVED_ANSWER, reward=0.0)],
+        failures=[],
+    )
+    inspected = submit.inspect_recovery("gym-job-q", "bench")
+    assert inspected.decision.action == RecoveryAction.REVERIFY and inspected.dispatched is None
+    assert inspected.gate_task["status"] == "PLANNED"
+    assert "PLANNED (NOT DISPATCHED): --inspect reports the reverify decision" in inspected.gate_task["warnings"][-1]
+
+    recovered = submit.recover("gym-job-q", "bench")
+    assert recovered.dispatched == "reverify" and recovered.gate_task["status"] == "RESUMING"
+    assert not any("NOT DISPATCHED" in warning for warning in recovered.gate_task["warnings"])
+    assert fake_executor.calls == ["decide", "decide", "reverify"]
+
+
 def test_cli_score_flags_need_recover(capsys, fake_executor) -> None:
     with pytest.raises(SystemExit):
         from nemo_gym.cli.main import main

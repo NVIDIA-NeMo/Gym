@@ -1988,7 +1988,8 @@ def gate_task_summary(
     if decision.scheduler_live:
         status = "RUNNING"
     elif decision.action in (RecoveryAction.RESUBMIT, RecoveryAction.REVERIFY):
-        status = "RESUMING"
+        # A plan, not a dispatch: only the caller that dispatches it reports RESUMING.
+        status = "PLANNED"
     elif decision.action == RecoveryAction.NOOP and decision.complete and not errors:
         status = "SUCCESS"
     else:
