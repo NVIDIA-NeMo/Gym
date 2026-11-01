@@ -98,6 +98,24 @@ def _digests(job):
     return {str(p): hashlib.sha256(p.read_bytes()).hexdigest() for p in (job / "artifacts").glob("*") if p.is_file()}
 
 
+def test_the_in_job_admission_verifies_and_reads_the_store_once(tmp_path, monkeypatch, capsys):
+    from nemo_gym.orchestration import recovery
+
+    job = tmp_path / "job"
+    _cut_run(job, scored=2, in_flight=2, not_started=2)
+    calls = []
+    select = recovery.select_managed_evidence
+    monkeypatch.setattr(
+        recovery,
+        "select_managed_evidence",
+        lambda collected, job_dir: calls.append(job_dir) or select(collected, job_dir),
+    )
+    assert recovery.continuation_admission(str(job), 2, None, "0:15", "100", "TIMEOUT") == "segment"
+    # Each selection hashes every source file and reads the whole Store: one per admission is enough.
+    assert calls == [job]
+    assert "4 identity(ies) need the policy again" in capsys.readouterr().out
+
+
 def test_in_flight_reservations_at_a_scheduler_cut_resume_with_never_started_rows(tmp_path):
     _cut_run(tmp_path)
     before = _digests(tmp_path)

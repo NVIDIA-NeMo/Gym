@@ -1703,7 +1703,8 @@ def continuation_admission(
                     and progress <= report["outcomes_recorded"]
                     and all(report.get(key) == value for key, value in store.coverage().items())
                 )
-        if select_managed_evidence(collected, job).managed_selection is None:
+        # The selection above verified the snapshot and read the Store once; a second read only hashes it again.
+        if collected.managed_selection is None:
             print(
                 f"{CONTINUATION_REASON_PREFIX}the Store could not verify the saved artifacts: "
                 f"{collected.managed_reader_error or 'no authoritative selection'}"
