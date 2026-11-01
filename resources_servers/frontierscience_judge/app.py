@@ -114,7 +114,7 @@ def parse_judgement(judge_text: str) -> Optional[str]:
 
 
 def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[float]:
-    """Parse the paper's final numeric ``VERDICT`` line on the rubric's point scale."""
+    """Parse a final ``VERDICT`` line or a response containing only a numeric score."""
     if not judge_text.strip():
         return None
 
@@ -126,6 +126,8 @@ def parse_rubric_score(judge_text: str, max_score: float = 10.0) -> Optional[flo
     # Ignore presentation around the final verdict, never intermediate scores.
     final_line = lines[-1].strip("`*_ \t.,;")
     match = _RUBRIC_VERDICT_RE.fullmatch(final_line)
+    if match is None:
+        match = re.fullmatch(r"([+-]?(?:\d+(?:\.\d+)?|\.\d+))", judge_text.strip())
     if match is None:
         return None
     score = float(match.group(1))
