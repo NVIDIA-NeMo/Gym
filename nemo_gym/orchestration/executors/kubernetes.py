@@ -84,6 +84,7 @@ class KubernetesExecutor(BaseExecutor):
         keep_budget: bool = False,
         accounted_walltime_s: float | None = None,
         accounting_snapshot: Mapping[str, str | None] | None = None,
+        accounting_reconciled: bool = False,
     ) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 

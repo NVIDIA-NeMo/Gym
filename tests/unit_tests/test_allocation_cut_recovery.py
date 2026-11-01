@@ -29,6 +29,7 @@ from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
     allocation_cut_from_accounting,
+    chain_accounting,
     decide_from_collected,
     select_managed_evidence,
 )
@@ -159,18 +160,24 @@ def test_only_unknown_rows_left_stop_with_the_populations(tmp_path):
 @pytest.mark.parametrize(
     "accounting,allocation,cut",
     [
-        ("100|TIMEOUT|14400\n101|FAILED|90", "100", True),
-        ("100|PREEMPTED|300", "100", True),
-        ("100|CANCELLED by 7|300", "100", True),
-        ("100|NODE_FAIL|300", "100", True),
-        ("100|FAILED|300", "100", False),
-        ("100|TIMEOUT|14400", "101", False),
-        ("100|TIMEOUT|14400", None, False),
-        ("malformed", "100", False),
+        ("100|TIMEOUT|14400|0\n101|FAILED|90|0", "100", True),
+        ("100|PREEMPTED|300|0", "100", True),
+        ("100|CANCELLED by 7|300|0", "100", True),
+        ("100|NODE_FAIL|300|0", "100", True),
+        # A requeued id: only its first incarnation ran work; the requeued one stopped in the prologue.
+        ("100|PREEMPTED|15000|0\n100|FAILED|14|1\n101|FAILED|16|0", "100", True),
+        ("100|FAILED|300|0", "100", False),
+        ("100|TIMEOUT|14400|0", "101", False),
+        ("100|TIMEOUT|14400|0", None, False),
     ],
 )
 def test_the_cut_is_read_from_the_allocation_that_last_wrote_the_store(accounting, allocation, cut):
-    assert allocation_cut_from_accounting(accounting, allocation) is cut
+    assert allocation_cut_from_accounting(chain_accounting(accounting), allocation) is cut
+
+
+@pytest.mark.parametrize("accounting", ["malformed", "100|TIMEOUT|14400", "100|TIMEOUT|x|0"])
+def test_malformed_chain_accounting_is_unknown(accounting):
+    assert chain_accounting(accounting) is None
 
 
 @pytest.mark.parametrize("state,debit", [("TIMEOUT", False), ("PREEMPTED", True)])
@@ -203,7 +210,7 @@ def test_recover_resumes_reservations_after_an_operator_cancel_or_a_node_failure
     for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
         (job / "artifacts" / name).unlink()
     _cut_run(job, scored=2, in_flight=2, not_started=1, chain=False)
-    (slurm_bin / "accounting").write_text(f"100|{state}|7200\n101|FAILED|60\n")
+    (slurm_bin / "accounting").write_text(f"100|{state}|7200|0\n101|FAILED|60|0\n")
     before = _digests(job)
     result = recover(*_handle(job))
     assert result.decision.action.value == "resubmit", result.decision.reason
@@ -220,3 +227,80 @@ def test_the_guard_never_continues_after_an_operator_cancel(tmp_path):
     assert (tmp_path / ".gym_chain_incomplete").read_text() == (
         "Previous job 100 was cancelled. Chain stopped with rollouts missing; resubmit to continue.\n"
     )
+
+
+_REQUEUE_MARKER = (
+    "GYM_ACCOUNTING_UNKNOWN: Requeued allocation elapsed time is unknown; "
+    "recover only after complete terminal accounting.\n"
+)
+
+
+def _requeued_run(tmp_path, slurm_bin, accounting, *, marker=_REQUEUE_MARKER, stored_walltime=None):
+    """Allocation 100 ran the Store, was preempted and requeued; the requeue and its follow-up 101 stopped early."""
+    job, script, resume = _resumable_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job / "artifacts" / name).unlink()
+    _cut_run(job, scored=3, in_flight=2, not_started=0, chain=False)
+    (job / ".gym_infra_retries").unlink()
+    (job / ".gym_accumulated_walltime").unlink()
+    if stored_walltime is not None:
+        (job / ".gym_accumulated_walltime").write_text(f"{stored_walltime}\n")
+    (job / ".gym_chain_incomplete").write_text(marker)
+    (job / ".gym_followup_queued.100").write_text("101\n")
+    (slurm_bin / "accounting").write_text(accounting)
+    return job, script, resume
+
+
+_TERMINAL_REQUEUE = "100|PREEMPTED|15000|0\n100|FAILED|14|1\n101|FAILED|16|0\n"
+
+
+def test_a_terminal_requeued_chain_is_reconciled_and_resumes_its_in_flight_rows(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.executors.resume_script import REQUEUE_RECONCILED_NOTE
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+    from tests.unit_tests.test_eval_resubmit import _start_queued_job
+
+    job, script, resume = _requeued_run(tmp_path, slurm_bin, _TERMINAL_REQUEUE)
+    before = _digests(job)
+    inspected = inspect_recovery(*_handle(job))
+    assert inspected.decision.action.value == "resubmit", inspected.decision.reason
+    assert inspected.decision.counts == {"scored": 3, "missing": 2}
+    assert inspected.dispatched is None and (job / ".gym_chain_incomplete").read_text() == _REQUEUE_MARKER
+
+    result = recover(*_handle(job))
+    assert result.dispatched == "resubmit"
+    assert _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    # Every incarnation is charged once: 15000 + 14 + 16 seconds.
+    assert (job / ".gym_accumulated_walltime").read_text() == "15030\n"
+    assert (job / ".gym_chain_incomplete").read_text() == REQUEUE_RECONCILED_NOTE + "\n"
+    assert _digests(job) == before
+    # The queued job passes the prologue's accounting checks, spends one infra retry and resumes saved rows.
+    args = _start_queued_job(script, resume, job, slurm_bin)
+    assert args[-1] == "++resume_from_cache=True"
+    assert (job / ".gym_infra_retries").read_text() == "1\n"
+
+
+@pytest.mark.parametrize(
+    "accounting,marker,stored",
+    [
+        # The first incarnation's record is absent: the requeued chain is not completely accounted.
+        ("100|FAILED|14|1\n101|FAILED|16|0\n", _REQUEUE_MARKER, None),
+        # The requeued incarnation is still running.
+        ("100|PREEMPTED|15000|0\n100|RUNNING|14|1\n101|FAILED|16|0\n", _REQUEUE_MARKER, None),
+        # The stored counter does not match the jobs before the requeue: the budget epoch is unknown.
+        (_TERMINAL_REQUEUE, _REQUEUE_MARKER, 7200),
+        # Another unknown reason is never reconciled from scheduler records.
+        (
+            _TERMINAL_REQUEUE,
+            "GYM_ACCOUNTING_UNKNOWN: Follow-up submission may have succeeded without an observed reply.\n",
+            None,
+        ),
+    ],
+)
+def test_an_incomplete_or_other_unknown_accounting_is_not_reconciled(tmp_path, slurm_bin, accounting, marker, stored):
+    from nemo_gym.orchestration.submit import recover
+
+    job, _, _ = _requeued_run(tmp_path, slurm_bin, accounting, marker=marker, stored_walltime=stored)
+    result = recover(*_handle(job))
+    assert result.decision.action.value == "stop" and result.dispatched is None
+    assert not (slurm_bin / "env").exists()
+    assert (job / ".gym_chain_incomplete").read_text() == marker

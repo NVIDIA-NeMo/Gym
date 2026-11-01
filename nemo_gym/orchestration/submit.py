@@ -250,6 +250,8 @@ def _recover(
             keep_budget=True,
             accounted_walltime_s=collected.accounted_walltime_s if collected is not None else None,
             accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
+            # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.
+            **({"accounting_reconciled": True} if collected is not None and collected.accounting_reconciled else {}),
         )
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow

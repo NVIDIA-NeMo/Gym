@@ -938,19 +938,23 @@ try:
     offset = int(open(os.path.join(a, "rollouts_resubmit_offset")).read().strip())
 except (OSError, ValueError):
     offset = 0
-def accounting_unknown():
+def accounting_unknown_reason():
+    # Why the chain's own accounting is unknown, or None when it is known. An unobserved claim comes first.
     marker = os.path.join(d, ".gym_chain_incomplete")
     try:
-        if os.path.exists(marker) and open(marker).read().startswith(ACCOUNTING_UNKNOWN_PREFIX):
-            return True
         for name in os.listdir(d):
             if name.startswith(".gym_followup_queued."):
                 value = open(os.path.join(d, name)).read().strip()
                 if not value.isascii() or not value.isdecimal():
-                    return True
+                    return "a follow-up submission claim is unobserved"
+        text = open(marker).read() if os.path.exists(marker) else ""
     except (OSError, ValueError):
-        return True
-    return False
+        return "the chain marker or a follow-up claim is unreadable"
+    if text.startswith(ACCOUNTING_UNKNOWN_PREFIX):
+        return (text[len(ACCOUNTING_UNKNOWN_PREFIX):].strip().splitlines() or ["no reason recorded"])[0][:300]
+    return None
+def accounting_unknown():
+    return accounting_unknown_reason() is not None
 def sha256(path):
     # Two bounded passes: stat identity misses a same-size in-place rewrite within one timestamp tick, the bytes
     # of a second read do not. This doubles source reads; it does not make a reader atomic against ABA writes.
@@ -1135,8 +1139,13 @@ collected["accounting_snapshot"] = (
 ) if stable_sources else None
 # Do not upgrade a stale scheduler-state read into a fresh budget. The executor and generated job
 # recheck the durable unknown marker under the existing submission/admission boundary as well.
-if not stable_sources or accounting_unknown():
+unknown_reason = accounting_unknown_reason()
+if not stable_sources or unknown_reason is not None:
     collected["infra_retries_state"] = collected["walltime_state"] = "unknown"
+# The counters' own states, for a caller that reconciles the unknown reason from terminal scheduler records.
+collected["accounting_unknown_reason"] = unknown_reason
+collected["counter_states"] = {"infra_retries": num(".gym_infra_retries")[1],
+                               "walltime": num(".gym_accumulated_walltime")[1]} if stable_sources else None
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 print(json.dumps(collected))
 """
@@ -1169,6 +1178,12 @@ class CollectedEvidence(BaseModel):
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
+    # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
+    # states (absent, ok, malformed) when the sources were stable.
+    accounting_unknown_reason: str | None = None
+    counter_states: dict[str, str] | None = None
+    # Set by an executor that reconciled a requeued chain from complete terminal scheduler records.
+    accounting_reconciled: bool = False
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -1530,14 +1545,71 @@ def continuation_admission(
         return "stop"
 
 
-def allocation_cut_from_accounting(accounting: str, allocation_id: str | None) -> bool:
-    """Whether ``sacct -X -P --format=JobIDRaw,State,ElapsedRaw`` rows end ``allocation_id`` in a cut state."""
-    states = {
-        parts[0]: parts[1].split()[0].rstrip("+") if parts[1].split() else ""
-        for parts in (line.strip().split("|") for line in accounting.splitlines())
-        if len(parts) == 3
+# What the executor reads for a chain: every incarnation of every allocation, a requeued one included.
+CHAIN_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,Restarts"
+
+
+def chain_accounting(accounting: str) -> list[tuple[str, str, int, int]] | None:
+    """Rows of ``sacct -D -X -n -P --format=CHAIN_ACCOUNTING_FORMAT`` as (job id, state, elapsed s, restarts).
+
+    The state keeps its first word without a trailing ``+`` ("CANCELLED by 7" is CANCELLED). None when any row is
+    malformed.
+    """
+    rows = []
+    for line in accounting.splitlines():
+        parts = line.strip().split("|")
+        if len(parts) != 4 or not parts[0] or not parts[2].isdecimal() or not parts[3].isdecimal():
+            return None
+        state = parts[1].split()[0].rstrip("+") if parts[1].split() else ""
+        rows.append((parts[0], state, int(parts[2]), int(parts[3])))
+    return rows
+
+
+def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], allocation_id: str | None) -> bool:
+    """Whether the first incarnation of ``allocation_id`` ended in a cut state.
+
+    Only the first incarnation (no restarts) runs work: the prologue stops a requeued one before any.
+    """
+    states = {state for job_id, state, _, restarts in rows if job_id == allocation_id and restarts == 0}
+    return allocation_id is not None and len(states) == 1 and states <= ALLOCATION_CUT_STATES
+
+
+def accounted_requeued_chain_walltime(
+    job_chain: list[str], rows: list[tuple[str, str, int, int]], *, stored_walltime_s: float = 0
+) -> float | None:
+    """Elapsed seconds of every incarnation of a chain with a requeued allocation, when the records are complete.
+
+    Every chain job needs terminal records numbered 0..n by restarts, and some job a requeue (n > 0). The stored
+    counter must equal the elapsed time of the jobs before the first requeued one: the requeued incarnation stops
+    before it adds anything, and so does every later allocation. Otherwise the budget epoch is unknown.
+    """
+    terminal = {
+        "COMPLETED",
+        "FAILED",
+        "CANCELLED",
+        "TIMEOUT",
+        "OUT_OF_MEMORY",
+        "NODE_FAIL",
+        "BOOT_FAIL",
+        "DEADLINE",
+        "PREEMPTED",
     }
-    return allocation_id is not None and states.get(allocation_id) in ALLOCATION_CUT_STATES
+    if not job_chain or len(set(job_chain)) != len(job_chain) or {row[0] for row in rows} != set(job_chain):
+        return None
+    restarts: dict[str, list[int]] = {}
+    for job_id, state, _, restart in rows:
+        if state not in terminal:
+            return None
+        restarts.setdefault(job_id, []).append(restart)
+    if any(sorted(numbers) != list(range(len(numbers))) for numbers in restarts.values()):
+        return None
+    requeued = [index for index, job_id in enumerate(job_chain) if len(restarts[job_id]) > 1]
+    if not requeued:
+        return None
+    before = set(job_chain[: requeued[0]])
+    if stored_walltime_s != sum(elapsed for job_id, _, elapsed, _ in rows if job_id in before):
+        return None
+    return float(sum(elapsed for _, _, elapsed, _ in rows))
 
 
 def accounted_chain_walltime(

@@ -120,7 +120,7 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
         '#!/bin/bash\necho "$PWD" > "$(dirname "$0")/cwd"\nenv > "$(dirname "$0")/env"\necho 4242\n'
     )
     (bin_dir / "sacct").write_text('#!/bin/bash\ncat "$(dirname "$0")/accounting"\n')
-    (bin_dir / "accounting").write_text("100|FAILED|7200\n101|FAILED|60\n")
+    (bin_dir / "accounting").write_text("100|FAILED|7200|0\n101|FAILED|60|0\n")
     for stub in ("squeue", "sbatch", "sacct"):
         (bin_dir / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
@@ -920,9 +920,9 @@ def test_recover_queues_a_mixed_run_and_the_resume_runs_only_the_eligible_identi
     "accounting",
     [
         "",
-        "100|FAILED|7200\n",
-        "100|FAILED|7200\n101|RUNNING|60\n",
-        "100|FAILED|7200\n101|FAILED|50400\n",
+        "100|FAILED|7200|0\n",
+        "100|FAILED|7200|0\n101|RUNNING|60|0\n",
+        "100|FAILED|7200|0\n101|FAILED|50400|0\n",
     ],
 )
 def test_recovery_never_queues_unaccounted_or_exhausted_chain(tmp_path, slurm_bin, accounting):
@@ -993,7 +993,7 @@ def test_recover_keeps_an_eligible_infrastructure_retry_and_spent_budgets(tmp_pa
     from nemo_gym.orchestration.submit import recover
 
     job_dir, _, _ = _resumable_run(tmp_path)
-    (slurm_bin / "accounting").write_text("100|PREEMPTED|7200\n101|NODE_FAIL|60\n")
+    (slurm_bin / "accounting").write_text("100|PREEMPTED|7200|0\n101|NODE_FAIL|60|0\n")
     out = recover(*_handle(job_dir))
     assert out.dispatched == "resubmit" and _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
     assert (job_dir / RETRY_FILE_NAME).read_text() == "2\n"

@@ -51,6 +51,14 @@ RESUBMIT_LOCK_NAME = ".gym_resubmit.lock"
 ACCOUNTING_UNKNOWN_PREFIX = "GYM_ACCOUNTING_UNKNOWN:"
 # The line prefix the installed continuation reader prints its decision reason with.
 CONTINUATION_REASON_PREFIX = "__GYM_CONTINUATION_REASON:"
+# The unknown-accounting reason a requeued allocation writes; recovery reconciles it from complete terminal accounting.
+REQUEUE_UNKNOWN_REASON = (
+    "Requeued allocation elapsed time is unknown; recover only after complete terminal accounting."
+)
+# What a reconciled recovery writes over that marker before it queues the run again.
+REQUEUE_RECONCILED_NOTE = (
+    "Requeued allocation accounting was reconciled from terminal scheduler records; recovery resubmitted."
+)
 ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
 
@@ -119,7 +127,7 @@ fi
 _gym_restart_count="${{SLURM_RESTART_COUNT:-0}}"
 [[ "$_gym_restart_count" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_accounting_unknown "Slurm restart accounting is unknown."
 if (( 10#$_gym_restart_count > 0 )); then
-    _gym_stop_accounting_unknown "Requeued allocation elapsed time is unknown; recover only after complete terminal accounting."
+    _gym_stop_accounting_unknown "{requeue_unknown_reason}"
 fi
 
 # A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
@@ -380,4 +388,5 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         ),
         admission_command=admission_command,
         continuation_reason_prefix=CONTINUATION_REASON_PREFIX,
+        requeue_unknown_reason=REQUEUE_UNKNOWN_REASON,
     )

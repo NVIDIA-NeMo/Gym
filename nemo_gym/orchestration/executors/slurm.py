@@ -49,6 +49,8 @@ from nemo_gym.orchestration.executors.resume_script import (
     BOUNDED_BUDGET_MARKER,
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
+    REQUEUE_RECONCILED_NOTE,
+    REQUEUE_UNKNOWN_REASON,
     RESUBMIT_ENV,
     RESUBMIT_LOCK_NAME,
     SCHEDULER_CAUSE_MARKER,
@@ -66,6 +68,7 @@ from nemo_gym.orchestration.jobs import (
     utc_timestamp,
 )
 from nemo_gym.orchestration.recovery import (
+    CHAIN_ACCOUNTING_FORMAT,
     COLLECT_SCRIPT,
     CollectedEvidence,
     RecoveryAction,
@@ -74,7 +77,9 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
+    accounted_requeued_chain_walltime,
     allocation_cut_from_accounting,
+    chain_accounting,
     decide_from_collected,
     select_managed_evidence,
 )
@@ -129,6 +134,36 @@ if raw.get("source_job_identity") != identity():
     raise ValueError("reader job directory changed")
 print("__GYM_MANAGED:" + json.dumps(projection))
 """
+
+
+def _reconcile_requeued_chain(
+    collected: CollectedEvidence, rows: list[tuple[str, str, int, int]]
+) -> CollectedEvidence:
+    """Know a requeued chain's budget again once every incarnation has a terminal scheduler record.
+
+    Only the requeue marker is reconciled: the counters themselves stayed readable and the missing fact is the elapsed
+    time of the requeued incarnations, which complete terminal records give. Any other unknown reason stays unknown.
+    """
+    states = collected.counter_states or {}
+    if (
+        collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON
+        or states.get("infra_retries") not in ("absent", "ok")
+        or states.get("walltime") not in ("absent", "ok")
+    ):
+        return collected
+    total = accounted_requeued_chain_walltime(
+        collected.job_chain, rows, stored_walltime_s=collected.walltime_used_s or 0
+    )
+    if total is None:
+        return collected
+    return collected.model_copy(
+        update={
+            "infra_retries_state": states["infra_retries"],
+            "walltime_state": states["walltime"],
+            "accounted_walltime_s": total,
+            "accounting_reconciled": True,
+        }
+    )
 
 
 def _remote_managed_reader_script() -> str:
@@ -186,15 +221,13 @@ def _remote_managed_evidence(
             "checkpoint_enabled",
         }
         # A pinned reader older than these host-collected fields drops them; the host collection owns them either way.
-        compared = allowed | {"accounting_snapshot", "coverage_allocation_id"}
+        host_owned = ("accounting_snapshot", "coverage_allocation_id", "accounting_unknown_reason", "counter_states")
+        compared = allowed | set(host_owned) | {"accounting_reconciled"}
         if selected.model_dump(exclude=compared) != collected.model_dump(exclude=compared):
             raise ValueError("remote Store reader changed collection evidence")
         return selected.model_copy(
-            update={
-                "source_job_identity": collected.source_job_identity,
-                "accounting_snapshot": collected.accounting_snapshot,
-                "coverage_allocation_id": collected.coverage_allocation_id,
-            }
+            update={"source_job_identity": collected.source_job_identity}
+            | {name: getattr(collected, name) for name in host_owned}
         )
     except (RuntimeError, OSError, ValueError) as error:
         return collected.model_copy(
@@ -455,25 +488,25 @@ class SlurmExecutor(BaseExecutor):
             if collected.job_chain and str(job_dir) not in workdirs:
                 try:
                     chain = ",".join(collected.job_chain)
-                    accounting = conn.run(
-                        [f"sacct -n -P -X -j {shlex.quote(chain)} --format=JobIDRaw,State,ElapsedRaw"]
+                    rows = chain_accounting(
+                        conn.run([f"sacct -D -n -P -X -j {shlex.quote(chain)} --format={CHAIN_ACCOUNTING_FORMAT}"])
                     )
                 except (RuntimeError, OSError):
-                    accounting = None
-                if accounting is not None:
-                    allocation_cut = allocation_cut_from_accounting(accounting, collected.coverage_allocation_id)
-                if resume.max_walltime is not None:
-                    try:
-                        collected.accounted_walltime_s = (
-                            accounted_chain_walltime(
-                                collected.job_chain, accounting, stored_walltime_s=collected.walltime_used_s or 0
-                            )
-                            if accounting is not None
-                            else None
+                    rows = None
+                if rows is not None:
+                    allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
+                    collected = _reconcile_requeued_chain(collected, rows)
+                if resume.max_walltime is not None and not collected.accounting_reconciled:
+                    # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
+                    collected.accounted_walltime_s = (
+                        accounted_chain_walltime(
+                            collected.job_chain,
+                            "\n".join(f"{job_id}|{state}|{elapsed}" for job_id, state, elapsed, _ in rows),
+                            stored_walltime_s=collected.walltime_used_s or 0,
                         )
-                    except ValueError:
-                        # Unavailable accounting cannot grant fresh walltime.
-                        collected.accounted_walltime_s = None
+                        if rows is not None
+                        else None
+                    )
         if collected.accounting_snapshot is not None:
             collected.accounting_snapshot = {
                 **collected.accounting_snapshot,
@@ -668,6 +701,7 @@ class SlurmExecutor(BaseExecutor):
         keep_budget: bool = False,
         accounted_walltime_s: float | None = None,
         accounting_snapshot: Mapping[str, str | None] | None = None,
+        accounting_reconciled: bool = False,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -675,6 +709,8 @@ class SlurmExecutor(BaseExecutor):
         a job.sh rendered before that option would reset them, so it is refused. ``accounting_snapshot`` is the
         collected evidence's ``accounting_snapshot``; it is required with ``keep_budget`` and rechecked under the
         resubmit lock before anything in the job dir changes, so a decision made on stale accounting is refused.
+        ``accounting_reconciled`` (with ``keep_budget``) admits the requeue marker that the collected evidence
+        reconciled from terminal scheduler records; it is replaced by a note just before the job is queued.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -695,6 +731,7 @@ class SlurmExecutor(BaseExecutor):
                     f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
                 ]
             snapshot_check = []
+            reconciled = keep_budget and accounting_reconciled and accounted_walltime_s is not None
             if keep_budget:
                 stale = "run accounting changed since the recovery evidence was collected; collect it again"
                 if accounting_snapshot is None:
@@ -770,8 +807,15 @@ class SlurmExecutor(BaseExecutor):
                         f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
                         f"&& ! grep -qxF -- {shlex.quote(ALLOCATION_ACCOUNTING_MARKER)} job.sh; then "
                         'fail "job.sh predates durable allocation accounting; stage a new compatible script"; fi',
-                        f"if grep -q -- {shlex.quote('^' + ACCOUNTING_UNKNOWN_PREFIX)} .gym_chain_incomplete 2>/dev/null; then "
-                        'fail "allocation accounting is unknown; reconcile every allocation before resubmission"; fi',
+                        (
+                            # Only the marker the evidence reconciled; its digest is also in the snapshot above.
+                            f"grep -qxF -- {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' ' + REQUEUE_UNKNOWN_REASON)} "
+                            ".gym_chain_incomplete || fail 'the reconciled requeue marker changed; collect it again'"
+                        )
+                        if reconciled
+                        else f"if grep -q -- {shlex.quote('^' + ACCOUNTING_UNKNOWN_PREFIX)} .gym_chain_incomplete "
+                        '2>/dev/null; then fail "allocation accounting is unknown; reconcile every allocation before '
+                        'resubmission"; fi',
                         'for claim in .gym_followup_queued.*; do [ -e "$claim" ] || continue; '
                         'claimed=$(cat "$claim") || fail "follow-up claim unreadable"; '
                         '[[ "$claimed" =~ ^[0-9]+$ ]] || fail "follow-up submission identity unknown"; done',
@@ -804,6 +848,14 @@ class SlurmExecutor(BaseExecutor):
                             else []
                         ),
                         *budget_update,
+                        *(
+                            [
+                                f"printf '%s\\n' {shlex.quote(REQUEUE_RECONCILED_NOTE)} > .gym_chain_incomplete "
+                                "|| fail 'cannot record the reconciled accounting'"
+                            ]
+                            if reconciled
+                            else []
+                        ),
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
