@@ -139,6 +139,11 @@ a policy is passed at create time.
 - Exact hostnames may resolve to private addresses. Private IP-literal endpoints also get `allowed_ips` for that
   address (a `/32` or `/128`), so the rule names the destination explicitly. Loopback, link-local and
   metadata addresses stay blocked by OpenShell regardless.
+- Endpoints must be an FQDN or an IP address. A short Kubernetes Service name such as `service.namespace` may not
+  resolve inside the sandbox; use `service.namespace.svc.cluster.local` or the IP.
+- The supervisor proxy terminates TLS with its own CA and exposes it to the sandbox through `SSL_CERT_FILE`,
+  `REQUESTS_CA_BUNDLE`, `CURL_CA_BUNDLE`, `GIT_SSL_CAINFO` and `NODE_EXTRA_CA_CERTS`. Tools inside the sandbox must keep
+  those variables (and must not use a bundled CA store only), or certificate verification fails.
 - An endpoint that cannot be expressed (loopback or wildcard host, or a URL with no derivable port) raises
   `ValueError` instead of producing a wider policy.
 - For anything else (extra hosts such as a package index, L7 rules), set `provider_options.policy` to a full
