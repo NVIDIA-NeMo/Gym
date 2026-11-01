@@ -2254,3 +2254,74 @@ async def test_typed_episode_outcomes_settle_stop_or_retry_through_collection_an
             sorted((row["_ng_task_index"], row["reward"]) for row in rows) == [(0, 1.0), (1, 0.0), (5, 0.0)]
             for rows in aggregated
         )
+
+
+def _identity_case(tmp_path: Path, settings: dict) -> tuple:
+    from nemo_gym.rollout_recovery import RunManifest
+
+    source = tmp_path / "input.jsonl"
+    source.write_text("{}\n")
+    materialized = tmp_path / "materialized.jsonl"
+    materialized.write_text("")
+    global_config = {"policy_model": {"responses_api_models": {"vllm_model": {"model": "demo-model", **settings}}}}
+    return RunManifest.create(source, [], {}, global_config), materialized
+
+
+def _saved_by_an_earlier_gym(tmp_path: Path, settings: dict) -> Path:
+    """A manifest whose configuration digest was taken from the identity as resolved, as earlier Gym recorded it."""
+    from nemo_gym.rollout_recovery import _configuration_identity, _digest
+
+    manifest, _ = _identity_case(tmp_path, settings)
+    global_config = {"policy_model": {"responses_api_models": {"vllm_model": {"model": "demo-model", **settings}}}}
+    path = tmp_path / "rollouts_manifest.json"
+    manifest.model_copy(update={"config_digest": _digest(_configuration_identity({}, global_config, []))}).write(path)
+    return path
+
+
+NULL_DEFAULTS = {"chat_template_kwargs": None, "sampling_overrides": None, "extra_body": None}
+
+
+@pytest.mark.parametrize("kept", [{}, {"sampling_overrides": {"temperature": 1.0}}])
+def test_a_run_saved_with_since_removed_null_defaults_resumes_without_them(tmp_path: Path, kept: dict) -> None:
+    from nemo_gym.rollout_recovery import validate_resume
+
+    saved = _saved_by_an_earlier_gym(tmp_path, NULL_DEFAULTS | kept)
+    current, materialized = _identity_case(tmp_path, kept)
+
+    assert validate_resume(saved, current, materialized) is not None
+
+
+def test_a_run_saved_by_an_earlier_gym_with_the_same_settings_resumes(tmp_path: Path) -> None:
+    from nemo_gym.rollout_recovery import validate_resume
+
+    saved = _saved_by_an_earlier_gym(tmp_path, {"extra_body": {"seed": 1}})
+    current, materialized = _identity_case(tmp_path, {"extra_body": {"seed": 1}})
+
+    assert validate_resume(saved, current, materialized) is not None
+
+
+@pytest.mark.parametrize(
+    "drift",
+    [{"model": "other-model"}, {"extra_body": {"seed": 2}}, {"chat_template_kwargs": {"thinking": True}}],
+)
+def test_any_other_configuration_drift_is_still_refused(tmp_path: Path, drift: dict) -> None:
+    from nemo_gym.config.config_types import ConfigError
+    from nemo_gym.rollout_recovery import validate_resume
+
+    saved = _saved_by_an_earlier_gym(tmp_path, NULL_DEFAULTS)
+    current, materialized = _identity_case(tmp_path, drift)
+
+    with pytest.raises(ConfigError, match="incompatible resolved configuration"):
+        validate_resume(saved, current, materialized)
+
+
+def test_a_new_manifest_treats_a_null_setting_as_absent(tmp_path: Path) -> None:
+    from nemo_gym.rollout_recovery import validate_resume
+
+    with_null, materialized = _identity_case(tmp_path, {"extra_body": None})
+    path = tmp_path / "rollouts_manifest.json"
+    with_null.write(path)
+    without, _ = _identity_case(tmp_path, {})
+
+    assert with_null.config_digest == without.config_digest
+    assert validate_resume(path, without, materialized) is not None

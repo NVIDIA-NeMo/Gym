@@ -30,6 +30,7 @@ import stat
 import warnings
 from collections.abc import Collection, Iterator, Mapping
 from contextlib import ExitStack, contextmanager
+from itertools import combinations
 from pathlib import Path
 from typing import Annotated, Any, BinaryIO, Literal
 from uuid import uuid4
@@ -486,6 +487,56 @@ def _configuration_identity(config: dict, global_config: dict, rows: list[dict])
     }
 
 
+# Null defaults a server config once declared and later dropped. Null and absent resolve alike, so a run saved while a
+# config still declared them resumes on the config without them; any other difference keeps the identities apart.
+_REMOVED_NULL_DEFAULTS: dict[tuple[str, str], tuple[str, ...]] = {
+    ("responses_api_models", "vllm_model"): ("chat_template_kwargs", "sampling_overrides", "extra_body"),
+}
+
+
+def _server_settings(identity: dict) -> Iterator[tuple[str, str, dict]]:
+    for block in identity["servers"].values():
+        for kind in _SERVER_KINDS:
+            implementations = block.get(kind) if isinstance(block, dict) else None
+            for implementation, settings in (implementations or {}).items():
+                if isinstance(settings, dict):
+                    yield kind, implementation, settings
+
+
+def _without_null_settings(identity: dict) -> dict:
+    """The identity with each server's None-valued settings dropped: a null setting and an absent one are the same."""
+    normalized = json.loads(json.dumps(identity))
+    for _, _, settings in _server_settings(normalized):
+        for key in [key for key, value in settings.items() if value is None]:
+            del settings[key]
+    return normalized
+
+
+# Each configuration digest this process recorded, mapped to the digests an earlier Gym recorded for the same
+# configuration. Deterministic: configurations that share a digest differ only by null settings.
+_LEGACY_CONFIG_DIGESTS: dict[str, frozenset[str]] = {}
+
+
+def _legacy_config_digests(identity: dict) -> frozenset[str]:
+    """Digests an earlier Gym recorded for this configuration: as resolved, and with removed null defaults restored."""
+    digests = {_digest(identity)}
+    absent = sorted(
+        {
+            (kind, implementation, key)
+            for kind, implementation, settings in _server_settings(identity)
+            for key in _REMOVED_NULL_DEFAULTS.get((kind, implementation), ())
+            if key not in settings
+        }
+    )
+    for size in range(1, len(absent) + 1):
+        for restored in combinations(absent, size):
+            variant = json.loads(json.dumps(identity))
+            for kind, implementation, settings in _server_settings(variant):
+                settings.update({key: None for k, i, key in restored if (k, i) == (kind, implementation)})
+            digests.add(_digest(variant))
+    return frozenset(digests)
+
+
 def _file_digest(path: Path) -> str:
     digest = hashlib.sha256()
     with path.open("rb") as source:
@@ -557,14 +608,23 @@ class RunManifest(BaseModel):
 
     @classmethod
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
+        identity = _configuration_identity(config, global_config, rows)
+        config_digest = _digest(_without_null_settings(identity))
+        _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(
+            config_digest, frozenset()
+        ) | _legacy_config_digests(identity)
         return cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
             retry_terminal_timeouts=config.get("retry_terminal_timeouts", False),
             source_digest=_file_digest(source),
             materialized_digest=_digest(rows),
-            config_digest=_digest(_configuration_identity(config, global_config, rows)),
+            config_digest=config_digest,
         )
+
+    def matches_config(self, saved_digest: str) -> bool:
+        """Whether a saved configuration digest names this configuration, in this or an earlier recorded form."""
+        return saved_digest == self.config_digest or saved_digest in _LEGACY_CONFIG_DIGESTS.get(self.config_digest, ())
 
     def write(self, path: Path) -> None:
         # Publish a complete manifest, or leave the previous one intact. An empty pending_rejudge is omitted so a
@@ -621,10 +681,11 @@ def validate_resume(
             for field, description in (
                 ("source_digest", "source dataset"),
                 ("materialized_digest", "current materialized inputs"),
-                ("config_digest", "resolved configuration"),
             ):
                 if getattr(saved, field) != getattr(current, field):
                     mismatches.append(description)
+            if not current.matches_config(saved.config_digest):
+                mismatches.append("resolved configuration")
         if not mismatches:
             return saved
         problem = "Cannot resume with incompatible " + ", ".join(mismatches) + "."
