@@ -173,6 +173,8 @@ class RolloutDigest(BaseModel):
     transcript_completion_tokens: int = 0
     capture_prompt_tokens: int = 0
     capture_completion_tokens: int = 0
+    # The record carries a numeric reward and is not masked, as the rollout store's `measured` count reads it.
+    scored: bool = False
     # What this rollout contributes to `run.stats.timeouts`.
     timing: RolloutTiming | None = None
 
