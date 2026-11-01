@@ -41,6 +41,7 @@ def judge_server(monkeypatch):
     client.post = post
     monkeypatch.setattr(judge, "raise_for_status", AsyncMock())
     monkeypatch.setattr(judge, "get_response_json", AsyncMock(side_effect=lambda reply: reply))
+    monkeypatch.setattr(judge, "_judge_retry_wait_s", lambda attempt: 0.0)
     return client, replies
 
 
@@ -89,7 +90,8 @@ async def test_a_grade_without_an_identified_parsed_verdict_stays_unknown(judge_
 @pytest.mark.asyncio
 async def test_a_failed_judge_call_propagates_unchanged_and_is_not_a_dependency(judge_server):
     client, replies = judge_server
-    replies.append(ConnectionError("judge unreachable"))
+    # A lost connection is tried again; it propagates once every attempt has failed.
+    replies.extend(ConnectionError("judge unreachable") for _ in range(judge.JUDGE_CALL_MAX_ATTEMPTS))
     invocation = VerifierInvocation(invocation_id="verify-1")
     token = verifier_observability._active_verifier.set(invocation)
     try:

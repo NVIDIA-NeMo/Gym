@@ -39,13 +39,16 @@ exception it sees, so covering a whole ``verify()`` would misfile ordinary bugs
 (a KeyError in prompt assembly, say) as judge failures.
 """
 
+import asyncio
 import functools
+import random
 import re
+import uuid
 from contextvars import ContextVar
 from dataclasses import dataclass, field
 from typing import Any, Awaitable, Callable, Type, TypeVar
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientConnectionError, ClientResponseError, ClientTimeout
 from fastapi.encoders import jsonable_encoder
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
@@ -57,7 +60,7 @@ from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_i
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
 )
-from nemo_gym.exception_inspection import bounded_text
+from nemo_gym.exception_inspection import bounded_text, error_to_http_status
 from nemo_gym.failure_transport import FailureReportRow, observe_failure, report_for_current_request
 from nemo_gym.server_runtime.episode_types import FailureBoundary, SdkErrorDetails
 from nemo_gym.trajectory.trajectory_record import ModelCallRef
@@ -103,13 +106,24 @@ class JudgeError(Exception):
     """A parser-declared judge failure; judge_failsafe routes the row to the failures sidecar."""
 
 
-def judge_call_failed(message: str, *, operation: str, sdk_error: SdkErrorDetails | None = None) -> NgFailureEvent:
+def judge_call_failed(
+    message: str,
+    *,
+    operation: str,
+    sdk_error: SdkErrorDetails | None = None,
+    operation_id: str | None = None,
+    attempt_id: str | None = None,
+    http_status: int | None = None,
+) -> NgFailureEvent:
     """The resources server boundary's ``judge_failed``; what was observed stays on the explicit cause."""
     return NgFailureEvent(
         boundary=FailureBoundary.RESOURCES_SERVER,
         failure_kind=JUDGE_FAILED,
         failure_reason=bounded_text(message, 2000),
         operation=operation,
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+        http_status=http_status,
         stage="verification",
         foreign_error=sdk_error,
         message_args=(message,),
@@ -129,18 +143,54 @@ JUDGE_FAILURES = (JudgeError, NgFailureEvent)
 """Types to catch around a judge call; narrow with ``is_judge_failure`` where other Gym failures can occur."""
 
 
-def _judge_error(error: Exception) -> JudgeError | NgFailureEvent:
+def _judge_error(
+    error: Exception, *, operation_id: str | None = None, attempt_id: str | None = None
+) -> JudgeError | NgFailureEvent:
     """The judge failure for a failed judge call; the caller raises it ``from error``.
 
     A call that failed over HTTP, could not connect or timed out is a typed ``judge_failed``. The kind is not
-    derived from the error's status: a policy that needs the status reads it on the cause.
+    derived from the error's status: a policy that needs the status reads it on the cause. ``call_judge`` names
+    each of its attempts with ``operation_id`` and ``attempt_id`` and records the reply's status.
     """
     message = f"{type(error).__name__}: {error}"
     return judge_call_failed(
         message,
         operation="judge.request",
         sdk_error=None if isinstance(error, NgFailureEvent) else sdk_error_details(error),
+        operation_id=operation_id,
+        attempt_id=attempt_id,
+        http_status=_judge_http_status(error) if operation_id is not None else None,
     )
+
+
+JUDGE_CALL_MAX_ATTEMPTS = 3
+"""Attempts of one ``call_judge`` call (the first one included) before its failure masks the row."""
+JUDGE_RETRY_BASE_WAIT_S = 2.0
+JUDGE_RETRY_MAX_WAIT_S = 30.0
+_RETRYABLE_JUDGE_STATUSES = frozenset({408, 429})
+
+
+def _judge_http_status(error: BaseException) -> int | None:
+    """The status of the judge reply that failed, from this hop's HTTP error; ``None`` when no reply came."""
+    if isinstance(error, NgFailureEvent):
+        error = error.http_error or error
+    return error.status if isinstance(error, ClientResponseError) else error_to_http_status(error)
+
+
+def _is_retryable_judge_error(error: BaseException) -> bool:
+    """Whether another attempt can succeed: a 408, 429 or 5xx reply, a timeout or a lost connection.
+
+    Other 4xx replies (auth, a bad request) and replies that do not parse fail the same way again.
+    """
+    status = _judge_http_status(error)
+    if status is not None:
+        return status in _RETRYABLE_JUDGE_STATUSES or status >= 500
+    return isinstance(error, (TimeoutError, ClientConnectionError, ConnectionError))
+
+
+def _judge_retry_wait_s(attempt: int) -> float:
+    """Full-jitter exponential backoff after failed attempt ``attempt`` (1-based)."""
+    return random.uniform(0, min(JUDGE_RETRY_MAX_WAIT_S, JUDGE_RETRY_BASE_WAIT_S * 2 ** (attempt - 1)))
 
 
 async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
@@ -149,10 +199,16 @@ async def reraise_judge_errors(coro: Awaitable[Any]) -> Any:
     Custom handlers catch ``JUDGE_FAILURES`` and select with ``is_judge_failure``;
     an ``except JudgeError`` handler alone catches only standalone parser failures.
     """
+    return await _reraise_judge_errors(coro)
+
+
+async def _reraise_judge_errors(
+    coro: Awaitable[Any], *, operation_id: str | None = None, attempt_id: str | None = None
+) -> Any:
     try:
         return await coro
     except Exception as e:
-        failure = e if is_judge_failure(e) else _judge_error(e)
+        failure = e if is_judge_failure(e) else _judge_error(e, operation_id=operation_id, attempt_id=attempt_id)
         if failure is not e:
             failure.__cause__ = e  # set before recording, so the observation carries the cause chain
         # Recorded before the caller decides: a retry that then succeeds keeps it as an observation.
@@ -180,6 +236,13 @@ async def call_judge(
     failure itself, not a validation error against the error body.
     The enclosing verify execution supplies the invocation identity; all its judge
     calls and retries share that identity. Standalone calls do not invent a verifier execution.
+
+    A 408, 429 or 5xx reply, a timeout or a lost connection is tried again, up to
+    ``JUDGE_CALL_MAX_ATTEMPTS`` attempts with full-jitter exponential backoff, before the
+    failure masks the row; other 4xx replies and unparseable replies fail at once. Each failed
+    attempt is observed as its own ``judge_failed`` event (one ``operation_id`` per call, the
+    attempt in ``attempt_id``, the reply's ``http_status``), so a row a retry scored and a row a
+    final failure masked both keep every attempt.
     """
 
     async def _call() -> ResponseT:
@@ -204,7 +267,19 @@ async def call_judge(
                 grading.unidentified_calls += 1
         return parsed
 
-    return await reraise_judge_errors(_call())
+    operation_id = uuid.uuid4().hex
+    for attempt in range(1, JUDGE_CALL_MAX_ATTEMPTS):
+        try:
+            return await _reraise_judge_errors(
+                _call(), operation_id=operation_id, attempt_id=f"{operation_id}-{attempt}"
+            )
+        except NgFailureEvent as failure:
+            if not _is_retryable_judge_error(failure.__cause__ or failure):
+                raise
+        await asyncio.sleep(_judge_retry_wait_s(attempt))
+    return await _reraise_judge_errors(
+        _call(), operation_id=operation_id, attempt_id=f"{operation_id}-{JUDGE_CALL_MAX_ATTEMPTS}"
+    )
 
 
 def judge_failsafe(verify_fn: Callable) -> Callable:

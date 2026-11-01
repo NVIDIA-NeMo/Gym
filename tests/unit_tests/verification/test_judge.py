@@ -22,6 +22,7 @@ from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
 from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.verification.judge import (
     JudgeError,
+    _judge_retry_wait_s,
     call_judge,
     judge_failsafe,
     normalize_math_judge_verdict,
@@ -341,3 +342,147 @@ async def test_call_judge_preserves_optional_transport_timeout(explicit):
         assert kwargs["timeout"] is timeout
     else:
         assert "timeout" not in kwargs
+
+
+@pytest.fixture(autouse=True)
+def judge_backoffs(monkeypatch) -> list[int]:
+    """The failed attempts ``call_judge`` backed off after; the waits themselves are skipped."""
+    backoffs: list[int] = []
+
+    def no_wait(attempt: int) -> float:
+        backoffs.append(attempt)
+        return 0.0
+
+    monkeypatch.setattr("nemo_gym.verification.judge._judge_retry_wait_s", no_wait)
+    return backoffs
+
+
+def _http_reply(status: int, body: bytes = b'{"error": "unavailable"}') -> MagicMock:
+    """An aiohttp-shaped reply whose ``raise_for_status`` raises the ``ClientResponseError`` aiohttp raises."""
+    from aiohttp import ClientResponseError, RequestInfo
+    from multidict import CIMultiDict, CIMultiDictProxy
+    from yarl import URL
+
+    url = URL("http://judge/v1/responses")
+    info = RequestInfo(url=url, method="POST", headers=CIMultiDictProxy(CIMultiDict()), real_url=url)
+    resp = MagicMock(ok=status < 400, status=status)
+    resp.read = AsyncMock(return_value=body)
+    resp.content.read = AsyncMock(return_value=body)
+    resp.raise_for_status = MagicMock(side_effect=ClientResponseError(info, (), status=status, message="judge error"))
+    return resp
+
+
+def _judge(*replies) -> MagicMock:
+    return MagicMock(post=AsyncMock(side_effect=list(replies)))
+
+
+def _attempts(report) -> list:
+    """The judge-call attempt events of ``report``, in attempt order."""
+    events = [e for e in report.events.values() if e.operation == "judge.request" and e.attempt_id]
+    return sorted(events, key=lambda e: int(e.attempt_id.rsplit("-", 1)[1]))
+
+
+def _graded_verify(client):
+    @judge_failsafe
+    async def verify(body):
+        verdict = await _call(client)
+        return {"reward": 1.0 if verdict.verdict == "CORRECT" else 0.0}
+
+    return verify
+
+
+async def test_a_judge_that_answers_after_two_503s_scores_the_row_and_keeps_both_failed_attempts(judge_backoffs):
+    from nemo_gym.failure_transport import RequestFailureLog
+
+    client = _judge(_http_reply(503), _http_reply(503), _http_reply(200, b'{"verdict": "CORRECT"}'))
+    with RequestFailureLog.capture() as log:
+        row = await _graded_verify(client)(_Req())
+        observed = log.reply_report(None)
+
+    assert row == {"reward": 1.0}
+    assert client.post.await_count == 3
+    assert judge_backoffs == [1, 2]
+    attempts = _attempts(observed)
+    operation_id = attempts[0].operation_id
+    assert [(e.attempt_id, e.http_status, e.failure_kind) for e in attempts] == [
+        (f"{operation_id}-1", 503, "judge_failed"),
+        (f"{operation_id}-2", 503, "judge_failed"),
+    ]
+    assert observed.failure_id is None  # the request succeeded
+
+
+async def test_three_503s_mask_the_row_and_journal_all_three_attempts(judge_backoffs):
+    from nemo_gym.failure_transport import FailureReportRow, RequestFailureLog
+
+    client = _judge(_http_reply(503), _http_reply(503), _http_reply(503))
+    with RequestFailureLog.capture() as log:
+        reply = await _graded_verify(client)(_Req(response={"saved": "answer"}))
+        observed = log.reply_report(None)
+
+    row = orjson.loads(reply.body)
+    assert (row["reward"], row["mask_sample"], row["failure_kind"]) == (0.0, True, "judge_failed")
+    assert row["response"] == {"saved": "answer"}
+    assert client.post.await_count == 3
+    assert judge_backoffs == [1, 2]
+    # Collection saves the row's own report merged with the observations its reply forwarded.
+    saved = FailureReportRow.report(FailureReportRow.merged_into(dict(row), observed))
+    attempts = _attempts(saved)
+    assert [e.http_status for e in attempts] == [503, 503, 503]
+    assert len({e.operation_id for e in attempts}) == 1
+    assert saved.failure_id == attempts[-1].event_id  # the last attempt is the row's failure
+
+
+async def test_a_400_masks_the_row_after_one_attempt(judge_backoffs):
+    from nemo_gym.failure_transport import RequestFailureLog
+
+    client = _judge(_http_reply(400), _http_reply(200, b'{"verdict": "CORRECT"}'))
+    with RequestFailureLog.capture() as log:
+        row = orjson.loads((await _graded_verify(client)(_Req())).body)
+        observed = log.reply_report(None)
+
+    assert row["mask_sample"] is True and row["failure_kind"] == "judge_failed"
+    assert client.post.await_count == 1
+    assert judge_backoffs == []
+    assert [e.http_status for e in _attempts(observed)] == [400]
+
+
+@pytest.mark.parametrize(
+    ("status", "attempts"), [(408, 3), (429, 3), (500, 3), (502, 3), (504, 3), (401, 1), (403, 1), (404, 1), (422, 1)]
+)
+async def test_only_408_429_and_5xx_replies_are_tried_again(status: int, attempts: int):
+    client = _judge(*(_http_reply(status) for _ in range(3)))
+    with pytest.raises(NgFailureEvent) as failure:
+        await _call(client)
+
+    assert client.post.await_count == attempts
+    assert failure.value.http_status == status
+    assert failure.value.attempt_id.endswith(f"-{attempts}")
+
+
+async def test_a_timeout_and_a_lost_connection_are_tried_again():
+    import asyncio
+
+    client = _judge(asyncio.TimeoutError(), ConnectionResetError("reset"), _http_reply(200, b'{"verdict": "CORRECT"}'))
+    assert (await _call(client)).verdict == "CORRECT"
+    assert client.post.await_count == 3
+
+
+async def test_an_unparseable_reply_is_not_tried_again():
+    client = _judge(_http_reply(200, b'{"no": "verdict"}'), _http_reply(200, b'{"verdict": "CORRECT"}'))
+    with pytest.raises(NgFailureEvent, match="ValidationError"):
+        await _call(client)
+    assert client.post.await_count == 1
+
+
+def test_the_backoff_is_full_jitter_exponential_and_capped(monkeypatch):
+    from nemo_gym.verification import judge
+
+    monkeypatch.setattr(judge.random, "uniform", lambda low, high: (low, high))
+    assert [_judge_retry_wait_s(attempt) for attempt in (1, 2, 3, 4, 5, 6)] == [
+        (0, 2.0),
+        (0, 4.0),
+        (0, 8.0),
+        (0, 16.0),
+        (0, 30.0),
+        (0, 30.0),
+    ]
