@@ -639,8 +639,7 @@ def e2e_rollout_collection():  # pragma: no cover
             resolved_config = OmegaConf.to_container(global_config_dict, resolve=True)
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
-            asyncio.run(rch.run_from_config(rollout_collection_config))
-            _rejudge_saved_judge_failures(global_config_dict, output_fpath, rollout_collection_config)
+            _collect_and_rejudge(rch, rollout_collection_config, global_config_dict, output_fpath)
         collection_completed = True
     except KeyboardInterrupt:
         interrupted = True
@@ -985,6 +984,48 @@ def _check_saved_completion(output: Path) -> None:
             )
 
 
+def _collect_and_rejudge(
+    rch: Any, config: Any, global_config_dict: DictConfig | Mapping[str, Any], output: Path
+) -> None:
+    """Run the built-in collection, then the saved-answer re-judge pass, before a strict run is rejected.
+
+    With ``require_complete``, ``run_from_config`` raises ``IncompleteEvaluationError`` when completed is below
+    expected, and a masked judge failure is not completed: the pass runs first, and the rejection stands unless the
+    saved run is complete afterwards, by the rule ``check_completion`` applies. A non-strict run and a terminated run
+    keep the error as raised. A custom ``rollout_collection_driver`` runs neither this pass nor this check.
+    """
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+    try:
+        asyncio.run(rch.run_from_config(config))
+    except IncompleteEvaluationError:
+        if not config.require_complete or _terminated:
+            raise
+        _rejudge_saved_judge_failures(global_config_dict, output, config)
+        if not _saved_run_complete(output):
+            raise
+        return
+    _rejudge_saved_judge_failures(global_config_dict, output, config)
+
+
+def _saved_run_complete(output: Path) -> bool:
+    """Whether the saved Store selection now meets ``check_completion``: unreadable evidence is not complete."""
+    from nemo_gym.rollout_recovery import has_only_intentional_gaps
+    from nemo_gym.rollout_store import RolloutStore
+
+    try:
+        store = RolloutStore.read(output, import_legacy=False)
+        if store is None:
+            return False
+        coverage = store.coverage()
+    except Exception:  # the original rejection stands
+        return False
+    completed = coverage["successful"] + coverage["final_zeros"]
+    return completed == coverage["expected"] or has_only_intentional_gaps(
+        expected=coverage["expected"], completed=completed, intentionally_omitted=coverage["intentionally_omitted"]
+    )
+
+
 def _rejudge_saved_judge_failures(
     global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any
 ) -> None:
@@ -1046,8 +1087,7 @@ def collect_rollouts():  # pragma: no cover
     init_telemetry(server_name="driver", server_type="driver")
     _interrupt_on_sigterm()
     try:
-        asyncio.run(rch.run_from_config(config))
-        _rejudge_saved_judge_failures(global_config_dict, Path(config.output_jsonl_fpath), config)
+        _collect_and_rejudge(rch, config, global_config_dict, Path(config.output_jsonl_fpath))
         _check_collection_completion(
             Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
         )
