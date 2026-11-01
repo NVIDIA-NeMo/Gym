@@ -222,3 +222,37 @@ def test_the_next_recovery_after_a_continuation_reads_a_known_budget(tmp_path, s
     # The chain is accounted from the continuation's epoch: its zero baseline plus what ran since.
     assert collected.accounted_walltime_s == (30.0 if ran else 0.0)
     assert (collected.infra_retries_state, collected.walltime_state) == ("ok", "ok")
+
+
+def test_a_client_lost_after_the_acknowledgement_still_leaves_the_epoch(tmp_path, slurm_bin, monkeypatch):
+    from nemo_gym.orchestration.executors.connection import LocalConnection
+    from nemo_gym.orchestration.submit import inspect_recovery, recover
+
+    job_dir = _unknown_run(tmp_path, unreadable=(".gym_infra_retries", ".gym_accumulated_walltime"))
+    run = LocalConnection.run
+    acknowledged = []
+
+    def lost_after_the_acknowledgement(self, commands):
+        # The queue acknowledged the job; the client or its SSH session fails before any later remote step.
+        if acknowledged:
+            raise RuntimeError("client lost after the queue acknowledged the job")
+        output = run(self, commands)
+        acknowledged.extend(command for command in commands if command == "_gym_submit_started=1")
+        return output
+
+    with monkeypatch.context() as patched:
+        patched.setattr(LocalConnection, "run", lost_after_the_acknowledgement)
+        with pytest.raises(RuntimeError, match="client lost"):
+            recover(*_handle(job_dir), **BUDGET)
+    assert acknowledged
+
+    [entry] = [json.loads(line) for line in (job_dir / OPERATOR_CONTINUATION_JOURNAL_NAME).read_text().splitlines()]
+    assert (entry["job_id"], entry["epoch"]) == ("4242", {"chain_length": 2, "walltime_s": 0.0})
+    assert not list(job_dir.glob("*.operator-previous")) and not list(job_dir.glob("*.tmp"))
+    record = load_submission_record(_handle(job_dir)[0])
+    _, collected = SlurmExecutor().recovery_evidence(record, "gsm8k")
+    # The fresh unknown-budget baseline is reconstructed from the epoch written under the lock.
+    assert collected.operator_epoch is not None and collected.accounted_walltime_s == 0.0
+    assert (collected.infra_retries_state, collected.walltime_state) == ("ok", "ok")
+    later = inspect_recovery(*_handle(job_dir))
+    assert UNKNOWN_BUDGET_REASON not in later.decision.reason

@@ -655,6 +655,14 @@ def _submission_exports(config: SubmitConfig) -> list[str]:
     return exports
 
 
+# Sets the job ID of the last operator journal entry from sbatch's reply (its last word), replacing the file atomically.
+_NAME_OPERATOR_JOB = (
+    "import json,os,sys; p=sys.argv[1]; lines=open(p).read().splitlines(); entry=json.loads(lines[-1]); "
+    "entry['job_id']=sys.argv[2].split()[-1]; lines[-1]=json.dumps(entry, sort_keys=True); "
+    "open(p+'.tmp','w').write(chr(10).join(lines)+chr(10)); os.replace(p+'.tmp', p)"
+)
+
+
 class SlurmExecutor(BaseExecutor):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
@@ -1094,7 +1102,11 @@ class SlurmExecutor(BaseExecutor):
         job_dir = Path(job.job_dir)
         if operator_continuation is not None and (not keep_budget or extend_retries):
             raise RuntimeError("an operator continuation needs --recover and sets its own infra-retry allowance")
-        operator_commands = self._operator_commands(operator_continuation) if operator_continuation is not None else []
+        operator_commands = (
+            self._operator_commands(operator_continuation, at=utc_timestamp(utc_now()))
+            if operator_continuation is not None
+            else []
+        )
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
             repin_commands, journals = (
@@ -1281,6 +1293,17 @@ class SlurmExecutor(BaseExecutor):
                             f"sys.exit(0 if words and re.fullmatch({_JOB_ID_RE.pattern!r}, words[-1]) else 1)"
                         )
                         + ' "$out"; then _gym_submit_confirmed=1; fi',
+                        *(
+                            # Still under the lock: name the queued job in the epoch record written before sbatch.
+                            # A failure here leaves the record without its job ID, never without its epoch.
+                            [
+                                'if [[ "$_gym_submit_confirmed" == 1 ]]; then python3 -c '
+                                + shlex.quote(_NAME_OPERATOR_JOB)
+                                + f' {OPERATOR_CONTINUATION_JOURNAL_NAME} "$out" || :; fi'
+                            ]
+                            if operator_continuation is not None
+                            else []
+                        ),
                     ]
                 )
             )
@@ -1300,10 +1323,6 @@ class SlurmExecutor(BaseExecutor):
                 entry = shlex.quote(json.dumps({"by": extend_retries, "at": utc_timestamp(utc_now())}))
                 journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
                 conn.run([f"printf '%s\\n' {entry} >> {journal}"])
-            if operator_continuation is not None:
-                entry = {**operator_continuation, "job_id": job_id, "at": utc_timestamp(utc_now())}
-                journal = shlex.quote(str(job_dir / OPERATOR_CONTINUATION_JOURNAL_NAME))
-                conn.run([f"printf '%s\\n' {shlex.quote(json.dumps(entry, sort_keys=True))} >> {journal}"])
             for name, entry in journals.items():
                 journal = Path(record.run_dir) / name
                 conn.run([f"printf '%s\\n' {shlex.quote(entry)} >> {shlex.quote(str(journal))}"])
@@ -1311,8 +1330,9 @@ class SlurmExecutor(BaseExecutor):
         return job
 
     @staticmethod
-    def _operator_commands(continuation: Mapping[str, Any]) -> list[str]:
-        """The locked steps of an operator continuation: fill the counters it names and replace the unknown marker.
+    def _operator_commands(continuation: Mapping[str, Any], *, at: str) -> list[str]:
+        """The locked steps of an operator continuation: fill the counters it names, replace the unknown marker and
+        journal the continuation with its epoch before sbatch, so a queued continuation always has its epoch.
 
         Each file is kept aside first and put back unless the job is queued; a readable counter is never named.
         """
@@ -1321,13 +1341,14 @@ class SlurmExecutor(BaseExecutor):
             type(write.get("value")) is not int or write["value"] < 0 for write in writes.values()
         ):
             raise ValueError("an operator continuation fills only the chain's counters, each with a whole number")
-        names = [*sorted(writes), INCOMPLETE_MARKER_NAME]
+        names = [*sorted(writes), INCOMPLETE_MARKER_NAME, OPERATOR_CONTINUATION_JOURNAL_NAME]
         kept = " ".join(f"{name}.operator-previous" for name in names)
         restore = "; ".join(
             f"if [[ -e {name}.operator-previous ]]; then mv -f {name}.operator-previous {name}; else rm -f {name}; fi"
             for name in names
         )
         unknown = shlex.quote("^" + ACCOUNTING_UNKNOWN_PREFIX)
+        entry = {**continuation, "job_id": None, "at": at}
         return [
             f"rm -f {kept}",
             *(
@@ -1343,6 +1364,8 @@ class SlurmExecutor(BaseExecutor):
             f"if grep -q -- {unknown} {INCOMPLETE_MARKER_NAME} 2>/dev/null; then "
             f"printf '%s\\n' {shlex.quote(OPERATOR_CONTINUATION_NOTE)} > {INCOMPLETE_MARKER_NAME} "
             "|| fail 'cannot record the operator continuation'; fi",
+            f"printf '%s\\n' {shlex.quote(json.dumps(entry, sort_keys=True))} >> {OPERATOR_CONTINUATION_JOURNAL_NAME} "
+            "|| fail 'cannot journal the operator continuation'",
         ]
 
     @staticmethod
