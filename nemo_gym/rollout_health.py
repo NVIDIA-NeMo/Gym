@@ -1292,6 +1292,10 @@ def _context_window_exceeded(record: Mapping[str, Any]) -> bool | None:
 _MLFLOW_REQUIRED_NAMES = ("mlflow_tracking_uri", "mlflow_experiment_name", "mlflow_run_name")
 
 
+# The top-level config key a run sets to false when it exports nothing to MLflow by design; absent means required.
+MLFLOW_TRACKING_REQUIRED_KEY = "mlflow_tracking_required"
+
+
 def _mlflow_configured(config: Mapping[str, Any]) -> bool | None:
     """A names-only fact about the saved config snapshot: whether its three MLflow name fields are concrete.
 
@@ -1354,7 +1358,11 @@ def run_provenance(rollout_path: Path) -> dict[str, Any]:
         "resolved_config": "read",
         "route_failures_to_sidecar": _flag(config.get("route_failures_to_sidecar")),
         "servers": servers,
-        "mlflow": {"configured": _mlflow_configured(config)},
+        "mlflow": {
+            "configured": _mlflow_configured(config),
+            # A run that exports nothing to MLflow by design says so (`+mlflow_tracking_required=false`).
+            "tracking_required": _flag(config.get(MLFLOW_TRACKING_REQUIRED_KEY)),
+        },
     }
 
 

@@ -2264,6 +2264,18 @@ def quality_inputs(
     return summary_valid, summary_reasons, True, [counts]
 
 
+def mlflow_notes(local: Mapping[str, Any] | None) -> list[str]:
+    """What the gate states about a passing MLflow part: a current post-run export beside a live run wins."""
+    local = local or {}
+    live, receipt = local.get("live_run_id"), local.get("receipt")
+    if isinstance(live, str) and live.strip() and isinstance(receipt, dict) and receipt.get("current") is True:
+        return [
+            f"MLflow live run {live} and post-run export run {receipt.get('run_id')} both exist: the post-run export "
+            "receipt is current for the saved artifacts, so it is the run of record"
+        ]
+    return []
+
+
 def mlflow_errors(
     local: Mapping[str, Any] | None,
     observed_status: str | None,
@@ -2338,7 +2350,19 @@ def mlflow_errors(
         and observed_run_id == receipt.get("run_id")
     )
     if live and receipt is not None and not bound:
-        errors.append(f"MLflow live run {live} and a post-run export both exist: the observed status names neither")
+        # The post-run export receipt, current for the saved artifacts, is the run of record; a live run is not.
+        if isinstance(receipt, dict) and receipt.get("current") is True:
+            if observed_run_id not in (None, live, receipt.get("run_id")):
+                errors.append(
+                    f"MLflow observed status is for run {observed_run_id}, neither the live run {live} nor the "
+                    f"post-run export run {receipt.get('run_id')}"
+                )
+        else:
+            stale = receipt.get("run_id") if isinstance(receipt, dict) else "with a malformed receipt"
+            errors.append(
+                f"MLflow live run {live} and a post-run export both exist, and the post-run export run {stale} is "
+                "stale: its receipt is not current for the saved artifacts, so neither is the run of record"
+            )
     elif live is not None and live.strip() and receipt is None:
         errors.append(
             f"MLflow live run {live}: configured payload delivery is not verified (live uploads log failures and "
@@ -3215,6 +3239,17 @@ def health_check_facts(quality: Mapping[str, Any] | None) -> list[str]:
     return facts
 
 
+MLFLOW_NOT_REQUIRED_NOTE = "no MLflow export by design (mlflow_tracking_required is false in the saved config)"
+
+
+def mlflow_tracking_required(collected: CollectedEvidence | None) -> bool:
+    """False only when the run's saved config snapshot sets ``mlflow_tracking_required`` to false; absent, unread or
+    any other value means tracking is required."""
+    provenance = ((collected.quality or {}) if collected is not None else {}).get("provenance")
+    facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
+    return not (isinstance(facts, dict) and facts.get("tracking_required") is False)
+
+
 def gate_summary_from_collected(
     decision: RecoveryDecision,
     collected: CollectedEvidence,
@@ -3280,14 +3315,19 @@ def gate_summary_from_collected(
     provenance = (collected.quality or {}).get("provenance")
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
-    extra.extend(
-        mlflow_errors(
+    task["mlflow_tracking_required"] = mlflow_tracking_required(collected)
+    if task["mlflow_tracking_required"] is False:
+        task["warnings"] = task["warnings"] + [MLFLOW_NOT_REQUIRED_NOTE]
+    else:
+        mlflow_problems = mlflow_errors(
             collected.mlflow,
             mlflow_status,
             configured=configured if isinstance(configured, bool) else None,
             observed_run_id=mlflow_run_id,
         )
-    )
+        extra.extend(mlflow_problems)
+        if not mlflow_problems:
+            task["warnings"] = task["warnings"] + mlflow_notes(collected.mlflow)
     if extra:
         task["errors"] = task["errors"] + extra
         if task["status"] == "SUCCESS":

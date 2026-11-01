@@ -3452,7 +3452,7 @@ def test_run_provenance_reports_only_what_the_resolved_config_states(tmp_path: P
             "bench_resources": {"kind": "resources_servers", "implementation": "scicode"},
             "bench_environment": {"kind": "environment_servers", "implementation": "bench_env"},
         },
-        "mlflow": {"configured": False},
+        "mlflow": {"configured": False, "tracking_required": None},
     }
 
 
@@ -3500,7 +3500,7 @@ def test_run_provenance_reads_mlflow_configuration_from_names_only(tmp_path: Pat
     lines = "".join(f"{key}: {json.dumps(value)}\n" for key, value in names.items())
     (tmp_path / "rollouts_resolved_config.yaml").write_text(lines + "mlflow_tracking_token: secret\n")
     summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
-    assert summary["run"]["provenance"]["mlflow"] == {"configured": configured}
+    assert summary["run"]["provenance"]["mlflow"] == {"configured": configured, "tracking_required": None}
     assert "secret" not in result_text(tmp_path)
 
 
@@ -3812,3 +3812,12 @@ def test_unavailable_journal_health_preserves_saved_evidence(tmp_path, monkeypat
     assert "Rollout health checks skipped: selected projection required" in capsys.readouterr().out
     assert output.read_bytes() == before
     assert not (tmp_path / "quality_summary.json").exists()
+
+
+@pytest.mark.parametrize(("written", "required"), [("false", False), ("true", True), (None, None), ('"no"', None)])
+def test_run_provenance_records_whether_mlflow_tracking_is_required(tmp_path: Path, written, required) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(0, 0), [_call()])])
+    line = f"mlflow_tracking_required: {written}\n" if written is not None else ""
+    (tmp_path / "rollouts_resolved_config.yaml").write_text(line + "route_failures_to_sidecar: true\n")
+    summary = json.loads(run_health_checks(rollout_path, output_dir=tmp_path, workers=1).summary_path.read_text())
+    assert summary["run"]["provenance"]["mlflow"]["tracking_required"] is required

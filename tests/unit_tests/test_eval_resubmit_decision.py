@@ -1390,13 +1390,14 @@ def test_a_finished_status_counts_only_for_the_receipt_s_own_run(observed_run_id
     ("observed_run_id", "status", "accepted"),
     [
         ("postrun-run", "FINISHED", True),
-        ("live-old", "FINISHED", False),
-        (None, "FINISHED", False),
+        # A current post-run export receipt is the run of record beside a live run (both exist, either is named).
+        ("live-old", "FINISHED", True),
+        (None, "FINISHED", True),
         ("other", "FINISHED", False),
         ("postrun-run", "FAILED", False),
     ],
 )
-def test_a_post_run_receipt_beside_an_earlier_live_run_is_bound_only_by_its_own_run(
+def test_a_current_post_run_receipt_beside_an_earlier_live_run_is_the_run_of_record(
     observed_run_id, status, accepted
 ) -> None:
     from nemo_gym.orchestration.recovery import mlflow_errors
@@ -2636,3 +2637,68 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert "trial: UNOBSERVED 50 of 100 expected trials" in health
     assert "observed healthy 49, unhealthy 1" in health
+
+
+_CURRENT_RECEIPT = {
+    "run_id": "postrun-run",
+    "current": True,
+    "uploaded_rollouts": True,
+    "rollout_projection_version": 1,
+}
+
+
+def test_both_runs_with_a_current_receipt_pass_with_a_note() -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors, mlflow_notes
+
+    local = {"live_run_id": "live-run", "receipt": _CURRENT_RECEIPT}
+    assert mlflow_errors(local, "FINISHED", observed_run_id="live-run") == []
+    assert mlflow_notes(local) == [
+        "MLflow live run live-run and post-run export run postrun-run both exist: the post-run export receipt is "
+        "current for the saved artifacts, so it is the run of record"
+    ]
+
+
+def test_both_runs_with_a_stale_receipt_fail_naming_the_stale_one() -> None:
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    stale = {"live_run_id": "live-run", "receipt": {**_CURRENT_RECEIPT, "current": False}}
+    errors = mlflow_errors(stale, "FINISHED", observed_run_id="live-run")
+    assert (
+        "MLflow live run live-run and a post-run export both exist, and the post-run export run postrun-run is "
+        "stale: its receipt is not current for the saved artifacts, so neither is the run of record"
+    ) in errors
+    assert not any("names neither" in error for error in errors)
+
+
+def _mlflow_gate(tmp_path: Path, *, tracking_required: bool | None) -> dict:
+    """The gate of a complete run that exported nothing to MLflow, with the snapshot's tracking requirement."""
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    job = gate_job(tmp_path, expected=4, final_zeros=0)
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    collected.mlflow = {}
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    mlflow = {"configured": False, "tracking_required": tracking_required}
+    collected.quality = unit_quality(
+        expected=d.expected, provenance={"resolved_config": "read", "servers": {}, "mlflow": mlflow}
+    )
+    return gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status=None)
+
+
+def test_mlflow_not_required_by_design_passes_the_mlflow_part_with_a_note(tmp_path) -> None:
+    task = _mlflow_gate(tmp_path, tracking_required=False)
+    assert task["mlflow_tracking_required"] is False
+    assert not any("MLflow" in error for error in task["errors"])
+    assert "no MLflow export by design (mlflow_tracking_required is false in the saved config)" in task["warnings"]
+
+
+@pytest.mark.parametrize("tracking_required", [True, None])
+def test_mlflow_required_or_unstated_fails_without_evidence_as_before(tmp_path, tracking_required) -> None:
+    task = _mlflow_gate(tmp_path, tracking_required=tracking_required)
+    assert task["mlflow_tracking_required"] is True
+    assert (
+        "no MLflow run evidence: no live run id and no post-run export receipt, and the saved config snapshot does "
+        "not name all of the tracking URI, experiment and run name; exporter activation and whether tracking was "
+        "required or disabled are not recorded"
+    ) in task["errors"]
+    assert task["status"] == "FAILED"

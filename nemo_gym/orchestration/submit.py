@@ -26,6 +26,7 @@ from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.orchestration.recovery import (
+    MLFLOW_NOT_REQUIRED_NOTE,
     GateCriteria,
     OperatorBudget,
     RecoveryAction,
@@ -33,6 +34,7 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     gate_summary_from_collected,
     gate_task_summary,
+    mlflow_tracking_required,
 )
 from nemo_gym.utils.decorators import experimental
 
@@ -270,7 +272,10 @@ def _recover(
         "local": collected.mlflow if collected is not None else None,
         "observed_status": mlflow_status,
         "observed_run_id": mlflow_run_id,
+        "tracking_required": mlflow_tracking_required(collected),
     }
+    if not mlflow["tracking_required"]:
+        mlflow["note"] = MLFLOW_NOT_REQUIRED_NOTE
     if inspect_only:
         if gate_task["status"] == "PLANNED":
             gate_task = {
