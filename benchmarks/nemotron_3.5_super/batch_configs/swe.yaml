@@ -6,8 +6,7 @@ config_paths:
   - responses_api_models/vllm_model/configs/vllm_model.yaml
 
 num_samples_in_parallel: 1024
-# Prepared inputs already contain three attempts per task.
-num_repeats: 1
+# No run-level num_repeats: the SWE-bench configs' own num_repeats: 3 applies.
 num_repeats_add_seed: false
 route_failures_to_sidecar: true
 uv_pip_set_python: true

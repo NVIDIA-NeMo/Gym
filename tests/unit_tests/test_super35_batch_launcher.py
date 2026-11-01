@@ -404,6 +404,14 @@ def test_recipes_resolve_without_local_pilot_files_or_credentials(
         assert rollout.num_repeats == {
             "apex_shortlist_math_with_judge_simple_agent": 16,
             "lmarena_v2_benchmark_agent": 3,
+            "aalcr_benchmark_simple_agent": 16,
+            "gpqa_mcqa_simple_agent": 8,
+            "ifbench_benchmark_simple_agent": 8,
+            "livecodebench_v6_cascade_code_gen_simple_agent": 3,
+            "omniscience_omniscience_simple_agent": 10,
+            "scicode_benchmark_agent": 8,
+            "tau2_banking_knowledge_bm25_grep_artificial_analysis_agent": 8,
+            "tau2_benchmark_agent": 8,
             "_default": 1,
         }
         assert rollout.num_repeats_add_seed == {

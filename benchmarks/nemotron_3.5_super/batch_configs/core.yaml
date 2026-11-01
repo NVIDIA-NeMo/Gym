@@ -8,9 +8,18 @@ config_paths:
   - benchmarks/nemotron_3.5_super/shared_model_endpoints.yaml
 
 num_samples_in_parallel: 512
+# A run's num_repeats replaces each benchmark's own, so every benchmark that repeats is listed here.
 num_repeats:
   apex_shortlist_math_with_judge_simple_agent: 16
   lmarena_v2_benchmark_agent: 3
+  aalcr_benchmark_simple_agent: 16
+  gpqa_mcqa_simple_agent: 8
+  ifbench_benchmark_simple_agent: 8
+  livecodebench_v6_cascade_code_gen_simple_agent: 3
+  omniscience_omniscience_simple_agent: 10
+  scicode_benchmark_agent: 8
+  tau2_banking_knowledge_bm25_grep_artificial_analysis_agent: 8
+  tau2_benchmark_agent: 8
   _default: 1
 num_repeats_add_seed:
   apex_shortlist_math_with_judge_simple_agent: true
