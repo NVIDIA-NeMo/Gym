@@ -117,6 +117,7 @@ from nemo_gym.rollout_collection import (
 )
 from nemo_gym.rollout_records import (
     coverage_path_for,
+    prepare_append,
 )
 from nemo_gym.rollout_records import (
     journal_path_for as rollout_attempts_path_for,
@@ -154,6 +155,8 @@ _OPERATIONAL_SERVER_FIELDS = frozenset({"concurrency"})
 # return ``(row, result)`` pairs (result == the agent's /run response, i.e. the
 # GDPVal verify response). Injected so tests can avoid real servers.
 RolloutRunner = Callable[[List[Dict[str, Any]]], Awaitable[List[Tuple[Dict[str, Any], Dict[str, Any]]]]]
+# Receives each ``(row, result)`` pair as soon as it completes, before the runner returns.
+RolloutResultSink = Callable[[Dict[str, Any], Dict[str, Any]], None]
 AssignmentRepair = Callable[
     [int, Sequence[str], Mapping[str, str]],
     Tuple[Dict[str, str], Dict[str, Any]],
@@ -1003,6 +1006,7 @@ async def run_multistage_stages(
     resume: Optional[StageResume] = None,
     dispatch_longest_first: bool = False,
     assignment_repair: Optional[AssignmentRepair] = None,
+    runner_reports_each_result: bool = False,
 ) -> Tuple[List[Dict[str, Any]], List[Dict[str, Any]]]:
     """Run every stage and return ``(all_result_rows, stage_summaries)``.
 
@@ -1028,6 +1032,11 @@ async def run_multistage_stages(
     reference assignment) are replayed so selection is identical even when
     ``multistage.seed`` is ``None``. ``resume=None`` preserves the same execution
     semantics without file-backed persistence.
+
+    With ``runner_reports_each_result``, ``run_rollouts`` takes a keyword-only
+    ``on_result`` :data:`RolloutResultSink` and calls it for each pair as it
+    completes. Each row is then saved through ``resume.on_rows`` at once, so a
+    job killed mid-batch keeps the rows that already returned.
     """
     base_rng = rng or (
         random.Random(multistage_config.seed) if multistage_config.seed is not None else random.Random()
@@ -1076,6 +1085,46 @@ async def run_multistage_stages(
 
     max_attempts = get_max_rollout_attempts()
     retry_inprocess = bool(getattr(multistage_config, "retry_inprocess", False))
+
+    async def run_and_save(
+        index: int, rows: List[Dict[str, Any]], expected_stage_row_count: int, *, save_no_persist: bool = True
+    ) -> List[Dict[str, Any]]:
+        """Run ``rows`` and return their tagged results, each saved once through ``resume.on_rows``.
+
+        Rows a reporting runner hands to ``on_result`` are saved as they complete;
+        the others are saved when the batch returns. Without ``save_no_persist``,
+        no-persist rows are not saved, so a drained retry journals no tombstone.
+        """
+
+        def tag(pairs: Sequence[Tuple[Mapping[str, Any], Mapping[str, Any]]]) -> List[Dict[str, Any]]:
+            return tag_results(
+                pairs,
+                index,
+                expected_final_stage_index=total_stages - 1,
+                expected_stage_row_count=expected_stage_row_count,
+            )
+
+        def save(tagged: List[Dict[str, Any]]) -> None:
+            if not save_no_persist:
+                tagged = [row for row in tagged if not row.get(NG_NO_PERSIST_KEY)]
+            if resume is not None and tagged:
+                resume.on_rows(index, tagged)
+
+        if not runner_reports_each_result:
+            tagged = tag(await run_rollouts(rows))
+            save(tagged)
+            return tagged
+
+        saved_keys: set[Tuple[Any, Any]] = set()
+
+        def on_result(row: Dict[str, Any], result: Dict[str, Any]) -> None:
+            save(tag([(row, result)]))
+            saved_keys.add(_stage_key(row))
+
+        tagged = tag(await run_rollouts(rows, on_result=on_result))
+        save([row for row in tagged if _stage_key(row) not in saved_keys])
+        return tagged
+
     for index, stage in enumerate(multistage_config.stages):
         # A sidecar reuse flag is emitted only after the policy artifact exists.
         # Treat it as produced from this stage onward even when the judging row
@@ -1267,16 +1316,12 @@ async def run_multistage_stages(
             replayed=replayed,
         )
 
-        pairs = [] if pre_dispatch_partial_outcome is not None else await run_rollouts(pending_rows)
         expected_stage_row_count = len(stage_rows)
-        new_tagged = tag_results(
-            pairs,
-            index,
-            expected_final_stage_index=total_stages - 1,
-            expected_stage_row_count=expected_stage_row_count,
+        new_tagged = (
+            []
+            if pre_dispatch_partial_outcome is not None
+            else await run_and_save(index, pending_rows, expected_stage_row_count)
         )
-        if resume is not None:
-            resume.on_rows(index, new_tagged)
 
         # In-process retry: re-dispatch rows that came back retryable, applying the
         # same gate a resume would (success / terminal / max-attempt), until the cap
@@ -1288,7 +1333,7 @@ async def run_multistage_stages(
         # key is: attempts recorded at startup + this leg's initial dispatch + the
         # in-process retries made below.
         inprocess_attempts: Dict[Tuple[Any, Any], int] = {}
-        if retry_inprocess and pairs and resume is not None:
+        if retry_inprocess and new_tagged and resume is not None:
             startup_attempts = resume.attempts_by_stage.get(index, {})
             startup_budget = resume.budget_by_stage.get(index, {})
             # Sticky for the whole stage: once a key is known to have a reusable
@@ -1324,13 +1369,7 @@ async def run_multistage_stages(
                     inprocess_attempts[key] = inprocess_attempts.get(key, 0) + 1
                 if not retry_rows:
                     break
-                retry_pairs = await run_rollouts(retry_rows)
-                retried = tag_results(
-                    retry_pairs,
-                    index,
-                    expected_final_stage_index=total_stages - 1,
-                    expected_stage_row_count=expected_stage_row_count,
-                )
+                retried = await run_and_save(index, retry_rows, expected_stage_row_count, save_no_persist=False)
                 # Once the dispatch budget is gone every row comes back drained
                 # without a POST. A drained row means "we never got to try", not
                 # "the earlier persisted attempt is void": it must neither become
@@ -1340,8 +1379,6 @@ async def run_multistage_stages(
                 # partial-outcome shortcut for that key.
                 dispatched = [r for r in retried if not r.get(NG_NO_PERSIST_KEY)]
                 num_drained = len(retried) - len(dispatched)
-                if dispatched:
-                    resume.on_rows(index, dispatched)
                 _emit(
                     "stage_retry",
                     index=index,
@@ -1454,15 +1491,7 @@ async def run_multistage_stages(
 
                 replacement_ids = {item["after"] for item in round_replacements}
                 replacement_rows = [row for row in stage_rows if row_task_id(row) in replacement_ids]
-                replacement_pairs = await run_rollouts(replacement_rows)
-                replacement_tagged = tag_results(
-                    replacement_pairs,
-                    index,
-                    expected_final_stage_index=total_stages - 1,
-                    expected_stage_row_count=len(stage_rows),
-                )
-                if resume is not None:
-                    resume.on_rows(index, replacement_tagged)
+                replacement_tagged = await run_and_save(index, replacement_rows, len(stage_rows))
                 new_tagged.extend(replacement_tagged)
                 _emit(
                     "stage_transport_replacement",
@@ -2584,7 +2613,9 @@ async def run_e2e_multistage(
             _attach_trajectory_record(row, result)
         _attach_ng_perf(result, observability_enabled=observability_enabled, rollout_latency_ms=rollout_latency_ms)
 
-    async def verify_cached(row: Dict[str, Any], semaphore: Any, server_client: Any) -> Tuple[Dict, Optional[Dict]]:
+    async def verify_cached(
+        row: Dict[str, Any], semaphore: Any, server_client: Any, on_result: RolloutResultSink
+    ) -> Tuple[Dict, Optional[Dict]]:
         """Score a deliverable an earlier stage produced, without running the policy again.
 
         The result is None when the resources server holds no deliverable for the row.
@@ -2616,9 +2647,12 @@ async def run_e2e_multistage(
             iter(server_client.global_config_dict[environment_server]["environment_servers"])
         )
         attach_rollout_evidence(row, result, (time.time() - started_at) * 1000)
+        on_result(row, result)
         return row, result
 
-    async def dispatch(rows: List[Dict[str, Any]], semaphore: Any) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    async def dispatch(
+        rows: List[Dict[str, Any]], semaphore: Any, on_result: RolloutResultSink
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         results: List[Tuple[Dict[str, Any], Dict[str, Any]]] = []
         if not rows:
             return results
@@ -2626,15 +2660,8 @@ async def run_e2e_multistage(
         if dispatch_budget_s is not None:
             remaining_budget_s = max(0.0, dispatch_budget_s - (time.monotonic() - dispatch_started_at))
         clear_model_call_captures_for_rollouts(rows, capture_dirs)
-        for future in helper._run_examples_with_metadata(
-            rows,
-            semaphore=semaphore,
-            dispatch_budget_s=remaining_budget_s,
-            drain_margin_s=drain_margin_s,
-            latency_tracker=latency_tracker,
-            route_failures_to_sidecar=route_failures_to_sidecar,
-        ):
-            completed = await future
+
+        def finish(completed: Any) -> None:
             # A failure while verifying comes after the rollout, so a retry judges the persisted deliverable;
             # without one, /verify answers 404 and the policy runs again.
             if (
@@ -2647,12 +2674,34 @@ async def run_e2e_multistage(
             if completed.environment_server_type is not None:
                 completed.result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
             attach_rollout_evidence(completed.row, completed.result, completed.rollout_latency_ms)
+            on_result(completed.row, completed.result)
             results.append((completed.row, completed.result))
+
+        completions = helper._run_examples_with_metadata(
+            rows,
+            semaphore=semaphore,
+            dispatch_budget_s=remaining_budget_s,
+            drain_margin_s=drain_margin_s,
+            latency_tracker=latency_tracker,
+            route_failures_to_sidecar=route_failures_to_sidecar,
+        )
+        try:
+            for future in completions:
+                finish(await future)
+        except BaseException:
+            # One raising rollout ends the batch; save the siblings that finished but were not consumed yet.
+            if hasattr(completions, "aclose_and_drain"):
+                for settled in await completions.aclose_and_drain():
+                    if not settled.cancelled() and settled.exception() is None:
+                        finish(settled.result())
+            raise
         return results
 
     outcomes_recorded = 0
 
-    async def run_rollouts(rows: List[Dict[str, Any]]) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
+    async def run_rollouts(
+        rows: List[Dict[str, Any]], *, on_result: RolloutResultSink
+    ) -> List[Tuple[Dict[str, Any], Dict[str, Any]]]:
         nonlocal outcomes_recorded
         semaphore = None
         if semaphore_size:
@@ -2669,16 +2718,18 @@ async def run_e2e_multistage(
             helper.resolve_task_sources(
                 [row for row in reused if NG_ENVIRONMENT_SERVER_KEY not in row], server_client.global_config_dict
             )
-        judging = asyncio.gather(*(verify_cached(row, semaphore, server_client) for row in reused))
+        judging = asyncio.gather(*(verify_cached(row, semaphore, server_client, on_result) for row in reused))
         try:
-            results = await dispatch([row for row in rows if not row.get("reuse_cached_deliverable")], semaphore)
+            results = await dispatch(
+                [row for row in rows if not row.get("reuse_cached_deliverable")], semaphore, on_result
+            )
         except BaseException:
             judging.cancel()
             raise
         judged = await judging
         results.extend((row, result) for row, result in judged if result is not None)
         # No deliverable was persisted for these rows, so the policy runs, as old Stirrup did.
-        results.extend(await dispatch([row for row, result in judged if result is None], semaphore))
+        results.extend(await dispatch([row for row, result in judged if result is None], semaphore, on_result))
         outcomes_recorded += sum(
             not result.get(NG_NO_PERSIST_KEY)
             and (
@@ -2741,6 +2792,7 @@ async def run_e2e_multistage(
         resume=resume,
         dispatch_longest_first=bool(getattr(rollout_collection_config, "dispatch_longest_first", False)),
         assignment_repair=assignment_repair,
+        runner_reports_each_result=True,
     )
 
     print(latency_tracker.summary())
@@ -2790,6 +2842,11 @@ def _prepare_resume(
     import sys
 
     resume_requested = bool(getattr(rollout_collection_config, "resume_from_cache", False))
+    if resume_requested:
+        # Rows are appended as each rollout completes, so a kill can cut the last line short.
+        for path in (output_fpath, failures_path_for(output_fpath), journal_fpath):
+            if path.exists():
+                prepare_append(path)
     if not resume_requested:
         reason = "resume_from_cache not set"
     elif not output_fpath.exists() or not journal_fpath.exists():
