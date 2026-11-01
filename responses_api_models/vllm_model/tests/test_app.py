@@ -28,12 +28,14 @@ from aiohttp import ClientResponseError, RequestInfo
 from fastapi import HTTPException, Response
 from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
+from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
 import nemo_gym.server_utils
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -4690,6 +4692,70 @@ class TestVLLMConverter:
         assert captured_kwargs["guided_json"] == '{"type": "object"}'
         assert captured_kwargs["min_tokens"] == 20
         assert captured_kwargs["new_param"] == "value"
+
+    def test_benchmark_extra_body_survives_model_type_config_and_reaches_vllm(self, tmp_path) -> None:
+        # `gym eval run --benchmark <b> --model-type vllm_model` merges the vllm_model config after the benchmark
+        # config; the per-request budget and template kwargs a benchmark sets must still reach the engine.
+        benchmark_settings = {
+            "extra_body": {"thinking_token_budget": 17408},
+            "chat_template_kwargs": {"enable_thinking": True},
+        }
+        benchmark_config = tmp_path / "config.yaml"
+        benchmark_config.write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": benchmark_settings}}})
+        )
+        model_type_config = PARENT_DIR / "responses_api_models/vllm_model/configs/vllm_model.yaml"
+        resolved = GlobalConfigDictParser().parse(
+            GlobalConfigDictParserConfig(
+                initial_global_config_dict=DictConfig(
+                    {
+                        "config_paths": [str(benchmark_config), str(model_type_config)],
+                        "policy_base_url": "http://api.openai.com/v1",
+                        "policy_api_key": "dummy_key",  # pragma: allowlist secret
+                        "policy_model_name": "dummy_model",
+                    }
+                ),
+                skip_load_from_cli=True,
+                skip_load_from_dotenv=True,
+                offline=True,
+            )
+        )
+        block = OmegaConf.to_container(resolved["policy_model"]["responses_api_models"]["vllm_model"], resolve=True)
+        config = VLLMModelConfig.model_validate({"name": "policy_model", **block})  # the parser assigns host/port
+        server = VLLMModel(config=config, server_client=MagicMock(spec=ServerClient, global_config_dict={}))
+        app = server.setup_webserver()
+
+        mock_chat_completion = NeMoGymChatCompletion(
+            id="chtcmpl",
+            object="chat.completion",
+            created=FIXED_TIME,
+            model="dummy_model",
+            choices=[
+                NeMoGymChoice(
+                    index=0,
+                    finish_reason="stop",
+                    message=NeMoGymChatCompletionMessage(role="assistant", content="response", tool_calls=[]),
+                )
+            ],
+        )
+        captured_kwargs = {}
+
+        async def mock_create_chat_completion(**kwargs):
+            captured_kwargs.update(kwargs)
+            return mock_chat_completion.model_dump()
+
+        mock_client = MagicMock(spec=NeMoGymAsyncOpenAI)
+        mock_client.create_chat_completion = AsyncMock(side_effect=mock_create_chat_completion)
+        server._clients = [mock_client]
+
+        request = NeMoGymResponseCreateParamsNonStreaming(
+            input=[NeMoGymEasyInputMessage(type="message", role="user", content="hello")]
+        )
+        response = TestClient(app).post("/v1/responses", json=request.model_dump(exclude_unset=True, mode="json"))
+
+        assert response.status_code == 200
+        assert captured_kwargs["thinking_token_budget"] == 17408
+        assert captured_kwargs["chat_template_kwargs"] == {"enable_thinking": True}
 
 
 # ──────────────────────────────────────────────────────────────────────────────
