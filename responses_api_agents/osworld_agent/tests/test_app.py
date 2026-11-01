@@ -2358,3 +2358,97 @@ def test_child_result_usage_is_unknown_when_a_finished_response_lost_its_usage(u
     assert result["usage"] is None
     response = _build_response(make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), result, "test-policy", 1.0, 0.9)
     assert response.response.usage is None
+
+
+def _start_timeout_result(http_status: Optional[int] = 502) -> Dict[str, Any]:
+    """What run_osworld_task returns when the sandbox guest never became ready."""
+    return DEFAULT_RUN_RESULT | {
+        "reward": 0.0,
+        "score": 0.0,
+        "finished": False,
+        "steps": [],
+        "evaluation_completed": False,
+        "runtime_eligible": False,
+        "runtime_admission_reason": "rollout_error",
+        "mask_sample": True,
+        "termination_reason": "rollout_error",
+        "error": "RuntimeError: environment start failed\nTraceback (most recent call last): ...",
+        "sandbox_start_failure": {
+            "provider": "docker",
+            "http_status": http_status,
+            "message": f"OSWorld guest did not become ready within 900s: HTTP {http_status}, bytes=0",
+            "sandbox_id": "sbx-1",
+        },
+    }
+
+
+def test_a_sandbox_start_timeout_is_a_typed_infrastructure_error_row() -> None:
+    response = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), _start_timeout_result(), "test-policy", 1.0, 0.9
+    )
+    row = response.model_dump(mode="json")
+
+    assert (row["failure_kind"], row["_ng_failure_class"]) == ("infrastructure_error", "infrastructure_error")
+    assert (row["reward"], row["mask_sample"], row["evaluation_completed"]) == (0.0, True, False)  # no score change
+    assert (row["sandbox_provider"], row["sandbox_http_status"], row["sandbox_id"]) == ("docker", 502, "sbx-1")
+    event = row["_ng_failure_events"][row["_ng_failure_id"]]
+    assert event["operation_id"] == "sbx-1"
+    assert (event["boundary"], event["failure_kind"], event["operation"], event["http_status"]) == (
+        "agent",
+        "infrastructure_error",
+        "osworld.sandbox_start",
+        502,
+    )
+    assert event["failure_reason"] == (
+        "OSWorld sandbox start failed on provider=docker: "
+        "TimeoutError: OSWorld guest did not become ready within 900s: HTTP 502, bytes=0"
+    )
+
+
+def test_a_result_without_a_sandbox_start_failure_has_no_failure_fields() -> None:
+    row = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), DEFAULT_RUN_RESULT, "test-policy", 1.0, 0.9
+    ).model_dump(mode="json")
+    assert row.get("failure_kind") is None
+    assert not {"_ng_failure_class", "_ng_failure_events", "sandbox_provider"} & set(row)
+
+
+def test_a_sandbox_start_timeout_is_retried_within_the_attempt_cap_and_then_stops(tmp_path, monkeypatch) -> None:
+    from nemo_gym.rollout_recovery import RunManifest
+    from nemo_gym.rollout_store import RolloutStore
+
+    monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "2")
+    rows = [{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "agent_ref": {"name": "osworld"}}]
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(b"".join(json.dumps(row).encode() + b"\n" for row in rows))
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {"osworld": {"responses_api_agents": {}}})
+
+    output = tmp_path / "rollouts.jsonl"
+    failure = _build_response(
+        make_run_request(osworld_task=DEFAULT_OSWORLD_TASK), _start_timeout_result(), "test-policy", 1.0, 0.9
+    ).model_dump(mode="json")
+    for attempt in range(2):
+        with RolloutStore.start_or_resume(output, prepare, resume=attempt > 0) as store:
+            (row,) = store.pending()  # retried: the run still has a failure attempt for this task
+            store.record_dispatch(row)
+            store.record_outcome(row | failure)
+
+    with RolloutStore.start_or_resume(output, prepare, resume=True) as store:
+        assert store.pending() == []  # stopped: both attempts are spent
+        (saved,) = store.failures()
+        assert saved["failure_kind"] == "infrastructure_error" and saved["sandbox_http_status"] == 502
+
+
+def test_the_ray_child_carries_the_sandbox_start_failure_and_defaults_it_for_other_runners() -> None:
+    failure = {
+        "provider": "docker",
+        "http_status": 502,
+        "message": "OSWorld guest did not become ready within 900s: HTTP 502, bytes=0",
+    }
+
+    carried = _run_child(lambda task_config, **kwargs: _child_result(sandbox_start_failure=failure), [])
+    assert carried["sandbox_start_failure"] == failure
+    # A runner whose own result type has no such attribute still returns a result.
+    assert _run_child(lambda task_config, **kwargs: _child_result(), [])["sandbox_start_failure"] is None

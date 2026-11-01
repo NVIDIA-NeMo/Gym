@@ -24,6 +24,7 @@ import requests
 
 from nemo_gym.sandbox import Sandbox, SandboxEndpoint, SandboxSpec, SandboxStatus
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldGuestStartTimeoutError
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.sandbox_provider")
@@ -108,6 +109,12 @@ def _parse_plain_http_endpoint(resolved: SandboxEndpoint, port: int) -> tuple[st
 def _http_origin(host: str, port: int) -> str:
     formatted_host = f"[{host}]" if ":" in host else host
     return f"http://{formatted_host}:{port}"
+
+
+def _url_without_credentials(url: str) -> str:
+    """``url`` for a log: no user info, query or fragment, which can carry credentials."""
+    parts = urlsplit(url)
+    return parts._replace(netloc=parts.netloc.rpartition("@")[2], query="", fragment="").geturl()
 
 
 def _uses_remote_docker_daemon() -> bool:
@@ -369,19 +376,23 @@ class GymSandboxDesktopProvider:
     def _wait_for_vm_ready(self, sandbox: Sandbox, host: str, server_port: int) -> None:
         deadline = time.monotonic() + self._ready_timeout_s
         last_error = "guest readiness was not attempted"
+        last_status: int | None = None
+        last_body = b""
+        url = f"{_http_origin(host, server_port)}/screenshot"
         with requests.Session() as session:
             session.trust_env = False
             while time.monotonic() < deadline:
                 try:
-                    response = session.get(
-                        f"{_http_origin(host, server_port)}/screenshot",
-                        timeout=(5.0, 10.0),
-                    )
+                    response = session.get(url, timeout=(5.0, 10.0))
                     if response.status_code == 200 and response.content:
                         return
                     last_error = f"HTTP {response.status_code}, bytes={len(response.content)}"
+                    last_status = response.status_code
+                    last_body = response.content[:512]
                 except requests.RequestException as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
+                    last_status = None
+                    last_body = b""
 
                 status = sandbox.status()
                 if status in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
@@ -389,7 +400,14 @@ class GymSandboxDesktopProvider:
                         f"Gym Sandbox stopped before the OSWorld guest became ready: status={status.value}"
                     )
                 time.sleep(min(self._ready_poll_s, max(deadline - time.monotonic(), 0.0)))
-        raise TimeoutError(f"OSWorld guest did not become ready within {self._ready_timeout_s:g}s: {last_error}")
+        raise OSWorldGuestStartTimeoutError(
+            f"OSWorld guest did not become ready within {self._ready_timeout_s:g}s: {last_error}",
+            provider=self._sandbox_provider_name,
+            http_status=last_status,
+            sandbox_id=sandbox.sandbox_id,
+            url=_url_without_credentials(url),
+            body_head=last_body.decode("utf-8", errors="replace"),
+        )
 
     def start_emulator(self, path_to_vm: str, headless: bool, os_type: str) -> None:
         if self._sandbox is not None:
@@ -405,11 +423,18 @@ class GymSandboxDesktopProvider:
             # SYNC_OPERATION_TIMEOUT_S, an hour by default, and the raise below
             # is what carries the diagnosis -- so a slow cleanup does not just
             # delay recovery, it hides why the start failed for that whole hour.
+            readiness = ""
+            if isinstance(startup_error, OSWorldGuestStartTimeoutError):
+                readiness = (
+                    f" (sandbox_id={startup_error.sandbox_id} url={startup_error.url} "
+                    f"body={startup_error.body_head!r})"
+                )
             LOG.warning(
-                "OSWorld sandbox start failed on provider=%s: %s: %s",
+                "OSWorld sandbox start failed on provider=%s: %s: %s%s",
                 self._sandbox_provider_name,
                 type(startup_error).__name__,
                 startup_error,
+                readiness,
             )
             self._stop_forwarders()
             # Best-effort, and bounded: a cleanup that cannot finish must not

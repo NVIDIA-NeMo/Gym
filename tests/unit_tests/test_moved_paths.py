@@ -96,6 +96,11 @@ def _runs() -> dict:
     return importlib.import_module("newpkg.counter").RUNS
 
 
+def _moved_path_warnings(caught: list[warnings.WarningMessage]) -> list[warnings.WarningMessage]:
+    """The moved-path deprecations among the captured warnings, ignoring unrelated ones."""
+    return [w for w in caught if w.category is DeprecationWarning and " moved to `" in str(w.message)]
+
+
 class TestMovedModuleFinder:
     def test_old_path_is_the_new_module(self, moved_tree) -> None:
         with pytest.warns(DeprecationWarning):
@@ -167,7 +172,8 @@ class TestMovedModuleFinder:
         with warnings.catch_warnings(record=True) as caught:
             warnings.simplefilter("always")
             importlib.import_module("oldpkg.mod")
-        [warning] = caught
+        # Other packages may warn during the import too; check only the moved-path warning.
+        [warning] = _moved_path_warnings(caught)
         message = str(warning.message)
         assert warning.category is DeprecationWarning
         assert "`oldpkg.mod` moved to `newpkg.sub.mod` in nemo_gym 0.8.0" in message
@@ -180,7 +186,7 @@ class TestMovedModuleFinder:
             warnings.simplefilter("always")
             importlib.import_module("oldpkg.mod")
             importlib.import_module("oldpkg.mod")
-        assert len(caught) == 1
+        assert len(_moved_path_warnings(caught)) == 1
 
     def test_find_spec_of_old_path_points_at_the_new_file(self, moved_tree, tmp_path: Path) -> None:
         # find_spec imports the parent packages, which are old paths too.
