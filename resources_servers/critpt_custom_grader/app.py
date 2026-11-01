@@ -146,6 +146,7 @@ class CritPtCustomGraderConfig(BaseResourcesServerConfig):
     comparison: ComparisonDefaults = Field(default_factory=ComparisonDefaults)
     reference_cache_dir: str | None = None
     startup_probe: bool = True
+    score_comparator_uncertain_as_incorrect: bool = False
     verified: bool = False
     description: str | None = None
     value: str | None = None
@@ -510,6 +511,16 @@ class CritPtCustomGraderServer(SimpleResourcesServer):
         if result.outcome == "unscorable" and result.reward is None and result.category in UNSCORABLE_CATEGORIES:
             failure_class, terminal = UNSCORABLE_CATEGORIES[result.category]
             if result.failure_class == failure_class and result.terminal is terminal:
+                if (
+                    self.config.score_comparator_uncertain_as_incorrect
+                    and counts_valid
+                    and result.category == "comparator_uncertain"
+                    and body.response.get("status") == "completed"
+                    and body.response.get("output")
+                ):
+                    return self._response(
+                        body, task, result.category, scored=True, cleanup=cleanup, sandboxes=observations
+                    )
                 return self._response(
                     body, task, result.category, terminal=terminal, cleanup=cleanup, sandboxes=observations
                 )

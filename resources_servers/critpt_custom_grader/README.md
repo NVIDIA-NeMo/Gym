@@ -125,6 +125,12 @@ whatever the outcome. A failed check refuses to serve and names one of seven cat
   print plain digits; or the bounded download failed or returned other bytes.
 - `provider_exec`: only the `id -u` or the import-check command raised, or the host's bounded wait on it expired.
 
+`score_comparator_uncertain_as_incorrect: true` opts into scoring completed answers
+with `comparator_uncertain` as zero, while retaining that category for separate reporting.
+Those rows are unmasked and do not trigger regeneration on resume. The default is false;
+reference faults and provider failures remain unscored in either mode.
+Record this option in the evaluation protocol when comparing results.
+
 `startup_probe: false` skips the startup sandbox and its checks, but not the `image_missing` check. Gym gives every
 server `server_spinup_timeout_seconds` (default 600 s) to become ready and the probe's sandbox create counts against
 it, so on a provider with a slow first image pull raise it above `execution.create_timeout_s` plus a margin, for

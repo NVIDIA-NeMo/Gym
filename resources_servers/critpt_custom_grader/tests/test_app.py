@@ -325,6 +325,20 @@ async def test_every_unscorable_category_masks_the_sample_and_keeps_its_name(mak
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("category", NONTERMINAL_CATEGORIES + TERMINAL_CATEGORIES)
+async def test_explicit_uncertainty_policy_scores_only_comparator_uncertainty(make_server, category):
+    _, app, _ = make_server(grade=unscorable_verdict(category), score_comparator_uncertain_as_incorrect=True)
+    status, result = await post(app, "/verify", payload())
+    assert status == 200 and result["category"] == category
+    if category == "comparator_uncertain":
+        assert result["reward"] == 0.0 and result["scored"] is True and result["mask_sample"] is False
+        assert "_ng_failure_class" not in result
+        assert result["response"] == saved_response()
+    else:
+        assert_unscorable(result, terminal=UNSCORABLE_CATEGORIES[category][1])
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("category", sorted(FAILED_CATEGORIES))
 async def test_scored_zero_rows_are_not_masked_and_carry_no_failure_keys(make_server, category):
     extra = (
