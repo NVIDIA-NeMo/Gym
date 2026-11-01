@@ -90,6 +90,33 @@ _gym_stop_accounting_unknown() {{
     _gym_stop_incomplete "$1"
 }}
 
+# The previous job queues a sentinel next to its follow-up F (afterany:F). F records itself in the chain before
+# anything else, so a sentinel only acts when F started and ended unrecorded: F died before its prologue ran.
+# The variable is read once and unset, so the follow-up and sentinel queued below are ordinary hops.
+_gym_sentinel_for="${{GYM_FOLLOWUP_SENTINEL:-}}"
+unset GYM_FOLLOWUP_SENTINEL
+_gym_sentinel_takeover=""
+if [[ -n "$_gym_sentinel_for" ]]; then
+    if grep -qxF -- "$_gym_sentinel_for" "$OUTPUT_DIR/{job_chain_name}" 2>/dev/null; then
+        echo "Follow-up $_gym_sentinel_for recorded itself in the chain; sentinel ${{SLURM_JOB_ID:-}} has nothing to do."
+        exit 0
+    fi
+    _gym_sentinel_elapsed=""
+    for _sacct_try in 1 2 3 4 5 6; do
+        _gym_sentinel_elapsed=$(sacct -X -P -n -j "$_gym_sentinel_for" --format=ElapsedRaw 2>/dev/null) || _gym_sentinel_elapsed=""
+        [[ "$_gym_sentinel_elapsed" =~ ^[0-9]{{1,15}}$ ]] && break
+        sleep 10
+    done
+    [[ "$_gym_sentinel_elapsed" =~ ^[0-9]{{1,15}}$ ]] || \
+        _gym_stop_accounting_unknown "Follow-up $_gym_sentinel_for accounting is unknown; its sentinel cannot tell whether it ran."
+    if (( 10#$_gym_sentinel_elapsed == 0 )); then
+        echo "Follow-up $_gym_sentinel_for never started (it was cancelled); sentinel ${{SLURM_JOB_ID:-}} leaves the chain as it is."
+        exit 0
+    fi
+    echo "Follow-up $_gym_sentinel_for ended after ${{_gym_sentinel_elapsed}}s before it recorded itself; sentinel ${{SLURM_JOB_ID:-}} continues the chain in its place."
+    _gym_sentinel_takeover=1
+fi
+
 {allocation_accounting_marker}
 # Every started allocation is spent history, including one that stops in a guard below.
 # Keep it before any reset or accounting query; a later reader must account for this allocation too.
@@ -241,6 +268,9 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
         _gym_stop_incomplete "$_gym_stop_reason"
     fi
 fi
+# The infrastructure ended the follow-up this sentinel replaces, so the takeover is an infra retry: dying
+# follow-ups spend the chain's retry budget and stop at its cap instead of continuing without end.
+[[ -z "$_gym_sentinel_takeover" ]] || _gym_needs_retry=1
 # Admission can identify a retry only after reading the authoritative saved outcomes.
 if [[ "$_gym_needs_retry" == 1 && $_retries -ge $_gym_max_retries ]]; then
     _gym_stop_incomplete "Infra retry limit ($_gym_max_retries) reached. Stopping."
@@ -291,6 +321,16 @@ if [[ $_gym_queue_followup == 1 ]]; then
         if [[ "$_next_id" =~ ^[0-9]+$ ]]; then
             echo "$_next_id" > "$_guard_marker" || _gym_stop_accounting_unknown "Cannot preserve the queued follow-up identity."
             echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
+            # Its sentinel continues the chain if the follow-up dies before its prologue records it (see the top).
+            if _sentinel_output=$(GYM_FOLLOWUP_SENTINEL=$_next_id sbatch --dependency=afterany:$_next_id --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
+                _sentinel_id="${{_sentinel_output##* }}"
+                if [[ "$_sentinel_id" =~ ^[0-9]+$ ]]; then
+                    echo "$_sentinel_id" > "$OUTPUT_DIR/.gym_followup_sentinel.$SLURM_JOB_ID" || true
+                fi
+                echo "Follow-up sentinel queued: $_sentinel_id (afterany:$_next_id)"
+            else
+                echo "WARNING: Failed to queue the follow-up sentinel; a follow-up that dies before its prologue ends the chain."
+            fi
         else
             echo "{accounting_unknown_prefix} Follow-up submission returned no unique job identity." > "$_incomplete_file"
         fi
