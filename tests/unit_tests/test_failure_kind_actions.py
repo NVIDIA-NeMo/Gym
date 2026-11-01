@@ -148,6 +148,46 @@ def test_a_failure_with_no_answer_is_retried_only_when_no_grade_was_recorded(gra
         )
 
 
+_EMPTY_PARTIAL = {"object": "response", "id": "resp-partial", "status": None, "output": []}
+
+
+@pytest.mark.parametrize(
+    "row,action,label",
+    [
+        # 1. A completed grade: the verifier graded the attempt, so it is a graded result and is kept.
+        (
+            _harness_unconfirmed(evaluation_completed=True),
+            "stop",
+            "harness_termination_unconfirmed: the verifier recorded a grade that a rerun would replace",
+        ),
+        # 2. A partial native response from the cleanup, even without output items: the agent ran; it is kept.
+        (
+            _harness_unconfirmed(_ng_failure_partial_response=_EMPTY_PARTIAL),
+            "stop",
+            f"harness_termination_unconfirmed: {_KEPT}",
+        ),
+        # 3. A placeholder zero (no completed evaluation, masked) with no kept answer is retried within the cap.
+        (_harness_unconfirmed(reward=0.0, evaluation_completed=False, mask_sample=True), "resubmit", None),
+        (_sandbox_create_rejected(reward=0.0, evaluation_completed=False, mask_sample=True), "resubmit", None),
+    ],
+    ids=[
+        "completed-grade-kept",
+        "partial-native-response-kept",
+        "placeholder-zero-retried",
+        "placeholder-zero-sandbox-retried",
+    ],
+)
+def test_the_three_protection_cases(row, action, label):
+    decision = _decide(row)
+    assert decision.action.value == action, decision.reason
+    if label is None:
+        assert decision.counts == {"scored": 1, "retryable": 1}
+    else:
+        assert decision.reason.endswith(
+            f"retryable 0 (resumed), unknown 1 (1 {label}) (reported, not retried), retained 1 (saved rows kept)"
+        )
+
+
 def test_a_failure_with_no_kind_anywhere_stops_and_says_so():
     decision = _decide({"_ng_failure_class": "unowned_class"})
     assert decision.action.value == "stop"

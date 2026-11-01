@@ -348,9 +348,14 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
 
 def _replay_refusal(row: Mapping[str, Any]) -> str | None:
     """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
-    from nemo_gym.rollout_recovery import has_recorded_grade, has_saved_generation, has_unclassified_execution_failure
+    from nemo_gym.rollout_recovery import (
+        has_recorded_grade,
+        has_saved_generation,
+        has_unclassified_execution_failure,
+        keeps_partial_response,
+    )
 
-    if has_saved_generation(row) or _saved_answer(row):
+    if has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row):
         return "the row kept an answer that a rerun would replace"
     if has_recorded_grade(row):
         return "the verifier recorded a grade that a rerun would replace"
