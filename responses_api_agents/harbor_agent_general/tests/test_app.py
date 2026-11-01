@@ -380,6 +380,17 @@ def test_failure_response_uses_native_agent_model(agent: HarborAgent, tmp_path: 
     response = agent.failure_response(body, RuntimeError("trial failed"))
     assert response.response.model == "native-model"
     assert response.response.status == "failed"
+    assert response.failure_reason == "RuntimeError: trial failed"
+
+    # A Ray task error wraps the worker's exception: the reason names Harbor's own failure, not the wrapper.
+    trial = RuntimeError("Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds")
+    wrapped = RuntimeError("ray task traceback ...")
+    wrapped.cause = trial
+    timed_out = agent.failure_response(body, wrapped)
+    assert timed_out.failure_reason == (
+        "RuntimeError: Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds"
+    )
+    assert timed_out.model_dump()["_ng_failure_class"] == "harbor_failed"
 
 
 @pytest.mark.parametrize("fails", [False, True])

@@ -651,6 +651,10 @@ class HarborAgent(SimpleResponsesAPIAgent):
             tools=[],
             status="failed",
         )
+        # A Ray task error wraps the worker's exception; its message names Harbor's own failure, for example
+        # "Harbor trial failed with AgentTimeoutError: Agent execution timed out after 1800.0 seconds".
+        cause = getattr(err, "cause", None) or err
+        reason = " ".join(f"{type(cause).__name__}: {cause}".split())
         return HarborVerifyResponse.model_validate(
             body.model_dump(by_alias=True)
             | {
@@ -658,6 +662,7 @@ class HarborAgent(SimpleResponsesAPIAgent):
                 "reward": 0.0,
                 NG_FAILURE_CLASS_KEY: "harbor_failed",
                 "error": f"{type(err).__name__}: {err}",
+                "failure_reason": reason[:500],
             }
         )
 

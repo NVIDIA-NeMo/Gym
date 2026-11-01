@@ -2,6 +2,9 @@
 # SPDX-License-Identifier: Apache-2.0
 
 skillsbench_max_input_tokens: 131072
+# One policy request's limit inside the agent (OpenHands' own default is 300 s); a leaf with a slower policy
+# sets it to that policy's request budget.
+skillsbench_llm_timeout_s: 3600
 
 skillsbench_harbor_agent:
   responses_api_agents:
@@ -27,6 +30,9 @@ skillsbench_harbor_agent:
       harbor_resolve_paths_from_gym_root: true
       harbor_unique_job_names: true
       job:
+        # The agent limit is each task's own [agent] timeout_sec (300 s to 3600 s), part of the benchmark; Harbor
+        # scales it by this multiplier, which stays 1.0 unless a reviewed config changes it.
+        agent_timeout_multiplier: 1.0
         jobs_dir: results/skillsbench/harbor_jobs
         datasets:
         - path: benchmarks/skillsbench/data/tasks
@@ -36,6 +42,8 @@ skillsbench_harbor_agent:
           kwargs:
             skill_mode: ${oc.env:SKILLSBENCH_SKILL_MODE,with-skill}
             max_turns: 100
+            llm_timeout_s: ${skillsbench_llm_timeout_s}
+            llm_num_retries: 5
             temperature: 1.0
             top_p: 0.95
             model_info:

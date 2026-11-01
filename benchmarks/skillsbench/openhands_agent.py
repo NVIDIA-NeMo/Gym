@@ -229,6 +229,8 @@ class SkillsBenchOpenHands(BaseAgent):
         top_p: float = 0.95,
         model_info: dict[str, int] | None = None,
         responses_create_params: dict[str, Any] | None = None,
+        llm_timeout_s: int = 3600,
+        llm_num_retries: int = 5,
         **kwargs: Any,
     ) -> None:
         super().__init__(logs_dir=logs_dir, model_name=model_name, **kwargs)
@@ -242,6 +244,10 @@ class SkillsBenchOpenHands(BaseAgent):
         self.temperature = (responses_create_params or {}).get("temperature", temperature)
         self.top_p = (responses_create_params or {}).get("top_p", top_p)
         self.model_info = dict(model_info or {})
+        # One policy request may take as long as the policy's own request budget (OpenHands' default is 300 s, which a
+        # slow but healthy policy exceeds); the retry count is OpenHands' default.
+        self.llm_timeout_s = llm_timeout_s
+        self.llm_num_retries = llm_num_retries
         limit = (responses_create_params or {}).get("max_output_tokens")
         if limit is not None:
             self.model_info["max_output_tokens"] = limit
@@ -340,6 +346,8 @@ class SkillsBenchOpenHands(BaseAgent):
             top_p=self.top_p,
             max_input_tokens=self.model_info.get("max_input_tokens", 131072),
             max_output_tokens=self.model_info.get("max_output_tokens", 32768),
+            timeout=self.llm_timeout_s,
+            num_retries=self.llm_num_retries,
         )
 
         skills = []
