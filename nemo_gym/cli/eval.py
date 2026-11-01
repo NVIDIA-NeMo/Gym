@@ -21,7 +21,7 @@ import site
 import subprocess
 import sys
 import sysconfig
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from multiprocessing import Pool
 from pathlib import Path
@@ -640,6 +640,7 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(driver_fn(rollout_collection_config, resolved_config))
         else:
             asyncio.run(rch.run_from_config(rollout_collection_config))
+            _rejudge_saved_judge_failures(global_config_dict, output_fpath, rollout_collection_config)
         collection_completed = True
     except KeyboardInterrupt:
         interrupted = True
@@ -984,6 +985,45 @@ def _check_saved_completion(output: Path) -> None:
             )
 
 
+def _rejudge_saved_judge_failures(
+    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any
+) -> None:
+    """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
+
+    Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``). A pass
+    that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
+    """
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollout_reverification import rejudge_saved_judge_failures
+
+    # The CLI passes the resolved OmegaConf config; callers that build the config themselves pass a plain mapping.
+    if isinstance(global_config_dict, DictConfig):
+        run_config = OmegaConf.to_container(global_config_dict, resolve=True)
+    else:
+        run_config = dict(global_config_dict)
+    try:
+        scored = asyncio.run(rejudge_saved_judge_failures(run_config, output))
+    except Exception as error:  # an optional pass after the run is saved; recovery still sees the failures
+        print(f"Saved judge failures were not re-judged: {type(error).__name__}: {error}", flush=True)
+        return
+    if not scored:
+        return
+    print(f"Re-judged saved judge failures: {scored} more rollout(s) scored", flush=True)
+    if collection_config.disable_aggregation:
+        return
+    try:
+        aggregation = RolloutAggregationConfig.model_validate(
+            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+        )
+        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+    except Exception as error:  # the settled rows are saved; only the metrics file is behind them
+        print(
+            f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
+            f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
+            flush=True,
+        )
+
+
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
@@ -1007,6 +1047,7 @@ def collect_rollouts():  # pragma: no cover
     _interrupt_on_sigterm()
     try:
         asyncio.run(rch.run_from_config(config))
+        _rejudge_saved_judge_failures(global_config_dict, Path(config.output_jsonl_fpath), config)
         _check_collection_completion(
             Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
         )
