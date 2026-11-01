@@ -410,9 +410,18 @@ class TestRecoveryDriverMetrics:
         )
         calls = Counter()
 
-        async def post(server_name, url_path, json, *, _resend_after_disconnect, _max_num_tries):
-            assert _resend_after_disconnect is False
-            assert _max_num_tries == 1
+        async def post(
+            server_name,
+            url_path,
+            json,
+            *,
+            _resend_after_disconnect=True,
+            _max_num_tries,
+            _retry_other_errors,
+            _on_transport_failure,
+        ):
+            # One bounded resend of a connection lost before any reply; every other failure is raised at once.
+            assert (_resend_after_disconnect, _max_num_tries, _retry_other_errors) == (True, 2, False)
             index = json[TASK_INDEX_KEY_NAME]
             calls[index] += 1
             if index == 1 and calls[index] == 1:
@@ -677,6 +686,8 @@ class TestRolloutCollection:
             *,
             _resend_after_disconnect: bool = True,
             _max_num_tries: int | None = None,
+            _retry_other_errors: bool = True,
+            _on_transport_failure=None,
         ) -> FakeResponse:
             assert url_path == "/run"
             assert server_name == f"{json[AGENT_REF_KEY_NAME]['name']}_environment_server"

@@ -3713,12 +3713,16 @@ class RolloutCollectionHelper(BaseModel):
         }
         max_attempts = _get_max_rollout_attempts()
         maxed_out = {k for k, n in budget_used.items() if n >= max_attempts}
-        from nemo_gym.rollout_recovery import has_saved_generation, has_unclassified_execution_failure
+        from nemo_gym.rollout_recovery import (
+            has_recorded_grade,
+            has_saved_generation,
+            has_unclassified_execution_failure,
+        )
 
         unclassified = {
             k
             for k, row in latest_by_key.items()
-            if has_unclassified_execution_failure(row) or has_saved_generation(row)
+            if has_unclassified_execution_failure(row) or has_saved_generation(row) or has_recorded_grade(row)
         }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 

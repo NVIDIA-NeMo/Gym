@@ -20,6 +20,7 @@ import socket
 import struct
 
 import httpx
+import pytest
 from aiohttp import ClientSession
 from omegaconf import OmegaConf
 
@@ -28,7 +29,7 @@ import nemo_gym.rollout_collection as collection
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-from nemo_gym.rollout_recovery import RunManifest, has_saved_generation
+from nemo_gym.rollout_recovery import RunManifest, has_recorded_grade, has_saved_generation
 from nemo_gym.rollout_store import RolloutStore
 from tests.single_agent_turn_helpers import _environment_server, _request
 
@@ -65,7 +66,15 @@ def test_an_empty_response_object_is_not_a_kept_answer():
     assert has_saved_generation({"_ng_failure_response": _EMPTY | {"status": "completed"}})
 
 
-def test_the_store_retries_a_sandbox_failure_saved_with_an_empty_response(tmp_path):
+def test_a_completed_evaluation_is_a_recorded_grade():
+    assert has_recorded_grade({"evaluation_completed": True})
+    assert not has_recorded_grade({"evaluation_completed": False})
+    assert not has_recorded_grade({"reward": 0.0})  # collection never keeps a placeholder score
+
+
+@pytest.mark.parametrize("graded,pending", [(False, [1]), (True, [])], ids=["no-grade-retried", "graded-kept"])
+def test_the_store_retries_a_sandbox_failure_saved_with_an_empty_response(tmp_path, graded, pending):
+    """No kept answer and no recorded grade: a fresh retry. A recorded grade is a graded result: it is kept."""
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
@@ -93,10 +102,9 @@ def test_the_store_retries_a_sandbox_failure_saved_with_an_empty_response(tmp_pa
             "exception_type": "SandboxApiException",
         }
         # Rows saved before this change still carry the empty response object.
-        store.record_outcome(
-            row | _sandbox_credentials_rejected(_ng_failure_record=record, _ng_failure_response=_EMPTY)
-        )
-        assert [pending["_ng_attempt_index"] for pending in store.pending()] == [1]
+        saved = _sandbox_credentials_rejected(_ng_failure_record=record, _ng_failure_response=_EMPTY)
+        store.record_outcome(row | saved | {"evaluation_completed": graded})
+        assert [row["_ng_attempt_index"] for row in store.pending()] == pending
 
 
 async def test_a_run_with_routing_off_survives_a_connection_reset_before_any_reply(tmp_path, monkeypatch):

@@ -78,6 +78,15 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def has_recorded_grade(row: Mapping[str, Any]) -> bool:
+    """Whether the verifier finished grading this failed attempt, so it is a graded result and a rerun would replace it.
+
+    Collection keeps no reward on a failure row (a placeholder score is never a result), so the completed
+    evaluation is the grade's durable record. Only a row with neither a kept answer nor a recorded grade may run fresh.
+    """
+    return row.get("evaluation_completed") is True
+
+
 def holds_response(row: Mapping[str, Any]) -> bool:
     """Whether the row keeps a full or partial response object, usable as an answer or not."""
     return any(
