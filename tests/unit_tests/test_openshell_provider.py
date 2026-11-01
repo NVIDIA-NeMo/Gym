@@ -35,6 +35,7 @@ pytest.importorskip("openshell", reason="openshell optional dependency is not in
 import grpc  # noqa: E402  (grpcio ships with the openshell SDK)
 from openshell import SandboxError, SandboxRef, SandboxStatusRef  # noqa: E402
 from openshell._proto import openshell_pb2, sandbox_pb2  # noqa: E402
+from openshell.mutations import DeletionOutcome, DeletionResult  # noqa: E402
 
 from nemo_gym.sandbox.providers.openshell import provider as openshell_provider  # noqa: E402
 from nemo_gym.sandbox.providers.openshell.provider import (  # noqa: E402
@@ -90,7 +91,7 @@ def make_exec_result(exit_code: int = 0, stdout: str = "", stderr: str = "") -> 
 class FakeClient:
     """Records SDK calls and replays queued results (a queued Exception is raised; the last entry repeats).
 
-    Method signatures mirror openshell's ``SandboxClient`` (0.0.92+): ``workspace`` is a
+    Method signatures mirror openshell's ``SandboxClient`` (0.1.x): ``workspace`` is a
     required keyword-only argument on the lifecycle calls, so provider call-shape drift
     fails these tests instead of passing silently.
     """
@@ -104,7 +105,7 @@ class FakeClient:
         self.create_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_PROVISIONING)]
         self.get_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_READY)]
         self.exec_results: list[Any] = [make_exec_result()]
-        self.delete_results: list[Any] = [True]
+        self.delete_results: list[Any] = [DeletionResult(DeletionOutcome.COMPLETED, "sbx-1")]
 
     @staticmethod
     def _next(queue: list[Any]) -> Any:
@@ -135,9 +136,10 @@ class FakeClient:
 
     def exec(
         self,
-        sandbox_id: str,
+        sandbox: str,
         command: list[str],
         *,
+        workspace: str,
         stream_output: bool = False,
         workdir: str | None = None,
         env: dict[str, str] | None = None,
@@ -146,7 +148,8 @@ class FakeClient:
     ) -> Any:
         self.exec_calls.append(
             {
-                "sandbox_id": sandbox_id,
+                "sandbox": sandbox,
+                "workspace": workspace,
                 "command": command,
                 "workdir": workdir,
                 "env": env,
@@ -245,7 +248,7 @@ def test_provider_call_shapes_bind_against_installed_sdk() -> None:
     inspect.signature(SandboxClient.get).bind(None, "n", workspace="w")
     inspect.signature(SandboxClient.delete).bind(None, "n", workspace="w")
     inspect.signature(SandboxClient.exec).bind(
-        None, "sid", ["/bin/sh", "-c", "true"], workdir=None, env=None, stdin=None, timeout_seconds=None
+        None, "n", ["/bin/sh", "-c", "true"], workspace="w", workdir=None, env=None, stdin=None, timeout_seconds=None
     )
     inspect.signature(SandboxClient.close).bind(None)
 
@@ -550,7 +553,8 @@ async def test_exec_maps_command_and_result(make_provider, fake_client: FakeClie
     result = await provider.exec(handle, "echo hi", env={"B": "override", "C": 3})
 
     call = fake_client.exec_calls[0]
-    assert call["sandbox_id"] == "sbx-1"
+    assert call["sandbox"] == "nemo-gym-test"
+    assert call["workspace"] == "default"
     assert call["command"] == ["/bin/sh", "-c", "echo hi"]
     assert call["workdir"] == "/workspace"
     # Env values are coerced to strings at the boundary, not inside protobuf map assignment.
@@ -688,6 +692,9 @@ async def test_download_file_invalid_base64_raises(make_provider, fake_client: F
         (openshell_pb2.SANDBOX_PHASE_ERROR, SandboxStatus.ERROR),
         (openshell_pb2.SANDBOX_PHASE_DELETING, SandboxStatus.STOPPED),
         (openshell_pb2.SANDBOX_PHASE_UNKNOWN, SandboxStatus.UNKNOWN),
+        (openshell_pb2.SANDBOX_PHASE_STARTING, SandboxStatus.STARTING),
+        (openshell_pb2.SANDBOX_PHASE_STOPPED, SandboxStatus.STOPPED),
+        (openshell_pb2.SANDBOX_PHASE_COMPLETED, SandboxStatus.STOPPED),
         (99, SandboxStatus.UNKNOWN),
     ],
 )
@@ -739,10 +746,17 @@ async def test_close_without_wait(make_provider, fake_client: FakeClient) -> Non
 
 async def test_close_deleted_false_skips_wait(make_provider, fake_client: FakeClient, caplog) -> None:
     provider = make_provider()
-    fake_client.delete_results = [False]
+    fake_client.delete_results = [DeletionResult(DeletionOutcome.UNSPECIFIED)]
     with caplog.at_level("WARNING"):
         await provider.close(_make_handle())
-    assert "deleted=False" in caplog.text
+    assert "skipping the deletion wait" in caplog.text
+    assert not fake_client.get_calls
+
+
+async def test_close_already_absent_skips_wait(make_provider, fake_client: FakeClient) -> None:
+    provider = make_provider()
+    fake_client.delete_results = [DeletionResult(DeletionOutcome.ALREADY_ABSENT)]
+    await provider.close(_make_handle())
     assert not fake_client.get_calls
 
 

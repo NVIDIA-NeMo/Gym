@@ -111,9 +111,15 @@ def _phase_to_status_map() -> dict[int, SandboxStatus]:
     return {
         openshell_pb2.SANDBOX_PHASE_UNSPECIFIED: SandboxStatus.UNKNOWN,
         openshell_pb2.SANDBOX_PHASE_PROVISIONING: SandboxStatus.STARTING,
+        openshell_pb2.SANDBOX_PHASE_STARTING: SandboxStatus.STARTING,
         openshell_pb2.SANDBOX_PHASE_READY: SandboxStatus.RUNNING,
         openshell_pb2.SANDBOX_PHASE_ERROR: SandboxStatus.ERROR,
         openshell_pb2.SANDBOX_PHASE_DELETING: SandboxStatus.STOPPED,
+        openshell_pb2.SANDBOX_PHASE_STOPPING: SandboxStatus.STOPPED,
+        openshell_pb2.SANDBOX_PHASE_STOPPED: SandboxStatus.STOPPED,
+        openshell_pb2.SANDBOX_PHASE_SUSPENDING: SandboxStatus.STOPPED,
+        openshell_pb2.SANDBOX_PHASE_SUSPENDED: SandboxStatus.STOPPED,
+        openshell_pb2.SANDBOX_PHASE_COMPLETED: SandboxStatus.STOPPED,
         openshell_pb2.SANDBOX_PHASE_UNKNOWN: SandboxStatus.UNKNOWN,
     }
 
@@ -589,8 +595,10 @@ class OpenShellProvider:
                     return
                 if ref.phase == _phase("SANDBOX_PHASE_ERROR"):
                     raise OpenShellCreateError(f"sandbox {inst.name!r} entered the ERROR phase while provisioning")
-                if ref.phase == _phase("SANDBOX_PHASE_DELETING"):
-                    raise OpenShellCreateError(f"sandbox {inst.name!r} is being deleted while provisioning")
+                if ref.phase in (_phase("SANDBOX_PHASE_DELETING"), _phase("SANDBOX_PHASE_STOPPED")):
+                    raise OpenShellCreateError(
+                        f"sandbox {inst.name!r} is being deleted or stopped while provisioning (phase={ref.phase})"
+                    )
             if loop.time() >= deadline:
                 raise OpenShellCreateError(
                     f"sandbox {inst.name!r} was not READY within {timeout_s:g}s (last phase={last_phase})"
@@ -671,8 +679,9 @@ class OpenShellProvider:
         try:
             result = await self._call(
                 self._client.exec,
-                inst.sandbox_id,
+                inst.name,
                 [self._exec_config.exec_shell, "-c", command],
+                workspace=inst.workspace,
                 workdir=workdir,
                 env=merged_env or None,
                 stdin=stdin,
@@ -752,15 +761,21 @@ class OpenShellProvider:
         """Delete the sandbox (already-gone counts as success), then wait until it is fully gone."""
         inst = handle.raw
         try:
-            deleted = await self._call(self._client.delete, inst.name, workspace=inst.workspace)
+            result = await self._call(self._client.delete, inst.name, workspace=inst.workspace)
         except Exception as e:
             if _is_not_found(e):
                 return
             if _is_runtime_failure(e):
                 raise RuntimeError(f"openshell delete failed for {inst.name!r}: {e}") from e
             raise
-        if not deleted:
-            LOGGER.warning(f"DeleteSandbox reported deleted=False for {inst.name!r}; skipping the deletion wait.")
+        from openshell.mutations import DeletionOutcome
+
+        if result.outcome == DeletionOutcome.ALREADY_ABSENT:
+            return
+        if result.outcome not in (DeletionOutcome.COMPLETED, DeletionOutcome.ACCEPTED):
+            LOGGER.warning(
+                f"DeleteSandbox returned outcome={result.outcome!r} for {inst.name!r}; skipping the deletion wait."
+            )
             return
         if self._operations.close_wait_deleted:
             await self._wait_deleted(inst)
