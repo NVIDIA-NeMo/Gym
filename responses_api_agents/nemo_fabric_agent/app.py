@@ -360,10 +360,11 @@ def _atif_output_items(trajectories: list[dict[str, Any]], response_text: str) -
     return items
 
 
-def _tool_output_counts(items: list[Any]) -> tuple[int, int]:
-    """(non-empty tool outputs, all tool outputs). An empty output is still a completed call."""
+def _record_counts(items: list[Any]) -> tuple[int, int, int]:
+    """(non-empty tool outputs, all tool outputs, reasoning items). An empty output is still a completed call."""
     outputs = [item.output for item in items if getattr(item, "type", None) == "function_call_output"]
-    return sum(1 for output in outputs if output), len(outputs)
+    reasoning = sum(1 for item in items if getattr(item, "type", None) == "reasoning")
+    return sum(1 for output in outputs if output), len(outputs), reasoning
 
 
 def _skill_paths(skills_root: Optional[str]) -> list[str]:
@@ -658,8 +659,9 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             for item in atif_items:
                 if isinstance(item, NeMoGymResponseFunctionCallOutput):
                     item.output = native_outputs.get(item.call_id, item.output)
-        # Some adapters' trajectories drop tool outputs or collapse the run into one step. Keep the fuller record.
-        atif_counts, native_counts = _tool_output_counts(atif_items), _tool_output_counts(native_items)
+        # Some adapters' trajectories drop tool outputs or collapse the run into one step, and Relay's ATIF steps carry
+        # no reasoning. Keep the fuller record.
+        atif_counts, native_counts = _record_counts(atif_items), _record_counts(native_items)
         output_items = (
             atif_items
             if atif_items and all(atif >= native for atif, native in zip(atif_counts, native_counts))

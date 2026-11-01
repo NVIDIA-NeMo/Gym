@@ -612,6 +612,50 @@ def test_relay_preserves_native_text_by_call_id(native_output: str, relay_only_c
     assert fabric_result["relay_atif"] == [trajectory]
 
 
+def test_relay_keeps_native_reasoning_that_atif_lacks(tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.claude")
+    # Relay's ATIF steps have no reasoning_content even when the model reasoned.
+    trajectory = {
+        "steps": [
+            {
+                "source": "agent",
+                "reasoning_content": None,
+                "tool_calls": [{"tool_call_id": "c1", "function_name": "Bash", "arguments": {"command": "ls"}}],
+                "observation": {"results": [{"source_call_id": "c1", "content": "README.txt"}]},
+            }
+        ]
+    }
+    events = [
+        {
+            "message": {
+                "content": [{"thinking": "List the files."}, {"id": "c1", "name": "Bash", "input": {"command": "ls"}}]
+            }
+        },
+        {"message": {"content": [{"tool_use_id": "c1", "content": "README.txt"}]}},
+    ]
+
+    async def run(config, **kwargs):
+        relay_dir = Path(config.to_mapping()["relay"]["output_dir"])
+        relay_dir.mkdir(parents=True)
+        path = relay_dir / "trajectory.json"
+        path.write_text(json.dumps(trajectory))
+        result = _FakeResult()
+        result.output.update(events=events, relay_artifacts=[{"kind": "atif", "path": str(path)}])
+        return result
+
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(side_effect=run)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        response, _ = asyncio.run(agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question")))
+
+    assert [item.type for item in response.output] == ["reasoning", "function_call", "function_call_output", "message"]
+    assert response.output[0].summary[0].text == "List the files."
+
+
 def test_atif_keeps_relay_structured_tool_results() -> None:
     fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")
