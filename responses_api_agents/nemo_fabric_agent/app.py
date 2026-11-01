@@ -59,6 +59,9 @@ def _content_text(content: Any) -> str:
         return ""
     parts: list[str] = []
     for part in content:
+        if isinstance(part, str):
+            parts.append(part)
+            continue
         if isinstance(part, dict):
             text = part.get("text")
         else:
@@ -346,6 +349,11 @@ def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items
             if content is None and "tool_result" in extra:
                 # Relay stores non-text tool returns here because ATIF content is text or image parts only.
                 value = extra["tool_result"]
+                if isinstance(value, dict) and "__nv_pydantic__" in value:
+                    # A serialized object such as a LangChain ToolMessage. Its content is what the model saw.
+                    value = _mapping(value.get("data")).get("content", value)
+                    if isinstance(value, list):
+                        value = _content_text(value)
                 content = value if isinstance(value, str) else json.dumps(value, ensure_ascii=False, sort_keys=True)
             items.append(
                 NeMoGymResponseFunctionCallOutput(

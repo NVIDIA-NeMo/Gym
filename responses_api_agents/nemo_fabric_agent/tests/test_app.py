@@ -678,6 +678,24 @@ def test_atif_keeps_tool_call_arguments_as_the_model_emitted_them() -> None:
     assert {item.call_id: item.arguments for item in items if item.type == "function_call"} == emitted
 
 
+def test_atif_unwraps_relay_serialized_tool_messages() -> None:
+    # How Relay records a Deep Agents (LangChain) tool return.
+    tool_message = {
+        "__nv_pydantic__": "langchain_core.messages.tool.ToolMessage",
+        "__nv_runtime_type__": "langchain_core.messages.tool.ToolMessage:1",
+        "data": {"content": "[]", "name": "ls", "status": "success", "tool_call_id": "c1", "type": "tool"},
+    }
+    step = {
+        "source": "agent",
+        "tool_calls": [{"tool_call_id": "c1", "function_name": "ls", "arguments": {"path": "/"}}],
+        "observation": {"results": [{"source_call_id": "c1", "extra": {"tool_result": tool_message}}]},
+    }
+
+    assert _atif_output_items([{"steps": [step]}], "answer")[1].output == "[]"
+    tool_message["data"]["content"] = ["line 1\n", {"type": "text", "text": "line 2"}]
+    assert _atif_output_items([{"steps": [step]}], "answer")[1].output == "line 1\nline 2"
+
+
 def test_atif_keeps_relay_structured_tool_results() -> None:
     fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")
