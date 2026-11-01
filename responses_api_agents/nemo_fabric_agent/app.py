@@ -491,6 +491,15 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
         if self._relay_supported is None:
             adapter = _mapping(Fabric().plan(fabric_config, base_dir=base_dir).to_mapping().get("adapter"))
             self._relay_supported = "relay" in _mapping(_mapping(adapter.get("telemetry")).get("providers"))
+            if self._relay_supported and self.config.adapter_id == "nvidia.fabric.hermes":
+                # Hermes declares Relay, but only a Hermes Agent build with Relay support can start with it.
+                from nemo_fabric_adapters.hermes.telemetry import validate_hermes_relay_compatibility
+
+                try:
+                    validate_hermes_relay_compatibility()
+                except RuntimeError as error:
+                    LOG.warning("%s", error)
+                    self._relay_supported = False
             if not self._relay_supported:
                 LOG.warning("%s does not support NeMo Relay, so it runs without Relay", self.config.adapter_id)
         return self._relay_supported

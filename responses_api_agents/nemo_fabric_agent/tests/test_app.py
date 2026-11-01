@@ -400,7 +400,7 @@ def test_relay_off_leaves_telemetry_unset(tmp_path: Path) -> None:
 
 
 def test_relay_run_builds_response_from_atif(tmp_path: Path) -> None:
-    agent = _agent(cwd=str(tmp_path), relay=True)
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.mini-swe-agent")
     agent.server_client.global_config_dict = {
         "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
     }
@@ -474,6 +474,27 @@ def test_relay_is_skipped_for_adapters_without_relay_support(tmp_path: Path) -> 
     assert "relay_atif" not in fabric_result
 
 
+def test_relay_is_skipped_when_hermes_agent_cannot_run_it(tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.hermes")
+    fabric = MagicMock()
+    fabric.plan.return_value.to_mapping.return_value = {"adapter": {"telemetry": {"providers": {"relay": {}}}}}
+    fabric.run = AsyncMock(return_value=_FakeResult())
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+        patch(
+            "nemo_fabric_adapters.hermes.telemetry.validate_hermes_relay_compatibility",
+            side_effect=RuntimeError("Hermes Agent without Relay support"),
+        ),
+    ):
+        _, fabric_result = asyncio.run(
+            agent._create_response(NeMoGymResponseCreateParamsNonStreaming(input="question"))
+        )
+
+    assert "relay" not in fabric.run.call_args.args[0].to_mapping()
+    assert "relay_atif" not in fabric_result
+
+
 def test_atif_inlines_subagent_trajectories_and_skips_wrapper_steps() -> None:
     trajectory = {
         "steps": [
@@ -523,7 +544,7 @@ def test_send_model_base_url_false_leaves_base_url_out(tmp_path: Path) -> None:
 
 @pytest.mark.parametrize("native_output", ["README.txt", ""])
 def test_relay_keeps_native_items_when_atif_lacks_tool_outputs(native_output: str, tmp_path: Path) -> None:
-    agent = _agent(cwd=str(tmp_path), relay=True)
+    agent = _agent(cwd=str(tmp_path), relay=True, adapter_id="nvidia.fabric.mini-swe-agent")
     agent.server_client.global_config_dict = {
         "policy_model": {"responses_api_models": {"policy_model": {"host": "127.0.0.1", "port": 9002}}}
     }
