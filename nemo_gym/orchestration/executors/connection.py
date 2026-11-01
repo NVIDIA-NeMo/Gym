@@ -17,6 +17,7 @@ import shlex
 import shutil
 import socket
 import subprocess
+import sys
 import tempfile
 import threading
 import time
@@ -202,18 +203,34 @@ def _checked(cmd: list[str], *, input: str | None = None, context: str = "") -> 
     return result.stdout
 
 
+# A line the login-host reader's wrapper prints on stderr while the reader runs; forwarded to this process's stderr.
+READER_PROGRESS_PREFIX = "gym-reader progress:"
+
+
+def _read_stderr_forwarding_progress(stream, output: dict[str, str]) -> None:
+    """Keep all of stderr for the error message, and pass each progress line on as it arrives."""
+    lines = []
+    for line in stream:
+        lines.append(line)
+        if line.startswith(READER_PROGRESS_PREFIX):
+            sys.stderr.write(line)
+            sys.stderr.flush()
+    output["stderr"] = "".join(lines)
+
+
 def _checked_holding_input(cmd: list[str], *, input: str, context: str = "") -> str:
     """Like ``_checked``, but stdin stays open until the command exits, so its EOF on the far end means that this
-    process or its connection is gone. The commands must end the remote shell themselves (``exit``)."""
+    process or its connection is gone. The commands must end the remote shell themselves (``exit``).
+
+    Progress lines on the command's stderr (``READER_PROGRESS_PREFIX``) reach this process's stderr while it runs;
+    stdout is returned whole, as before."""
     with subprocess.Popen(
         cmd, stdin=subprocess.PIPE, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True
     ) as process:
         output: dict[str, str] = {}
         readers = [
-            threading.Thread(
-                target=lambda name=name, stream=stream: output.__setitem__(name, stream.read()), daemon=True
-            )
-            for name, stream in (("stdout", process.stdout), ("stderr", process.stderr))
+            threading.Thread(target=lambda: output.__setitem__("stdout", process.stdout.read()), daemon=True),
+            threading.Thread(target=_read_stderr_forwarding_progress, args=(process.stderr, output), daemon=True),
         ]
         for reader in readers:
             reader.start()

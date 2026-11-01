@@ -265,6 +265,23 @@ _READER_FLOOR_S = 900
 _READER_S_PER_GB = 100
 _READER_CEILING_S = 14400
 _READER_RETRY_BACKOFF_S = 10
+# A watched reader reports its progress on stderr at this interval (see _READER_PROGRESS_SCRIPT).
+_READER_PROGRESS_INTERVAL_S = 60
+# Run as ``bash -c`` beside a watched reader: $1 is the reader's session, $2 the interval, $3 the rollout bytes, $4 the
+# start time. Every interval it prints the bytes the session's processes have read (rchar) and the pass over the
+# rollout files that implies. It reads /proc only, so it works for a pinned reader that prints nothing itself. Its
+# sleep holds none of the shell's streams, so a loop that outlives its kill cannot keep the caller waiting.
+_READER_PROGRESS_SCRIPT = r"""while sleep "$2" >/dev/null 2>&1; kill -0 "$1" 2>/dev/null; do
+    b=0
+    for p in /proc/[0-9]*; do
+        [[ -O $p ]] || continue
+        read -r s < "$p/stat" || continue
+        read -ra f <<< "${s##*) }"
+        [[ ${f[3]} == "$1" ]] || continue
+        while read -r k v; do [[ $k == rchar: ]] && b=$((b + v)); done < "$p/io"
+    done 2>/dev/null
+    echo "gym-reader progress: pass=$(( $3 > 0 ? b / $3 + 1 : 1 )) bytes=$b elapsed_s=$(( $(date +%s) - $4 ))" >&2
+done"""
 
 
 def _remote_reader_bound_s() -> int | None:
@@ -377,6 +394,7 @@ def _reader_command(
     factor: int,
     token: str | None = None,
     watchdog: bool = False,
+    progress_interval_s: int | None = None,
 ) -> list[str]:
     """The login-host steps: size the bound from the rollout files, run the reader, report its exit code and stderr.
 
@@ -388,7 +406,9 @@ def _reader_command(
     session (``setsid``), and a watcher in its own session waits for EOF on the shell's stdin, which comes when the
     client process or its SSH connection ends, then kills the reader's process group (TERM, KILL after 10 s). It is
     an EOF loop, not a hangup: without a terminal nothing sends SIGHUP. The steps run as one function that exits the
-    shell, so the watcher never reads a line of the script itself.
+    shell, so the watcher never reads a line of the script itself. A progress loop in its own session prints
+    ``gym-reader progress: pass=<n> bytes=<b> elapsed_s=<s>`` on stderr every ``progress_interval_s`` (60 s by
+    default) while the reader runs; stdout and its ``__GYM_READER_*`` lines are unchanged.
     """
     artifacts = job_dir / "artifacts"
     sources = " ".join(shlex.quote(str(artifacts / name)) for name in ("rollouts.jsonl", "rollouts_failures.jsonl"))
@@ -407,8 +427,14 @@ def _reader_command(
             'setsid bash -c \'cat <&4 >/dev/null; kill -TERM -- -"$1" 2>/dev/null; sleep 10; kill -KILL -- -"$1" 2>/dev/null\' '
             '_ "$_gym_reader" >/dev/null 2>&1 &',
             "_gym_watcher=$!",
+            f"setsid bash -c {shlex.quote(_READER_PROGRESS_SCRIPT)} "
+            f'_ "$_gym_reader" {progress_interval_s or _READER_PROGRESS_INTERVAL_S} "$_gym_bytes" "$(date +%s)" '
+            "</dev/null >/dev/null 4<&- &",
+            "_gym_progress=$!",
             'wait "$_gym_reader"',
             "_gym_rc=$?",
+            # Its sleep holds no stream; killing its pid covers a loop stopped before its setsid made the group.
+            'kill -- -"$_gym_progress" 2>/dev/null || kill "$_gym_progress" 2>/dev/null',
             'kill -- -"$_gym_watcher" 2>/dev/null',
         ]
     else:
