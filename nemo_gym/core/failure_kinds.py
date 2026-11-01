@@ -126,6 +126,12 @@ SHUTDOWN = "shutdown"
 PERSISTENCE_FAILED = "persistence_failed"
 COHORT_INCOMPLETE = "cohort_incomplete"
 
+# --- producer labels older than the layer-prefix rule ------------------------------------------ #
+# Shipped producers write these today: the Harbor agent's failed trial, and the terminal-bench sidecar class of an
+# agent or sandbox failure. They are registered so saved rows have an owner; new producers use a prefixed name.
+HARBOR_FAILED = "harbor_failed"
+INFRASTRUCTURE_ERROR = "infrastructure_error"
+
 
 FAILURE_KINDS: frozenset[str] = frozenset(
     {
@@ -164,6 +170,8 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         HARNESS_TERMINATION_UNCONFIRMED,
         EPISODE_FAILED,
         COLLECTION_DISPATCH_FAILED,
+        HARBOR_FAILED,
+        INFRASTRUCTURE_ERROR,
     }
 )
 

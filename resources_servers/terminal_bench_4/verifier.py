@@ -209,8 +209,9 @@ async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
             raise TimeoutError("The total verifier deadline has expired")
         return value
 
+    budget = asyncio.timeout_at(deadline)
     try:
-        async with asyncio.timeout_at(deadline):
+        async with budget:
             result = await environment.exec("chmod +x /tests/test.sh", user="root", timeout_sec=remaining())
             _require_command_outcome(result, "preparation")
             if result.return_code != 0:
@@ -241,6 +242,9 @@ async def run_verifier(environment, directory, diagnostics, timeout_sec=None):
         _record_verifier_error(diagnostics, f"verifier_{phase}", error)
         if rewards is None:
             if isinstance(error, TimeoutError):
+                if budget.expired() or asyncio.get_running_loop().time() >= deadline:
+                    # The verifier's own allowance ran out: Terminal-Bench scores the trial 0.
+                    raise VerifierTimeoutError(f"Verifier {phase} timed out after {timeout_sec} seconds") from error
                 raise VerifierStatusUnknownError(
                     f"Verifier {phase} timed out without a confirmed native deadline outcome"
                 ) from error

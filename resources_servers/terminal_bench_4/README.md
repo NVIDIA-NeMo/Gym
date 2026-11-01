@@ -47,11 +47,16 @@ killed`) also records a completed `reward: 0.0` without starting a verifier, wit
 the agent's own command and one by the per-process OOM killer look the same, and
 either ends the attempt.
 
-A completed verifier command that leaves no reward file, an empty one, or one
-that cannot be parsed scores zero under the Terminal-Bench contract. Ordinary
-completed zero rewards remain scored. A client deadline or a sandbox result
-without a confirmed command outcome is inconclusive: neither proves that the
-submitted code exhausted the verifier's execution budget.
+A verifier that runs past its own deadline, or that leaves no reward file, an
+empty one or one that cannot be parsed, scores `reward: 0.0` and counts in the
+pass-rate denominator. This is how Terminal-Bench scores it: Harbor never retries
+these outcomes and counts a trial without a reward as 0. The response keeps
+`evaluation_completed: false`, names the exception in `failure_reason`, and sets
+`failure_kind: verifier_error`. Only the verifier's own deadline makes a timeout:
+a provider call that times out inside it, or a sandbox that reports no command
+outcome, stays ungraded. So does a trial whose agent ended on an infrastructure
+failure, whatever its verifier did next, because Harbor decides a retry from the
+trial's first exception.
 
 Preparation, test execution, reward retrieval and optional log transfer share the
 original total task verifier deadline. Each command receives only the remaining
@@ -61,9 +66,8 @@ successfully retrieved authoritative reward survives failures while collecting
 optional logs or cleaning up local staging; those failures remain in
 `verifier_diagnostics`. No verifier command is repeated.
 
-The current sandbox result does not separately attest a native execution timeout
-versus a cancelled or lost status wait. Those ambiguous outcomes therefore remain
-ungraded. Environment-session results use the existing mask and failure fields;
+A provider timeout or a lost status wait inside the deadline is not the
+verifier's own timeout, so it remains ungraded. Environment-session results use the existing mask and failure fields;
 legacy post-answer verifier failures use the same ungraded outcome. Earlier agent
 infrastructure failures retain their legacy failure metadata. Saved answers are preserved,
 and unsupported TB4 reverification does not authorize another agent attempt.

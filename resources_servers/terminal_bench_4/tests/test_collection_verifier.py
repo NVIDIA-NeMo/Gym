@@ -338,7 +338,8 @@ async def test_verifier_timeout_does_not_promote_partial_reward(tmp_path, monkey
 
     download = AsyncMock()
     monkeypatch.setattr(verifier, "download_dir", download)
-    with pytest.raises(VerifierStatusUnknownError, match="preparation"):
+    # The verifier ran past its own deadline: Terminal-Bench scores that 0.
+    with pytest.raises(verifier.VerifierTimeoutError, match="preparation"):
         await run_verifier(env, tmp_path, [])
     download.assert_not_awaited()
 
@@ -357,7 +358,7 @@ async def test_verifier_timeout_override_replaces_the_package_timeout(tmp_path, 
     from resources_servers.terminal_bench_4 import verifier
 
     monkeypatch.setattr(verifier, "download_dir", AsyncMock())
-    with pytest.raises(VerifierStatusUnknownError, match="preparation"):
+    with pytest.raises(verifier.VerifierTimeoutError, match="preparation"):
         await run_verifier(env, tmp_path, [], timeout_sec=0.01)
 
 

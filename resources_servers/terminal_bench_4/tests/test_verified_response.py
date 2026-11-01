@@ -56,7 +56,7 @@ def _diagnostic(subphase, exception_type):
 
 @pytest.mark.parametrize(
     "exception_type",
-    ["RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"],
+    ["VerifierTimeoutError", "RewardFileNotFoundError", "RewardFileEmptyError", "VerifierOutputParseError"],
 )
 @pytest.mark.parametrize(
     "agent_exit,reason",
@@ -105,9 +105,7 @@ def test_an_agent_infrastructure_failure_stays_one_whatever_its_verifier_did(tmp
     assert verified["failure_kind"] is None
 
 
-@pytest.mark.parametrize(
-    "exception_type", ["TimeoutError", "RuntimeError", "VerifierTimeoutError", "VerifierStatusUnknownError"]
-)
+@pytest.mark.parametrize("exception_type", ["TimeoutError", "RuntimeError", "VerifierStatusUnknownError"])
 def test_a_verifier_that_failed_on_infrastructure_is_not_scored(tmp_path, exception_type):
     """What run_verifier raises when a provider call times out within its budget (TimeoutError) or the sandbox
     reports no command outcome (RuntimeError)."""
