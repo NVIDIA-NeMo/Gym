@@ -2718,7 +2718,9 @@ def _row_with_a_model_call(task: int, *, operations_field: bool) -> dict:
     return ident(task, reward=1.0, ng_trajectory=trajectory)
 
 
-def _trial_gate_of(tmp_path: Path, *, expected: int, final_zeros: int, operations_field: bool) -> tuple:
+def _trial_gate_of(
+    tmp_path: Path, *, expected: int, final_zeros: int, operations_field: bool, recovery: dict | None = None
+) -> tuple:
     from nemo_gym.orchestration.recovery import trial_health
 
     scored = expected - final_zeros
@@ -2729,6 +2731,8 @@ def _trial_gate_of(tmp_path: Path, *, expected: int, final_zeros: int, operation
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     collected.quality = unit_quality(expected=d.expected)
+    if recovery is not None:
+        collected.quality["observed_upstream_recovery"] = recovery
     return d, trial_health(d, collected)
 
 
@@ -2739,6 +2743,27 @@ def test_a_complete_earlier_pin_run_is_certified_on_coverage_with_the_note(tmp_p
         "trial: 0 settled zero-scored failure(s) of 50 expected trials (0.00%); exact failure count unavailable "
         "(earlier pin): the run's rows predate operation observations, so the complete run is certified on coverage"
     )
+
+
+_RECOVERED = {"recovered_attempt_errors": 3, "recovered_operations": 2}
+
+
+def test_an_earlier_pin_run_with_recovered_attempts_is_certified_on_coverage(tmp_path) -> None:
+    # The pin recorded no operations, so its recovered attempts cannot be joined to one either.
+    d, (passed, reason) = _trial_gate_of(
+        tmp_path, expected=50, final_zeros=0, operations_field=False, recovery=_RECOVERED
+    )
+    assert d.complete and passed is True
+    assert "(earlier pin)" in reason
+    assert reason.endswith("; 3 recovered attempt error(s) cannot be joined to an operation")
+
+
+def test_a_current_pin_run_with_unjoined_recovered_attempts_stays_unknown(tmp_path) -> None:
+    _, (passed, reason) = _trial_gate_of(
+        tmp_path, expected=50, final_zeros=0, operations_field=True, recovery=_RECOVERED
+    )
+    assert passed is None
+    assert reason.startswith("trial: recovered failures are not fully joined to a completed policy or grading")
 
 
 def test_a_current_pin_run_with_uncovered_operations_stays_unknown(tmp_path) -> None:

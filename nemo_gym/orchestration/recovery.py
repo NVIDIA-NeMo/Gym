@@ -3167,6 +3167,15 @@ def trial_health(
         or any(_count(recovery.get(key)) is None for key in ("recovered_attempt_errors", "recovered_operations"))
     ):
         return None, "trial: recovered attempt/operation counters are malformed or incomplete"
+    if _predates_operation_observations(decision, collected):
+        # Those pins never recorded the operations the strict rule joins, so neither a trial nor a recovered attempt
+        # can be joined to one; the known-failure limit above still holds.
+        unjoined = recovery["recovered_attempt_errors"] if isinstance(recovery, dict) else 0
+        return True, (
+            f"trial: {counts}{detail}; exact failure count unavailable (earlier pin): the run's rows predate "
+            "operation observations, so the complete run is certified on coverage"
+            + (f"; {unjoined} recovered attempt error(s) cannot be joined to an operation" if unjoined else "")
+        )
     judge_recovery: dict[str, int] = {}
     policy_recovery: dict[str, int] = {}
     invalid_grades: list[str] = []
@@ -3205,12 +3214,6 @@ def trial_health(
             f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
             f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; {retried}"
             "actual model/tool and bound grading operations cover every identity and repeat",
-        )
-    if _predates_operation_observations(decision, collected):
-        # Those pins never recorded the operations the strict rule joins; the known-failure limit above still holds.
-        return True, (
-            f"trial: {counts}{detail}; exact failure count unavailable (earlier pin): the run's rows predate "
-            "operation observations, so the complete run is certified on coverage"
         )
     observed = trial_counts(decision, collected)
     if observed is not None and observed["unobserved"]:
