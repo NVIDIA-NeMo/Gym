@@ -173,6 +173,8 @@ class RecoveryOutcome(BaseModel):
     gate_task: dict[str, Any] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
+    # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
+    reader_token: str | None = None
 
 
 class IdentityEvidence(BaseModel):

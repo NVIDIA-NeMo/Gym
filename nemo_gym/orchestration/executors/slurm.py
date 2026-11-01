@@ -22,6 +22,7 @@ import re
 import shlex
 import tempfile
 import time
+import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -257,12 +258,89 @@ def _remote_reader_error_text(error: BaseException) -> str:
     return f"remote Store reader unavailable: {type(error).__name__}: {detail}"
 
 
-def _reader_command(entrypoint: str, job_dir: Path, payload: str, *, bound_s: int | None, factor: int) -> list[str]:
+READER_TOKEN_ENV = "GYM_READER_TOKEN"
+_reader_token: str | None = None
+
+
+def reader_token() -> str:
+    """The token this process's login-host Store readers carry in their environment as ``GYM_READER_TOKEN``: the
+    caller's own value when it sets one, else one generated uuid for the process. Recovery reports it as
+    ``reader_token``, so whoever stops a recovery can find its reader."""
+    global _reader_token
+    if _reader_token is None:
+        _reader_token = os.environ.get(READER_TOKEN_ENV) or uuid.uuid4().hex
+    return _reader_token
+
+
+class RemoteReaderInterrupted(KeyboardInterrupt):
+    """A signal stopped recovery while the login-host Store reader ran; the reader was stopped by its token.
+
+    A ``KeyboardInterrupt``, so the reader's ordinary error handling does not turn it into evidence and the open
+    connection unwinds and closes its master.
+    """
+
+
+# The bash script that stops a login-host reader by its token. The match runs in bash itself, so no helper process
+# carries the token in its own arguments; the script's own environment does not carry it either.
+_KILL_READER_SCRIPT = r"""_gym_token=@TOKEN@
+_gym_matches() {
+    local proc pid environ cmdline
+    for proc in /proc/[0-9]*; do
+        pid=${proc#/proc/}
+        [[ -O $proc && $pid != "$$" && $pid != "$BASHPID" ]] || continue
+        environ=$(tr '\0' '\n' < "$proc/environ" 2>/dev/null) || continue
+        cmdline=$(tr '\0' ' ' < "$proc/cmdline" 2>/dev/null) || continue
+        if [[ $'\n'$environ$'\n' == *$'\n'"@ENV@=$_gym_token"$'\n'* || $cmdline == *"$_gym_token"* ]]; then
+            echo "$pid"
+        fi
+    done
+}
+_gym_pids=$(_gym_matches)
+_gym_termed=$(echo $_gym_pids | wc -w)
+[[ -z $_gym_pids ]] || kill -TERM $_gym_pids 2>/dev/null
+_gym_waited=0
+while [[ -n $_gym_pids && $_gym_waited -lt 10 ]]; do
+    sleep 1
+    _gym_waited=$((_gym_waited + 1))
+    _gym_pids=$(_gym_matches)
+done
+_gym_killed=$(echo $_gym_pids | wc -w)
+[[ -z $_gym_pids ]] || kill -KILL $_gym_pids 2>/dev/null
+echo "__GYM_READER_KILL:term=$_gym_termed kill=$_gym_killed"
+"""
+
+
+def _kill_reader_command(token: str) -> list[str]:
+    """Stop this user's login-host processes whose environment or command line carries ``token``: TERM, then KILL
+    for any still running after 10 s. It prints ``__GYM_READER_KILL:term=<n> kill=<n>``."""
+    return [_KILL_READER_SCRIPT.replace("@TOKEN@", shlex.quote(token)).replace("@ENV@", READER_TOKEN_ENV)]
+
+
+def _run_reader(conn: Connection, command: list[str], token: str) -> str:
+    """Run the reader. A signal on the client (raised as ``KeyboardInterrupt``) leaves the remote reader running,
+    since ``ssh bash -s`` has no terminal to hang up, so it is stopped by its token before the error unwinds."""
+    try:
+        return conn.run(command)
+    except KeyboardInterrupt as interrupt:
+        try:
+            report = conn.run(_kill_reader_command(token)).strip()
+        except (RuntimeError, OSError) as error:
+            report = f"stopping it failed: {error}"
+        cause = str(interrupt) or "an interrupt"
+        raise RemoteReaderInterrupted(
+            f"remote Store reader interrupted by {cause}; its login-host processes with {READER_TOKEN_ENV}={token} "
+            f"were stopped ({report})"
+        ) from None
+
+
+def _reader_command(
+    entrypoint: str, job_dir: Path, payload: str, *, bound_s: int | None, factor: int, token: str | None = None
+) -> list[str]:
     """The login-host steps: size the bound from the rollout files, run the reader, report its exit code and stderr.
 
     The reader's own failure is reported on stdout (``__GYM_READER_*`` lines) so a timeout, a MemoryError or a
     failed bootstrap reaches the decision with its exit code and the end of its stderr; only SSH itself fails the
-    command.
+    command. With ``token``, the reader runs with it as ``GYM_READER_TOKEN`` in its environment.
     """
     artifacts = job_dir / "artifacts"
     sources = " ".join(shlex.quote(str(artifacts / name)) for name in ("rollouts.jsonl", "rollouts_failures.jsonl"))
@@ -272,6 +350,7 @@ def _reader_command(entrypoint: str, job_dir: Path, payload: str, *, bound_s: in
         size_bound = str(bound_s * factor)
     return [
         "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        *([f"export {READER_TOKEN_ENV}={shlex.quote(token)}"] if token is not None else []),
         f"_gym_bytes=$(stat -c %s -- {sources} 2>/dev/null | awk '{{s += $1}} END {{print s + 0}}')",
         f"_gym_bound={size_bound}",
         f"(( _gym_bound > {_READER_CEILING_S} )) && _gym_bound={_READER_CEILING_S}",
@@ -348,8 +427,17 @@ def _remote_managed_evidence(
         for attempt in (1, 2):
             started = time.monotonic()
             try:
-                output = conn.run(
-                    _reader_command(entrypoint, job_dir, payload, bound_s=_remote_reader_bound_s(), factor=attempt)
+                output = _run_reader(
+                    conn,
+                    _reader_command(
+                        entrypoint,
+                        job_dir,
+                        payload,
+                        bound_s=_remote_reader_bound_s(),
+                        factor=attempt,
+                        token=reader_token(),
+                    ),
+                    reader_token(),
                 )
             except RuntimeError as error:
                 if "exit code 255" not in str(error):

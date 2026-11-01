@@ -19,11 +19,13 @@ import logging
 import os
 import re
 import shlex
+import signal
 import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
 from pathlib import Path
+from types import FrameType
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
@@ -708,10 +710,22 @@ def _eval_submit(args: argparse.Namespace, overrides: list[str]) -> None:
         sys.exit(1)
 
 
+def _raise_keyboard_interrupt_on_sigterm() -> None:
+    """Make SIGTERM unwind like Ctrl-C, so a stopped recovery stops its login-host reader and closes its connection."""
+
+    def _on_sigterm(signum: int, frame: FrameType | None) -> None:
+        raise KeyboardInterrupt("SIGTERM")
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
 def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides:
         args._parser.error("resubmit does not accept Hydra overrides")
+    from nemo_gym.orchestration.executors.slurm import RemoteReaderInterrupted
     from nemo_gym.orchestration.submit import inspect_recovery, load_original_submission_record, recover, resubmit
+
+    _raise_keyboard_interrupt_on_sigterm()
 
     inspect_only = getattr(args, "inspect", False)
     record_path = getattr(args, "record", None)
@@ -806,6 +820,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 sys.exit(1)
             return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)
+    except RemoteReaderInterrupted as error:
+        print(f"Error: {error}", file=sys.stderr)
+        sys.exit(128 + (signal.SIGTERM if "SIGTERM" in str(error) else signal.SIGINT))
     except (OSError, ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)

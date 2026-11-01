@@ -22,7 +22,7 @@ from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
-from nemo_gym.orchestration.executors.slurm import SlurmExecutor
+from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
 from nemo_gym.orchestration.jobs import BenchmarkJob, SubmissionRecord, load_submission_record
 from nemo_gym.orchestration.recovery import (
     GateCriteria,
@@ -94,8 +94,9 @@ def recover(
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
+    The outcome names the ``reader_token`` its login-host Store readers carry.
     """
-    return _recover(
+    outcome = _recover(
         gym_job_id,
         benchmark,
         score_key=score_key,
@@ -113,6 +114,7 @@ def recover(
         max_walltime=max_walltime,
         walltime_reason=walltime_reason,
     )
+    return outcome.model_copy(update={"reader_token": reader_token()})
 
 
 def inspect_recovery(
@@ -132,7 +134,7 @@ def inspect_recovery(
     extend_retries: int = 0,
 ) -> RecoveryOutcome:
     """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action."""
-    return _recover(
+    outcome = _recover(
         gym_job_id,
         benchmark,
         inspect_only=True,
@@ -148,6 +150,7 @@ def inspect_recovery(
         mlflow_status=mlflow_status,
         mlflow_run_id=mlflow_run_id,
     )
+    return outcome.model_copy(update={"reader_token": reader_token()})
 
 
 def _recover(
