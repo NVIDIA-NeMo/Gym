@@ -971,6 +971,7 @@ def trial_metadata(value):
     result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
     operations = value.get("model_operations")
+    result["model_operations_recorded"] = "model_operations" in value
     result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms")}
                                   if isinstance(operation, dict) else None for operation in operations] if isinstance(operations, list) else None
     report = value.get("failure_report")
@@ -3110,6 +3111,30 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     return counts
 
 
+def _predates_operation_observations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> bool:
+    """Whether every scored row was written by a Gym pin from before operation observations were recorded.
+
+    Current pins write ``response_metadata.model_operations`` on every captured model call (a list, or null), and
+    the collector reports whether the key was there (``model_operations_recorded``). Only an explicit False on every
+    call of every scored row counts. A row without captured calls, or read by a collector that does not report the
+    key, proves nothing, so the strict rule applies to it.
+    """
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    rows = [row for row in (collected.results or []) if _identity(row) in scored] if collected is not None else []
+    if not scored or len(rows) != len(scored):
+        return False
+    for row in rows:
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        if not isinstance(calls, list) or not calls:
+            return False
+        for call in calls:
+            meta = call.get("response_metadata") if isinstance(call, dict) else None
+            if not isinstance(meta, dict) or meta.get("model_operations_recorded") is not False:
+                return False
+    return True
+
+
 def trial_health(
     decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
 ) -> tuple[bool | None, str]:
@@ -3180,6 +3205,12 @@ def trial_health(
             f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
             f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; {retried}"
             "actual model/tool and bound grading operations cover every identity and repeat",
+        )
+    if _predates_operation_observations(decision, collected):
+        # Those pins never recorded the operations the strict rule joins; the known-failure limit above still holds.
+        return True, (
+            f"trial: {counts}{detail}; exact failure count unavailable (earlier pin): the run's rows predate "
+            "operation observations, so the complete run is certified on coverage"
         )
     observed = trial_counts(decision, collected)
     if observed is not None and observed["unobserved"]:

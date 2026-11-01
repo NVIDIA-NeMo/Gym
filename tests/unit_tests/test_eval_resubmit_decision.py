@@ -2702,3 +2702,51 @@ def test_mlflow_required_or_unstated_fails_without_evidence_as_before(tmp_path, 
         "required or disabled are not recorded"
     ) in task["errors"]
     assert task["status"] == "FAILED"
+
+
+def _row_with_a_model_call(task: int, *, operations_field: bool) -> dict:
+    """A scored row with one captured model call; a current pin writes model_operations, an earlier one does not."""
+    metadata = {"response_id": f"response-{task}", "status_code": 200, "response_status": "completed"}
+    if operations_field:
+        metadata["model_operations"] = None
+    trajectory = {
+        "task_id": str(task),
+        "rollout_id": f"{task}-0",
+        "invocations": [{"invocation_id": "root", "status": "completed", "model_calls": [{"model_call_id": "c"}]}],
+        "model_calls": [{"model_call_id": "c", "response_metadata": metadata}],
+    }
+    return ident(task, reward=1.0, ng_trajectory=trajectory)
+
+
+def _trial_gate_of(tmp_path: Path, *, expected: int, final_zeros: int, operations_field: bool) -> tuple:
+    from nemo_gym.orchestration.recovery import trial_health
+
+    scored = expected - final_zeros
+    results = [_row_with_a_model_call(t, operations_field=operations_field) for t in range(scored)]
+    failures = [final_model_zero(t, 0) for t in range(scored, expected)]
+    job = write_job_dir(tmp_path / "job", n=expected, results=results, failures=failures)
+    (job / "artifacts" / "rollouts_aggregate_metrics.json").write_text(json.dumps({"agent": {"mean/reward": 1.0}}))
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    collected.quality = unit_quality(expected=d.expected)
+    return d, trial_health(d, collected)
+
+
+def test_a_complete_earlier_pin_run_is_certified_on_coverage_with_the_note(tmp_path) -> None:
+    d, (passed, reason) = _trial_gate_of(tmp_path, expected=50, final_zeros=0, operations_field=False)
+    assert d.complete and passed is True
+    assert reason == (
+        "trial: 0 settled zero-scored failure(s) of 50 expected trials (0.00%); exact failure count unavailable "
+        "(earlier pin): the run's rows predate operation observations, so the complete run is certified on coverage"
+    )
+
+
+def test_a_current_pin_run_with_uncovered_operations_stays_unknown(tmp_path) -> None:
+    _, (passed, reason) = _trial_gate_of(tmp_path, expected=50, final_zeros=0, operations_field=True)
+    assert passed is None and "known failures are a lower bound" in reason
+    assert "earlier pin" not in reason
+
+
+def test_an_earlier_pin_run_at_the_failure_limit_still_fails(tmp_path) -> None:
+    _, (passed, reason) = _trial_gate_of(tmp_path, expected=100, final_zeros=2, operations_field=False)
+    assert passed is False and "is not below 2%" in reason
