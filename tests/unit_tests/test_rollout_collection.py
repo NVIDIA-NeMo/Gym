@@ -4221,6 +4221,30 @@ class TestRolloutCollection:
         with pytest.raises(ConfigPathNotFoundError, match="does_not_exist.jsonl.*--input"):
             RolloutCollectionHelper._preprocess_rows_from_config(None, config)
 
+    @pytest.mark.parametrize("layout", ["aabbcc", "abcabc"])
+    def test_preprocess_rows_limit_counts_tasks_not_baked_repeats(self, tmp_path: Path, layout: str) -> None:
+        """A prepared benchmark writes each task num_repeats times; limit keeps the first N tasks with every copy."""
+        questions = {name: {"responses_create_params": {"input": f"question {name}"}} for name in "abc"}
+        fpath = tmp_path / "input.jsonl"
+        fpath.write_text("".join(json.dumps(questions[name]) + "\n" for name in layout))
+
+        config = RolloutCollectionConfig(
+            agent_name="my_agent",
+            input_jsonl_fpath=str(fpath),
+            output_jsonl_fpath=str(tmp_path / "out.jsonl"),
+            limit=2,
+        )
+
+        result = RolloutCollectionHelper._preprocess_rows_from_config(None, config)
+
+        assert sorted((row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]) for row in result) == [
+            (0, 0),
+            (0, 1),
+            (1, 0),
+            (1, 1),
+        ]
+        assert {row["responses_create_params"]["input"] for row in result} == {"question a", "question b"}
+
     def test_preprocess_rows_prompt_config_preserves_rcp_fields(self, tmp_path: Path) -> None:
         """prompt_config preserves other responses_create_params fields like tools."""
         prompt_path = tmp_path / "prompt.yaml"
