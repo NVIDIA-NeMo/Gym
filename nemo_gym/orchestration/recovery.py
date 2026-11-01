@@ -72,7 +72,11 @@ from nemo_gym.core.failure_kinds import (
     is_registered,
 )
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.orchestration.executors.resume_script import ACCOUNTING_UNKNOWN_PREFIX, CONTINUATION_REASON_PREFIX
+from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTING_UNKNOWN_PREFIX,
+    CONTINUATION_REASON_PREFIX,
+    PROVISIONAL_MARKER_PREFIX,
+)
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.task_materialization import TASK_ID_FIELDS
 
@@ -941,6 +945,9 @@ COLLECT_SCRIPT = (
     "ACCOUNTING_UNKNOWN_PREFIX = "
     + repr(ACCOUNTING_UNKNOWN_PREFIX)
     + "\n"
+    + "PROVISIONAL_MARKER_PREFIX = "
+    + repr(PROVISIONAL_MARKER_PREFIX)
+    + "\n"
     + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
     + "\n"
@@ -1401,6 +1408,15 @@ def resume_drift_keys():
         return None
     return [key[:200] for key in keys if isinstance(key, str)][:200] or None
 collected["resume_drift_keys"] = resume_drift_keys()
+def chain_continuation_note():
+    # A continuation's provisional line, left when it ended before queuing its follow-up (see resume_script).
+    try:
+        text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
+    except OSError:
+        return None
+    line = text.strip().splitlines()[0] if text.strip() else ""
+    return line[:500] if line.startswith(PROVISIONAL_MARKER_PREFIX) else None
+collected["chain_continuation_note"] = chain_continuation_note()
 print(json.dumps(collected))
 """
 )
@@ -1453,6 +1469,8 @@ class CollectedEvidence(BaseModel):
     reader_fallback_reason: str | None = None
     # The operational settings the run's latest resume crossed (its resume-drift journal), None when it crossed none.
     resume_drift_keys: list[str] | None = None
+    # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
+    chain_continuation_note: str | None = None
 
 
 # The host sets the reader placement; a reader neither receives it nor replaces it.
@@ -1757,11 +1775,15 @@ def resume_drift_note(keys: list[str] | None) -> str | None:
 
 
 def decide_from_collected(collected: CollectedEvidence, **options: Any) -> RecoveryDecision:
-    """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed, so
-    an inspection, a recovery and a chain continuation all say it (see ``resume_drift_note``)."""
+    """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed (see
+    ``resume_drift_note``) and a continuation that ended before it queued its follow-up, so an inspection, a recovery
+    and a chain continuation all say it."""
     decision = _decide_from_collected(collected, **options)
-    note = resume_drift_note(collected.resume_drift_keys)
-    return decision if note is None else decision.model_copy(update={"reason": f"{decision.reason}; {note}"})
+    notes = [resume_drift_note(collected.resume_drift_keys)]
+    if collected.chain_continuation_note:
+        notes.append(f"the chain recorded: {collected.chain_continuation_note}")
+    notes = [note for note in notes if note]
+    return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
 
 
 def _decide_from_collected(

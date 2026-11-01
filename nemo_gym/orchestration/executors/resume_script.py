@@ -74,6 +74,9 @@ REQUEUE_RECONCILED_NOTE = (
 )
 ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
+# The first words of the line a continuation writes to the incomplete marker as soon as it records itself, before
+# it has queued its own follow-up. It stays only when the job ended in between, before its guard.
+PROVISIONAL_MARKER_PREFIX = "Continuation "
 # Why the chain ends after a segment that timed out before Gym wrote the task inventory.
 PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
 # Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
@@ -120,10 +123,17 @@ _gym_sentinel_for="${{GYM_FOLLOWUP_SENTINEL:-}}"
 unset GYM_FOLLOWUP_SENTINEL
 _gym_sentinel_takeover=""
 _gym_sentinel_debit=0
+_gym_sentinel_recorded=""
 if [[ -n "$_gym_sentinel_for" ]]; then
     if grep -qxF -- "$_gym_sentinel_for" "$OUTPUT_DIR/{job_chain_name}" 2>/dev/null; then
-        echo "Follow-up $_gym_sentinel_for recorded itself in the chain; sentinel ${{SLURM_JOB_ID:-}} has nothing to do."
-        exit 0
+        # A follow-up that recorded itself died before its guard only when it made no follow-up claim and its own
+        # provisional line is still the marker: a deliberate stop replaced that line with its reason.
+        if [[ -e "$OUTPUT_DIR/.gym_followup_queued.$_gym_sentinel_for" ]] || \
+            ! grep -qF -- "{provisional_marker_prefix}$_gym_sentinel_for started" "$_incomplete_file" 2>/dev/null; then
+            echo "Follow-up $_gym_sentinel_for recorded itself in the chain; sentinel ${{SLURM_JOB_ID:-}} has nothing to do."
+            exit 0
+        fi
+        _gym_sentinel_recorded=1
     fi
     _gym_sentinel_elapsed=""
     for _sacct_try in 1 2 3 4 5 6; do
@@ -133,15 +143,21 @@ if [[ -n "$_gym_sentinel_for" ]]; then
     done
     [[ "$_gym_sentinel_elapsed" =~ ^[0-9]{{1,15}}$ ]] || \
         _gym_stop_accounting_unknown "Follow-up $_gym_sentinel_for accounting is unknown; its sentinel cannot tell whether it ran."
-    if (( 10#$_gym_sentinel_elapsed == 0 )); then
+    if [[ -z "$_gym_sentinel_recorded" ]] && (( 10#$_gym_sentinel_elapsed == 0 )); then
         echo "Follow-up $_gym_sentinel_for never started (it was cancelled); sentinel ${{SLURM_JOB_ID:-}} leaves the chain as it is."
         exit 0
     fi
-    echo "Follow-up $_gym_sentinel_for ended after ${{_gym_sentinel_elapsed}}s before it recorded itself; sentinel ${{SLURM_JOB_ID:-}} continues the chain in its place."
+    if [[ -n "$_gym_sentinel_recorded" ]]; then
+        echo "Follow-up $_gym_sentinel_for ended after ${{_gym_sentinel_elapsed}}s, after it recorded itself and before it queued its follow-up; sentinel ${{SLURM_JOB_ID:-}} continues the chain in its place."
+    else
+        echo "Follow-up $_gym_sentinel_for ended after ${{_gym_sentinel_elapsed}}s before it recorded itself; sentinel ${{SLURM_JOB_ID:-}} continues the chain in its place."
+    fi
     _gym_sentinel_takeover=1
-    # The dead follow-up is spent history: record it before this allocation, so a reader rebuilds the chain from disk,
-    # and debit its elapsed time once, with the parent's below. Nothing else names it as a predecessor.
-    echo "$_gym_sentinel_for" >> "$OUTPUT_DIR/{job_chain_name}" || _gym_stop_accounting_unknown "Cannot record the dead follow-up."
+    # The dead follow-up is spent history: record it before this allocation (unless it recorded itself), so a reader
+    # rebuilds the chain from disk, and debit its elapsed time once, with the parent's below. Nothing else names it as
+    # a predecessor.
+    [[ -n "$_gym_sentinel_recorded" ]] || echo "$_gym_sentinel_for" >> "$OUTPUT_DIR/{job_chain_name}" || \
+        _gym_stop_accounting_unknown "Cannot record the dead follow-up."
     _gym_sentinel_debit=$((10#$_gym_sentinel_elapsed))
 fi
 
@@ -156,6 +172,17 @@ fi
 if ! grep -qxF "$SLURM_JOB_ID" "$OUTPUT_DIR/{job_chain_name}" 2>/dev/null; then
     echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}" || _gym_stop_accounting_unknown "Cannot record the allocation."
 fi
+# Until this job has queued its follow-up, the marker says so. A stop below replaces the line with its reason; the
+# line goes once the follow-up is claimed or the run turns out complete. If the job dies in between (a node failure
+# seconds in), the line stays, so the job dir and recovery say what happened, and this job's sentinel takes over.
+_gym_provisional="{provisional_marker_prefix}$SLURM_JOB_ID started and had not queued its follow-up; if this line remains, it ended before its guard and nothing continued the chain: continue with gym eval resubmit --recover."
+if ! grep -q '^{accounting_unknown_prefix}' "$_incomplete_file" 2>/dev/null; then
+    echo "$_gym_provisional" > "$_incomplete_file" || _gym_stop_accounting_unknown "Cannot record the continuation."
+fi
+_gym_clear_provisional() {{
+    if grep -qxF -- "$_gym_provisional" "$_incomplete_file" 2>/dev/null; then rm -f "$_incomplete_file"; fi
+    return 0
+}}
 # A manually submitted worker can start before sbatch returns to its caller. The existing submission
 # lock keeps it from resetting counters until the caller has either confirmed the reply or recorded uncertainty.
 for _gym_submit_wait in {{1..30}}; do
@@ -244,6 +271,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
     _prev_state=${{_prev_state%+}}
     case "$_prev_state" in
         COMPLETED)
+            _gym_clear_provisional
             echo "Previous job $_prev_slurm_job_id completed successfully. Exiting."
             exit 0 ;;
         CANCELLED)
@@ -332,8 +360,8 @@ if [[ "$_gym_needs_retry" == 1 ]]; then
     echo "Infra retry $_retries/$_gym_max_retries..."
 fi
 
-# This job continues the run, so an earlier stop no longer describes it.
-rm -f "$_incomplete_file"
+# This job continues the run, so an earlier stop no longer describes it: its provisional line replaced that stop when
+# it recorded itself, and goes once the follow-up below is claimed.
 # A requeued job keeps its job id and runs this script again. One follow-up per job id: the marker is a
 # claim on it, taken with an O_EXCL create (bash noclobber, not mkdir: uutils coreutils 0.10.0's mkdir tells
 # concurrent callers that both succeeded). A claim with no follow-up pending on this job was left by a shell
@@ -361,6 +389,7 @@ if ! _gym_claim_followup; then
         ) && [[ "$_followup" =~ ^[0-9]+$ ]]; then
         echo "$_followup" > "$_guard_marker" || _gym_stop_accounting_unknown "Cannot preserve the observed follow-up."
         echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued: $_followup (requeued job). Not queueing another."
+        _gym_clear_provisional
     else
         _gym_stop_accounting_unknown "The existing follow-up claim has no unique observed pending job; it may already have run."
     fi
@@ -371,6 +400,7 @@ if [[ $_gym_queue_followup == 1 ]]; then
         _next_id="${{_next_output##* }}"
         if [[ "$_next_id" =~ ^[0-9]+$ ]]; then
             echo "$_next_id" > "$_guard_marker" || _gym_stop_accounting_unknown "Cannot preserve the queued follow-up identity."
+            _gym_clear_provisional
             echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
             # Its sentinel continues the chain if the follow-up dies before its prologue records it (see the top).
             if _sentinel_output=$(GYM_FOLLOWUP_SENTINEL=$_next_id sbatch --dependency=afterany:$_next_id --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
@@ -494,6 +524,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         max_walltime_check=max_walltime_check,
         resubmit_lock_name=RESUBMIT_LOCK_NAME,
         accounting_unknown_prefix=ACCOUNTING_UNKNOWN_PREFIX,
+        provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
         allocation_accounting_marker=ALLOCATION_ACCOUNTING_MARKER,
         runtime_admission_marker=(
             RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"

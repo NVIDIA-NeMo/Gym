@@ -25,6 +25,7 @@ import pytest
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
     INCOMPLETE_MARKER_NAME,
+    PROVISIONAL_MARKER_PREFIX,
     _walltime_to_seconds,
     render_resume_prologue,
 )
@@ -107,6 +108,8 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
 
 _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
+# The node dies under the job: kill the job's shell, found by its script path (never the test runner).
+if [[ -n "${FAKE_SACCT_KILLS_JOB:-}" ]]; then pkill -KILL -f "$FAKE_LOG_DIR/job.sh"; exit 1; fi
 if [[ -n "${FAKE_FOLLOWUP:-}" && " $* " == *" -j ${FAKE_FOLLOWUP} "* ]]; then echo "${FAKE_FOLLOWUP_ELAPSED:-}"; exit 0; fi
 if [[ "$*" == *State,ElapsedRaw* ]]; then echo "${FAKE_STATE:-}|${FAKE_ELAPSED:-}";
 elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}";
@@ -956,3 +959,87 @@ def test_a_sentinel_stops_at_the_infra_retry_cap_so_dying_follow_ups_cannot_loop
     assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
     assert "Infra retry limit (2) reached" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
     assert _sbatch_calls(tmp_path) == []
+
+
+def _provisional_line(job_id: str) -> str:
+    return f"{PROVISIONAL_MARKER_PREFIX}{job_id} started and had not queued its follow-up; if this line remains, ..."
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("pkill") is None, reason="bash and pkill needed")
+def test_a_continuation_killed_before_its_guard_leaves_its_provisional_line(tmp_path):
+    _write_inventory(tmp_path)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text("An earlier stop.\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env={"FAKE_SACCT_KILLS_JOB": "1"})
+
+    assert result.returncode == -9 and "REACHED_WORK" not in result.stdout
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n200\n"
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker.startswith(f"{PROVISIONAL_MARKER_PREFIX}200 started") and "gym eval resubmit --recover" in marker
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_sentinel_takes_over_a_follow_up_that_recorded_itself_and_died_before_its_guard(tmp_path):
+    _write_inventory(tmp_path)
+    (tmp_path / ".gym_job_chain").write_text("100\n777\n")
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text(_provisional_line("777") + "\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("13"))
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "after it recorded itself and before it queued its follow-up" in result.stdout
+    # 777 is in the chain once; its 13 s are debited with the parent's 60 s; the takeover spends an infra retry.
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n200\n"
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "73"
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
+    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
+        "--dependency=afternotok:200",
+        "--dependency=afterany:999",
+    ]
+    # Its own follow-up is claimed, so its provisional line is gone.
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("case", ["deliberate-stop", "claimed"])
+def test_a_sentinel_leaves_a_follow_up_that_stopped_the_chain_or_claimed_its_successor(tmp_path, case):
+    (tmp_path / ".gym_job_chain").write_text("100\n777\n")
+    if case == "deliberate-stop":
+        (tmp_path / INCOMPLETE_MARKER_NAME).write_text("Infra retry limit (3) reached. Stopping.\n")
+    else:
+        (tmp_path / INCOMPLETE_MARKER_NAME).write_text(_provisional_line("777") + "\n")
+        (tmp_path / ".gym_followup_queued.777").write_text("888\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("13"))
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout
+    assert "Follow-up 777 recorded itself in the chain" in result.stdout
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n"
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_finished_run_clears_the_provisional_line(tmp_path):
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "COMPLETED")
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+
+
+def test_inspection_names_a_continuation_that_died_before_its_guard(tmp_path):
+    from nemo_gym.orchestration.recovery import decide_from_collected
+    from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
+    (job / INCOMPLETE_MARKER_NAME).write_text(_provisional_line("777") + "\n")
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.chain_continuation_note.startswith(f"{PROVISIONAL_MARKER_PREFIX}777 started")
+    assert f"the chain recorded: {PROVISIONAL_MARKER_PREFIX}777 started" in decision.reason
+
+    (job / INCOMPLETE_MARKER_NAME).write_text("Infra retry limit (3) reached. Stopping.\n")
+    assert (
+        "the chain recorded"
+        not in decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False).reason
+    )
