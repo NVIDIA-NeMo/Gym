@@ -15,3 +15,25 @@ class OSWorldModelTimeoutError(OSWorldOperationTimeoutError):
 
 class OSWorldActionTimeoutError(OSWorldOperationTimeoutError):
     """An environment action did not complete within its per-action deadline."""
+
+
+class OSWorldGuestStartTimeoutError(TimeoutError):
+    """The OSWorld guest in a new sandbox did not become ready within its deadline.
+
+    ``provider`` names the sandbox provider and ``http_status`` is the status of the guest's last reply (``None``
+    when the last probe got no reply).
+    """
+
+    def __init__(self, message: str, *, provider: str, http_status: int | None) -> None:
+        super().__init__(message)
+        self.provider = provider
+        self.http_status = http_status
+
+    @property
+    def is_infrastructure_failure(self) -> bool:
+        """A fresh sandbox can succeed: no reply, a 5xx, 408 or 429 reply, or an empty success.
+
+        A guest that kept answering another 4xx is a task or image problem a new sandbox repeats.
+        """
+        status = self.http_status
+        return status is None or not 400 <= status < 500 or status in (408, 429)

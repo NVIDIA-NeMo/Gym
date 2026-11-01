@@ -24,6 +24,7 @@ import requests
 
 from nemo_gym.sandbox import Sandbox, SandboxEndpoint, SandboxSpec, SandboxStatus
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldGuestStartTimeoutError
 
 
 LOG = logging.getLogger("nemo_gym.osworld_agent.sandbox_provider")
@@ -369,6 +370,7 @@ class GymSandboxDesktopProvider:
     def _wait_for_vm_ready(self, sandbox: Sandbox, host: str, server_port: int) -> None:
         deadline = time.monotonic() + self._ready_timeout_s
         last_error = "guest readiness was not attempted"
+        last_status: int | None = None
         with requests.Session() as session:
             session.trust_env = False
             while time.monotonic() < deadline:
@@ -380,8 +382,10 @@ class GymSandboxDesktopProvider:
                     if response.status_code == 200 and response.content:
                         return
                     last_error = f"HTTP {response.status_code}, bytes={len(response.content)}"
+                    last_status = response.status_code
                 except requests.RequestException as exc:
                     last_error = f"{type(exc).__name__}: {exc}"
+                    last_status = None
 
                 status = sandbox.status()
                 if status in {SandboxStatus.ERROR, SandboxStatus.STOPPED}:
@@ -389,7 +393,11 @@ class GymSandboxDesktopProvider:
                         f"Gym Sandbox stopped before the OSWorld guest became ready: status={status.value}"
                     )
                 time.sleep(min(self._ready_poll_s, max(deadline - time.monotonic(), 0.0)))
-        raise TimeoutError(f"OSWorld guest did not become ready within {self._ready_timeout_s:g}s: {last_error}")
+        raise OSWorldGuestStartTimeoutError(
+            f"OSWorld guest did not become ready within {self._ready_timeout_s:g}s: {last_error}",
+            provider=self._sandbox_provider_name,
+            http_status=last_status,
+        )
 
     def start_emulator(self, path_to_vm: str, headless: bool, os_type: str) -> None:
         if self._sandbox is not None:

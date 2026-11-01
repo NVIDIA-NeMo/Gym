@@ -48,6 +48,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.responses_converter import chat_completion_usage_to_response_usage
 from nemo_gym.sandbox import resolve_provider_config, resolve_provider_metadata
 from nemo_gym.server_runtime import (
@@ -57,6 +58,7 @@ from nemo_gym.server_runtime import (
 from nemo_gym.server_utils import (
     get_first_server_config_dict,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 from responses_api_agents.osworld_agent.agent_contract import (
     ResolvedAgentContract,
     assert_train_eval_parity,
@@ -1182,6 +1184,8 @@ def _run_osworld_task_remote(task_config: Dict[str, Any], runner_kwargs: Dict[st
         "artifact_dir": result.artifact_dir,
         "termination_reason": result.termination_reason,
         "agent_contract": result.agent_contract,
+        # Set only by the built-in rollout; a runner's own result type need not have it.
+        "sandbox_start_failure": getattr(result, "sandbox_start_failure", None),
         # Only Gym's model callers see usage. m3_agent and pointer_agent call models through their own clients, so
         # their usage stays unknown (None).
         "usage": usage.model_dump(mode="json") if (usage := policy_usage.reported()) is not None else None,
@@ -1853,7 +1857,45 @@ def _build_response(
         "verifier_metadata": metadata,
         **runtime_admission,
     }
+    sandbox_start_failure = result.get("sandbox_start_failure")
+    if isinstance(sandbox_start_failure, Mapping):
+        response_fields |= _sandbox_start_failure_fields(result.get("error"), sandbox_start_failure)
     return OSWorldVerifyResponse(**response_fields)
+
+
+def _sandbox_start_failure_fields(error: Optional[str], failure: Mapping[str, Any]) -> Dict[str, Any]:
+    """Report a sandbox guest that never became ready as a retryable ``infrastructure_error``.
+
+    The row goes to the failures sidecar, so recovery runs the task again within the run's retry budget. Its reward
+    stays 0.0 and it stays masked, so no score changes. The event carries the guest's last HTTP status, and the
+    reason names the sandbox provider.
+    """
+    provider = str(failure.get("provider") or "unknown")
+    status = failure.get("http_status")
+    http_status = status if isinstance(status, int) and not isinstance(status, bool) and 100 <= status <= 599 else None
+    message = failure.get("message")
+    lines = (error or "").strip().splitlines()
+    if isinstance(message, str) and message.strip():
+        cause = f"TimeoutError: {message.strip()}"
+    else:
+        cause = lines[0] if lines else "the guest did not become ready"
+    reason = f"OSWorld sandbox start failed on provider={provider}: {cause}"[:2000]
+    event = NgFailureEvent(
+        boundary="agent",
+        failure_kind="infrastructure_error",
+        failure_reason=reason,
+        http_status=http_status,
+        operation="osworld.sandbox_start",
+        stage="agent",
+    )
+    return {
+        "failure_kind": "infrastructure_error",
+        "failure_reason": reason,
+        "sandbox_provider": provider,
+        "sandbox_http_status": http_status,
+        "_ng_failure_class": "infrastructure_error",
+        **FailureReportRow.fields(failure_report_for(event)),
+    }
 
 
 def _empty_response(

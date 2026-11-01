@@ -5,6 +5,7 @@ from __future__ import annotations
 
 import http.server
 import threading
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -13,6 +14,7 @@ import requests
 from nemo_gym.sandbox import SandboxEndpoint, SandboxStatus
 from responses_api_agents.osworld_agent import sandbox_provider as osworld_sandbox
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldGuestStartTimeoutError
 
 
 class FakeSandbox:
@@ -571,3 +573,43 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="forwarder failed"):
         provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
     assert BadEndpointSandbox.instances[-1].stopped == 1
+
+
+@pytest.mark.parametrize(
+    ("reply", "http_status", "infrastructure"),
+    [(502, 502, True), (429, 429, True), (200, 200, True), (404, 404, False), (None, None, True)],
+)
+def test_a_guest_that_never_becomes_ready_raises_a_typed_start_timeout(
+    monkeypatch, reply, http_status, infrastructure
+) -> None:
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            if reply is None:
+                raise osworld_sandbox.requests.ConnectionError("connection refused")
+            return SimpleNamespace(status_code=reply, content=b"")
+
+    monkeypatch.setattr(osworld_sandbox.requests, "Session", Session)
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"docker": {}}, {"image": "osworld:fixed"})
+    provider._ready_timeout_s = 0.05
+    provider._ready_poll_s = 0.01
+    sandbox = SimpleNamespace(status=lambda: SandboxStatus.RUNNING)
+
+    with pytest.raises(OSWorldGuestStartTimeoutError) as caught:
+        provider._wait_for_vm_ready(sandbox, "guest.example.invalid", 5000)
+
+    error = caught.value
+    assert isinstance(error, TimeoutError)  # callers that catch TimeoutError still do
+    assert str(error).startswith("OSWorld guest did not become ready within 0.05s: ")
+    assert (error.provider, error.http_status, error.is_infrastructure_failure) == (
+        "docker",
+        http_status,
+        infrastructure,
+    )
