@@ -67,7 +67,9 @@ def test_remote_projection_retains_actual_store_selection(tmp_path, case, expect
     assert saved_bytes(tmp_path) == before
     assert "synthetic saved answer" not in "\n".join(conn.commands)
     command = "\n".join(conn.commands)
-    assert f"timeout --kill-after=10s {slurm._remote_reader_bound_s()}s" in command
+    # The login host sizes the bound from the rollout files (floor 900 s, 100 s per GB, ceiling 14400 s).
+    assert 'timeout --kill-after=10s "${_gym_bound}s"' in command
+    assert "_gym_bound=$(( (900 + _gym_bytes * 100 / 1073741824) * 1 ))" in command
     assert "prepare" not in command
     assert "a" * 40 in command
     assert "rm -rf" in command

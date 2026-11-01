@@ -21,6 +21,7 @@ import os
 import re
 import shlex
 import tempfile
+import time
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
@@ -202,28 +203,88 @@ def _reconcile_requeued_chain(
     )
 
 
-def _remote_reader_bound_s() -> int:
-    """Seconds the remote Store reader may spend on bootstrap plus selection on the login host.
+# The size-aware reader bound: bootstrap plus a floor, then time per GB of saved rollout files, up to a ceiling.
+_READER_FLOOR_S = 900
+_READER_S_PER_GB = 100
+_READER_CEILING_S = 14400
+_READER_RETRY_BACKOFF_S = 10
 
-    The default covers large saved stores (several GB of rollout files); ``NEMO_GYM_REMOTE_READER_TIMEOUT_S``
-    overrides it for an inspect of an unusually large run. The value is clamped to [300, 14400].
+
+def _remote_reader_bound_s() -> int | None:
+    """The explicit reader bound from ``NEMO_GYM_REMOTE_READER_TIMEOUT_S``, clamped to [300, 14400], else None.
+
+    Without it the login host sizes the bound from the run's rollout files (``_reader_command``).
     """
     raw = os.environ.get("NEMO_GYM_REMOTE_READER_TIMEOUT_S", "")
     try:
-        bound = int(raw) if raw else 1800
+        return min(max(int(raw), 300), _READER_CEILING_S) if raw else None
     except ValueError:
-        bound = 1800
-    return min(max(bound, 300), 14400)
+        return None
 
 
 def _remote_reader_error_text(error: BaseException) -> str:
-    """Name the reader failure with its cause, not only the exception type."""
+    """Name the reader failure with its cause, not only the exception type: the end of the message, where it is."""
     detail = " ".join(str(error).split())
     if not detail:
         return f"remote Store reader unavailable: {type(error).__name__}"
     if len(detail) > 300:
-        detail = detail[:300] + "..."
+        detail = "..." + detail[-300:]
     return f"remote Store reader unavailable: {type(error).__name__}: {detail}"
+
+
+def _reader_command(entrypoint: str, job_dir: Path, payload: str, *, bound_s: int | None, factor: int) -> list[str]:
+    """The login-host steps: size the bound from the rollout files, run the reader, report its exit code and stderr.
+
+    The reader's own failure is reported on stdout (``__GYM_READER_*`` lines) so a timeout, a MemoryError or a
+    failed bootstrap reaches the decision with its exit code and the end of its stderr; only SSH itself fails the
+    command.
+    """
+    artifacts = job_dir / "artifacts"
+    sources = " ".join(shlex.quote(str(artifacts / name)) for name in ("rollouts.jsonl", "rollouts_failures.jsonl"))
+    if bound_s is None:
+        size_bound = f"$(( ({_READER_FLOOR_S} + _gym_bytes * {_READER_S_PER_GB} / 1073741824) * {factor} ))"
+    else:
+        size_bound = str(bound_s * factor)
+    return [
+        "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        f"_gym_bytes=$(stat -c %s -- {sources} 2>/dev/null | awk '{{s += $1}} END {{print s + 0}}')",
+        f"_gym_bound={size_bound}",
+        f"(( _gym_bound > {_READER_CEILING_S} )) && _gym_bound={_READER_CEILING_S}",
+        'echo "__GYM_READER_BOUND:$_gym_bound $_gym_bytes"',
+        "_gym_err=$(mktemp)",
+        f'timeout --kill-after=10s "${{_gym_bound}}s" {entrypoint} 3<<\'GYM_MANAGED_INPUT\' 2>"$_gym_err"\n'
+        + payload
+        + "\nGYM_MANAGED_INPUT",
+        "_gym_rc=$?",
+        'echo "__GYM_READER_RC:$_gym_rc"',
+        "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\n' ' ')\"",
+        'rm -f -- "$_gym_err"',
+    ]
+
+
+def _reader_failure(output: str, elapsed_s: float) -> tuple[str | None, bool]:
+    """The reader failure named from its report, and whether it timed out; (None, False) when it exited 0."""
+    facts = {}
+    for line in output.splitlines():
+        for name in ("BOUND", "RC", "ERR"):
+            if line.startswith(f"__GYM_READER_{name}:"):
+                facts[name] = line.split(":", 1)[1].strip()
+    rc = int(facts["RC"]) if facts.get("RC", "").isdigit() else None
+    if rc == 0 or (rc is None and sum(line.startswith("__GYM_MANAGED:") for line in output.splitlines()) == 1):
+        return None, False
+    bound, _, size = facts.get("BOUND", "").partition(" ")
+    gb = int(size) / 2**30 if size.isdigit() else None
+    scope = f"the {bound} s bound for {gb:.1f} GB of rollout files" if gb is not None else f"the {bound} s bound"
+    timed_out = rc in (124, 137)
+    cause = (
+        f"timed out after {elapsed_s:.0f} s ({scope})"
+        if timed_out
+        else f"exited {rc if rc is not None else 'without an exit code'} after {elapsed_s:.0f} s ({scope})"
+    )
+    stderr = facts.get("ERR", "")
+    if len(stderr) > 400:
+        stderr = "..." + stderr[-400:]
+    return f"remote Store reader unavailable: {cause}" + (f"; stderr: {stderr}" if stderr else ""), timed_out
 
 
 def _remote_managed_reader_script() -> str:
@@ -252,15 +313,30 @@ def _remote_managed_evidence(
         )
         # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
-        # bootstrap stdin. No service, prepare script or scheduler is invoked.
-        output = conn.run(
-            [
-                "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
-                f"timeout --kill-after=10s {_remote_reader_bound_s()}s {entrypoint} 3<<'GYM_MANAGED_INPUT'\n"
-                + collected.model_dump_json()
-                + "\nGYM_MANAGED_INPUT",
-            ]
-        )
+        # bootstrap stdin. No service, prepare script or scheduler is invoked. One retry, with twice the bound,
+        # follows a timeout or a failed SSH hop; any other failure is final and reported with its cause.
+        payload = collected.model_dump_json()
+        for attempt in (1, 2):
+            started = time.monotonic()
+            try:
+                output = conn.run(
+                    _reader_command(entrypoint, job_dir, payload, bound_s=_remote_reader_bound_s(), factor=attempt)
+                )
+            except RuntimeError as error:
+                if "exit code 255" not in str(error):
+                    raise
+                if attempt == 2:
+                    raise RuntimeError(f"SSH to the login host failed twice (exit code 255): {error}") from error
+                time.sleep(_READER_RETRY_BACKOFF_S)
+                continue
+            failure, timed_out = _reader_failure(output, time.monotonic() - started)
+            if failure is None:
+                break
+            if not timed_out or attempt == 2:
+                retried = " (after one retry with twice the bound)" if attempt == 2 else ""
+                return collected.model_copy(
+                    update={"managed_selection": None, "managed_reader_error": failure + retried}
+                )
         lines = [
             line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
         ]
