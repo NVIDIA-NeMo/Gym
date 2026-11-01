@@ -272,6 +272,18 @@ def _atif_trajectories(output: dict[str, Any]) -> list[dict[str, Any]]:
     return trajectories
 
 
+def _emitted_arguments(value: Any, call_id: str) -> Optional[str]:
+    """The arguments string of tool call call_id in a raw chat or Responses API model response, if present."""
+    if isinstance(value, list):
+        return next((found for item in value if (found := _emitted_arguments(item, call_id)) is not None), None)
+    if not isinstance(value, dict):
+        return None
+    arguments = _mapping(value.get("function")).get("arguments", value.get("arguments"))
+    if call_id in (value.get("id"), value.get("call_id")) and isinstance(arguments, str):
+        return arguments
+    return _emitted_arguments(list(value.values()), call_id)
+
+
 def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items: list[Any]) -> None:
     """Append the agent-step items of one ATIF trajectory, inlining embedded subagent trajectories at their call."""
     subagents = {
@@ -303,13 +315,18 @@ def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items
             for tool_call in step.get("tool_calls") or []:
                 if not isinstance(tool_call, dict):
                     continue
-                arguments = tool_call.get("arguments")
+                call_id = str(tool_call.get("tool_call_id") or f"call_{uuid4().hex}")
+                # Relay records arguments that are not a JSON object as {"raw": text} or {"value": json}, so take them
+                # from its copy of the model's response when it has one.
+                arguments = _emitted_arguments(_mapping(step.get("extra")).get("llm_response"), call_id)
+                if arguments is None:
+                    arguments = tool_call.get("arguments")
                 if not isinstance(arguments, str):
                     arguments = json.dumps(arguments or {}, ensure_ascii=False, sort_keys=True)
                 items.append(
                     NeMoGymResponseFunctionToolCall(
                         id=f"fc_{uuid4().hex}",
-                        call_id=str(tool_call.get("tool_call_id") or f"call_{uuid4().hex}"),
+                        call_id=call_id,
                         name=str(tool_call.get("function_name") or ""),
                         arguments=arguments,
                         status="completed",

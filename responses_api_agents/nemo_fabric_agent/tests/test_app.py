@@ -656,6 +656,28 @@ def test_relay_keeps_native_reasoning_that_atif_lacks(tmp_path: Path) -> None:
     assert response.output[0].summary[0].text == "List the files."
 
 
+def test_atif_keeps_tool_call_arguments_as_the_model_emitted_them() -> None:
+    emitted = {"c1": '{"command": "ls', "c2": "[1, 2]", "c3": '{"value": 5}'}
+    # Relay's record: arguments that are not a JSON object are wrapped, and the raw response keeps the original text.
+    calls = [
+        {"tool_call_id": "c1", "function_name": "bash", "arguments": {"raw": emitted["c1"]}},
+        {"tool_call_id": "c2", "function_name": "bash", "arguments": {"value": [1, 2]}},
+        {"tool_call_id": "c3", "function_name": "bash", "arguments": {"value": 5}},
+    ]
+    message = {
+        "role": "assistant",
+        "tool_calls": [
+            {"id": key, "type": "function", "function": {"name": "bash", "arguments": text}}
+            for key, text in emitted.items()
+        ],
+    }
+    step = {"source": "agent", "tool_calls": calls, "extra": {"llm_response": {"choices": [{"message": message}]}}}
+
+    items = _atif_output_items([{"steps": [step]}], "answer")
+
+    assert {item.call_id: item.arguments for item in items if item.type == "function_call"} == emitted
+
+
 def test_atif_keeps_relay_structured_tool_results() -> None:
     fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")
