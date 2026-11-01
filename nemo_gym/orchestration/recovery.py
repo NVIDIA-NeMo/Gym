@@ -1326,6 +1326,10 @@ def _managed_trial_metadata(
         return results, None
 
 
+# Row values the Store selection never reads, and the largest ones in agent runs.
+STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_model_call_capture", "ng_agent_observations"})
+
+
 def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:
     """Read locally accessible Store history in this installed Gym process; never copy its selection rules.
 
@@ -1363,7 +1367,8 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
 
         if collected.source_digests is None or collected.source_digests != snapshot():
             raise ValueError("managed source changed or has no stable collection snapshot")
-        store = RolloutStore.read(artifacts / "rollouts.jsonl", import_legacy=False)
+        # No selection rule reads a trajectory or model-call capture: large rows are read without them.
+        store = RolloutStore.read(artifacts / "rollouts.jsonl", import_legacy=False, skip_keys=STORE_SKIP_KEYS)
         if store is None or collected.materialized is None:
             raise ValueError("managed source has no readable manifest or inventory")
         if store.manifest.max_rollout_attempts is None:

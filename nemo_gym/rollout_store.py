@@ -263,12 +263,18 @@ class RolloutStore:
 
     @classmethod
     def read(
-        cls, output: Path, *, import_legacy: bool = True, retry_terminal_timeouts: bool = False
+        cls,
+        output: Path,
+        *,
+        import_legacy: bool = True,
+        retry_terminal_timeouts: bool = False,
+        skip_keys: frozenset[str] = frozenset(),
     ) -> "RolloutStore | None":
         """Read selected outcomes without modifying files or acquiring a writer lock.
 
         Managed runs use their saved timeout policy. ``retry_terminal_timeouts``
-        applies only to legacy artifacts without a manifest.
+        applies only to legacy artifacts without a manifest. ``skip_keys`` (see ``RolloutRecords.load``) is for a
+        selection that reads no trajectory: its records read back without those values.
         """
         output = resolve_rollout_path(output, read_only=True)
         path = manifest_path_for(output)
@@ -296,7 +302,7 @@ class RolloutStore:
         else:
             return None
         state = RolloutRecords.load(
-            output, manifest, import_legacy=manifest.legacy_import, outcome_limits=outcome_limits
+            output, manifest, import_legacy=manifest.legacy_import, outcome_limits=outcome_limits, skip_keys=skip_keys
         )
         if not path.exists():
             state.retry_terminal_timeouts = retry_terminal_timeouts

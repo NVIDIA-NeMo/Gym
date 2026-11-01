@@ -21,6 +21,7 @@ reserved in the run manifest; no dispatch or outcome event journal is written.
 import hashlib
 import math
 import os
+import re
 import warnings
 from collections import Counter
 from collections.abc import Iterator
@@ -158,6 +159,8 @@ class RolloutRecord:
     legacy_attempt_index: int | None = None
     file_identity: tuple[int, int] | None = None
     expected_identity: tuple[str | None, str, int] | None = None
+    # Top-level keys a read-only selection skips in large rows; ``read`` applies the same projection.
+    skip_keys: frozenset[str] = frozenset()
 
     def read(self) -> dict:
         """Read this record with its effective legacy attempt identity."""
@@ -166,7 +169,12 @@ class RolloutRecord:
 
     def _read(self, file: BinaryIO) -> dict:
         file.seek(self.offset)
-        row = orjson.loads(file.read(self.length))
+        if self.skip_keys:
+            row, _ = _read_row(file, self.length, self.skip_keys)
+            if row is None:
+                raise ConfigError(f"Saved record at byte {self.offset} of {self.path} is incomplete.")
+        else:
+            row = orjson.loads(file.read(self.length))
         if self.legacy_attempt_index is not None:
             row[ATTEMPT_INDEX_KEY_NAME] = self.legacy_attempt_index
         if self.expected_identity is not None:
@@ -191,8 +199,153 @@ class _Outcome:
     unclassified_execution_failure: bool = False
 
 
-def _indexed_records(path: Path, *, end_offset: int | None = None) -> Iterator[tuple[RolloutRecord, dict]]:
-    """Scan one record at a time, retaining its original byte coordinates."""
+# A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
+PROJECTED_ROW_BYTES = 64 << 20
+_CHUNK_BYTES = 1 << 20
+_STRUCTURE = re.compile(rb'["{}\[\],:]')
+_NESTED = re.compile(rb'["{}\[\]]')
+_IN_STRING = re.compile(rb'["\\]')
+_NON_SPACE = re.compile(rb"[^ \t\r\n]")
+# Inside a nested value only brackets matter: one match skips plain bytes and whole strings up to the next one.
+_NESTED_RUN = re.compile(rb'[^"\\\[\]{}]*(?:"[^"\\]*(?:\\.[^"\\]*)*"[^"\\\[\]{}]*)*')
+
+
+class _TopLevelProjector:
+    """Copy one JSON object, replacing the values of some top-level keys with null, in bounded memory.
+
+    Bytes are fed in chunks; a skipped value is scanned for its end but never kept. Only top-level keys are
+    matched, so the same name nested anywhere else is copied.
+    """
+
+    def __init__(self, skip_keys: frozenset[str]) -> None:
+        self._skip = {key.encode() for key in skip_keys}
+        self._parts: list[bytes] = []
+        self._depth = 0
+        self._in_string = False
+        self._escape = False
+        self._key: bytearray | None = None
+        self._expect_key = False
+        self._last_key: bytes | None = None
+        self._await_value = False
+        self._skipping = False
+
+    def feed(self, chunk: bytes) -> None:
+        pos, size = 0, len(chunk)
+        copy_from = None if self._skipping else 0
+        while pos < size:
+            if self._in_string:
+                if self._escape:
+                    self._escape = False
+                    if self._key is not None:
+                        self._key += chunk[pos : pos + 1]
+                    pos += 1
+                    continue
+                found = _IN_STRING.search(chunk, pos)
+                end = found.start() if found else size
+                if self._key is not None and len(self._key) <= 256:
+                    self._key += chunk[pos:end]
+                if found is None:
+                    break
+                pos = found.end()
+                if found.group() == b"\\":
+                    self._escape = True
+                    continue
+                self._in_string = False
+                if self._key is not None:
+                    self._last_key, self._key = bytes(self._key), None
+                continue
+            if self._await_value:
+                found = _NON_SPACE.search(chunk, pos)
+                if found is None:
+                    break
+                pos = found.start()
+                self._await_value = False
+                if self._last_key in self._skip:
+                    self._parts.append(chunk[copy_from:pos] + b"null")
+                    copy_from, self._skipping = None, True
+                continue
+            if self._depth >= 2:
+                pos = _NESTED_RUN.match(chunk, pos).end()
+                if pos >= size:
+                    break
+            found = (_STRUCTURE if self._depth <= 1 else _NESTED).search(chunk, pos)
+            if found is None:
+                break
+            char, pos = found.group(), found.end()
+            if char == b'"':
+                self._in_string = True
+                if self._depth == 1 and self._expect_key:
+                    self._key, self._expect_key = bytearray(), False
+            elif char in (b"{", b"["):
+                self._depth += 1
+                self._expect_key = self._depth == 1 and char == b"{"
+            elif char in (b"}", b"]"):
+                if self._depth == 1 and self._skipping:
+                    self._skipping, copy_from = False, found.start()
+                self._depth -= 1
+            elif char == b"," and self._depth == 1:
+                if self._skipping:
+                    self._skipping, copy_from = False, found.start()
+                self._expect_key = True
+            elif char == b":" and self._depth == 1 and self._last_key is not None:
+                self._await_value = True
+        if copy_from is not None:
+            self._parts.append(chunk[copy_from:])
+
+    def result(self) -> bytes:
+        return b"".join(self._parts)
+
+
+def _read_row(file: BinaryIO, limit: int | None, skip_keys: frozenset[str]) -> tuple[dict | None, int]:
+    """Read one JSONL row from the file position in chunks; a large row is parsed without its skipped values.
+
+    Returns the row (None for a blank line, or for an incomplete final row) and the bytes consumed.
+    """
+    kept: list[bytes] = []
+    projector = None
+    consumed = 0
+    ended = False
+    while limit is None or consumed < limit:
+        chunk = file.readline(_CHUNK_BYTES if limit is None else min(_CHUNK_BYTES, limit - consumed))
+        if not chunk:
+            break
+        consumed += len(chunk)
+        ended = chunk.endswith(b"\n")
+        if projector is not None:
+            projector.feed(chunk)
+        else:
+            kept.append(chunk)
+            if consumed > PROJECTED_ROW_BYTES:
+                projector = _TopLevelProjector(skip_keys)
+                for part in kept:
+                    projector.feed(part)
+                kept = []
+        if ended:
+            break
+    raw = projector.result() if projector is not None else b"".join(kept)
+    if not raw.strip():
+        return None, consumed
+    if not ended:
+        raise _IncompleteRow(consumed)
+    value = orjson.loads(raw)
+    for key in skip_keys if projector is not None else ():
+        value.pop(key, None)
+    return value, consumed
+
+
+class _IncompleteRow(Exception):
+    def __init__(self, consumed: int) -> None:
+        self.consumed = consumed
+
+
+def _indexed_records(
+    path: Path, *, end_offset: int | None = None, skip_keys: frozenset[str] = frozenset()
+) -> Iterator[tuple[RolloutRecord, dict]]:
+    """Scan one record at a time, retaining its original byte coordinates.
+
+    With ``skip_keys`` a row larger than ``PROJECTED_ROW_BYTES`` is read in chunks and parsed without those
+    top-level values, so a read-only selection never holds a whole large row.
+    """
     if not path.exists():
         return
     with path.open("rb") as file:
@@ -201,21 +354,38 @@ def _indexed_records(path: Path, *, end_offset: int | None = None) -> Iterator[t
         offset = 0
         number = 0
         while end_offset is None or offset < end_offset:
-            raw = file.readline(-1 if end_offset is None else end_offset - offset)
-            if not raw:
-                break
-            number += 1
-            record = RolloutRecord(path, offset, len(raw), number, file_identity=file_identity)
-            offset += len(raw)
-            if not raw.strip():
-                continue
-            try:
-                value = orjson.loads(raw)
-            except orjson.JSONDecodeError as error:
-                if not raw.endswith(b"\n"):
-                    warnings.warn(f"Ignoring incomplete final record in {path} at line {number}.", stacklevel=2)
+            limit = None if end_offset is None else end_offset - offset
+            if skip_keys:
+                try:
+                    value, length = _read_row(file, limit, skip_keys)
+                except _IncompleteRow:
+                    warnings.warn(f"Ignoring incomplete final record in {path} at line {number + 1}.", stacklevel=2)
                     return
-                raise ConfigError(f"Malformed JSON in {path} at line {number}: {error}") from error
+                except orjson.JSONDecodeError as error:
+                    raise ConfigError(f"Malformed JSON in {path} at line {number + 1}: {error}") from error
+                if not length:
+                    break
+                number += 1
+                record = RolloutRecord(path, offset, length, number, file_identity=file_identity, skip_keys=skip_keys)
+                offset += length
+                if value is None:
+                    continue
+            else:
+                raw = file.readline(-1 if limit is None else limit)
+                if not raw:
+                    break
+                number += 1
+                record = RolloutRecord(path, offset, len(raw), number, file_identity=file_identity)
+                offset += len(raw)
+                if not raw.strip():
+                    continue
+                try:
+                    value = orjson.loads(raw)
+                except orjson.JSONDecodeError as error:
+                    if not raw.endswith(b"\n"):
+                        warnings.warn(f"Ignoring incomplete final record in {path} at line {number}.", stacklevel=2)
+                        return
+                    raise ConfigError(f"Malformed JSON in {path} at line {number}: {error}") from error
             if not isinstance(value, dict):
                 raise ConfigError(f"Expected an object in {path} at line {number}.")
             yield record, value
@@ -481,8 +651,12 @@ class RolloutRecords:
         *,
         import_legacy: bool = False,
         outcome_limits: dict[Path, int] | None = None,
+        skip_keys: frozenset[str] = frozenset(),
     ) -> "RolloutRecords":
-        """Index outcomes, optionally restricted to prefixes captured before the manifest read."""
+        """Index outcomes, optionally restricted to prefixes captured before the manifest read.
+
+        ``skip_keys`` names top-level row values that no selection rule reads; large rows are parsed without them.
+        """
         expected = list(read_records(materialized_path_for(output)))
         if _digest(expected) != manifest.materialized_digest:
             raise ConfigError("Saved materialized inputs do not match the run manifest.")
@@ -497,7 +671,7 @@ class RolloutRecords:
         resubmitted = resubmit_offset_path_for(output).exists()
         for path in (failures_path_for(output), output):
             for record, payload in _indexed_records(
-                path, end_offset=outcome_limits[path] if outcome_limits is not None else None
+                path, end_offset=outcome_limits[path] if outcome_limits is not None else None, skip_keys=skip_keys
             ):
                 if payload.get("_ng_omitted_rollout") and (
                     payload.get("_ng_dispatch_drained") or payload.get("_ng_unrouted_run_error")
