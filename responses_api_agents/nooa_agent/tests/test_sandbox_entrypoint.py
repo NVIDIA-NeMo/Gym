@@ -690,8 +690,9 @@ def test_collect_trace_export_joins_session_files_and_tolerates_absence(tmp_path
     assert (tmp_path / "empty.jsonl").read_text() == ""
 
 
-def test_enable_trace_export_writes_otlp_jsonl_per_session(tmp_path: Path) -> None:
-    """The real NOOA exporter: a span stamped with session.id lands in <trace_dir>/<session>.jsonl as OTLP JSON."""
+def test_enable_trace_export_writes_journal_jsonl_per_session(tmp_path: Path) -> None:
+    """The real NOOA exporter: a span stamped with session.id lands in <trace_dir>/<session>.nooa.jsonl, the
+    message-journal file the viewer imports, with the journal manifest first and the OTLP spans after it."""
     pytest.importorskip("nooa.tracing")
     from opentelemetry import trace
 
@@ -700,10 +701,13 @@ def test_enable_trace_export_writes_otlp_jsonl_per_session(tmp_path: Path) -> No
     with trace.get_tracer("test").start_as_current_span("probe") as span:
         span.set_attribute("session.id", "probe-session")
     lines = entrypoint.collect_trace_export(str(trace_dir), tmp_path / "traces.jsonl")
-    assert lines >= 1
-    assert (trace_dir / "probe-session.jsonl").exists()
-    first = json.loads((tmp_path / "traces.jsonl").read_text().splitlines()[0])
-    assert "resourceSpans" in first
+    assert lines >= 2
+    assert (trace_dir / "probe-session.nooa.jsonl").exists()
+    assert not (trace_dir / "probe-session.jsonl").exists(), "spans must be written once, not by two exporters"
+    records = [json.loads(line) for line in (tmp_path / "traces.jsonl").read_text().splitlines()]
+    assert records[0]["nooaJournal"]["format"] == "nooa.message_journal"
+    assert records[0]["nooaJournal"]["session_id"] == "probe-session"
+    assert any("resourceSpans" in record for record in records[1:])
 
 
 def test_expose_runtime_scripts_exposes_only_rg_not_the_runtime_bin(tmp_path, monkeypatch) -> None:

@@ -17,6 +17,8 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import time
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
 from typing import Any, Literal, Protocol
@@ -47,6 +49,16 @@ from nemo_gym.openai_utils import (
 )
 from nemo_gym.rollout_observability import ModelCallRef, ObservationGap
 from nemo_gym.server_utils import get_response_json, raise_for_status
+
+
+try:
+    # NOOA's viewer reads message bodies from its message journal, which NOOA's own clients feed through LiteLLM.
+    # This client posts to Gym directly, so it journals each call itself. Older NOOA revisions have no entry point.
+    from nooa.tracing import journal_llm_call as _journal_llm_call
+except ImportError:  # pragma: no cover - depends on the pinned NOOA revision
+    _journal_llm_call = None
+
+logger = logging.getLogger(__name__)
 
 
 class GymModelClient(Protocol):
@@ -493,6 +505,8 @@ class GymResponsesLLM(UnifiedLLM):
         self._state.calls.append(call)
         if self._on_call is not None:
             self._on_call(call)
+        started = time.monotonic()
+        journal_extra: dict[str, Any] = {"invocation_id": call.invocation_id, "model_server": self._model_server_name}
         try:
             # CodeAct rebuilds context after an LLM error. Retry throttling here
             # so every wire attempt retains this logical call's exact request.
@@ -523,11 +537,13 @@ class GymResponsesLLM(UnifiedLLM):
             call.response = response
             self._cookies.update({name: morsel.value for name, morsel in http_response.cookies.items()})
         except Exception as error:
+            self._journal(messages, None, started, {**journal_extra, "error": type(error).__name__})
             # Summary forks contain their own errors; their optional model calls
             # must neither poison nor clear the main invocation's failure state.
             if not summary_fork_active():
                 self._state.fatal_error = error
             raise
+        journal_extra["response_id"] = response.id
         if not summary_fork_active():
             # A recovered model call no longer vetoes successful completion.
             # Earlier requests and responses remain in the rollout evidence.
@@ -535,6 +551,16 @@ class GymResponsesLLM(UnifiedLLM):
         if self._on_response is not None:
             self._on_response()
 
+        try:
+            result = self._llm_response(response, output_model)
+        except (OutputTokenLimitExceeded, InvalidPolicyOutputError) as error:
+            # The model answered, but NOOA never sees this answer; the journal records the rejection instead.
+            self._journal(messages, None, started, {**journal_extra, "error": type(error).__name__})
+            raise
+        self._journal(messages, result, started, journal_extra)
+        return result
+
+    def _llm_response(self, response: NeMoGymResponse, output_model: type[BaseModel] | None) -> LLMResponse:
         # Capture the upstream response first, but never hand a truncated tool
         # call to NOOA for execution. Its retry loop may recover with a later call.
         if response.incomplete_details is not None and response.incomplete_details.reason == "max_output_tokens":
@@ -567,3 +593,24 @@ class GymResponsesLLM(UnifiedLLM):
             finish_reason="tool_calls" if function_calls else _finish_reason(response),
             usage=usage,
         )
+
+    def _journal(
+        self,
+        messages: list[dict[str, Any] | LLMResponse | CacheBoundary],
+        response: LLMResponse | None,
+        started: float,
+        extra: dict[str, Any],
+    ) -> None:
+        """Record the call in NOOA's message journal so the viewer shows its messages; diagnostics, never a failure."""
+        if _journal_llm_call is None:
+            return
+        try:
+            _journal_llm_call(
+                model=self.model,
+                messages=messages,
+                response=response,
+                latency_ms=(time.monotonic() - started) * 1000,
+                extra=extra,
+            )
+        except Exception:  # noqa: BLE001 - the journal is a viewer aid; the rollout must not depend on it
+            logger.warning("NOOA message journal write failed", exc_info=True)

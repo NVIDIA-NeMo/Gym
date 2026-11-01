@@ -1335,3 +1335,75 @@ async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(
         await llm.acall([{"role": "user", "content": "hello"}], **params)
     client.post.assert_not_awaited()
     assert state.used == 0
+
+
+@pytest.mark.asyncio
+async def test_each_call_is_written_to_nooas_message_journal(monkeypatch) -> None:
+    """The viewer reads message bodies from NOOA's journal, which the Gym client must feed itself: NOOA's own
+    clients journal through LiteLLM, and this client never uses LiteLLM."""
+    from responses_api_agents.nooa_agent import gym_llm
+
+    journal = []
+    monkeypatch.setattr(gym_llm, "_journal_llm_call", lambda **kwargs: journal.append(kwargs))
+    output = NeMoGymResponseOutputMessage(
+        id="msg-1", content=[NeMoGymResponseOutputText(annotations=[], text="Cold", logprobs=[])]
+    )
+    llm, client, state = make_llm(model_response(output))
+    messages = [{"role": "user", "content": "Weather?"}]
+
+    result = await llm.acall(messages)
+
+    assert len(journal) == 1
+    (entry,) = journal
+    assert entry["model"] == "gym-policy"
+    assert entry["messages"] == messages
+    assert entry["response"] is result
+    assert entry["latency_ms"] >= 0
+    assert entry["extra"] == {"invocation_id": None, "model_server": "policy_model", "response_id": "resp-1"}
+
+    truncated = model_response(output, response_id="resp-2")
+    truncated["incomplete_details"] = {"reason": "max_output_tokens"}
+    client.post.return_value = FakeHTTPResponse(truncated)
+    with pytest.raises(OutputTokenLimitExceeded):
+        await llm.acall(messages)
+    assert journal[1]["response"] is None
+    assert journal[1]["extra"]["response_id"] == "resp-2"
+    assert journal[1]["extra"]["error"] == "OutputTokenLimitExceeded"
+
+
+@pytest.mark.asyncio
+async def test_journal_records_failed_wire_calls_and_never_fails_the_call(monkeypatch) -> None:
+    from responses_api_agents.nooa_agent import gym_llm
+
+    journal = []
+
+    def broken_journal(**kwargs) -> None:
+        journal.append(kwargs)
+        raise RuntimeError("journal disk full")
+
+    monkeypatch.setattr(gym_llm, "_journal_llm_call", broken_journal)
+    llm, client, state = make_llm(model_response())
+    client.post.side_effect = ClientResponseError(request_info=None, history=(), status=500, message="boom")
+    with pytest.raises(ClientResponseError):
+        await llm.acall([{"role": "user", "content": "hi"}])
+    assert journal[0]["response"] is None
+    assert journal[0]["extra"] == {
+        "invocation_id": None,
+        "model_server": "policy_model",
+        "error": "ClientResponseError",
+    }
+
+    # A journal failure is logged, not raised: the policy call still returns.
+    client.post.side_effect = None
+    client.post.return_value = FakeHTTPResponse(model_response())
+    result = await llm.acall([{"role": "user", "content": "hi"}])
+    assert result.finish_reason == "stop"
+    assert len(journal) == 2
+
+
+def test_journal_is_skipped_when_the_pinned_nooa_has_no_entry_point(monkeypatch) -> None:
+    from responses_api_agents.nooa_agent import gym_llm
+
+    monkeypatch.setattr(gym_llm, "_journal_llm_call", None)
+    llm, _, _ = make_llm(model_response())
+    llm._journal([], None, 0.0, {})

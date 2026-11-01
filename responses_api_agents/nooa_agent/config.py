@@ -73,9 +73,9 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     trace_jsonl: bool = Field(
         default=False,
         description=(
-            "Write NOOA's OTLP JSONL trace in the sandbox for each rollout and copy it to "
-            "<artifacts_dir>/<rollout_id>/traces.jsonl on this host. A debugging artifact, not evidence: Gym's own "
-            "capture and the rollout record remain authoritative."
+            "Write NOOA's JSONL trace (OTLP spans plus the message journal NOOA's viewer imports) in the sandbox for "
+            "each rollout and copy it to <artifacts_dir>/<rollout_id>/traces.jsonl on this host. A debugging "
+            "artifact, not evidence: Gym's own capture and the rollout record remain authoritative."
         ),
     )
     artifacts_dir: Path = Field(

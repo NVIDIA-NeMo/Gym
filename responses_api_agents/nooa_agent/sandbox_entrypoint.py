@@ -266,18 +266,25 @@ async def execute(
 
 
 def enable_trace_export(trace_dir: str) -> None:
-    """Route NOOA's OpenTelemetry spans to OTLP JSONL files, one per NOOA session, under ``trace_dir``."""
+    """Route NOOA's spans and message journal to one JSONL file per NOOA session under ``trace_dir``.
+
+    The journal file exporter writes the OTLP spans with their large message attributes removed, plus the journal
+    records (content-addressed message blocks and one record per model call) that NOOA's viewer imports to show
+    each call's messages. The plain OTLP exporter is not added as well: the viewer stores every span it reads, so
+    one file per session keeps each span once.
+    """
     from nooa.tracing import enable_tracing, exporters
 
     Path(trace_dir).mkdir(parents=True, exist_ok=True)
-    enable_tracing(exporters=[exporters.jsonl(trace_dir)])
+    enable_tracing(exporters=[exporters.journal_file(trace_dir)])
 
 
 def collect_trace_export(trace_dir: str, output: Path) -> int:
     """Flush the exporters and join the per-session JSONL files into ``output``; return the line count.
 
-    Each line is a complete OTLP ``TracesData`` object that carries its ``session.id`` attribute, so joining the
-    files loses nothing and the controller reads one known file. Best effort: a missing directory yields 0 lines.
+    Each line is a complete object that names its session: an OTLP ``TracesData`` envelope or a journal record
+    carrying ``session_id``. Joining the files loses nothing and the controller reads one known file. Best effort: a
+    missing directory yields 0 lines.
     """
     try:
         from nooa.tracing import flush_traces
