@@ -1451,6 +1451,53 @@ def test_postprocess_without_logprobs_leaves_the_field_unset(converter: Response
     assert converter.postprocess_chat_response(choice)[0].content[0].logprobs is None
 
 
+@pytest.mark.parametrize("format_type", ["json_schema", "json_object"])
+@pytest.mark.parametrize("prefix", ["", "<think>draft</think>", " \n<think>one</think>\n<think>two</think>"])
+def test_structured_response_preserves_literal_think_tags(converter, format_type, prefix):
+    final = '{"quoted": "<think>literal</think>", "nested": ["</think>", "<think>"]}'
+    format_config = {"type": format_type}
+    if format_type == "json_schema":
+        format_config.update(name="verdict", schema={"type": "object"}, strict=True)
+    request = NeMoGymResponseCreateParamsNonStreaming(input="test", model="test", text={"format": format_config})
+    completion = NeMoGymChatCompletion(
+        id="chat",
+        model="test",
+        created=0,
+        object="chat.completion",
+        choices=[_choice_with_tokens([prefix, final])],
+    )
+    response = converter.chat_completion_to_response(request, completion)
+    messages = [item for item in response.output if item.type == "message"]
+    assert len(messages) == 1
+    assert messages[0].content[0].text == (" \n\n" if prefix.startswith(" ") else "") + final
+    reasoning = [summary.text for item in response.output if item.type == "reasoning" for summary in item.summary]
+    assert reasoning == (["one", "two"] if prefix.startswith(" ") else ["draft"] if prefix else [])
+
+
+def test_structured_reasoning_removal_aligns_only_removed_token_spans(converter):
+    tokens = ["<think>", "draft", "</think>", '{"quote":"', "<think>", "literal", "</think>", '"}']
+    output = converter.postprocess_chat_response(_choice_with_tokens(tokens), structured_output=True)
+    part = output[1].content[0]
+    assert part.text == "".join(tokens[3:])
+    entries = [entry if isinstance(entry, dict) else entry.model_dump() for entry in part.logprobs]
+    assert [entry["token"] for entry in entries] == tokens[3:]
+    assert [entry["logprob"] for entry in entries] == pytest.approx([-0.1 * (i + 1) for i in range(3, len(tokens))])
+
+
+@pytest.mark.parametrize("content", ['{"broken":"<think>literal</think>', '<think>unfinished {"draft":true}'])
+def test_structured_conversion_does_not_repair_malformed_json_or_unclosed_reasoning(converter, content):
+    output = converter.postprocess_chat_response(_choice_with_tokens([content]), structured_output=True)
+    assert len(output) == 1 and output[0].type == "message"
+    assert output[0].content[0].text == content
+
+
+def test_structured_conversion_respects_disabled_reasoning_parser():
+    converter = ResponsesConverter(return_token_id_information=False, uses_reasoning_parser=False)
+    content = '<think>draft</think>{"quote":"<think>literal</think>"}'
+    output = converter.postprocess_chat_response(_choice_with_tokens([content]), structured_output=True)
+    assert len(output) == 1 and output[0].content[0].text == content
+
+
 def test_postprocess_extracts_reasoning_when_enabled(converter: ResponsesConverter):
     output = converter.postprocess_assistant_message_dict(
         {"role": "assistant", "content": "<think>reasoning</think>the answer"}
