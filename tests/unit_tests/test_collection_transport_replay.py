@@ -118,7 +118,7 @@ async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_sav
     assert store.coverage()["max_rollout_attempts"] == 3
     assert store.pending() == []
     decision = decide_persisted(tmp_path)
-    assert decision.action.value == "stop"
+    assert (decision.action.value, decision.counts) == ("noop", {"scored": 1})
     assert (decision.evidence[0].attempts, decision.evidence[0].max_attempts) == (int(routed), 3)
     failures = [json.loads(line) for line in output.with_name("rollouts_failures.jsonl").read_text().splitlines()]
     assert len(failures) == 1
