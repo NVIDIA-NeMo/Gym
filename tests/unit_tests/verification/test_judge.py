@@ -363,7 +363,7 @@ def _http_reply(status: int, body: bytes = b'{"error": "unavailable"}') -> Magic
     from multidict import CIMultiDict, CIMultiDictProxy
     from yarl import URL
 
-    url = URL("http://judge/v1/responses")
+    url = URL("http://judge.example.invalid/v1/responses")
     info = RequestInfo(url=url, method="POST", headers=CIMultiDictProxy(CIMultiDict()), real_url=url)
     resp = MagicMock(ok=status < 400, status=status)
     resp.read = AsyncMock(return_value=body)
