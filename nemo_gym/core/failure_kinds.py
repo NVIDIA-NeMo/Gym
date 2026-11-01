@@ -121,6 +121,8 @@ SESSION_RELEASE_FAILED = "session_release_failed"
 CANCELLED = "cancelled"
 KILL_SHAPED = "kill_shaped"
 SHUTDOWN = "shutdown"
+# A Gym server process exited before it was ready, for example because its port was already in use.
+SERVER_START_FAILED = "server_start_failed"
 
 # --- persistence and cohorts --------------------------------------------------------------- #
 PERSISTENCE_FAILED = "persistence_failed"
@@ -164,6 +166,7 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         CANCELLED,
         KILL_SHAPED,
         SHUTDOWN,
+        SERVER_START_FAILED,
         PERSISTENCE_FAILED,
         COHORT_INCOMPLETE,
         AGENT_ROUTE_FAILED,

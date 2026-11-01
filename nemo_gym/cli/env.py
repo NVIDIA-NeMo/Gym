@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import asyncio
+import errno
 import importlib.util
 import json
 import os
@@ -66,13 +67,17 @@ from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    PORT_RANGE_HIGH_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
     QUERY_KEY_NAME,
     SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
     SERVER_TYPE_KEYS,
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
+    _find_open_port_using_range,
     get_global_config_dict,
 )
+from nemo_gym.core.failure_kinds import SERVER_START_FAILED
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -518,6 +523,31 @@ class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
 
+class ServerStartFailedError(RuntimeError):
+    """A Gym server process (or the head server) exited before it was ready.
+
+    ``failure_kind`` is ``server_start_failed``. ``errno`` is the errno of the bind error the server printed, when it
+    printed one: ``errno.EADDRINUSE`` means another process took its port between the port check and the bind.
+    """
+
+    failure_kind = SERVER_START_FAILED
+
+    def __init__(self, message: str, *, server_name: str, errno: int | None) -> None:
+        super().__init__(message)
+        self.server_name = server_name
+        self.errno = errno
+
+
+# uvicorn's report of a failed bind: "[Errno 98] error while attempting to bind on address (...)".
+_BIND_ERRNO_PATTERN = re.compile(r"\[Errno (\d+)\] error while attempting to bind")
+
+
+def _bind_errno(stderr: str | None) -> int | None:
+    """The errno of the bind error a server printed on stderr, or None when it printed none."""
+    match = _BIND_ERRNO_PATTERN.search(stderr or "")
+    return int(match.group(1)) if match else None
+
+
 def _startup_outcome(error: BaseException) -> str:
     """How a startup that raised `error` ended, as the startup telemetry reports it."""
     if isinstance(error, ServerSpinupTimeoutError):
@@ -549,19 +579,55 @@ class RunHelper:  # pragma: no cover
         Callers reach their own `shutdown()` only after this returns.
         The spawned servers have no process group or atexit handler, so nothing else would stop them.
         """
-        self._processes = dict()
-        self._head_server = None
-        self._h2_ping_sidecar = None
-        try:
-            self._start(global_config_dict_parser_config)
-        except BaseException as error:
-            # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
-            if self._startup is not None:
-                self._startup.abort(_startup_outcome(error), error)
-            self.shutdown()
-            raise
+        for attempt in (1, 2):
+            self._processes = dict()
+            self._head_server = None
+            self._h2_ping_sidecar = None
+            # Until every server is ready, a server that exits is a failed start (see poll()).
+            self._servers_ready = False
+            try:
+                self._start(global_config_dict_parser_config)
+                return
+            except BaseException as error:
+                # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
+                if self._startup is not None:
+                    self._startup.abort(_startup_outcome(error), error)
+                # The sidecar rewrote the model URLs in the config; a second start would point them at a stopped one.
+                sidecar_started = self._h2_ping_sidecar is not None
+                self.shutdown()
+                if attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
+                    raise
+
+    def _move_to_a_fresh_port(self, error: BaseException) -> bool:
+        """After a server found its port in use, give it a fresh one in the config every server is started from.
+
+        Each server learns every other server's port from that config when it starts, so the caller starts them all
+        again. Only a bind that failed with EADDRINUSE qualifies; the head server keeps its configured port.
+        """
+        if not isinstance(error, ServerStartFailedError) or error.errno != errno.EADDRINUSE:
+            return False
+        server_config = getattr(self, "_server_configs", {}).get(error.server_name)
+        if server_config is None:
+            return False
+        global_config_dict = get_global_config_dict()
+        taken = [config.get("port") for config in self._server_configs.values()]
+        taken.append(global_config_dict.get(HEAD_SERVER_KEY_NAME, {}).get("port"))
+        port = _find_open_port_using_range(
+            disallowed_ports=[port for port in taken if isinstance(port, int)],
+            port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
+            port_range_high=global_config_dict[PORT_RANGE_HIGH_KEY_NAME],
+        )
+        print(
+            f"`{error.server_name}` could not bind port {server_config.get('port')}: address already in use. "
+            f"Starting every server again once, with `{error.server_name}` on port {port}."
+        )
+        # The key exists (config resolution set it), so a struct-mode config accepts the new value.
+        server_config["port"] = port
+        return True
 
     def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        # Each started server's node in the config it is started from, for a retry on a fresh port.
+        self._server_configs: Dict[str, DictConfig] = {}
         self._startup = SupervisorStartup()
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
@@ -622,6 +688,7 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath,
             dir_path,
         ) in configured_servers:
+            self._server_configs[top_level_path] = server_config_dict
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
@@ -691,18 +758,7 @@ class RunHelper:  # pragma: no cover
             global_config_dict=global_config_dict,
         )
 
-        print("Waiting for head server to spin up")
-        poll_count = 0
-        while True:
-            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success":
-                break
-
-            if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
-
-            poll_count += 1
-            sleep(3)
+        self._wait_for_head_server()
         self._startup.mark("wait_for_head_server")
 
         print("Waiting for servers to spin up")
@@ -710,6 +766,28 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_server_readiness(global_config_dict)
+
+    def _wait_for_head_server(self) -> None:
+        """Wait until the head server answers; a head server thread that ended (a failed bind) never will."""
+        print("Waiting for head server to spin up")
+        poll_count = 0
+        while True:
+            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
+            if status == "success":
+                return
+            if not self._head_server_thread.is_alive():
+                raise ServerStartFailedError(
+                    "server_start_failed: the head server exited before it was ready; its error is in the log "
+                    f"above. Is its port already in use? Set it with `++{HEAD_SERVER_KEY_NAME}.port=<port>`.",
+                    server_name=HEAD_SERVER_KEY_NAME,
+                    errno=None,
+                )
+
+            if poll_count % 10 == 0:  # Print every 30s
+                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+
+            poll_count += 1
+            sleep(3)
 
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
         """Mark the head ready only after every managed server and model endpoint is reachable."""
@@ -721,6 +799,7 @@ class RunHelper:  # pragma: no cover
         if self._startup is not None:
             self._startup.mark("wait_for_model_endpoints")
         self._head_server_instance.mark_ready()
+        self._servers_ready = True
         if self._startup is not None:
             self._startup.finish()
 
@@ -766,6 +845,12 @@ Process `{process_name}` stdout:
 Process `{process_name}` stderr:
 {proc_err}"""
 
+                if not getattr(self, "_servers_ready", True):
+                    raise ServerStartFailedError(
+                        f"server_start_failed: {print_str}",
+                        server_name=process_name,
+                        errno=_bind_errno(proc_err if isinstance(proc_err, str) else None),
+                    )
                 raise RuntimeError(print_str)
 
     def wait_for_dry_run_spinup(self) -> None:
