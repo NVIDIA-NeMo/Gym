@@ -153,6 +153,8 @@ class IdentityEvidence(BaseModel):
     max_attempts: int | None = None
     # (boundary, operation, operation_id, attempt_id, cause_id) of each saved failure event, in saved order.
     events: list[tuple[str | None, str | None, str | None, str | None, str | None]] = Field(default_factory=list)
+    # Why an unknown identity has no supported action, when a specific rule refused it.
+    reason: str | None = None
 
 
 class RecoveryDecision(BaseModel):
@@ -179,8 +181,13 @@ def _identity(row: Mapping[str, Any]) -> Identity | None:
     return None
 
 
+# Labels that shipped producers write as the failure kind outside the shared vocabulary, whose naming rule they do
+# not follow: the Harbor agent's failed trial and the terminal-bench sidecar class of an agent or sandbox failure.
+PRODUCER_FAILURE_LABELS = frozenset({"harbor_failed", "infrastructure_error"})
+
+
 def _known_kind(kind: Any) -> bool:
-    return isinstance(kind, str) and (is_registered(kind) or is_namespaced(kind))
+    return isinstance(kind, str) and (is_registered(kind) or is_namespaced(kind) or kind in PRODUCER_FAILURE_LABELS)
 
 
 def _events(row: Mapping[str, Any]) -> list[tuple[str | None, str | None, str | None, str | None, str | None]]:
@@ -281,8 +288,9 @@ def _policy_evidence(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
 
 
 def _sidecar_action(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> OutcomeAction:
-    kind, status = _policy_evidence(row)
-    return choose_action(failure_kind=kind or "unknown", http_status=status, config=policy)
+    return choose_action(
+        failure_kind=_retry_kind(row) or "unknown", http_status=_policy_evidence(row)[1], config=policy
+    )
 
 
 # Compatibility with older metadata-only projections of a judge's saved answer.
@@ -340,34 +348,54 @@ def _cause_chain(row: Mapping[str, Any]) -> list[tuple[str | None, ...]] | None:
     return chain or None
 
 
-def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
-    """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
+def _replay_refusal(row: Mapping[str, Any]) -> str | None:
+    """Why replay needs a saved-answer path or model-budget accounting unavailable to recovery; None when it does not."""
     from nemo_gym.rollout_recovery import has_saved_generation, has_unclassified_execution_failure
 
-    if has_unclassified_execution_failure(row) or has_saved_generation(row) or _saved_answer(row):
-        return True
+    if has_saved_generation(row) or _saved_answer(row):
+        return "the row kept an answer that a rerun would replace"
+    if has_unclassified_execution_failure(row):
+        return "its recorded cause does not permit another agent run"
     chain = _cause_chain(row)
     if chain is None:
         # A legacy row may carry observations without selecting one; they are not its causal failure.
-        return row.get(FAILURE_ID) is not None
-    return (
-        any(
-            boundary == FailureBoundary.RESOURCES_SERVER and operation == "verify" for boundary, operation, *_ in chain
-        )
-        or (
-            bool(chain)
-            and chain[0][0] == FailureBoundary.COLLECTION
-            and any(boundary == FailureBoundary.MODEL for boundary, *_ in chain)
-        )
-        or (
-            # Unconfirmed harness termination after the agent saved an answer: replay would ask the model again.
-            any(
-                boundary == FailureBoundary.HARNESS and operation == "harness.terminate"
-                for boundary, operation, *_ in chain
-            )
-            and _saved_answer(row)
-        )
+        return "its selected failure event is missing" if row.get(FAILURE_ID) is not None else None
+    if any(
+        boundary == FailureBoundary.RESOURCES_SERVER and operation == "verify" for boundary, operation, *_ in chain
+    ):
+        return "verification failed after the agent answered"
+    if (
+        bool(chain)
+        and chain[0][0] == FailureBoundary.COLLECTION
+        and any(boundary == FailureBoundary.MODEL for boundary, *_ in chain)
+    ):
+        return "a model failure inside collection has no saved model-attempt budget"
+    return None
+
+
+def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
+    """Whether replay needs a saved-answer path or model-budget accounting unavailable to recovery."""
+    return _replay_refusal(row) is not None
+
+
+def _retry_kind(row: Mapping[str, Any]) -> str | None:
+    """The kind a retry decision selects on: the policy evidence, else, for a row that selects no event, the one kind
+    every saved event names, else the failure record's own kind. Final-zero and judge decisions do not use it."""
+    kind = _policy_evidence(row)[0]
+    if kind is not None or FAILURE_ID in row:
+        return kind
+    events = row.get(FAILURE_EVENTS)
+    kinds = (
+        {e.get("failure_kind") for e in events.values() if isinstance(e, Mapping)}
+        if isinstance(events, Mapping)
+        else set()
     )
+    if len(kinds) == 1 and isinstance(next(iter(kinds)), str):
+        return next(iter(kinds))
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    value = failure.get("failure_kind") if isinstance(failure, Mapping) else None
+    return value if isinstance(value, str) else None
 
 
 def decide_recovery(
@@ -495,6 +523,7 @@ def decide_recovery(
                     state=state,
                     attempts=spent,
                     max_attempts=cap,
+                    reason=_replay_refusal(last) if state == IdentityState.UNKNOWN else None,
                     failure_kind=last.get("failure_kind"),
                     failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                     events=_events(last),
@@ -513,7 +542,8 @@ def decide_recovery(
             if (row.get("_line") if isinstance(row.get("_line"), int) else index) >= resubmit_offset
             and not is_omitted_rollout_row(row)
         ]
-        kind = _policy_evidence(last)[0]
+        kind = _retry_kind(last)
+        reason = None
         if is_omitted_rollout_row(last):
             # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
             interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
@@ -562,8 +592,9 @@ def decide_recovery(
                 if model_kind and is_terminal_failure(last) and not contradictory
                 else IdentityState.UNKNOWN
             )
-        elif not _known_kind(_policy_evidence(last)[0]):
+        elif not _known_kind(_retry_kind(last)):
             state = IdentityState.UNKNOWN
+            reason = f"unregistered kind {_retry_kind(last)}" if _retry_kind(last) else "no failure kind"
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
         elif (action := _sidecar_action(last, policy)) == OutcomeAction.FAIL:
@@ -575,6 +606,7 @@ def decide_recovery(
             # agent answer, so replay must not generate another. For collection-wrapped model failures, the sidecar projection
             # has no durable model-operation budget accounting: replay must not silently replenish that budget.
             state = IdentityState.UNKNOWN
+            reason = _replay_refusal(last) or "the policy verifies a failure that has no saved judge answer"
         elif spent < cap:
             state = IdentityState.RETRYABLE
         else:
@@ -588,6 +620,7 @@ def decide_recovery(
                 attempts=spent,
                 max_attempts=cap,
                 events=_events(last),
+                reason=reason if state == IdentityState.UNKNOWN else None,
             )
         )
 
@@ -714,11 +747,18 @@ def decide_recovery(
     )
 
 
+def _unknown_label(item: IdentityEvidence) -> str:
+    """The kind of an unknown identity with the rule that refused it, without naming the kind twice."""
+    if item.reason and item.failure_kind and item.failure_kind not in item.reason:
+        return f"{item.failure_kind}: {item.reason}"
+    return item.reason or item.failure_kind or "no kind"
+
+
 def _populations(counts: Mapping[str, int], evidence: list[IdentityEvidence]) -> str:
     """What a resume runs, what nobody owns (by kind, largest first) and the saved rows kept as they are."""
     retryable = counts.get(IdentityState.MISSING, 0) + counts.get(IdentityState.RETRYABLE, 0)
     retained = counts.get(IdentityState.SCORED, 0) + counts.get(IdentityState.MODEL_FINAL, 0)
-    kinds = Counter(item.failure_kind or "no kind" for item in evidence if item.state == IdentityState.UNKNOWN)
+    kinds = Counter(_unknown_label(item) for item in evidence if item.state == IdentityState.UNKNOWN)
     detail = ", ".join(f"{n} {kind}" for kind, n in kinds.most_common(3))
     return (
         f"retryable {retryable} (resumed), unknown {counts.get(IdentityState.UNKNOWN, 0)}"
@@ -860,7 +900,7 @@ def rows(name, skip=0):
             if isinstance(record, dict):
                 failure = record.get("failure")
                 selected["_ng_failure_record"] = {"source": record.get("source"), "delivery": record.get("delivery"),
-                    "failure": {"stage": failure.get("stage")} if isinstance(failure, dict) else None}
+                    "failure": {"stage": failure.get("stage"), "failure_kind": failure.get("failure_kind")} if isinstance(failure, dict) else None}
             for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
                 answer = r.get(key)
                 if key in r and not isinstance(answer, dict):

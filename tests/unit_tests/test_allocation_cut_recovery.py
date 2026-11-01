@@ -166,7 +166,7 @@ def test_unknown_failures_a_resume_would_rerun_still_stop(tmp_path):
     _, decision = _decide(tmp_path, allocation_cut=True)
     assert decision.action.value == "stop"
     assert "nobody owns them and a resume would run 1 of them again" in decision.reason
-    assert "unknown 1 (1 not_registered)" in decision.reason
+    assert "unknown 1 (1 unregistered kind not_registered)" in decision.reason
 
 
 def test_only_unknown_rows_left_stop_with_the_populations(tmp_path):

@@ -1,0 +1,177 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Failure kinds that had no recovery action: a fresh retry when no answer was kept, else a stop that says why."""
+
+import json
+import subprocess
+import sys
+
+import pytest
+
+from nemo_gym.orchestration.recovery import (
+    COLLECT_SCRIPT,
+    CollectedEvidence,
+    RecoveryBudget,
+    decide_from_collected,
+    decide_recovery,
+    select_managed_evidence,
+)
+from nemo_gym.rollout_recovery import RunManifest
+from nemo_gym.rollout_store import RolloutStore
+from tests.unit_tests.test_possibly_delivered_replay import _ANSWER, _route_failure_row
+
+
+_BUDGET = RecoveryBudget(max_infra_retries=2, infra_retries_used=0, walltime_used_s=0.0, live_job=False)
+_KEPT = "the row kept an answer that a rerun would replace"
+
+
+def _decide(*failures, scored=1):
+    """One scored row, then one standing sidecar row per failure, as saved without a rollout store."""
+    total = scored + len(failures)
+    materialized = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(total)]
+    results = [{"_ng_task_index": i, "_ng_rollout_index": 0, "reward": 1.0} for i in range(scored)]
+    rows = [{"_ng_task_index": scored + i, "_ng_rollout_index": 0, "_line": i} | f for i, f in enumerate(failures)]
+    return decide_recovery(materialized=materialized, results=results, failures=rows, budget=_BUDGET)
+
+
+def _harbor_failed(**extra):
+    """The Harbor agent's failed trial: a producer label as kind, an empty failed response, no event report."""
+    return {
+        "_ng_failure_class": "harbor_failed",
+        "failure_kind": "harbor_failed",
+        "_ng_failure_message": "Agent reported a no-result failure",
+        "_ng_failure_record": {"source": "environment", "delivery": "delivered", "failure": {"stage": None}},
+        "_ng_failure_response": {"object": "response", "id": "harbor-error", "status": "failed", "output": []},
+        **extra,
+    }
+
+
+def _sandbox_create_rejected(**extra):
+    """A terminal-bench legacy row: the sandbox create call refused its credentials before the agent ran."""
+    return {
+        "_ng_failure_class": "infrastructure_error",
+        "failure_kind": None,
+        "_ng_failure_message": "SandboxApiException",
+        "_ng_failure_record": {
+            "source": "environment",
+            "delivery": "delivered",
+            "failure": {"stage": None, "failure_kind": "infrastructure_error"},
+        },
+        **extra,
+    }
+
+
+def _harness_unconfirmed(**extra):
+    events = {
+        "stop": {
+            "boundary": "harness",
+            "failure_kind": "harness_termination_unconfirmed",
+            "operation": "harness.terminate",
+        }
+    }
+    return {"_ng_failure_class": "agent_run_error", "_ng_failure_events": events, "_ng_failure_id": "stop", **extra}
+
+
+@pytest.mark.parametrize(
+    "row",
+    [
+        _route_failure_row(),
+        _harbor_failed(),
+        _sandbox_create_rejected(),
+        _harness_unconfirmed(),
+        # A legacy row that saved events but selected none: every event names the same kind.
+        {
+            "_ng_failure_class": "agent_run_error",
+            "_ng_failure_events": {"e": {"boundary": "agent", "failure_kind": "agent_route_failed"}},
+        },
+    ],
+    ids=["legacy-run-5xx", "harbor-failed", "sandbox-credentials", "harness-unconfirmed", "unselected-events"],
+)
+def test_a_failure_that_kept_no_answer_is_retried_within_its_budget(row):
+    decision = _decide(row)
+    assert decision.action.value == "resubmit", decision.reason
+    assert decision.counts == {"scored": 1, "retryable": 1}
+
+
+@pytest.mark.parametrize(
+    "row,label",
+    [
+        (_route_failure_row(_ng_failure_response=_ANSWER), f"collection_dispatch_failed: {_KEPT}"),
+        (_harness_unconfirmed(response=_ANSWER), f"harness_termination_unconfirmed: {_KEPT}"),
+        # The legacy adapter keeps the agent's empty response object, which the replay gate counts as kept.
+        (
+            _sandbox_create_rejected(
+                _ng_failure_response={"object": "response", "id": "resp-empty", "status": None, "output": []}
+            ),
+            f"infrastructure_error: {_KEPT}",
+        ),
+    ],
+    ids=["legacy-run-5xx", "harness-unconfirmed", "sandbox-credentials"],
+)
+def test_a_failure_that_kept_an_answer_stops_and_names_the_rule(row, label):
+    decision = _decide(row)
+    assert decision.action.value == "stop"
+    assert decision.reason.endswith(
+        f"retryable 0 (resumed), unknown 1 (1 {label}) (reported, not retried), retained 1 (saved rows kept)"
+    )
+
+
+def test_a_failure_with_no_kind_anywhere_stops_and_says_so():
+    decision = _decide({"_ng_failure_class": "unowned_class"})
+    assert decision.action.value == "stop"
+    assert "unknown 1 (1 no failure kind)" in decision.reason
+
+
+def test_the_store_and_the_plan_agree_on_a_legacy_run_5xx_route_failure(tmp_path):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(2)]
+    source = tmp_path / "source.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {}).model_copy(update={"max_rollout_attempts": 3})
+
+    with RolloutStore.start_or_resume(artifacts / "rollouts.jsonl", prepare, resume=False) as store:
+        scored = dict(rows[0])
+        store.allocate_attempt(scored)
+        store.record_outcome(scored | {"reward": 1.0})
+        failed = dict(rows[1])
+        store.allocate_attempt(failed)
+        failure = _route_failure_row()
+        failure["_ng_failure_record"] = {
+            "schema_version": 1,
+            "episode_id": {"rollout_id": "1-0", "attempt": 0},
+            "run_id": store.manifest.run_id,
+            "source": "collector",
+            "delivery": "delivered",
+            "failure": {
+                "failure_reason": "500 Internal Server Error",
+                "terminal": False,
+                "failure_kind": "agent_run_error",
+            },
+            "http_status": 500,
+            "exception_type": "ClientResponseError",
+        }
+        store.record_outcome(failed | failure)
+        assert [row["_ng_task_index"] for row in store.pending()] == [1]
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), tmp_path)
+    decision = decide_from_collected(collected, max_infra_retries=2, max_walltime_s=None, live_job=False)
+    assert decision.action.value == "resubmit", decision.reason
+    assert decision.counts == {"scored": 1, "retryable": 1}
