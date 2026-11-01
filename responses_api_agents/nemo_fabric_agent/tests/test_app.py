@@ -770,6 +770,17 @@ def test_atif_unwraps_relay_serialized_tool_messages() -> None:
     assert _atif_output_items([{"steps": [step]}], "answer")[1].output == "line 1\nline 2"
 
 
+def test_atif_skips_copied_context_steps() -> None:
+    steps = [
+        {"source": "agent", "is_copied_context": True, "message": "earlier turn"},
+        {"source": "agent", "message": "new turn"},
+    ]
+
+    items = _atif_output_items([{"steps": steps}], "answer")
+
+    assert [item.content[0].text for item in items] == ["new turn", "answer"]
+
+
 def test_atif_keeps_relay_structured_tool_results() -> None:
     fixture = Path(__file__).parents[3] / "tests/unit_tests/fixtures/relay_atif_v1_7_tool_trajectory.json"
     items = _atif_output_items([json.loads(fixture.read_text())], "answer")

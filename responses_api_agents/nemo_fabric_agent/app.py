@@ -307,7 +307,8 @@ def _atif_trajectory_items(trajectory: dict[str, Any], response_text: str, items
         if isinstance(sub, dict)
     }
     for step in trajectory.get("steps") or []:
-        if not isinstance(step, dict) or step.get("source") != "agent":
+        # Copied-context steps repeat earlier steps (for example after compaction), so they are not new output.
+        if not isinstance(step, dict) or step.get("source") != "agent" or step.get("is_copied_context"):
             continue
         # A step without LLM calls only wraps a subagent (for example the Deep Agents orchestrator scope).
         # The policy did not emit it, so only its subagent steps become items.
