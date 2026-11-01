@@ -368,6 +368,7 @@ async def request(
     _resend_after_disconnect: bool = True,
     _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
+    _retry_other_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """Make an outbound HTTP call through Gym's shared aiohttp client.
@@ -390,6 +391,10 @@ async def request(
 
     ``_resend_after_disconnect=False`` raises a dropped connection instead of sending the request again, because the
     server may already have received it. A connection that was never made is still retried.
+
+    ``_retry_other_errors=False`` resends only a dropped or refused connection (``ServerDisconnectedError``,
+    ``ClientOSError``) within the caller's bound; any other error, a timeout or a body cut off mid-read included,
+    is raised at once.
 
     ``_read_body=True`` reads a success reply's body before returning, but only within a ``_max_num_tries`` or
     ``_max_connection_retries`` bound and only when resending is allowed, so a reply cut off mid-body is sent again
@@ -424,6 +429,7 @@ async def request(
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
+            _retry_other_errors=_retry_other_errors,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -444,6 +450,7 @@ async def request(
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
+            _retry_other_errors=_retry_other_errors,
             **kwargs,
         )
         # A Gym server's reply may forward failures it recovered from; they join this request's observations,
@@ -465,6 +472,7 @@ async def _traced_request(
     _resend_after_disconnect: bool = True,
     _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
+    _retry_other_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     """`_request_with_retries` wrapped in a CLIENT span, with `traceparent` injected.
@@ -510,6 +518,7 @@ async def _traced_request(
             _resend_after_disconnect=_resend_after_disconnect,
             _on_transport_failure=_on_transport_failure,
             _read_body=_read_body,
+            _retry_other_errors=_retry_other_errors,
             **kwargs,
         )
 
@@ -592,6 +601,7 @@ async def _request_with_retries(
     _resend_after_disconnect: bool = True,
     _on_transport_failure: Callable[[Exception, bool | None], None] | None = None,
     _read_body: bool = False,
+    _retry_other_errors: bool = True,
     **kwargs: Unpack[_RequestOptions],
 ) -> ClientResponse:  # pragma: no cover
     client = get_global_aiohttp_control_client() if _control else get_global_aiohttp_client()
@@ -671,9 +681,9 @@ async def _request_with_retries(
                     _on_transport_failure(e, _request_upload_complete(upload))
                 if _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG:
                     print_exc()
-                if not _resend_after_disconnect:
+                if not _resend_after_disconnect or not _retry_other_errors:
                     # A connection that was never made is a ClientOSError, handled above;
-                    # anything else may have sent it.
+                    # anything else may have sent it, or returned part of a reply.
                     raise
 
                 # num_tries only advances on the default path, so count explicit attempts when capped.

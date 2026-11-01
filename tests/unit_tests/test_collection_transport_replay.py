@@ -28,7 +28,9 @@ async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_sav
     tmp_path, monkeypatch, lost_response, routed
 ):
     environment, dependencies = _environment_server()
-    dependencies.responses.extend(list(dependencies.responses))
+    # A dropped connection is sent once more in the same invocation; a timeout is not. Both lose every reply here.
+    lost = 2 if lost_response == "disconnect" else 1
+    dependencies.responses.extend(list(dependencies.responses) * lost)
     requests, results = [], []
     async with httpx.AsyncClient(
         transport=httpx.ASGITransport(app=environment.setup_webserver()), base_url="http://environment"
@@ -48,7 +50,7 @@ async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_sav
             response = await endpoint.post("/run", json=body)
             assert response.status_code == 200, response.text
             results.append(response.json())
-            if len(requests) != 1:
+            if len(requests) > lost:
                 payload = response.content
                 writer.write(
                     b"HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
@@ -108,8 +110,8 @@ async def test_persisted_collection_reruns_a_possibly_delivered_episode_that_sav
 
     agent_calls = [call for call in dependencies.calls if call[1].endswith("/v1/responses")]
     seeds = [call[2]["json"]["agent_session_id"] for call in dependencies.calls if call[1] == "/v1/agent_sessions"]
-    # Session seeding is idempotent only for the same ID. A replay creates fresh handles.
-    assert len(requests) == len(agent_calls) == len(seeds) == len(set(seeds)) == 2
+    # Session seeding is idempotent only for the same ID. Every /run, the in-run resend included, creates fresh handles.
+    assert len(requests) == len(agent_calls) == len(seeds) == len(set(seeds)) == lost + 1
     store = RolloutStore.read(output)
     assert [row["_ng_attempt_index"] for row in store.selected("success")] == [1]
     assert store.coverage()["measured"] == 1
@@ -171,7 +173,8 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
         monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
         with pytest.raises(IncompleteEvaluationError if routed else aiohttp.ClientConnectorError):
             await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=2)
-    assert len(connections) == 1
+    # One bounded resend of a refused connection; every attempt failed to connect, so /run was never sent.
+    assert len(connections) == 2
     failure = json.loads(output.with_name("rollouts_failures.jsonl").read_text())
     assert failure["_ng_failure_type"] == "ClientConnectorError"
     assert failure["_ng_failure_record"]["delivery"] == "not_sent"

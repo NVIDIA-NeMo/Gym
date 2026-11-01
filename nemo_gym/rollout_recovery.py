@@ -43,10 +43,11 @@ from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_fo
 
 
 def has_saved_generation(row: Mapping[str, Any]) -> bool:
-    """Recognize retained response data, including a serialized response with empty output.
+    """Recognize retained response data, including a completed response with empty output.
 
-    A diagnostic error object or an empty mapping is not generation. A typed response
-    has its producer identity and output list even when no assistant text was emitted.
+    A diagnostic error object or an empty mapping is not generation. A typed response counts when it has at least
+    one output item or a status: a producer finished it, even with no assistant text. A response object with no
+    output and no status is a placeholder, for example from an agent that never ran.
     """
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
@@ -66,7 +67,7 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
             answer.get("object") == "response"
             and isinstance(answer.get("id"), str)
             and answer["id"]
-            and (output or (answer.get("error") is None and answer.get("status") != "failed"))
+            and (output or (answer.get("error") is None and answer.get("status") not in (None, "failed")))
         ):
             return True
         if answer.get("status") == "completed" and any(

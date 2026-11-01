@@ -2553,9 +2553,11 @@ def _failure_diagnostics(result: Any) -> Dict:
         isinstance(response, dict)
         and response
         and result.get(NG_FAILURE_CLASS_KEY) not in ("judge_failed", "judge_invalid")
+        and (response.get("output") or response.get("status") is not None)
     ):
         # This is producer evidence, possibly including synthetic failure text.
-        # It is never a scored response or a judge-only recovery candidate.
+        # It is never a scored response or a judge-only recovery candidate. A response object with no output and no
+        # status is a placeholder from an agent that never ran: only the failure record is kept for it.
         diagnostics.setdefault("_ng_failure_response", response)
     return diagnostics
 
@@ -4113,9 +4115,10 @@ class RolloutCollectionHelper(BaseModel):
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 record_unrouted_failures=True,
-                # The persisted attempt and recovery selector own retries, including uncertain delivery.
-                retry_requests=False,
-                _max_num_tries=1,
+                # One bounded resend of a /run whose connection dropped or was refused before any reply, as before
+                # this change: nothing was saved for it. Other failures belong to the persisted attempt and the
+                # recovery selector.
+                _max_num_tries=2,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
                 on_dispatch_batch=store.record_dispatches,
@@ -5115,7 +5118,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         drain_margin_s: Optional[float] = None,
         latency_tracker: Optional["DispatchLatencyTracker"] = None,
         retry_requests: bool = True,
-        _max_num_tries: Optional[Literal[1]] = None,
+        _max_num_tries: Optional[int] = None,
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
     ) -> Iterator[Future]:  # pragma: no cover
@@ -5242,6 +5245,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     run_timing.record_start(started)
                 res = None
                 stage = "request"
+                attempt_errors: list[Exception] = []
                 await reserve_dispatch(row)
                 succeeded = False
                 dispatch_span_context = None
@@ -5258,7 +5262,15 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                             url_path="/run",
                             json=request_body,
                             **({"_resend_after_disconnect": False} if not retry_requests else {}),
-                            **({"_max_num_tries": _max_num_tries} if _max_num_tries is not None else {}),
+                            **(
+                                {
+                                    "_max_num_tries": _max_num_tries,
+                                    "_retry_other_errors": False,
+                                    "_on_transport_failure": lambda error, _: attempt_errors.append(error),
+                                }
+                                if _max_num_tries is not None
+                                else {}
+                            ),
                         )
                     await raise_for_status(res)
                     stage = "response"
@@ -5335,11 +5347,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     failed_outcome = _failure_outcome(row, failure, stage) if typed_outcomes or unrouted else failure
                     if (
                         isinstance(failed_outcome, RolloutFailureRecord)
-                        and _max_num_tries == 1
                         and isinstance(e, ClientConnectorError)
+                        and all(isinstance(error, ClientConnectorError) for error in attempt_errors)
                     ):
-                        # One failed connection attempt cannot have delivered /run. A final error after retries
-                        # cannot establish this fact about earlier attempts.
+                        # A connection that was never made cannot have delivered /run: every attempt failed to
+                        # connect. One that connected first may have delivered it.
                         failed_outcome = failed_outcome.model_copy(update={"delivery": "not_sent"})
                     return _CompletedRollout(
                         row=row,
