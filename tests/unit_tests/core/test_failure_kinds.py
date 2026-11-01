@@ -52,6 +52,8 @@ class TestNamingConvention:
             "environment_",
             "harness_",
             "collection_",
+            # Gym's server supervisor, which starts every server of a run.
+            "server_",
         )
         lifecycle = {"cancelled", "kill_shaped", "shutdown"}
         # Registered for saved rows of shipped producers; the rule binds every name added after them.
