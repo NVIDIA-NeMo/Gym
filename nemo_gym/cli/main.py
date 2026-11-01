@@ -709,6 +709,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--repin and --repin-reason need --recover and cannot be used with --inspect")
     if (repin is None) != (repin_reason is None):
         args._parser.error("--repin and --repin-reason go together")
+    if getattr(args, "extend_retries", None) is not None and not getattr(args, "recover", False):
+        args._parser.error("--extend-retries needs --recover")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -737,6 +739,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         if getattr(args, "recover", False):
             operation = inspect_recovery if inspect_only else recover
             extra = {} if repin is None else {"repin": repin, "repin_reason": repin_reason}
+            if getattr(args, "extend_retries", None) is not None:
+                extra["extend_retries"] = args.extend_retries
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1768,6 +1772,15 @@ COMMANDS = {
                     help="With --recover: continue the run on this full Gym commit. The launcher must be that "
                     "revision; job.sh and resolved-config.yaml are rendered again with it, the old files are kept "
                     "beside them, and saved rows and budgets stay as they are.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--extend-retries",
+                    type=int,
+                    metavar="N",
+                    help="With --recover: record N more infra retries for this run on top of its configured cap; "
+                    "the spent count is kept, the extension is journaled in the job dir and named in the decision.",
                 ),
             ),
             Flag(

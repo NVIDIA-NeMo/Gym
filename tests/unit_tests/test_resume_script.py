@@ -73,7 +73,8 @@ def test_invalid_day_component_raises():
 def test_default_prologue_has_no_walltime_check():
     out = render_resume_prologue(ResumeConfig())
     assert "_gym_accumulated >=" not in out
-    assert "-ge 3" in out  # default max_retries
+    assert "_gym_max_retries=3" in out  # default max_retries
+    assert "-ge $_gym_max_retries" in out
 
 
 def test_prologue_with_max_walltime_adds_check():
@@ -83,8 +84,8 @@ def test_prologue_with_max_walltime_adds_check():
 
 def test_prologue_uses_custom_max_retries():
     out = render_resume_prologue(ResumeConfig(max_retries=9))
-    assert "-ge 9" in out
-    assert "Infra retry limit (9)" in out
+    assert "_gym_max_retries=9" in out
+    assert "Infra retry limit ($_gym_max_retries)" in out
 
 
 def test_prologue_queues_own_successor():

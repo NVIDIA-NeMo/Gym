@@ -85,10 +85,12 @@ def recover(
     mlflow_run_id: str | None = None,
     repin: str | None = None,
     repin_reason: str | None = None,
+    extend_retries: int = 0,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
+    ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     """
     return _recover(
         gym_job_id,
@@ -104,6 +106,7 @@ def recover(
         mlflow_run_id=mlflow_run_id,
         repin=repin,
         repin_reason=repin_reason,
+        extend_retries=extend_retries,
     )
 
 
@@ -121,6 +124,7 @@ def inspect_recovery(
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
+    extend_retries: int = 0,
 ) -> RecoveryOutcome:
     """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action."""
     return _recover(
@@ -128,6 +132,7 @@ def inspect_recovery(
         benchmark,
         inspect_only=True,
         original_record=original_record,
+        extend_retries=extend_retries,
         score_key=score_key,
         score_agent=score_agent,
         score_environment=score_environment,
@@ -157,6 +162,7 @@ def _recover(
     mlflow_run_id: str | None = None,
     repin: str | None = None,
     repin_reason: str | None = None,
+    extend_retries: int = 0,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -210,6 +216,7 @@ def _recover(
         outcome_policy=outcome_policy,
         # A repinned run resumes on the target's Store: its reader decides what that Store would run.
         **({"reader_ref": repin} if repin is not None else {}),
+        **({"extend_retries": extend_retries} if extend_retries else {}),
     )
     gate_task = (
         gate_summary_from_collected(
@@ -264,6 +271,7 @@ def _recover(
             # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.
             **({"accounting_reconciled": True} if collected is not None and collected.accounting_reconciled else {}),
             **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
+            **({"extend_retries": extend_retries} if extend_retries else {}),
         )
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow

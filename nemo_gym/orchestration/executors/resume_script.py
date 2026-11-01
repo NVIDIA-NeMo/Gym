@@ -35,6 +35,10 @@ _JOB_SCRIPT_NAME = "job.sh"
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
 RETRY_FILE_NAME = ".gym_infra_retries"
+# Written only by `gym eval resubmit --recover --extend-retries`: infra retries added to the configured cap.
+RETRY_EXTENSION_NAME = ".gym_infra_retry_extension"
+# Capability of the generated script: it reads the recorded extension.
+RETRY_EXTENSION_MARKER = "# --- Recorded retry extension v1 ---"
 # Written when the chain stops before the run finished (no eligible retries, walltime cap, or cancel), so a reader of the
 # job dir, not only of sacct, sees that rollouts are missing. A chain that continues removes it.
 INCOMPLETE_MARKER_NAME = ".gym_chain_incomplete"
@@ -152,6 +156,14 @@ fi
 [[ "$_retries" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_accounting_unknown "Stored retries are unknown or malformed."
 _gym_accumulated=$((10#$_gym_accumulated))
 _retries=$((10#$_retries))
+{retry_extension_marker}
+# The configured cap plus any extension an explicit recovery recorded; never a reset of the spent count.
+_gym_max_retries={max_retries}
+if [[ -e "$OUTPUT_DIR/{retry_extension_name}" ]]; then
+    _gym_extension=$(cat "$OUTPUT_DIR/{retry_extension_name}") || _gym_stop_accounting_unknown "Cannot read the recorded retry extension."
+    [[ "$_gym_extension" =~ ^[0-9]{{1,6}}$ ]] || _gym_stop_accounting_unknown "The recorded retry extension is malformed."
+    _gym_max_retries=$(( {max_retries} + 10#$_gym_extension ))
+fi
 # An explicit reset is permitted only after the old counters are readable and known.
 if [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" != 1 ]]; then
     rm -f "$_retry_file" "$_walltime_file"
@@ -204,8 +216,8 @@ elif [[ "$_gym_resubmit" == 1 && "$_gym_keep_budget" == 1 ]]; then
     _gym_needs_retry=1
 fi
 
-if [[ "$_gym_needs_retry" == 1 && $_retries -ge {max_retries} ]]; then
-    _gym_stop_incomplete "Infra retry limit ({max_retries}) reached. Stopping."
+if [[ "$_gym_needs_retry" == 1 && $_retries -ge $_gym_max_retries ]]; then
+    _gym_stop_incomplete "Infra retry limit ($_gym_max_retries) reached. Stopping."
 fi
 {max_walltime_check}
 if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/artifacts/rollouts_manifest.json" ) ]]; then
@@ -230,13 +242,13 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
     fi
 fi
 # Admission can identify a retry only after reading the authoritative saved outcomes.
-if [[ "$_gym_needs_retry" == 1 && $_retries -ge {max_retries} ]]; then
-    _gym_stop_incomplete "Infra retry limit ({max_retries}) reached. Stopping."
+if [[ "$_gym_needs_retry" == 1 && $_retries -ge $_gym_max_retries ]]; then
+    _gym_stop_incomplete "Infra retry limit ($_gym_max_retries) reached. Stopping."
 fi
 if [[ "$_gym_needs_retry" == 1 ]]; then
     _retries=$((_retries + 1))
     echo "$_retries" > "$_retry_file" || _gym_stop_incomplete "Cannot preserve the spent retry."
-    echo "Infra retry $_retries/{max_retries}..."
+    echo "Infra retry $_retries/$_gym_max_retries..."
 fi
 
 # This job continues the run, so an earlier stop no longer describes it.
@@ -388,5 +400,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         ),
         admission_command=admission_command,
         continuation_reason_prefix=CONTINUATION_REASON_PREFIX,
+        retry_extension_marker=RETRY_EXTENSION_MARKER,
+        retry_extension_name=RETRY_EXTENSION_NAME,
         requeue_unknown_reason=REQUEUE_UNKNOWN_REASON,
     )

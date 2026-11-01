@@ -1191,6 +1191,7 @@ def build_sbatch_script(
             ref=gi.ref if gi else None,
             prepare_cmd=None,
             command=f"python -c {shlex.quote(admission_python)} {shlex.quote(str(remote_bench_dir))} "
+            # The configured cap: the reader adds the recorded extension itself.
             f'{resume.max_retries} {cap} "$GYM_PREVIOUS_EXIT_CODE" "$GYM_PREVIOUS_JOB_ID" "$GYM_PREVIOUS_STATE"',
         )
         admission_command = (

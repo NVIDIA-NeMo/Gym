@@ -87,6 +87,7 @@ class KubernetesExecutor(BaseExecutor):
         accounting_reconciled: bool = False,
         repin: str | None = None,
         repin_reason: str | None = None,
+        extend_retries: int = 0,
     ) -> BenchmarkJob:
         raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 

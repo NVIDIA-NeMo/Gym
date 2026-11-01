@@ -59,6 +59,8 @@ from nemo_gym.orchestration.executors.resume_script import (
     REQUEUE_UNKNOWN_REASON,
     RESUBMIT_ENV,
     RESUBMIT_LOCK_NAME,
+    RETRY_EXTENSION_MARKER,
+    RETRY_EXTENSION_NAME,
     SCHEDULER_CAUSE_MARKER,
     _walltime_to_seconds,
 )
@@ -142,6 +144,8 @@ print("__GYM_MANAGED:" + json.dumps(projection))
 """
 
 
+# Appended in the job dir when `gym eval resubmit --recover --extend-retries` records an extension.
+RETRY_EXTENSION_JOURNAL_NAME = "retry-extension-journal.jsonl"
 # Appended in the run dir when `gym eval resubmit --recover --repin` moves a benchmark to another Gym commit.
 REPIN_JOURNAL_NAME = "repin-journal.jsonl"
 
@@ -464,6 +468,7 @@ class SlurmExecutor(BaseExecutor):
         score_environment: str | None = None,
         outcome_policy: RecoveryOutcomePolicyConfig | None = None,
         reader_ref: str | None = None,
+        extend_retries: int = 0,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
 
@@ -519,6 +524,7 @@ class SlurmExecutor(BaseExecutor):
                             else None,
                             live_job=None,
                             outcome_policy=outcome_policy,
+                            extend_retries=extend_retries,
                         ), collected
             workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
             allocation_cut = False
@@ -556,6 +562,7 @@ class SlurmExecutor(BaseExecutor):
             live_job=str(job_dir) in workdirs,
             outcome_policy=outcome_policy,
             allocation_cut=allocation_cut,
+            extend_retries=extend_retries,
         )
         return decision, collected
 
@@ -741,6 +748,7 @@ class SlurmExecutor(BaseExecutor):
         accounting_reconciled: bool = False,
         repin: str | None = None,
         repin_reason: str | None = None,
+        extend_retries: int = 0,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -755,6 +763,9 @@ class SlurmExecutor(BaseExecutor):
         rendered again with the new ref (and the MLflow pin tags that named the old one), the old files are kept
         beside them, and both are restored if the job is not queued. Rows, attempts and budget files stay as they are;
         the queued job's record carries the new commit and the run dir's repin journal records the move.
+        ``extend_retries`` (with ``keep_budget``) adds that many infra retries to the recorded extension that the
+        job's prologue adds to the configured cap; it is written just before sbatch, restored if the job is not
+        queued, and journaled once queued. The spent retry count is never reset.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -840,7 +851,8 @@ class SlurmExecutor(BaseExecutor):
                         f"printf '%s\\n' {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' Resubmit acknowledgement was not confirmed.')} "
                         "> .gym_chain_incomplete || return; fi; "
                         f"rm -f {_RESUBMIT_LOCK}; }}",
-                        "trap _gym_release_resubmit_lock EXIT",
+                        "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }",
+                        "trap '_gym_restore_extension; _gym_restore_repin; _gym_release_resubmit_lock' EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
                         'for d in $workdirs; do [ "$d" != "$PWD" ] || '
@@ -849,6 +861,14 @@ class SlurmExecutor(BaseExecutor):
                         *snapshot_check,
                         # The checks below then read the re-rendered job.sh; the exit trap restores it unless queued.
                         *repin_commands,
+                        *(
+                            [
+                                f"grep -qxF -- {shlex.quote(RETRY_EXTENSION_MARKER)} job.sh || fail "
+                                "'job.sh predates recorded retry extensions; repin the run or stage a new script'"
+                            ]
+                            if extend_retries
+                            else []
+                        ),
                         # An older chain retries FAILED, OUT_OF_MEMORY and DEADLINE as infrastructure failures.
                         # Refuse it before anything in the job dir changes.
                         f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
@@ -907,6 +927,7 @@ class SlurmExecutor(BaseExecutor):
                             if reconciled
                             else []
                         ),
+                        *(self._extension_commands(extend_retries, keep_budget=keep_budget) if extend_retries else []),
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
                         _sbatch_command(benchmark, job_dir / "job.sh"),
@@ -929,11 +950,34 @@ class SlurmExecutor(BaseExecutor):
             job = job.model_copy(
                 update={"job_id": job_id, "error": None} | ({"gym_commit": repin} if repin is not None else {})
             )
+            if extend_retries:
+                entry = shlex.quote(json.dumps({"by": extend_retries, "at": utc_timestamp(utc_now())}))
+                journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
+                conn.run([f"printf '%s\\n' {entry} >> {journal}"])
             if repin_journal is not None:
                 journal = Path(record.run_dir) / REPIN_JOURNAL_NAME
                 conn.run([f"printf '%s\\n' {shlex.quote(repin_journal)} >> {shlex.quote(str(journal))}"])
             self.persist_record(record.with_benchmark(job), conn.write_text)
         return job
+
+    @staticmethod
+    def _extension_commands(extend_retries: int, *, keep_budget: bool) -> list[str]:
+        """The locked steps that record ``extend_retries`` more infra retries, restored unless the job is queued."""
+        if not keep_budget:
+            raise RuntimeError("--extend-retries needs --recover: it extends the spent budget, never resets it")
+        if type(extend_retries) is not int or not 0 < extend_retries <= 1000:
+            raise ValueError(f"--extend-retries needs a whole number from 1 to 1000, not {extend_retries!r}")
+        name = RETRY_EXTENSION_NAME
+        return [
+            f"_gym_old_extension=$(cat {name} 2>/dev/null || echo 0)",
+            '[[ "$_gym_old_extension" =~ ^[0-9]{1,6}$ ]] || fail "the recorded retry extension is malformed"',
+            f"[[ -e {name} ]] && _gym_had_extension=1 || _gym_had_extension=0",
+            '_gym_restore_extension() { [[ "$_gym_submit_confirmed" == 1 ]] && return; '
+            f'if [[ "$_gym_had_extension" == 1 ]]; then printf "%s\\n" "$_gym_old_extension" > {name}; '
+            f"else rm -f {name}; fi; }}",
+            f"printf '%s\\n' $((10#$_gym_old_extension + {extend_retries})) > {name}.tmp && mv -f {name}.tmp {name} "
+            "|| fail 'cannot record the retry extension'",
+        ]
 
     def _repin_commands(
         self,
@@ -982,7 +1026,6 @@ class SlurmExecutor(BaseExecutor):
             f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before repin'",
             # Restored by the exit trap below unless sbatch confirms the queued job.
             f'_gym_restore_repin() {{ [[ "$_gym_submit_confirmed" == 1 ]] || {{ {restore}; }}; }}',
-            "trap '_gym_restore_repin; _gym_release_resubmit_lock' EXIT",
             f"(umask 077; printf %s {shlex.quote(script)} > job.sh.repin) && mv -f job.sh.repin job.sh "
             "|| fail 'cannot write the repinned job script'",
             f"printf %s {shlex.quote(resolved)} > {old_config}.repin && mv -f {old_config}.repin {old_config} "

@@ -1051,7 +1051,7 @@ def followup_snapshot():
         return None
 initial_followups = followup_snapshot()
 source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
-accounting_files = (".gym_infra_retries", ".gym_accumulated_walltime", ".gym_job_chain",
+accounting_files = (".gym_infra_retries", ".gym_accumulated_walltime", ".gym_job_chain", ".gym_infra_retry_extension",
                     ".gym_chain_incomplete", "../resolved-config.yaml", "artifacts/rollouts_resubmit_offset")
 accounting_snapshot = {name: sha256(os.path.join(d, name)) for name in accounting_files}
 chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
@@ -1194,6 +1194,7 @@ if not stable_sources or unknown_reason is not None:
     collected["infra_retries_state"] = collected["walltime_state"] = "unknown"
 # The counters' own states, for a caller that reconciles the unknown reason from terminal scheduler records.
 collected["accounting_unknown_reason"] = unknown_reason
+collected["infra_retry_extension"], collected["infra_retry_extension_state"] = num(".gym_infra_retry_extension")
 collected["counter_states"] = {"infra_retries": num(".gym_infra_retries")[1],
                                "walltime": num(".gym_accumulated_walltime")[1]} if stable_sources else None
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
@@ -1234,6 +1235,9 @@ class CollectedEvidence(BaseModel):
     counter_states: dict[str, str] | None = None
     # Set by an executor that reconciled a requeued chain from complete terminal scheduler records.
     accounting_reconciled: bool = False
+    # Infra retries an explicit recovery added to the configured cap (.gym_infra_retry_extension), and its state.
+    infra_retry_extension: float | None = None
+    infra_retry_extension_state: str = "absent"
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -1422,11 +1426,17 @@ def decide_from_collected(
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     planned_missing_continuation: bool = False,
     allocation_cut: bool = False,
+    extend_retries: int = 0,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing inventory or result file stops the decision.
 
-    ``allocation_cut`` (see ``decide_recovery``) applies only with no live job.
+    ``allocation_cut`` (see ``decide_recovery``) applies only with no live job. The infra-retry cap is the configured
+    one plus the run's recorded extension plus ``extend_retries`` that this recovery asks to record.
     """
+    recorded = {"absent": 0, "ok": collected.infra_retry_extension}.get(collected.infra_retry_extension_state)
+    configured = max_infra_retries
+    if max_infra_retries is not None:
+        max_infra_retries = None if recorded is None else max_infra_retries + int(recorded) + extend_retries
     # resume_script creates .gym_infra_retries on the first infra retry, so its absence means none ran; it adds every
     # previous hop to .gym_accumulated_walltime, so after a follow-up hop that file must exist. Malformed is unknown.
     retries = {"absent": 0, "ok": collected.infra_retries_used}.get(collected.infra_retries_state)
@@ -1504,6 +1514,12 @@ def decide_from_collected(
                 "reason": "the results file is absent; collection cannot safely resume its saved history",
             }
         )
+    if max_infra_retries is not None and max_infra_retries != configured:
+        extension = (
+            f"infra-retry cap {max_infra_retries}: {configured} configured + {int(recorded or 0)} recorded extension"
+            + (f" + {extend_retries} requested now" if extend_retries else "")
+        )
+        decision = decision.model_copy(update={"reason": f"{decision.reason} ({extension})"})
     return decision
 
 
