@@ -114,7 +114,7 @@ def live(tmp_path, monkeypatch):
                                 "model_call_id": f"call-{i}",
                                 "request": {"input": "private fixture"},
                                 "response": {"output_text": "private fixture"},
-                                "response_metadata": {"status_code": 200},
+                                "response_metadata": {"status_code": 200, "model_operations": None},
                             }
                         ],
                     },
@@ -337,7 +337,7 @@ def test_live_delivery_retains_canonical_observations_without_raw_capture(live):
             trajectory["model_calls"][0]["model_call_id"]
             == original["ng_trajectory"]["model_calls"][0]["model_call_id"]
         )
-        assert trajectory["model_calls"][0]["response_metadata"] == {"status_code": 200}
+        assert trajectory["model_calls"][0]["response_metadata"] == {"status_code": 200, "model_operations": None}
         assert "request" not in trajectory["model_calls"][0]
         assert "response" not in trajectory["model_calls"][0]
         assert "conversation" not in trajectory["invocations"][0]
