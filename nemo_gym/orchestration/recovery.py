@@ -1775,13 +1775,14 @@ def stopped_followup(job_id: str, accounting: str) -> str | None:
     if state not in _FOLLOWUP_ENDED_STATES or int(elapsed) == 0:
         return None
     code, _, signal = exit_code.partition(":")
-    detail = f" with signal {signal}" if signal not in ("", "0") else f" with exit code {code}" if code != "0" else ""
-    # A signal that ended the job, not a person's cancel, or a scheduler state that names the infrastructure.
-    killed = signal not in ("", "0") and state != "CANCELLED"
-    cause = "on infrastructure" if killed or state in {"NODE_FAIL", "BOOT_FAIL", "PREEMPTED"} else ""
+    signaled = signal not in ("", "0")
+    detail = f" with signal {signal}" if signaled else f" with exit code {code}" if code != "0" else ""
+    # Only the scheduler's own state names the infrastructure; the record does not say who sent a signal or why.
+    cause = " on infrastructure" if state in {"NODE_FAIL", "BOOT_FAIL", "PREEMPTED"} else ""
+    unknown = " (cause not recorded)" if signaled and not cause else ""
     return (
-        f"the chain stopped{' ' + cause if cause else ''}: its follow-up {job_id} ended {state}{detail} after "
-        f"{elapsed} s, before it recorded itself in the chain, so no job continued the run"
+        f"the chain stopped{cause}: its follow-up {job_id} ended {state}{detail} after {elapsed} s{unknown}, "
+        "before it recorded itself in the chain, so no job continued the run"
     )
 
 

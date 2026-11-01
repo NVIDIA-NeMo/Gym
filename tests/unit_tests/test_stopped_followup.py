@@ -25,7 +25,7 @@ from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 
 
 _KILLED = (
-    "the chain stopped on infrastructure: its follow-up 101 ended FAILED with signal 53 after 14 s, before it "
+    "the chain stopped: its follow-up 101 ended FAILED with signal 53 after 14 s (cause not recorded), before it "
     "recorded itself in the chain, so no job continued the run"
 )
 
@@ -80,10 +80,14 @@ def test_a_follow_up_its_dependency_cancelled_before_it_started_is_not_named(tmp
             "the chain stopped on infrastructure: its follow-up 101 ended NODE_FAIL after 30 s",
         ),
         ("101|FAILED|14|1:0\n", "the chain stopped: its follow-up 101 ended FAILED with exit code 1 after 14 s"),
-        # A person's cancel after the job started: named, but not as infrastructure.
+        # A signal's sender and reason are not in the record, whatever the state.
         (
             "101|CANCELLED by 7|9|0:15\n",
-            "the chain stopped: its follow-up 101 ended CANCELLED with signal 15 after 9 s",
+            "the chain stopped: its follow-up 101 ended CANCELLED with signal 15 after 9 s (cause not recorded),",
+        ),
+        (
+            "101|NODE_FAIL|30|0:9\n",
+            "the chain stopped on infrastructure: its follow-up 101 ended NODE_FAIL with signal 9 after 30 s,",
         ),
         ("101|PENDING|0|0:0\n", None),
         ("101|RUNNING|5|0:0\n", None),
@@ -91,7 +95,17 @@ def test_a_follow_up_its_dependency_cancelled_before_it_started_is_not_named(tmp
         ("101|FAILED|14|0:53\n101|FAILED|3|0:53\n", None),
         ("", None),
     ],
-    ids=["node-fail", "exit-code", "cancelled-by-signal", "pending", "running", "other-job", "two-rows", "no-record"],
+    ids=[
+        "node-fail",
+        "exit-code",
+        "cancelled-by-signal",
+        "node-fail-by-signal",
+        "pending",
+        "running",
+        "other-job",
+        "two-rows",
+        "no-record",
+    ],
 )
 def test_the_follow_up_record_names_only_a_started_and_ended_job(accounting, expected):
     note = stopped_followup("101", accounting)
