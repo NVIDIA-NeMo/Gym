@@ -40,6 +40,15 @@ from nemo_gym.server_utils import get_response_json, raise_for_status
 
 LOG = logging.getLogger(__name__)
 _MODEL_API_KEY_ENV = "NEMO_GYM_FABRIC_MODEL_API_KEY"  # pragma: allowlist secret
+# Adapter failures that are the model's own outcome, as (error code, metadata subtype): the model ran out of turns or
+# its step budget, so the rollout is verified and scored.
+_MODEL_STOPS = frozenset(
+    {
+        ("mini_swe_agent_incomplete", None),
+        ("deepagents_recursion_limit_reached", None),
+        ("claude_result_failed", "error_max_turns"),
+    }
+)
 
 
 def _deep_merge(base: dict[str, Any], overlay: dict[str, Any]) -> dict[str, Any]:
@@ -658,7 +667,10 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             trajectories = _atif_trajectories(_mapping(result.output)) if relay_dir else []
 
         result_mapping = result.to_mapping()
-        if result.status != "succeeded":
+        model_stop = (
+            result.error is not None and (result.error.code, result.error.metadata.get("subtype")) in _MODEL_STOPS
+        )
+        if result.status != "succeeded" and not model_stop:
             error = result.error.message if result.error is not None else "unknown Fabric failure"
             error_mapping = _mapping(result_mapping.get("error"))
             details = {k: v for k, v in error_mapping.items() if k != "message" and v not in (None, {}, [])}
@@ -767,8 +779,8 @@ class NeMoFabricAgent(SimpleResponsesAPIAgent):
             await raise_for_status(verify_response)
             verify_json = await get_response_json(verify_response)
             fabric_output = _mapping(fabric_result.get("output"))
-            finished_naturally = not fabric_output.get("failed", False)
-            if "completed" in fabric_output:
+            finished_naturally = fabric_result.get("status") == "succeeded" and not fabric_output.get("failed", False)
+            if finished_naturally and "completed" in fabric_output:
                 finished_naturally = bool(fabric_output["completed"])
             return NeMoFabricAgentVerifyResponse.model_validate(
                 verify_json

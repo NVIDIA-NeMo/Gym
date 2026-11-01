@@ -367,6 +367,44 @@ def test_run_preserves_fabric_result_and_verifies(
     assert dynamic["custom_headers"] == {"X-NeMo-Gym-Session-Token": "token"}
 
 
+@pytest.mark.parametrize(
+    ("code", "metadata"),
+    [
+        ("mini_swe_agent_incomplete", {}),
+        ("deepagents_recursion_limit_reached", {}),
+        ("claude_result_failed", {"subtype": "error_max_turns"}),
+    ],
+)
+def test_run_verifies_a_model_that_ran_out_of_turns(code: str, metadata: dict, tmp_path: Path) -> None:
+    agent = _agent(cwd=str(tmp_path))
+    verified = []
+
+    async def post(server_name, url_path, json=None, cookies=None, **kwargs):
+        if url_path == "/seed_session":
+            return _FakeHttpResponse({})
+        verified.append(json["response"])
+        return _FakeHttpResponse(json | {"reward": 0.0})
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    body = NeMoFabricAgentRunRequest.model_validate({"responses_create_params": {"input": "question"}})
+    request = MagicMock()
+    request.cookies = {}
+    out_of_turns = _FakeResult()
+    out_of_turns.status = "failed"
+    out_of_turns.error = MagicMock(code=code, metadata=metadata, message="ran out of turns")
+    fabric = MagicMock()
+    fabric.run = AsyncMock(return_value=out_of_turns)
+    with (
+        patch.object(NeMoFabricAgent, "resolve_model_base_url", return_value="http://127.0.0.1:9002"),
+        patch("responses_api_agents.nemo_fabric_agent.app.Fabric", return_value=fabric),
+    ):
+        result = asyncio.run(agent.run(request, body))
+
+    assert len(verified) == 1
+    assert result.reward == 0.0
+    assert result.finished_naturally is False
+
+
 def test_relay_config_enables_atif_under_the_relay_directory(tmp_path: Path) -> None:
     agent = _agent(relay=True)
     config = agent._fabric_config(
