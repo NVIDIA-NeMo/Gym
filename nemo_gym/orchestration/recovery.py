@@ -1237,14 +1237,15 @@ if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
             and isinstance(receipt.get("run_id"), str) and receipt["run_id"].strip()
             and isinstance(receipt.get("artifacts"), dict)
             and set(receipt["artifacts"]) == set(RECEIPT_FILES)):
-        current = {k: sha256(os.path.join(a, n)) for k, n in RECEIPT_FILES.items()}
+        # Bound to the opening snapshot; the closing one below reports any later change as unstable sources.
+        current = {k: source_snapshot[n] for k, n in RECEIPT_FILES.items()}
         health_current = True
         try:
             aggregate = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
             payloads = [entry["_ng_run_health_metrics"] for entry in aggregate if isinstance(entry, dict) and "_ng_run_health_metrics" in entry]
             if payloads:
                 health_sources = {k: v for k, v in current.items() if k != "aggregate_metrics_json_fpath"}
-                health_sources.update({name: sha256(os.path.join(a, "rollouts_" + name)) for name in ("manifest.json", "attempts.jsonl")})
+                health_sources.update({name: source_snapshot["rollouts_" + name] for name in ("manifest.json", "attempts.jsonl")})
                 try:
                     summary = json.load(open(os.path.join(a, "quality_summary.json")))
                     stats = summary.get("run", {}).get("stats", {})
@@ -1282,7 +1283,7 @@ try:
                      and all(value is None or isinstance(value, str) and len(value) == 64
                              and all(c in "0123456789abcdef" for c in value) for value in binding.values())
                      and isinstance(binding.get("rollouts_jsonl_fpath"), str))
-    source_matches = source_matches and binding_valid and binding == {k: sha256(os.path.join(a, n)) for k, n in expected_files.items()}
+    source_matches = source_matches and binding_valid and binding == {k: source_snapshot[n] for k, n in expected_files.items()}
     quality = {"source_matches": source_matches, "rollouts": sources, "artifacts": {k: acc.get(k) for k in ("expected", "missing", "healthy", "unhealthy_reasons", "partial")},
                "verdicts": run.get("verdicts"), "issues": run.get("issues"), "coverage": acc.get("coverage"),
                "ignored_checks": run.get("ignored_checks"), "responses": (run.get("stats") or {}).get("responses"),
@@ -1340,9 +1341,11 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
                   "coverage_allocation_id": coverage_allocation_id}
-if quality is not None and source_snapshot != {name: sha256(os.path.join(a, name)) for name in source_files}:
+# One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
+closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
+if quality is not None and source_snapshot != closing_snapshot:
     quality["source_matches"] = False
-stable_sources = (source_snapshot == {name: sha256(os.path.join(a, name)) for name in source_files}
+stable_sources = (source_snapshot == closing_snapshot
                   and accounting_snapshot == {name: sha256(os.path.join(d, name)) for name in accounting_files}
                   and initial_followups is not None and initial_followups == followup_snapshot())
 collected["source_digests"] = source_snapshot if stable_sources else None
