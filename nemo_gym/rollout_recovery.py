@@ -78,6 +78,21 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
     return False
 
 
+def keeps_partial_response(row: Mapping[str, Any]) -> bool:
+    """Whether the row keeps the agent's partial response from a native cleanup, even one without output.
+
+    The agent ran, so its partial response stays a kept answer and is never regenerated. An agent-stage response
+    the outcome policy rejected as failed is diagnostic only, as in ``has_saved_generation``.
+    """
+    answer = row.get("_ng_failure_partial_response")
+    if not isinstance(answer, Mapping):
+        return False
+    record = row.get("_ng_failure_record")
+    failure = record.get("failure") if isinstance(record, Mapping) else None
+    stage = failure.get("stage") if isinstance(failure, Mapping) else row.get("_ng_failure_stage")
+    return not (stage == "agent" and answer.get("status") == "failed")
+
+
 def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     """Whether the verifier finished grading this failed attempt, so it is a graded result and a rerun would replace it.
 
