@@ -80,7 +80,8 @@ FAILURE_ID = "_ng_failure_id"
 Identity = tuple[int, int]
 
 # Scheduler states that end an allocation from outside the run: its in-flight requests died with it and saved nothing.
-ALLOCATION_CUT_STATES = frozenset({"TIMEOUT", "PREEMPTED"})
+# An operator's cancel counts only for an explicit `gym eval resubmit --recover`: the in-job guard never continues it.
+ALLOCATION_CUT_STATES = frozenset({"TIMEOUT", "PREEMPTED", "NODE_FAIL", "CANCELLED"})
 
 
 class IdentityState(StrEnum):
@@ -1516,7 +1517,7 @@ def continuation_admission(
             planned_missing_continuation=segment,
             # The cut allocation must be the one that last wrote the Store: an older allocation's reservations
             # keep their own, unknown, ending.
-            allocation_cut=previous_state in ALLOCATION_CUT_STATES
+            allocation_cut=previous_state in ALLOCATION_CUT_STATES - {"CANCELLED"}
             and bool(previous_job_id)
             and collected.coverage_allocation_id == previous_job_id,
         )

@@ -34,10 +34,12 @@ from nemo_gym.orchestration.recovery import (
 )
 from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_store import RolloutStore
+from tests.unit_tests.test_eval_resubmit import _handle, _resumable_run, _sbatch_env
+from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_resume_script import _run_prologue
 
 
-def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, allocation="100"):
+def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, allocation="100", chain=True):
     """A run cut while ``in_flight`` reservations had no row; ``masked`` results and ``unowned`` failures."""
     artifacts = job / "artifacts"
     artifacts.mkdir(parents=True, exist_ok=True)
@@ -73,8 +75,9 @@ def _cut_run(job, *, scored=2, in_flight=2, not_started=2, masked=0, unowned=0, 
                 # Reserved and dispatched; the allocation ended before any outcome was saved.
                 store.record_dispatch(dict(rows[index]))
                 index += 1
-    (job / ".gym_job_chain").write_text(f"{allocation}\n")
-    (job / ".gym_accumulated_walltime").write_text("14400\n")
+    if chain:
+        (job / ".gym_job_chain").write_text(f"{allocation}\n")
+        (job / ".gym_accumulated_walltime").write_text("14400\n")
     return artifacts / "rollouts.jsonl"
 
 
@@ -158,7 +161,8 @@ def test_only_unknown_rows_left_stop_with_the_populations(tmp_path):
     [
         ("100|TIMEOUT|14400\n101|FAILED|90", "100", True),
         ("100|PREEMPTED|300", "100", True),
-        ("100|CANCELLED by 7|300", "100", False),
+        ("100|CANCELLED by 7|300", "100", True),
+        ("100|NODE_FAIL|300", "100", True),
         ("100|FAILED|300", "100", False),
         ("100|TIMEOUT|14400", "101", False),
         ("100|TIMEOUT|14400", None, False),
@@ -189,3 +193,30 @@ def test_the_guard_stop_names_the_three_populations_when_the_cut_is_not_the_stor
     assert marker.startswith("Saved recovery evidence has no eligible retries; 2 failure(s) have no registered kind")
     assert "retryable 2 (resumed), unknown 2 (2 reservation_without_outcome)" in marker
     assert marker.rstrip().endswith("(previous job 100 ended TIMEOUT)")
+
+
+@pytest.mark.parametrize("state", ["CANCELLED by 1000", "NODE_FAIL"])
+def test_recover_resumes_reservations_after_an_operator_cancel_or_a_node_failure(tmp_path, slurm_bin, state):
+    from nemo_gym.orchestration.submit import recover
+
+    job, _, _ = _resumable_run(tmp_path)
+    for name in ("rollouts.jsonl", "rollouts_materialized_inputs.jsonl"):
+        (job / "artifacts" / name).unlink()
+    _cut_run(job, scored=2, in_flight=2, not_started=1, chain=False)
+    (slurm_bin / "accounting").write_text(f"100|{state}|7200\n101|FAILED|60\n")
+    before = _digests(job)
+    result = recover(*_handle(job))
+    assert result.decision.action.value == "resubmit", result.decision.reason
+    assert result.decision.counts == {"scored": 2, "missing": 3}
+    assert result.dispatched == "resubmit"
+    assert _sbatch_env(slurm_bin)["GYM_RESUBMIT_KEEP_BUDGET"] == "1"
+    assert _digests(job) == before
+
+
+def test_the_guard_never_continues_after_an_operator_cancel(tmp_path):
+    _cut_run(tmp_path)
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "CANCELLED", exit_code="0:15", prev_job_id="100")
+    assert "REACHED_WORK" not in result.stdout
+    assert (tmp_path / ".gym_chain_incomplete").read_text() == (
+        "Previous job 100 was cancelled. Chain stopped with rollouts missing; resubmit to continue.\n"
+    )
