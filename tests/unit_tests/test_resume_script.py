@@ -107,13 +107,12 @@ def test_rendered_prologue_is_valid_bash(resume, tmp_path):
 
 _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
-if [[ -n "${FAKE_FOLLOWUP:-}" && " $* " == *" -j ${FAKE_FOLLOWUP} "* ]]; then echo "${FAKE_FOLLOWUP_ELAPSED:-}"; exit 0; fi
 if [[ "$*" == *State,ElapsedRaw* ]]; then echo "${FAKE_STATE:-}|${FAKE_ELAPSED:-}";
 elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}";
 elif [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAKE_STATE:-}"; fi
 """
 _FAKE_SBATCH = """#!/bin/bash
-echo "$* sentinel=${GYM_FOLLOWUP_SENTINEL:-}" >> "$FAKE_LOG_DIR/sbatch_calls"
+echo "$*" >> "$FAKE_LOG_DIR/sbatch_calls"
 if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
 # The queued follow-up waits on its dependency in this job dir, as squeue would list it. In a hidden partition
 # squeue lists it only with --all.
@@ -169,7 +168,6 @@ def _run_prologue(
     restart_count: str = "0",
     manual_resubmit: bool = False,
     admission_command: str | None = None,
-    extra_env: dict[str, str] | None = None,
 ) -> subprocess.CompletedProcess:
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
@@ -212,7 +210,6 @@ def _run_prologue(
         **({"FAKE_SQUEUE_FAILS": "1"} if squeue_fails else {}),
         **({"FAKE_HIDDEN_PARTITION": "1"} if hidden_partition else {}),
         **({"FAKE_SBATCH_LOSES_REPLY": "1"} if sbatch_loses_reply else {}),
-        **(extra_env or {}),
     }
     return subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True)
 
@@ -297,11 +294,8 @@ def test_a_requeued_job_does_not_queue_a_second_follow_up(tmp_path, prev_state):
     requeued = _run_prologue(tmp_path, ResumeConfig(), prev_state)
 
     assert "REACHED_WORK" in first.stdout and "REACHED_WORK" in requeued.stdout
-    # The first run queued the follow-up and its sentinel; the requeue queued nothing.
-    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
-        "--dependency=afternotok:200",
-        "--dependency=afterany:999",
-    ]
+    assert _sbatch_calls(tmp_path) == [_sbatch_calls(tmp_path)[0]]
+    assert "--dependency=afternotok:200" in _sbatch_calls(tmp_path)[0]
     assert "already queued" in requeued.stdout
 
 
@@ -326,12 +320,8 @@ def test_the_claim_records_the_follow_up_and_a_requeue_finds_it_pending(tmp_path
     requeued = _run_prologue(tmp_path, ResumeConfig(), None)
 
     assert (tmp_path / ".gym_followup_queued.200").read_text() == "999\n"
-    assert (tmp_path / ".gym_followup_sentinel.200").read_text() == "999\n"
     assert "already queued: 999" in requeued.stdout
-    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
-        "--dependency=afternotok:200",
-        "--dependency=afterany:999",
-    ]
+    assert len(_sbatch_calls(tmp_path)) == 1
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -380,9 +370,7 @@ def test_each_resumed_segment_still_queues_its_own_follow_up(tmp_path):
     assert "REACHED_WORK" in resumed.stdout
     assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
         "--dependency=afternotok:200",
-        "--dependency=afterany:999",
         "--dependency=afternotok:999",
-        "--dependency=afterany:999",
     ]
 
 
@@ -518,10 +506,7 @@ def test_a_follow_up_pending_in_a_hidden_partition_is_found(tmp_path):
     requeued = _run_prologue(tmp_path, ResumeConfig(), None, hidden_partition=True)
 
     assert "already queued: 999" in requeued.stdout
-    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
-        "--dependency=afternotok:200",
-        "--dependency=afterany:999",
-    ]
+    assert len(_sbatch_calls(tmp_path)) == 1
 
 
 @pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
@@ -846,71 +831,3 @@ def test_collector_binds_dynamic_followup_claim_set_and_contents(tmp_path, mutat
     else:
         assert collected.infra_retries_state == collected.walltime_state == "unknown"
         assert collected.source_digests is None
-
-
-def _sentinel_of(followup_elapsed: str, **extra: str) -> dict[str, str]:
-    """The environment of sentinel 200 for follow-up 777 of job 100, with 777's elapsed time in accounting."""
-    return {"GYM_FOLLOWUP_SENTINEL": "777", "FAKE_FOLLOWUP": "777", "FAKE_FOLLOWUP_ELAPSED": followup_elapsed, **extra}
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_a_sentinel_takes_the_place_of_a_follow_up_that_died_before_it_recorded_itself(tmp_path):
-    (tmp_path / ".gym_job_chain").write_text("100\n")
-    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("14"))
-
-    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
-    assert "Follow-up 777 ended after 14s before it recorded itself" in result.stdout
-    assert (tmp_path / ".gym_job_chain").read_text() == "100\n200\n"
-    # The infrastructure ended the follow-up, so the takeover spends one infra retry.
-    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
-    # It continues as the follow-up would: its own follow-up and sentinel, which are ordinary hops. Only the new
-    # sentinel is told which follow-up to watch; the follow-up does not inherit this sentinel's role.
-    assert [(call.split()[0], call.split()[-1]) for call in _sbatch_calls(tmp_path)] == [
-        ("--dependency=afternotok:200", "sentinel="),
-        ("--dependency=afterany:999", "sentinel=999"),
-    ]
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-@pytest.mark.parametrize(
-    "chain,elapsed,said",
-    [
-        ("100\n777\n", "14", "Follow-up 777 recorded itself in the chain"),
-        ("100\n", "0", "Follow-up 777 never started"),
-    ],
-    ids=["follow-up-ran", "follow-up-cancelled"],
-)
-def test_a_sentinel_leaves_the_chain_as_it_is_when_its_follow_up_ran_or_never_started(tmp_path, chain, elapsed, said):
-    (tmp_path / ".gym_job_chain").write_text(chain)
-    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of(elapsed))
-
-    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout
-    assert said in result.stdout
-    assert (tmp_path / ".gym_job_chain").read_text() == chain
-    assert _sbatch_calls(tmp_path) == []
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_a_sentinel_that_cannot_read_its_follow_up_stops_with_unknown_accounting(tmp_path):
-    (tmp_path / ".gym_job_chain").write_text("100\n")
-    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of(""))
-
-    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
-    assert (
-        (tmp_path / INCOMPLETE_MARKER_NAME)
-        .read_text()
-        .startswith("GYM_ACCOUNTING_UNKNOWN: Follow-up 777 accounting is unknown")
-    )
-    assert (tmp_path / ".gym_job_chain").read_text() == "100\n"
-    assert _sbatch_calls(tmp_path) == []
-
-
-@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
-def test_a_sentinel_stops_at_the_infra_retry_cap_so_dying_follow_ups_cannot_loop(tmp_path):
-    (tmp_path / ".gym_job_chain").write_text("100\n")
-    (tmp_path / ".gym_infra_retries").write_text("2\n")
-    result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "TIMEOUT", extra_env=_sentinel_of("14"))
-
-    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
-    assert "Infra retry limit (2) reached" in (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
-    assert _sbatch_calls(tmp_path) == []
