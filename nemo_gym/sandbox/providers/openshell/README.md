@@ -93,9 +93,11 @@ Unknown `provider_options` keys raise `ValueError`; wrong-typed values raise `Ty
     about 35s normally. Only a hard kill (SIGKILL, `os._exit`) skips the delete and leaks the sandbox, since
     OpenShell has no TTL.
   - At `aclose()`, when this process has no live sandbox left, it also deletes this run's leftovers: it
-    lists the gateway sandboxes labelled `nemo-gym.nvidia.com/run=<this run>` and `nemo-gym.sandbox=1`
+    lists the gateway sandboxes labelled `nemo-gym.nvidia.com/run=<this run>`,
+    `nemo-gym.nvidia.com/process=<this process>` and `nemo-gym.sandbox=1`
     (needs `attribution.enabled`) and deletes those it no longer tracks (for example a create that was
-    cancelled after the gateway committed it).
+    cancelled after the gateway committed it). The per-process label keeps it from touching sibling
+    processes of the same job, which share the run id.
 - A sandbox that never becomes READY (for example an unpullable image) fails after `create.ready_timeout_s`.
   The SDK exposes no pull-specific signal, so the provider does not guess; the error message includes the
   conditions the gateway reports (`SandboxStatus.conditions`) for diagnosis.

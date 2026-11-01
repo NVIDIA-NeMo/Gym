@@ -22,6 +22,7 @@ import inspect
 import re
 import threading
 import time
+from os import getpid as os_getpid
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
@@ -109,6 +110,7 @@ class FakeClient:
         self.delete_calls: list[dict[str, Any]] = []
         self.list_calls: list[dict[str, Any]] = []
         self.list_results: list[Any] = [[]]
+        self.gateway_labels: dict[str, dict[str, str]] | None = None  # name -> labels, when set
         self.close_calls = 0
         self.create_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_PROVISIONING)]
         self.get_results: list[Any] = [make_ref(openshell_pb2.SANDBOX_PHASE_READY)]
@@ -178,6 +180,13 @@ class FakeClient:
 
     def list_all(self, *, workspace: str, label_selector: str | None = None, **_: Any) -> list[Any]:
         self.list_calls.append({"workspace": workspace, "label_selector": label_selector})
+        if self.gateway_labels is not None:  # filter like the gateway: every k=v of the selector must match
+            wanted = dict(term.split("=", 1) for term in (label_selector or "").split(",") if term)
+            return [
+                make_ref(openshell_pb2.SANDBOX_PHASE_READY, name=name)
+                for name, labels in self.gateway_labels.items()
+                if all(labels.get(k) == v for k, v in wanted.items())
+            ]
         return self._next(self.list_results)
 
     def close(self) -> None:
@@ -394,6 +403,7 @@ async def test_create_adds_attribution_labels_with_spec_keys_winning(
         "nemo-gym.nvidia.com/user": "alice",
         "nemo-gym.nvidia.com/workload": "bench",
         "nemo-gym.nvidia.com/run": "run-1",
+        "nemo-gym.nvidia.com/process": openshell_provider._process_id(),
         "task": "demo",
         SANDBOX_LABEL: "1",
     }
@@ -1084,9 +1094,57 @@ async def test_aclose_sweeps_untracked_sandboxes_of_this_run(
     openshell_provider._PENDING_DELETES.pop(("default", "pending"))
     await _drain_deletes_only()
     assert fake_client.list_calls == [
-        {"workspace": "default", "label_selector": f"nemo-gym.nvidia.com/run=run_1_x,{SANDBOX_LABEL}=1"}
+        {
+            "workspace": "default",
+            "label_selector": (
+                f"nemo-gym.nvidia.com/run=run_1_x,nemo-gym.nvidia.com/process={openshell_provider._process_id()},"
+                f"{SANDBOX_LABEL}=1"
+            ),
+        }
     ]
     assert [call["name"] for call in fake_client.delete_calls] == ["leftover"]
+
+
+async def test_sweep_never_deletes_another_process_sandboxes_of_the_same_run(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Two processes of one job share the run id (NEMO_GYM_RUN_ID is inherited), so the run label alone must not
+    # decide what this process may delete: process B's live sandbox shares the run but not the process label.
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared-run")
+    monkeypatch.setattr(openshell_provider, "_process_id", lambda: "process-a")
+    provider = make_provider()
+    prefix = "nemo-gym.nvidia.com/"
+    fake_client.gateway_labels = {
+        "a-leftover": {f"{prefix}run": "shared-run", f"{prefix}process": "process-a", SANDBOX_LABEL: "1"},
+        "b-live": {f"{prefix}run": "shared-run", f"{prefix}process": "process-b", SANDBOX_LABEL: "1"},
+        "other-run": {f"{prefix}run": "other", f"{prefix}process": "process-a", SANDBOX_LABEL: "1"},
+        "unlabeled": {},
+    }
+    fake_client.get_results = [FakeRpcError(grpc.StatusCode.NOT_FOUND)]
+    await provider.aclose()
+    await _drain_deletes_only()
+    assert [call["name"] for call in fake_client.delete_calls] == ["a-leftover"]
+
+
+async def test_create_process_label_differs_per_process(
+    make_provider, fake_client: FakeClient, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("NEMO_GYM_RUN_ID", "shared-run")
+    provider = make_provider()
+    monkeypatch.setattr(openshell_provider, "_process_id", lambda: "process-a")
+    await provider.create(SandboxSpec())
+    monkeypatch.setattr(openshell_provider, "_process_id", lambda: "process-b")
+    await provider.create(SandboxSpec())
+    first, second = (call["labels"] for call in fake_client.create_calls)
+    assert first["nemo-gym.nvidia.com/run"] == second["nemo-gym.nvidia.com/run"] == "shared-run"
+    assert (first["nemo-gym.nvidia.com/process"], second["nemo-gym.nvidia.com/process"]) == ("process-a", "process-b")
+
+
+def test_process_id_is_stable_in_a_process_and_new_after_fork(monkeypatch: pytest.MonkeyPatch) -> None:
+    first = openshell_provider._process_id()
+    assert openshell_provider._process_id() == first
+    monkeypatch.setattr(openshell_provider.os, "getpid", lambda: os_getpid() + 1)
+    assert openshell_provider._process_id() != first
 
 
 async def test_aclose_sweep_skips_sandboxes_still_live_in_this_process(make_provider, fake_client: FakeClient) -> None:

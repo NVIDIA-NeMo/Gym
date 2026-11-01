@@ -30,6 +30,7 @@ import dataclasses
 import functools
 import logging
 import math
+import os
 import posixpath
 import shlex
 import threading
@@ -459,6 +460,22 @@ def _release_shared_client(state: _SharedClientState) -> None:
     state.client.close()
 
 
+PROCESS_KEY = "process"
+_process_id_by_pid: dict[int, str] = {}
+
+
+def _process_id() -> str:
+    """An id unique to this process (a forked child gets its own), used to scope the leftover sweep.
+
+    The run id can be shared by every process of a job, so it alone cannot tell this process's sandboxes
+    from a sibling's live ones.
+    """
+    pid = os.getpid()
+    if pid not in _process_id_by_pid:
+        _process_id_by_pid[pid] = uuid.uuid4().hex[:12]
+    return _process_id_by_pid[pid]
+
+
 def _forget_delete(key: tuple[str, str], future: Future[None]) -> None:
     with _SHARED_CLIENTS_LOCK:
         if _PENDING_DELETES.get(key) is future:
@@ -680,9 +697,12 @@ class OpenShellProvider:
         name = _generate_sandbox_name()
         # Explicit spec keys win over attribution keys; the marker label goes last so nothing clobbers it.
         # Label values must be valid Kubernetes label values (at most 63 characters), so sanitize them all.
+        attribution = self._attribution.metadata()
+        if attribution:
+            attribution[f"{self._attribution.key_prefix}{PROCESS_KEY}"] = _process_id()
         labels = {
             str(key): sanitize_label_value(value)
-            for key, value in {**self._attribution.metadata(), **spec.metadata, SANDBOX_LABEL: "1"}.items()
+            for key, value in {**attribution, **spec.metadata, SANDBOX_LABEL: "1"}.items()
         }
 
         try:
@@ -928,12 +948,13 @@ class OpenShellProvider:
         future.add_done_callback(lambda done, key=key: _forget_delete(key, done))
 
     async def _sweep_leftovers(self) -> None:
-        """Delete this run's sandboxes that the process no longer tracks (for example a create that was cancelled
+        """Delete this process's sandboxes that it no longer tracks (for example a create that was cancelled
         after the gateway committed it). Needs attribution: the run label is what scopes the listing."""
         if not self._attribution.enabled:
             return
         run = sanitize_label_value(resolve_run_id(self._attribution.run))
-        selector = f"{self._attribution.key_prefix}{RUN_KEY}={run},{SANDBOX_LABEL}=1"
+        prefix = self._attribution.key_prefix
+        selector = f"{prefix}{RUN_KEY}={run},{prefix}{PROCESS_KEY}={_process_id()},{SANDBOX_LABEL}=1"
         workspace = self._connection.workspace
         try:
             refs = await self._call(self._client.list_all, workspace=workspace, label_selector=selector)
