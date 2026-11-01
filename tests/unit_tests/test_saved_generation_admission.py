@@ -29,12 +29,16 @@ def response(output=None):
 def test_retained_generation_is_structural_not_placeholder_presence(slot):
     from nemo_gym.rollout_recovery import has_saved_generation
 
-    assert has_saved_generation({slot: response()})
+    # A producer finished the response: it has an output item, or a status, even with no assistant text.
+    assert has_saved_generation({slot: response() | {"status": "completed"}})
+    assert has_saved_generation({slot: response([{"type": "message", "role": "assistant", "content": []}])})
     for placeholder in (
         {},
         {"error": "failed"},
         {"output": []},
         {"status": "failed", "output": []},
+        # A typed response object with no output and no status: an agent that never ran.
+        response(),
         response() | {"status": "failed", "error": {"code": "server_error", "message": "diagnostic only"}},
     ):
         assert not has_saved_generation({slot: placeholder})
@@ -88,7 +92,7 @@ async def test_native_cleanup_partial_response_survives_collection(tmp_path, mon
         assert store.pending() == []
         failure = store.failures()[0]
         assert "_ng_failure_partial_response" in failure
-        assert has_actual_generation(failure)
+        assert has_actual_generation(failure) is not empty_output
         try:
             await RolloutCollectionHelper().run_from_config(config.model_copy(update={"resume_from_cache": True}))
         except IncompleteEvaluationError:

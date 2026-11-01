@@ -2553,9 +2553,11 @@ def _failure_diagnostics(result: Any) -> Dict:
         isinstance(response, dict)
         and response
         and result.get(NG_FAILURE_CLASS_KEY) not in ("judge_failed", "judge_invalid")
+        and (response.get("output") or response.get("status") is not None)
     ):
         # This is producer evidence, possibly including synthetic failure text.
-        # It is never a scored response or a judge-only recovery candidate.
+        # It is never a scored response or a judge-only recovery candidate. A response object with no output and no
+        # status is a placeholder from an agent that never ran: only the failure record is kept for it.
         diagnostics.setdefault("_ng_failure_response", response)
     return diagnostics
 
