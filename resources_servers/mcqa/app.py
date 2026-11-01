@@ -74,6 +74,8 @@ class MCQAVerifyRequest(MCQARunRequest, BaseVerifyRequest):
 class MCQAVerifyResponse(BaseVerifyResponse):
     expected_answer: str
     extracted_answer: Optional[str]
+    # Every verify path grades the row (an unparsed answer scores 0), so none is incomplete: gym-p0/v1 TE-6.
+    evaluation_completed: bool = True
 
 
 class MCQADualVerifyResponse(MCQAVerifyResponse, BaseMultiRewardVerifyResponse):
