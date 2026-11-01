@@ -556,8 +556,10 @@ class TestOpenCodeSandboxedAgent:
                 'else rg --version && touch "$HOME/agent-started"; fi\n'
             )
             opencode.chmod(0o755)
-            local_command = command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded))).replace(
-                "/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error"))
+            local_command = (
+                command.replace("/tmp/nemo-gym-ripgrep-", shlex.quote(str(uploaded)))
+                .replace("/tmp/nemo-gym-mcp-setup-error", shlex.quote(str(tmp_path / "mcp-error")))
+                .replace(app_module.STABLE_DATE_MARKER, shlex.quote(str(tmp_path / "stable-date")))
             )
             try:
                 completed = subprocess.run(
@@ -877,6 +879,8 @@ class TestOpenCodeSandboxedAgent:
         config = await server._create_opencode_config(request)
 
         assert config["provider"]["nemo_gym"]["options"]["baseURL"] == expected_base_url
+        stable_date = "file:///tmp/nemo-gym-stable-date.js"
+        assert (stable_date in config.get("plugin", [])) == token_capture_enabled
 
     async def test_create_opencode_config_merges_recursively(self, monkeypatch: MonkeyPatch) -> None:
         """A nested override must not blow away its siblings in the generated config.
@@ -1732,6 +1736,47 @@ async def test_plugin_registration_and_upload_come_from_one_list(monkeypatch):
     config.opencode_plugins = ["nemo_gym_sentinel.js", "not_a_plugin.js"]
     with raises(FileNotFoundError, match="not_a_plugin.js"):
         server._plugin_uploads()
+
+
+async def test_unpinned_date_fails_a_finished_capture_run(monkeypatch):
+    server = OpenCodeSandboxedAgent(
+        config=TestOpenCodeSandboxedAgent()._create_config(), server_client=MagicMock(spec=ServerClient)
+    )
+    monkeypatch.setattr(server, "_token_id_capture_enabled", lambda: True)
+    monkeypatch.setattr(server, "_upload_plugin_verified", AsyncMock())
+    sandbox = MagicMock(
+        upload=AsyncMock(),
+        download=AsyncMock(),
+        exec=AsyncMock(
+            side_effect=[
+                SimpleNamespace(stdout="OpenCode run finished", stderr="", return_code=0, error_type=None),
+                SimpleNamespace(stdout="", stderr="", return_code=1, error_type=None),
+            ]
+        ),
+    )
+    monkeypatch.setattr(server, "_sandbox_id_to_sandbox", {"": sandbox})
+    monkeypatch.setattr(server, "_create_opencode_config", AsyncMock(return_value={}))
+    with raises(RuntimeError, match="stable-date plugin"):
+        await server.responses(
+            request=MagicMock(session={SESSION_ID_KEY: "trial"}, cookies={"sandbox_id": ""}, path_params={}),
+            body=NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}]),
+        )
+    assert app_module.STABLE_DATE_MARKER in sandbox.exec.await_args_list[0].kwargs["command"]
+    assert sandbox.exec.await_args_list[1].kwargs["command"] == f"test -f {app_module.STABLE_DATE_MARKER}"
+    sandbox.download.assert_not_awaited()
+    assert not server._sandbox_id_to_run_result
+
+
+@mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")
+def test_stable_date_extension():
+    result = subprocess.run(
+        ["node", "--test", str(Path(__file__).with_name("test_stable_date.mjs"))],
+        capture_output=True,
+        text=True,
+        errors="replace",
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stdout + result.stderr
 
 
 @mark.skipif(shutil.which("node") is None, reason="Node is required for the OpenCode extension")

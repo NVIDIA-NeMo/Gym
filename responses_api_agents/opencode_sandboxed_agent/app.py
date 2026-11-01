@@ -132,6 +132,8 @@ def _warn_deprecated_once() -> None:
 
 
 _REMOTE_ASSISTANT_MESSAGE_PLUGIN = "/tmp/nemo-gym-opencode-assistant-message-header.js"
+# Written by stable-date.js once it pins a date; must match its MARKER.
+STABLE_DATE_MARKER = "/tmp/nemo-gym-stable-date-active"
 # Image parts of the user turn are uploaded here and handed to `opencode run -f`. Outside the task
 # workdir on purpose (see the export path below) and fixed because each rollout owns its sandbox.
 _REMOTE_ATTACHMENTS_DIR = "/tmp/nemo-gym-attachments"
@@ -826,6 +828,9 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             policy_plugins.append("remaining-context.js")
         if self.config.tool_servers:
             policy_plugins.append("required-mcp.js")
+        if self._token_id_capture_enabled():
+            # Source-history capture links calls by exact prompt text; keep the date stable.
+            policy_plugins.append("stable-date.js")
         uploads.extend((Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}") for name in policy_plugins)
         return uploads
 
@@ -1292,7 +1297,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         && export PATH="$HOME/.opencode/bin:$PATH" \
         && test "$(opencode --version)" = {quote(self.config.opencode_version)} \
         && echo "Installed OpenCode" \
-        && rm -f /tmp/nemo-gym-mcp-setup-error \
+        && rm -f /tmp/nemo-gym-mcp-setup-error {STABLE_DATE_MARKER} \
         && {query_seed_str}NEMO_GYM_REQUIRED_MCP_SERVERS={quote(json.dumps([s.name for s in self.config.tool_servers]))} OPENCODE_CONFIG_CONTENT={quote(opencode_config_content)} OPENCODE_EXPERIMENTAL_OUTPUT_TOKEN_MAX=1000000000 {xdg_home_str} {extra_env_str} \
             opencode run --title "NG dummy title" {opencode_debug_str} {opencode_thinking_str}{opencode_attachment_str} {query_arg_str} \
         && echo "OpenCode run finished"
@@ -1349,6 +1354,11 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             mcp_check = await sandbox.exec(command="test ! -f /tmp/nemo-gym-mcp-setup-error", timeout_s=30)
             if mcp_check.return_code != 0 or mcp_check.error_type:
                 raise RuntimeError("Required Gym MCP tools could not be initialized")
+        if self._token_id_capture_enabled() and result is not None and result.return_code == 0:
+            # A finished run made model calls; without the marker the date pin did not apply.
+            marker_check = await sandbox.exec(command=f"test -f {STABLE_DATE_MARKER}", timeout_s=30)
+            if marker_check.return_code != 0 or marker_check.error_type:
+                raise RuntimeError("OpenCode stable-date plugin did not pin the system prompt date")
 
         export_fname = "export.json"
         # Kept outside the sandbox workdir on purpose: SWE-bench-style environments set the workdir
