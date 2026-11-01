@@ -118,9 +118,13 @@ if not job.is_absolute() or raw.get("source_job_identity") != identity():
 collected = recovery.CollectedEvidence.model_validate(raw)
 selected = recovery.select_managed_evidence(collected, job)
 projection = json.loads(selected.model_dump_json())
-# The saved install may predate these facts: derive them with the caller's helper on the install's own APIs.
-projection["checkpoint_enabled"] = None
-if selected.managed_selection is not None and selected.managed_reader_error is None:
+# A saved install whose selection already derives these facts is not read a second time (one Store parse and two
+# fewer source snapshots). An older one may predate them: derive them with the caller's helper on its own APIs.
+import inspect
+derived = "_managed_trial_metadata(" in inspect.getsource(recovery.select_managed_evidence)
+if not derived:
+    projection["checkpoint_enabled"] = None
+if not derived and selected.managed_selection is not None and selected.managed_reader_error is None:
     artifacts = job / "artifacts"
     def snapshot():
         return {name: recovery._managed_source_digest(artifacts / name) for name in collected.source_digests}
