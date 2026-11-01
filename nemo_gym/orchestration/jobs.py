@@ -139,6 +139,8 @@ class BenchmarkJob(BaseModel):
     job_dir: str
     job_id: str | None = None
     error: str | None = None
+    # Set by a repinned recovery: the Gym commit this benchmark's job runs, when it differs from the submission's.
+    gym_commit: str | None = None
 
 
 class SubmissionTelemetry(BaseModel):

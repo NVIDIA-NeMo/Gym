@@ -704,6 +704,11 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--inspect requires --recover")
     if record_path is not None and not inspect_only:
         args._parser.error("--record requires --inspect")
+    repin, repin_reason = getattr(args, "repin", None), getattr(args, "repin_reason", None)
+    if (repin is not None or repin_reason is not None) and (not getattr(args, "recover", False) or inspect_only):
+        args._parser.error("--repin and --repin-reason need --recover and cannot be used with --inspect")
+    if (repin is None) != (repin_reason is None):
+        args._parser.error("--repin and --repin-reason go together")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -731,7 +736,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             args._parser.error("--score-key and --max-unhealthy-fraction need --recover")
         if getattr(args, "recover", False):
             operation = inspect_recovery if inspect_only else recover
-            extra = {}
+            extra = {} if repin is None else {"repin": repin, "repin_reason": repin_reason}
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1754,6 +1759,22 @@ COMMANDS = {
                     type=Path,
                     metavar="PATH",
                     help="With --inspect: read an original submission record without updating the local index.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--repin",
+                    metavar="SHA",
+                    help="With --recover: continue the run on this full Gym commit. The launcher must be that "
+                    "revision; job.sh and resolved-config.yaml are rendered again with it, the old files are kept "
+                    "beside them, and saved rows and budgets stay as they are.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--repin-reason",
+                    metavar="TEXT",
+                    help="With --repin: why the run moves to that commit; recorded in the repin journal.",
                 ),
             ),
             Flag(

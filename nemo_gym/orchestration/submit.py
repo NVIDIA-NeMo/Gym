@@ -83,8 +83,13 @@ def recover(
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
+    repin: str | None = None,
+    repin_reason: str | None = None,
 ) -> RecoveryOutcome:
-    """Recover a saved submission, preserving its recorded retry and walltime budgets."""
+    """Recover a saved submission, preserving its recorded retry and walltime budgets.
+
+    ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
+    """
     return _recover(
         gym_job_id,
         benchmark,
@@ -97,6 +102,8 @@ def recover(
         outcome_policy=outcome_policy,
         mlflow_status=mlflow_status,
         mlflow_run_id=mlflow_run_id,
+        repin=repin,
+        repin_reason=repin_reason,
     )
 
 
@@ -148,6 +155,8 @@ def _recover(
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
+    repin: str | None = None,
+    repin_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -199,6 +208,8 @@ def _recover(
         score_agent=score_agent,
         score_environment=score_environment,
         outcome_policy=outcome_policy,
+        # A repinned run resumes on the target's Store: its reader decides what that Store would run.
+        **({"reader_ref": repin} if repin is not None else {}),
     )
     gate_task = (
         gate_summary_from_collected(
@@ -252,6 +263,7 @@ def _recover(
             accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
             # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.
             **({"accounting_reconciled": True} if collected is not None and collected.accounting_reconciled else {}),
+            **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
         )
         return RecoveryOutcome(
             decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow

@@ -69,6 +69,7 @@ class BaseExecutor(ABC):
         score_agent: str | None = None,
         score_environment: str | None = None,
         outcome_policy: RecoveryOutcomePolicyConfig | None = None,
+        reader_ref: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
         return self.recovery_decision(record, benchmark), None
@@ -106,6 +107,8 @@ class BaseExecutor(ABC):
         accounted_walltime_s: float | None = None,
         accounting_snapshot: Mapping[str, str | None] | None = None,
         accounting_reconciled: bool = False,
+        repin: str | None = None,
+        repin_reason: str | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark` of `record` again, in place, and return its updated entry.
 

@@ -29,7 +29,13 @@ from pathlib import Path
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import (
+    HOST_ENV_REFS,
+    SAVED_CONFIG,
+    SlurmComputeConfig,
+    SubmitConfig,
+    VllmPDServiceConfig,
+)
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
@@ -134,6 +140,32 @@ if raw.get("source_job_identity") != identity():
     raise ValueError("reader job directory changed")
 print("__GYM_MANAGED:" + json.dumps(projection))
 """
+
+
+# Appended in the run dir when `gym eval resubmit --recover --repin` moves a benchmark to another Gym commit.
+REPIN_JOURNAL_NAME = "repin-journal.jsonl"
+
+
+def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitConfig:
+    """``config`` with the driver's Gym install at ``ref``, and the benchmark's MLflow pin tags that named the old one."""
+    install = config.driver.gym_install
+    old = install.ref if install is not None else None
+    bench = config.driver.benchmarks[benchmark]
+    run = dict(bench.run)
+    tags = run.get("mlflow_run_tags")
+    if isinstance(tags, Mapping) and old:
+        # Saved tag values are Hydra-quoted strings ('<sha>'); keep the quoting, change only the old commit.
+        run["mlflow_run_tags"] = {
+            key: value.replace(old, ref) if key in ("gym_sha", "gym_commit") and isinstance(value, str) else value
+            for key, value in tags.items()
+        }
+    driver = config.driver.model_copy(
+        update={
+            "gym_install": install.model_copy(update={"ref": ref}) if install is not None else None,
+            "benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update={"run": run})},
+        }
+    )
+    return config.model_copy(update={"driver": driver})
 
 
 def _reconcile_requeued_chain(
@@ -431,8 +463,12 @@ class SlurmExecutor(BaseExecutor):
         score_agent: str | None = None,
         score_environment: str | None = None,
         outcome_policy: RecoveryOutcomePolicyConfig | None = None,
+        reader_ref: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
-        """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH."""
+        """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
+
+        ``reader_ref`` runs the Store reader at that full commit instead of the saved one: a repinned run resumes there.
+        """
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
@@ -462,7 +498,8 @@ class SlurmExecutor(BaseExecutor):
                 if isinstance(conn, LocalConnection):
                     collected = select_managed_evidence(collected, job_dir)
                 else:
-                    collected = _remote_managed_evidence(conn, collected, job_dir, config)
+                    reader_config = _repinned_config(config, benchmark, reader_ref) if reader_ref else config
+                    collected = _remote_managed_evidence(conn, collected, job_dir, reader_config)
                     try:
                         if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
                             raise ValueError("saved submission config changed during remote selection")
@@ -702,6 +739,8 @@ class SlurmExecutor(BaseExecutor):
         accounted_walltime_s: float | None = None,
         accounting_snapshot: Mapping[str, str | None] | None = None,
         accounting_reconciled: bool = False,
+        repin: str | None = None,
+        repin_reason: str | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -711,6 +750,11 @@ class SlurmExecutor(BaseExecutor):
         resubmit lock before anything in the job dir changes, so a decision made on stale accounting is refused.
         ``accounting_reconciled`` (with ``keep_budget``) admits the requeue marker that the collected evidence
         reconciled from terminal scheduler records; it is replaced by a note just before the job is queued.
+        ``repin`` (with ``keep_budget`` and ``repin_reason``) continues the run on that full Gym commit, which must be
+        this launcher's: under the lock, after the live-job and snapshot checks, job.sh and resolved-config.yaml are
+        rendered again with the new ref (and the MLflow pin tags that named the old one), the old files are kept
+        beside them, and both are restored if the job is not queued. Rows, attempts and budget files stay as they are;
+        the queued job's record carries the new commit and the run dir's repin journal records the move.
 
         Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
         refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
@@ -720,6 +764,11 @@ class SlurmExecutor(BaseExecutor):
         job_dir = Path(job.job_dir)
         with get_connection(record.hostname) as conn:
             config = self._saved_config(conn, Path(record.run_dir))
+            repin_commands, repin_journal = (
+                self._repin_commands(record, benchmark, config, repin, repin_reason, keep_budget=keep_budget)
+                if repin is not None
+                else ([], None)
+            )
             exports = _submission_exports(config)
             # A resubmit can lose access to the remote token. Refresh only this benchmark's
             # collector config, inside the lock and after refusing any active job in its dir.
@@ -798,6 +847,8 @@ class SlurmExecutor(BaseExecutor):
                         'fail "A job of this run is still pending or running in $PWD."; done',
                         # Before any job.sh, collector, counter or sbatch change, under the same lock.
                         *snapshot_check,
+                        # The checks below then read the re-rendered job.sh; the exit trap restores it unless queued.
+                        *repin_commands,
                         # An older chain retries FAILED, OUT_OF_MEMORY and DEADLINE as infrastructure failures.
                         # Refuse it before anything in the job dir changes.
                         f"if grep -qxF -- {shlex.quote(PROLOGUE_MARKER)} job.sh "
@@ -871,10 +922,77 @@ class SlurmExecutor(BaseExecutor):
             )
             job_id, error = results.get(benchmark, (None, "sbatch produced no result"))
             if job_id is None:
-                raise RuntimeError(f"Resubmit of {benchmark} failed: {error}")
-            job = job.model_copy(update={"job_id": job_id, "error": None})
+                raise RuntimeError(
+                    f"Resubmit of {benchmark} failed: {error}"
+                    + ("; the run stays on its recorded Gym commit" if repin is not None else "")
+                )
+            job = job.model_copy(
+                update={"job_id": job_id, "error": None} | ({"gym_commit": repin} if repin is not None else {})
+            )
+            if repin_journal is not None:
+                journal = Path(record.run_dir) / REPIN_JOURNAL_NAME
+                conn.run([f"printf '%s\\n' {shlex.quote(repin_journal)} >> {shlex.quote(str(journal))}"])
             self.persist_record(record.with_benchmark(job), conn.write_text)
         return job
+
+    def _repin_commands(
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        config: SubmitConfig,
+        repin: str,
+        repin_reason: str | None,
+        *,
+        keep_budget: bool,
+    ) -> tuple[list[str], str]:
+        """The locked shell steps that move one benchmark's run to ``repin``, and its journal entry."""
+        install = config.driver.gym_install
+        if not keep_budget:
+            raise RuntimeError("--repin needs --recover: the run continues with its spent budgets")
+        if re.fullmatch(r"[0-9a-f]{40}", repin) is None:
+            raise ValueError(f"--repin needs a full 40-character commit hash, not {repin!r}")
+        if not (repin_reason or "").strip():
+            raise ValueError("--repin needs a nonempty --repin-reason")
+        if install is None:
+            raise RuntimeError(
+                "the submission installs no Gym revision (driver.gym_install), so it cannot be repinned"
+            )
+        if installed_gym_commit() != repin:
+            raise RuntimeError(
+                f"this launcher is Gym {installed_gym_commit()}, not the repin target {repin}; "
+                "install that revision and resubmit with it"
+            )
+        if len(record.benchmarks) != 1:
+            raise RuntimeError("repin of a submission with several benchmarks is unsupported: they share one config")
+        repinned = _repinned_config(config, benchmark, repin)
+        validate_gym_install_ref(repinned)
+        job_dir = Path(record.benchmark_job(benchmark).job_dir)
+        run_dir = Path(record.run_dir)
+        script = build_sbatch_script(
+            repinned, benchmark, repinned.driver.benchmarks[benchmark], repinned.compute[record.cluster], job_dir
+        )
+        resolved = yaml.safe_dump(repinned.model_dump(mode="json", context={HOST_ENV_REFS: True}), sort_keys=False)
+        stamp = utc_timestamp(utc_now()).replace(":", "")
+        old_config = shlex.quote(str(run_dir / RESOLVED_CONFIG_NAME))
+        kept_config = shlex.quote(str(run_dir / f"{RESOLVED_CONFIG_NAME}.pre-repin-{stamp}"))
+        kept_script = f"job.sh.pre-repin-{stamp}"
+        restore = f"mv -f {kept_script} job.sh 2>/dev/null; mv -f {kept_config} {old_config} 2>/dev/null"
+        commands = [
+            f"cp -p job.sh {kept_script} || fail 'cannot keep the job script before repin'",
+            f"cp -p {old_config} {kept_config} || fail 'cannot keep the resolved config before repin'",
+            # Restored by the exit trap below unless sbatch confirms the queued job.
+            f'_gym_restore_repin() {{ [[ "$_gym_submit_confirmed" == 1 ]] || {{ {restore}; }}; }}',
+            "trap '_gym_restore_repin; _gym_release_resubmit_lock' EXIT",
+            f"(umask 077; printf %s {shlex.quote(script)} > job.sh.repin) && mv -f job.sh.repin job.sh "
+            "|| fail 'cannot write the repinned job script'",
+            f"printf %s {shlex.quote(resolved)} > {old_config}.repin && mv -f {old_config}.repin {old_config} "
+            "|| fail 'cannot write the repinned resolved config'",
+        ]
+        entry = json.dumps(
+            {"benchmark": benchmark, "from": install.ref, "to": repin, "reason": repin_reason, "at": stamp},
+            sort_keys=True,
+        )
+        return commands, entry
 
     @staticmethod
     def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
