@@ -90,6 +90,10 @@ def _harness_unconfirmed(**extra):
         _route_failure_row(),
         _harbor_failed(),
         _sandbox_create_rejected(),
+        # Saved before the collector dropped it: the agent's empty response object is not a kept answer.
+        _sandbox_create_rejected(
+            _ng_failure_response={"object": "response", "id": "resp-empty", "status": None, "output": []}
+        ),
         _harness_unconfirmed(),
         # A legacy row that saved events but selected none: every event names the same kind.
         {
@@ -97,7 +101,14 @@ def _harness_unconfirmed(**extra):
             "_ng_failure_events": {"e": {"boundary": "agent", "failure_kind": "agent_route_failed"}},
         },
     ],
-    ids=["legacy-run-5xx", "harbor-failed", "sandbox-credentials", "harness-unconfirmed", "unselected-events"],
+    ids=[
+        "legacy-run-5xx",
+        "harbor-failed",
+        "sandbox-credentials",
+        "sandbox-credentials-empty-response",
+        "harness-unconfirmed",
+        "unselected-events",
+    ],
 )
 def test_a_failure_that_kept_no_answer_is_retried_within_its_budget(row):
     decision = _decide(row)
@@ -110,15 +121,8 @@ def test_a_failure_that_kept_no_answer_is_retried_within_its_budget(row):
     [
         (_route_failure_row(_ng_failure_response=_ANSWER), f"collection_dispatch_failed: {_KEPT}"),
         (_harness_unconfirmed(response=_ANSWER), f"harness_termination_unconfirmed: {_KEPT}"),
-        # The legacy adapter keeps the agent's empty response object, which the replay gate counts as kept.
-        (
-            _sandbox_create_rejected(
-                _ng_failure_response={"object": "response", "id": "resp-empty", "status": None, "output": []}
-            ),
-            f"infrastructure_error: {_KEPT}",
-        ),
     ],
-    ids=["legacy-run-5xx", "harness-unconfirmed", "sandbox-credentials"],
+    ids=["legacy-run-5xx", "harness-unconfirmed"],
 )
 def test_a_failure_that_kept_an_answer_stops_and_names_the_rule(row, label):
     decision = _decide(row)
