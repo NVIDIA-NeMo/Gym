@@ -406,6 +406,8 @@ def _policy_replay_is_unsupported(row: Mapping[str, Any]) -> bool:
 def _retry_kind(row: Mapping[str, Any]) -> str | None:
     """The kind a retry decision selects on: the policy evidence, else, for a row that selects no event, the one kind
     every saved event names, else the failure record's own kind. Final-zero and judge decisions do not use it."""
+    from nemo_gym.rollout_recovery import holds_response
+
     kind = _policy_evidence(row)[0]
     if kind is not None or FAILURE_ID in row:
         return kind
@@ -415,7 +417,9 @@ def _retry_kind(row: Mapping[str, Any]) -> str | None:
         if isinstance(events, Mapping)
         else set()
     )
-    if len(kinds) == 1 and isinstance(next(iter(kinds)), str):
+    # A row that keeps a producer response reports its final outcome there (a validated agent outcome): its
+    # unselected events are attempts, not causes, and never stand in for an outcome that failed validation.
+    if len(kinds) == 1 and isinstance(next(iter(kinds)), str) and not holds_response(row):
         return next(iter(kinds))
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
