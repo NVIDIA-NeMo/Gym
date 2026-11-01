@@ -93,6 +93,25 @@ The JSON response separates dispatch from acceptance:
 
 Completed answers, ordinary incorrect answers and supported final model zeros are not regenerated. Judge-only failures request re-verification of saved answers; Slurm does not yet implement that operation and reports it as unsupported. A run containing both judge failures and missing/retryable policy work stops until a supported separate saved-answer recovery path is available.
 
+### Where the remote readers run
+
+On a Slurm run, `gym eval resubmit --recover` (and `--inspect`) reads the saved run on the login host with two
+readers: the collector, and the managed Store reader. `NEMO_GYM_REMOTE_READER_TIMEOUT_S` bounds the Store reader
+(clamped to 300-14400 s; by default the bound grows with the size of the rollout files). A login host may allow
+each user one core, so both readers can run in a Slurm step instead:
+
+- `NEMO_GYM_REMOTE_READER_SRUN`: extra `srun` arguments for the step, for example `-p cpu -c 4 --mem=16G`. When it
+  is unset, the readers run on the login host exactly as before. Gym adds `--ntasks=1`, a time limit of the reader
+  bound plus 60 s, and the job name `gym-reader-<GYM_READER_TOKEN>`. If the recovery process or its SSH connection
+  ends while the Store reader runs in a step, Gym cancels the step by name.
+- `NEMO_GYM_REMOTE_READER_SRUN_WAIT_S` (default 120): a step that has not started by then is cancelled by name, at
+  most 60 s is spent waiting for it to leave the queue, and the reader runs on the login host.
+- `NEMO_GYM_REMOTE_READER_MAX` (default 8): when the user already has this many `gym-reader-*` steps running or
+  pending, or `squeue` fails, the reader runs on the login host.
+
+The gate task reports `reader_host` and `collector_host` (`login` or `cpu:<job id>`), and `reader_fallback_reason`
+and `collector_fallback_reason` when a reader stayed on the login host.
+
 The optional unhealthy fraction is a **per-rollout** criterion for the existing quality report. It is not a response or trial denominator. Response health separately requires unique, verified raw-response observations and a failure fraction strictly below 2%. Trial health can reject at 2% from its known-failure lower bound. Below that threshold, it can pass when source-bound agent, model-attempt, supported client-executed function-tool, and verifier observations join across every expected identity and repeat. The verifier must record an actually executed programmatic grading calculation bound to the saved response and reward. Unjoined recovered failures, unsupported hosted or custom tools, unobserved judge dependencies, sandbox lifecycle gaps, and historical records without grading observations remain unknown; a low failure count alone does not certify them. Missing report-source identity, unsupported multi-source summaries, malformed counters or missing runtime facts remain unknown.
 
 ### Unobserved trials

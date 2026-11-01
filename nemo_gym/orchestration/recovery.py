@@ -1422,6 +1422,16 @@ class CollectedEvidence(BaseModel):
     followup_claims: dict[str, str] = Field(default_factory=dict)
     # The last operator continuation's epoch (OPERATOR_CONTINUATION_JOURNAL_NAME): the chain is accounted after it.
     operator_epoch: OperatorEpoch | None = None
+    # Where the heavy readers ran: "login" or "cpu:<job id>" with a reader step (NEMO_GYM_REMOTE_READER_SRUN), and why
+    # one stayed on the login host; all None without a reader step.
+    collector_host: str | None = None
+    collector_fallback_reason: str | None = None
+    reader_host: str | None = None
+    reader_fallback_reason: str | None = None
+
+
+# The host sets the reader placement; a reader neither receives it nor replaces it.
+READER_PLACEMENT_FIELDS = ("collector_host", "collector_fallback_reason", "reader_host", "reader_fallback_reason")
 
 
 def _managed_source_digest(path: Path) -> str | None:
@@ -3341,6 +3351,9 @@ def gate_summary_from_collected(
     judge_recovery: dict[str, int] = {}
     _observed_trial_operations(decision, collected, judge_recovery=judge_recovery, grading_failures=[])
     task["observed_grading_recovery"] = judge_recovery or None
+    for name in READER_PLACEMENT_FIELDS:
+        if getattr(collected, name) is not None:
+            task[name] = getattr(collected, name)
     judged = {True: "within", False: "beyond", None: "not judged against"}[rollout_health]
     task["warnings"] = (
         task["warnings"]

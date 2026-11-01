@@ -25,6 +25,7 @@ import time
 import uuid
 from collections.abc import Mapping
 from concurrent.futures import ThreadPoolExecutor
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any
@@ -88,6 +89,7 @@ from nemo_gym.orchestration.recovery import (
     INFRA_RETRY_EXTENSION_FILE,
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
+    READER_PLACEMENT_FIELDS,
     CollectedEvidence,
     OperatorBudget,
     RecoveryAction,
@@ -296,6 +298,186 @@ def _remote_reader_bound_s() -> int | None:
         return None
 
 
+# The heavy remote readers (the collector and the managed Store reader) can run in a Slurm step instead of on the
+# login host, which may allow each user one core. Unset, they run on the login host exactly as before.
+READER_SRUN_ENV = "NEMO_GYM_REMOTE_READER_SRUN"
+READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
+READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
+# After cancelling a reader step that did not start, how long to wait for it to leave the queue.
+_READER_CANCEL_WAIT_S = 60
+_READER_HOST_PREFIX = "__GYM_READER_HOST:"
+_READER_FALLBACK_PREFIX = "__GYM_READER_FALLBACK:"
+
+
+@dataclass(frozen=True)
+class ReaderStep:
+    """How a heavy reader runs in a Slurm step: the caller's srun arguments (each quoted), how long the step may take
+    to start, and how many reader steps the user may have running or pending before readers stay on the login host."""
+
+    args: str
+    wait_s: int
+    max_readers: int
+
+
+def _env_count(name: str, default: int) -> int:
+    raw = os.environ.get(name, "")
+    try:
+        value = int(raw) if raw else default
+    except ValueError:
+        return default
+    return value if value >= 1 else default
+
+
+def reader_step() -> ReaderStep | None:
+    """The reader step from ``NEMO_GYM_REMOTE_READER_SRUN`` (extra srun arguments, for example ``-p cpu -c 4``),
+    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120) and ``NEMO_GYM_REMOTE_READER_MAX`` (default 8); None when
+    the arguments are unset or empty."""
+    raw = os.environ.get(READER_SRUN_ENV, "").strip()
+    if not raw:
+        return None
+    return ReaderStep(
+        args=" ".join(shlex.quote(arg) for arg in shlex.split(raw)),
+        wait_s=_env_count(READER_SRUN_WAIT_ENV, 120),
+        max_readers=_env_count(READER_MAX_ENV, 8),
+    )
+
+
+def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str, watchdog: bool = False) -> list[str]:
+    """Bash that runs ``script`` in a Slurm step, else leaves it to the login host.
+
+    It sets ``_gym_host`` ("login" or "cpu:<job id>") and ``_gym_fallback`` (why the reader stays on the login host,
+    empty when it ran in the step); after a step that ran, ``_gym_rc`` is its exit code and ``$_gym_step_out`` holds
+    its output. Inside the step the input on stdin becomes FD 3, because srun forwards stdin but no other descriptor,
+    and ``script`` reads the reader bound as ``$1``. The step is named gym-reader-<token>, and its time limit is the
+    reader bound plus 60 s, so Slurm ends an orphan. A step that has not started after the wait is cancelled by name,
+    and the reader runs on the login host. With ``watchdog`` (FD 4 is the shell's stdin), srun runs under the EOF
+    watcher (``_watch_lines``), which also cancels the step by name.
+    """
+    name = shlex.quote(f"gym-reader-{token}")
+    inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
+    # The step's stderr (the reader's, through srun) goes where the login-host reader's goes.
+    srun = (
+        f'timeout --kill-after=10s "$(( _gym_bound + {step.wait_s} + 60 ))s" srun {step.args} --ntasks=1 '
+        f'--immediate={step.wait_s} -t "$(( (_gym_bound + 119) / 60 ))" -J {name} bash -c {inside} gym-reader '
+        f'"$_gym_bound" {stdin} >"$_gym_step_out" 2>>"$_gym_err"'
+    )
+    if watchdog:
+        run_step = [f"setsid {srun} 4<&- &", "_gym_reader=$!", *_watch_lines(cancel=name)]
+    else:
+        run_step = [srun, "_gym_rc=$?"]
+    return [
+        "_gym_host=login",
+        '_gym_fallback=""',
+        "_gym_step_out=$(mktemp)",
+        'if ! _gym_readers=$(squeue -h -u "$USER" -t RUNNING,PENDING -o %j 2>/dev/null); then',
+        '    _gym_fallback="squeue failed, so the running reader steps cannot be counted"',
+        f'elif (( $(printf "%s\\n" "$_gym_readers" | grep -c "^gym-reader-") >= {step.max_readers} )); then',
+        f'    _gym_fallback="{step.max_readers} reader steps are already running or pending"',
+        "fi",
+        "if [[ -z $_gym_fallback ]]; then",
+        *(f"    {line}" for line in run_step),
+        f'    _gym_host=$(grep -m 1 "^{_READER_HOST_PREFIX}cpu:" "$_gym_step_out")',
+        "    if [[ -n $_gym_host ]]; then",
+        f"        _gym_host=${{_gym_host#{_READER_HOST_PREFIX}}}",
+        "    else",
+        "        _gym_host=login",
+        '        _gym_srun_said=$(tail -n 1 "$_gym_err" | cut -c 1-300)',
+        f'        scancel --name {name} --user "$USER" 2>/dev/null',
+        "        _gym_waited=0",
+        f'        while [[ -n $(squeue -h -u "$USER" -n {name} -o %i 2>/dev/null) ]] '
+        f"&& (( _gym_waited < {_READER_CANCEL_WAIT_S} )); do",
+        "            sleep 2",
+        "            _gym_waited=$(( _gym_waited + 2 ))",
+        "        done",
+        f'        _gym_fallback="the reader step did not start within {step.wait_s} s and was cancelled"',
+        '        [[ -z $_gym_srun_said ]] || _gym_fallback="$_gym_fallback ($_gym_srun_said)"',
+        f"        (( _gym_waited < {_READER_CANCEL_WAIT_S} )) || "
+        f'_gym_fallback="$_gym_fallback; it was still queued after {_READER_CANCEL_WAIT_S} s"',
+        "    fi",
+        "fi",
+    ]
+
+
+def _watch_lines(*, cancel: str | None = None, progress: list[str] | None = None) -> list[str]:
+    """Bash that waits for the background reader ``$_gym_reader``, started in its own session, and sets ``_gym_rc``.
+
+    A watcher in its own session reads the shell's stdin through FD 4 and at EOF kills the reader's process group:
+    TERM, then KILL after 10 s. With ``cancel``, a quoted Slurm job name, it cancels that job before the TERM: the step
+    runs on another host, and srun may exit at the TERM, which ends the wait and stops the watcher. ``progress``
+    starts a loop that sets ``$_gym_progress``; it is stopped after the wait.
+    """
+    cancel_first = ' scancel --name "$2" --user "$USER" 2>/dev/null;' if cancel is not None else ""
+    name = "" if cancel is None else f" {cancel}"
+    return [
+        f'setsid bash -c \'cat <&4 >/dev/null;{cancel_first} kill -TERM -- -"$1" 2>/dev/null; sleep 10; '
+        f'kill -KILL -- -"$1" 2>/dev/null\' _ "$_gym_reader"{name} >/dev/null 2>&1 &',
+        "_gym_watcher=$!",
+        *(progress or []),
+        'wait "$_gym_reader"',
+        "_gym_rc=$?",
+        # Its sleep holds no stream; killing its pid covers a loop stopped before its setsid made the group.
+        *(['kill -- -"$_gym_progress" 2>/dev/null || kill "$_gym_progress" 2>/dev/null'] if progress else []),
+        'kill -- -"$_gym_watcher" 2>/dev/null',
+    ]
+
+
+def _report_placement_lines() -> list[str]:
+    return [
+        f'echo "{_READER_HOST_PREFIX}$_gym_host"',
+        f'[[ -z $_gym_fallback ]] || echo "{_READER_FALLBACK_PREFIX}$_gym_fallback"',
+    ]
+
+
+def reader_placement(output: str) -> tuple[str | None, str | None]:
+    """Where a reader ran ("login" or "cpu:<job id>") and why it fell back to the login host, from its report; both
+    None for a reader that ran without a reader step."""
+    host = reason = None
+    for line in output.splitlines():
+        if line.startswith(_READER_HOST_PREFIX):
+            host = line.removeprefix(_READER_HOST_PREFIX).strip() or None
+        elif line.startswith(_READER_FALLBACK_PREFIX):
+            reason = line.removeprefix(_READER_FALLBACK_PREFIX).strip() or None
+    return host, reason
+
+
+def _bound_lines(job_dir: Path, *, bound_s: int | None, factor: int) -> list[str]:
+    artifacts = job_dir / "artifacts"
+    sources = " ".join(shlex.quote(str(artifacts / name)) for name in ("rollouts.jsonl", "rollouts_failures.jsonl"))
+    if bound_s is None:
+        size_bound = f"$(( ({_READER_FLOOR_S} + _gym_bytes * {_READER_S_PER_GB} / 1073741824) * {factor} ))"
+    else:
+        size_bound = str(bound_s * factor)
+    return [
+        f"_gym_bytes=$(stat -c %s -- {sources} 2>/dev/null | awk '{{s += $1}} END {{print s + 0}}')",
+        f"_gym_bound={size_bound}",
+        f"(( _gym_bound > {_READER_CEILING_S} )) && _gym_bound={_READER_CEILING_S}",
+    ]
+
+
+def collector_command(collect: str, job_dir: Path, step: ReaderStep, token: str) -> list[str]:
+    """The collector in a reader step, else on the login host; its output keeps only the collector's own lines after
+    the placement report is taken off (``reader_placement``, ``without_placement``). Its exit code is the
+    collector's."""
+    return [
+        *_bound_lines(job_dir, bound_s=_remote_reader_bound_s(), factor=1),
+        "_gym_err=$(mktemp)",
+        *_reader_step_lines(step, token, script=f"exec {collect}", stdin="</dev/null"),
+        *_report_placement_lines(),
+        'if [[ $_gym_host == login ]]; then rm -f -- "$_gym_err" "$_gym_step_out"; exec ' + collect + "; fi",
+        f'grep -v "^{_READER_HOST_PREFIX}" "$_gym_step_out"',
+        '[[ $_gym_rc == 0 ]] || cat "$_gym_err" >&2',
+        'rm -f -- "$_gym_err" "$_gym_step_out"',
+        'exit "$_gym_rc"',
+    ]
+
+
+def without_placement(output: str) -> str:
+    """The output without the reader placement report."""
+    return "\n".join(
+        line for line in output.splitlines() if not line.startswith((_READER_HOST_PREFIX, _READER_FALLBACK_PREFIX))
+    )
+
+
 def _remote_reader_error_text(error: BaseException) -> str:
     """Name the reader failure with its cause, not only the exception type: the end of the message, where it is."""
     detail = " ".join(str(error).split())
@@ -395,21 +577,29 @@ def _reader_command(
     token: str | None = None,
     watchdog: bool = False,
     progress_interval_s: int | None = None,
+    step: ReaderStep | None = None,
 ) -> list[str]:
     """The login-host steps: size the bound from the rollout files, run the reader, report its exit code and stderr.
 
     The reader's own failure is reported on stdout (``__GYM_READER_*`` lines) so a timeout, a MemoryError or a
     failed bootstrap reaches the decision with its exit code and the end of its stderr; only SSH itself fails the
-    command. With ``token``, the reader runs with it as ``GYM_READER_TOKEN`` in its environment.
+    command. With ``token``, the reader runs with it as ``GYM_READER_TOKEN`` in its environment. With ``step``, it
+    runs in a Slurm step when it can (``_reader_step_lines``) and reports where it ran.
 
     With ``watchdog``, for a connection that holds the shell's stdin open while it runs: the reader runs in its own
     session (``setsid``), and a watcher in its own session waits for EOF on the shell's stdin, which comes when the
     client process or its SSH connection ends, then kills the reader's process group (TERM, KILL after 10 s). It is
     an EOF loop, not a hangup: without a terminal nothing sends SIGHUP. The steps run as one function that exits the
-    shell, so the watcher never reads a line of the script itself. A progress loop in its own session prints
+    shell, so the watcher never reads a line of the script itself. In a step, the watched process is srun, and the
+    watcher also cancels the step by name. On the login host, a progress loop in its own session prints
     ``gym-reader progress: pass=<n> bytes=<b> elapsed_s=<s>`` on stderr every ``progress_interval_s`` (60 s by
-    default) while the reader runs; stdout and its ``__GYM_READER_*`` lines are unchanged.
+    default) while the reader runs; a reader in a step has none. Stdout and its ``__GYM_READER_*`` lines are
+    unchanged.
     """
+    if step is not None:
+        return _reader_command_in_step(
+            entrypoint, job_dir, payload, bound_s=bound_s, factor=factor, token=token, step=step, watchdog=watchdog
+        )
     artifacts = job_dir / "artifacts"
     sources = " ".join(shlex.quote(str(artifacts / name)) for name in ("rollouts.jsonl", "rollouts_failures.jsonl"))
     if bound_s is None:
@@ -424,18 +614,14 @@ def _reader_command(
             + payload
             + "\nGYM_MANAGED_INPUT",
             "_gym_reader=$!",
-            'setsid bash -c \'cat <&4 >/dev/null; kill -TERM -- -"$1" 2>/dev/null; sleep 10; kill -KILL -- -"$1" 2>/dev/null\' '
-            '_ "$_gym_reader" >/dev/null 2>&1 &',
-            "_gym_watcher=$!",
-            f"setsid bash -c {shlex.quote(_READER_PROGRESS_SCRIPT)} "
-            f'_ "$_gym_reader" {progress_interval_s or _READER_PROGRESS_INTERVAL_S} "$_gym_bytes" "$(date +%s)" '
-            "</dev/null >/dev/null 4<&- &",
-            "_gym_progress=$!",
-            'wait "$_gym_reader"',
-            "_gym_rc=$?",
-            # Its sleep holds no stream; killing its pid covers a loop stopped before its setsid made the group.
-            'kill -- -"$_gym_progress" 2>/dev/null || kill "$_gym_progress" 2>/dev/null',
-            'kill -- -"$_gym_watcher" 2>/dev/null',
+            *_watch_lines(
+                progress=[
+                    f"setsid bash -c {shlex.quote(_READER_PROGRESS_SCRIPT)} "
+                    f'_ "$_gym_reader" {progress_interval_s or _READER_PROGRESS_INTERVAL_S} "$_gym_bytes" "$(date +%s)" '
+                    "</dev/null >/dev/null 4<&- &",
+                    "_gym_progress=$!",
+                ]
+            ),
         ]
     else:
         run_reader = [
@@ -460,6 +646,61 @@ def _reader_command(
     if not watchdog:
         return steps
     # One function, called by the last line: bash has read the whole script before the watcher reads its stdin.
+    return ["_gym_read() {", *steps, "exit 0", "}", "_gym_read"]
+
+
+def _reader_command_in_step(
+    entrypoint: str,
+    job_dir: Path,
+    payload: str,
+    *,
+    bound_s: int | None,
+    factor: int,
+    token: str | None,
+    step: ReaderStep,
+    watchdog: bool = False,
+) -> list[str]:
+    """``_reader_command`` with the reader in a Slurm step: the payload is saved once, sent on the step's stdin, and
+    read again from the file by a login-host reader that runs instead. With ``watchdog``, srun and that login-host
+    reader each run under the EOF watcher, as the reader of ``_reader_command(..., watchdog=True)`` does."""
+    token = token if token is not None else uuid.uuid4().hex
+    login = f'timeout --kill-after=10s "${{_gym_bound}}s" {entrypoint} 3<"$_gym_payload" 2>"$_gym_err"'
+    if watchdog:
+        run_login = [f"setsid {login} </dev/null 4<&- &", "_gym_reader=$!", *_watch_lines()]
+    else:
+        run_login = [login, "_gym_rc=$?"]
+    steps = [
+        "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+        f"export {READER_TOKEN_ENV}={shlex.quote(token)}",
+        *_bound_lines(job_dir, bound_s=bound_s, factor=factor),
+        'echo "__GYM_READER_BOUND:$_gym_bound $_gym_bytes"',
+        "_gym_err=$(mktemp)",
+        "_gym_payload=$(mktemp)",
+        "cat >\"$_gym_payload\" <<'GYM_MANAGED_INPUT'\n" + payload + "\nGYM_MANAGED_INPUT",
+        # A background command's stdin is /dev/null, so the watcher reads the shell's stdin through FD 4.
+        *(["exec 4<&0"] if watchdog else []),
+        # In the step as on the login host, the reader stops at its bound with exit code 124 (retried once).
+        *_reader_step_lines(
+            step,
+            token,
+            script=f'timeout --kill-after=10s "${{1}}s" {entrypoint}',
+            stdin='<"$_gym_payload"',
+            watchdog=watchdog,
+        ),
+        "if [[ $_gym_host == login ]]; then",
+        *(f"    {line}" for line in run_login),
+        "else",
+        f'    grep -v "^{_READER_HOST_PREFIX}" "$_gym_step_out"',
+        "fi",
+        'rm -f -- "$_gym_step_out" "$_gym_payload"',
+        *_report_placement_lines(),
+        'echo "__GYM_READER_RC:$_gym_rc"',
+        "printf '__GYM_READER_ERR:%s\\n' \"$(tail -c 2000 \"$_gym_err\" | tr '\\n' ' ')\"",
+        'rm -f -- "$_gym_err"',
+    ]
+    if not watchdog:
+        return steps
+    # As in _reader_command: bash has read the whole script before a watcher reads its stdin.
     return ["_gym_read() {", *steps, "exit 0", "}", "_gym_read"]
 
 
@@ -511,6 +752,7 @@ def _remote_managed_evidence(
         return collected.model_copy(
             update={"managed_reader_error": "remote Store reader requires a saved immutable Gym ref"}
         )
+    placement: dict[str, str | None] = {}
     try:
         command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
         entrypoint = render_driver_entrypoint(
@@ -520,7 +762,7 @@ def _remote_managed_evidence(
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
         # bootstrap stdin. No service, prepare script or scheduler is invoked. One retry, with twice the bound,
         # follows a timeout or a failed SSH hop; any other failure is final and reported with its cause.
-        payload = collected.model_dump_json()
+        payload = collected.model_dump_json(exclude=set(READER_PLACEMENT_FIELDS))
         for attempt in (1, 2):
             started = time.monotonic()
             try:
@@ -534,9 +776,11 @@ def _remote_managed_evidence(
                         factor=attempt,
                         token=reader_token(),
                         watchdog=getattr(conn, "holds_input", False),
+                        step=reader_step(),
                     ),
                     reader_token(),
                 )
+                placement = dict(zip(("reader_host", "reader_fallback_reason"), reader_placement(output)))
             except RuntimeError as error:
                 if "exit code 255" not in str(error):
                     raise
@@ -550,7 +794,7 @@ def _remote_managed_evidence(
             if not timed_out or attempt == 2:
                 retried = " (after one retry with twice the bound)" if attempt == 2 else ""
                 return collected.model_copy(
-                    update={"managed_selection": None, "managed_reader_error": failure + retried}
+                    update={"managed_selection": None, "managed_reader_error": failure + retried} | placement
                 )
         lines = [
             line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
@@ -581,6 +825,7 @@ def _remote_managed_evidence(
             "coverage_allocation_id",
             "accounting_unknown_reason",
             "counter_states",
+            *READER_PLACEMENT_FIELDS,
             *sorted(set(CollectedEvidence.model_fields) - set(projection)),
         )
         compared = allowed | set(host_owned) | {"accounting_reconciled"}
@@ -589,6 +834,7 @@ def _remote_managed_evidence(
         return selected.model_copy(
             update={"source_job_identity": collected.source_job_identity}
             | {name: getattr(collected, name) for name in host_owned}
+            | placement
         )
     except (RuntimeError, OSError, ValueError) as error:
         return collected.model_copy(
@@ -596,6 +842,7 @@ def _remote_managed_evidence(
                 "managed_selection": None,
                 "managed_reader_error": _remote_reader_error_text(error),
             }
+            | placement
         )
 
 
@@ -839,9 +1086,16 @@ class SlurmExecutor(BaseExecutor):
             args = [shlex.quote(str(job_dir))]
             if score_key:
                 args += [shlex.quote(json.dumps(score_key)), shlex.quote(json.dumps(selector))]
-            collected = CollectedEvidence.model_validate_json(
-                conn.run([f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"])
-            )
+            collect = f"python3 -c {shlex.quote(COLLECT_SCRIPT)} {' '.join(args)}"
+            step = reader_step()
+            if step is None:
+                collected = CollectedEvidence.model_validate_json(conn.run([collect]))
+            else:
+                output = conn.run(collector_command(collect, job_dir, step, reader_token()))
+                host, reason = reader_placement(output)
+                collected = CollectedEvidence.model_validate_json(without_placement(output)).model_copy(
+                    update={"collector_host": host, "collector_fallback_reason": reason}
+                )
             if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
                 raise RuntimeError(
                     "saved submission config changed while collecting recovery evidence; collect it again"
