@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+config_paths:
+  - responses_api_agents/nooa_agent/configs/nooa_agent.yaml
+
+# The run config binds the benchmark and harness through its own Environment Server.
+nooa_environment_server: null
+
+agent:
+  _inherit_from: nooa_agent
+  responses_api_agents:
+    nooa_agent:
+      resources_server: null
+      nooa:
+        execution_mode: sandboxed
+      sandbox_runner_timeout_seconds: 21600
+      max_policy_calls: null
