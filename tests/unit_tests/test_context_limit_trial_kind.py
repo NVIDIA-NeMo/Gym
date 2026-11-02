@@ -22,6 +22,9 @@ server's, and a policy 4xx without a context reason stays ``model_request_error`
 
 import json
 
+import pytest
+
+from nemo_gym.orchestration.recovery import decide_from_collected, final_zero_trials
 from tests.unit_tests.test_evaluation_health import _gate, _run
 from tests.unit_tests.test_recovery_health_binding import collect, save_rows, setup
 from tests.unit_tests.test_trajectory_evidence_reporting import _simulated_user_shape
@@ -140,3 +143,44 @@ def test_the_collector_keeps_a_calls_upstream_status_and_local_reason(tmp_path):
     kept = call["response_metadata"]
     assert (kept["upstream_status_code"], kept["local_response_reason"]) == (400, "context_length_exceeded")
     assert "synthetic" not in json.dumps(kept)
+
+
+@pytest.mark.parametrize("field", ["error_category", "local_response_reason"])
+def test_an_output_budget_the_window_cannot_hold_is_an_evaluation_side_setup_failure(field):
+    """The request's output budget alone exceeds the context window: the deployment cannot serve it."""
+    collected = _lmarena_style_run(reason=None)
+    [call] = collected.results[0]["ng_trial_observations"]["model_calls"]
+    call["response_metadata"][field] = "invalid_output_token_parameter"
+    _, (passed, reason, report), _ = _gate(collected)
+    assert report["exact"] is True, reason
+    assert report["model"]["count"] == 0
+    assert report["evaluation"]["kinds"] == {"invalid_output_budget": 1}
+    assert report["evaluation"]["server"] == 0
+
+
+def test_a_saved_upstream_context_rejection_is_typed_when_the_run_is_read_again(tmp_path):
+    """The saved shape of an upstream rejection: its event names no kind and records the failure reason and status;
+    the call keeps the upstream status and the local response reason, and no error category."""
+    a, rows = setup(tmp_path)
+    meta = rows[0]["ng_trajectory"]["model_calls"][0]["response_metadata"]
+    [operation] = meta["model_operations"]
+    operation["outcome"], operation["failure_id"] = "failed", "rejected-1"
+    event = {
+        "event_id": "rejected-1",
+        "boundary": "model",
+        "operation": "model_request",
+        "operation_id": operation["operation_id"],
+        "attempt_id": operation["final_attempt_id"],
+        "cause_id": None,
+        "failure_kind": None,
+        "failure_reason": "HTTP 400 from the model server",
+        "http_status": 400,
+    }
+    meta["failure_report"]["events"] = {"rejected-1": event}
+    meta |= {"status_code": None, "response_status": None, "error_category": None}
+    meta |= {"upstream_status_code": 400, "local_response_reason": "context_length_exceeded"}
+    rows[0]["_ng_failure_events"] = {"rejected-1": dict(event)}
+    save_rows(a, rows)
+    collected = collect(a)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}

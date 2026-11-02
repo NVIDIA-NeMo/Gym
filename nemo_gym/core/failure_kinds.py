@@ -193,8 +193,10 @@ FAILURE_KINDS: frozenset[str] = frozenset(
 # --- derived by the acceptance gate from saved rows; no producer emits them ------------- #
 # The trial gate names these from what a saved row shows, never from a producer's report: a scored-zero answer the
 # benchmark's rule scored without a grade (cut off with a cutoff signal, empty, or malformed), a model server's 5xx
-# reply whatever kind the failure names, and another model's 4xx rejection. They are registered here so their names
-# are shared, and kept out of ``FAILURE_KINDS`` so no producer can emit one (``require_failure_kind`` refuses them).
+# reply whatever kind the failure names, another model's 4xx rejection, and the policy's request the model server
+# rejected because its output budget alone exceeds the context window (a setup the deployment cannot serve, not the
+# model's outcome). They are registered here so their names are shared, and kept out of ``FAILURE_KINDS`` so no
+# producer can emit one (``require_failure_kind`` refuses them).
 TRUNCATED_ANSWER = "truncated_answer"
 EMPTY_ANSWER = "empty_answer"
 MALFORMED_ANSWER = "malformed_answer"
@@ -203,6 +205,7 @@ NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 # An ``agent_timeout`` whose window held a recorded server-side fault (``is_infrastructure_agent_timeout`` in
 # ``nemo_gym.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
 AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
+INVALID_OUTPUT_BUDGET = "invalid_output_budget"
 GATE_DERIVED_KINDS: frozenset[str] = frozenset(
     {
         TRUNCATED_ANSWER,
@@ -211,6 +214,7 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
         MODEL_SERVER_ERROR,
         NON_POLICY_MODEL_REJECTION,
         AGENT_TIMEOUT_INFRASTRUCTURE,
+        INVALID_OUTPUT_BUDGET,
     }
 )
 
