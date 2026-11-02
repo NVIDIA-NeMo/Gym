@@ -18,8 +18,8 @@ import pytest
 
 from nemo_gym.agent_utils import sandbox_python
 from nemo_gym.agent_utils.sandbox_python import SandboxPlatform, SandboxPythonRuntime, probe_sandbox_platform
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
 from nemo_gym.sandbox.providers.local import LocalProvider
 
 
