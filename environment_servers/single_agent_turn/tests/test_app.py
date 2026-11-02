@@ -1807,7 +1807,7 @@ async def test_seed_observation_is_appended_only_to_the_agent_request(
 async def test_serialized_invoke_boundary_preserves_the_seed_observation(
     monkeypatch: pytest.MonkeyPatch, retain_observation: bool
 ) -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord
 
     environment, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
