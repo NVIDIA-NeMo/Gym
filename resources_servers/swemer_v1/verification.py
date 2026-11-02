@@ -31,6 +31,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_EXIT,
+    SETUP_PATCH_PATH,
+    apply_setup_patch_command,
+)
 from responses_api_agents.swe_agents.swe_bench_ext.frameworks import (
     get_framework_config,
     get_test_command_with_output,
@@ -94,6 +99,8 @@ class VerificationInputs:
     test_command: str
     fail_to_pass: Sequence[str] = field(default_factory=tuple)
     pass_to_pass: Sequence[str] = field(default_factory=tuple)
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
 
 
 @dataclass
@@ -178,6 +185,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     Patch order mirrors scale_swe/swemer_v2: candidate patch first, then the dataset's held-out
     ``test_patch``.
     """
+    apply_setup = apply_setup_patch_command(inputs.setup_patch)
     apply_patch = (
         "git apply --reject --recount --ignore-space-change --whitespace=nowarn /tmp/nemo_gym_patch.diff || true"
         if inputs.patch.strip()
@@ -200,6 +208,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
 cd {shlex.quote(inputs.workdir)} || exit 97
 set +e
 mkdir -p /workspace/test-results 2>/dev/null
+{apply_setup}
 {apply_patch}
 {apply_test_patch}
 
@@ -250,6 +259,8 @@ def mirror_files(*, maven_settings: bool = True) -> dict[str, str]:
 
 def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: bool = True) -> dict[str, str]:
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
+    if inputs.setup_patch.strip():
+        files[SETUP_PATCH_PATH] = inputs.setup_patch
     files.update(mirror_files(maven_settings=overwrite_maven_settings))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
@@ -329,6 +340,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist)
 
+    if result.return_code == SETUP_PATCH_FAILED_EXIT:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error="start-state setup patch did not apply",
+        )
     if result.return_code == 97:
         return VerificationResult(
             completed=False,

@@ -311,8 +311,8 @@ class TestAntiCheating:
 
     def test_seed_session_calls_the_shared_anti_cheat_helper(self) -> None:
         source = self._source()
-        assert "from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup" in source
-        assert "apply_anti_cheat_setup(" in source
+        assert "from resources_servers.swebench.start_state import seed_start_state" in source
+        assert "apply_anti_cheating=self.config.apply_anti_cheating" in source
 
     def test_config_enables_it_by_default(self) -> None:
         from resources_servers.swemer_v2.app import SwemerV2ResourcesServerConfig
@@ -323,7 +323,7 @@ class TestAntiCheating:
         source = self._source()
         assert "_ensure_git_repo(" in source
         ensure_idx = source.index("await self._ensure_git_repo(")
-        anti_cheat_idx = source.index("apply_anti_cheat_setup(sandbox")
+        anti_cheat_idx = source.index("await seed_start_state(")
         assert ensure_idx < anti_cheat_idx
 
     def test_agent_facing_config_turns_it_on(self) -> None:

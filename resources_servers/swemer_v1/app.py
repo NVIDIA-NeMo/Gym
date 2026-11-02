@@ -58,13 +58,13 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
-from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.start_state import seed_start_state, setup_files
 from resources_servers.swemer_v1.verification import (
     VerificationInputs,
     VerificationResult,
@@ -114,6 +114,9 @@ class SwemerV1InstanceRequest(BaseModel):
     test_command: str
     FAIL_TO_PASS: list[str] = []
     PASS_TO_PASS: list[str] = []
+    # Curriculum start states; see swebench/start_state.py. Absent on ordinary rows.
+    setup_patch: str = ""
+    squash_history: bool = False
 
 
 class SwemerV1SeedSessionRequest(SwemerV1InstanceRequest, BaseSeedSessionRequest):
@@ -165,6 +168,7 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
     def _inputs(self, body: SwemerV1InstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
             instance_id=body.instance_id,
+            setup_patch=body.setup_patch,
             workdir=body.workdir,
             patch=drop_test_patch_files(patch, body.test_patch),
             test_patch=body.test_patch,
@@ -277,11 +281,23 @@ class SwemerV1ResourcesServer(SimpleResourcesServer):
         # Mirror files here too, not just the verification sandbox: an agent building/testing its
         # own changes hits the same Maven Central rate limit otherwise.
         sandbox = await self._create_sandbox(
-            body, files=mirror_files(maven_settings=self.config.overwrite_maven_settings)
+            body,
+            files=mirror_files(maven_settings=self.config.overwrite_maven_settings) | setup_files(body.setup_patch),
         )
         await self._ensure_git_repo(sandbox, body.workdir)
-        if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swemer_v1")
+        try:
+            await seed_start_state(
+                sandbox,
+                body.workdir,
+                body.instance_id,
+                "swemer_v1",
+                setup_patch=body.setup_patch,
+                squash_history=body.squash_history,
+                apply_anti_cheating=self.config.apply_anti_cheating,
+            )
+        except Exception:
+            await self._stop_sandbox(sandbox)
+            raise
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swemer_v1")
 

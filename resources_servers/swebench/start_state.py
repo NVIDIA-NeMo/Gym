@@ -35,12 +35,14 @@ seeded HEAD (see ``seeded_head``).
 import shlex
 from typing import Any
 
+from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
+
 
 SETUP_PATCH_PATH = "/tmp/nemo_gym_setup.diff"
 
 _COMMIT_SCRIPT = r"""set -e
 git config --global --add safe.directory "$PWD" 2>/dev/null || true
-git reset -q --hard
+{prepare}
 base=$(git rev-parse HEAD)
 if [ -s {setup} ]; then git apply --index {setup}; fi
 export GIT_AUTHOR_NAME="$(git log -1 --format=%an "$base")"
@@ -62,10 +64,12 @@ rm -f {setup}
 """
 
 _NORMALIZE_SCRIPT = r"""set -e
-stamp=$(date +%s)
-git ls-files -z | xargs -0 -r touch -h -d "@$stamp"
 find . -name __pycache__ -type d -prune -exec rm -rf {} + 2>/dev/null || true
 rm -rf .pytest_cache
+# Snapshot repos (git init over the image) can track caches; only untracked ones may go.
+git ls-files -z --deleted | xargs -0 -r git checkout --
+stamp=$(date +%s)
+git ls-files -z | xargs -0 -r touch -h -d "@$stamp"
 git update-index -q --refresh || true
 """
 
@@ -85,9 +89,17 @@ async def _run(sandbox: Any, workdir: str, script: str, what: str) -> None:
         raise RuntimeError(f"{what} failed ({result.return_code}): {result.stderr or result.stdout}")
 
 
-async def commit_start_state(sandbox: Any, workdir: str, *, squash_history: bool) -> None:
-    """Step 1. Raises: an agent must never start from a wrong or half-made state."""
-    script = _COMMIT_SCRIPT.format(setup=SETUP_PATCH_PATH, squash="1" if squash_history else "0")
+async def commit_start_state(sandbox: Any, workdir: str, *, squash_history: bool, keep_worktree: bool = False) -> None:
+    """Step 1. Raises: an agent must never start from a wrong or half-made state.
+
+    ``keep_worktree`` folds the image's own edits to tracked files into the start-state commit
+    instead of discarding them, for servers whose grading runs on the image's tree as shipped.
+    """
+    script = _COMMIT_SCRIPT.format(
+        setup=SETUP_PATCH_PATH,
+        squash="1" if squash_history else "0",
+        prepare="git add -u" if keep_worktree else "git reset -q --hard",
+    )
     await _run(sandbox, workdir, script, "start-state commit")
 
 
@@ -108,3 +120,42 @@ async def seeded_head(sandbox: Any, workdir: str) -> str:
     if result.return_code != 0 or not (result.stdout or "").strip():
         raise RuntimeError(f"Could not read the seeded HEAD: {result.stderr}")
     return result.stdout.strip()
+
+
+async def seed_start_state(
+    sandbox: Any,
+    workdir: str,
+    instance_id: str,
+    log_prefix: str,
+    *,
+    setup_patch: str,
+    squash_history: bool,
+    apply_anti_cheating: bool,
+) -> None:
+    """Steps 1-3 around the anti-cheat scrub, for a sandbox whose ``workdir`` is a git repo
+    at the base commit and whose grading applies patches to the image's tree as shipped.
+    Without a start state this is only the configured scrub; with one the scrub is required,
+    since the rewritten HEAD must leave the original unreachable.
+    """
+    start_state = wants_start_state(setup_patch, squash_history)
+    if start_state:
+        original = await seeded_head(sandbox, workdir)
+        await commit_start_state(sandbox, workdir, squash_history=squash_history, keep_worktree=True)
+    if apply_anti_cheating or start_state:
+        await apply_anti_cheat_setup(sandbox, workdir, instance_id, log_prefix)
+    if start_state:
+        await assert_unreachable(sandbox, workdir, original)
+        await normalize_tree(sandbox, workdir)
+
+
+SETUP_PATCH_FAILED_EXIT = 96
+
+
+def apply_setup_patch_command(setup_patch: str) -> str:
+    """The grading script's first change to the checkout. Unlike the agent's patch, the start
+    state is the task itself: if it does not apply exactly, the run says nothing about the
+    agent and must not be graded.
+    """
+    if not setup_patch.strip():
+        return ""
+    return f"git apply {SETUP_PATCH_PATH} || exit {SETUP_PATCH_FAILED_EXIT}"

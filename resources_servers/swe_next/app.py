@@ -65,13 +65,13 @@ from resources_servers.swe_next.verification import (
     run_verification,
     verification_files,
 )
-from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.start_state import seed_start_state, setup_files
 
 
 GRADING_ARTIFACTS = (
@@ -148,6 +148,9 @@ class SWENextInstanceRequest(BaseModel):
     FAIL_TO_PASS: list[str] = []
     PASS_TO_PASS: list[str] = []
     expected_output_json: str = "{}"
+    # Curriculum start states; see swebench/start_state.py. Absent on ordinary rows.
+    setup_patch: str = ""
+    squash_history: bool = False
 
 
 class SWENextSeedSessionRequest(SWENextInstanceRequest, BaseSeedSessionRequest):
@@ -196,6 +199,7 @@ class SWENextResourcesServer(SimpleResourcesServer):
     def _inputs(self, body: SWENextInstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
             instance_id=body.instance_id,
+            setup_patch=body.setup_patch,
             workdir=body.workdir,
             patch=patch,
             test_patch=body.test_patch,
@@ -295,11 +299,22 @@ class SWENextResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
 
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, files=setup_files(body.setup_patch))
         await hide_grading_artifacts(sandbox, body.workdir)
         await self._init_git_repo(sandbox, body.workdir)
-        if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "swe_next")
+        try:
+            await seed_start_state(
+                sandbox,
+                body.workdir,
+                body.instance_id,
+                "swe_next",
+                setup_patch=body.setup_patch,
+                squash_history=body.squash_history,
+                apply_anti_cheating=self.config.apply_anti_cheating,
+            )
+        except Exception:
+            await self._stop_sandbox(sandbox)
+            raise
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "swe_next")
 

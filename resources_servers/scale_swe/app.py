@@ -67,13 +67,13 @@ from resources_servers.scale_swe.verification import (
     run_verification,
     verification_files,
 )
-from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
     capture_model_patch,
     prepare_git_for_commits,
 )
+from resources_servers.swebench.start_state import seed_start_state, setup_files
 
 
 class ScaleSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -109,6 +109,9 @@ class ScaleSWEInstanceRequest(BaseModel):
     # round-trips unchanged.
     FAIL_TO_PASS: str | list[str] = []
     PASS_TO_PASS: str | list[str] = []
+    # Curriculum start states; see swebench/start_state.py. Absent on ordinary rows.
+    setup_patch: str = ""
+    squash_history: bool = False
 
 
 class ScaleSWESeedSessionRequest(ScaleSWEInstanceRequest, BaseSeedSessionRequest):
@@ -158,6 +161,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
     def _inputs(self, body: ScaleSWEInstanceRequest, patch: str) -> VerificationInputs:
         return VerificationInputs(
             instance_id=body.instance_id,
+            setup_patch=body.setup_patch,
             workdir=body.workdir,
             patch=drop_test_patch_files(patch, body.f2p_patch),
             pre_commands=body.pre_commands,
@@ -269,7 +273,7 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_base_commit.pop(session_id, None)
 
-        sandbox = await self._create_sandbox(body)
+        sandbox = await self._create_sandbox(body, files=setup_files(body.setup_patch))
 
         pre = clean_commands(body.pre_commands)
         if pre:
@@ -282,8 +286,19 @@ class ScaleSWEResourcesServer(SimpleResourcesServer):
                 )
 
         await self._ensure_git_repo(sandbox, body.workdir)
-        if self.config.apply_anti_cheating:
-            await apply_anti_cheat_setup(sandbox, body.workdir, body.instance_id, "scale_swe")
+        try:
+            await seed_start_state(
+                sandbox,
+                body.workdir,
+                body.instance_id,
+                "scale_swe",
+                setup_patch=body.setup_patch,
+                squash_history=body.squash_history,
+                apply_anti_cheating=self.config.apply_anti_cheating,
+            )
+        except Exception:
+            await self._stop_sandbox(sandbox)
+            raise
         # The anti-cheat scrub leaves no committer identity, so the agent's `git commit` would fail.
         await prepare_git_for_commits(sandbox, body.workdir, "scale_swe")
 
