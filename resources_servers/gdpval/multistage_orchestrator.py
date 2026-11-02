@@ -623,7 +623,11 @@ def _fingerprint_payload(
         )
 
     def real_paths(value: Any) -> Any:
-        """Replace each string that names an existing absolute path with that path's real location."""
+        """Replace each string that names an absolute path with that path's real location.
+
+        A path that does not exist yet (a deliverables directory the run creates) still has its existing prefix
+        resolved, so the value is the same before and after the run creates it.
+        """
         if not canonical_paths:
             return value
         if isinstance(value, Mapping):
@@ -631,8 +635,7 @@ def _fingerprint_payload(
         if isinstance(value, list):
             return [real_paths(item) for item in value]
         if isinstance(value, str) and os.path.isabs(value) and not any(c.isspace() for c in value):
-            if os.path.exists(value):
-                return os.path.realpath(value)
+            return os.path.realpath(value)
         return value
 
     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
