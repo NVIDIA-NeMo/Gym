@@ -11,7 +11,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import TypeAdapter
 
-import nemo_gym.openai_utils as openai_utils
+import nemo_gym.models.openai_utils as openai_utils
 from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef

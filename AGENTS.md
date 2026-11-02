@@ -170,7 +170,7 @@ gym env test --all
 pytest tests/unit_tests/ -x
 
 # Run a single test file
-pytest tests/unit_tests/test_openai_utils.py -x
+pytest tests/unit_tests/models/test_openai_utils.py -x
 
 # Lint and format
 ruff check --fix .
