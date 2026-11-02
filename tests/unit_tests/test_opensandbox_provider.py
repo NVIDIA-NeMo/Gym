@@ -2031,6 +2031,282 @@ async def test_close_treats_missing_sandbox_as_terminated_without_retry(caplog: 
     assert any("already gone; treating terminate as success" in record.message for record in caplog.records)
 
 
+@pytest.mark.parametrize("already_deleted", [False, True], ids=["deleted", "missing"])
+async def test_close_recovers_an_early_lost_delete_reply(already_deleted: bool) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    missing = SandboxApiException("Sandbox sandbox-1 not found")
+    missing.status_code = 404
+    raw = SimpleNamespace(
+        kill=AsyncMock(side_effect=[TimeoutError("delete response lost"), missing if already_deleted else None]),
+        close=AsyncMock(),
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    await provider.close(handle)
+
+    assert raw.kill.await_count == 2
+    raw.close.assert_awaited_once_with()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
+@pytest.mark.parametrize("failure", ["permission", "unauthorized", "forbidden", "cancelled"])
+async def test_delete_recovery_keeps_permission_and_cancellation_terminal(failure: str, after_timeout: bool) -> None:
+    from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
+
+    if failure == "permission":
+        error = PermissionError("Sandbox sandbox-1 not found or permission denied")
+    elif failure == "cancelled":
+        error = asyncio.CancelledError("connection reset")
+    else:
+        error = SandboxApiException("Sandbox sandbox-1 not found or permission denied")
+        error.status_code = 401 if failure == "unauthorized" else 403
+        error.__cause__ = ConnectionError("connection reset")
+    errors = ([TimeoutError("delete response lost")] if after_timeout else []) + [error, None]
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=errors), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(type(error)) as caught:
+        await provider.close(handle)
+
+    assert caught.value is error
+    assert raw.kill.await_count == 1 + after_timeout
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
+@pytest.mark.parametrize("failure", ["permission", "permission-not-found", "unauthorized", "forbidden", "cancelled"])
+async def test_delete_recovery_keeps_wrapped_terminal_errors(failure: str, after_timeout: bool) -> None:
+    from opensandbox.adapters.converter.exception_converter import ExceptionConverter  # noqa: PLC0415
+    from opensandbox.exceptions import SandboxApiException, SandboxInternalException  # noqa: PLC0415
+
+    if failure.startswith("permission"):
+        message = (
+            "Sandbox sandbox-1 not found or permission denied"
+            if failure.endswith("not-found")
+            else "permission denied"
+        )
+        error = ExceptionConverter.to_sandbox_exception(PermissionError(message))
+    else:
+        if failure == "cancelled":
+            cause = asyncio.CancelledError("connection reset")
+        else:
+            cause = SandboxApiException("permission denied", status_code=401 if failure == "unauthorized" else 403)
+        error = SandboxInternalException("Network connectivity error: Sandbox sandbox-1 not found", cause=cause)
+    raw = SimpleNamespace(
+        kill=AsyncMock(side_effect=([TimeoutError("delete response lost")] if after_timeout else []) + [error, None]),
+        close=AsyncMock(),
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(type(error)) as caught:
+        await provider.close(handle)
+
+    assert caught.value is error
+    assert raw.kill.await_count == 1 + after_timeout
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_delete_terminal_error_check_handles_cyclic_causes(terminal: bool) -> None:
+    error = ValueError("invalid delete")
+    cause = PermissionError("permission denied") if terminal else ValueError("invalid cause")
+    error.__cause__ = cause
+    cause.__cause__ = error
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=[error, None]), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(ValueError) as caught:
+        await provider.close(handle)
+
+    assert caught.value is error
+    raw.kill.assert_awaited_once_with()
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+async def test_delete_recovery_exhaustion_keeps_the_handle_available_for_owner_retry() -> None:
+    error = TimeoutError("delete response lost")
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=error), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 2, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+
+    with pytest.raises(TimeoutError):
+        await provider.close(handle)
+
+    assert raw.kill.await_count == 3
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+    raw.kill.side_effect = None
+    await provider.close(handle)
+    assert raw.kill.await_count == 4
+    raw.close.assert_awaited_once_with()
+
+
+@pytest.mark.parametrize("after_timeout", [False, True], ids=["first-attempt", "after-lost-reply"])
+async def test_caller_cancellation_during_delete_is_not_retried(after_timeout: bool) -> None:
+    entered = asyncio.Event()
+    calls = 0
+
+    async def kill() -> None:
+        nonlocal calls
+        calls += 1
+        if after_timeout and calls == 1:
+            raise TimeoutError("delete response lost")
+        entered.set()
+        await asyncio.Event().wait()
+
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=kill), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0},
+        probe={"command": None},
+    )
+    task = asyncio.create_task(provider.close(handle))
+    await asyncio.wait_for(entered.wait(), 1)
+    task.cancel("caller stopped cleanup")
+    with pytest.raises(asyncio.CancelledError, match="caller stopped cleanup"):
+        await task
+
+    assert raw.kill.await_count == 1 + after_timeout
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+async def test_delete_recovery_attempts_share_one_close_deadline() -> None:
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+    calls = 0
+
+    async def kill() -> None:
+        nonlocal calls
+        calls += 1
+        if calls == 1:
+            raise TimeoutError("delete response lost")
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=kill), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "retry_delay_s": 0, "retry_max_delay_s": 0, "close_timeout_s": 0.1},
+        probe={"command": None},
+    )
+
+    with pytest.raises(TimeoutError):
+        await asyncio.wait_for(provider.close(handle), 1)
+
+    assert entered.is_set() and cancelled.is_set()
+    assert raw.kill.await_count == 2
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+@pytest.mark.parametrize("cancel_caller", [False, True], ids=["deadline", "caller-cancellation"])
+async def test_delete_recovery_backoff_shares_the_deadline_and_allows_cancellation(
+    monkeypatch: pytest.MonkeyPatch, cancel_caller: bool
+) -> None:
+    import tenacity
+
+    sleeping = asyncio.Event()
+    monkeypatch.setattr(tenacity, "wait_random_exponential", lambda **_: tenacity.wait_fixed(30))
+    original_log_retry = opensandbox_provider._log_operation_retry
+
+    def log_retry(*args: Any, **kwargs: Any) -> None:
+        sleeping.set()
+        original_log_retry(*args, **kwargs)
+
+    monkeypatch.setattr(opensandbox_provider, "_log_operation_retry", log_retry)
+    raw = SimpleNamespace(kill=AsyncMock(side_effect=TimeoutError("delete response lost")), close=AsyncMock())
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 3, "close_timeout_s": 30 if cancel_caller else 0.1},
+        probe={"command": None},
+    )
+    task = asyncio.create_task(provider.close(handle))
+    await asyncio.wait_for(sleeping.wait(), 1)
+    if cancel_caller:
+        task.cancel("caller stopped cleanup")
+    else:
+        done, _ = await asyncio.wait({task}, timeout=0.5)
+        if not done:
+            task.cancel()
+            await asyncio.gather(task, return_exceptions=True)
+        assert done, "DELETE deadline must interrupt retry backoff before the outer test guard"
+    with pytest.raises(asyncio.CancelledError if cancel_caller else TimeoutError):
+        await asyncio.wait_for(task, 1)
+
+    raw.kill.assert_awaited_once_with()
+    raw.close.assert_not_awaited()
+    assert handle.raw is raw
+
+
+async def test_delete_recovery_does_not_spend_the_separate_transport_close_budget() -> None:
+    entered, cancelled = asyncio.Event(), asyncio.Event()
+
+    async def close() -> None:
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled.set()
+
+    raw = SimpleNamespace(
+        kill=AsyncMock(side_effect=[TimeoutError("delete response lost"), None]), close=AsyncMock(side_effect=close)
+    )
+    handle = opensandbox_provider.SandboxHandle("sandbox-1", "opensandbox", raw)
+    provider = opensandbox_provider.OpenSandboxProvider(
+        operations={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0, "close_timeout_s": 0.1},
+        probe={"command": None},
+    )
+
+    # Local transport cleanup is best effort after confirmed deletion; its own
+    # timeout must not be converted into an unconfirmed DELETE failure.
+    await asyncio.wait_for(provider.close(handle), 1)
+
+    assert entered.is_set() and cancelled.is_set()
+    assert raw.kill.await_count == 2
+    raw.close.assert_awaited_once_with()
+
+
+async def test_delete_timeout_recovery_does_not_enable_disabled_create_retries() -> None:
+    provider = opensandbox_provider.OpenSandboxProvider(
+        create={"retries": 0}, operations={"retries": 3}, probe={"command": None}
+    )
+    provider._create_once = AsyncMock(
+        side_effect=opensandbox_provider.OpenSandboxCreateTimeoutError("ambiguous create")
+    )
+
+    with pytest.raises(opensandbox_provider.OpenSandboxCreateTimeoutError):
+        await provider.create(SandboxSpec(image="task"))
+
+    provider._create_once.assert_awaited_once()
+
+
 async def test_non_terminate_operation_still_raises_on_missing_sandbox() -> None:
     from opensandbox.exceptions import SandboxApiException  # noqa: PLC0415
 
