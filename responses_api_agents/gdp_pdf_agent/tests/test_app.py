@@ -24,9 +24,10 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
 import pytest
-from aiohttp import ClientResponseError
+from aiohttp import ClientPayloadError, ClientResponseError
 from PIL import Image
 
+from nemo_gym.agent_utils import verify_call
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import AGENT_ROUTE_FAILED, NeMoGymResponse
@@ -865,3 +866,50 @@ class TestStripImageBlocks:
         assert [_block_type(block) for block in content] == ["input_text"]
         gaps = stripped.model_extra["ng_trajectory"]["gaps"]
         assert {"code": "multimodal_history_redacted"} in gaps
+
+
+class TestVerifyTransportRetry:
+    @staticmethod
+    def _agent(tmp_path: Path, failures: int):
+        agent, manifest_relpath = _text_only_agent(tmp_path)
+        verify_calls = []
+
+        async def post(**kw):
+            if kw["url_path"] == "/verify":
+                verify_calls.append(kw)
+                if len(verify_calls) <= failures:
+                    raise ClientPayloadError("Response payload is not completed")
+                return SimpleNamespace(cookies={}, data=kw["json"] | {"reward": 1.0})
+            return SimpleNamespace(cookies={})
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        return agent, manifest_relpath, verify_calls
+
+    async def _run(self, agent, manifest_relpath):
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", new=AsyncMock(return_value=(_response(), None, {}, {}))),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+            patch.object(verify_call, "_stateless_verifier", new=AsyncMock(return_value=True)),
+            patch.object(verify_call, "_retry_wait_s", return_value=0),
+            RequestFailureLog.capture() as failure_log,
+        ):
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request(manifest_relpath))
+        return result, failure_log
+
+    async def test_a_payload_error_on_verify_is_retried_and_the_row_is_not_masked(self, tmp_path: Path) -> None:
+        agent, manifest_relpath, verify_calls = self._agent(tmp_path, failures=2)
+        result, failure_log = await self._run(agent, manifest_relpath)
+        assert len(verify_calls) == 3
+        assert result.reward == 1.0 and not result.mask_sample and result.failure_kind is None
+        # Both lost replies stay observations of the scored row.
+        assert [e.operation for e in failure_log.report.events.values()].count("verify") == 2
+
+    async def test_a_persistent_payload_error_still_masks_after_the_bound(self, tmp_path: Path) -> None:
+        agent, manifest_relpath, verify_calls = self._agent(tmp_path, failures=5)
+        result, _ = await self._run(agent, manifest_relpath)
+        assert len(verify_calls) == 3
+        assert result.mask_sample is True and result.reward == 0.0 and result.response == _response()
+        assert result.failure_kind == AGENT_ROUTE_FAILED
+        assert result.failure_reason == "Agent operation verify failed: ClientPayloadError"

@@ -2648,6 +2648,27 @@ def _run_with_outcomes(
     return json.loads(result.summary_path.read_text())["run"]["artifacts"]
 
 
+def test_an_agent_deadline_that_kept_its_answer_is_a_final_failure_without_a_store(tmp_path: Path) -> None:
+    rollout_path = _write_fixture(tmp_path, [(_record(task, 0), [_call()]) for task in range(97)])
+    (tmp_path / "rollouts_materialized_inputs.jsonl").write_bytes(
+        b"".join(orjson.dumps({"_ng_task_index": task, "_ng_rollout_index": 0}) + b"\n" for task in range(100))
+    )
+    answer = {"id": "agent-1", "object": "response", "output": [{"type": "message", "role": "assistant"}]}
+    timeout = {"_ng_failure_class": "agent_timeout", "failure_kind": "agent_timeout", "mask_sample": True}
+    rows = [
+        {"_ng_task_index": 97, "_ng_rollout_index": 0, **timeout, "response": answer},
+        {"_ng_task_index": 98, "_ng_rollout_index": 0, **timeout},
+        {"_ng_task_index": 99, "_ng_rollout_index": 0, "_ng_failure_class": "agent_run_error", "response": answer},
+    ]
+    (tmp_path / "rollouts_failures.jsonl").write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
+
+    result = run_health_checks(rollout_path, workers=1)
+    artifacts = json.loads(result.summary_path.read_text())["run"]["artifacts"]
+
+    # Only the answered agent deadline is final, as in the Store's coverage; the others keep their retry.
+    assert (artifacts["failed"]["final"], artifacts["failed"]["not_final"]) == (1, 2)
+
+
 def test_run_is_healthy_when_nothing_is_missing_and_failures_stay_below_the_limits(tmp_path: Path) -> None:
     artifacts = _run_with_outcomes(tmp_path, landed=98, not_final=1, final=1)
 

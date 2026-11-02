@@ -192,7 +192,7 @@ class KiloSandboxSession(AgentSessionState):
         )
 
     async def stage_activation(
-        self, *, command: list[str], config: str, mcp_preflight: bool = False
+        self, *, command: list[str], config: str, output_token_max: int | None = None, mcp_preflight: bool = False
     ) -> SandboxCommand:
         """Stage the isolated provider config and CLI argv without altering task files."""
         directory = self.directory
@@ -218,6 +218,11 @@ class KiloSandboxSession(AgentSessionState):
                 "XDG_DATA_HOME": f"{directory}/data",
                 "XDG_CONFIG_HOME": f"{directory}/config",
                 "XDG_CACHE_HOME": f"{directory}/cache",
+                **(
+                    {"KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX": str(output_token_max)}
+                    if output_token_max is not None
+                    else {}
+                ),
                 "KILO_NO_DAEMON": "1",
                 "KILO_DB": f"{directory}/kilo.db",
                 "KILO_CONFIG": f"{directory}/kilo.json",

@@ -287,6 +287,22 @@ class MLflowExporter(BaseExporter):
         if operation is not None:
             self._pending_operations.append(operation)
 
+    def link_superseding_export(self, live_run_id: str, run_id: str) -> None:
+        """Tag the live run `superseded_by=<run_id>` and the post-run export's run `supersedes=<live_run_id>`.
+
+        A reader that finds two runs for one evaluation picks the one the receipt names. Only tags are set, with this
+        live activation's client: metrics, params and status are untouched, and MLflow accepts tags on a finished
+        run. Each failure is logged and ignored; the receipt is already written.
+        """
+        if self.client is None:
+            logger.warning(f"Exporter {self.name} could not tag runs {live_run_id} and {run_id}: no open client")
+            return
+        for target, key, value in ((live_run_id, "superseded_by", run_id), (run_id, "supersedes", live_run_id)):
+            try:
+                self.client.set_tag(target, key, value)
+            except Exception as e:
+                logger.warning(f"Exporter {self.name} could not tag run {target} {key}={value}: {e}")
+
     def finalize_live(self, artifacts: RunArtifacts, version: dict[str, str | None]) -> None:
         """Certify the same fresh live run only after the caller verifies final collection and health files."""
         if self._live_finalized or self.reopened or self._exported_artifacts is not None:

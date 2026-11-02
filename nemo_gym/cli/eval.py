@@ -792,6 +792,11 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
                 metrics[f"health/{family}/rate"] = facts[family]["rate"]
                 for cause, fact in facts[family]["by_cause"].items():
                     metrics[f"health/{family}/{cause}"] = fact["count"]
+            # Health metrics are numbers only: the source is the one key of its name set to 1.
+            coverage = facts["metric_coverage"]
+            metrics["health/metric_coverage/trials"] = coverage["trials"]
+            metrics["health/metric_coverage/expected"] = coverage["expected"]
+            metrics[f"health/metric_coverage/source/{coverage['source']}"] = 1
         upstream = (quality or {}).get("observed_upstream_recovery")
         upstream_keys = (
             "observed_attempt_errors",
@@ -885,10 +890,44 @@ def _finalize_live_exporters(output: Path) -> None:
                 exporter.export_metrics(health_metrics)
                 if health.read_bytes() != health_bytes or _artifact_version(artifacts) != version:
                     raise RuntimeError("Final run artifacts changed before live finalization.")
-                exporter.finalize_live(artifacts, version)
+                try:
+                    exporter.finalize_live(artifacts, version)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Live tracking completion remains unverified: %s", exc, exc_info=True
+                    )
+                _export_without_receipt(exporter, artifacts)
     except Exception as exc:
         # Tracking failure never changes scores or requests another model attempt.
         logging.getLogger(__name__).warning("Live tracking completion remains unverified: %s", exc, exc_info=True)
+
+
+def _export_without_receipt(exporter, artifacts) -> None:
+    """Export the completed run after the fact when live finalization left it without a receipt.
+
+    A live run reopened by a later segment never certifies (`finalize_live` cannot vouch for rows an earlier segment
+    sent), nor does a live delivery it could not verify. Such a run gets Gym's post-run export, as `gym eval export`
+    sends it, from a fresh exporter of the same backend and config; the caller holds the run lock and has prepared the
+    health metrics. An exporter that never certifies a live run keeps no receipt, so it is not exported again, and an
+    existing receipt is never replaced. A failed export is logged; it never changes scores or the exit code.
+    """
+    from nemo_gym.artifacts.exporters.base import BaseExporter, ExportState
+
+    if (
+        type(exporter).finalize_live is BaseExporter.finalize_live
+        or artifacts.export_done_fpath(exporter.name).exists()
+    ):
+        return
+    result = type(exporter)(exporter.global_config_dict).export(artifacts)
+    if result.state is ExportState.FAILED:
+        logging.getLogger(__name__).warning(
+            "Post-run %s export after live finalization failed; the run has no export receipt: %s",
+            exporter.name,
+            result.error,
+        )
+    elif result.state is ExportState.SUCCEEDED and result.detail.get("live_run_id") and result.detail.get("run_id"):
+        # The evaluation now has two backend runs: name the run of record on both, after the receipt is written.
+        exporter.link_superseding_export(result.detail["live_run_id"], result.detail["run_id"])
 
 
 _terminated = False
@@ -994,21 +1033,61 @@ def _collect_and_rejudge(
 
     With ``require_complete``, ``run_from_config`` raises ``IncompleteEvaluationError`` when completed is below
     expected, and a masked judge failure is not completed: the pass runs first, and the rejection stands unless the
-    saved run is complete afterwards, by the rule ``check_completion`` applies. A non-strict run and a terminated run
-    keep the error as raised. A custom ``rollout_collection_driver`` runs neither this pass nor this check.
-    """
-    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    saved run is complete afterwards, by the rule ``check_completion`` applies. Whether a rejected run is retried is
+    then read from the settled run (``_settled_rejection``). A non-strict run and a terminated run keep the error as
+    raised. A custom ``rollout_collection_driver`` runs neither this pass nor this check.
 
+    A resumed run grades its saved answers again first, while its servers are up, and only then runs its policy
+    work: a recovery that resumes a run with both re-verifies the saved answers before the missing and retryable
+    rollouts run.
+    """
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError, manifest_path_for
+
+    if getattr(config, "resume_from_cache", False) and manifest_path_for(output).exists():
+        _rejudge_saved_judge_failures(global_config_dict, output, config, aggregate=False)
     try:
         asyncio.run(rch.run_from_config(config))
-    except IncompleteEvaluationError:
+    except IncompleteEvaluationError as rejected:
         if not config.require_complete or _terminated:
             raise
         _rejudge_saved_judge_failures(global_config_dict, output, config)
         if not _saved_run_complete(output):
-            raise
+            raise _settled_rejection(output, rejected) from None
         return
     _rejudge_saved_judge_failures(global_config_dict, output, config)
+
+
+def _settled_rejection(output: Path, rejected: BaseException) -> BaseException:
+    """The rejection of a strict run as its settled state decides it, after the saved-answer pass.
+
+    Whether unfinished work remains retryable is read from the Store again, so a pass that settled rows decides the
+    retry, not the state before it. The collection's own progress still counts. Unreadable evidence keeps the
+    original rejection.
+    """
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+    from nemo_gym.rollout_store import RolloutStore
+
+    try:
+        store = RolloutStore.read(output, import_legacy=False)
+        coverage = store.coverage() if store is not None else None
+    except Exception:
+        return rejected
+    if coverage is None:
+        return rejected
+    retryable = coverage["retryable"] > 0
+    guidance = (
+        "Resume unfinished work after resolving failures."
+        if retryable
+        else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
+    )
+    return IncompleteEvaluationError(
+        f"{coverage['successful'] + coverage['final_zeros']}/{coverage['expected']} samples completed after the "
+        f"saved-answer re-verification. Partial artifacts retained at {output}. {guidance}",
+        retryable=retryable,
+        # exit code 1 is a retryable rejection that made no progress; any other rejection keeps progress.
+        made_progress=getattr(rejected, "exit_code", 75) != 1,
+        failure_kind=getattr(rejected, "failure_kind", None),
+    )
 
 
 def _saved_run_complete(output: Path) -> bool:
@@ -1030,12 +1109,14 @@ def _saved_run_complete(output: Path) -> bool:
 
 
 def _rejudge_saved_judge_failures(
-    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any
+    global_config_dict: DictConfig | Mapping[str, Any], output: Path, collection_config: Any, *, aggregate: bool = True
 ) -> None:
     """Re-judge the run's saved judge failures while its servers are up, then recompute its metrics in place.
 
-    Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``). A pass
-    that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
+    Collection calls it at the end of a run and of each resumed run (see ``rejudge_saved_judge_failures``), and at the
+    start of a resumed run, with ``aggregate`` off since its collection aggregates afterwards. The saved results to
+    grade again (masked by a judge or verify-transport failure, or never graded) are re-verified in the same pass. A
+    pass that cannot run, or fails, leaves the failures masked as before and never fails the collected run.
     """
     from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
     from nemo_gym.rollout_reverification import rejudge_saved_judge_failures
@@ -1052,8 +1133,8 @@ def _rejudge_saved_judge_failures(
         return
     if not scored:
         return
-    print(f"Re-judged saved judge failures: {scored} more rollout(s) scored", flush=True)
-    if collection_config.disable_aggregation:
+    print(f"Re-judged saved judge failures: {scored} rollout(s) settled from their saved answers", flush=True)
+    if collection_config.disable_aggregation or not aggregate:
         return
     try:
         aggregation = RolloutAggregationConfig.model_validate(

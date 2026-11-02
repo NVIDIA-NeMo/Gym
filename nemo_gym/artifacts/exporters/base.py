@@ -346,6 +346,10 @@ class BaseExporter(Exporter):
     def finalize_live(self, artifacts: RunArtifacts, version: dict[str, str | None]) -> None:
         """Optionally certify an explicitly completed live activation; teardown alone never certifies it."""
 
+    def link_superseding_export(self, live_run_id: str, run_id: str) -> None:
+        """Optionally mark that the post-run export `run_id` supersedes the live run `live_run_id` it could not
+        certify. Best effort: a backend logs and ignores any failure, and never changes either run's data."""
+
     def _guard(self, what: str, fn, *args) -> None:
         try:
             fn(*args)
