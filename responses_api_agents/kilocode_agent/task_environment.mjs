@@ -38,6 +38,14 @@ export const TaskEnvironment = async ({ client } = {}) => {
     await (check ??= checkRequiredMcp());
   };
   const hooks = {
+    "tool.execute.before": async (input, output) => {
+      if (input.tool === "background_process" && output.args?.action === "start") {
+        // Verification runs after Kilo exits. The task sandbox owns these
+        // services and stops them after grading, including subagent services.
+        output.args.persistent = true;
+        delete output.args.inherit;
+      }
+    },
     "shell.env": async (_input, output) => {
       Object.assign(output.env, env);
     },
