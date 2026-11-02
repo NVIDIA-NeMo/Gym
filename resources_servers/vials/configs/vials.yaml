@@ -1,0 +1,42 @@
+vials:
+  resources_servers:
+    vials:
+      entrypoint: app.py
+      domain: knowledge
+      description: VIALS -- free-form answers to life-sciences image questions, graded by the upstream LLM judge (arXiv:2608.21357)
+      value: Tests reading of blots, gels, phylogenetic trees, flow-cytometry plots, plasmid maps, cell images and molecular structures
+      verified: false
+      judge_model_server:
+        type: responses_api_models
+        name: judge_model
+      judge_max_concurrency: 64
+      # Upstream: up to three judge attempts for an empty or unparseable verdict, and an image re-grade
+      # for UNVERIFIABLE verdicts. The judge request (512 output tokens, JSON schema) is the server default.
+      judge_attempts: 3
+      multimodal_judge_fallback: true
+
+vials_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: vials
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        # A synthetic task with a generated image, not VIALS data.
+        jsonl_fpath: resources_servers/vials/data/example.jsonl
+        license: Apache 2.0
+
+vials_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: vials_simple_agent

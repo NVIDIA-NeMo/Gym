@@ -1,0 +1,32 @@
+# VIALS (https://arxiv.org/abs/2608.21357): 161 life-sciences image questions, three attempts each.
+# See benchmarks/vials/README.md for the protocol and the published numbers.
+config_paths:
+  - resources_servers/vials/configs/vials.yaml
+  - resources_servers/vials/configs/judge_model_openai.yaml
+
+vials_benchmark_resources_server:
+  _inherit_from: vials
+
+vials_benchmark_simple_agent:
+  _inherit_from: vials_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: vials_benchmark_resources_server
+      datasets:
+      - name: vials
+        type: benchmark
+        jsonl_fpath: benchmarks/vials/data/vials_benchmark.jsonl
+        prepare_script: benchmarks/vials/prepare.py
+        license: CC BY 4.0
+        # Rows hold the complete upstream request.
+        prompt_config: null
+        # Upstream K=3: accuracy is the mean over the attempts; pass@3 and pass^3 use all three.
+        num_repeats: 3
+
+vials_benchmark_environment_server:
+  _inherit_from: vials_environment_server
+  environment_servers:
+    legacy_agent:
+      agent_server:
+        name: vials_benchmark_simple_agent
