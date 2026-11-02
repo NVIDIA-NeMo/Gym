@@ -543,9 +543,17 @@ class TestRun:
         assert result.document_delivery["rejected_attempts"] == []
         assert agent.server_client.post.await_count == 2  # seed_session, verify
 
-    @requires_example_manifest
-    async def test_adapts_dpi_on_rejection_then_succeeds(self) -> None:
-        agent = _agent(strip_images_from_output=False)
+    async def test_adapts_dpi_on_rejection_then_succeeds(self, tmp_path: Path) -> None:
+        Image.new("RGB", (150, 150), "white").save(tmp_path / "page.png")
+        (tmp_path / "manifest.json").write_text(
+            json.dumps(
+                {
+                    "source_dpi": 150,
+                    "pages": [{"page_number": 1, "image": "page.png", "text": "Cap: 42"}],
+                }
+            )
+        )
+        agent = _agent(strip_images_from_output=False, documents_base_dir=str(tmp_path))
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},
@@ -555,7 +563,7 @@ class TestRun:
         attempts = []
 
         async def episode(params, **kwargs):
-            attempts.append(len(attempts))
+            attempts.append(params.model_dump(mode="json")["input"])
             if len(attempts) < 3:
                 raise _error("payload too large")
             return _response(), None, {}, {}
@@ -566,10 +574,12 @@ class TestRun:
             patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
             patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
         ):
-            result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
+            result = await agent.run(SimpleNamespace(cookies={}), _run_request("manifest.json"))
         assert len(attempts) == 3
         assert result.document_delivery["image_dpi"] == 96  # 150 -> 120 -> 96
         assert len(result.document_delivery["rejected_attempts"]) == 2
+        assert result.response.model_extra["agent_input"] == attempts[-1]
+        assert attempts[0] != attempts[-1]
 
     @requires_example_manifest
     async def test_incomplete_status_triggers_dpi_backoff_without_an_error(self) -> None:
@@ -752,6 +762,10 @@ class TestRun:
             result = await agent.run(SimpleNamespace(cookies={}), _run_request())
         assert result.mask_sample is True
         assert result.failure_kind == "judge_failed"
+        assert (
+            result.response.model_extra["agent_input"]
+            == _run_request().responses_create_params.model_dump(mode="json")["input"]
+        )
 
 
 class TestStripImageBlocks:

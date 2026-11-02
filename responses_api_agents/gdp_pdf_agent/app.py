@@ -571,6 +571,7 @@ class GdpPdfAgent(SimpleAgent):
         terminal_limit: Optional[str] = None
         pages_truncated = 0
         trajectory = None
+        episode_input = body.responses_create_params.model_dump(mode="json")["input"]
 
         if manifest_relpath and (self.config.include_text or self.config.include_images):
             manifest_path = resolved_base / manifest_relpath
@@ -619,6 +620,7 @@ class GdpPdfAgent(SimpleAgent):
                 params_dict = body.responses_create_params.model_dump(exclude_unset=True)
                 params_dict["input"] = [{"role": "user", "content": content}]
                 params = NeMoGymResponseCreateParamsNonStreaming.model_validate(params_dict)
+                episode_input = params.model_dump(mode="json")["input"]
                 try:
                     model_response, trajectory, _, cookies = await self._create_episode(
                         params,
@@ -686,6 +688,9 @@ class GdpPdfAgent(SimpleAgent):
         if trajectory is not None:
             result["ng_trajectory"] = trajectory.model_dump(mode="json")
 
+        # Return the final attempt's actual images to the RL learner, including
+        # manifest embedding and any reactive resizing performed above.
+        result["response"]["agent_input"] = episode_input
         result = SimpleAgentVerifyResponse.model_validate(result)
         if self.config.strip_images_from_output:
             result = _strip_image_blocks(result)
