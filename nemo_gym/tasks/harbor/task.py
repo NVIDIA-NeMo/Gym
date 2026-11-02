@@ -9,7 +9,7 @@ import logging
 import re
 import tomllib
 from collections.abc import Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Any
 
@@ -30,7 +30,8 @@ from nemo_gym.tasks.harbor.dockerfile import (
     resolve_dockerfile,
 )
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborStep, HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HARBOR_STEP_VERIFIER_TIMEOUT_SEC, HarborTaskConfig, HarborTaskStep
+from nemo_gym.tasks.harbor.python_verifier import VERIFIER_FILE, python_verifier_for
 from nemo_gym.tasks.harbor.records import (
     BUILT_IMAGES_FILE,
     IMAGE_CONFIGS_FILE,
@@ -44,9 +45,13 @@ from nemo_gym.tasks.harbor.records import (
 from nemo_gym.tasks.harbor.task_data import read_task_fields
 from nemo_gym.tasks.harbor.verifier_env import (
     TESTS_COMPOSE_FILE,
+    TESTS_DOCKERFILE,
     _verifier_build_required,
     _verifier_definition_required,
     effective_verifier_environment,
+    step_verifier_build_context,
+    step_verifier_environment,
+    step_verifier_mode,
     verifier_build_context,
     verifier_compose_main_overrides,
     verifier_compose_refusal,
@@ -58,9 +63,18 @@ logger = logging.getLogger(__name__)
 
 TASK_FILE = "task.toml"
 INSTRUCTION_FILE = "instruction.md"
+# Harbor's seed trajectory (``TaskPaths.TRAJECTORY_FILENAME``): an ATIF document a task ships beside its instruction
+# (``steps/<first step>/`` for a multi-step task, where a top-level one is ignored) that Harbor 0.22.0 loads into the
+# agent's session before its first turn, for every agent but the oracle and nop (``Trial._resolve_load_trajectory``).
+# Gym cannot seed a harness with it yet: the loader records the file (:attr:`HarborTask.seed_trajectory`) and the
+# environment server runs the task for the oracle alone, refusing it for any other agent rather than running it
+# without its prior context.
+TRAJECTORY_FILE = "trajectory.json"
 STEPS_DIR = "steps"
-# Per-step Harbor features this loader does not run yet; a task using one is refused by name.
-UNSUPPORTED_STEP_FILES = ("workdir", "setup.sh")
+# A step's files under ``steps/<name>/``: the folder merged into the working directory before the turn and the
+# script run from there (Harbor's ``_upload_step_workdir`` and ``_run_step_setup``: the script lives inside the folder).
+STEP_WORKDIR = "workdir"
+STEP_SETUP_SCRIPT = "setup.sh"
 # The one value of the pre-1.3 `multi_step_reward_mode` key that older multi-step generators wrote: the per-step
 # average, which is the default `mean` roll-up the task gets once the key is dropped, so it is dropped silently.
 LEGACY_AGGREGATE_REWARD_MODE = "aggregate"
@@ -77,11 +91,30 @@ MAX_DISCOVERY_DEPTH = 6
 
 @dataclass(frozen=True)
 class HarborTurn:
-    """One ``[[steps]]`` entry read from disk: the instruction the agent gets for that turn."""
+    """One task step loaded with its ``steps/<name>/`` folder, which the harbor server runs as one agent turn.
 
-    name: str
+    ``config`` is the step as ``task.toml`` writes it (:class:`HarborTaskStep`) and ``instruction`` is
+    ``steps/<name>/instruction.md``, so ``HarborTaskStep`` is to ``HarborTurn`` what ``HarborTaskConfig`` is to
+    ``HarborTask``. One turn per task step is this server's choice, as in Harbor's multi-step trial, not something
+    a task step implies: Harbor's simulated-user trials run many turns of the agent under test inside one step.
+
+    ``verifier_mode`` is the step's own, as Harbor's ``resolve_step_verifier_mode`` resolves it (the step's explicit
+    mode, else ``separate`` when it declares a ``[steps.verifier.environment]``, else the task's). ``verifier_image``
+    and ``verifier_image_config`` are, for a separate turn, what :attr:`HarborTask.verifier_image` and
+    :attr:`HarborTask.verifier_image_config` are for a single-step task: the image the turn's verifier runs in when
+    it is not the task's own (``None`` runs the task image), by the same rules, and that image's recorded
+    configuration when there is one.
+    """
+
     instruction: str
-    config: HarborStep
+    config: HarborTaskStep
+    verifier_mode: str = "shared"
+    verifier_image: str | None = None
+    verifier_image_config: BaseImageConfig | None = None
+
+    @property
+    def name(self) -> str:
+        return self.config.name
 
     @property
     def tests_dir(self) -> Path:
@@ -93,6 +126,18 @@ class HarborTurn:
         """The step's own reference solution, relative to the task folder (Harbor's ``steps/<name>/solution/``);
         may be absent, in which case the task's top-level ``solution/`` stands in for it (:meth:`HarborTask.turn_solution_dir`)."""
         return Path(STEPS_DIR) / self.name / "solution"
+
+    @property
+    def workdir_dir(self) -> Path:
+        """``steps/<name>/workdir/``, relative to the task folder: merged into the sandbox's working directory
+        before the turn's agent session, as Harbor's ``_upload_step_workdir`` uploads it; may be absent."""
+        return Path(STEPS_DIR) / self.name / STEP_WORKDIR
+
+    @property
+    def setup_script(self) -> Path:
+        """``steps/<name>/workdir/setup.sh``, relative to the task folder: run as ``bash <workdir>/setup.sh`` once the
+        folder is in place, as Harbor's ``_run_step_setup`` runs it; may be absent."""
+        return self.workdir_dir / STEP_SETUP_SCRIPT
 
 
 @dataclass(frozen=True)
@@ -187,6 +232,11 @@ class HarborTask:
     parameterized task's rendered row), ``{}`` for a task without one. Materialize writes them into the
     row's ``task_data`` beside the reserved ``_ng_*`` keys, and the dataset's ``task_data.py`` validates
     them when it ships one (:mod:`nemo_gym.tasks.harbor.task_data`).
+
+    ``seed_trajectory`` is Harbor's seed trajectory when the task ships one, relative to the task folder:
+    ``steps/<first step>/trajectory.json`` for a multi-step task, else ``trajectory.json`` (one or the other, as
+    Harbor's ``_task_trajectory_path`` picks it); ``None`` otherwise. The environment server runs such a task for
+    the oracle alone and refuses it for any other agent, naming the file.
     """
 
     path: Path
@@ -216,6 +266,11 @@ class HarborTask:
     # The task's own field values (``task_data.json`` in its folder), written into the row's ``task_data``
     # beside the reserved keys and validated against the dataset's ``task_data.py`` when it ships one.
     task_data: Mapping[str, Any] = field(default_factory=dict)
+    # The Python verifier that grades the task (``tests/verifier.py``, or the dataset root's ``verifier.py`` for a
+    # task without ``tests/``), run inside the sandbox through the test.sh shim; ``None`` when ``tests/test.sh`` does.
+    python_verifier: Path | None = None
+    # Harbor's seed trajectory, relative to the task folder, when the task ships one (see the class docstring).
+    seed_trajectory: Path | None = None
 
     @property
     def needs_sandbox(self) -> bool:
@@ -229,12 +284,17 @@ class HarborTask:
 
     @property
     def has_solution(self) -> bool:
-        """Whether the oracle can run this task: ``solution/solve.sh`` for a single-turn task; for a multi-step
-        task a ``solve.sh`` for every step, its own under ``steps/<name>/solution/`` or the task's top-level one
-        (:meth:`turn_solution_dir`), as Harbor 0.22.0's oracle resolves each step's solution (``agents/oracle.py``)."""
+        """Whether the oracle can run this task: ``solution/solve.sh``, or ``solution/answer.md`` it submits as its
+        response, for a single-turn task; for a multi-step task a ``solve.sh`` for every step, its own under
+        ``steps/<name>/solution/`` or the task's top-level one (:meth:`turn_solution_dir`), as Harbor 0.22.0's
+        oracle resolves each step's solution (``agents/oracle.py``)."""
         if self.turns:
             return all((self.turn_solution_dir(turn) / "solve.sh").is_file() for turn in self.turns)
-        return (self.path / "solution" / "solve.sh").is_file()
+        return (self.path / "solution" / "solve.sh").is_file() or self.has_answer
+
+    @property
+    def has_answer(self) -> bool:
+        return (self.path / "solution" / "answer.md").is_file()
 
     def turn_solution_dir(self, turn: HarborTurn) -> Path:
         """The folder the oracle gets at ``/solution`` for ``turn``: the step's own ``steps/<name>/solution/`` when
@@ -380,6 +440,11 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
     for step in config.steps:
         phases[f"steps.{step.name}.agent"] = step.agent
         phases[f"steps.{step.name}.verifier"] = step.verifier
+        if step.verifier.environment is not None:
+            # A step's own verifier environment carries the same restriction fields as the task's; the server creates
+            # the step's verifier sandbox from it with no egress policy, so a restriction there is refused like the
+            # task-level one rather than dropped.
+            phases[f"steps.{step.name}.verifier.environment"] = step.verifier.environment
     for name, phase in phases.items():
         if phase.network_mode in (None, "public") and not phase.allowed_hosts:
             continue
@@ -388,29 +453,38 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
             # only the separate verifier's own sandbox can carry a phase policy (multi-step tasks verify in the
             # agent's sandbox).
             raise HarborTaskError(f"{path}: {name} network restrictions are not supported yet")
-        if config.is_shared_verifier:
+        # The task-wide [verifier] restriction applies to every grader that runs: for a multi-step task those are the
+        # steps' verifiers in their resolved modes (the task-level default is never run by itself), for a task without
+        # steps the task's own verifier.
+        if config.steps:
+            shared_grader = any(step_verifier_mode(config, step) == "shared" for step in config.steps)
+        else:
+            shared_grader = config.is_shared_verifier
+        if shared_grader:
             raise HarborTaskError(
                 f"{path}: [verifier] network restrictions are not supported in Harbor's shared verifier mode: a "
                 "running sandbox's network policy cannot be changed after the agent's turn, so the restricted "
                 "policy is applied to the separate verifier's sandbox when it is created (declare "
-                '[verifier].environment_mode = "separate" or a [verifier.environment])'
+                '[verifier].environment_mode = "separate" or a [verifier.environment], on every step of a '
+                "multi-step task too)"
             )
         if phase.allowed_hosts and phase.network_mode != "allowlist":
             raise HarborTaskError(f"{path}: [verifier] allowed_hosts is only valid when network_mode='allowlist'")
-    for name, environment in (
-        ("environment", config.environment),
-        ("verifier.environment", config.verifier.environment),
-    ):
+    environments = [("environment", config.environment), ("verifier.environment", config.verifier.environment)]
+    environments += [(f"steps.{step.name}.verifier.environment", step.verifier.environment) for step in config.steps]
+    for name, environment in environments:
         if environment is not None and environment.os != "linux":
             raise HarborTaskError(f"{path}: {name} Windows tasks are not supported yet")
 
     instruction_path = path / INSTRUCTION_FILE
     turns = _load_turns(path, config)
+    seed_trajectory = _seed_trajectory(path, turns)
     # Harbor reads a multi-step task's instructions from its steps; the top-level file is then optional.
     if not turns and not instruction_path.is_file():
         raise HarborTaskError(f"{path} has no {INSTRUCTION_FILE}")
-    if not turns and not (path / "tests").is_dir():
-        raise HarborTaskError(f"{path} has no tests/ folder")
+    python_verifier = python_verifier_for(path, root) if not turns else None
+    if not turns and python_verifier is None and not (path / "tests").is_dir():
+        raise HarborTaskError(f"{path} has no tests/ folder (and the dataset has no {VERIFIER_FILE} to grade it with)")
     try:
         instruction = read_instruction(instruction_path) if instruction_path.is_file() else ""
     except (OSError, UnicodeDecodeError) as exc:
@@ -634,11 +708,20 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
                 except ValueError as exc:
                     raise HarborTaskError(f"{root / IMAGE_CONFIGS_FILE}: {verifier_image!r}: {exc}") from exc
 
+    if any(turn.verifier_mode == "separate" for turn in turns):
+        turns = tuple(_resolve_turn_verifiers(path, root, config, turns))
+
     try:
         folder_digest = content_hash(path)
     except (OSError, ValueError) as exc:
         raise HarborTaskError(f"{path}: {exc}") from exc
-    digest = task_digest(folder_digest, dataset, path.name)
+    # A dataset-level verifier grades the task from outside its folder, so its content enters the task's digest.
+    shared_verifier = python_verifier if python_verifier is not None and python_verifier.parent == root else None
+    try:
+        verifier_digest = hashlib.sha256(shared_verifier.read_bytes()).hexdigest() if shared_verifier else None
+    except OSError as exc:
+        raise HarborTaskError(f"{shared_verifier}: {exc}") from exc
+    digest = task_digest(folder_digest, dataset, path.name, shared_verifier_digest=verifier_digest)
     task_data = read_task_fields(path)
 
     return HarborTask(
@@ -667,10 +750,14 @@ def load_task(path: Path, *, root: Path | None = None, image_configs: Mapping[st
         overlay_workdirs=overlay_workdirs,
         turns=turns,
         task_data=task_data,
+        python_verifier=python_verifier,
+        seed_trajectory=seed_trajectory,
     )
 
 
-def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> str:
+def task_digest(
+    folder_digest: str, dataset: GymDatasetConfig, task_id: str, *, shared_verifier_digest: str | None = None
+) -> str:
     """The digest a task is materialized and served under: its folder's content hash plus the dataset slice applied to it.
 
     ``dataset.toml``'s ``[gym]`` table can change the effective task without touching the folder, so the
@@ -679,15 +766,19 @@ def task_digest(folder_digest: str, dataset: GymDatasetConfig, task_id: str) -> 
     declares only identity, run and catalog keys (``license``, ``type``, ``allowed_agents``, ``domain``,
     ``verified``, ``[gym.defaults].num_repeats``), keeps the plain folder hash, which is also what the
     package store checks: none of those keys says what the task is, so none enters its digest.
+    ``shared_verifier_digest`` is the digest of the dataset root's ``verifier.py`` when it grades the task:
+    grading code outside the folder is part of the task's identity too.
     """
-    if not dataset.shapes_tasks:
+    if not dataset.shapes_tasks and shared_verifier_digest is None:
         return folder_digest
     # `num_repeats` is how often a run plays the task, not what the task is: left out of the slice too, so a
     # shaping table with a repeat count hashes the same as one without.
-    applied = {
+    applied: dict[str, Any] = {
         "defaults": dataset.defaults.model_dump(mode="json", exclude={"num_repeats"}),
         "task": (dataset.tasks.get(task_id) or GymTaskOverride()).model_dump(mode="json"),
     }
+    if shared_verifier_digest is not None:
+        applied[VERIFIER_FILE] = shared_verifier_digest
     return hashlib.sha256(f"{folder_digest}\n{json.dumps(applied, sort_keys=True)}".encode()).hexdigest()
 
 
@@ -723,6 +814,40 @@ def iter_task_folders(root: Path, *, max_depth: int = MAX_DISCOVERY_DEPTH) -> li
     return found
 
 
+def _seed_trajectory(path: Path, turns: tuple[HarborTurn, ...]) -> Path | None:
+    """The seed trajectory the task ships, relative to the task folder, or ``None``; warns when there is one.
+
+    Harbor 0.22.0 loads ``trajectory.json`` beside the instruction (``steps/<first step>/trajectory.json`` for a
+    multi-step task, where a top-level one is ignored: ``Trial._task_trajectory_path`` picks one path or the other,
+    never both) into the agent's session as prior context, as its ``--load-trajectory`` option does, for every
+    agent but the oracle and nop (the oracle runs the task's own solution, so the prior context does not apply to
+    it, and task authors validate with it); an agent that cannot load an ATIF trajectory fails the trial before any
+    environment spend. This server hands no prior context to a harness yet, so running the task for a model would
+    grade it without the context the task was written for: the task loads, the oracle runs it as Harbor's does,
+    and the environment server refuses it at seed for any other agent, naming the file. The file stays part of
+    the task's identity and its package (:func:`~nemo_gym.tasks.harbor.digest.content_hash` covers it), so a
+    fetched task verifies against its advertised hash.
+    """
+    seed = path / STEPS_DIR / turns[0].name / TRAJECTORY_FILE if turns else path / TRAJECTORY_FILE
+    if not seed.is_file():
+        return None
+    where = seed.relative_to(path)
+    logger.warning(
+        "%s: %s is Harbor's seed trajectory (the prior context Harbor loads into the agent's session before its first "
+        "turn, as --load-trajectory does, for every agent but the oracle and nop); loading a trajectory into a harness "
+        "is not supported yet, so the environment server runs the task for the oracle alone and refuses it for any "
+        "other agent. Remove the file to run the task without its prior context",
+        path,
+        where.as_posix(),
+    )
+    return where
+
+
+def _is_root_user(user: str | int | None) -> bool:
+    """Whether an agent user runs with uid 0 (``None`` is the image's own user, root in most images)."""
+    return user is None or str(user).split(":")[0] in ("root", "0")
+
+
 def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
     """Read every ``[[steps]]`` entry as a turn, refusing the per-step features the server does not run yet.
 
@@ -730,21 +855,62 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
     ``steps/<name>/tests/`` or the task's under ``tests/``, which is the script Harbor runs for the step.
     A step's own ``[steps.agent].user`` is read as written: the server switches the sandbox's default user,
     the working directory's owner and the harness's user to it for that turn (and refuses a ``name:group``
-    pair at seed on a provider that switches user by name only, as it refuses the task's own).
+    pair at seed on a provider that switches user by name only, as it refuses the task's own). A step's
+    ``workdir/``, ``workdir/setup.sh``, ``[steps.healthcheck]`` and ``artifacts`` are read by the server per turn
+    (:attr:`HarborTurn.workdir_dir`, :attr:`HarborTurn.setup_script`, ``HarborTaskStep.healthcheck`` and
+    ``HarborTaskStep.artifacts``, collected after the turn's agent with the task's); a ``setup.sh``
+    beside ``instruction.md`` instead of inside ``workdir/`` is not a Harbor file and is warned about, since Harbor
+    0.22.0 runs ``steps/<name>/workdir/setup.sh`` only. A step without its own ``[steps.verifier].timeout_sec`` is
+    graded within Harbor's step default of 600 s (times the dataset's ``timeout_multiplier``, like every budget),
+    not the task's ``[verifier].timeout_sec`` (:meth:`HarborTaskConfig.step_verifier_timeout_sec`); when the task's
+    figure differs, the steps it does not reach are warned about once, since an author who set it for the steps
+    would expect it to apply.
     """
     turns: list[HarborTurn] = []
+    # The agent users of the steps so far that are not root (`None` is the image's own user, unknown here).
+    earlier_unprivileged: list[tuple[str, str]] = []
+    # The steps graded within Harbor's 600 s step default (under the dataset's multiplier, as the task's figure is)
+    # while the task's [verifier].timeout_sec says otherwise.
+    default_timeout_steps: list[str] = []
+    step_default = HARBOR_STEP_VERIFIER_TIMEOUT_SEC
     for step in config.steps:
         where = f"{path / TASK_FILE} step {step.name!r}"
         step_dir = path / STEPS_DIR / step.name
         if not step_dir.is_dir():
             raise HarborTaskError(f"{where}: {step_dir} does not exist")
-        for name in UNSUPPORTED_STEP_FILES:
-            if (step_dir / name).exists():
-                raise HarborTaskError(f"{where}: steps/{step.name}/{name} is not supported yet")
-        if step.healthcheck is not None or step.artifacts:
-            raise HarborTaskError(f"{where}: per-step healthcheck and artifacts are not supported yet")
-        if step.verifier.environment_mode == "separate" or step.verifier.environment is not None:
-            raise HarborTaskError(f"{where}: separate per-step verification is not supported yet")
+        if step.verifier.timeout_sec is None:
+            step_default = config.step_verifier_timeout_sec(step)
+            if config.verifier.timeout_sec != step_default:
+                default_timeout_steps.append(step.name)
+        user = step.agent.user if step.agent.user is not None else config.agent.user
+        if (step_dir / STEP_WORKDIR / STEP_SETUP_SCRIPT).is_file() and _is_root_user(user) and earlier_unprivileged:
+            # The script runs as the step's agent, root here, in the working directory an earlier step's agent
+            # owned: a process that agent left running can replace the uploaded script before it runs. Harbor
+            # shares the window (docker cp, then exec); the step's agent gets root right after anyway.
+            previous, previous_user = earlier_unprivileged[-1]
+            logger.warning(
+                "%s: steps/%s/%s/%s runs as %s after step %r ran as %r; a process that step left running in the "
+                "working directory it owned can replace the script between its upload and its run, so the script "
+                "must not be relied on to undo what the earlier step did (Harbor runs it the same way)",
+                where,
+                step.name,
+                STEP_WORKDIR,
+                STEP_SETUP_SCRIPT,
+                "root" if user is not None else "the image's own user (root unless the image sets USER)",
+                previous,
+                previous_user,
+            )
+        if not _is_root_user(user):
+            earlier_unprivileged.append((step.name, str(user)))
+        if (step_dir / STEP_SETUP_SCRIPT).exists():
+            logger.warning(
+                "%s: steps/%s/%s is not run; Harbor runs steps/<name>/%s/%s (uploaded with the step's workdir/)",
+                where,
+                step.name,
+                STEP_SETUP_SCRIPT,
+                STEP_WORKDIR,
+                STEP_SETUP_SCRIPT,
+            )
         if not (step_dir / "tests" / "test.sh").is_file() and not (path / "tests" / "test.sh").is_file():
             raise HarborTaskError(f"{where}: no test.sh in steps/{step.name}/tests/ or tests/")
         instruction_path = step_dir / INSTRUCTION_FILE
@@ -754,10 +920,107 @@ def _load_turns(path: Path, config: HarborTaskConfig) -> tuple[HarborTurn, ...]:
             instruction = read_instruction(instruction_path)
         except (OSError, UnicodeDecodeError) as exc:
             raise HarborTaskError(f"{instruction_path}: {exc}") from exc
-        turns.append(HarborTurn(name=step.name, instruction=instruction, config=step))
-    if turns and not config.is_shared_verifier:
-        raise HarborTaskError(f"{path / TASK_FILE}: multi-step tasks with a separate verifier are not supported yet")
+        turns.append(HarborTurn(instruction=instruction, config=step, verifier_mode=step_verifier_mode(config, step)))
+    if default_timeout_steps:
+        logger.warning(
+            "%s: step(s) %s name no [steps.verifier].timeout_sec and are graded within Harbor's step default of %gs%s, "
+            "not the task's [verifier].timeout_sec = %gs (Harbor's StepConfig.verifier is a VerifierConfig of its own, "
+            "whose timeout never falls back to the task's); set [steps.verifier].timeout_sec on each step that needs "
+            "another bound",
+            path / TASK_FILE,
+            ", ".join(repr(name) for name in default_timeout_steps),
+            step_default,
+            ""
+            if step_default == HARBOR_STEP_VERIFIER_TIMEOUT_SEC
+            else f" ({HARBOR_STEP_VERIFIER_TIMEOUT_SEC:g}s times the dataset's timeout_multiplier)",
+            config.verifier.timeout_sec,
+        )
     return tuple(turns)
+
+
+def _resolve_turn_verifiers(
+    path: Path, root: Path, config: HarborTaskConfig, turns: tuple[HarborTurn, ...]
+) -> list[HarborTurn]:
+    """The separate turns' verifier images, by the rules :func:`load_task` applies to a single-step task's.
+
+    Harbor starts a step's separate verifier from ``steps/<name>/tests/`` when that folder exists, else from
+    ``tests/`` (``_verifier_env_build_context``), with the step's effective environment
+    (:func:`step_verifier_environment`): a declared ``docker_image`` is run as it is, otherwise the folder's
+    ``Dockerfile`` is built. Prepare builds ``tests/Dockerfile`` only, so a step whose verifier would be built from
+    its own ``steps/<name>/tests/`` is refused naming the image to declare; one built from ``tests/`` reads the
+    recorded build, as the task's does. The ``docker-compose.yaml`` of the folder the step starts from (the step's
+    own ``tests/`` or the task's, which Harbor stacks on the step verifier's template, ``_docker_compose_paths``) is
+    refused as the task's verifier's is: one that is not read as written (not valid YAML, not a mapping, or carrying a
+    top-level key other than ``services``, ``name``, ``version`` and ``x-`` extensions, an ``include`` or a ``networks``
+    block among them: :func:`verifier_compose_refusal`), services beside ``main``, and a runtime setting on
+    ``main`` (:func:`verifier_compose_main_overrides`; ``main``'s ``image``, its ``build`` section and a
+    ``pull_policy`` of ``build`` are ones beside a step verifier with a ``docker_image``), which would reach Harbor's
+    step verifier and never this server's.
+    """
+    resolved: list[HarborTurn] = []
+    image_configs = None
+    for turn in turns:
+        if turn.verifier_mode != "separate":
+            resolved.append(turn)
+            continue
+        where = f"{path / TASK_FILE} step {turn.name!r}"
+        environment = step_verifier_environment(config, turn.config)
+        assert environment is not None  # the turn is separate
+        context = step_verifier_build_context(path, turn.config)
+        refusal = verifier_compose_refusal(context.parent) if context.name == "tests" else None
+        if refusal:
+            raise HarborTaskError(f"{where}: {refusal}")
+        sidecars = verifier_compose_sidecars(context.parent) if context.name == "tests" else []
+        if sidecars:
+            raise HarborTaskError(
+                f"{where}: {context / TESTS_COMPOSE_FILE.name} declares service(s) {', '.join(sidecars)} beside main; "
+                "Harbor starts them as the separate verifier's Compose project and this server starts a single "
+                "verifier sandbox, so the task is not supported until it does"
+            )
+        overrides = (
+            verifier_compose_main_overrides(context.parent, prebuilt=bool(environment.docker_image))
+            if context.name == "tests"
+            else []
+        )
+        if overrides:
+            raise HarborTaskError(
+                f"{where}: {context / TESTS_COMPOSE_FILE.name} sets {', '.join(overrides)} on main; Harbor applies the "
+                "file to the step's separate verifier container and this server starts that verifier from task.toml's "
+                "environment and the verifier image alone (main's build section and image are read for a verifier "
+                "built from tests/Dockerfile only), so the task is not supported until it does"
+            )
+        verifier_image: str | None = None
+        if environment.docker_image:
+            # A declared image (the step's or the task's [verifier.environment]) runs as it is; a copy of [environment]
+            # with a docker_image runs the task's own image (verifier_image stays None), as for a single-step task.
+            if turn.config.verifier.environment is not None or config.verifier.environment is not None:
+                verifier_image = environment.docker_image
+        elif context != path / TESTS_DOCKERFILE.parent:
+            raise HarborTaskError(
+                f"{where}: the step's separate verifier names no docker_image, so Harbor builds it from "
+                f"{context / TESTS_DOCKERFILE.name} (the step's own tests/ folder is its environment dir); this server "
+                "builds tests/Dockerfile only. Declare [steps.verifier.environment].docker_image (or "
+                "[verifier.environment].docker_image) with a prebuilt image"
+            )
+        else:
+            if not (path / TESTS_DOCKERFILE).is_file():
+                raise _verifier_definition_required(path)
+            verifier_record = read_built_images(root).get(context_digest(context))
+            verifier_image = recorded_service_images(verifier_record).get(VERIFIER_SERVICE)
+            if verifier_image is None:
+                raise _verifier_build_required(path, root)
+        verifier_image_config: BaseImageConfig | None = None
+        if verifier_image is not None:
+            if image_configs is None:
+                image_configs = read_image_configs(root)
+            record = image_configs.get(verifier_image)
+            if record is not None:
+                try:
+                    verifier_image_config = BaseImageConfig.from_record(record)
+                except ValueError as exc:
+                    raise HarborTaskError(f"{root / IMAGE_CONFIGS_FILE}: {verifier_image!r}: {exc}") from exc
+        resolved.append(replace(turn, verifier_image=verifier_image, verifier_image_config=verifier_image_config))
+    return resolved
 
 
 def discover_tasks(root: Path, *, skipped: dict[str, HarborTaskError] | None = None) -> list[HarborTask]:

@@ -224,6 +224,25 @@ def test_tool_calls_and_reasoning_skips_non_dict_output_items():
     assert _tool_calls_and_reasoning(anth) == ([{"call_id": "t", "name": "g", "arguments": {"b": 2}}], None)
 
 
+def test_tool_calls_and_reasoning_records_custom_tool_calls():
+    from nemo_gym.observability.model_calls import _tool_calls_and_reasoning
+
+    patch = "*** Begin Patch\n*** Add File: a.txt\n+hi\n*** End Patch\n"
+    resp = {
+        "output": [
+            {"type": "custom_tool_call", "call_id": "c1", "name": "apply_patch", "input": patch},
+            {"type": "function_call", "call_id": "c2", "name": "shell", "arguments": '{"command": "ls"}'},
+        ]
+    }
+    assert _tool_calls_and_reasoning(resp) == (
+        [
+            {"call_id": "c1", "name": "apply_patch", "arguments": {"input": patch}},
+            {"call_id": "c2", "name": "shell", "arguments": {"command": "ls"}},
+        ],
+        None,
+    )
+
+
 def _capture_exchange(dialect, model_server, usage, response):
     return {
         "model_call_id": f"call-{model_server}",

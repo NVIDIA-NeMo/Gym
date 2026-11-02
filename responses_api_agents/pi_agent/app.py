@@ -34,7 +34,6 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator,
 from nemo_gym.agent_outcome import AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -44,9 +43,11 @@ from nemo_gym.base_responses_api_agent import (
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.failure_kinds import MODEL_REQUEST_ERROR, MODEL_TRANSPORT_ERROR
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.core import (
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -60,7 +61,16 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
 )
 from nemo_gym.responses_converter import ResponsesConverter
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import (
+    AsyncSandbox,
+    DirectSandboxConnection,
+    SandboxSpec,
+    SandboxStatus,
+    create_provider,
+    resolve_provider_config,
+)
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse, MCPToolAccess, ToolAccess
+from nemo_gym.trajectory import (
     AgentEpisode,
     AgentInvocation,
     AgentObservationBundle,
@@ -69,11 +79,6 @@ from nemo_gym.rollout_observability import (
     ObservationGap,
     ToolCallObservation,
 )
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, SandboxStatus, create_provider
-from nemo_gym.sandbox.access import DirectSandboxConnection
-from nemo_gym.sandbox.config import resolve_provider_config
-from nemo_gym.server_utils import get_global_config_dict, get_response_json, raise_for_status
-from nemo_gym.tool_access import MCPToolAccess, ToolAccess
 from responses_api_agents.pi_agent.sandbox import PiSandboxSession
 from responses_api_agents.pi_agent.setup_pi import ensure_pi
 
@@ -134,6 +139,46 @@ def _ends_on_finish_tool(messages: list[Any]) -> bool:
         if message.get("role") == "toolResult":
             results.append(message)
     return False
+
+
+def _was_still_working(events: list[tuple[float, dict[str, Any]]]) -> bool:
+    """True when the run had not ended and had submitted nothing, so a stop at its deadline is a timeout.
+
+    A finish tool call that succeeded is a submission; gym_mcp.mjs marks only those results terminal. Pi reports each
+    call's result when the call ends, but the turn's tool results only after all of the turn's calls end, so a finish
+    call batched with a slower tool shows only in the former. A run whose last reply stopped (`stop` or `length`)
+    without a tool call has ended, and the deadline then cut only Pi's compaction call after the run, unless the reply
+    was an empty `length` reply that Pi counts as a context overflow: Pi compacts to retry it (Pi 0.80.2 then exits
+    with code 1, a failure).
+    """
+    if any(
+        event.get("type") == "tool_execution_end"
+        and isinstance(event.get("result"), dict)
+        and isinstance(event["result"].get("details"), dict)
+        and event["result"]["details"].get("terminal") is True
+        for _, event in events
+    ):
+        return False
+    replies = [
+        index
+        for index, (_, event) in enumerate(events)
+        if event.get("type") == "message_end"
+        and isinstance(event.get("message"), dict)
+        and event["message"].get("role") == "assistant"
+    ]
+    if not replies:
+        return True
+    last = events[replies[-1]][1]["message"]
+    # Pi keeps a provider's `stop` for a reply with tool calls, and then runs them.
+    called_tools = any(isinstance(part, dict) and part.get("type") == "toolCall" for part in last.get("content") or [])
+    # pi-ai also counts an empty `length` reply at a full context as an overflow, and Pi compacts to retry it (Pi
+    # 0.80.2 then exits with code 1, a failure). Pi never retries a `stop` reply, so its compaction for an overflow
+    # after one runs after the run has ended.
+    recovering = last.get("stopReason") == "length" and any(
+        event.get("type") == "compaction_start" and event.get("reason") == "overflow"
+        for _, event in events[replies[-1] + 1 :]
+    )
+    return called_tools or recovering or last.get("stopReason") not in ("stop", "length")
 
 
 def _gym_mcp_tool_name(name: str, server_names: list[str]) -> str:
@@ -613,6 +658,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     workspace_root: str = "outputs/pi_agent/workspaces"
     thinking: Optional[str] = None
     system_prompt: Optional[str] = None
+    system_prompt_mode: Literal["append", "replace"] = "append"
+    enable_tools: bool = True
     timeout: int = Field(default=900, gt=0)
     bash_timeout: Optional[int] = Field(default=None, gt=0)
     extra_args: list[str] = []
@@ -642,7 +689,8 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
         default_factory=list,
         description=(
             "Granted MCP tools, by their name on the server, whose successful call ends a sandbox session's run "
-            "when every tool call of that turn is one of them."
+            "when every tool call of that turn is one of them. Only one required grant may offer each; an optional "
+            "grant that also offers one is left out."
         ),
     )
     session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
@@ -953,7 +1001,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         ``mcp`` adds gym_mcp.mjs, which serves the episode's MCP tool grants.
         """
         extensions = ["output-limit.mjs"]
-        if self.config.sandbox_runtime_guards:
+        if self.config.enable_tools and self.config.sandbox_runtime_guards:
             extensions.append("runtime-guards.mjs")
         extensions.append("outcome.mjs")
         if mcp:
@@ -985,10 +1033,13 @@ class PiAgent(SimpleResponsesAPIAgent):
         for extension in extensions:
             command += ["--extension", f"{directory}/{extension}"]
         command += ["--no-skills", "--no-prompt-templates", "--no-themes"]
+        if not self.config.enable_tools:
+            command.append("--no-builtin-tools")
         if self.config.thinking:
             command += ["--thinking", self.config.thinking]
         if system:
-            command += ["--append-system-prompt", system]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            command += [flag, system]
         env = dict(self.config.sandbox_env)
         env |= {
             "PI_CODING_AGENT_DIR": f"{directory}/home/.pi/agent",
@@ -1071,9 +1122,18 @@ class PiAgent(SimpleResponsesAPIAgent):
         payload = self._sandbox_payload(state, prompt=prompt, system=system, extensions=extensions)
         try:
             async with self.sem:
-                raw = await state.execute(
-                    **payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
-                )
+                try:
+                    raw = await state.execute(
+                        **payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+                    )
+                except TimeoutError:
+                    # The supervisor stops Pi at the deadline, and execute returns. If the provider's exec limit
+                    # expired as well, the run is still a timeout, as Stirrup counts it, when the supervisor
+                    # confirmed the deadline and the events were captured.
+                    cleanup, raw = state.session.cleanup, state.session.artifacts
+                    if not (cleanup and cleanup["timed_out"] and raw is not None):
+                        raise
+                    LOG.warning("The sandbox provider stopped waiting for Pi's supervisor after Pi's deadline")
         except BaseException as failure:
             # Common finalization captures before close removes the session directory.
             raw = state.session.artifacts if state.session.artifacts is not None else ""
@@ -1179,9 +1239,11 @@ class PiAgent(SimpleResponsesAPIAgent):
             # which classify_outcome leaves unknown: retryable by default, even if that call hit the context limit.
             model_limit, terminal_error = False, recovery_error
             compaction_failure = {"stopReason": "error", "errorMessage": recovery_error}
-        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted"):
-            # Expected model limits/interruptions do not invalidate partial work.
-            # They must not erase an independently confirmed worker or cleanup failure.
+        terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
+        retrying = terminal.get("willRetry") is True
+        if model_limit or (stop_reasons and stop_reasons[-1] == "aborted") or (cleanup["timed_out"] and retrying):
+            # Expected model limits/interruptions, including a deadline before Pi's retry of an error, do not
+            # invalidate partial work. They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
         execution_error = cleanup["error"]
         if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
@@ -1205,12 +1267,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         if cleanup["timed_out"] and not stop_reasons and cleanup["error"] is None:
             execution_error = None
         error = execution_error or terminal_error
-        terminal = next((event for _, event in reversed(events) if event.get("type") == "agent_end"), {})
         assistant = next((m for m in reversed(terminal.get("messages") or []) if m.get("role") == "assistant"), {})
         reported_error = (
-            bool(error)
-            and not execution_error
-            and _reported_model_error(assistant, cleanup, will_retry=terminal.get("willRetry") is True)
+            bool(error) and not execution_error and _reported_model_error(assistant, cleanup, will_retry=retrying)
         )
         graded_error = None
         # A failure Pi reported from the model endpoint is classified below, not graded here.
@@ -1253,6 +1312,8 @@ class PiAgent(SimpleResponsesAPIAgent):
                 "pi_version": self.config.pi_version,
                 AGENT_TIMEOUT_METADATA_KEY: str(timeout),
                 **({"graded_agent_error": graded_error[:500]} if graded_error is not None else {}),
+                # Stirrup's timeout report: the deadline stopped a run that had neither ended nor submitted.
+                **({"stop_reason": "wall_time"} if cleanup["timed_out"] and _was_still_working(events) else {}),
             },
         )
         conversation_input = [NeMoGymEasyInputMessage(role="system", content=system)] if system else []
@@ -1399,7 +1460,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         env = self._env(home)
 
         cmd = [*self.config.command_parts, "--print", "--mode", "json", "--no-session"]
-        if self.config.bash_timeout is not None:
+        if self.config.enable_tools and self.config.bash_timeout is not None:
             env["NEMO_GYM_PI_BASH_TIMEOUT"] = str(self.config.bash_timeout)
             cmd += ["--extension", str(Path(__file__).with_name("bash-timeout.mjs"))]
         if self.config.output_token_policy == "remaining_context":
@@ -1414,10 +1475,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             cmd += ["--provider", provider, "--model", model_id]
         else:
             cmd += ["--model", self.config.model]
+        if not self.config.enable_tools:
+            cmd.append("--no-builtin-tools")
         if self.config.thinking:
             cmd += ["--thinking", self.config.thinking]
         if system_prompt:
-            cmd += ["--append-system-prompt", system_prompt]
+            flag = "--system-prompt" if self.config.system_prompt_mode == "replace" else "--append-system-prompt"
+            cmd += [flag, system_prompt]
         cmd += self.config.extra_args
         cmd.append(instruction)
 

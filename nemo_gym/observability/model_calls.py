@@ -13,10 +13,10 @@ from typing import Any, Literal, Mapping, Optional
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.observability.verifiers import merge_verifier_call_observation
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
+from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
     ObservationGap,
@@ -138,6 +138,15 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
                         "call_id": item.get("call_id") or item.get("id"),
                         "name": item.get("name"),
                         "arguments": _as_arguments(item.get("arguments")),
+                    }
+                )
+            elif item.get("type") == "custom_tool_call":
+                # A free-form tool takes one raw string; record it the way a function stand-in takes it.
+                tool_calls.append(
+                    {
+                        "call_id": item.get("call_id") or item.get("id"),
+                        "name": item.get("name"),
+                        "arguments": {"input": item.get("input")},
                     }
                 )
             elif item.get("type") == "reasoning":

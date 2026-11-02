@@ -6,7 +6,10 @@
 Harbor is the input format; Gym owns execution. A task is a folder holding
 ``task.toml``, ``instruction.md``, ``environment/`` and ``tests/``. A dataset is a
 folder of task folders. ``harbor:<dataset>[@<version>]`` names a dataset in the
-Harbor registry, which this package fetches into ``environments/harbor/`` in the Gym checkout.
+Harbor registry, which this package fetches into ``environments/harbor/`` in the Gym checkout, or
+under the working directory when Gym is installed as a package (``gym dataset pull``;
+:func:`nemo_gym.tasks.harbor.hub.datasets_dir`); a committed entry there declares its dataset as
+``[gym] source`` and is pulled into its own folder (:mod:`nemo_gym.tasks.harbor.entries`).
 """
 
 from nemo_gym.tasks.harbor.digest import DIGEST_KEY, content_hash

@@ -11,7 +11,7 @@ from pydantic import BaseModel
 
 from environment_servers.harbor.app import HarborEpisodeResponse
 from environment_servers.harbor.tests.conftest import make_server
-from nemo_gym.sandbox.access import SandboxAccess
+from nemo_gym.sandbox import SandboxAccess
 
 
 # Request fields that would let a caller run something in the sandbox through the server.

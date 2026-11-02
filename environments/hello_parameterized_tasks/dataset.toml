@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Dataset-level settings: the [dataset] table is Harbor's manifest, the [gym] table is NeMo Gym's slice
+# (see the harbor environment server README, "Dataset-level settings").
+
+[dataset]
+name = "nemo-gym/hello-parameterized-tasks"
+version = "1.0.0"
+description = "Two arithmetic questions rendered from one template, graded by a shared Python verifier"
+
+[gym]
+license = "Apache 2.0"
+
+[gym.defaults]
+timeout_multiplier = 1.0
+resource_multiplier = 1.0

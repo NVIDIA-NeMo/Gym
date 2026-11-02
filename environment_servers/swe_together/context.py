@@ -2,7 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Deterministic reference view; private reasoning never enters the simulator."""
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 
 
 INCREMENTAL_NOTICE = (
