@@ -4,3 +4,5 @@ scipy>=1.7
 sympy>=1.10
 fix-busted-json>=0.0.18
 pandas>=1.5.3
+# NewtonBench imports dotenv directly; do not rely on optional transitive dependencies.
+python-dotenv>=1.0.0

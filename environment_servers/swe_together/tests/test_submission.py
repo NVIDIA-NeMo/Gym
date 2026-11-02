@@ -165,3 +165,13 @@ def test_bad_chunk_cannot_replace_fresh_image(tmp_path):
     with pytest.raises(ValueError, match="checksum"):
         restore(chunks)
     assert (root / "data").read_text() == "fresh"
+
+
+def test_freeze_does_not_use_the_slowest_gzip_level(tmp_path):
+    root = tmp_path / "task"
+    root.mkdir()
+    (root / "target.bin").write_bytes(os.urandom(4096) * 64)
+    freeze([str(root)], tmp_path / "submission")
+    header = (tmp_path / "submission" / "state.tar.gz").read_bytes()[:10]
+    # RFC 1952 XFL 2 marks the slowest level, tarfile's default 9, which ran large build trees past the timeout.
+    assert header[:2] == b"\x1f\x8b" and header[8] != 2

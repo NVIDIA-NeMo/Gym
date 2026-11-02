@@ -14,12 +14,14 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
-from nemo_gym.mcp_auto_exposure import harvest_tools
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient, SimpleServer, entrypoint_ray_enabled
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
+from nemo_gym.server_utils import SimpleServer, entrypoint_ray_enabled
 from nemo_gym.testing.session_conformance import check_resources_session_contract
-from nemo_gym.verifier_fixture import exercise_verifier_fixture, load_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
+from nemo_gym.verification.verifier_fixture import load_verifier_fixture
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if.evidence import MAX_EVIDENCE_CHARS
 from resources_servers.partner_if.example_tools import NotesBackend
@@ -521,7 +523,7 @@ async def test_retire_retains_a_known_episode_identity(server):
 
 async def test_closed_ids_are_remembered_for_the_close_retry_window(tmp_path, plugin, monkeypatch):
     clock = [0.0]
-    monkeypatch.setattr("nemo_gym.base_resources_server.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
     resource = make_server(tmp_path, session_close_retry_window_seconds=10)
     client = TestClient(resource.setup_webserver())
     closed, retired = seed_for(row()), seed_for(row(), session="session-two")

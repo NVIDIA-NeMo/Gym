@@ -165,8 +165,11 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-Keep `resources_tool_transports: []`: Kilo provides its own sandbox tools and rejects required
-external tool grants. Collection calls the Environment Server's `/run`, never the agent's `/run`.
+This SWE-bench Pro recipe uses `resources_tool_transports: []` because Kilo operates on the task's
+sandbox files. For Resources MCP tools, use `[mcp]`; required direct HTTP grants remain unsupported.
+See [Kilo MCP and sandbox ownership](https://docs.nvidia.com/nemo/gym/main/agent-server/integrate-existing-agents#kilo-mcp-and-sandbox-ownership)
+for MCP readiness checks and the configuration when Resources supplies no sandbox.
+Collection calls the Environment Server's `/run`, never the agent's `/run`.
 
 Set `context_window` / `max_output_tokens` to the served model's limits and raise `timeout` for
 long-horizon benchmarks. `timeout` also sets Kilo's model-stream watchdog (`chunkTimeout`), because
@@ -182,8 +185,8 @@ unchanged. Check task-image support and the benchmark's `allowed_agents` before 
 ### Runtime and ownership
 
 The task image must be Linux (x86_64 or aarch64 with glibc; x86_64 only with musl), and the sandbox needs network
-access to nodejs.org, the npm registry, and the Gym Model Server. Python 3.8+ and Bash must be
-present or, on a root image, are installed with apk or apt-get. Task images need not ship Node:
+access to nodejs.org, the npm registry, and the Gym Model Server. Bash must be present or,
+on a root image, is installed with apk or apt-get; the image needs no Python. Task images need not ship Node:
 session setup runs [install_kilo_runtime.sh](install_kilo_runtime.sh), which downloads a
 checksum-verified Node 22 and installs the pinned `kilo_version` into a private directory under
 `/tmp/nemo-gym-kilo-sessions/<id>/`. Missing download tools (`curl`, CA certificates) are installed
@@ -214,7 +217,7 @@ mark them `failed` instead; see Quick start). A killed run
 or a `length` stop returns an `incomplete` response, except a run that times out before any model
 call completes: Kilo retries an unreachable model server without reporting it, so that run raises
 with the end of Kilo's log instead. Observations come from a snapshot of Kilo's
-SQLite database (root and child sessions, tool calls with timing and bash exit status, usage),
+SQLite database, taken on the agent server after the run (root and child sessions, tool calls with timing and bash exit status, usage),
 annotated with the root outcome and a sandbox record; if the snapshot is unavailable, a coverage gap
 is reported. The response metadata records the sandbox runner's hostname and PID and the Kilo
 version. Token IDs and logprobs are not available.

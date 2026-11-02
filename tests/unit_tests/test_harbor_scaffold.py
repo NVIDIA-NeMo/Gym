@@ -13,7 +13,6 @@ import pytest
 
 from nemo_gym.tasks.harbor import discover_tasks
 from nemo_gym.tasks.harbor.materialize import write_rows
-from tests.unit_tests.test_harbor_tasks import fake_registry  # noqa: F401 (fixture)
 
 
 @pytest.mark.usefixtures("fake_registry")
@@ -113,6 +112,7 @@ class TestDatasetInit:
         # `harbor` test package when this file is collected with environment_servers/harbor/tests.
         pytest.importorskip("harbor.models.dataset.manifest")
         pytest.importorskip("harbor.models.task.config")
+        pytest.importorskip("harbor.models.task.task")
         from harbor.models.dataset.manifest import DatasetManifest
         from harbor.models.task.config import TaskConfig
         from pydantic import ValidationError

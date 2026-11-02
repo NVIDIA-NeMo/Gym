@@ -101,20 +101,22 @@ def _user_group(user: str | int | None) -> str:
     return group
 
 
-def _check_user_group(task: HarborTask, user: str | int | None, provider: str | None) -> None:
+def _check_user_group(task: HarborTask, user: str | int | None, provider: str | None, where: str = "") -> None:
     """Refuse a ``name:group`` default on a provider that cannot apply the group.
 
     Dropping the group would run the task with another gid than it asked for and lose the files readable
     only by that group, so the mismatch fails the episode instead of logging a warning. ``provider`` is the
     registry name of the block that runs the task; a provider with no name (``None``) is not known to take
-    the pair either.
+    the pair either. ``where`` names the part of the task that carries the pair when it is not the task's own
+    user (``" step 'build'"`` for a ``[steps.verifier].user``), so a multi-step task's author need not search
+    every step for it; it follows the task id, as the loader labels its per-step refusals.
     """
     group = _user_group(user)
     if not group or provider in GROUP_CAPABLE_PROVIDERS:
         return
     raise HarborUserError(
-        f"{task.task_id}: user {user!r} names group {group!r}; the {provider!r} sandbox provider switches user by "
-        "name only and cannot apply a group (Docker's --user takes the pair)"
+        f"{task.task_id}{where}: user {user!r} names group {group!r}; the {provider!r} sandbox provider switches user "
+        "by name only and cannot apply a group (Docker's --user takes the pair)"
     )
 
 
@@ -158,11 +160,18 @@ class HarborUsersMixin:
     """
 
     async def _set_default_user(
-        self, sandbox: AsyncSandbox, task: HarborTask, names: dict[str, str], *, role: str = "agent"
+        self,
+        sandbox: AsyncSandbox,
+        task: HarborTask,
+        names: dict[str, str],
+        *,
+        role: str = "agent",
+        user: str | None = None,
     ) -> None:
-        """Make the task's user (the image's own ``USER`` for a separate verifier, see :func:`_sandbox_spec`)
-        the sandbox's default for every exec, once it exists in the sandbox, normalised as
-        :func:`_normalised_user` says.
+        """Make the task's user (the image's own ``USER`` for a separate verifier, see :func:`_sandbox_spec`), or
+        ``user`` when given (a step's ``[steps.agent].user`` for one turn of a multi-step task, see
+        :meth:`HarborEnvironmentServer._apply_turn_user`), the sandbox's default for every exec, once it exists
+        in the sandbox, normalised as :func:`_normalised_user` says.
 
         A digit-only ``USER`` is resolved to its name with ``getent`` (``names`` is what the overlay
         already looked up), because OpenSandbox and PTY sessions switch user by name. When the uid
@@ -173,8 +182,14 @@ class HarborUsersMixin:
         (``agent:1000``, or ``1000:1000`` as written when the uid has no name): only Docker takes the pair,
         and :func:`_check_user_group` has refused it on every other provider.
         """
-        user: str | int | None = _normalised_user(task, task.entrypoint_user if role == "verifier" else task.user)
         if user is None:
+            user = task.entrypoint_user if role == "verifier" else task.user
+        user = _normalised_user(task, user)
+        if user is None:
+            # Plain root on an image that starts as root: the provider's own default already is root. A turn
+            # switching back to root from another user has to say so, since the facade's default was changed.
+            if sandbox.default_user is not None:
+                sandbox.set_default_user(None)
             return
         # `_sandbox_spec` refused the pair before the sandbox existed; the one place the default is installed
         # checks too, for a sandbox created another way.
@@ -189,12 +204,17 @@ class HarborUsersMixin:
         sandbox.set_default_user(user)
 
     def _refuse_unsupported_group(
-        self, task: HarborTask, user: str | int | None, global_config_dict: Mapping[str, Any] | None = None
+        self,
+        task: HarborTask,
+        user: str | int | None,
+        global_config_dict: Mapping[str, Any] | None = None,
+        where: str = "",
     ) -> None:
         """:func:`_check_user_group` for ``user`` on the provider that runs ``task``, resolved only when there is a
-        group to check (:meth:`HarborEnvironmentServer._task_provider_name`)."""
+        group to check (:meth:`HarborEnvironmentServer._task_provider_name`); ``where`` labels the step that
+        carries the pair, as there."""
         if _user_group(user):
-            _check_user_group(task, user, self._task_provider_name(task, global_config_dict))
+            _check_user_group(task, user, self._task_provider_name(task, global_config_dict), where)
 
     async def _user_name(self, sandbox: AsyncSandbox, task: HarborTask, uid: str, names: dict[str, str]) -> str | None:
         """The name of ``uid`` in the image, looked up once with ``getent``; ``None`` (warned once) when it has none."""

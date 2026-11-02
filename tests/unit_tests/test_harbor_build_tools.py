@@ -26,8 +26,9 @@ from nemo_gym.tasks.harbor.compose_variables import compose_variables
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION, dockerfile_has_heredoc
 from nemo_gym.tasks.harbor.image_build import build_images
+from nemo_gym.tasks.harbor.image_configs import load_compose_document
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
-from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.tasks.harbor.task import built_service_images, load_task
 from tests.unit_tests.harbor_build_helpers import (
     ARM_BUILDAH_INSPECT,
     BUILD_DOCKERFILE,
@@ -41,6 +42,7 @@ from tests.unit_tests.harbor_build_helpers import (
     HeredocTool,
     harbor_hash,
     local_docker,
+    main_record,
     settled,
     tagged_buildah,
     task_inputs_digest,
@@ -64,7 +66,7 @@ class TestImageBuilder:
         assert build_argv[build_argv.index("--project-directory") + 1] == str(folder / "a" / "environment")
         assert inspect_argv == ["docker", "image", "inspect", result.tag]
         built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
-        assert built == {result.digest: {"image": result.tag, "tasks": ["a"], "tool": "docker", "pushed": False}}
+        assert built == {result.digest: main_record(result.tag, ["a"], "docker", False)}
         configs = json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
         assert (
             configs[result.tag]["config"]["User"] == "app" and configs[result.tag]["config_digest"] == "sha256:def456"
@@ -78,6 +80,55 @@ class TestImageBuilder:
         # A repository is the registry path the Harbor name goes under; a trailing slash is dropped.
         pushed = ImageBuilder(tool="buildah", repository=REPO + "/", storage_root=tmp_path, run=FakeTool("buildah"))
         assert pushed.tag_for(entry) == f"{REPO}/hb__{digest}"
+
+    def test_tag_for_names_a_sidecar_as_compose_names_it_under_the_project(self, tmp_path):
+        digest = "0123456789abcdef0123456789abcdef"  # pragma: allowlist secret
+        local = ImageBuilder(tool="docker", run=FakeTool("docker"))
+        pushed = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path, run=FakeTool("buildah"))
+        world = BuildPlanEntry(digest, tmp_path / "ctx", ("a",), service="world")
+        # Compose's <project>-<service> under the project name Gym passes, hb__<hash>; one flat name per image.
+        assert local.tag_for(world) == f"hb__{digest}-world"
+        assert pushed.tag_for(world) == f"{REPO}/hb__{digest}-world" == pushed.tag_name(digest, "world")
+        assert pushed.tag_name(digest) == f"{REPO}/hb__{digest}"
+        # An odd service name is sanitised like Harbor sanitises image names.
+        odd = BuildPlanEntry(digest, tmp_path / "ctx", ("a",), service="Legacy App@2")
+        assert local.tag_for(odd) == f"hb__{digest}-legacy-app-2"
+
+    @pytest.mark.parametrize("tool", ["docker", "buildah"])
+    def test_services_that_differ_by_case_only_are_refused_before_any_build(self, tmp_path, tool):
+        """Review (M24): ``Db`` and ``db`` are both valid Compose service names and both build as ``hb__<digest>-db``
+        once the name is lower-cased, so the second build silently replaced the first and both records named one image
+        (on the compose path the images override replaced their distinct explicit ``image:`` values too). The collision
+        is refused before any command, naming both services and the shared tag, on either tool path."""
+        folder = tmp_path / "ds"
+        compose = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  Db:\n    image: org/primary:1\n    build: ./primary\n"
+            "  db:\n    image: org/replica:1\n    build: ./replica\n"
+        )
+        write_task(
+            folder / "a",
+            extra={
+                "docker-compose.yaml": compose,
+                "tools/setup.sh": "#!/bin/sh\necho ok\n",
+                "primary/Dockerfile": "FROM postgres:16\n",
+                "replica/Dockerfile": "FROM postgres:16\nENV REPLICA=1\n",
+            },
+        )
+        builder, runner = local_docker() if tool == "docker" else tagged_buildah(tmp_path)
+        plan = plan_builds(folder)
+        assert [entry.service for entry in plan] == ["main", "Db", "db"]
+        tag = builder.tag_name(plan[0].digest, "db")
+        assert builder.tag_for(plan[1]) == builder.tag_for(plan[2]) == tag
+        with pytest.raises(BuildError) as info:
+            list(builder.build_many(plan))
+        message = str(info.value)
+        assert message.startswith(f"{folder / 'a' / 'environment' / 'docker-compose.yaml'} of task(s) a declares ")
+        assert "declares services 'Db' and 'db', which both build as image " + tag in message
+        assert message.endswith("; image names are lower-case, so rename one")
+        # Nothing was built or pushed under any hb__ name; the docker path ran only its compose plugin check.
+        assert [call for call in runner.calls if any("hb__" in arg for arg in call)] == []
+        assert not any("build" in call or "bud" in call or "push" in call for call in runner.calls)
 
     def test_buildah_builds_and_pushes_with_its_storage_flags(self, tmp_path):
         folder = tmp_path / "ds"
@@ -106,7 +157,7 @@ class TestImageBuilder:
         assert inspect_argv[-3:] == ["--type", "image", result.tag]
         assert push_argv[-2:] == [result.tag, f"docker://{result.tag}"] and "--digestfile" in push_argv
         built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
-        assert built == {result.digest: {"image": result.image, "tasks": ["a"], "tool": "buildah", "pushed": True}}
+        assert built == {result.digest: main_record(result.image, ["a"], "buildah", True)}
         configs = json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
         assert configs[result.image] == {
             "architecture": "amd64",
@@ -174,7 +225,7 @@ class TestImageBuilder:
         (second,) = build_images(folder, builder=pushing, log=lines.append)
         assert lines[0] == f"Rebuilding {first.image} for a: it was built locally and this run pushes to a repository"
         built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
-        assert built[first.digest] == {"image": second.image, "tasks": ["a"], "tool": "podman", "pushed": True}
+        assert built[first.digest] == main_record(second.image, ["a"], "podman", True)
         # A pushed image serves a local run too.
         assert build_images(folder, builder=local, log=lines.append) == []
         assert lines[-1] == f"Built image recorded for a: {second.image}"
@@ -825,12 +876,15 @@ class TestDirectBuildPath:
 
     def test_the_direct_build_validates_the_compose_file_before_any_command(self, tmp_path):
         folder = tmp_path / "ds"
-        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        compose = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build:\n      context: ./db\n"
+            "      network: host\n"
+        )
         write_task(folder / "a", extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM postgres:16\n"})
         fake = FakeTool("buildah")
         builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
-        # A context the loader refuses is never built and pushed under the hb__ name.
-        with pytest.raises(BuildError, match="service 'db' has a build section"):
+        # A context the docker path refuses is refused here too, main included: nothing is built or pushed.
+        with pytest.raises(BuildError, match=r"services\.db\.build\.network is refused"):
             build_images(folder, builder=builder, log=lambda _: None)
         assert fake.calls == [] and not (folder / BUILT_IMAGES_FILE).exists()
 
@@ -858,6 +912,193 @@ class TestDirectBuildPath:
         builder, fake = tagged_buildah(tmp_path)
         with pytest.raises(BuildError, match=r"environment has no Dockerfile\.agent"):
             builder.build(entry)
+        assert fake.calls == []
+
+    # -- G2: sidecars, one build per service -------------------------------------------------------
+
+    SIDECAR_FILES = {
+        "docker-compose.yaml": (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n"
+            "  world:\n    build:\n      context: .\n      dockerfile: world/Dockerfile\n"
+            "  db:\n    image: ${MAIN_IMAGE_NAME}_db\n    build:\n      context: ./db\n      args:\n        V: '1'\n"
+            "      no_cache: true\n"
+        ),
+        "world/Dockerfile": "FROM python:3.12-slim\nCOPY world/ /opt/world/\n",
+        "db/Dockerfile": "FROM postgres:16\nARG V\n",
+        "tools/setup.sh": "#!/bin/sh\necho ok\n",
+    }
+
+    def test_sidecars_build_one_per_service_with_their_own_context_and_dockerfile(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", extra=self.SIDECAR_FILES)
+        context = (folder / "a" / "environment").resolve()
+        fake = FakeTool("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
+        main, world, db = build_images(folder, builder=builder, log=lambda _: None)
+        assert [r.service for r in (main, world, db)] == ["main", "world", "db"]
+        assert world.tag == f"{REPO}/hb__{main.digest}-world" and db.tag == f"{REPO}/hb__{main.digest}-db"
+        assert all(r.image == f"{r.tag}@sha256:pushed01" and r.pushed for r in (main, world, db))
+        # buildah: build, inspect, push per service, in order; each service's context and Dockerfile.
+        verbs = [next(a for a in call if a in ("bud", "inspect", "push")) for call in fake.calls]
+        assert verbs == ["bud", "inspect", "push"] * 3
+        builds = [call for call in fake.calls if "bud" in call]
+        assert builds[0][-3:] == ["-f", str(context / "Dockerfile"), str(context)]
+        # counselbench's world: context `.`, dockerfile under a subfolder.
+        assert builds[1][-3:] == ["-f", str(context / "world" / "Dockerfile"), str(context)]
+        # A sidecar with its own context, its build args applied; no_cache is ignored on the direct path.
+        assert builds[2][-3:] == ["-f", str(context / "db" / "Dockerfile"), str(context / "db")]
+        assert builds[2][builds[2].index("--build-arg") + 1] == "V=1" and "--no-cache" not in builds[2]
+        assert all("--format" in call and call[call.index("--format") + 1] == "docker" for call in builds)
+        # One merged record per context; compose-images.json holds every image's configuration.
+        built = json.loads((folder / BUILT_IMAGES_FILE).read_text())
+        assert built == {
+            main.digest: {
+                "image": main.image,
+                "tasks": ["a"],
+                "tool": "buildah",
+                "pushed": True,
+                "services": {
+                    "main": {"image": main.image, "tool": "buildah", "pushed": True},
+                    "world": {"image": world.image, "tool": "buildah", "pushed": True},
+                    "db": {"image": db.image, "tool": "buildah", "pushed": True},
+                },
+            }
+        }
+        configs = json.loads((folder / IMAGE_CONFIGS_FILE).read_text())
+        assert {main.image, world.image, db.image} <= set(configs)
+        assert configs[world.image]["config"]["Cmd"] == ["/bin/sh"] and configs[world.image]["image"] == world.image
+        # The loader: main runs from its image, the sidecars are substituted by service name.
+        task = load_task(folder / "a")
+        assert task.image == main.image
+        assert built_service_images(folder / "a") == {"main": main.image, "world": world.image, "db": db.image}
+        # Nothing to do the second time, each service reported.
+        lines: list[str] = []
+        assert build_images(folder, builder=builder, log=lines.append) == []
+        assert lines == [
+            f"Built image recorded for a: {main.image}",
+            f"Built image recorded for a (world): {world.image}",
+            f"Built image recorded for a (db): {db.image}",
+        ]
+
+    def test_a_failure_on_the_second_service_leaves_the_first_recorded(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", extra=self.SIDECAR_FILES)
+        context = (folder / "a" / "environment").resolve()
+        # world's build fails: its bud line ends with the context, `.`, the same as main's, so fail on the Dockerfile.
+        fake = FakeTool("buildah", fail=str(context / "world" / "Dockerfile"))
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
+        with pytest.raises(BuildError, match=rf"Building {REPO}/hb__[0-9a-f]+-world for task\(s\) a failed"):
+            build_images(folder, builder=builder, log=lambda _: None)
+        # main was built, pushed and recorded before world failed; db was never started.
+        (entry,) = json.loads((folder / BUILT_IMAGES_FILE).read_text()).values()
+        assert set(entry["services"]) == {"main"} and entry["image"] == entry["services"]["main"]["image"]
+        assert not any(str(context / "db") in call for call in fake.calls)
+        # The next run builds the two missing services only.
+        good = FakeTool("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=good)
+        lines: list[str] = []
+        world, db = build_images(folder, builder=builder, log=lines.append)
+        assert (world.service, db.service) == ("world", "db")
+        assert lines[0].startswith("Built image recorded for a: ") and len([c for c in good.calls if "bud" in c]) == 2
+        assert set(json.loads((folder / BUILT_IMAGES_FILE).read_text())[world.digest]["services"]) == {
+            "main",
+            "world",
+            "db",
+        }
+
+    def test_a_sidecar_left_local_by_an_interrupted_pushing_run_is_rebuilt_not_vouched_for_by_main(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", extra=self.SIDECAR_FILES)
+        context = (folder / "a" / "environment").resolve()
+        # 1. A local docker prepare (iterating on a laptop): main, world and db recorded as local tags.
+        main, world, db = build_images(folder, builder=local_docker()[0], log=lambda _: None)
+        assert not main.pushed and world.image == f"hb__{main.digest}-world"
+        # 2. The cluster prepare (buildah, repository) rebuilds everything, pushes main, then fails on world.
+        failing = FakeTool("buildah", fail=str(context / "world" / "Dockerfile"))
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=failing)
+        lines: list[str] = []
+        with pytest.raises(BuildError, match=r"-world for task\(s\) a failed"):
+            build_images(folder, builder=builder, log=lines.append)
+        local = "it was built locally and this run pushes to a repository"
+        assert lines[:3] == [
+            f"Rebuilding {main.image} for a: {local}",
+            f"Rebuilding {world.image} for a (world): {local}",
+            f"Rebuilding {db.image} for a (db): {local}",
+        ]
+        entry = json.loads((folder / BUILT_IMAGES_FILE).read_text())[main.digest]
+        pushed_main = entry["services"]["main"]
+        assert pushed_main["pushed"] is True and pushed_main["image"].startswith(f"{REPO}/hb__{main.digest}@sha256:")
+        # world's record is still the local docker tag, flagged as such: main's push does not vouch for it.
+        assert entry["services"]["world"] == {"image": world.image, "tool": "docker", "pushed": False}
+        assert entry["image"] == pushed_main["image"] and entry["pushed"] is True and entry["tool"] == "buildah"
+        # 3. The retry: main's pushed record fits, the local world and db are rebuilt and pushed, not reused.
+        good = FakeTool("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=good)
+        lines.clear()
+        assert [r.service for r in build_images(folder, builder=builder, log=lines.append)] == ["world", "db"]
+        assert lines[0] == f"Built image recorded for a: {pushed_main['image']}"
+        assert lines[1] == f"Rebuilding {world.image} for a (world): {local}"
+        assert len([c for c in good.calls if "bud" in c]) == 2
+        entry = json.loads((folder / BUILT_IMAGES_FILE).read_text())[main.digest]
+        assert all(record["pushed"] and record["tool"] == "buildah" for record in entry["services"].values())
+        # The seed document carries the pushed sidecar, the one OpenSandbox can pull.
+        document = load_compose_document(load_task(folder / "a"))
+        assert document["services"]["world"]["image"].startswith(f"{REPO}/hb__{main.digest}-world@sha256:")
+        assert build_images(folder, builder=builder, log=lambda _: None) == []
+
+    def test_a_platform_mismatch_on_a_sidecar_names_the_service(self, tmp_path):
+        folder = tmp_path / "ds"
+        write_task(folder / "a", extra=self.SIDECAR_FILES)
+
+        class ArmWorld(FakeTool):
+            def __call__(self, argv, env=None):
+                self.inspect = ARM_BUILDAH_INSPECT if any(a.endswith("-world") for a in argv) else None
+                return super().__call__(argv, env)
+
+        fake = ArmWorld("buildah")
+        builder = ImageBuilder(tool="buildah", repository=REPO, storage_root=tmp_path / "store", run=fake)
+        with pytest.raises(
+            BuildError, match=r"-world for task\(s\) a \(service world\): the image came out as linux/arm64"
+        ):
+            build_images(folder, builder=builder, log=lambda _: None)
+        assert not any("push" in call and call[-1].endswith("-world") for call in fake.calls)
+        assert set(json.loads((folder / BUILT_IMAGES_FILE).read_text()).popitem()[1]["services"]) == {"main"}
+
+    @pytest.mark.parametrize(
+        ("section", "message"),
+        [
+            (
+                "      dockerfile_inline: |\n        FROM scratch\n",
+                r"services\.db\.build\.dockerfile_inline is not supported by the direct podman build",
+            ),
+            (
+                "      additional_contexts:\n        base: service:main\n",
+                r"services\.db\.build\.additional_contexts is not supported by the direct podman build",
+            ),
+        ],
+        ids=["dockerfile_inline", "additional_contexts"],
+    )
+    def test_compose_only_build_keys_on_a_sidecar_are_refused_on_the_direct_path(self, tmp_path, section, message):
+        folder = tmp_path / "ds"
+        compose = (
+            "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build:\n      context: ./db\n" + section
+        )
+        write_task(folder / "a", extra={"docker-compose.yaml": compose, "db/Dockerfile": "FROM postgres:16\n"})
+        fake = FakeTool("podman")
+        builder = ImageBuilder(tool="podman", repository=REPO, run=fake)
+        with pytest.raises(BuildError, match=message + r".*builds\.tool: docker"):
+            build_images(folder, builder=builder, log=lambda _: None)
+        # Knowable from the checked file: nothing is built, pushed or recorded for the context, main included.
+        assert fake.calls == []
+        assert not (folder / BUILT_IMAGES_FILE).is_file()
+
+    def test_a_missing_sidecar_dockerfile_is_a_clear_error_naming_the_service(self, tmp_path):
+        folder = tmp_path / "ds"
+        compose = "services:\n  main:\n    image: ${MAIN_IMAGE_NAME}\n  db:\n    build: ./db\n"
+        write_task(folder / "a", extra={"docker-compose.yaml": compose})
+        builder, fake = tagged_buildah(tmp_path)
+        with pytest.raises(BuildError, match=r"environment/db has no Dockerfile for services\.db\.build"):
+            build_images(folder, builder=builder, log=lambda _: None)
         assert fake.calls == []
 
 

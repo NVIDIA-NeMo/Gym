@@ -11,8 +11,6 @@ kilo_version=$2
 node_version=22.19.0
 [[ "$kilo_version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || { echo 'An exact Kilo version is required' >&2; exit 1; }
 [ "$(uname -s)" = Linux ] || { echo 'Kilo sandbox sessions require Linux' >&2; exit 1; }
-# The session runner is a standalone Python script.
-python3 -c 'import sys; assert sys.version_info >= (3, 8), "Kilo sandbox sessions require Python >=3.8"'
 case "$(uname -m)" in
   x86_64) arch=x64 ;;
   aarch64) arch=arm64 ;;
@@ -53,7 +51,9 @@ if [ ! -s /etc/ssl/certs/ca-certificates.crt ] && [ ! -s /etc/pki/tls/certs/ca-b
 if [ "$missing" = 1 ]; then
   install_packages curl ca-certificates tar gzip coreutils gawk
 fi
-if [ "$platform" = linux-x64-musl ] && ! python3 -c 'import ctypes; ctypes.CDLL("libstdc++.so.6")' 2>/dev/null; then
+# Look where musl's loader looks by default.
+if [ "$platform" = linux-x64-musl ] && [ ! -e /lib/libstdc++.so.6 ] && [ ! -e /usr/local/lib/libstdc++.so.6 ] \
+  && [ ! -e /usr/lib/libstdc++.so.6 ]; then
   install_packages libstdc++
 fi
 

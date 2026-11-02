@@ -4,15 +4,16 @@
 """Pydantic mirror of Harbor's ``task.toml`` (schema 1.4).
 
 Field names are Harbor's. Deprecated spellings (``version``, ``memory``, ``storage``,
-``allow_internet``) are read and normalized but never written back. Keys
-this mirror does not know are ignored, as Harbor ignores them; :meth:`HarborSettings.unknown_keys`
-lists them so the loader can say so.
+``allow_internet``) are read and normalized but never written back; the pre-1.3 ``multi_step_reward_mode``
+is accepted and dropped, as Harbor drops it. Keys this mirror does not know are ignored, as Harbor ignores
+them; :meth:`HarborSettings.unknown_keys` lists them so the loader can say so.
 """
 
+import re
 from pathlib import PurePosixPath
 from typing import Any, ClassVar, Literal, get_args
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, model_validator
 
 
 class HarborSettings(BaseModel):
@@ -168,18 +169,49 @@ class HarborCollectHook(HarborSettings):
     user: str | int | None = None
 
 
+# The files the shared verifier's own run leaves in /logs/verifier (the reward, the exit record, the wrapper's
+# stdout): never a sidecar input, so `[verifier].inputs` cannot name them.
+VERIFIER_OUTPUT_NAMES = ("reward.json", "reward.txt", "test-stdout.txt", ".ng-exit")
+
+
 class HarborVerifier(HarborPhaseSettings):
+    """``[verifier]``. ``inputs`` is a Gym extension Harbor has no field for, set from the dataset's ``dataset.toml``
+    (``[gym.tasks."<task_id>".verifier] inputs = [...]``): the names of files under ``/logs/verifier`` a Compose
+    sidecar writes during the rollout for ``test.sh`` to read (kumo's ``verifier`` service appends ``actions.jsonl``
+    for ``main``'s ``tests/score.py``). The server empties ``/logs/verifier`` before a shared verification and
+    before the next turn of a multi-step task; these names alone survive, as regular files, so an agent-planted
+    report or reward is never left for the grader. Plain file names: no path separators, never the grader's own
+    outputs (:data:`VERIFIER_OUTPUT_NAMES`)."""
+
     timeout_sec: float = Field(default=600, gt=0)
     user: str | int | None = None
     env: dict[str, str] = Field(default_factory=dict)
     environment_mode: Literal["separate", "shared"] | None = None
     environment: HarborEnvironment | None = None
     collect: list[HarborCollectHook] = Field(default_factory=list)
+    inputs: list[str] = Field(default_factory=list)
 
     @model_validator(mode="after")
     def shared_has_no_environment(self) -> "HarborVerifier":
         if self.environment_mode == "shared" and self.environment is not None:
             raise ValueError("A shared verifier cannot declare its own [verifier.environment]")
+        return self
+
+    @model_validator(mode="after")
+    def inputs_are_file_names(self) -> "HarborVerifier":
+        for name in self.inputs:
+            if not name or name in (".", "..") or "/" in name or "\\" in name or "\0" in name:
+                raise ValueError(f"[verifier].inputs entry {name!r} must be a plain file name under /logs/verifier")
+            # The server keeps the name with `find -path`, which matches it as a glob: a literal name only, or a
+            # declared `log[1].jsonl` would be deleted and an undeclared `log1.jsonl` kept.
+            if any(char in name for char in "*?["):
+                raise ValueError(
+                    f"[verifier].inputs entry {name!r} must be a literal file name, not a glob pattern (no *, ? or [)"
+                )
+            if name in VERIFIER_OUTPUT_NAMES:
+                raise ValueError(f"[verifier].inputs entry {name!r} is the grader's own output, not a sidecar input")
+        if len(set(self.inputs)) != len(self.inputs):
+            raise ValueError(f"[verifier].inputs names a file twice: {self.inputs}")
         return self
 
 
@@ -238,10 +270,84 @@ class HarborArtifact(HarborSettings):
         return PurePosixPath(self.destination or self.source.lstrip("/"))
 
 
+_STEP_NAME = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+
+
+class HarborTaskStepAgent(HarborPhaseSettings):
+    """``[steps.agent]``: unset values fall back to the task's ``[agent]``, as in Harbor."""
+
+    timeout_sec: float | None = Field(default=None, gt=0)
+    user: str | int | None = None
+
+
+# Harbor's `VerifierConfig.timeout_sec` default, which a step's verifier gets when `[steps.verifier]` names none:
+# `StepConfig.verifier` is a full `VerifierConfig` (0.22.0 and main alike), so the task's `[verifier].timeout_sec`
+# never reaches a step (`_step_verifier_timeout_sec`'s fallback to it is dead code there).
+HARBOR_STEP_VERIFIER_TIMEOUT_SEC = 600.0
+
+
+class HarborTaskStepVerifier(HarborPhaseSettings):
+    """``[steps.verifier]``: ``user``, ``env``, ``environment_mode`` and ``environment`` fall back to the task's
+    ``[verifier]`` as Harbor resolves them (``_step_verifier_user``, ``resolve_step_verifier_mode``,
+    ``resolve_effective_verifier_env_config``). ``timeout_sec`` does not: Harbor's step verifier is a
+    ``VerifierConfig`` of its own with the 600 s default, so a step that names none is graded within
+    :data:`HARBOR_STEP_VERIFIER_TIMEOUT_SEC`, whatever the task's ``[verifier].timeout_sec`` says
+    (:meth:`HarborTaskConfig.step_verifier_timeout_sec`; the loader warns when the two differ). ``collect`` is the
+    step's own ``[[steps.verifier.collect]]`` hooks, run after the task's in the step's collection pass (Harbor's
+    ``_collect_hooks_for``: the task's hooks, then the step's). A shared step cannot declare its own environment, as
+    the task's verifier cannot (Harbor's ``_validate_mode_env_consistency`` is on the class both share)."""
+
+    timeout_sec: float | None = Field(default=None, gt=0)
+    user: str | int | None = None
+    env: dict[str, str] = Field(default_factory=dict)
+    environment_mode: Literal["separate", "shared"] | None = None
+    environment: HarborEnvironment | None = None
+    collect: list[HarborCollectHook] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def shared_has_no_environment(self) -> "HarborTaskStepVerifier":
+        if self.environment_mode == "shared" and self.environment is not None:
+            raise ValueError(
+                "[steps.verifier].environment_mode='shared' is incompatible with [steps.verifier.environment]; "
+                "omit the environment or set environment_mode='separate'"
+            )
+        return self
+
+
+class HarborTaskStep(HarborSettings):
+    """One ``[[steps]]`` entry of ``task.toml`` (Harbor's ``StepConfig``): a step of the task, which the task
+    author defines and grades, not a step of a trajectory (``nemo_gym.trajectory.atif_v1_7.AtifStep``).
+
+    The loader pairs it with its ``steps/<name>/`` folder into a ``HarborTurn``, as ``HarborTaskConfig`` pairs
+    with its folder into a ``HarborTask``. The step has its own instruction (``steps/<name>/instruction.md``)
+    and verifier (the task's ``tests/`` with ``steps/<name>/tests/`` on top). ``min_reward`` stops the episode
+    after this step when its rewards fall short: a number gates the ``reward`` key, a mapping gates each named
+    key, and a step without a verifier result fails every gate.
+    """
+
+    name: str
+    agent: HarborTaskStepAgent = Field(default_factory=HarborTaskStepAgent)
+    verifier: HarborTaskStepVerifier = Field(default_factory=HarborTaskStepVerifier)
+    min_reward: float | dict[str, float] | None = None
+    healthcheck: HarborHealthcheck | None = None
+    artifacts: list[HarborArtifact] = Field(default_factory=list)
+
+    @model_validator(mode="after")
+    def portable_name(self) -> "HarborTaskStep":
+        if not _STEP_NAME.fullmatch(self.name) or self.name in (".", ".."):
+            raise ValueError(f"Step name {self.name!r} must be a portable directory name under steps/")
+        return self
+
+
 class HarborTaskConfig(HarborSettings):
     """One ``task.toml``."""
 
-    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version", "steps", "multi_step_reward_strategy"})
+    # `multi_step_reward_mode` is the pre-1.3 spelling older multi-step generators (the MemoryArena adapters
+    # among them) write as "aggregate". Harbor 0.22.0 has no such field: `TaskConfig` drops the key and the
+    # task rolls up with the default `mean`, or its own `multi_step_reward_strategy`. The mirror does the same
+    # through `extra="ignore"`; naming the key here only keeps the loader from reporting it as unknown (the
+    # loader warns about a value other than "aggregate", which Harbor drops silently).
+    deprecated_keys: ClassVar[frozenset[str]] = frozenset({"version", "multi_step_reward_mode"})
 
     schema_version: str = "1.4"
     task: dict[str, Any] = Field(default_factory=dict)
@@ -252,6 +358,13 @@ class HarborTaskConfig(HarborSettings):
     environment: HarborEnvironment = Field(default_factory=HarborEnvironment)
     verifier: HarborVerifier = Field(default_factory=HarborVerifier)
     artifacts: list[HarborArtifact] = Field(default_factory=list)
+    # A task with steps runs them in order as turns in one sandbox; ``mean`` is Harbor's default roll-up.
+    steps: list[HarborTaskStep] = Field(default_factory=list)
+    multi_step_reward_strategy: Literal["mean", "final"] = "mean"
+    # The dataset's `[gym.defaults].timeout_multiplier` once `apply_dataset_config` has scaled this task's budgets by
+    # it (not a task.toml key): the default a step inherits for a budget it does not name reads scaled by it too,
+    # like the budgets the task names (`step_verifier_timeout_sec`).
+    _timeout_multiplier: float = PrivateAttr(default=1.0)
 
     @model_validator(mode="before")
     @classmethod
@@ -261,9 +374,30 @@ class HarborTaskConfig(HarborSettings):
         data = dict(data)
         if "version" in data:
             data.setdefault("schema_version", str(data.pop("version")))
-        if data.get("steps") or data.get("multi_step_reward_strategy"):
-            raise ValueError("Multi-step tasks ([[steps]]) are not supported yet")
         return data
+
+    @model_validator(mode="after")
+    def unique_step_names(self) -> "HarborTaskConfig":
+        names = [step.name for step in self.steps]
+        if len(names) != len(set(names)):
+            raise ValueError(f"Step names must be unique: {names}")
+        return self
+
+    @property
+    def is_multi_turn(self) -> bool:
+        return bool(self.steps)
+
+    def step_agent_timeout_sec(self, step: HarborTaskStep) -> float:
+        return step.agent.timeout_sec if step.agent.timeout_sec is not None else self.agent.timeout_sec
+
+    def step_verifier_timeout_sec(self, step: HarborTaskStep) -> float:
+        """The step's own ``[steps.verifier].timeout_sec``, else Harbor's step default of 600 s, never the task's
+        ``[verifier].timeout_sec`` (:data:`HARBOR_STEP_VERIFIER_TIMEOUT_SEC`)."""
+        if step.verifier.timeout_sec is not None:
+            return step.verifier.timeout_sec
+        # Harbor's `_step_verifier_timeout_sec` feeds that default through `_resolve_timeout_sec`, so it scales by
+        # the dataset's `timeout_multiplier` like every budget the task names (`apply_dataset_config` carries it).
+        return HARBOR_STEP_VERIFIER_TIMEOUT_SEC * self._timeout_multiplier
 
     @property
     def is_shared_verifier(self) -> bool:
