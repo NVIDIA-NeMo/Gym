@@ -120,5 +120,3 @@ parallel_tool_calls_single_step_tool_use_with_argument_comparison_environment_se
       agent_server:
         type: responses_api_agents
         name: parallel_tool_calls_single_step_tool_use_with_argument_comparison_agent
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

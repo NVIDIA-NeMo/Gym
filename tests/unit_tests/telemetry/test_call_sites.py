@@ -138,7 +138,7 @@ async def test_sandbox_spans_carry_the_rollout_id_inside_a_rollout(
     """The same correlation key the endpoint spans carry, so a rollout's sandbox time is filterable
     by attribute and not only through the parent chain. The sandbox API learns it through the
     provider Gym's telemetry setup registers, not by importing rollout correlation."""
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core.episode import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start()
@@ -189,7 +189,7 @@ async def test_sandbox_spans_keep_the_rollout_id_when_the_provider_fails(
     """Correlation is attached before the awaited work, so a failed start or exec is still filterable."""
     from opentelemetry.trace import StatusCode
 
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core.episode import rollout_context
     from nemo_gym.sandbox.api import AsyncSandbox
     from nemo_gym.sandbox.providers.base import SandboxSpec
 
@@ -242,10 +242,10 @@ def test_server_type_is_derived_from_the_class_hierarchy():
     Matched against the MRO by name rather than by import, because the base server
     modules import `server_utils` and importing them back would be circular.
     """
-    from nemo_gym.base_resources_server import SimpleResourcesServer
     from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
     from nemo_gym.base_responses_api_model import SimpleResponsesAPIModel
-    from nemo_gym.server_utils import _telemetry_server_type
+    from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
+    from nemo_gym.server_runtime.base_server import _telemetry_server_type
 
     assert _telemetry_server_type(SimpleResourcesServer) == "resources_servers"
     assert _telemetry_server_type(SimpleResponsesAPIAgent) == "responses_api_agents"
@@ -254,8 +254,8 @@ def test_server_type_is_derived_from_the_class_hierarchy():
 
 def test_server_type_survives_subclassing():
     """Every real Gym server is a subclass, so the lookup has to walk the MRO."""
-    from nemo_gym.base_resources_server import SimpleResourcesServer
-    from nemo_gym.server_utils import _telemetry_server_type
+    from nemo_gym.server_runtime.base_resources_server import SimpleResourcesServer
+    from nemo_gym.server_runtime.base_server import _telemetry_server_type
 
     class MyWeatherServer(SimpleResourcesServer):
         pass
@@ -264,14 +264,14 @@ def test_server_type_survives_subclassing():
 
 
 def test_server_type_is_none_for_an_unrelated_class():
-    from nemo_gym.server_utils import _telemetry_server_type
+    from nemo_gym.server_runtime.base_server import _telemetry_server_type
 
     assert _telemetry_server_type(dict) is None
 
 
 def test_url_query_string_is_stripped_before_it_becomes_an_attribute():
     """Gym URLs carry API keys, and rollout-prefixed routes carry task identity."""
-    from nemo_gym.server_utils import _redacted_url
+    from nemo_gym.client.http_client import _redacted_url
 
     assert _redacted_url("http://h:1/v1/responses?api_key=sk-abc") == "http://h:1/v1/responses"
     assert _redacted_url("http://h:1/v1/responses") == "http://h:1/v1/responses"
@@ -494,7 +494,7 @@ def test_lens_imports_are_function_local_outside_the_fallback_resolver():
 
 async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorded_spans, started_sandbox):
     """The sandbox package on its own knows nothing about rollouts."""
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core.episode import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start()
@@ -507,7 +507,7 @@ async def test_sandbox_spans_have_no_extra_attributes_without_a_provider(recorde
 async def test_explicit_span_attributes_win_over_the_provider(
     recorded_spans, started_sandbox, rollout_attributes_registered
 ):
-    from nemo_gym.rollout_correlation import rollout_context
+    from nemo_gym.core.episode import rollout_context
 
     with rollout_context("7-0"):
         sandbox = await started_sandbox().start(span_attributes={"nemo.gym.rollout.id": "explicit", "extra": "x"})
@@ -611,7 +611,7 @@ def test_dispatch_span_omits_a_repeat_that_is_not_an_index(recorded_spans):
 def _write_rollout_input(tmp_path, n: int):
     import json as _json
 
-    from nemo_gym.global_config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
+    from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, TASK_SOURCE_KEY_NAME
 
     path = tmp_path / "input.jsonl"
     path.write_text(
@@ -660,7 +660,7 @@ def _install_recording_post(monkeypatch):
         sent.append(
             {"span": otel_trace.get_current_span().get_span_context(), "traceparent": headers.get("traceparent")}
         )
-        return FakeResponse(200, {"response": {}})
+        return FakeResponse(200, {"response": {}, "reward": 1.0})
 
     install_fake_server_client(monkeypatch, AsyncMock(side_effect=post), agent_names=("alpha",))
     return sent
@@ -703,6 +703,14 @@ async def test_standalone_run_gives_each_rollout_its_own_trace_linked_to_the_job
     for request in sent:
         dispatch = by_span_id[request["span"].span_id]
         assert request["traceparent"].split("-")[1] == f"{dispatch.context.trace_id:032x}"
+    assert driver_telemetry._OWNED_JOB_SPAN_CONTEXT.get() is None
+
+    # Reusing completed outcomes must not dispatch requests or emit rollout traces again.
+    config = _collection_config(tmp_path, tmp_path / "input.jsonl")
+    config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(config)
+    assert len(sent) == 3
+    assert len([s for s in recorded_spans() if s.name == "gym.rollout.dispatch"]) == 3
     assert driver_telemetry._OWNED_JOB_SPAN_CONTEXT.get() is None
 
 

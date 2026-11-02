@@ -63,7 +63,7 @@ from pathlib import Path
 
 import yaml
 
-from nemo_gym.global_config import AGENT_SESSION_AGENT_TYPES
+from nemo_gym.config import AGENT_SESSION_AGENT_TYPES
 
 
 REPO = Path(__file__).resolve().parents[1]
@@ -86,7 +86,7 @@ RESOURCES_SERVERS_ROOT = REPO / "resources_servers"
 TYPED_SEED = "ResourcesSeedSessionRequest"
 RELAY = "legacy_agent"
 SWITCHED_AGENT_TYPE = "simple_agent"
-# The timeouts are the relay's own defaults, which the relay did not enforce and this server does.
+# The server defaults preserve the migrated relay's timeouts without repeating them in every config.
 SWITCHED = """\
 {server}:
   environment_servers:
@@ -100,8 +100,6 @@ SWITCHED = """\
         name: {resources}
       resources_tool_transports:
       - direct_http
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 """
 # A relay that inherits another keeps inheriting it, so the parent stays a template that composition consumes.
 # The parent switches in the same run, so the merge holds one environment server type.
@@ -221,7 +219,7 @@ def load(path: Path) -> dict | None:
 def agent_references(server: dict) -> list[tuple[str, str]]:
     """Return each ``(field, agent)`` that one environment server's config references.
 
-    Matches `environment_server_agent_refs` in `nemo_gym/global_config.py`.
+    Matches `environment_server_agent_refs` in `nemo_gym/config/global_config.py`.
     """
     return [
         (field, value["name"])
@@ -644,7 +642,8 @@ def split_servers(
             if inherited is not None:
                 refused.append(
                     f"{name} in a run of {display(path)} would merge a {RELAY} server with {inherited}, "
-                    f"which switches; declare a server of its own there instead"
+                    f"which switches; keep the name there and replace its definition with a complete {RELAY} server, "
+                    f"deleting _inherit_from and single_agent_turn_legacy, as benchmarks/hle/opencode.yaml does"
                 )
                 continue
             for declaration in switching:

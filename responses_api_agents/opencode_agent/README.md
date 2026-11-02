@@ -73,8 +73,8 @@ task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
-needs Linux, Python 3.8+ with SQLite and `fcntl`, and Bash. Missing Python/Bash can
-be installed with apt-get or apk when running as root; otherwise preinstall them.
+needs Linux and Bash; it does not need Python. Missing Bash can be installed with
+apt-get or apk when running as root; otherwise preinstall it.
 Online installation needs GitHub access, curl, tar, gzip and a Debian or RHEL CA
 bundle. Missing required packages are installed with apt-get or apk as root;
 non-root images must preinstall them. System `rg` is a best-effort optimization:
@@ -87,18 +87,19 @@ correlation plugin. The plugin is uploaded into each sandbox when model-call
 observability is enabled. Sessions disable automatic updates and models.dev fetches.
 
 The runner uses ordinary sandbox `exec`, with an internal deadline.
-The supervisor stops live harness-group processes and reaps its children. On timeout
-or close it preserves children already adopted before the stop, typically services from
-completed tools, and drains newly adopted children within the cleanup deadline, including
-tools in separate sessions. The sandbox owner stops the preserved services later.
+The supervisor stops live harness-group processes. On timeout or close it also kills, within
+the cleanup deadline, the harness's descendants in other process groups (typically tools in
+their own sessions) and processes that inherited the harness's `NEMO_GYM_SUPERVISOR`
+environment marker, such as services a tool daemonizes during the stop. Processes that left
+the harness before the stop, typically services from completed tools, remain for the sandbox
+owner to stop later.
 Natural CLI exit cannot distinguish unfinished tools in other sessions from services;
-those processes may still change task files. The stop-time cutoff also has adoption/PID
-races and cannot classify later service forks. It is not a security boundary.
-The supervisor and the runner above OpenCode run as `gym-supervisor` and `gym-runner` (links to the
-sandbox's `python3`) from files without a `.py` suffix, so a task agent's `pkill -f python3`,
-`pkill python3` or `killall python3` does not end OpenCode.
+those processes may still change task files. The stop-time cutoff also has PID races and
+cannot classify later service forks. It is not a security boundary.
+The supervisor and the runner above OpenCode are bash scripts, so a task agent's
+`pkill -f python3`, `pkill python3` or `killall python3` does not end OpenCode.
 The CLI must exit before
-SQLite observations are captured; services must use task-owned files rather than the
+its SQLite database is copied to the agent server and exported there; services must use task-owned files rather than the
 agent session directory, which close removes. Capture requires confirmed termination.
 Missing evidence remains retryable; a final negative receipt skips capture and verification
 but permits connection release. Successful close receipts are retained for `session_close_retry_window_seconds` (default 300).
@@ -115,8 +116,16 @@ the task environment hook before accepting a gradable result. A missing or inval
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one text task, optional system/developer text and
-`instructions`. Unsupported controls, images, history replay and required external
-HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are independent
+`instructions`. Unsupported controls, images, history replay and required direct-HTTP
+tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
+their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
+timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
+fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
+`required_mcp.mjs` checks
+their status: a required grant that did not connect fails the activation, and an optional one is
+reported as an `mcp_server_skipped` gap. A run that called the model but left no readable status
+also fails, because nothing confirms its required tools; a run that failed for another reason keeps
+that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
@@ -211,8 +220,7 @@ Ordinary single-turn sessions keep their existing protocol and evidence shape.
 For a sandbox without runtime-download egress, set `sandbox_executable_path` to
 an existing sandbox-visible OpenCode binary and `sandbox_executable_sha256` to its
 SHA-256. Seed verifies bytes and version before copying it into the adapter cache.
-`sandbox_python_executable` selects an existing Python interpreter (default
-`python3`); `sandbox_path_prefix` adds executable directories for installation and
+`sandbox_path_prefix` adds executable directories for installation and
 CLI/tool subprocesses while retaining the image PATH. These paths must already
 exist; the sandbox owner supplies mounts or image contents.
 

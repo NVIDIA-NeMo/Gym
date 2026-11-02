@@ -532,8 +532,6 @@ def _write_config(config_path: Path, out_path: Path, agent_ref: str) -> None:
       agent_server:
         type: responses_api_agents
         name: {agent_ref}
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 """
     config_path.write_text(config_text)
 
@@ -553,7 +551,7 @@ def validate_output(path: Path, gym_repo: Path, agent_ref: str) -> Counter:
 
     from pydantic import TypeAdapter
 
-    from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+    from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
     from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
         ExpectedAction,
     )

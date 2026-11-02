@@ -32,9 +32,9 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
-import nemo_gym.server_utils as server_utils
+import nemo_gym.client.http_client
 import responses_api_models.switchyard_model.app as app_module
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_models.switchyard_model.app import (
     NeMoGymAsyncOpenAI,
     SwitchyardModel,
@@ -84,7 +84,7 @@ def _install_fake_switchyard(monkeypatch: MonkeyPatch, server_cls: type) -> None
 def _install_fake_stats_endpoint(
     monkeypatch: MonkeyPatch, payload: dict | None = None, error: Exception | None = None
 ) -> list:
-    """Stand in for nemo_gym.server_utils.request on the stats path; return the recorded calls.
+    """Stand in for nemo_gym.client.http_client.request on the stats path; return the recorded calls.
 
     Unit tests must not touch Gym's real aiohttp singleton: it parses the process's CLI args the
     first time it is built, which under pytest is a SystemExit, and it binds to whichever event
@@ -879,9 +879,9 @@ target = "policy"
             # The snapshot built the process-singleton aiohttp client on this test's loop; leaving
             # it behind would break later classes that bind it to theirs.
             try:
-                server_utils.global_aiohttp_client_exit()
+                nemo_gym.client.http_client.global_aiohttp_client_exit()
             except Exception:
-                server_utils._GLOBAL_AIOHTTP_CLIENT = None
+                nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
 
         manifest = json.loads((tmp_path / "condition" / "switchyard-condition.json").read_text())
         assert manifest["route"] == "policy-model"

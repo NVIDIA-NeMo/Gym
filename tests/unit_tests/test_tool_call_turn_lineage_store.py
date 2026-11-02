@@ -18,10 +18,9 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.token_id_capture import stamp_lineage
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, tool_call_turn_fingerprint
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, stamp_continuation
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST, compute_chain_hash, hash_token_ids
 from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 from nemo_gym.token_id_capture.store import TokenCaptureStore

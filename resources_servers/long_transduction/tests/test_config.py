@@ -7,7 +7,7 @@ from pathlib import Path
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.rollout_collection import _environment_server_for_agent, _environment_servers_by_agent
 
 
