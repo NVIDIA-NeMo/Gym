@@ -56,9 +56,7 @@ def test_importing_a_package_loads_none_of_its_lazy_submodules(package: str) -> 
         "import sys, nemo_gym.{p}; print(sorted(m for m in {lazy!r} if f'nemo_gym.{p}.' + m in sys.modules))"
     ).format(p=package, lazy=lazy)
     loaded = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True).stdout
-    # sandbox's existing eager exports import these submodules; nothing else may load.
-    eager = {"sandbox": ["compose_fields", "config", "providers.base", "utils"]}
-    assert loaded.strip() == repr(eager.get(package, []))
+    assert loaded.strip() == "[]"
 
 
 def test_packages_declare_public_apis() -> None:
