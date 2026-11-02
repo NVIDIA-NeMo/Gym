@@ -268,14 +268,26 @@ def test_a_record_it_could_not_read_leaves_tool_time_unknown(transcript: str, ex
 
 
 @pytest.mark.parametrize(
-    "damage", [None, "wrong_scope", "policy_request", "different_summary", "duplicate", "shared_event", "failed"]
+    "damage",
+    [
+        None,
+        "missing_model",
+        "policy_request",
+        "different_summary",
+        "duplicate",
+        "shared_event",
+        "failed",
+        "transport",
+        "missing_id",
+    ],
 )
-def test_compaction_requires_native_event_and_unique_scoped_summary_call(damage):
-    from nemo_gym.observability.model_calls import ModelCallRecord
-    from nemo_gym.rollout_observability import ContextCompactionObservation
+def test_compaction_requires_native_event_and_unique_session_helper(damage):
+    from copy import deepcopy
+
+    from nemo_gym.config import ModelServerRef
+    from nemo_gym.trajectory import ContextCompactionObservation
     from responses_api_agents.codex_agent.observability import (
         _COMPACTION_PREFIX,
-        _COMPACTION_PROMPT,
         associate_codex_compaction_calls,
     )
 
@@ -287,48 +299,40 @@ def test_compaction_requires_native_event_and_unique_scoped_summary_call(damage)
         }
     )
     bundle = parse_codex_observations(transcript, "root", returncode=0, timed_out=False)
-    call = ModelCallRecord(
-        call_index=0,
-        model_call_id="helper",
-        response_id="response-helper",
-        client_session_id="root",
-        status_code=200,
-        request={"input": [{"role": "user", "content": _COMPACTION_PROMPT}]},
-        response={
-            "output": [
-                {
-                    "type": "message",
-                    "role": "assistant",
-                    "content": [{"type": "output_text", "text": "Keep the changes."}],
-                }
-            ]
-        },
-    )
-    calls = [call]
-    if damage == "wrong_scope":
-        call.client_session_id = "child"
+    model_ref = ModelServerRef(type="responses_api_models", name="policy")
+    attempt = {
+        "status": 200,
+        "compaction_response": {"response_id": "response-helper", "summary": "Keep the changes."},
+    }
+    attempts = [attempt]
+    if damage == "missing_model":
+        model_ref = None
     elif damage == "policy_request":
-        call.request["input"][0]["content"] = "Continue"
+        del attempt["compaction_response"]
     elif damage == "different_summary":
-        call.response["output"][0]["content"][0]["text"] = "Different"
+        attempt["compaction_response"]["summary"] = "Different"
     elif damage == "duplicate":
-        calls.append(call.model_copy(update={"model_call_id": "other"}))
+        attempts.append(deepcopy(attempt))
     elif damage == "shared_event":
         bundle.records.append(bundle.records[-1].model_copy(deep=True))
     elif damage == "failed":
-        call.status_code = 500
-    joined = associate_codex_compaction_calls(bundle, calls)
+        attempt["status"] = 500
+    elif damage == "transport":
+        attempt["transport_error"] = "stream closed"
+    elif damage == "missing_id":
+        del attempt["compaction_response"]["response_id"]
+    joined = associate_codex_compaction_calls(bundle, attempts, model_ref=model_ref)
     event = next(r for r in joined.records if isinstance(r, ContextCompactionObservation))
     assert event.summary == "Keep the changes."
     assert event.outcome == "completed"
-    assert [ref.model_call_id for ref in event.model_calls] == ([] if damage else ["helper"])
+    assert [ref.response_id for ref in event.model_calls] == ([] if damage else ["response-helper"])
+    assert joined.records[0].model_calls == event.model_calls
     assert bool(joined.gaps) == bool(damage)
     assert bundle.records[-1].model_calls == []
     if damage is None:
-        repeated = associate_codex_compaction_calls(joined, calls)
+        repeated = associate_codex_compaction_calls(joined, attempts, model_ref=model_ref)
         assert repeated == joined
-        repeated = associate_codex_compaction_calls(
-            joined, calls + [call.model_copy(update={"model_call_id": "duplicate"})]
-        )
+        repeated = associate_codex_compaction_calls(joined, attempts * 2, model_ref=model_ref)
         event = next(r for r in repeated.records if isinstance(r, ContextCompactionObservation))
         assert not event.model_calls and repeated.gaps
+        assert not repeated.records[0].model_calls

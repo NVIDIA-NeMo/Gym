@@ -9,17 +9,17 @@ import re
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
-from typing import TYPE_CHECKING, Literal
+from typing import Literal
 
-from pydantic import TypeAdapter, ValidationError
+from pydantic import JsonValue, TypeAdapter, ValidationError
 
+from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymResponseInputItem,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.responses_converter import message_content_to_text
 from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
@@ -30,9 +30,6 @@ from nemo_gym.trajectory import (
 )
 
 
-if TYPE_CHECKING:
-    from nemo_gym.observability.model_calls import ModelCallRecord
-
 _COMPACTION_PREFIX = (
     "Another language model started to solve this problem and produced a summary of its thinking process. "
     "You also have access to the state of the tools that were used by that language model. "
@@ -40,7 +37,6 @@ _COMPACTION_PREFIX = (
     "Here is the summary produced by the other language model, use the information in this summary "
     "to assist with your own analysis:\n"
 )
-_COMPACTION_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION."
 
 
 _ITEM = TypeAdapter(NeMoGymResponseInputItem)
@@ -235,52 +231,53 @@ def parse_codex_observations(
 
 
 def associate_codex_compaction_calls(
-    bundle: AgentObservationBundle, calls: list["ModelCallRecord"]
+    bundle: AgentObservationBundle,
+    attempts: list[dict[str, JsonValue]],
+    *,
+    model_ref: ModelServerRef | None,
 ) -> AgentObservationBundle:
-    """Join exec's persisted summary to one explicitly requested, successful helper response."""
+    """Attach session-local helper identities before returning the agent's bundle.
+
+    The session transport records only completed responses to explicit compaction
+    requests. The native compacted event must independently confirm the summary.
+    """
     result = bundle.model_copy(deep=True)
-    result.gaps = [gap for gap in result.gaps if gap.code != "compaction_model_call_reference_unavailable"]
     events = [record for record in result.records if isinstance(record, ContextCompactionObservation)]
-    candidates = []
-    for event in events:
-        # Finalization can run again with additional capture records. Recompute
-        # references so newly ambiguous evidence cannot retain an earlier match.
-        event.model_calls = []
-        matches = []
-        for index, call in enumerate(calls):
-            history = (call.request or {}).get("input")
-            if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
-                continue
-            last = history[-1]
-            output = (call.response or {}).get("output")
-            if not isinstance(output, list):
-                continue
-            text = "".join(
-                message_content_to_text(item.get("content"))
-                for item in output
-                if isinstance(item, dict) and item.get("type") == "message" and item.get("role") == "assistant"
-            )
-            if (
-                call.client_session_id == event.invocation_id
-                and call.status_code == 200
-                and call.error_category is None
-                and call.model_call_id
-                and event.summary
-                and last.get("role") == "user"
-                and message_content_to_text(last.get("content")).startswith(_COMPACTION_PROMPT)
-                and text == event.summary
-            ):
-                matches.append(index)
-        candidates.append(matches)
+    invocations = [record for record in result.records if isinstance(record, AgentInvocation)]
+    previous_refs = [ref for event in events for ref in event.model_calls]
+    for invocation in invocations:
+        invocation.model_calls = [ref for ref in invocation.model_calls if ref not in previous_refs]
+    result.gaps = [gap for gap in result.gaps if gap.code != "compaction_model_call_reference_unavailable"]
+    helpers = []
+    for attempt in attempts:
+        helper = attempt.get("compaction_response")
+        if (
+            attempt.get("status") == 200
+            and not attempt.get("transport_error")
+            and isinstance(helper, dict)
+            and isinstance(helper.get("response_id"), str)
+            and helper["response_id"]
+            and isinstance(helper.get("summary"), str)
+        ):
+            helpers.append(helper)
+    candidates = [
+        [i for i, helper in enumerate(helpers) if event.summary and helper["summary"] == event.summary]
+        for event in events
+    ]
     counts = Counter(index for matches in candidates for index in matches)
+    identities = Counter(helper["response_id"] for helper in helpers)
     for event, matches in zip(events, candidates):
-        if len(matches) == 1 and counts[matches[0]] == 1:
-            call = calls[matches[0]]
-            event.model_calls = [
-                ModelCallRef(model_call_id=call.model_call_id, model_ref=call.model_ref, response_id=call.response_id)
-            ]
-        else:
-            result.gaps.append(
-                ObservationGap(code="compaction_model_call_reference_unavailable", invocation_id=event.invocation_id)
-            )
+        event.model_calls = []
+        owners = [inv for inv in invocations if inv.invocation_id == event.invocation_id]
+        if model_ref is not None and len(matches) == 1 and counts[matches[0]] == 1 and len(owners) == 1:
+            helper = helpers[matches[0]]
+            if identities[helper["response_id"]] == 1:
+                reference = ModelCallRef(model_ref=model_ref, response_id=helper["response_id"])
+                event.model_calls = [reference]
+                if reference not in owners[0].model_calls:
+                    owners[0].model_calls.append(reference)
+                continue
+        result.gaps.append(
+            ObservationGap(code="compaction_model_call_reference_unavailable", invocation_id=event.invocation_id)
+        )
     return result
