@@ -34,6 +34,7 @@ from nemo_gym.orchestration.executors.otel import (
     resolve_token,
     scrape_targets,
 )
+from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import RESOLVED_CONFIG_NAME
@@ -510,6 +511,15 @@ def test_script_flushes_the_collector_after_the_driver_and_keeps_the_driver_exit
     assert tail.index("sleep 20") < tail.index("pkill -TERM") < tail.index("kill -0 $OTEL_COLLECTOR_PID")
     # srun only gets TERM as a last resort, after the collector had its chance to flush.
     assert tail.index("kill -0 $OTEL_COLLECTOR_PID") < tail.index("kill -TERM $OTEL_COLLECTOR_PID")
+
+
+def test_a_resumable_script_ends_its_own_chain_before_the_flush_reads_the_driver_status():
+    driver = {"container": "gym:latest", "policy_model": "policy", "benchmarks": {"scicode": {"resumable": {}}}}
+    script = _script(_config(driver=driver))
+    tail = script[script.index("--output=logs/driver-$SLURM_JOB_ID.log") :]
+    # The epilogue returns the driver's status, which the flush keeps as the job's.
+    assert render_resume_epilogue() + "\nDRIVER_RC=$?" in tail
+    assert tail.rstrip().endswith("exit $DRIVER_RC")
 
 
 def _driver_line(script):

@@ -84,6 +84,11 @@ over only if the successor dies before its own prologue, then reads its predeces
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. |
 | `TIMEOUT` before the task inventory was written | Stops and names the fresh-restart command (step 6). |
 
+A job whose driver finishes the run ends the chain itself. After the driver step, it writes the
+record the next job would have written (the run complete, or its missing export receipt), cancels
+the sentinel and the successor it queued, and journals both, with their ids and the `scancel`
+result, in `chain-end-journal.jsonl`. No allocation starts for a finished run.
+
 A run that hangs instead of failing is not left to hold its allocation. A driver that stops on a
 typed condition exits at once (76 when another attempt cannot help), and the next segment's guard
 ends the chain and writes the kind and the way out to `.gym_chain_incomplete`:
@@ -108,7 +113,7 @@ Do not resubmit while a job of the run is live; recovery answers NOOP then anywa
 | Location | What |
 | --- | --- |
 | Run directory | `gym-job.json` (the submission record), `resolved-config.yaml` (the config as submitted), and the journals `walltime-extension-journal.jsonl`, `repin-journal.jsonl`, `unsafe-resume-journal.jsonl`. |
-| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl`, `spinup-timeout-journal.jsonl` and `operator-continuation-journal.jsonl`. |
+| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl`, `spinup-timeout-journal.jsonl`, `operator-continuation-journal.jsonl` and `chain-end-journal.jsonl`. |
 | `artifacts/` | `rollouts.jsonl` (results), `rollouts_failures.jsonl` (failed attempts), `rollouts_materialized_inputs.jsonl` (the task inventory), `rollouts_manifest.json` with its identity and resume-drift journal, `rollouts_coverage.json`, `rollouts_aggregate_metrics.json`, `quality_summary.json` (health), and `rollouts_mlflow_export_done` (the post-run export receipt). |
 | Your machine | A copy of each submission record under the Gym jobs cache (see Job Records). |
 
@@ -363,8 +368,10 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 1. Cancel the running job of the chain and the jobs it queued (`scancel <ids>`): its successor
    (in `.gym_followup_queued.<job id>`) and the successor's sentinel (in
    `.gym_followup_sentinel.<job id>`). A successor that is left to start sees `CANCELLED` and stops
-   without doing work, but only after it got an allocation. Cancel a pending sentinel after a
-   completed run too: once Slurm cancels the successor, the sentinel's dependency is met. If you
+   without doing work, but only after it got an allocation. A job that finished the run cancels
+   both itself (see `chain-end-journal.jsonl`); a `job.sh` rendered before that did not, so after
+   such a run cancel a pending sentinel too: once Slurm cancels the successor, the sentinel's
+   dependency is met. If you
    cancel only the running job, its follow-up starts when it gets an allocation, sees `CANCELLED`,
    writes the stop to `.gym_chain_incomplete` and exits; cancelling the successor and the sentinel
    too saves that allocation and leaves no stop record (the inspection reads the state from the

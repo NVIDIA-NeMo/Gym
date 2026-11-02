@@ -202,8 +202,8 @@ driver:
 ```
 
 `limit` counts tasks; the run log prints the tasks and the rows they become. Bound the smoke to
-one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`,
-and when it completes, cancel the chain's pending follow-up and sentinel (see gym-eval, step 10).
+one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`;
+when it completes, it cancels the chain's pending follow-up and sentinel itself (see gym-eval, step 10).
 Then follow the [gym-eval](../gym-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
 <benchmark> --recover --inspect` and `gym eval health-check` (gym-eval, step 9). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser

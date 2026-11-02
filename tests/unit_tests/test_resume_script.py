@@ -16,6 +16,7 @@
 import hashlib
 import json
 import os
+import re
 import shlex
 import shutil
 import subprocess
@@ -26,12 +27,14 @@ import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
+    CHAIN_END_JOURNAL_NAME,
     EXPORT_RECEIPT_MISSING,
     EXPORT_RECEIPT_MISSING_REASON,
     INCOMPLETE_MARKER_NAME,
     PROVISIONAL_MARKER_PREFIX,
     ROWS_AT_START_NAME,
     _walltime_to_seconds,
+    render_resume_epilogue,
     render_resume_prologue,
 )
 
@@ -103,7 +106,8 @@ def test_prologue_queues_own_successor():
 @pytest.mark.parametrize("resume", [ResumeConfig(), ResumeConfig(max_walltime="12:00:00")])
 def test_rendered_prologue_is_valid_bash(resume, tmp_path):
     script = tmp_path / "prologue.sh"
-    script.write_text(render_resume_prologue(resume))
+    # The epilogue follows the driver step in job.sh and calls the prologue's functions.
+    script.write_text(render_resume_prologue(resume) + "\n" + render_resume_epilogue())
     subprocess.run(["bash", "-n", str(script)], check=True)
 
 
@@ -131,13 +135,23 @@ _FAKE_SBATCH = """#!/bin/bash
 echo "$* sentinel=${GYM_FOLLOWUP_SENTINEL:-}" >> "$FAKE_LOG_DIR/sbatch_calls"
 echo "${GYM_RESUBMIT:-}|${GYM_RESUBMIT_KEEP_BUDGET:-}" >> "$FAKE_LOG_DIR/sbatch_env"
 if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
+# Every queued job is 999 unless a test gives the sentinel its own id, to tell the two apart.
+_id=999
+[[ -z "${GYM_FOLLOWUP_SENTINEL:-}" || -z "${FAKE_SENTINEL_ID:-}" ]] || _id=$FAKE_SENTINEL_ID
 # The queued follow-up waits on its dependency in this job dir, as squeue would list it. In a hidden partition
 # squeue lists it only with --all.
 _pending="$FAKE_LOG_DIR/pending${FAKE_HIDDEN_PARTITION:+_hidden}"
-echo "999|${1#--dependency=}(unfulfilled)|$PWD" >> "$_pending"
+echo "$_id|${1#--dependency=}(unfulfilled)|$PWD" >> "$_pending"
 # A lost reply: the job exists, but sbatch reports a failure.
 if [[ -n "${FAKE_SBATCH_LOSES_REPLY:-}" ]]; then echo "sbatch: error: Socket timed out on send/recv operation"; exit 1; fi
-echo "Submitted batch job 999"
+echo "Submitted batch job $_id"
+"""
+_FAKE_SCANCEL = """#!/bin/bash
+echo "$*" >> "$FAKE_LOG_DIR/scancel_calls"
+if [[ " ${FAKE_SCANCEL_FAILS:-} " == *" $1 "* ]]; then
+    echo "scancel: error: Kill job error on job id $1: Invalid job id specified" >&2
+    exit 1
+fi
 """
 _FAKE_SCONTROL = """#!/bin/bash
 echo "$*" >> "$FAKE_LOG_DIR/scontrol_calls"
@@ -186,7 +200,16 @@ def _run_prologue(
     manual_resubmit: bool = False,
     admission_command: str | None = None,
     extra_env: dict[str, str] | None = None,
+    driver: str | None = None,
+    sentinel_id: str = "",
+    scancel_fails: str = "",
 ) -> subprocess.CompletedProcess:
+    """Run the prologue as job ``job_id`` after ``prev_job_id`` ended ``prev_state`` (None: the first segment).
+
+    With ``driver``, that shell is the driver step and the epilogue runs after it, as in job.sh.
+    ``sentinel_id`` gives the queued sentinel its own id (the follow-up is 999); ``scancel_fails`` names the ids
+    scancel refuses.
+    """
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir(exist_ok=True)
     for name, body in (
@@ -194,6 +217,7 @@ def _run_prologue(
         ("sbatch", _FAKE_SBATCH),
         ("squeue", _FAKE_SQUEUE),
         ("scontrol", _FAKE_SCONTROL),
+        ("scancel", _FAKE_SCANCEL),
         ("sleep", "#!/bin/bash\n"),
     ):
         tool = bin_dir / name
@@ -209,7 +233,11 @@ def _run_prologue(
             f"{resume.max_retries}, {_walltime_to_seconds(resume.max_walltime) if resume.max_walltime else None!r}, sys.argv[1], sys.argv[2], sys.argv[3]))"
         )
         admission_command = f'{shlex.quote(sys.executable)} -c {shlex.quote(code)} "$_gym_exit_code" "$_prev_slurm_job_id" "$_prev_state"'
-    script.write_text(render_resume_prologue(resume, admission_command=admission_command) + "\necho REACHED_WORK\n")
+    body = render_resume_prologue(resume, admission_command=admission_command) + "\necho REACHED_WORK\n"
+    if driver is not None:
+        # The driver step, then the epilogue job.sh runs after it.
+        body += f"{driver}\n" + render_resume_epilogue()
+    script.write_text(body)
     args = ["bash", str(script)] + ([] if prev_state is None else [prev_job_id])
     env = {
         "PATH": f"{bin_dir}:/usr/bin:/bin",
@@ -228,6 +256,8 @@ def _run_prologue(
         **({"FAKE_SQUEUE_FAILS": "1"} if squeue_fails else {}),
         **({"FAKE_HIDDEN_PARTITION": "1"} if hidden_partition else {}),
         **({"FAKE_SBATCH_LOSES_REPLY": "1"} if sbatch_loses_reply else {}),
+        **({"FAKE_SENTINEL_ID": sentinel_id} if sentinel_id else {}),
+        **({"FAKE_SCANCEL_FAILS": scancel_fails} if scancel_fails else {}),
         **(extra_env or {}),
     }
     return subprocess.run(args, cwd=tmp_path, env=env, capture_output=True, text=True)
@@ -311,6 +341,11 @@ def _write_inventory(tmp_path) -> None:
 
 def _sbatch_calls(tmp_path) -> list[str]:
     calls = tmp_path / "sbatch_calls"
+    return calls.read_text().splitlines() if calls.exists() else []
+
+
+def _scancel_calls(tmp_path) -> list[str]:
+    calls = tmp_path / "scancel_calls"
     return calls.read_text().splitlines() if calls.exists() else []
 
 
@@ -1444,3 +1479,148 @@ def test_a_sentinel_debits_the_parent_once_when_its_follow_up_died_around_the_co
     # Parent 100 (60 s) and dead follow-up 777 (13 s), each once: 73, not 60 + 60 + 13.
     assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "73"
     assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n200\n"
+
+
+# ---------------------------------------------------------------------------
+# A segment that completes the run cancels the sentinel and follow-up it queued
+# ---------------------------------------------------------------------------
+
+# The driver step of a segment that saves the last rollout and exports the run: it leaves a finished run's artifacts.
+_FINISHES_THE_RUN = "cp -R done/artifacts/. artifacts/"
+
+
+def _segment_finishing_the_run(tmp_path, monkeypatch, **finished) -> None:
+    """Job 200 continues job 100 of a run with a rollout missing; `_FINISHES_THE_RUN` leaves it as `finished` says."""
+    _finished_run(tmp_path / "done", monkeypatch, **finished)
+    _finished_run(tmp_path, monkeypatch, case="missing")
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+
+
+def _chain_end_entries(tmp_path) -> list[dict]:
+    journal = tmp_path / CHAIN_END_JOURNAL_NAME
+    return [json.loads(line) for line in journal.read_text().splitlines()] if journal.exists() else []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_that_completes_the_run_cancels_its_own_sentinel_and_follow_up(tmp_path, monkeypatch):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver=_FINISHES_THE_RUN, sentinel_id="998")
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    # Like every segment, it queued both before its work.
+    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
+        "--dependency=afternotok:200",
+        "--dependency=afterany:999",
+    ]
+    # The sentinel first: once its follow-up is gone, its afterany dependency is met and it could start.
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    # The record the sentinel would have written, from the segment that finished the run.
+    assert (
+        "Run complete: the Store covers all 2 expected rollouts and its MLflow export receipt is current; "
+        "job 200 ends the chain with nothing to recover." in result.stdout
+    )
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["job_id"] == "200" and entry["ended"] == "run_complete"
+    assert entry["cancelled"] == {
+        "sentinel": {"job_id": "998", "result": "cancelled"},
+        "follow_up": {"job_id": "999", "result": "cancelled"},
+    }
+    assert re.fullmatch(r"\d{4}-\d\d-\d\dT\d\d:\d\d:\d\dZ", entry["at"])
+    # The chain's records stay as they were: the job is in the chain and its claims name what it queued.
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n200\n"
+    assert (tmp_path / ".gym_followup_queued.200").read_text() == "999\n"
+    assert (tmp_path / ".gym_followup_sentinel.200").read_text() == "998\n"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("status", [1, 143])
+def test_a_segment_whose_driver_failed_keeps_its_status_and_its_queued_jobs(tmp_path, monkeypatch, status):
+    # The job fails, so its follow-up starts; the follow-up's own prologue ends the chain of the complete run.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(
+        tmp_path, ResumeConfig(), "TIMEOUT", driver=f"{_FINISHES_THE_RUN}; ( exit {status} )", sentinel_id="998"
+    )
+
+    assert result.returncode == status, result.stdout + result.stderr
+    assert "REACHED_WORK" in result.stdout and "Run complete" not in result.stdout
+    assert _scancel_calls(tmp_path) == []
+    assert _chain_end_entries(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_that_leaves_the_run_incomplete_keeps_its_queued_jobs(tmp_path, monkeypatch):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver="true", sentinel_id="998")
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "Run complete" not in result.stdout
+    assert _scancel_calls(tmp_path) == []
+    assert _chain_end_entries(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_that_completes_the_run_without_its_export_receipt_writes_the_stop_and_cancels(
+    tmp_path, monkeypatch
+):
+    # The sentinel would have started only to write this stop: the segment writes it instead.
+    _segment_finishing_the_run(tmp_path, monkeypatch, receipt=None)
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", driver=_FINISHES_THE_RUN, sentinel_id="998")
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == EXPORT_RECEIPT_MISSING_REASON + "\n"
+    assert EXPORT_RECEIPT_MISSING_REASON in result.stdout and "Run complete" not in result.stdout
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["ended"] == EXPORT_RECEIPT_MISSING
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_that_completes_the_run_keeps_a_deliberate_stop(tmp_path, monkeypatch):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    stop = "Accumulated walltime reached the cap; continue with gym eval resubmit --recover."
+    result = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        driver=f"{_FINISHES_THE_RUN}; echo {shlex.quote(stop)} > {INCOMPLETE_MARKER_NAME}",
+        sentinel_id="998",
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop + "\n"
+    assert "Run complete" not in result.stdout
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["ended"] == "run_complete_stop_kept"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_sentinel_that_cannot_be_cancelled_is_journaled_and_the_segment_still_completes(tmp_path, monkeypatch):
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(
+        tmp_path, ResumeConfig(), "TIMEOUT", driver=_FINISHES_THE_RUN, sentinel_id="998", scancel_fails="998"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _scancel_calls(tmp_path) == ["998", "999"]
+    assert "WARNING: could not cancel this chain's queued sentinel 998" in result.stdout
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["cancelled"] == {
+        "sentinel": {"job_id": "998", "result": "scancel_failed"},
+        "follow_up": {"job_id": "999", "result": "cancelled"},
+    }
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_segment_without_a_recorded_sentinel_cancels_only_its_follow_up(tmp_path, monkeypatch):
+    # The sentinel was not queued (its sbatch failed), so nothing names one.
+    _segment_finishing_the_run(tmp_path, monkeypatch)
+    result = _run_prologue(
+        tmp_path, ResumeConfig(), "TIMEOUT", driver=f"rm .gym_followup_sentinel.200; {_FINISHES_THE_RUN}"
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert _scancel_calls(tmp_path) == ["999"]
+    [entry] = _chain_end_entries(tmp_path)
+    assert entry["cancelled"] == {"follow_up": {"job_id": "999", "result": "cancelled"}}

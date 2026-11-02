@@ -54,6 +54,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     KEEP_BUDGET_ENV,
     RESUBMIT_ENV,
     _walltime_to_seconds,
+    render_resume_epilogue,
     render_resume_prologue,
 )
 from nemo_gym.orchestration.executors.script_templates import (
@@ -1222,6 +1223,9 @@ def build_sbatch_script(
         for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
     ]
     driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
+    if resume:
+        # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
+        driver_command += "\n" + render_resume_epilogue()
     if observed:
         driver_command += "\n" + _render_collector_shutdown(config, remote_bench_dir)
 

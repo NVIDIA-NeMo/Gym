@@ -32,6 +32,7 @@ from hydra.core.override_parser.overrides_parser import OverridesParser
 from omegaconf import OmegaConf
 
 from nemo_gym.orchestration.api import NodePool, RayServiceConfig, SubmitConfig, VllmPDTierConfig
+from nemo_gym.orchestration.executors.resume_script import render_resume_epilogue
 from nemo_gym.orchestration.executors.script_templates import (
     RAY_SYMMETRIC_RUN_CLUSTER_WAIT_TIMEOUT_S,
     render_driver_entrypoint,
@@ -1050,6 +1051,8 @@ def test_build_sbatch_script_resumable_adds_prologue_and_resume_flag(bench_dir):
     assert "_gym_accumulated >= 36000" in script
     assert "_gym_max_retries=5" in script
     assert "+resume_from_cache=True" in script
+    # Right after the driver step, which it reads the status of, the job ends its own chain when the run is complete.
+    assert "\n_gym_run_driver\n" + render_resume_epilogue() + "\n" in script
 
 
 def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_dir):
@@ -1057,6 +1060,7 @@ def test_build_sbatch_script_not_resumable_omits_prologue(submit_config, bench_d
     compute = next(iter(submit_config.compute.values()))
     script = build_sbatch_script(submit_config, "gsm8k", benchmark, compute, bench_dir)
     assert "Auto-resume chain" not in script
+    assert render_resume_epilogue() not in script
     # Only a resubmit (see test_eval_resubmit.py) turns resume on for a run that is not resumable.
     assert "\n    +resume_from_cache=True" not in script
 
