@@ -128,7 +128,8 @@ also fails, because nothing confirms its required tools; a run that failed for a
 that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
-Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.
+Session `opencode_config` permits `permission`, `tools` and `compaction`, preserving Gym routing.
+Training configs can disable automatic compaction and pruning to retain the sampled history.
 
 Text, reasoning, tool results, partial output and usage come from the persisted
 session tree. Unavailable artifacts or usage details are reported as observation

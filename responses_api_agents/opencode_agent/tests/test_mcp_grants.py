@@ -174,7 +174,7 @@ def test_configured_and_request_grants_are_both_kept(setup):  # noqa: F811
 
 
 def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F811
-    """Session opencode_config allows only permission and tools, so no static MCP server can be overwritten."""
+    """Static MCP config cannot replace the session's tool grants."""
     agent, sandbox = setup
     agent.config.opencode_config = {"mcp": {"task_tools": {"type": "remote", "url": "http://other"}}}
     body = seed().model_dump(mode="json")
@@ -182,8 +182,22 @@ def test_static_mcp_servers_in_opencode_config_are_rejected(setup):  # noqa: F81
     with TestClient(agent.setup_webserver()) as client:
         response = client.post("/v1/agent_sessions", json=body)
     assert response.status_code == 422
-    assert "permission/tools only" in response.json()["detail"]
+    assert "unsupported: ['mcp']" in response.json()["detail"]
     sandbox.exec.assert_not_awaited()
+
+
+def test_training_compaction_controls_reach_harness(setup):  # noqa: F811
+    agent, sandbox = setup
+    agent.config.opencode_config = {"compaction": {"auto": False, "prune": False}}
+    with TestClient(agent.setup_webserver()) as client:
+        created = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
+        assert created.status_code == 200, created.text
+        response = client.post("/ng-rollout/opencode-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        payload = read_params(sandbox.files[f"{sandbox.directory}/params.sh"])
+        config = json.loads(payload["env"]["OPENCODE_CONFIG_CONTENT"])
+        assert config["compaction"] == {"auto": False, "prune": False}
+        client.post("/v1/agent_sessions/close", json=close_body(created.json()["agent_session_id"]))
 
 
 def test_required_non_mcp_grant_is_still_rejected(setup):  # noqa: F811
