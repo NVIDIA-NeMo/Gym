@@ -1128,7 +1128,7 @@ def rows(name, skip=0):
                     "task_id": trajectory.get("task_id"), "rollout_id": trajectory.get("rollout_id"),
                     "invocations": [({k: item.get(k) for k in ("invocation_id", "status", "in_session", "verification_skipped", "error_type", "parent_invocation_id", "stop_reason")} | {"model_calls": trial_refs(item.get("model_calls"))})
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
-                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
+                    "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
                     "model_calls": [{"model_call_id": item.get("model_call_id"), "response_metadata": trial_metadata(item.get("response_metadata")),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
@@ -2646,11 +2646,14 @@ def _observed_trial_operations(
     judge_recovery: dict[str, int] | None = None,
     grading_failures: list[str] | None = None,
     policy_recovery: dict[str, int] | None = None,
+    verifier_recorded: list[Identity] | None = None,
 ) -> bool:
     """Join observed model/tool operations and the outer verifier invocation for every expected trial.
 
-    A source-reviewed programmatic grading operation must bind the saved response and score. Empty captured
-    model calls alone never establish grading coverage; old or uninstrumented verifiers remain unknown.
+    A source-reviewed programmatic grading operation must bind the saved response and score. A verifier that
+    recorded no grading operation and owns no model call is observed through its own grading record instead
+    (``_verifier_recorded``); those trials go to ``verifier_recorded``. Empty captured model calls or a reward
+    alone never establish grading coverage; old or uninstrumented verifiers remain unknown.
     Recovered grading attempts are reported separately and do not count toward the trial-health threshold;
     every failed attempt must join the same completed, result-bound grading dependency. A policy request retried
     inside one completed operation is recovered the same way (``policy_recovery`` receives its counts): each failed
@@ -2687,6 +2690,7 @@ def _observed_trial_operations(
     recovered_policy = {"policy_recovered_attempts": 0, "policy_recovered_operations": 0}
     recovered_events = {}
     invalid_grades = []
+    recorded_trials = []
 
     def nonempty(value):
         return isinstance(value, str) and bool(value.strip())
@@ -2980,11 +2984,15 @@ def _observed_trial_operations(
             ):
                 return False
             grading = verifier.get("grading_operations")
-            if not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
+            if judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
+                grade = None
+                recorded_trials.append(_identity(row))
+            elif not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
                 return False
-            grade = grading[0]
+            else:
+                grade = grading[0]
             binding = row.get("_ng_collected_grading_binding")
-            if (
+            if grade is not None and (
                 grade.get("kind") != ("programmatic_calculation" if judge_calls is None else "llm_judge")
                 or grade.get("outcome")
                 not in (
@@ -3000,7 +3008,8 @@ def _observed_trial_operations(
                 or grade.get("result_binding_sha256") != binding
             ):
                 return False
-            grading_ids.add(grade["operation_id"])
+            if grade is not None:
+                grading_ids.add(grade["operation_id"])
             populations[3].add(verifier["invocation_id"])
             if judge_calls is not None and not all(
                 completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed") for call in judge_calls
@@ -3099,6 +3108,8 @@ def _observed_trial_operations(
         grading_failures.extend(invalid_grades)
     if policy_recovery is not None:
         policy_recovery.update(recovered_policy)
+    if verifier_recorded is not None:
+        verifier_recorded.extend(recorded_trials)
     return True
 
 
@@ -3166,6 +3177,50 @@ def _graded(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
+    """Whether the row's verifier saved its own grading record for it, in place of a recorded grading operation.
+
+    The shared verify path records it only for a verify execution that completed without asking any model. It must
+    name the row's resources server, carry the saved score with a ``scored`` verdict and bind the saved response and
+    score. A verifier that recorded a grading operation or owns a model call is judged by those, never by the record.
+    """
+    record = verifier.get("grading_record") if isinstance(verifier, dict) else None
+    binding, reward = row.get("_ng_collected_grading_binding"), row.get("reward")
+    return (
+        isinstance(record, dict)
+        and verifier.get("status") == "completed"
+        and verifier.get("failure_kind") is None
+        and verifier.get("grading_operations") is None
+        and verifier.get("model_calls") == []
+        and isinstance(resources_server, str)
+        and bool(resources_server)
+        and record.get("verifier") == resources_server
+        and record.get("verdict") == "scored"
+        and type(record.get("score")) in (int, float)
+        and type(reward) in (int, float)
+        and record["score"] == reward
+        and isinstance(binding, str)
+        and len(binding) == 64
+        and record.get("result_binding_sha256") == binding
+    )
+
+
+def _recorded_by_verifier(row: Mapping[str, Any], collected: CollectedEvidence) -> bool:
+    """Whether the row's one verifier invocation saved its own grading record for it (``_verifier_recorded``)."""
+    provenance = (collected.quality or {}).get("provenance")
+    servers = provenance.get("servers") if isinstance(provenance, dict) else None
+    agent_ref = row.get("agent_ref")
+    agent = servers.get(agent_ref.get("name")) if isinstance(servers, dict) and isinstance(agent_ref, dict) else None
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, dict) else None
+    return (
+        isinstance(agent, dict)
+        and isinstance(verifiers, list)
+        and len(verifiers) == 1
+        and _verifier_recorded(verifiers[0], row, agent.get("resources_server"))
+    )
+
+
 def _verifying_servers(collected: CollectedEvidence) -> str:
     """The resources servers the run's agents name, from the run provenance, for an unobserved-trial reason."""
     provenance = (collected.quality or {}).get("provenance")
@@ -3184,8 +3239,9 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     """Acceptance's trial counts: observed healthy, unhealthy and unobserved, over the expected trials.
 
     ``unhealthy`` are the known failures the trial gate counts. ``unobserved`` are the other scored trials whose
-    verifier recorded no grading operation: nothing observed their grading, so they are unverified, never healthy.
-    ``observed_healthy`` are the rest. None until the run is complete.
+    verifier recorded neither a grading operation nor its own grading record: nothing observed their grading, so
+    they are unverified, never healthy. ``observed_healthy`` are the rest; ``verifier_recorded`` of them are
+    observed only through the verifier's grading record. None until the run is complete.
     """
     trials = decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
     if not decision.complete or trials <= 0 or collected is None:
@@ -3193,19 +3249,18 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     final_zero = final_zero_trials(decision, collected)
     unhealthy = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    unobserved = sum(
-        1
-        for row in collected.results or []
-        if _identity(row) in scored and _identity(row) not in final_zero and not _graded(row)
-    )
+    rows = [row for row in collected.results or [] if _identity(row) in scored and _identity(row) not in final_zero]
+    recorded = sum(1 for row in rows if not _graded(row) and _recorded_by_verifier(row, collected))
+    unobserved = sum(1 for row in rows if not _graded(row)) - recorded
     counts: dict[str, Any] = {
         "observed_healthy": trials - unhealthy - unobserved,
         "unhealthy": unhealthy,
         "unobserved": unobserved,
+        "verifier_recorded": recorded,
     }
     if unobserved:
         counts["unobserved_reason"] = (
-            f"no grading operation was recorded by the verifier ({_verifying_servers(collected)})"
+            f"no grading operation or grading record was recorded by the verifier ({_verifying_servers(collected)})"
         )
     return counts
 
@@ -3278,12 +3333,14 @@ def trial_health(
     judge_recovery: dict[str, int] = {}
     policy_recovery: dict[str, int] = {}
     invalid_grades: list[str] = []
+    recorded: list[Identity] = []
     covered = _observed_trial_operations(
         decision,
         collected,
         judge_recovery=judge_recovery,
         grading_failures=invalid_grades,
         policy_recovery=policy_recovery,
+        verifier_recorded=recorded,
     )
     # A recovered attempt is no trial failure only when it joins a completed policy or grading operation.
     recovered_policy = policy_recovery.get("policy_recovered_attempts", 0)
@@ -3308,18 +3365,26 @@ def trial_health(
             if recovered_policy
             else ""
         )
+        grading = (
+            f"grading ({len(recorded)} verifier-recorded, {decision.expected - len(recorded)} observed through a "
+            "recorded grading operation)"
+            if recorded
+            else "bound grading operations"
+        )
         return (
             rate < limit,
             f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
             f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; {retried}"
-            "actual model/tool and bound grading operations cover every identity and repeat",
+            f"actual model/tool and {grading} cover every identity and repeat",
         )
     observed = trial_counts(decision, collected)
     if observed is not None and observed["unobserved"]:
         return None, (
             f"trial: UNOBSERVED {observed['unobserved']} of {trials} expected trials: "
             f"{observed['unobserved_reason']}, so the run is unverified, not healthy; observed healthy "
-            f"{observed['observed_healthy']}, unhealthy {observed['unhealthy']}{detail}"
+            f"{observed['observed_healthy']}"
+            + (f" ({observed['verifier_recorded']} verifier-recorded)" if observed["verifier_recorded"] else "")
+            + f", unhealthy {observed['unhealthy']}{detail}"
         )
     return None, (
         f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "

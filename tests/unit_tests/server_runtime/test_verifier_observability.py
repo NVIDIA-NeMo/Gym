@@ -26,6 +26,7 @@ from nemo_gym.server_runtime.base_resources_server import (
 )
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from nemo_gym.trajectory.trajectory_record import grading_result_binding
 from nemo_gym.verification.judge import JudgeError, call_judge, judge_failsafe
 
 
@@ -546,3 +547,115 @@ def test_the_registered_verify_route_keeps_a_raised_failure_and_its_cause(tmp_pa
     assert selected.cause_id == resources.event_id
     assert report.events[resources.event_id].cause_id == model.event_id
     assert list(report.events).count(model.event_id) == 1
+
+
+_GRADED = {"response": {"id": "graded-response", "output": []}, "reward": 0.25}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("masked,verdict", [(False, "scored"), (True, "masked")])
+async def test_an_in_process_verify_saves_its_own_grading_record(tmp_path, masked, verdict):
+    result = {**_GRADED, "mask_sample": masked}
+
+    async def verify():
+        return result
+
+    with rollout_context("in-process"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="metric_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert invocation["grading_record"] == {
+        "verifier": "metric_verifier",
+        "score": 0.25,
+        "verdict": verdict,
+        "result_binding_sha256": grading_result_binding(result),
+    }
+    record = collected(tmp_path, "in-process", returned)
+    trajectory = _build_trajectory_record({"_ng_task_index": 0, "_ng_rollout_index": 0}, record)
+    assert trajectory.verifier_invocations[0].grading_record.verifier == "metric_verifier"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("route", ["judge", "direct"])
+async def test_a_verify_that_asks_a_model_saves_no_grading_record(monkeypatch, route):
+    from omegaconf import OmegaConf
+
+    transport = AsyncMock()
+    monkeypatch.setattr("nemo_gym.client.server_client.request", transport)
+    client = ServerClient(
+        head_server_config={"host": "localhost", "port": 0},
+        global_config_dict=OmegaConf.create(
+            {
+                "observability_enabled": True,
+                "judge": {"responses_api_models": {"openai_model": {"host": "localhost", "port": 9999}}},
+            }
+        ),
+    )
+
+    async def post(**kwargs):
+        response = MagicMock(ok=True, status=200)
+        response.read = AsyncMock(return_value=b'{"grade":1.0}')
+        return response
+
+    async def verify():
+        if route == "judge":
+            await call_judge(
+                MagicMock(post=post), server_name="judge", url_path="/v1/responses", json={}, response_model=Verdict
+            )
+        else:
+            await client.post(server_name="judge", url_path="/v1/responses", json={})
+        return _GRADED
+
+    with rollout_context("judged"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="judge_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert invocation["status"] == "completed"
+    assert "grading_record" not in invocation
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "result",
+    [{"reward": 1.0}, {**_GRADED, "_ng_failure_class": "verifier"}, {**_GRADED, "evaluation_completed": False}],
+)
+async def test_an_unbound_or_unfinished_grade_saves_no_grading_record(result):
+    async def verify():
+        return result
+
+    with rollout_context("unbound"):
+        returned = await observe_verifier(verify, enabled=True, verifier_name="metric_verifier")()
+    (invocation,) = returned["ng_verifier_invocations"]
+    assert "grading_record" not in invocation
+
+
+def test_the_resources_route_names_its_server_in_the_grading_record():
+    class Resources(SimpleResourcesServer):
+        async def verify(self, body: BaseVerifyRequest) -> BaseVerifyResponse:
+            return BaseVerifyResponse(**body.model_dump(), reward=1.0)
+
+    client = MagicMock(spec=ServerClient)
+    client.global_config_dict = {"observability_enabled": True}
+    server = Resources(
+        config=BaseResourcesServerConfig(name="metric_verifier", host="127.0.0.1", port=12345, entrypoint="app.py"),
+        server_client=client,
+    )
+    response = TestClient(server.setup_webserver()).post(
+        "/ng-rollout/metric/verify",
+        json={
+            "responses_create_params": {"input": "task"},
+            "response": {
+                "id": "response",
+                "created_at": 0,
+                "model": "test",
+                "object": "response",
+                "output": [],
+                "parallel_tool_calls": True,
+                "tool_choice": "auto",
+                "tools": [],
+            },
+        },
+    )
+    assert response.status_code == 200, response.text
+    (invocation,) = response.json()["ng_verifier_invocations"]
+    assert invocation["grading_record"]["verifier"] == "metric_verifier"
+    assert invocation["grading_record"]["score"] == 1.0
+    assert invocation["grading_record"]["verdict"] == "scored"

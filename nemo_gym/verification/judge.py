@@ -56,7 +56,11 @@ from pydantic import BaseModel
 from nemo_gym.client.http_client import get_response_json, raise_for_status
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import ModelServerRef
-from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, current_verifier_invocation_id
+from nemo_gym.core.episode import (
+    VERIFIER_INVOCATION_HEADER,
+    current_verifier_invocation_id,
+    note_verifier_model_request,
+)
 from nemo_gym.core.failure_kinds import (
     JUDGE_FAILED,
 )
@@ -247,6 +251,7 @@ async def call_judge(
 
     async def _call() -> ResponseT:
         invocation_id = current_verifier_invocation_id()
+        note_verifier_model_request(server_name)
         http_response = await server_client.post(
             server_name=server_name,
             url_path=url_path,

@@ -2610,13 +2610,14 @@ def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_
         "observed_healthy": 0,
         "unhealthy": 0,
         "unobserved": 6,
-        "unobserved_reason": "no grading operation was recorded by the verifier (demo_verifier)",
+        "verifier_recorded": 0,
+        "unobserved_reason": "no grading operation or grading record was recorded by the verifier (demo_verifier)",
     }
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert health.startswith("response/trial health unknown")
     assert (
-        "trial: UNOBSERVED 6 of 6 expected trials: no grading operation was recorded by the verifier "
-        "(demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0" in health
+        "trial: UNOBSERVED 6 of 6 expected trials: no grading operation or grading record was recorded by the "
+        "verifier (demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0" in health
     )
     assert task["status"] == "FAILED"
 

@@ -1117,6 +1117,8 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                         # Contradictory returned facts cannot establish authoritative verifier coverage.
                         gaps.append(ObservationGap(code=f"verifier_{field}_conflict"))
                         setattr(existing, field, [])
+                if invocation.grading_record is not None:
+                    existing.grading_record = invocation.grading_record
                 if invocation.status != "unknown":
                     existing.status = invocation.status
                     existing.failure_kind = invocation.failure_kind

@@ -200,6 +200,21 @@ class GradingOperationObservation(ObservationModel):
     dependencies: list[ModelCallRef] | None = None
 
 
+class VerifierGradingRecord(ObservationModel):
+    """The grade a verifier returned without asking any model, recorded by the shared verify path.
+
+    It names the verifier (its resources server), the score and the verifier's verdict on it (``masked`` when the
+    verifier marked the score as no valid measurement), and binds the graded response and score like a grading
+    operation. A verify execution that sent a model request records none: its grading is observed only through
+    its captured calls.
+    """
+
+    verifier: str = Field(min_length=1)
+    score: float
+    verdict: Literal["scored", "masked"]
+    result_binding_sha256: str = Field(pattern=r"^[0-9a-f]{64}$")
+
+
 def grading_result_binding(result: object) -> str | None:
     """Bind the actual graded response and numeric reward/components, without exporting their payload."""
     if isinstance(result, BaseModel):
@@ -259,6 +274,10 @@ class VerifierInvocation(ObservationModel):
     failure_kind: Optional[str] = None
     model_calls: list[ModelCallRef] = Field(default_factory=list)
     grading_operations: list[GradingOperationObservation] | None = Field(
+        default=None,
+        exclude_if=lambda value: value is None,
+    )
+    grading_record: VerifierGradingRecord | None = Field(
         default=None,
         exclude_if=lambda value: value is None,
     )

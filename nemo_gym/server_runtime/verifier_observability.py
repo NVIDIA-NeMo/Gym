@@ -22,6 +22,7 @@ from starlette.responses import JSONResponse, Response
 from nemo_gym.core.episode import (
     current_rollout_id,
     verifier_invocation_context,
+    verifier_model_requests,
 )
 from nemo_gym.core.failure_kinds import TRANSPORT_TIMEOUT, VERIFIER_ERROR
 from nemo_gym.failure_transport import FailureHeader, observe_failure
@@ -31,6 +32,7 @@ from nemo_gym.trajectory.trajectory_record import (
     GradingOperationObservation,
     ModelCallRef,
     SandboxObservation,
+    VerifierGradingRecord,
     VerifierInvocation,
     grading_result_binding,
 )
@@ -150,7 +152,9 @@ def merge_verifier_call_observation(
         existing.model_calls.append(reference)
 
 
-def _finish(invocation: VerifierInvocation, result: object) -> None:
+def _finish(
+    invocation: VerifierInvocation, result: object, *, verifier_name: str | None, graded_in_process: bool
+) -> None:
     if isinstance(result, Response):
         if result.status_code >= 400:
             invocation.status = "failed"
@@ -172,10 +176,29 @@ def _finish(invocation: VerifierInvocation, result: object) -> None:
         invocation.status = "incomplete"
     else:
         invocation.status = "completed"
+    if invocation.status != "completed" or not verifier_name or not graded_in_process:
+        return
+    # The verifier graded without asking any model, so its returned grade is its own grading record.
+    try:
+        binding = grading_result_binding(dict(data))
+    except Exception:
+        binding = None
+    if binding is not None:
+        invocation.grading_record = VerifierGradingRecord(
+            verifier=verifier_name,
+            score=data["reward"],
+            verdict="masked" if data.get("mask_sample") else "scored",
+            result_binding_sha256=binding,
+        )
 
 
-def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> Callable[P, Awaitable[T | Response]]:
+def observe_verifier(
+    verify_fn: Callable[P, Awaitable[T]], *, enabled: bool, verifier_name: str | None = None
+) -> Callable[P, Awaitable[T | Response]]:
     """Return verification evidence with its result, leaving persistence to collection.
+
+    A verify execution named by ``verifier_name`` that completes without sending any model request also returns
+    its grading record: the verifier, the score and its verdict, bound to the graded response.
 
     HTTP failures keep their status and carry evidence in the error body. Cancellation
     still propagates; a cancelled or lost response cannot deliver in-memory evidence.
@@ -223,7 +246,9 @@ def observe_verifier(verify_fn: Callable[P, Awaitable[T]], *, enabled: bool) -> 
                     report = report.merged(inner) if report.failure_id is not None else inner.merged(report)
                 result.headers.update(FailureHeader.encode(report))
             else:
-                _finish(invocation, result)
+                _finish(
+                    invocation, result, verifier_name=verifier_name, graded_in_process=not verifier_model_requests()
+                )
             finally:
                 _active_verifier.reset(token)
 

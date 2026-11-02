@@ -546,6 +546,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                 observe_verifier(
                     judge_failsafe(self.verify),
                     enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
+                    verifier_name=self.config.name,
                 ),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
