@@ -236,7 +236,7 @@ class TestSeedSessionMavenSettings:
         )
         with pytest.raises(self._Stop):
             await SwemerV1ResourcesServer.seed_session(
-                server, SimpleNamespace(session={SESSION_ID_KEY: "s"}), SimpleNamespace()
+                server, SimpleNamespace(session={SESSION_ID_KEY: "s"}), SimpleNamespace(setup_patch="")
             )
 
         files = create_sandbox.await_args.kwargs["files"]
