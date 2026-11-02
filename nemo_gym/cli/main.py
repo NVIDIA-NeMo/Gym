@@ -1949,7 +1949,7 @@ COMMANDS = {
                     "--max-unhealthy-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the per-rollout health criterion; independent response/trial gates still apply.",
+                    help="With --recover: the per-rollout health criterion, reported in warnings; it does not change the verdict.",
                 ),
             ),
             Flag(
@@ -1957,7 +1957,7 @@ COMMANDS = {
                     "--max-response-failure-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the response gate passes only strictly below this fraction (default 0.02).",
+                    help="With --recover: reported under criteria with applied: false; it does not change the verdict.",
                 ),
             ),
             Flag(
@@ -1965,7 +1965,7 @@ COMMANDS = {
                     "--max-trial-failure-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the trial gate fails at or above this fraction (default 0.02).",
+                    help="With --recover: reported under criteria with applied: false; it does not change the verdict.",
                 ),
             ),
             Flag(
