@@ -26,6 +26,7 @@ from typing import BinaryIO
 CACHE_ROOT = Path("/opt/super-vl-evals/flashinfer-autotune-cache")
 JIT_WORKSPACE = Path("/opt/super-vl-evals/flashinfer-warmup-workspace")
 VLLM_CACHE_ROOT = Path("/opt/super-vl-evals/vllm-cache")
+CUTE_CACHE_ROOT = Path("/opt/super-vl-evals/prims-cute-cache")
 
 
 def wait_for_engines(urls: list[str], timeout: int) -> None:
@@ -112,8 +113,38 @@ def install_caches(root: Path, payloads: list[str]) -> None:
     print(f"Installed {len(caches)} autotuning configuration caches in {root}", flush=True)
 
 
+def cute_cache_path(root: Path, name: str) -> Path:
+    """Resolve a relative CuTe cache file without escaping the cache directory."""
+    if not name or name.startswith("/") or any(part in ("", ".", "..") for part in name.split("/")):
+        raise ValueError(f"Invalid CuTe cache path: {name}")
+    path = root / name
+    if not path.resolve().is_relative_to(root.resolve()):
+        raise ValueError(f"Invalid CuTe cache path: {name}")
+    return path
+
+
+def cute_cache_files(root: Path) -> list[Path]:
+    """Collect persistent CuTe files, excluding locks and atomic-write temporaries."""
+    files = []
+    for path in sorted(root.rglob("*")):
+        if path.is_symlink():
+            raise ValueError(f"Unexpected symlink in CuTe cache: {path}")
+        parts = path.relative_to(root).parts
+        if any(part.startswith("tmp.") or part.endswith((".lock", ".tmp")) or part == ".warmed" for part in parts):
+            continue
+        if path.is_file():
+            files.append(path)
+    return files
+
+
 def dump_warmup(
-    cache_root: Path, jit_workspace: Path, startup_root: Path, output: BinaryIO, *, allow_empty: bool
+    cache_root: Path,
+    jit_workspace: Path,
+    startup_root: Path,
+    output: BinaryIO,
+    *,
+    allow_empty: bool,
+    cute_root: Path | None = None,
 ) -> None:
     """Stream tuning results, compiled kernels, and startup plans from one node."""
     caches = json.dumps(collect_caches(cache_root, allow_empty=allow_empty)).encode()
@@ -136,6 +167,11 @@ def dump_warmup(
                 raise ValueError(f"Unexpected symlink in Torch compilation cache: {path}")
             if path.is_file():
                 archive.add(path, arcname=f"compile/{path.relative_to(compile_root)}", recursive=False)
+        # CuTe's cache contains compiler IR/objects, not FlashInfer cached_ops
+        # libraries. Keep its original filenames and layout for CuTe to resolve.
+        if cute_root is not None:
+            for path in cute_cache_files(cute_root):
+                archive.add(path, arcname=f"cute/{path.relative_to(cute_root)}", recursive=False)
 
 
 def compile_cache_group(name: str) -> str:
@@ -153,12 +189,15 @@ def compile_cache_group(name: str) -> str:
     return match[1]
 
 
-def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source: BinaryIO) -> list[Path]:
+def install_warmup(
+    cache_root: Path, aot_root: Path, startup_root: Path, source: BinaryIO, *, cute_root: Path | None = None
+) -> list[Path]:
     """Merge concatenated node archives into one image, including both PD roles."""
     caches = []
     libraries: dict[str, Path] = {}
     plans: dict[str, dict] = {}
     compile_groups: dict[str, int] = {}
+    cute_files: set[str] = set()
     compile_root = startup_root.parent / "torch_compile_cache"
     # Each dump is a standalone tar stream. ignore_zeros reads past its end
     # markers into the next node's stream without buffering large libraries.
@@ -171,6 +210,19 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
             with contents:
                 if entry.name == "autotune.json":
                     caches.append(contents.read().decode())
+                elif entry.name.startswith("cute/"):
+                    if cute_root is None:
+                        raise ValueError("CuTe archive entries require a destination cache directory")
+                    relative = entry.name.removeprefix("cute/")
+                    destination = cute_cache_path(cute_root, relative)
+                    # Compiler cache filenames identify entries. Preserve a
+                    # complete file from the first replica for duplicate keys.
+                    if relative in cute_files:
+                        continue
+                    cute_files.add(relative)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    with destination.open("wb") as output:
+                        shutil.copyfileobj(contents, output)
                 elif entry.name.startswith("compile/"):
                     relative = entry.name.removeprefix("compile/")
                     group = compile_cache_group(relative)
@@ -223,10 +275,13 @@ def install_warmup(cache_root: Path, aot_root: Path, startup_root: Path, source:
         startup_root.mkdir(parents=True, exist_ok=True)
         (startup_root / f"startup_plan_{fingerprint}.json").write_text(json.dumps(plan))
     install_caches(cache_root, caches)
+    if cute_root is not None and cute_cache_files(cute_root):
+        (cache_root / ".cute-cache-baked").write_text("Loaded automatically by sbatch_external_vllm.sh\n")
     if plans:
         (cache_root / ".startup-plans-baked").write_text("Loaded automatically by sbatch_external_vllm.sh\n")
     print(f"Installed {len(libraries)} FlashInfer JIT modules and {len(plans)} startup plans", flush=True)
     print(f"Installed {len(compile_groups)} Torch cache groups (rank caches and shared Inductor files)", flush=True)
+    print(f"Installed {len(cute_files)} CuTe-DSL cache files", flush=True)
     return list(libraries.values())
 
 
@@ -243,7 +298,9 @@ def verify_libraries(libraries: list[Path]) -> None:
         print(f"Verified baked FlashInfer module: {library.stem}", flush=True)
 
 
-def write_manifest(cache_root: Path, aot_root: Path, startup_root: Path, libraries: list[Path]) -> None:
+def write_manifest(
+    cache_root: Path, aot_root: Path, startup_root: Path, libraries: list[Path], *, cute_root: Path | None = None
+) -> None:
     """Record what was baked so later jobs can identify and check the actual image."""
     path = cache_root / "warmed-manifest.json"
     previous = json.loads(path.read_text()) if path.exists() else {}
@@ -265,11 +322,19 @@ def write_manifest(cache_root: Path, aot_root: Path, startup_root: Path, librari
             for path in sorted((startup_root.parent / "torch_compile_cache").rglob("*"))
             if path.is_file()
         },
+        "cute_files": {
+            str(path.relative_to(cute_root)): hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in cute_cache_files(cute_root)
+        }
+        if cute_root is not None
+        else {},
     }
     path.write_text(json.dumps(manifest, indent=2) + "\n")
 
 
-def inspect_manifest(cache_root: Path, aot_root: Path, startup_root: Path) -> list[Path]:
+def inspect_manifest(
+    cache_root: Path, aot_root: Path, startup_root: Path, *, cute_root: Path | None = None
+) -> list[Path]:
     """Check baked artifacts before startup, without loading CUDA or compiling."""
     manifest = json.loads((cache_root / "warmed-manifest.json").read_text())
     if manifest.get("schema") != 1 or not manifest.get("autotune"):
@@ -300,10 +365,17 @@ def inspect_manifest(cache_root: Path, aot_root: Path, startup_root: Path) -> li
         path = startup_root.parent / "torch_compile_cache" / name
         if not path.is_file() or path.stat().st_size != size:
             raise ValueError(f"Baked Torch compilation cache missing or changed: {path}")
+    cute_files = manifest.get("cute_files", {})
+    if cute_files and cute_root is None:
+        raise ValueError("Manifest contains CuTe cache files but no cache directory was provided")
+    for name, digest in cute_files.items():
+        path = cute_cache_path(cute_root, name)
+        if not path.is_file() or hashlib.sha256(path.read_bytes()).hexdigest() != digest:
+            raise ValueError(f"Baked CuTe cache missing or changed: {path}")
     print(
         f"Warmed image build={manifest['build_id']}: {len(manifest['autotune'])} autotune caches, "
         f"{len(manifest['startup_plans'])} startup plans, {len(libraries)} baked JIT modules, "
-        f"{len(compile_files)} Torch compilation files",
+        f"{len(compile_files)} Torch compilation files, {len(cute_files)} CuTe-DSL files",
         flush=True,
     )
     print(f"Baked autotune hashes: {', '.join(sorted(manifest['autotune']))}", flush=True)
@@ -337,6 +409,7 @@ def main() -> None:
                 VLLM_CACHE_ROOT / "startup_plan",
                 output,
                 allow_empty=args.allow_empty,
+                cute_root=CUTE_CACHE_ROOT,
             )
         print(f"Appended warmup artifacts to {args.output}", flush=True)
     elif args.command == "install":
@@ -344,10 +417,20 @@ def main() -> None:
 
         with args.input.open("rb") as source:
             libraries = install_warmup(
-                CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", source
+                CACHE_ROOT,
+                jit_env.FLASHINFER_AOT_DIR,
+                VLLM_CACHE_ROOT / "startup_plan",
+                source,
+                cute_root=CUTE_CACHE_ROOT,
             )
         verify_libraries(libraries)
-        write_manifest(CACHE_ROOT, jit_env.FLASHINFER_AOT_DIR, VLLM_CACHE_ROOT / "startup_plan", libraries)
+        write_manifest(
+            CACHE_ROOT,
+            jit_env.FLASHINFER_AOT_DIR,
+            VLLM_CACHE_ROOT / "startup_plan",
+            libraries,
+            cute_root=CUTE_CACHE_ROOT,
+        )
         # All collected libraries now live in the package. Leave no disposable
         # compilation workspace (or object files) in the exported image.
         shutil.rmtree(JIT_WORKSPACE, ignore_errors=True)
@@ -358,7 +441,7 @@ def main() -> None:
         if spec is None or spec.origin is None:
             raise RuntimeError("Warmed image is missing the FlashInfer Python package")
         aot_root = Path(spec.origin).parent / "data" / "aot"
-        libraries = inspect_manifest(CACHE_ROOT, aot_root, VLLM_CACHE_ROOT / "startup_plan")
+        libraries = inspect_manifest(CACHE_ROOT, aot_root, VLLM_CACHE_ROOT / "startup_plan", cute_root=CUTE_CACHE_ROOT)
         if args.command == "verify":
             verify_libraries(libraries)
 

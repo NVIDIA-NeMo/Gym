@@ -32,8 +32,9 @@ set -euo pipefail
 # Disaggregated pools also support two TP2 replicas per node with VLLM_ENGINES_PER_NODE=2.
 # Disaggregated TP1 pools: VLLM_ENGINES_PER_NODE=4 NUM_PREFILL_NODES=1 NUM_DECODE_NODES=1
 # SAVE_WARMED_CONTAINER=/shared/images/warmed.sqsh runs startup only (omit eval args),
-# collects all nodes' FlashInfer autotuning caches, compiled JIT modules, and
-# vLLM startup plans inside one image, exports it, and exits. No cache mount is used.
+# collects all nodes' FlashInfer autotuning caches, compiled JIT modules, CuTe-DSL
+# file caches, and vLLM startup plans inside one image, exports it, and exits.
+# No cache mount is used.
 # Later runs with CONTAINER pointing to that image automatically load the baked
 # caches. Keep the same GPU type and
 # serving config; changed kernels/configs may need fresh tuning. Mounted model
@@ -391,11 +392,27 @@ if [[ -f "\$flashinfer_manifest" ]]; then
     echo "FlashInfer build=\$flashinfer_build_id workspace=\$FLASHINFER_WORKSPACE_BASE on \$(hostname)"
     FLASHINFER_DISABLE_JIT=1 python3 /opt/super-vl-evals/verify-flashinfer.py \\
         --verify /opt/super-vl-evals/flashinfer-warmup.env
+elif [[ -f /opt/super-vl-evals/flashinfer-slim.json ]]; then
+    # Slim images invalidate native modules instead of compiling them. A new
+    # workspace namespace prevents mounted caches from supplying old binaries.
+    flashinfer_build_id=\$(sha256sum /opt/super-vl-evals/flashinfer-slim.json)
+    flashinfer_build_id=\${flashinfer_build_id%% *}
+    export FLASHINFER_WORKSPACE_BASE="\${FLASHINFER_WORKSPACE_BASE:-/tmp}/flashinfer-builds/\$flashinfer_build_id"
+    mkdir -p "\$FLASHINFER_WORKSPACE_BASE"
+    unset FLASHINFER_DISABLE_JIT
+    echo "FlashInfer slim build=\$flashinfer_build_id workspace=\$FLASHINFER_WORKSPACE_BASE on \$(hostname)"
 fi
 
 # CuTe-DSL has its own cache, separate from the FlashInfer native module cache.
 prims_cache=/opt/super-vl-evals/prims-cute-cache
-if [[ -f "\$prims_cache/.warmed" && -f "\$flashinfer_manifest" ]] && \\
+if [[ -n "$SAVE_WARMED_CONTAINER" || -f "\$baked_cache/.cute-cache-baked" ]]; then
+    # Set before workers import CuTe. Export/install merges this exact directory
+    # across nodes, including Prims GEMMs compiled by either PD role.
+    export CUTE_DSL_CACHE_DIR="\$prims_cache"
+    export CUTE_DSL_DISABLE_FILE_CACHING=False
+    mkdir -p "\$CUTE_DSL_CACHE_DIR"
+    echo "Using image-local CuTe-DSL cache: \$CUTE_DSL_CACHE_DIR on \$(hostname)"
+elif [[ -f "\$prims_cache/.warmed" && -f "\$flashinfer_manifest" ]] && \\
     grep -qx "FLASHINFER_SHA=\$(cat "\$prims_cache/.warmed")" "\$flashinfer_manifest"; then
     export CUTE_DSL_CACHE_DIR="\${CUTE_DSL_CACHE_DIR:-\$prims_cache}"
     export CUTE_DSL_DISABLE_FILE_CACHING="\${CUTE_DSL_DISABLE_FILE_CACHING:-False}"

@@ -2,34 +2,31 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-# Install a same-release FlashInfer branch and rebuild selected host dispatchers.
+# Install a same-release FlashInfer branch and invalidate selected native modules.
 # Keep the base image's cubin and JIT-cache packages; no previous build manifest
-# is needed. The caller must select every native module affected by their changes.
-# Requires the base image's CUDA toolkit, git, and Python build dependencies.
+# is needed. Select every native module affected by your changes; vLLM compiles
+# those modules when they are first used.
+# Requires git and Python build dependencies; vLLM warmup needs the CUDA toolkit.
 #
 # SLURM_ACCOUNT=... BASE_IMAGE=/lustre/base.sqsh FLASHINFER_BRANCH=... \
-#   FLASHINFER_REBUILD_MODULES=fused_moe_trtllm_sm100,fmha_gen \
+#   FLASHINFER_INVALIDATE_MODULES='fused_moe_trtllm_sm100,checkpointing_ssu_*,replayssm_materialize_*' \
 #   bash custom_flashinfer_slim.sh /lustre/output.sqsh
-# Supported modules: fused_moe_trtllm_sm100 (default), fmha_gen.
-# Prims CuTe-DSL kernels still compile on first use; this script builds native
-# dispatchers only. No runtime dependencies are installed or upgraded.
+# Accepts comma-separated module names/globs (default: fused_moe_trtllm_sm100).
+# FLASHINFER_REBUILD_MODULES is accepted as a compatibility alias.
+# No kernels are compiled here; use SAVE_WARMED_CONTAINER in the vLLM launcher
+# to bake startup compilation results. Runtime dependencies remain installed.
 set -Eeuo pipefail
 
 export FLASHINFER_REPO="${FLASHINFER_REPO:-https://github.com/bxyu-nvidia/flashinfer.git}"
-export FLASHINFER_REBUILD_MODULES="${FLASHINFER_REBUILD_MODULES:-fused_moe_trtllm_sm100}"
+export FLASHINFER_INVALIDATE_MODULES="${FLASHINFER_INVALIDATE_MODULES:-${FLASHINFER_REBUILD_MODULES:-fused_moe_trtllm_sm100}}"
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.0a}"
-export MAX_JOBS="${MAX_JOBS:-64}"
-export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
 
 if [[ "${1:-}" == __inside_build ]]; then
     : "${FLASHINFER_HEAD_SHA:?}" "${BASE_IMAGE:?}"
-    for executable in git nvcc c++ ninja; do
-        command -v "$executable" >/dev/null || { echo "Missing build tool: $executable" >&2; exit 1; }
-    done
+    command -v git >/dev/null || { echo "Missing build tool: git" >&2; exit 1; }
     BUILD_DIR=$(mktemp -d /tmp/flashinfer-slim.XXXXXX)
     export BUILD_DIR
     trap 'cd /; rm -rf "$BUILD_DIR"' EXIT
-    export FLASHINFER_WORKSPACE_BASE="$BUILD_DIR/workspace"
     unset FLASHINFER_DISABLE_JIT FLASHINFER_DISABLE_VERSION_CHECK FLASHINFER_CUBIN_DIR
     git init "$BUILD_DIR/source"
     git -C "$BUILD_DIR/source" remote add origin "$FLASHINFER_REPO"
@@ -66,6 +63,7 @@ packages = {dist.metadata["Name"]: dist.version for dist in metadata.distributio
             if dist.metadata["Name"].lower().replace("_", "-").startswith("flashinfer-")
             and dist.metadata["Name"].lower().replace("_", "-") != "flashinfer-python"}
 (root / "binary-packages.json").write_text(json.dumps(packages))
+(root / "old-cache-root").write_text(str(env.FLASHINFER_CACHE_DIR))
 PY
     export FLASHINFER_LOCAL_VERSION="$(cat "$BUILD_DIR/local-version")"
     unset FLASHINFER_DEV_RELEASE_SUFFIX
@@ -76,90 +74,76 @@ PY
     # dependencies, including cubins/providers, installed as-is (--no-deps).
     python3 -m pip install --no-deps --no-build-isolation --force-reinstall "$BUILD_DIR/source"
 
-    # Write a helper for the two Python calls below; this heredoc does not run it.
-    # Both modes check the source commit, retained package versions, and expected
-    # cubin manifest. Build mode compiles; verify mode only loads saved binaries.
-    cat > "$BUILD_DIR/modules.py" <<'PY'
-import hashlib
-import importlib
+    # Python 3: restore unrelated AOT overrides, remove matching module families
+    # from package/provider/JIT caches, and update provider manifests. No spec
+    # generators, shape lists, CUDA compilation, or kernel launches are needed.
+    python3 - <<'PY'
+import fnmatch
 import importlib.metadata as metadata
 import json
 import os
 import shutil
-import sys
 from pathlib import Path
 
 from flashinfer._build_meta import __git_commit__
-from flashinfer.artifacts import ArtifactPath, CheckSumHash
 from flashinfer.jit import env
-from flashinfer.jit.core import build_jit_specs
 
-# Extend this registry with zero-argument JIT spec generators as needed.
-generators = {
-    "fused_moe_trtllm_sm100": ("flashinfer.jit.fused_moe", "gen_trtllm_gen_fused_moe_sm100_module", "TRTLLM_GEN_BMM"),
-    "fmha_gen": ("flashinfer.jit.attention.modules", "gen_trtllm_gen_fmha_module", "TRTLLM_GEN_FMHA"),
-}
 root = Path(os.environ["BUILD_DIR"])
-verify = sys.argv[1] == "verify"
 if __git_commit__ != os.environ["FLASHINFER_HEAD_SHA"]:
     raise RuntimeError("Installed FlashInfer source commit differs from requested commit")
-for package, version in json.loads((root / "binary-packages.json").read_text()).items():
+packages = json.loads((root / "binary-packages.json").read_text())
+for package, version in packages.items():
     if metadata.version(package) != version:
         raise RuntimeError(f"Unexpected binary package change: {package}")
-if not verify and (root / "aot").exists():
+if (root / "aot").exists():
     shutil.copytree(root / "aot", env.FLASHINFER_AOT_DIR, dirs_exist_ok=True)
-records = json.loads((root / "modules.json").read_text()) if verify else {}
-for name in dict.fromkeys(os.environ["FLASHINFER_REBUILD_MODULES"].split(",")):
-    name = name.strip()
-    module, function, artifact_name = generators[name]
-    artifact = getattr(ArtifactPath, artifact_name)
-    manifest = env.FLASHINFER_CUBIN_DIR / artifact / "checksums.txt"
-    if not manifest.is_file() or hashlib.sha256(manifest.read_bytes()).hexdigest() != getattr(CheckSumHash, artifact_name):
-        raise RuntimeError(f"Installed cubins do not match {artifact_name} expected by this branch: {manifest}. "
-                           "Install compatible cubins or use the full build script.")
-    spec = getattr(importlib.import_module(module), function)()
-    if spec.name != name:
-        raise RuntimeError(f"Generator returned {spec.name}, expected {name}")
-    destination = env.FLASHINFER_AOT_DIR / name / f"{name}.so"
-    if verify:
-        if spec.aot_path != destination or hashlib.sha256(destination.read_bytes()).hexdigest() != records[name]:
-            raise RuntimeError(f"Rebuilt module is missing, changed, or shadowed: {name}")
-        spec.build_and_load()
-        print(f"Loaded rebuilt module with JIT disabled: {destination}", flush=True)
-    else:
-        build_jit_specs([spec], verbose=True, skip_prebuilt=False)
-        compiled = env.FLASHINFER_JIT_DIR / name / f"{name}.so"
-        destination.parent.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(compiled, destination)
-        records[name] = hashlib.sha256(destination.read_bytes()).hexdigest()
-if not verify:
-    (root / "modules.json").write_text(json.dumps(records, indent=2) + "\n")
-PY
-    # Python 3: restore AOT overrides backed up before pip, compile only selected
-    # modules even if prebuilt versions exist, and install their .so files as AOT
-    # overrides. Save their SHA256 hashes for the subsequent verification call.
-    python3 "$BUILD_DIR/modules.py" build
-    rm -rf "$FLASHINFER_WORKSPACE_BASE"
-    # Python 4: in a fresh process with compilation disabled and its workspace
-    # deleted, check that module resolution selects the saved .so files, verify
-    # their hashes, and load them. This is a load check, not a GPU correctness test.
-    FLASHINFER_DISABLE_JIT=1 python3 "$BUILD_DIR/modules.py" verify
-    mkdir -p /opt/super-vl-evals
-    # Python 5: write flashinfer-slim.json into the saved image, recording the
-    # base image, source SHA, target architecture, rebuilt module hashes, and
-    # retained binary-package versions. This call performs no compilation.
-    python3 - <<'PY'
-import json
-import os
-from pathlib import Path
+patterns = os.environ["FLASHINFER_INVALIDATE_MODULES"].split(",")
 
-root = Path(os.environ["BUILD_DIR"])
+
+def selected(name: str) -> bool:
+    return any(fnmatch.fnmatchcase(name, pattern) for pattern in patterns)
+
+
+removed = []
+# Scan all architectures, including cached specializations not used at startup.
+module_roots = set(env.FLASHINFER_AOT_DIRS)
+cache_roots = {Path((root / "old-cache-root").read_text()), env.FLASHINFER_CACHE_DIR,
+               Path("/opt/super-vl-evals/flashinfer-warmup-workspace")}
+for cache_root in cache_roots:
+    module_roots.update(cache_root.glob("**/cached_ops"))
+for module_root in sorted(module_roots):
+    for directory in sorted(module_root.glob("*")):
+        if selected(directory.name):
+            if directory.is_symlink():
+                directory.unlink()
+            elif directory.is_dir():
+                shutil.rmtree(directory)
+            else:
+                continue
+            removed.append(str(directory))
+            print(f"Invalidated {directory}", flush=True)
+# Remove provider registry entries as well as binaries so missing entries fall
+# through to JIT rather than advertising a prebuilt specialization.
+for provider in env.FLASHINFER_AOT_PROVIDERS:
+    manifest_path = provider.jit_cache_dir.parent / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    remaining = [name for name in manifest["modules"] if not selected(name)]
+    if remaining != manifest["modules"]:
+        manifest["modules"] = remaining
+        manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
 record = {key: os.environ[key] for key in
-          ("BASE_IMAGE", "FLASHINFER_HEAD_SHA", "FLASHINFER_CUDA_ARCH_LIST", "FLASHINFER_REBUILD_MODULES")}
-record["modules"] = json.loads((root / "modules.json").read_text())
-record["retained_packages"] = json.loads((root / "binary-packages.json").read_text())
-Path("/opt/super-vl-evals/flashinfer-slim.json").write_text(json.dumps(record, indent=2) + "\n")
+          ("BASE_IMAGE", "FLASHINFER_HEAD_SHA", "FLASHINFER_CUDA_ARCH_LIST", "FLASHINFER_INVALIDATE_MODULES")}
+record["invalidated_paths"] = removed
+record["retained_packages"] = packages
+(root / "flashinfer-slim.json").write_text(json.dumps(record, indent=2) + "\n")
+print(f"Invalidated {len(removed)} native cache entries; selected modules will JIT on first use", flush=True)
 PY
+    mkdir -p /opt/super-vl-evals
+    cp "$BUILD_DIR/flashinfer-slim.json" /opt/super-vl-evals/flashinfer-slim.json
+    # These derived caches/plans describe the previous installation. Recreate
+    # them during warmup instead of validating stale manifests or reusing graphs.
+    rm -rf /opt/super-vl-evals/flashinfer-autotune-cache \
+        /opt/super-vl-evals/vllm-cache /opt/super-vl-evals/prims-cute-cache
     # A previous full-build verifier describes the old Python sources/modules.
     # Keep it for reference, but don't let the launcher apply it to this build.
     if [[ -f /opt/super-vl-evals/flashinfer-build.env ]]; then
@@ -172,12 +156,15 @@ if [[ $# -ne 1 || -z "${SLURM_ACCOUNT:-}" || -z "${BASE_IMAGE:-}" || -z "${FLASH
     echo "Usage: SLURM_ACCOUNT=... BASE_IMAGE=... FLASHINFER_BRANCH=... $0 OUTPUT.sqsh" >&2
     exit 2
 fi
-IFS=',' read -r -a modules <<< "$FLASHINFER_REBUILD_MODULES"
+# Keep patterns to module-name characters; never interpret them as file paths.
+if [[ "$FLASHINFER_INVALIDATE_MODULES" == *, ]]; then
+    echo "Empty module pattern" >&2; exit 2
+fi
+IFS=',' read -r -a modules <<< "$FLASHINFER_INVALIDATE_MODULES"
 for module in "${modules[@]}"; do
-    case "$module" in
-        fused_moe_trtllm_sm100|fmha_gen) ;;
-        *) echo "Unsupported module: $module. Choose fused_moe_trtllm_sm100 and/or fmha_gen." >&2; exit 2 ;;
-    esac
+    if [[ ! "$module" =~ ^[A-Za-z0-9_*?-]+$ ]]; then
+        echo "Invalid module name/glob: $module" >&2; exit 2
+    fi
 done
 export BASE_IMAGE FLASHINFER_BRANCH
 mkdir -p "$(dirname "$1")"
@@ -195,7 +182,7 @@ trap 'rm -f "$SNAP"' EXIT
 cp "$0" "$SNAP"
 MOUNTS="$(dirname "$SNAP"):$(dirname "$SNAP")"
 [[ ! -d /lustre ]] || MOUNTS="$MOUNTS,/lustre:/lustre"
-echo "Building $FLASHINFER_BRANCH @ $FLASHINFER_HEAD_SHA; modules: $FLASHINFER_REBUILD_MODULES"
+echo "Building $FLASHINFER_BRANCH @ $FLASHINFER_HEAD_SHA; invalidate: $FLASHINFER_INVALIDATE_MODULES"
 if ! srun \
     --account="$SLURM_ACCOUNT" --partition="${SLURM_PARTITION:-batch}" --qos="${SLURM_QOS:-interactive}" \
     --job-name=flashinfer-slim --nodes=1 --ntasks=1 --segment=1 \

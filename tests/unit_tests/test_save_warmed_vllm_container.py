@@ -97,6 +97,7 @@ def test_cli_transfers_node_archives_through_file(
         monkeypatch.setattr(helper, "CACHE_ROOT", cache)
         monkeypatch.setattr(helper, "JIT_WORKSPACE", tmp_path / "jit")
         monkeypatch.setattr(helper, "VLLM_CACHE_ROOT", tmp_path / "vllm")
+        monkeypatch.setattr(helper, "CUTE_CACHE_ROOT", tmp_path / "cute")
         monkeypatch.setattr(sys, "argv", ["helper", "dump", "--output", str(archive)])
         print("Unrelated launcher output must not enter the archive")
         helper.main()
@@ -235,7 +236,68 @@ def test_compile_caches_include_both_roles_without_mixing_replicas(helper: Modul
     assert helper.inspect_manifest(target / "cache", target / "aot", target / "startup") == []
 
 
-@pytest.mark.parametrize("damaged", [None, "autotune", "startup", "jit", "compile"])
+def test_cute_cache_merges_roles_and_preserves_file_layout(helper: ModuleType, tmp_path: Path) -> None:
+    stream = io.BytesIO()
+    for node in range(2):
+        root = tmp_path / str(node)
+        cache = root / "cache"
+        config = cache / (str(node) * 64)
+        config.mkdir(parents=True)
+        (cache / ".warmup-start").touch()
+        (config / "autotune_configs.json").write_text('{"tactic": 1}')
+        cute = root / "cute"
+        for name in (f"kernel-{node}.mlir", "nested/kernel.o", "kernel.lock", "tmp.pid_123/partial", ".warmed"):
+            path = cute / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_bytes(bytes([node]))
+        helper.dump_warmup(cache, root / "jit", root / "startup", stream, allow_empty=False, cute_root=cute)
+    stream.seek(0)
+    with tarfile.open(fileobj=stream, ignore_zeros=True) as archive:
+        assert not any("tmp.pid_" in name or name.endswith((".lock", ".warmed")) for name in archive.getnames())
+    stream.seek(0)
+    target = tmp_path / "image"
+    cute = target / "cute"
+    # Export overwrites an older entry in the destination using the first node.
+    (cute / "nested").mkdir(parents=True)
+    (cute / "nested/kernel.o").write_bytes(b"previous image")
+    helper.install_warmup(target / "cache", target / "aot", target / "startup", stream, cute_root=cute)
+    assert (cute / "kernel-0.mlir").read_bytes() == b"\x00"
+    assert (cute / "kernel-1.mlir").read_bytes() == b"\x01"
+    assert (cute / "nested/kernel.o").read_bytes() == b"\x00"
+    assert (target / "cache/.cute-cache-baked").is_file()
+    helper.write_manifest(target / "cache", target / "aot", target / "startup", [], cute_root=cute)
+    assert helper.inspect_manifest(target / "cache", target / "aot", target / "startup", cute_root=cute) == []
+    # Detect corruption even when the file length is unchanged.
+    (cute / "kernel-1.mlir").write_bytes(b"\x02")
+    with pytest.raises(ValueError, match="Baked CuTe cache missing or changed"):
+        helper.inspect_manifest(target / "cache", target / "aot", target / "startup", cute_root=cute)
+
+
+@pytest.mark.parametrize("name", ["../outside", "/absolute", "x/../../outside", "x//file", "./file"])
+def test_cute_archive_rejects_path_traversal(helper: ModuleType, tmp_path: Path, name: str) -> None:
+    stream = io.BytesIO()
+    with tarfile.open(fileobj=stream, mode="w") as archive:
+        entry = tarfile.TarInfo(f"cute/{name}")
+        entry.size = 1
+        archive.addfile(entry, io.BytesIO(b"x"))
+    stream.seek(0)
+    with pytest.raises(ValueError, match="Invalid CuTe cache path"):
+        helper.install_warmup(
+            tmp_path / "cache", tmp_path / "aot", tmp_path / "startup", stream, cute_root=tmp_path / "cute"
+        )
+
+
+def test_cute_cache_rejects_symlinks(helper: ModuleType, tmp_path: Path) -> None:
+    cute = tmp_path / "cute"
+    cute.mkdir()
+    (cute / "link").symlink_to(tmp_path / "outside")
+    with pytest.raises(ValueError, match="Unexpected symlink"):
+        helper.cute_cache_files(cute)
+    with pytest.raises(ValueError, match="Invalid CuTe cache path"):
+        helper.cute_cache_path(cute, "link/file")
+
+
+@pytest.mark.parametrize("damaged", [None, "autotune", "startup", "jit", "compile", "cute"])
 def test_manifest_checks_exported_artifacts(helper: ModuleType, tmp_path: Path, damaged: str | None) -> None:
     cache_root, aot_root, startup_root = (tmp_path / name for name in ("cache", "aot", "startup"))
     paths = {
@@ -243,24 +305,30 @@ def test_manifest_checks_exported_artifacts(helper: ModuleType, tmp_path: Path, 
         "startup": startup_root / f"startup_plan_{'b' * 16}.json",
         "jit": aot_root / "checkpointing_ssu" / "checkpointing_ssu.so",
         "compile": tmp_path / "torch_compile_cache" / ("c" * 10) / "rank_0_0" / "model",
+        "cute": tmp_path / "cute" / "cutlass_kernel.mlir",
     }
     for path in paths.values():
         path.parent.mkdir(parents=True)
         path.write_bytes(b"original")
-    helper.write_manifest(cache_root, aot_root, startup_root, [paths["jit"]])
+    helper.write_manifest(cache_root, aot_root, startup_root, [paths["jit"]], cute_root=tmp_path / "cute")
     if damaged:
         paths[damaged].write_bytes(b"changed artifact")
         with pytest.raises(ValueError, match="missing or changed"):
-            helper.inspect_manifest(cache_root, aot_root, startup_root)
+            helper.inspect_manifest(cache_root, aot_root, startup_root, cute_root=tmp_path / "cute")
     else:
-        assert helper.inspect_manifest(cache_root, aot_root, startup_root) == [paths["jit"]]
+        assert helper.inspect_manifest(cache_root, aot_root, startup_root, cute_root=tmp_path / "cute") == [
+            paths["jit"]
+        ]
         original = json.loads((cache_root / "warmed-manifest.json").read_text())
         # Rewarming may reuse every AOT library without producing any new JIT files.
-        helper.write_manifest(cache_root, aot_root, startup_root, [])
+        helper.write_manifest(cache_root, aot_root, startup_root, [], cute_root=tmp_path / "cute")
         rebuilt = json.loads((cache_root / "warmed-manifest.json").read_text())
         assert rebuilt["build_id"] != original["build_id"]
         assert rebuilt["jit_modules"] == original["jit_modules"]
-        assert helper.inspect_manifest(cache_root, aot_root, startup_root) == [paths["jit"]]
+        assert rebuilt["cute_files"] == original["cute_files"]
+        assert helper.inspect_manifest(cache_root, aot_root, startup_root, cute_root=tmp_path / "cute") == [
+            paths["jit"]
+        ]
 
 
 def test_headless_warmup_exports_kernels_without_autotuning(helper: ModuleType, tmp_path: Path) -> None:
