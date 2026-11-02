@@ -1387,3 +1387,23 @@ async def test_actual_harness_exec_cause_survives_legacy_verify(fixture, monkeyp
     # Grading may complete, but it must not erase the selected execution failure.
     assert row["reward"] == 0.75
     assert f.agent._runs
+
+
+async def test_a_resumed_rollout_that_was_already_graded_is_answered_without_a_second_episode(fixture):
+    """A segment ended after TB4 graded a rollout and before the run saved it. The resumed run sends the rollout again
+    as its next attempt, from a new client session. The agent forwards the Gym identity, and TB4 answers from its
+    record: no second model loop and no second verification."""
+    f = fixture
+    gym = {"_ng_run_id": "c" * 32, "_ng_task_index": 3, "_ng_rollout_index": 0}
+    first = TerminalBench4RunRequest.model_validate(f.body.model_dump() | gym | {"_ng_attempt_index": 0})
+    graded = await f.agent.run(f.request, first)
+    assert graded.evaluation_completed and graded.reward == 0.75
+
+    resumed = TerminalBench4RunRequest.model_validate(
+        f.body.model_dump() | gym | {"_ng_attempt_index": 1, "rollout_id": "rollout-resumed"}
+    )
+    replayed = await f.agent.run(SimpleNamespace(session={SESSION_ID_KEY: "next-segment"}, cookies={}), resumed)
+
+    assert f.grade.await_count == 1 and len(f.harnesses) == 1
+    assert replayed.reward == 0.75 and replayed.evaluation_completed
+    assert replayed.model_dump()["replayed_from"]["attempt_index"] == 0

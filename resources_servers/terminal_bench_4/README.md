@@ -89,6 +89,17 @@ the configured grace period, then interrupts grading and awaits cleanup, includi
 provisioned sessions that never reached verification. Abrupt resources-process
 death stops renewal; provider TTL is the sandbox cleanup fallback.
 
+An attempt cut short is marked `interrupted` in its `result.json` and state
+record, with the reason (`agent_killed` or `resources_shutdown`), so no later
+reader takes it for a graded outcome. Each state record also keeps the Gym run id,
+task, rollout and attempt indices the request carried (`gym_identity`). When a
+resumed run sends a rollout again, as a new request, the server answers with the
+recorded attempt of the same run, task and rollout instead of running it again,
+marked `replayed_from`. It does so only when the agent finished normally and the
+verifier ran after it: a completed termination, no exception, no `interrupted`
+mark, and a completed, unmasked evaluation. Any other record runs the rollout as
+before.
+
 Model-call capture and harness trajectories belong to the agent server. Resource
 artifacts, including collected remote `/logs/agent` files, remain under the trial
 directory. The seed's connection configuration is used only for the internal
