@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import hashlib
 import json
 import os
 import shlex
@@ -25,6 +26,8 @@ import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
+    EXPORT_RECEIPT_MISSING,
+    EXPORT_RECEIPT_MISSING_REASON,
     INCOMPLETE_MARKER_NAME,
     PROVISIONAL_MARKER_PREFIX,
     ROWS_AT_START_NAME,
@@ -273,7 +276,8 @@ def test_incomplete_evaluation_chain_obeys_retryability(tmp_path, monkeypatch, e
     incomplete = tmp_path / INCOMPLETE_MARKER_NAME
     assert incomplete.exists() is not continues
     if not continues:
-        assert "no eligible retries" in incomplete.read_text()
+        # Both rollouts are saved: the run is complete, so the stop names its missing export, not the retry budget.
+        assert incomplete.read_text() == EXPORT_RECEIPT_MISSING_REASON + "\n"
 
 
 def test_retryable_evaluation_still_obeys_walltime_cap(tmp_path):
@@ -1226,3 +1230,175 @@ def test_inspection_names_a_chain_stopped_on_rejected_sandbox_credentials(tmp_pa
 
     assert collected.chain_continuation_note == line
     assert "the chain recorded: Previous job 100 ended FAILED: provider_credentials_rejected" in decision.reason
+
+
+# ---------------------------------------------------------------------------
+# A complete, exported run ends the chain before any retry or budget decision
+# ---------------------------------------------------------------------------
+
+_MLFLOW_CONFIG = "mlflow_tracking_uri: http://tracking.example\nmlflow_experiment_name: evals\nmlflow_run_name: run\n"
+
+
+def _finished_run(tmp_path, monkeypatch, case="healthy", config=_MLFLOW_CONFIG, receipt="current") -> None:
+    """A managed run of two rollouts as its last segment left it: Store, saved config, aggregate and export receipt."""
+    from tests.unit_tests.test_managed_recovery_selection import prepare_managed
+
+    monkeypatch.setenv("SLURM_JOB_ID", "100")
+    prepare_managed(tmp_path, case, n=2)
+    artifacts = tmp_path / "artifacts"
+    (artifacts / "rollouts_resolved_config.yaml").write_text(config)
+    (artifacts / "rollouts_aggregate_metrics.json").write_text("[]\n")
+    if receipt is None:
+        return
+    files = {
+        "rollouts_jsonl_fpath": "rollouts.jsonl",
+        "resolved_config_yaml_fpath": "rollouts_resolved_config.yaml",
+        "aggregate_metrics_json_fpath": "rollouts_aggregate_metrics.json",
+        "failures_jsonl_fpath": "rollouts_failures.jsonl",
+        "materialized_inputs_jsonl_fpath": "rollouts_materialized_inputs.jsonl",
+    }
+    digests = {key: hashlib.sha256((artifacts / name).read_bytes()).hexdigest() for key, name in files.items()}
+    receipt_value = {"version": 1, "run_id": "tracked", "artifacts": digests, "uploaded_rollouts": True}
+    (artifacts / "rollouts_mlflow_export_done").write_text(json.dumps(receipt_value, separators=(",", ":")))
+    if receipt == "stale":
+        # The rollouts changed after the export: the receipt no longer describes them.
+        with (artifacts / "rollouts.jsonl").open("a") as rollouts:
+            rollouts.write("\n")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("prev_state", ["TIMEOUT", "FAILED", "PREEMPTED"])
+def test_a_follow_up_ends_the_chain_of_a_complete_exported_run_whatever_the_previous_state(
+    tmp_path, monkeypatch, prev_state
+):
+    # The segment saved the last rollout and the export receipt, then hit its walltime.
+    _finished_run(tmp_path, monkeypatch)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), prev_state)
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    assert (
+        "Run complete: the Store covers all 2 expected rollouts and its MLflow export receipt is current; "
+        "job 200 ends the chain with nothing to recover." in result.stdout
+    )
+    assert "no eligible retries" not in result.stdout and "--recover" not in result.stdout
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / ".gym_infra_retries").exists()
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n200\n"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "chain,elapsed,marker",
+    [("100\n", "14", None), ("100\n", "0", None), ("100\n777\n", "13", _provisional_line("777"))],
+    ids=["follow-up-died-unrecorded", "follow-up-cancelled", "follow-up-died-before-its-guard"],
+)
+def test_a_sentinel_ends_the_chain_of_a_complete_exported_run_instead_of_taking_over(
+    tmp_path, monkeypatch, chain, elapsed, marker
+):
+    _finished_run(tmp_path, monkeypatch)
+    (tmp_path / ".gym_job_chain").write_text(chain)
+    if marker is not None:
+        (tmp_path / INCOMPLETE_MARKER_NAME).write_text(marker + "\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of(elapsed))
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    assert "Run complete: the Store covers all 2 expected rollouts and its MLflow export receipt is current" in (
+        result.stdout
+    )
+    assert "--recover" not in result.stdout
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / ".gym_infra_retries").exists()
+    assert (tmp_path / ".gym_job_chain").read_text() == chain
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("receipt", [None, "stale"], ids=["no-receipt", "stale-receipt"])
+@pytest.mark.parametrize("sentinel", [False, True], ids=["follow-up", "sentinel"])
+def test_a_complete_run_without_a_current_export_receipt_names_the_missing_export(
+    tmp_path, monkeypatch, receipt, sentinel
+):
+    _finished_run(tmp_path, monkeypatch, receipt=receipt)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("14") if sentinel else None)
+
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker == EXPORT_RECEIPT_MISSING_REASON + "\n"
+    assert marker.startswith(f"{EXPORT_RECEIPT_MISSING}: the run is complete")
+    assert "gym eval resubmit --recover" in marker
+    assert "no eligible retries" not in result.stdout + marker
+    assert "Run complete" not in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+    assert not (tmp_path / ".gym_infra_retries").exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "config,said",
+    [
+        (_MLFLOW_CONFIG + "mlflow_tracking_required: false\n", "it exports nothing by design"),
+        ("mlflow_tracking_uri: null\nmlflow_experiment_name: evals\nmlflow_run_name: run\n", "configures no MLflow"),
+        ("num_repeats: 1\n", "configures no MLflow export (mlflow_tracking_uri is unset)"),
+    ],
+    ids=["tracking-not-required", "tracking-uri-null", "no-mlflow-names"],
+)
+def test_a_complete_run_that_exports_nothing_needs_no_receipt(tmp_path, monkeypatch, config, said):
+    _finished_run(tmp_path, monkeypatch, config=config, receipt=None)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    assert "Run complete: the Store covers all 2 expected rollouts and " in result.stdout and said in result.stdout
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_an_incomplete_run_with_an_export_receipt_continues_as_before(tmp_path, monkeypatch):
+    # One rollout is still missing: a receipt (here, of the partial run) does not make the run complete.
+    _finished_run(tmp_path, monkeypatch, case="missing")
+    coverage = json.loads((tmp_path / "artifacts" / "rollouts_coverage.json").read_text())
+    assert coverage["complete"] is False and coverage["expected"] == 2
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "Run complete" not in result.stdout
+    assert [call.split()[0] for call in _sbatch_calls(tmp_path)] == [
+        "--dependency=afternotok:200",
+        "--dependency=afterany:999",
+    ]
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize("mismatch", ["inventory", "run_id"])
+def test_a_coverage_report_of_another_inventory_or_run_does_not_end_the_chain(tmp_path, monkeypatch, mismatch):
+    _finished_run(tmp_path, monkeypatch)
+    artifacts = tmp_path / "artifacts"
+    if mismatch == "inventory":
+        with (artifacts / "rollouts_materialized_inputs.jsonl").open("a") as inputs:
+            inputs.write('{"_ng_task_index": 2, "_ng_rollout_index": 0}\n')
+    else:
+        report = json.loads((artifacts / "rollouts_coverage.json").read_text())
+        (artifacts / "rollouts_coverage.json").write_text(json.dumps(report | {"run_id": "0" * 32}, indent=2) + "\n")
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert "Run complete" not in result.stdout, result.stdout + result.stderr
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_sentinel_keeps_a_deliberate_stop_on_a_complete_run(tmp_path, monkeypatch):
+    _finished_run(tmp_path, monkeypatch)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    stop = "Accumulated walltime reached the cap; continue with gym eval resubmit --recover."
+    (tmp_path / INCOMPLETE_MARKER_NAME).write_text(stop + "\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("0"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert "Run complete" not in result.stdout
+    assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop + "\n"
+    assert _sbatch_calls(tmp_path) == []

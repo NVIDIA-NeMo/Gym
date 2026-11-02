@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_store import RolloutStore
@@ -78,7 +79,12 @@ def test_installed_runtime_authorizes_only_selected_remaining_work(
     assert retry.exists() is debit
     if debit:
         assert retry.read_text().strip() == "1"
-    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "60"
+    coverage = tmp_path / "artifacts" / "rollouts_coverage.json"
+    if coverage.exists() and json.loads(coverage.read_text()).get("complete") is True:
+        # A complete run ends its chain before the previous job's state is read; with no export receipt it says so.
+        assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == EXPORT_RECEIPT_MISSING_REASON + "\n"
+    else:
+        assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "60"
     if case != "absent":
         assert before == {
             str(f): hashlib.sha256(f.read_bytes()).hexdigest()
