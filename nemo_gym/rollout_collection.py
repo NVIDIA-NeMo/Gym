@@ -1400,13 +1400,18 @@ async def enrich_run_result(
             result[key] = row[key]
 
     # A try that left no result (interrupted, or never started) joins captured calls only when it returned agent or
-    # verifier evidence; reported failures keep theirs, since they are saved for recovery.
+    # verifier evidence, a trajectory, or the failure events of a reported failure: those are saved for recovery, so
+    # the calls behind them are kept as well.
     no_persist = bool(result.get(NG_NO_PERSIST_KEY))
     # The capture file may go only once its bodies are safely on the record: writes drained, readback complete,
     # nothing unreadable, and the bodies kept (not redacted).
     safe_to_delete = False
     if capture_dirs and (
-        not no_persist or NG_AGENT_OBSERVATIONS_KEY in result or NG_VERIFIER_INVOCATIONS_KEY in result
+        not no_persist
+        or NG_AGENT_OBSERVATIONS_KEY in result
+        or NG_VERIFIER_INVOCATIONS_KEY in result
+        or NG_TRAJECTORY_KEY in result
+        or FailureReportRow.EVENTS in result
     ):
         # A cancelled call's capture write runs detached, so drain the claims this
         # rollout still holds before snapshotting; otherwise a late row is lost.
