@@ -1111,6 +1111,16 @@ def test_source_history_requires_external_vllm_staging(staging, backend):
         )
 
 
+def test_record_last_output_item_requires_external_staging():
+    config = TokenIdCaptureConfig.model_validate(
+        _block(external_staging=True, rebuild_response=False, record_last_output_item=True)
+    )
+    assert config.token_id_capture.record_last_output_item is True
+    assert TokenIdCaptureConfig().token_id_capture.record_last_output_item is False
+    with pytest.raises(ValueError, match="record_last_output_item requires external_staging"):
+        TokenIdCaptureConfig.model_validate(_block(record_last_output_item=True))
+
+
 @pytest.mark.parametrize("setting", [{"parent_resolution": "unsupported"}, {"framework_owned_context": True}])
 def test_invalid_or_obsolete_parent_resolution_is_rejected(setting):
     with pytest.raises(ValidationError):

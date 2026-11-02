@@ -110,6 +110,8 @@ class CaptureContext:
     # strict tri-state of the lineage result.
     external_staging: bool = False
     parent_resolution_mode: ParentResolutionMode = "fingerprint"
+    # Record the served call's last output item on its ledger row in every mode.
+    record_last_output_item: bool = False
     # Stamped once when the middleware admits the call. The ledger row reuses
     # this value on every commit retry so idempotent re-records stay
     # byte-identical.

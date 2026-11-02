@@ -154,6 +154,10 @@ class TokenIdCaptureSettings(BaseModel):
     # Fingerprints match assistant content; source_history matches committed source
     # prefixes and starts a root without a parent when no unique match exists.
     parent_resolution: ParentResolutionMode = "fingerprint"
+    # Record each externally staged call's last served output item on its ledger row
+    # (``CallRecord.last_output_item``), so the framework can run its output detectors.
+    # source_history always records it; other modes keep model text out of the ledger by default.
+    record_last_output_item: bool = False
     # A custom sink normally needs a resolver over the same backend namespace.
     # Without one, every multi-call continuation is unresolved and masked.
     # This flag permits that degraded behavior explicitly.
@@ -214,6 +218,8 @@ class TokenIdCaptureConfig(BaseModel):
             not block.external_staging or block.external_staging_backend != "vllm_worker"
         ):
             raise ValueError("parent_resolution=source_history requires external vLLM staging")
+        if block.record_last_output_item and not block.external_staging:
+            raise ValueError("token_id_capture.record_last_output_item requires external_staging=true")
         if block.external_staging and not block.enabled:
             raise ValueError("token_id_capture.external_staging requires token_id_capture.enabled")
         if block.external_staging and block.rebuild_response:
