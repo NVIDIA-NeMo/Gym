@@ -34,7 +34,16 @@ from nemo_gym.orchestration.jobs import CHAIN_INCOMPLETE_FILE, EVAL_EXIT_FILE, J
 
 # Every line of the script's output that carries an answer starts with this, so a warning from a shell
 # profile or from Slurm cannot be mistaken for one.
-_MARK = "__GYM_STATE:"
+_MARK = "__GYM_STATE"
+_SEP = ":"
+
+# What an answer line is about: `<_MARK><_SEP><kind><_SEP><payload>`.
+_KIND_SQUEUE_ERROR = "squeue-error"
+_KIND_ACCT_ERROR = "acct-error"
+_KIND_CHAIN = "chain"
+_KIND_ACTIVE = "active"
+_KIND_FILE = "file"
+_KIND_ACCT = "acct"
 
 # Read at most this much of a state file; they hold a short reason or an exit code.
 _STATE_FILE_BYTES = 4096
@@ -62,7 +71,7 @@ def render_status_script(refs: Iterable[JobRef]) -> list[str]:
     lines = [
         "set +e",
         "squeue_out=$(squeue --me --all --noheader --format='%i|%T|%Z' 2>&1); squeue_rc=$?",
-        f'if [ "$squeue_rc" -ne 0 ]; then echo "{_MARK}squeue-error:$(echo "$squeue_out" | tr "\\n" " ")"; squeue_out=""; fi',
+        f'if [ "$squeue_rc" -ne 0 ]; then echo "{_MARK}{_SEP}{_KIND_SQUEUE_ERROR}{_SEP}$(echo "$squeue_out" | tr "\\n" " ")"; squeue_out=""; fi',
         'ids=""',
     ]
     for index, ref in enumerate(refs):
@@ -72,24 +81,26 @@ def render_status_script(refs: Iterable[JobRef]) -> list[str]:
         lines += [
             f"dir={shlex.quote(ref.job.job_dir)}",
             f'chain=$(tr "\\n" "," < "$dir/{JOB_CHAIN_NAME}" 2>/dev/null)',
-            f'echo "{_MARK}chain:{tag}:$chain"',
+            f'echo "{_MARK}{_SEP}{_KIND_CHAIN}{_SEP}{tag}:$chain"',
             f'ids="$ids,$chain,{recorded}"',
             # squeue's %Z is the --chdir path as given while the directory here may be the resolved one,
             # so the two are compared as the same file (-ef), never as strings.
             'while IFS="|" read -r _id _state _cwd; do',
-            f'  if [ -n "$_cwd" ] && [ "$_cwd" -ef "$dir" ]; then echo "{_MARK}active:{tag}:$_id|$_state"; fi',
+            f'  if [ -n "$_cwd" ] && [ "$_cwd" -ef "$dir" ]; then echo "{_MARK}{_SEP}{_KIND_ACTIVE}{_SEP}{tag}:$_id|$_state"; fi',
             'done <<< "$squeue_out"',
             f"for _f in {' '.join(STATE_FILES)}; do",
-            f'  if [ -f "$dir/$_f" ]; then echo "{_MARK}file:{tag}:$_f:'
-            f'$(head -c {_STATE_FILE_BYTES} "$dir/$_f" | base64 | tr -d "\\n")"; fi',
+            f'  if [ -f "$dir/$_f" ] && _encoded=$(set -o pipefail; head -c {_STATE_FILE_BYTES} "$dir/$_f" 2>/dev/null'
+            ' | base64 | tr -d "\\n"); then',
+            f'    echo "{_MARK}{_SEP}{_KIND_FILE}{_SEP}{tag}:$_f:$_encoded"',
+            "  fi",
             "done",
         ]
     lines += [
         'ids=$(echo "$ids" | tr "," "\\n" | grep -E "^[0-9]+$" | sort -un | paste -sd, -)',
         'if [ -n "$ids" ]; then',
         '  acct=$(sacct -j "$ids" -X -P -n -o JobID,State,ExitCode 2>&1); acct_rc=$?',
-        f'  if [ "$acct_rc" -eq 0 ]; then echo "$acct" | sed "s/^/{_MARK}acct:/";'
-        f' else echo "{_MARK}acct-error:$(echo "$acct" | tr "\\n" " ")"; fi',
+        f'  if [ "$acct_rc" -eq 0 ]; then echo "$acct" | sed "s/^/{_MARK}{_SEP}{_KIND_ACCT}{_SEP}/";'
+        f' else echo "{_MARK}{_SEP}{_KIND_ACCT_ERROR}{_SEP}$(echo "$acct" | tr "\\n" " ")"; fi',
         "fi",
         "true",
     ]
@@ -105,25 +116,25 @@ def parse_status_output(output: str, refs: list[JobRef]) -> dict[JobKey, Observe
     squeue_error = acct_error = None
 
     for line in output.splitlines():
-        if not line.startswith(_MARK):
+        if not line.startswith(f"{_MARK}{_SEP}"):
             continue
-        kind, _, rest = line[len(_MARK) :].partition(":")
-        if kind == "squeue-error":
+        kind, _, rest = line[len(_MARK) + len(_SEP) :].partition(_SEP)
+        if kind == _KIND_SQUEUE_ERROR:
             squeue_error = rest.strip()
-        elif kind == "acct-error":
+        elif kind == _KIND_ACCT_ERROR:
             acct_error = rest.strip()
-        elif kind == "chain":
+        elif kind == _KIND_CHAIN:
             tag, _, ids = rest.partition(":")
             chains[tag] = [job_id for job_id in ids.split(",") if job_id.isdigit()]
-        elif kind == "active":
+        elif kind == _KIND_ACTIVE:
             tag, _, job = rest.partition(":")
             job_id, _, state = job.partition("|")
             active.setdefault(tag, []).append((job_id, state.strip()))
-        elif kind == "file":
+        elif kind == _KIND_FILE:
             tag, _, rest = rest.partition(":")
             name, _, encoded = rest.partition(":")
             files.setdefault(tag, {})[name] = base64.b64decode(encoded).decode("utf-8", errors="replace")
-        elif kind == "acct":
+        elif kind == _KIND_ACCT:
             job_id, _, rest = rest.partition("|")
             state, _, exit_code = rest.partition("|")
             if job_id.isdigit():
@@ -149,7 +160,7 @@ def render_read_files_script(paths: Iterable[Path]) -> list[str]:
     for index, path in enumerate(paths):
         quoted = shlex.quote(str(path))
         lines.append(
-            f'if [ -f {quoted} ] && [ -r {quoted} ]; then echo "{_MARK}file:{index}:$(base64 < {quoted} | tr -d "\\n")"; fi'
+            f'if [ -f {quoted} ] && [ -r {quoted} ]; then echo "{_MARK}{_SEP}{_KIND_FILE}{_SEP}{index}:$(base64 < {quoted} | tr -d "\\n")"; fi'
         )
     lines.append("true")
     return lines
@@ -159,9 +170,9 @@ def parse_read_files_output(output: str, paths: list[Path]) -> dict[Path, str | 
     """The contents `render_read_files_script` printed, `None` for a file it did not find."""
     contents: dict[Path, str | None] = {path: None for path in paths}
     for line in output.splitlines():
-        if not line.startswith(f"{_MARK}file:"):
+        if not line.startswith(f"{_MARK}{_SEP}{_KIND_FILE}{_SEP}"):
             continue
-        index, _, encoded = line[len(f"{_MARK}file:") :].partition(":")
+        index, _, encoded = line[len(f"{_MARK}{_SEP}{_KIND_FILE}{_SEP}") :].partition(":")
         if index.isdigit() and int(index) < len(paths):
             contents[paths[int(index)]] = base64.b64decode(encoded).decode("utf-8", errors="replace")
     return contents
@@ -188,8 +199,13 @@ def _observe(
         native = next(native for found, native in active if found == job_id)
         return ObservedStatus(state=state, detail=native, job_id=job_id, **common)
 
-    # Nothing of this run is queued or running, so the most recent job of the run says how it ended.
-    for job_id in sorted(job_ids, key=int, reverse=True):
+    if squeue_error:
+        # A failed queue query cannot show that no newer job is active, so an old completion proves nothing.
+        return ObservedStatus(state=JobState.UNKNOWN, detail=f"squeue failed: {squeue_error}", **common)
+
+    # Nothing of this run is queued or running, so its newest job says how it ended; an older job's outcome
+    # is never borrowed, because accounting can lag behind the newest one.
+    for job_id in job_ids[-1:]:
         if job_id in accounting:
             native, exit_status = accounting[job_id]
             state = state_from_sacct(native)
@@ -198,8 +214,6 @@ def _observe(
                 state=state, detail=native, exit_code=exit_status, reason=reason, job_id=job_id, **common
             )
 
-    if squeue_error:
-        return ObservedStatus(state=JobState.UNKNOWN, detail=f"squeue failed: {squeue_error}", **common)
     if acct_error:
         return ObservedStatus(state=JobState.UNKNOWN, detail=f"sacct failed: {acct_error}", **common)
     if ref.job.job_id is None and ref.job.error:

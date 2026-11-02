@@ -96,7 +96,8 @@ def _status_block(result: SubmissionStatus) -> str:
         job_id = job.job_id or "-"
         if recorded.get(job.benchmark) and job.job_id and recorded[job.benchmark] != job.job_id:
             job_id = f"{job.job_id} (record: {recorded[job.benchmark]})"
-        rows.append((job.benchmark, job.state.value, job_id, job.detail or "-"))
+        detail = " ".join((job.detail or "").split()) or "-"
+        rows.append((job.benchmark, job.state.value, job_id, detail))
     table = _table(("BENCHMARK", "STATE", "JOB ID", "DETAIL"), rows).splitlines()
     lines.append(f"  {table[0]}")
     indent = " " * (2 + max(len("BENCHMARK"), *(len(row[0]) for row in rows)) + 2)

@@ -22,7 +22,6 @@ scheduler, and `info` describes one submission and where its parts are. What the
 """
 
 import json
-import sys
 
 from nemo_gym.cli.job_render import render_info, render_list, render_status
 from nemo_gym.orchestration.jobs import list_submissions
@@ -37,6 +36,7 @@ def list_command(*, limit: int | None, as_json: bool) -> None:
 
 
 def status_command(ids: list[str], *, benchmarks: list[str] | None, limit: int | None, as_json: bool) -> None:
+    # Imported here because `submit` loads every executor, which `gym job list` does not need.
     from nemo_gym.orchestration.submit import status
 
     results = status(ids or None, benchmarks=benchmarks, limit=limit)
@@ -45,7 +45,11 @@ def status_command(ids: list[str], *, benchmarks: list[str] | None, limit: int |
         return
     note = None
     if not ids and limit is not None:
-        total = len(list_submissions())
+        eligible = list_submissions()
+        if benchmarks:
+            wanted = set(benchmarks)
+            eligible = [record for record in eligible if wanted <= {job.benchmark for job in record.benchmarks}]
+        total = len(eligible)
         if total > len(results):
             note = f"{len(results)} of {total} submissions shown (--all for the rest)."
     print(render_status(results, note=note))
@@ -61,8 +65,3 @@ def info_command(gym_job_id: str, *, benchmark: str | None, show_config: bool, a
         print(json.dumps(shown.model_dump(mode="json"), indent=2))
         return
     print(render_info(described, show_config=show_config))
-
-
-def exit_with_error(error: Exception) -> None:
-    print(f"Error: {error}", file=sys.stderr)
-    sys.exit(1)

@@ -215,7 +215,7 @@ No. `compute` takes one entry. Submit once per cluster.
 
 ### Where is the status of my run?
 
-Use Slurm's own tools with the job IDs from the output or the manifest (`squeue`, `sacct`). The record tells you where the logs and artifacts are; there is no Gym command that tracks status for you.
+Use `gym job status ID` for one submission, or `gym job status` for the newest submissions in this machine's index. `gym job info ID` shows directories and planned logs. See [Job Management](/main/orchestration/job-management). Slurm's `squeue` and `sacct` remain available for scheduler details.
 
 ### Can I preview what will be queued?
 
