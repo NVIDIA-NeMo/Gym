@@ -22,6 +22,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.server_runtime._checkpoint.agent import (
     AgentSessionParticipant,
@@ -39,7 +40,6 @@ from nemo_gym.server_runtime._checkpoint.control import (
 from nemo_gym.server_runtime._checkpoint.errors import AdmissionClosedError, ControlError, StaleAttemptError
 from nemo_gym.server_runtime._checkpoint.participant_workers import COORDINATOR_SOCKET_ENV
 from nemo_gym.server_runtime.base_resources_server import BaseRunRequest, BaseVerifyResponse
-from nemo_gym.server_utils import BaseServerConfig
 from tests.unit_tests.server_runtime.test_checkpoint_resources import SEED
 
 

@@ -165,7 +165,7 @@ async def test_confirmed_timeout_policy_actions_keep_facts_and_collection_budget
     port = listener.sockets[0].getsockname()[1]
     session = aiohttp.ClientSession()
     monkeypatch.setattr(nemo_gym.client.http_client, "get_global_aiohttp_client", lambda: session)
-    monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda _: False)
+    monkeypatch.setattr(nemo_gym.server_runtime.base_server, "is_span_group_enabled", lambda _: False)
     model = NeMoGymAsyncOpenAI(
         api_key="test",
         base_url=f"http://127.0.0.1:{port}",

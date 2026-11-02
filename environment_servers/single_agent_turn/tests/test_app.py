@@ -32,10 +32,10 @@ from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     ResourcesCloseSessionRequest,
     ResourcesSeedSessionRequest,
+    SimpleServer,
     SingleAgentTurnResponse,
     is_retryable_dependency_error,
 )
-from nemo_gym.server_utils import SimpleServer
 from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
 from tests.single_agent_turn_helpers import _agent_response, _Client, _environment_server, _request, _Response
 
@@ -805,8 +805,7 @@ async def test_an_episode_that_grants_mcp_access_is_a_restart(transports: list[L
 
 
 async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_and_stays_ready() -> None:
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
 
     environment_server, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
@@ -841,7 +840,7 @@ async def test_an_agent_that_returns_during_a_checkpoint_parks_at_close_agent_an
 
 
 async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_invoking_the_agent() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _environment_server()
     participant = EnvironmentParticipant(mode="exported")
@@ -870,7 +869,7 @@ async def test_an_episode_restored_at_close_agent_closes_and_verifies_without_in
 
 
 async def test_an_episode_restored_at_verify_with_skip_on_closes_without_verifying() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import EnvironmentParticipant, EpisodeRecord, task_digest
 
     environment_server, client = _skipping_environment_server(
         environment={"skip_verification": True, "skip_verification_reward": 0.5}, agent={}
@@ -917,14 +916,16 @@ async def test_a_restored_replacement_admitted_during_a_second_checkpoint_parks_
     stage: str, tmp_path: Path
 ) -> None:
     from environment_servers.single_agent_turn.app import SessionHandles
-    from nemo_gym.server_runtime._checkpoint.control import (
+    from nemo_gym.server_runtime import (
         CheckpointRequest,
         CommitRequest,
+        EnvironmentParticipant,
+        EpisodeRecord,
         ParticipantControlPlane,
         RestoreRequest,
+        task_digest,
+        write_participant_state,
     )
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
-    from nemo_gym.server_runtime._checkpoint.store import write_participant_state
 
     environment_server, client = _environment_server(client_type=_HoldingClient)
     participant = EnvironmentParticipant(mode="exported")
@@ -1014,8 +1015,7 @@ class _AgentGateClient(_Client):
 
 
 async def test_an_agent_failure_during_a_checkpoint_closes_the_agent_only_after_resume() -> None:
-    from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest, ParticipantControlPlane
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import CheckpointRequest, EnvironmentParticipant, ParticipantControlPlane
 
     environment_server, client = _environment_server(client_type=_AgentGateClient)
     participant = EnvironmentParticipant(mode="exported")
@@ -1141,8 +1141,12 @@ def _checkpointed_agent(model_calls: list[str]) -> tuple[Any, httpx.AsyncClient]
 
 async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_the_activation() -> None:
     from environment_servers.single_agent_turn.app import SessionHandles
-    from nemo_gym.server_runtime import ResourcesSeedSessionResponse
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant, EpisodeRecord, task_digest
+    from nemo_gym.server_runtime import (
+        EnvironmentParticipant,
+        EpisodeRecord,
+        ResourcesSeedSessionResponse,
+        task_digest,
+    )
 
     request = _request()
     first_attempt = request.model_copy(update={"episode_id": request.episode_id.model_copy(update={"attempt": 1})})
@@ -1197,7 +1201,7 @@ async def test_an_agent_reply_lost_to_a_restore_is_given_again_without_running_t
 
 
 async def test_with_checkpointing_on_a_direct_http_grant_names_the_seeding_attempt() -> None:
-    from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
+    from nemo_gym.server_runtime import EnvironmentParticipant
 
     environment_server, client = _environment_server(resources_tool_transports=["direct_http"])
     environment_server._checkpoint = EnvironmentParticipant(mode="exported")

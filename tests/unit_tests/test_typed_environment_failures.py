@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client
 import nemo_gym.openai_utils as openai_utils_module
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
@@ -184,8 +184,8 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
 
 def _set_tracing(monkeypatch, traced: bool) -> None:
     """Select the traced or the untraced request path; diagnostics must not depend on it."""
-    monkeypatch.setattr(nemo_gym.server_utils, "is_trace_exporter_active", lambda: traced)
-    monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda group: traced)
+    monkeypatch.setattr(nemo_gym.server_runtime.base_server, "is_trace_exporter_active", lambda: traced)
+    monkeypatch.setattr(nemo_gym.server_runtime.base_server, "is_span_group_enabled", lambda group: traced)
 
 
 def _episode_response():
