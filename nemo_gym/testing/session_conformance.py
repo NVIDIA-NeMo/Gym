@@ -14,13 +14,13 @@ from collections.abc import Callable, Mapping
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.core.failure_kinds import SESSION_EXPIRED, SESSION_LOST
+from nemo_gym.server_runtime.base_resources_server import (
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
 )
-from nemo_gym.core.failure_kinds import SESSION_EXPIRED, SESSION_LOST
 
 
 def check_resources_session_contract(

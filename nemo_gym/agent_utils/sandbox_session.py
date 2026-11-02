@@ -13,6 +13,7 @@ from time import monotonic
 from typing import cast
 
 from nemo_gym.agent_utils.supervisor_client import (
+    EXPIRE_REQUEST_FILE,
     OUTPUT_LOG_FILE,
     STOP_REQUEST_FILE,
     SUPERVISOR_FILE,
@@ -27,10 +28,12 @@ from nemo_gym.agent_utils.supervisor_client import (
 )
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.sandbox.utils import read_text
+from nemo_gym.sandbox.utils import read_text, upload_text
 
 
 LOG = logging.getLogger(__name__)
+
+
 # Shared runner uploaded by adapters; reads the bash source written by shell_assignments().
 HARNESS_RUNNER_FILE = "harness_runner.sh"
 HARNESS_RUNNER_SCRIPT = Path(__file__).with_name(HARNESS_RUNNER_FILE)
@@ -98,6 +101,10 @@ def shell_assignments(values: Mapping[str, str | Sequence[str] | Mapping[str, st
     return "".join(f"{line}\n" for line in lines)
 
 
+class ExpiryUnsupportedError(Exception):
+    """``expire`` cannot stop this running harness: its sandbox's uploads can wait for capacity the harness holds."""
+
+
 @dataclass(kw_only=True)
 class SandboxSession[Artifacts]:
     """Execute, stop, capture, then release an owned or borrowed sandbox.
@@ -148,6 +155,13 @@ class SandboxSession[Artifacts]:
     _close_task: asyncio.Task[None] | None = field(default=None, init=False)
     _collect: Callable[[], Awaitable[Artifacts]] | None = field(default=None, init=False)
     _capture_attempted: bool = field(default=False, init=False)
+    _expire_requested: bool = field(default=False, init=False)
+    # The caller's reason for the expiry ``expire`` requested, if it gave one.
+    expire_reason: str | None = field(default=None, init=False)
+    # An expiry whose marker write failed, possibly after the marker reached the sandbox, and its reason.
+    _unconfirmed_expiry: bool = field(default=False, init=False)
+    _unconfirmed_expire_reason: str | None = field(default=None, init=False)
+    _expire_write: asyncio.Task[None] | None = field(default=None, init=False)
 
     @property
     def closing(self) -> bool:
@@ -172,6 +186,16 @@ class SandboxSession[Artifacts]:
     def stop_request_path(self) -> str:
         """Marker path an adapter may pass to its harness for cancellation diagnostics."""
         return f"{self.session_dir}/{STOP_REQUEST_FILE}"
+
+    @property
+    def expired(self) -> bool:
+        """Whether ``expire`` ended this activation; its receipt then records the timeout."""
+        return self._expire_requested and bool(self.cleanup and self.cleanup["timed_out"])
+
+    @property
+    def expired_before_launch(self) -> bool:
+        """Whether ``expire`` kept the harness from starting, so it left no output to collect."""
+        return self.expired and self.cleanup["return_code"] is None and self.cleanup["error"] is None
 
     async def read_output_log(self) -> str:
         """Read combined supervisor/harness diagnostics without masking the original failure."""
@@ -209,6 +233,8 @@ class SandboxSession[Artifacts]:
         try:
             async with asyncio.timeout_at(deadline):
                 command = await asyncio.shield(self._stage_task)
+            if self._expire_requested:
+                await self._request_expiry(timeout=close_timeout)
             if self.closing or self._finalize_task is not None:
                 raise RuntimeError(f"{self.harness} sandbox session closed before launch")
             if deadline is not None:
@@ -274,6 +300,11 @@ class SandboxSession[Artifacts]:
                 raise RuntimeError(f"{self.harness} sandbox session is closing")
             if not self.cleanup_confirmed:
                 raise RuntimeError(f"{self.harness} previous activation cleanup is unconfirmed")
+            # An expiry applies to the activation it was requested for; one requested before the first launch stays.
+            self._expire_requested = False
+            self.expire_reason = None
+            self._unconfirmed_expiry = False
+            self._expire_write = None
         if self._session_root is None:
             self._session_root = self.session_dir
         self.session_dir = session_dir
@@ -286,6 +317,61 @@ class SandboxSession[Artifacts]:
         self._finalize_task = None
         self._collect = None
         self._capture_attempted = False
+
+    async def expire(self, *, timeout: float, reason: str | None = None) -> bool:
+        """End the harness as at its time limit, so its receipt records ``timed_out``.
+
+        Unlike ``stop_harness`` (a cancellation), the activation is then graded like a timeout.
+        A request made before launch ends the harness as it would launch. Returns False when the
+        activation already finished, the session is closing, or expiry was already requested.
+
+        Stopping a running harness takes an upload, which on a provider without
+        ``SupportsSandboxIndependentUploads`` can wait behind the very commands it must stop, so there it
+        raises ``ExpiryUnsupportedError``. A request before launch works on every provider.
+        """
+        if self.closing or self.sandbox_stopped or self._expire_requested or self.cleanup is not None:
+            return False
+        if self._exec_task is not None and self._exec_task.done():
+            return False
+        if self.launch_started and not self.sandbox.uploads_independent_of_execs:
+            raise ExpiryUnsupportedError(
+                f"the {self.harness} sandbox's provider cannot stop a running harness: its file uploads can wait "
+                "for the capacity running commands hold"
+            )
+        self._expire_requested = True
+        self.expire_reason = reason
+        if self.launch_started:
+            # A task, so that finalization can wait for a write still in flight before it checks the marker.
+            self._expire_write = asyncio.create_task(self._write_expiry(timeout=timeout, reason=reason))
+            # Shielded, so a caller that stops waiting (a disconnected stop request) cannot cancel the write before
+            # it starts and leave the stop requested but never delivered. The write is bounded by ``timeout`` and,
+            # if it fails, makes the stop retryable again.
+            await asyncio.shield(self._expire_write)
+        return True
+
+    async def _write_expiry(self, *, timeout: float, reason: str | None) -> None:
+        try:
+            await self._request_expiry(timeout=timeout)
+        except BaseException:
+            self._expire_requested = False
+            self.expire_reason = None
+            # The marker may have landed before the write failed; finalization keeps the stop only if it did.
+            self._unconfirmed_expiry, self._unconfirmed_expire_reason = True, reason
+            raise
+
+    async def _request_expiry(self, *, timeout: float) -> None:
+        """Write the marker the supervisor watches, within ``timeout`` including any wait for the provider.
+
+        A file write, not an exec: a provider that bounds its concurrent execs (Local) counts the harness's
+        own launch against that bound for as long as it runs, and a stop must not wait for the harness to end.
+        """
+        try:
+            async with asyncio.timeout(timeout):
+                await upload_text(self.sandbox, path=f"{self.session_dir}/{EXPIRE_REQUEST_FILE}", text="")
+        except TimeoutError as error:
+            raise RuntimeError(f"Could not request {self.harness} expiry within {timeout:g} s") from error
+        except Exception as error:
+            raise RuntimeError(f"Could not request {self.harness} expiry: {error}") from error
 
     async def stop_harness(self, *, timeout: float) -> None:
         """Confirm harness termination before capture and transport release."""
@@ -330,6 +416,7 @@ class SandboxSession[Artifacts]:
         if self._stage_task is not None:
             await self._cancel_and_wait(self._stage_task, timeout=timeout)
         await self.stop_harness(timeout=timeout)
+        await self._confirm_unacknowledged_expiry(timeout=timeout)
         if self.launch_started and not self._capture_attempted and self._collect is not None:
             if self.sandbox_stopped:
                 self.capture_error = RuntimeError(f"{self.harness} sandbox stopped before artifact capture")
@@ -343,6 +430,39 @@ class SandboxSession[Artifacts]:
                     LOG.exception("%s artifact capture failed after confirmed harness termination", self.harness)
             self._capture_attempted = True
         await self._release_exec(timeout=timeout)
+
+    async def _confirm_unacknowledged_expiry(self, *, timeout: float) -> None:
+        """Keep a stop whose marker write failed only if the marker is in place and the receipt timed out.
+
+        A write still in flight is awaited first, so a failure that arrives during finalization is checked too.
+        The whole check, including any wait for provider capacity, is bounded by ``timeout``; without a
+        confirmation the stop stays unattributed and finalization goes on. That includes a write still in flight
+        when the bound runs out: the harness may have ended at its own deadline, before any marker arrived.
+        """
+        try:
+            async with asyncio.timeout(timeout):
+                if self._expire_write is not None and not self._expire_write.done():
+                    await asyncio.wait({self._expire_write})
+                if (
+                    not self._unconfirmed_expiry
+                    or self._expire_requested
+                    or not (self.cleanup and self.cleanup["timed_out"])
+                ):
+                    return
+                self._unconfirmed_expiry = False
+                marker = quote(f"{self.session_dir}/{EXPIRE_REQUEST_FILE}")
+                probe = await self.sandbox.exec(
+                    f"[ -e {marker} ] && echo present", cwd=self.workdir, timeout_s=timeout
+                )
+        except Exception:
+            if self._expire_write is not None and not self._expire_write.done():
+                self._expire_requested, self.expire_reason = False, None
+            LOG.warning(
+                "Could not confirm the %s expiry marker; the stop stays unattributed", self.harness, exc_info=True
+            )
+            return
+        if probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "present":
+            self._expire_requested, self.expire_reason = True, self._unconfirmed_expire_reason
 
     async def _release_exec(self, *, timeout: float) -> None:
         if (

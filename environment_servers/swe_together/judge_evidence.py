@@ -15,7 +15,7 @@ from nemo_gym.observability.model_calls import (
     build_model_call_record,
     model_call_capture_dirs_from_config,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,

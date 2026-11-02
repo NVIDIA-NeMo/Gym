@@ -19,7 +19,11 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
+from nemo_gym.rollout_collection import NG_TERMINAL_KEY
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
@@ -29,10 +33,6 @@ from nemo_gym.base_resources_server import (
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
-from nemo_gym.rollout_collection import NG_TERMINAL_KEY
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
-from nemo_gym.server_utils import SESSION_ID_KEY
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.environment import EnvironmentConfig, ExecLimitConfigurationError

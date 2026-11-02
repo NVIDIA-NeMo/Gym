@@ -7,7 +7,7 @@ import logging
 
 import pytest
 
-import nemo_gym.exporters as exporters_module
+import nemo_gym.artifacts.exporters as exporters_module
 from nemo_gym.config.global_config import reset_global_config_dict
 from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
 

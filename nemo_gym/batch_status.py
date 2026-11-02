@@ -29,6 +29,7 @@ from typing import Any, Dict, List, Literal, Mapping, Optional, Sequence
 import orjson
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
+from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
 from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
@@ -42,7 +43,6 @@ from nemo_gym.config.global_config import (
 )
 
 
-AGGREGATION_ERROR_KEY = "aggregation_error"
 BATCH_STATUS_FNAME = "batch_status.json"
 BATCH_STATUS_WRITE_INTERVAL_SECONDS = 5.0
 _DATASET_DIGEST_DOMAIN = b"nemo-gym-batch-dataset-v1\0"

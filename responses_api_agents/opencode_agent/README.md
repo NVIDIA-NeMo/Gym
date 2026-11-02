@@ -116,8 +116,16 @@ the task environment hook before accepting a gradable result. A missing or inval
 receipt fails the activation even if the CLI ignored a plugin-loading error.
 
 The session path accepts one text task, optional system/developer text and
-`instructions`. Unsupported controls, images, history replay and required external
-HTTP/MCP tools are rejected. `context_window` and `max_output_tokens` are independent
+`instructions`. Unsupported controls, images, history replay and required direct-HTTP
+tool grants are rejected. MCP tool grants become OpenCode `remote` MCP servers, and the model sees
+their tools as `<grant>_<tool>`. `mcp_tool_timeout_seconds` sets their connection and per-call
+timeout; without it, OpenCode allows 30 seconds to connect and 60 seconds per call. A call still
+fails after about 300 seconds, Bun's default `fetch` timeout. Before the first model call,
+`required_mcp.mjs` checks
+their status: a required grant that did not connect fails the activation, and an optional one is
+reported as an `mcp_server_skipped` gap. A run that called the model but left no readable status
+also fails, because nothing confirms its required tools; a run that failed for another reason keeps
+that cause. `context_window` and `max_output_tokens` are independent
 config settings; leave room for the prompt in the served model's context. Configure
 sampling on the Gym model server. Request-level overrides are not silently ignored.
 Session `opencode_config` permits only `permission` and `tools`, preserving Gym capture.

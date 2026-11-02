@@ -14,8 +14,8 @@
 # limitations under the License.
 from unittest.mock import MagicMock
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 from resources_servers.circle_count.app import (
     CircleCountConfig,
     CircleCountResourcesServer,

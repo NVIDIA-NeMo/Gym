@@ -19,6 +19,7 @@ import pytest
 from fastapi import Request
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -26,7 +27,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherGetWeatherRequest,
     ExampleMCPWeatherResourcesServer,
@@ -181,7 +181,7 @@ def _rpc(client: TestClient, method: str, params: dict | None = None, token: str
 
 
 def _mcp_client(server: ExampleMCPWeatherResourcesServer) -> TestClient:
-    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
     app = server.setup_webserver()
     maybe_auto_expose(server, app)

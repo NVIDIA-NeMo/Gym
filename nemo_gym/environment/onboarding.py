@@ -16,7 +16,7 @@ from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.environment.validation import EnvironmentValidationReport, ResolvedComponent, validate_environment
 from nemo_gym.registry import EnvironmentCatalogEntry
-from nemo_gym.verifier_fixture import (
+from nemo_gym.verification.verifier_fixture import (
     VerifierFixture,
     VerifierFixtureError,
     VerifierFixtureResult,

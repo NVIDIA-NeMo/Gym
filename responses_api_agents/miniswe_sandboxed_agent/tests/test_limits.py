@@ -150,3 +150,41 @@ async def test_context_overflow_stops_without_format_retries(
     assert json.loads((tmp_path / "trajectory.json").read_text())["info"]["exit_status"] == expected
     if is_context_overflow:
         assert outcome.detail == "ContextWindowExceededError"
+
+
+@pytest.mark.parametrize("saved_steps", [1, 0])
+async def test_a_runner_killed_mid_run_is_reported_only_from_a_saved_trajectory(tmp_path, runner_factory, saved_steps):
+    """mini-SWE records an exit status whenever its loop ends, so a saved trajectory without one means the process
+    was killed. Without a saved step there is no evidence that the run got going, and the failure stays
+    infrastructure."""
+    commands = ["echo working"] * saved_steps + ["kill -9 $PPID"]
+
+    async def query(params):
+        return NeMoGymResponse(
+            id=f"response-{len(commands)}",
+            created_at=0,
+            object="response",
+            model="model",
+            tools=[],
+            tool_choice="auto",
+            parallel_tool_calls=False,
+            output=[
+                {
+                    "type": "function_call",
+                    "call_id": f"call-{len(commands)}",
+                    "name": "bash",
+                    "arguments": json.dumps({"command": commands.pop(0)}),
+                }
+            ],
+        )
+
+    harness = await make_harness(tmp_path, query, runner_factory)
+    _, outcome, extra = await harness.execute(15)
+    assert commands == []
+    if saved_steps:
+        assert (outcome.reason, outcome.exit_code) == ("killed", -9)
+        assert outcome.detail.startswith("mini-SWE command exited -9")
+        assert extra["mini_swe_trajectory"]["info"]["exit_status"] == ""
+    else:
+        assert (outcome.reason, outcome.detail) == ("infrastructure_error", "mini-SWE produced no trajectory")
+        assert "mini_swe_trajectory" not in extra

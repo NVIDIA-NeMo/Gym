@@ -304,7 +304,7 @@ def _make_server(subprocess_timeout: float = 120.0):
 
     from app import SciCodePileResourcesServer, SciCodePileResourcesServerConfig
 
-    from nemo_gym.server_utils import ServerClient
+    from nemo_gym.client import ServerClient
 
     return SciCodePileResourcesServer(
         config=SciCodePileResourcesServerConfig(

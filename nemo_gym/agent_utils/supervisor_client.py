@@ -15,6 +15,7 @@ bin/gym-runner        Launch shell         Interpreter link for a standard-libra
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec (see below)
 stop.request          Stop shell           Polled by the supervisor to stop the harness
+expire.request        Session              Polled by the supervisor to time out the harness
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
 ===================== ==================== ===========================================
@@ -52,6 +53,7 @@ RUNNER_INTERPRETER = "bin/gym-runner"
 LAUNCH_CLAIM_FILE = "launch.claim"
 SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
+EXPIRE_REQUEST_FILE = "expire.request"
 CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
 
@@ -201,6 +203,7 @@ def supervised_launch_command(
         f"exec bash {supervisor} "
         f"--timeout {_seconds(timeout)} --cleanup-timeout {_seconds(cleanup_timeout)} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
+        f"--expire-file {quote(f'{session_dir}/{EXPIRE_REQUEST_FILE}')} "
         f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {harness} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )

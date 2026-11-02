@@ -67,6 +67,43 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym._checkpoint.model": MovedPath(new="nemo_gym.models._checkpoint", since="0.8.0"),
+    "nemo_gym._checkpoint.model_workers": MovedPath(new="nemo_gym.models._checkpoint_workers", since="0.8.0"),
+    "nemo_gym._checkpoint": MovedPath(new="nemo_gym.server_runtime._checkpoint", since="0.8.0"),
+    "nemo_gym.base_resources_server": MovedPath(new="nemo_gym.server_runtime.base_resources_server", since="0.8.0"),
+    "nemo_gym.base_environment_server": MovedPath(
+        new="nemo_gym.server_runtime.base_environment_server", since="0.8.0"
+    ),
+    "nemo_gym.session_routing": MovedPath(
+        new="nemo_gym.server_runtime.request_handling.session_routing", since="0.8.0"
+    ),
+    "nemo_gym.rollout_correlation": MovedPath(
+        new="nemo_gym.server_runtime.request_handling.rollout_context", since="0.8.0"
+    ),
+    "nemo_gym.mcp_auto_exposure": MovedPath(new="nemo_gym.server_runtime.mcp_auto_exposure", since="0.8.0"),
+    "nemo_gym.server_status": MovedPath(new="nemo_gym.server_runtime.server_status", since="0.8.0"),
+    "nemo_gym.episode_types": MovedPath(new="nemo_gym.server_runtime.episode_types", since="0.8.0"),
+    "nemo_gym.single_agent_turn_types": MovedPath(
+        new="nemo_gym.server_runtime.single_agent_turn_types", since="0.8.0"
+    ),
+    "nemo_gym.tool_access": MovedPath(new="nemo_gym.server_runtime.tool_access", since="0.8.0"),
+    "nemo_gym.runtime_dir": MovedPath(new="nemo_gym.server_runtime.runtime_dir", since="0.8.0"),
+    "nemo_gym.observability.verifiers": MovedPath(new="nemo_gym.server_runtime.verifier_observability", since="0.8.0"),
+    "nemo_gym.resolved_config": MovedPath(new="nemo_gym.artifacts.resolved_config", since="0.8.0"),
+    "nemo_gym.run_artifacts": MovedPath(new="nemo_gym.artifacts.run_artifacts", since="0.8.0"),
+    "nemo_gym.run_exporter_registry": MovedPath(new="nemo_gym.artifacts.exporter_registry", since="0.8.0"),
+    "nemo_gym.exporters": MovedPath(new="nemo_gym.artifacts.exporters", since="0.8.0"),
+    "nemo_gym.reward_profile": MovedPath(new="nemo_gym.metrics.reward_profile", since="0.8.0"),
+    "nemo_gym.metrics_config": MovedPath(new="nemo_gym.metrics.metrics_config", since="0.8.0"),
+    "nemo_gym.judge": MovedPath(new="nemo_gym.verification.judge", since="0.8.0"),
+    "nemo_gym.verifier_fixture": MovedPath(new="nemo_gym.verification.verifier_fixture", since="0.8.0"),
+    "nemo_gym.verifier_utils": MovedPath(new="nemo_gym.verification", since="0.8.0"),
+    "nemo_gym.rollout_observability": MovedPath(new="nemo_gym.trajectory.trajectory_record", since="0.8.0"),
+    "nemo_gym.atif_export": MovedPath(new="nemo_gym.trajectory.atif_export", since="0.8.0"),
+    "nemo_gym.atif_reverification": MovedPath(new="nemo_gym.trajectory.atif_reverification", since="0.8.0"),
+    "nemo_gym.atif_json": MovedPath(new="nemo_gym.trajectory.atif_json", since="0.8.0"),
+    "nemo_gym.atif_v1_7": MovedPath(new="nemo_gym.trajectory.atif_v1_7", since="0.8.0"),
+    "nemo_gym.profiling": MovedPath(new="nemo_gym.telemetry.profiling", since="0.8.0"),
     "nemo_gym.failure_kinds": MovedPath(new="nemo_gym.core.failure_kinds", since="0.8.0"),
     "nemo_gym.config_types": MovedPath(new="nemo_gym.config.config_types", since="0.8.0"),
     "nemo_gym.global_config": MovedPath(new="nemo_gym.config.global_config", since="0.8.0"),
@@ -90,22 +127,90 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
     "nemo_gym.server_utils": {
         # Moved, or imported before the split, and no longer used by server_utils:
         # served by its __getattr__ with a warning.
-        **_names("nemo_gym.config.global_config", "0.8.0", "NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME"),
+        **_names(
+            "nemo_gym.client.http_client",
+            "0.8.0",
+            """
+            _detach_global_aiohttp_clients _format_upstream_error_body _GLOBAL_AIOHTTP_CLIENT
+            _GLOBAL_AIOHTTP_CLIENT_CONFIG _GLOBAL_AIOHTTP_CLIENT_LOOP _GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY
+            _GLOBAL_AIOHTTP_CLIENT_REQUEST_DEBUG _GLOBAL_AIOHTTP_CONTROL_CLIENT _make_keepalive_socket_factory
+            _NUM_CLIENT_OS_ERROR _NUM_SERVER_DISCONNECTED_ERROR _PickleSafeRequestInfo _redacted_url
+            _request_with_retries _RequestOptions _traced_request _UPSTREAM_ERROR_LOG_BODY_CHARS CIMultiDict
+            ClientConnectorError ClientOSError ClientResponse ClientSession ClientTimeout
+            close_global_aiohttp_client DISCONNECTED_CLIENT_OS_HELP_TEXT DISCONNECTED_CLIENT_OS_PRINT_INTERVAL
+            DummyCookieJar Field format_exception_with_response_body get_global_aiohttp_client
+            get_global_aiohttp_control_client get_response_json global_aiohttp_client_exit
+            is_global_aiohttp_client_setup MAX_NUM_TRIES raise_for_status request ServerDisconnectedError
+            set_global_aiohttp_client
+            """,
+        ),
+        **_names(
+            "nemo_gym.client.server_client",
+            "0.8.0",
+            """
+            _connectable_client_host apply_rollout_prefix ConfigDict ConnectionError get_server_url
+            NEMO_GYM_MODEL_SERVER_BASE_URL_ENV_VAR_NAME NEMO_GYM_MODEL_SERVER_NAME_ENV_VAR_NAME rollout_path_prefix
+            setup_server_client trace_context_path_segment
+            """,
+        ),
+        **_names("nemo_gym.config.config_types", "0.8.0", "HeadServerUnreachableError"),
+        **_names(
+            "nemo_gym.config.global_config",
+            "0.8.0",
+            """
+            GlobalConfigDictParser GlobalConfigDictParserConfig HEAD_SERVER_KEY_NAME maybe_get_global_config_dict
+            NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME OBSERVABILITY_ENABLED_KEY_NAME
+            """,
+        ),
+        **_names(
+            "nemo_gym.core.episode",
+            "0.8.0",
+            """
+            current_rollout_id current_verifier_invocation_id maybe_rollout_id_from_run_body
+            VERIFIER_INVOCATION_HEADER
+            """,
+        ),
+        **_names("nemo_gym.server_runtime._checkpoint.settings", "0.8.0", "checkpoint_settings"),
+        **_names("nemo_gym.telemetry._fallbacks", "0.8.0", "safe_set_span_attributes"),
+        **_names(
+            "nemo_gym.telemetry.connection_pool",
+            "0.8.0",
+            """
+            build_connection_pool_connector QueueTimedTCPConnector reset_server_name set_server_name
+            """,
+        ),
+        **_names("nemo_gym.telemetry.profiling", "0.8.0", "ProfilingMiddlewareInputConfig"),
         **_names(
             "nemo_gym.utils.server_process",
             "0.8.0",
             """
-            is_nemo_gym_fastapi_entrypoint IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME
+            get_nemo_gym_fastapi_num_workers is_nemo_gym_fastapi_entrypoint IS_NEMO_GYM_FASTAPI_ENTRYPOINT_KEY_NAME
             IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME NEMO_GYM_FASTAPI_NUM_WORKERS
             """,
         ),
         # Moved, and still imported by server_utils for its own use, so these old paths do not warn yet.
         **_names(
+            "nemo_gym.client.http_client",
+            "0.8.0",
+            """
+            _format_upstream_error_log _set_tcp_keepalive GlobalAIOHTTPAsyncClientConfig
+            is_global_aiohttp_client_request_debug_enabled
+            """,
+        ),
+        **_names(
+            "nemo_gym.client.server_client",
+            "0.8.0",
+            """
+            _TRACEPARENT_PATTERN ServerClient ServerStatus SESSION_ID_KEY
+            """,
+        ),
+        **_names("nemo_gym.telemetry.profiling", "0.8.0", "ProfilingMiddlewareConfig"),
+        **_names(
             "nemo_gym.utils.server_process",
             "0.8.0",
             """
-            _has_injected_global_config_env get_nemo_gym_fastapi_num_workers is_nemo_gym_fastapi_worker
-            set_is_nemo_gym_fastapi_entrypoint set_is_nemo_gym_fastapi_worker set_nemo_gym_fastapi_num_workers
+            _has_injected_global_config_env is_nemo_gym_fastapi_worker set_is_nemo_gym_fastapi_entrypoint
+            set_is_nemo_gym_fastapi_worker set_nemo_gym_fastapi_num_workers
             """,
         ),
     },
@@ -260,6 +365,26 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         **_names("nemo_gym.core.episode", "0.8.0", "_CAPTURE_KEY_ATTEMPT"),
         # Moved, and still imported by episode_types for its own use.
         **_names("nemo_gym.core.episode", "0.8.0", "EpisodeId TaskId"),
+    },
+    "nemo_gym.rollout_collection": {
+        **_names("nemo_gym.artifacts.rollout_rows", "0.8.0", "_MODEL_CALL_PAYLOAD_KEYS"),
+        # Moved, and still imported by rollout_collection for its own use.
+        **_names(
+            "nemo_gym.artifacts.rollout_rows",
+            "0.8.0",
+            "NG_DISPATCH_DRAINED_KEY NG_FAILURE_CLASS_KEY NG_NO_PERSIST_KEY _rollout_for_export _strip_capture_payloads",
+        ),
+    },
+    "nemo_gym.health.types": {
+        **_names(
+            "nemo_gym.artifacts.run_files",
+            "0.8.0",
+            "QUALITY_SUMMARY_FILENAME QUALITY_SUMMARY_SOURCES_KEY ROLLOUT_VERDICTS_FILENAME",
+        ),
+    },
+    "nemo_gym.batch_status": {
+        # Moved, and still imported by batch_status for its own use.
+        **_names("nemo_gym.artifacts.run_files", "0.8.0", "AGGREGATION_ERROR_KEY"),
     },
 }
 

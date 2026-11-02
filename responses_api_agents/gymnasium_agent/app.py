@@ -24,11 +24,8 @@ import anyio
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseRunRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
@@ -37,7 +34,10 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import (
+    BaseRunRequest,
+    BaseVerifyResponse,
+)
 from resources_servers.gymnasium import EnvResetResponse, EnvStepResponse, extract_text
 
 

@@ -11,7 +11,7 @@ from sqlite3 import Row
 from typing import Any, NamedTuple
 
 from nemo_gym.config import ModelServerRef
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ObservationGap,

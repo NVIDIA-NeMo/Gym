@@ -17,7 +17,7 @@ from nemo_gym.agent_utils.uv_bootstrap import uv_for_sandbox
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 
 
 # The sandbox runs the Python and Stirrup versions installed with this server.

@@ -21,9 +21,9 @@ from pydantic import ValidationError
 
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage, TaskId
 from nemo_gym.sandbox import SandboxExecResult
-from nemo_gym.server_utils import ServerClient
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig, _unique_usage_messages
@@ -1549,8 +1549,10 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
     import orjson
 
     import nemo_gym.rollout_collection as collection
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
+    from environment_servers.single_agent_turn_legacy.app import (
+        SingleAgentTurnLegacyEnvironmentServer,
+        SingleAgentTurnLegacyEnvironmentServerConfig,
+    )
     from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
     agent, sandbox = setup
@@ -1601,7 +1603,7 @@ async def test_independent_configs_route_prepared_rows_through_environment_run(s
     agent.server_client.global_config_dict = global_config
     agent.server_client._resolve_base_url.return_value = "http://resources.example:8000"
     environment = SingleAgentTurnLegacyEnvironmentServer(
-        config=SingleAgentTurnEnvironmentServerConfig(name=env_name, **OmegaConf.to_container(env_config)),
+        config=SingleAgentTurnLegacyEnvironmentServerConfig(name=env_name, **OmegaConf.to_container(env_config)),
         server_client=agent.server_client,
     )
     calls = []
