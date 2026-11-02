@@ -200,8 +200,9 @@ FAILURE_KINDS: frozenset[str] = frozenset(
 # benchmark's rule scored without a grade (cut off with a cutoff signal, empty, or malformed), a model server's 5xx
 # reply whatever kind the failure names, another model's 4xx rejection, and the policy's request the model server
 # rejected because its output budget alone exceeds the context window or because a parameter carries a value the
-# deployment does not support (setups the deployment cannot serve, not the model's outcome). They are registered here so their names are shared, and kept out of ``FAILURE_KINDS`` so no
-# producer can emit one (``require_failure_kind`` refuses them).
+# deployment does not support (setups the deployment cannot serve, not the model's outcome). They are registered here
+# so their names are shared, and kept out of ``FAILURE_KINDS`` so no producer can emit one (``require_failure_kind``
+# refuses them).
 TRUNCATED_ANSWER = "truncated_answer"
 EMPTY_ANSWER = "empty_answer"
 MALFORMED_ANSWER = "malformed_answer"
