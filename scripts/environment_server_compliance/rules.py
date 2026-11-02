@@ -14,6 +14,10 @@ def lacking_agent_sessions(target: Target) -> object | None:
     return None if target.server.supports_agent_sessions() else target.server
 
 
+def defined_aggregate_metrics(target: Target) -> object | None:
+    return vars(target.server).get("aggregate_metrics")
+
+
 RULES: tuple[Rule, ...] = (
     Rule(
         "A1",
@@ -26,6 +30,12 @@ RULES: tuple[Rule, ...] = (
         AGENT_SERVER,
         "Agent servers should implement agent sessions: seed and close.",
         lacking_agent_sessions,
+    ),
+    Rule(
+        "A3",
+        AGENT_SERVER,
+        "Agent servers should not override `aggregate_metrics`; aggregation belongs to the environment server.",
+        defined_aggregate_metrics,
     ),
 )
 validate(RULES)

@@ -95,6 +95,25 @@ def test_an_agent_without_session_seed_and_close_is_reported_at_its_class():
     ]
 
 
+def test_an_agent_overriding_aggregate_metrics_is_reported_at_the_override():
+    from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
+
+    class Overriding(SimpleResponsesAPIAgent):
+        async def aggregate_metrics(self, body):
+            pass
+
+    class Inheriting(Overriding):
+        pass
+
+    class Default(SimpleResponsesAPIAgent):
+        pass
+
+    path = "responses_api_agents/example/app.py"
+    [finding] = _filter_findings(findings(path, [Overriding, Inheriting, Default], rules_for(AGENT_SERVER)), "A3")
+    assert finding["path"] == path
+    assert finding["line"] == Overriding.aggregate_metrics.__code__.co_firstlineno
+
+
 def test_an_unknown_component_kind_is_rejected():
     with pytest.raises(ValueError, match="Unknown component kind: 'tools'"):
         _base_class("tools")
