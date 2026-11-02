@@ -3302,13 +3302,15 @@ def _observed_trial_operations(
         for row in rows:
             if _identity(row) in final_zero:
                 continue
+            if _scored_kind(row) is not None:
+                continue  # A counted failure with its own recorded kind (``_scored_fault``), like a final zero.
             if _answer_fault(row, collected):
                 # A counted model failure (``_answer_fault``), like a final zero: only its answer must be observed.
                 if not _observed_incomplete_answer(row):
                     return False
                 continue
             if _unparsed_judge_verdict(row):
-                continue  # A counted grading fault (``_grading_fault``): its reward is no grade to observe.
+                continue  # A counted grading fault (``_scored_fault``): its reward is no grade to observe.
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
@@ -3904,7 +3906,7 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     rows = [
         row
         for row in collected.results or []
-        if _identity(row) in scored and _identity(row) not in final_zero and not _grading_fault(row, collected)
+        if _identity(row) in scored and _identity(row) not in final_zero and not _scored_fault(row, collected)
     ]
     # The same per-trial evidence the gate validates: a grading bound to the saved row, the verifier's own record, or
     # a bound grading artifact. A mismatched or missing binding stays unobserved, never healthy.
@@ -4060,10 +4062,18 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
-def _grading_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
-    """A scored row's counted fault: its answer's (``_answer_fault``), else ``judge_unparseable`` when its saved
-    judge evaluation recorded no verdict (``_unparsed_judge_verdict``)."""
-    fault = _answer_fault(row, collected)
+def _scored_kind(row: Mapping[str, Any]) -> str | None:
+    """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
+    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result."""
+    kind, status = _policy_evidence(row)
+    return status_fault_kind(kind, status) if _known_kind(kind) else None
+
+
+def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
+    """A scored row's one counted fault: its own recorded kind (``_scored_kind``), else its answer's
+    (``_answer_fault``), else ``judge_unparseable`` when its saved judge evaluation recorded no verdict
+    (``_unparsed_judge_verdict``)."""
+    fault = _scored_kind(row) or _answer_fault(row, collected)
     if fault is None and _unparsed_judge_verdict(row):
         return JUDGE_UNPARSEABLE
     return fault
@@ -4370,7 +4380,8 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
     (``final_zero_trials``), scored-zero incomplete answers the benchmark's rule scored without a recorded grade
     (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed), and scored rows whose saved
-    judge evaluation recorded no verdict (``judge_unparseable``, ``_grading_fault``).
+    judge evaluation recorded no verdict (``judge_unparseable``) or that record their own failure kind, each counted
+    once (``_scored_fault``).
     """
     final_zero = final_zero_trials(decision, collected)
     kinds = Counter(
@@ -4385,7 +4396,7 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
         for row in (collected.results or [] if collected is not None else [])
         if _identity(row) in scored
         and _identity(row) not in final_zero
-        and (fault := _grading_fault(row, collected)) is not None
+        and (fault := _scored_fault(row, collected)) is not None
     )
     return +kinds
 
@@ -4645,8 +4656,9 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     A response failure is a scored rollout without a recorded grade (``_recorded_grade``) whose saved answer is
     truncated (incomplete with a cutoff signal, ``_cut_off``), empty (no assistant output) or malformed (no response
     with an output list, an answer the verifier marked invalid, or one left incomplete without a cutoff signal). A trial failure is a rollout in a failed, masked or
-    unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, or an observed
-    grading without a valid verdict, by the cause its failure kind names (``trial_failure_cause``).
+    unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, a scored
+    rollout that records its own failure kind or whose judge recorded no verdict, or an observed grading without a
+    valid verdict, by the cause its failure kind names (``trial_failure_cause``).
     """
     population = trial_population(decision)
     if population <= 0:
@@ -4682,6 +4694,16 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         if e.state in _TRIAL_FAILURE_STATES
     )
     causes.update(trial_failure_cause(kind) for kind in final_zero.values())
+    # A scored row's own failure kind or an unparsed judge verdict (``_scored_fault``); answer faults are response
+    # failures above.
+    causes.update(
+        trial_failure_cause(fault)
+        for row in ((collected.results or []) if collected is not None else [])
+        if _identity(row) in scored
+        and _identity(row) not in final_zero
+        and (fault := _scored_fault(row, collected)) is not None
+        and fault != _answer_fault(row, collected)
+    )
     causes["judge"] += len(invalid_grades)
 
     def family(found: Counter, names: tuple[str, ...]) -> dict[str, Any]:

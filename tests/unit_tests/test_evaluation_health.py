@@ -284,3 +284,17 @@ def test_trial_counts_leave_an_unbound_grading_artifact_unobserved():
     decision, (passed, _, _), task = _gate(collected)
     assert passed is None
     assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
+
+
+def test_a_scored_harbor_agent_timeout_counts_its_own_failure_kind_once():
+    collected = _run(100)
+    # Harbor's terminal graded timeout: a main result with its own failure kind, graded and not masked.
+    for row in collected.results[:30]:
+        row |= {"failure_kind": "agent_timeout", "evaluation_completed": True, "mask_sample": False}
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.counts == {"scored": 100}
+    assert report["model"]["kinds"] == {"agent_timeout": 30} and report["evaluation"]["count"] == 0, reason
+    # A model fault never fails health; every other trial is observed, so the count is exact.
+    assert passed is True and report["exact"] is True, reason
+    assert task["failures"]["trial_failures"]["by_cause"]["timeout"]["count"] == 30
+    assert task["trial_counts"] == {"observed_healthy": 70, "unhealthy": 30, "unobserved": 0, "verifier_recorded": 0}
