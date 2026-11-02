@@ -1260,6 +1260,9 @@ async def test_real_sdk_serializes_lifecycle_policy(
         bodies.append(json.loads(request.content))
         raise ConnectionError("captured before network")
 
+    # Install the Gym transport here, so this test never depends on test order to stay off the network.
+    monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
     monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", capture_request)
     provider = E2BProvider(
@@ -1308,7 +1311,10 @@ async def test_status_control_plane_failure_is_unknown(monkeypatch: pytest.Monke
     assert await provider.status(handle) is SandboxStatus.UNKNOWN
 
 
-@pytest.mark.parametrize(("state", "expected"), [("running", SandboxStatus.RUNNING), ("paused", SandboxStatus.PAUSED)])
+@pytest.mark.parametrize(
+    ("state", "expected"),
+    [("running", SandboxStatus.RUNNING), ("paused", SandboxStatus.PAUSED), ("gone", SandboxStatus.STOPPED)],
+)
 async def test_real_sdk_status_only_reads_control_plane(
     monkeypatch: pytest.MonkeyPatch, state: str, expected: SandboxStatus
 ) -> None:
@@ -1327,6 +1333,9 @@ async def test_real_sdk_status_only_reads_control_plane(
         if request.method == "POST" and request.url.path.endswith("/sandboxes"):
             return httpx.Response(201, json=sandbox, request=request)
         if request.method == "GET" and request.url.path.endswith("/sandboxes/sbx-1"):
+            if state == "gone":
+                # Killed at its timeout: the SDK's 404 must read as STOPPED, not UNKNOWN.
+                return httpx.Response(404, json={"code": 404, "message": "sandbox not found"}, request=request)
             detail = {
                 **sandbox,
                 "startedAt": "2026-01-01T00:00:00Z",
@@ -1339,6 +1348,9 @@ async def test_real_sdk_status_only_reads_control_plane(
             return httpx.Response(200, content=json.dumps(detail), request=request)
         raise AssertionError(f"unexpected request {request.method} {request.url}")
 
+    # Install the Gym transport here, so this test never depends on test order to stay off the network.
+    monkeypatch.setenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, "{}")
+    monkeypatch.setattr(e2b_sdk, "_CONFIGURED_SDK_MODULES", {})
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _REAL_PROVIDER_REQUIRE_E2B_SDK)
     monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", fake_api)
     provider = E2BProvider(connection={"api_key": "test-key", "validate_api_key": False}, create={"template": "base"})
