@@ -222,7 +222,7 @@ def test_legacy_ordinary_zero_keeps_score_but_unobserved_grading_is_unknown(tmp_
     d, task = evaluate(c)
     assert d.expected == 2 and d.counts == {"scored": 2}
     assert response_health(d, c.quality)[0] is True and trial_health(d, c)[0] is None
-    assert task["status"] == "FAILED" and task["score"] == 0.0
+    assert task["status"] == "UNVERIFIED" and task["score"] == 0.0
     assert d.action.value == "noop"  # Unknown grading coverage never requests another generation.
     assert snapshot(a) == before
 
@@ -246,12 +246,12 @@ def test_file_changed_after_producer_report_cannot_pass(tmp_path):
             sort_keys=True,
         ),
     )
-    assert any(error.startswith("response/trial health unknown") for error in task["errors"])
+    assert any(error.startswith("response/trial health unknown") for error in task["warnings"])
     assert not any(warning.startswith("health gate within") for warning in task["warnings"])
     assert c.quality["source_matches"] is False
     # The stale counters are retained as history, never recomputed or accepted by the remote reader.
     assert c.quality["responses"]["selected"] == 2 and c.quality["responses"]["faulted"] == 0
-    assert task["status"] == "FAILED"
+    assert task["status"] == "UNVERIFIED"
     assert (a / "quality_summary.json").read_bytes() == original_quality
     assert all(snapshot(a)[name] == value for name, value in before.items())
 
@@ -263,7 +263,7 @@ def test_valid_explicit_id_survives_collection(tmp_path):
     print("EXPLICIT", json.dumps({"trial": trial_health(d, c), "status": task["status"]}))
     assert [r.get("_ng_rollout_id") for r in c.results] == [r["_ng_rollout_id"] for r in rows]
     assert d.expected == 2 and d.counts == {"scored": 2}
-    assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
+    assert trial_health(d, c)[0] is None and task["status"] == "UNVERIFIED"
 
 
 @pytest.mark.parametrize("sources", [None, [], ["other.jsonl"], ["rollouts.jsonl", "rollouts.jsonl"]])
@@ -285,8 +285,8 @@ def test_missing_wrong_or_ambiguous_source_remains_nonaccepting(tmp_path, source
     c = collect(a)
     d, task = evaluate(c)
     assert c.quality["source_matches"] is False
-    assert task["status"] == "FAILED"
-    assert any("not bound" in e or "unknown" in e for e in task["errors"])
+    assert task["status"] == "UNVERIFIED"
+    assert any("not bound" in e or "unknown" in e for e in task["warnings"])
 
 
 def test_missing_report_remains_nonaccepting(tmp_path):
@@ -294,7 +294,7 @@ def test_missing_report_remains_nonaccepting(tmp_path):
     (a / "quality_summary.json").unlink()
     c = collect(a)
     _, task = evaluate(c)
-    assert c.quality is None and task["status"] == "FAILED"
+    assert c.quality is None and task["status"] == "UNVERIFIED"
 
 
 def test_saved_answer_and_spent_budget_files_unchanged(tmp_path):
@@ -358,7 +358,7 @@ json.loads = changing
 """
     c = collect(a, hook)
     _, task = evaluate(c)
-    assert c.quality["source_matches"] is False and task["status"] == "FAILED"
+    assert c.quality["source_matches"] is False and task["status"] == "UNVERIFIED"
 
 
 @pytest.mark.parametrize("binding", [None, [], "malformed", [{}], [{"rollouts_jsonl_fpath": True}]])
@@ -369,7 +369,7 @@ def test_missing_or_malformed_binding_remains_nonaccepting(tmp_path, binding):
     write_json(a / "quality_summary.json", q)
     c = collect(a)
     _, task = evaluate(c)
-    assert c.quality["source_matches"] is False and task["status"] == "FAILED"
+    assert c.quality["source_matches"] is False and task["status"] == "UNVERIFIED"
 
 
 @pytest.mark.parametrize(
@@ -388,7 +388,7 @@ def test_any_gate_input_changed_after_report_is_unbound(tmp_path, name):
     before = snapshot(a)
     c = collect(a)
     _, task = evaluate(c)
-    assert c.quality["source_matches"] is False and task["status"] == "FAILED"
+    assert c.quality["source_matches"] is False and task["status"] == "UNVERIFIED"
     assert all(snapshot(a)[name] == value for name, value in before.items())
 
 
@@ -418,7 +418,7 @@ def test_inputs_changed_while_producing_report_are_not_bound(tmp_path, monkeypat
     assert "rollout_artifact_digests" not in result.summary["run"]["provenance"]
     c = collect(a)
     _, task = evaluate(c)
-    assert c.quality["source_matches"] is False and task["status"] == "FAILED"
+    assert c.quality["source_matches"] is False and task["status"] == "UNVERIFIED"
 
 
 @pytest.mark.parametrize("n,accept", [(49, False), (50, False), (51, True)])
@@ -446,7 +446,7 @@ def test_persisted_response_denominator_and_strict_boundary(tmp_path, n, accept)
     # This historical fixture has no grading operation. Response threshold is still exact above;
     # absence of grading evidence now leaves the full gate nonaccepting even below that threshold.
     assert trial_health(d, c)[0] is None
-    assert task["status"] == "FAILED"
+    assert task["status"] == "UNVERIFIED"
     assert (a / "rollouts.jsonl").read_bytes() == before
 
 
@@ -476,7 +476,7 @@ def test_binding_requires_exact_keys_types_and_current_digests(tmp_path, mutatio
     write_json(path, summary)
     c = collect(a)
     _, task = evaluate(c)
-    assert c.quality["source_matches"] is False and task["status"] == "FAILED"
+    assert c.quality["source_matches"] is False and task["status"] == "UNVERIFIED"
 
 
 @pytest.mark.parametrize(
@@ -496,7 +496,7 @@ def test_malformed_optional_quality_does_not_erase_saved_score(tmp_path, broken)
     d, task = evaluate(c)
     assert c.quality is None
     assert d.action.value == "noop" and d.counts == {"scored": 2}
-    assert task["status"] == "FAILED" and task["score"] == 0.0
+    assert task["status"] == "UNVERIFIED" and task["score"] == 0.0
     assert snapshot(a) == before
 
 
@@ -533,7 +533,7 @@ def test_legacy_task_identity_is_bound_to_saved_input(tmp_path, identity_fields,
     assert c.materialized[0]["_ng_collected_task_id"] == task_id
     # Legacy grading absence remains unknown independently of identity; current bound producer
     # identity mismatches have positive/negative controls in test_tool_trial_coverage.
-    assert trial_health(d, c)[0] is None and task["status"] == "FAILED"
+    assert trial_health(d, c)[0] is None and task["status"] == "UNVERIFIED"
     assert snapshot(a) == before
 
 
@@ -577,7 +577,7 @@ def test_nested_optional_quality_reasons_cannot_abort_saved_outcomes(tmp_path, r
     assert validity is None and health is None
     assert validity_reasons == health_reasons == ["quality summary artifacts.unhealthy_reasons is malformed"]
     assert decision.action.value == "noop" and decision.counts == {"scored": 2}
-    assert gate["status"] == "FAILED" and gate["score"] == 0.0
+    assert gate["status"] == "UNVERIFIED" and gate["score"] == 0.0
     assert snapshot(a) == before
 
 

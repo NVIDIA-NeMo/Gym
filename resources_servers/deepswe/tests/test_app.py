@@ -383,6 +383,30 @@ async def test_incomplete_verification_is_a_typed_masked_failure_that_keeps_the_
     assert event.failure_reason == "Verifier reward.json is missing its reward field"
 
 
+async def test_long_verifier_diagnostic_is_bounded_and_keeps_the_patch(
+    task_assets: Path, monkeypatch: MonkeyPatch
+) -> None:
+    """A diagnostic longer than the failure event allows is truncated there; the result and patch survive."""
+    server = DeepSWEResourcesServer(config=_config(task_assets), server_client=MagicMock(spec=ServerClient))
+    monkeypatch.setattr(server, "_create_sandbox", AsyncMock(return_value=AsyncMock()))
+    long_error = "provider said: " + "x" * 5000
+    monkeypatch.setattr(server, "_run_verifier", AsyncMock(side_effect=RuntimeError(long_error)))
+    request = MagicMock()
+    request.session = {SESSION_ID_KEY: "test-session"}
+
+    with RequestFailureLog.capture() as log:
+        response = await server.verify(request, DeepSWEVerifyRequest.model_validate(_request()))
+
+    assert response.evaluation_completed is False
+    assert response.mask_sample is True
+    assert response.model_patch == "golden patch\n"
+    assert response.verifier_error == f"RuntimeError: {long_error}"
+    [event] = log.report.events.values()
+    assert len(event.failure_reason) <= 2000
+    assert event.failure_reason.startswith("RuntimeError: provider said: xxx")
+    assert event.failure_reason.endswith("[truncated]")
+
+
 @pytest.mark.parametrize(
     ("reward_json", "expected_reward", "expected_error"),
     [

@@ -59,7 +59,7 @@ def test_a_graded_row_with_an_incomplete_status_is_no_response_failure():
     assert _response_failures(task) == {"truncated": 0, "empty": 0, "malformed": 0}
 
 
-@pytest.mark.parametrize(
+CUTOFF_SIGNALS = pytest.mark.parametrize(
     "signal",
     [
         {"finish_reason": "length"},
@@ -69,19 +69,51 @@ def test_a_graded_row_with_an_incomplete_status_is_no_response_failure():
     ],
     ids=["length-finish", "max-output-tokens-finish", "incomplete-reason", "output-at-cap"],
 )
+
+
+def _cut_off(row: dict, signal: dict) -> None:
+    if "finish_reason" in signal:
+        row["ng_trial_observations"]["model_calls"][0]["response_metadata"]["finish_reason"] = signal["finish_reason"]
+    else:
+        row["response"] |= signal
+
+
+@CUTOFF_SIGNALS
 def test_an_incomplete_answer_with_a_cutoff_signal_scored_zero_is_truncated(signal):
     collected = _run(20)
     row = collected.results[0]
     _incomplete(row)
     _scored_zero_by_rule(row)
-    if "finish_reason" in signal:
-        row["ng_trial_observations"]["model_calls"][0]["response_metadata"]["finish_reason"] = signal["finish_reason"]
-    else:
-        row["response"] |= signal
+    _cut_off(row, signal)
     _, (passed, reason, report), task = _gate(collected)
     assert passed is True and report["exact"] is True, reason
     assert report["model"]["kinds"] == {"truncated_answer": 1}
     assert _response_failures(task) == {"truncated": 1, "empty": 0, "malformed": 0}
+
+
+@CUTOFF_SIGNALS
+def test_a_graded_cut_off_answer_scored_zero_is_truncated(signal):
+    # A recorded grade of zero does not hide the cutoff: the answer was cut off at the output cap.
+    collected = _run(20)
+    row = collected.results[0]
+    _incomplete(row)
+    row["reward"] = 0.0
+    _cut_off(row, signal)
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert report["model"]["kinds"] == {"truncated_answer": 1}
+    assert _response_failures(task) == {"truncated": 1, "empty": 0, "malformed": 0}
+
+
+def test_a_graded_cut_off_answer_that_kept_its_score_is_no_failure():
+    collected = _run(20)
+    row = collected.results[0]
+    _incomplete(row, message=True)
+    _cut_off(row, {"incomplete_details": {"reason": "max_output_tokens"}})
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert report["model"]["count"] == 0
+    assert _response_failures(task) == {"truncated": 0, "empty": 0, "malformed": 0}
 
 
 @pytest.mark.parametrize("message,cause", [(False, "empty"), (True, "malformed")])

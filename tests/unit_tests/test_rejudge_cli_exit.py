@@ -11,7 +11,7 @@ from nemo_gym.orchestration import submit
 
 @pytest.mark.parametrize(
     "requested,status,expected",
-    [(True, "SUCCESS", 0), (True, "FAILED", 1), (True, "UNKNOWN", 1), (False, "FAILED", 0)],
+    [(True, "SUCCESS", 0), (True, "FAILED", 1), (True, "UNVERIFIED", 1), (True, "UNKNOWN", 1), (False, "FAILED", 0)],
 )
 def test_requested_gate_controls_exit(monkeypatch, requested, status, expected):
     outcome = SimpleNamespace(ok=True, gate_task={"status": status}, model_dump_json=lambda **kw: "{}")
@@ -27,7 +27,7 @@ def test_requested_gate_controls_exit(monkeypatch, requested, status, expected):
         _eval_resubmit(args, [])
 
 
-@pytest.mark.parametrize("status,expected", [("SUCCESS", 0), ("FAILED", 1), ("UNKNOWN", 1)])
+@pytest.mark.parametrize("status,expected", [("SUCCESS", 0), ("FAILED", 1), ("UNVERIFIED", 1), ("UNKNOWN", 1)])
 def test_inspection_status_controls_exit_without_criterion_overrides(monkeypatch, status, expected):
     """Exit-code boundary only; the persisted-evidence CLI controls exercise the real gate separately."""
     calls = []

@@ -87,7 +87,9 @@ def test_an_extension_whose_job_is_not_queued_is_not_recorded(tmp_path, slurm_bi
 
     job_dir, _ = _spent_run(tmp_path)
     (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
-    with pytest.raises(RuntimeError, match="failed"):
-        recover(*_handle(job_dir), extend_retries=2)
+    out = recover(*_handle(job_dir), extend_retries=2)
+    assert not out.ok and out.dispatched is None
+    assert out.scheduler_refusal["scheduler_text"] == "sbatch: error: Batch job submission failed"
+    assert out.scheduler_refusal["job_dir_restored"] is True
     assert not (job_dir / RETRY_EXTENSION_NAME).exists()
     assert not (job_dir / RETRY_EXTENSION_JOURNAL_NAME).exists()

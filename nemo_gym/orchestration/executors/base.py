@@ -16,7 +16,7 @@
 from abc import ABC, abstractmethod
 from collections.abc import Callable, Mapping
 from pathlib import Path
-from typing import ClassVar
+from typing import Any, ClassVar
 
 import yaml
 from pydantic import BaseModel
@@ -41,6 +41,14 @@ from nemo_gym.orchestration.recovery import (
 
 class UnsupportedOperationError(RuntimeError):
     """The executor does not implement this operation."""
+
+
+class SchedulerRefusedError(RuntimeError):
+    """The scheduler refused to queue a resubmitted job; ``detail`` holds its text verbatim and the job dir's state."""
+
+    def __init__(self, message: str, detail: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.detail = detail
 
 
 class BaseExecutor(ABC):
@@ -98,6 +106,24 @@ class BaseExecutor(ABC):
             unsupported=f"{type(self).__name__} has no saved-answer re-judgment; run `gym eval reverify "
             "--judge-failed-only` on the run's artifacts. The policy is not queued.",
         )
+
+    def export_tracking(
+        self, record: SubmissionRecord, benchmark: str, evidence: CollectedEvidence | None
+    ) -> dict[str, Any]:
+        """Send a complete run without an MLflow export receipt to MLflow with Gym's post-run export, and report
+        what happened: ``state`` (``succeeded``, ``skipped``, ``failed`` or ``unsupported``), ``run_id`` and ``error``.
+        """
+        return {
+            "exporter": "mlflow",
+            "state": "unsupported",
+            "error": f"{type(self).__name__} cannot export a saved run; run `gym eval export mlflow "
+            "+rollouts_jsonl_fpath=<job dir>/artifacts/rollouts.jsonl` with the run's MLflow settings",
+        }
+
+    def walltime_plan(self, record: SubmissionRecord, benchmark: str, max_walltime: str) -> dict[str, Any] | None:
+        """How a ``--max-walltime`` raise fits the scheduler's limits, checked before any evidence is read; None
+        when the executor has no such limit to check."""
+        return None
 
     @abstractmethod
     def resubmit(
