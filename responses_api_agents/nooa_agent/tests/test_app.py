@@ -249,6 +249,7 @@ async def test_failed_activation_replays_error_and_returns_evidence_on_close(
         NOOATerminationReason.POLICY_BUDGET_EXCEEDED,
         NOOATerminationReason.MAX_ITERATIONS_EXCEEDED,
         NOOATerminationReason.MAX_OUTPUT_TOKENS_EXCEEDED,
+        NOOATerminationReason.LOOP_DETECTED,
         NOOATerminationReason.INVALID_POLICY_OUTPUT,
     ],
 )
@@ -267,12 +268,8 @@ async def test_policy_termination_remains_a_gradable_response(
     runner_run.return_value = partial
     req = await open_session(instance)
     response = await instance.responses(req, NeMoGymResponseCreateParamsNonStreaming(input="task"))
-    if reason is NOOATerminationReason.INVALID_POLICY_OUTPUT:
-        assert response.status == "failed"
-        assert reason in response.error.message
-    else:
-        assert response.status == "incomplete"
-        assert response.error is None
+    assert response.status == "incomplete"
+    assert response.error is None
     assert response.output == partial.episode.response.output
     assert "_ng_failure_class" not in response.model_dump(mode="json")
     assert reason in {gap.code for gap in (await close(instance)).agent_observations.gaps}

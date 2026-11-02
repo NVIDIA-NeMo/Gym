@@ -733,6 +733,72 @@ async def test_transport_error_clears_after_a_later_success() -> None:
     assert state.fatal_error is None
 
 
+@pytest.mark.asyncio
+@pytest.mark.parametrize("main_failed", [False, True])
+@pytest.mark.parametrize("summary_failed", [False, True])
+async def test_summary_call_preserves_main_transport_state(main_failed: bool, summary_failed: bool) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    llm, client, state = make_llm(model_response())
+    main_error = ConnectionError("main model failure")
+    summary_error = ConnectionError("optional summary failure")
+    client.post.side_effect = [
+        main_error if main_failed else FakeHTTPResponse(model_response()),
+        summary_error if summary_failed else FakeHTTPResponse(model_response()),
+    ]
+    if main_failed:
+        with pytest.raises(ConnectionError) as caught:
+            await llm.acall([{"role": "user", "content": "task"}])
+        assert caught.value is main_error
+    else:
+        await llm.acall([{"role": "user", "content": "task"}])
+
+    token = _in_summary_fork.set(True)
+    try:
+        if summary_failed:
+            with pytest.raises(ConnectionError) as caught:
+                await llm.acall([{"role": "user", "content": "summary"}])
+            assert caught.value is summary_error
+        else:
+            await llm.acall([{"role": "user", "content": "summary"}])
+    finally:
+        _in_summary_fork.reset(token)
+
+    assert state.fatal_error is (main_error if main_failed else None)
+    assert state.used == len(state.calls) == 2
+    assert (state.calls[0].response is None) is main_failed
+    assert (state.calls[1].response is None) is summary_failed
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("main_failed", [False, True])
+@pytest.mark.parametrize("invalid_cap", [False, True])
+async def test_summary_preparation_failure_preserves_main_state(main_failed: bool, invalid_cap: bool) -> None:
+    from nooa.agents.summarization import _in_summary_fork
+
+    llm, client, state = make_llm(model_response())
+    main_error = ConnectionError("main model failure")
+    if main_failed:
+        client.post.side_effect = main_error
+        with pytest.raises(ConnectionError):
+            await llm.acall([{"role": "user", "content": "task"}])
+    else:
+        await llm.acall([{"role": "user", "content": "task"}])
+
+    token = _in_summary_fork.set(True)
+    try:
+        with pytest.raises((ValueError, KeyError)):
+            if invalid_cap:
+                await llm.acall([{"role": "user", "content": "summary"}], max_output_tokens=0)
+            else:
+                await llm.acall([{"role": "tool", "content": "missing call id"}])
+    finally:
+        _in_summary_fork.reset(token)
+
+    assert state.fatal_error is (main_error if main_failed else None)
+    assert state.used == llm.calls == len(state.calls) == client.post.await_count == 1
+
+
 def output_limit_response(*outputs: object, response_id: str = "partial-response") -> dict:
     return model_response(*outputs, response_id=response_id) | {
         "status": "incomplete",
