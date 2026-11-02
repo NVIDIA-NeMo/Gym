@@ -16,6 +16,7 @@ import asyncio
 import hashlib
 import json
 import math
+import os
 import re
 import time
 import uuid
@@ -220,6 +221,15 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
             "spent, instead of refusing the whole re-judgment. That failure keeps its masked row."
         ),
     )
+    settle_receipt_fpath: Optional[str] = Field(
+        default=None,
+        description=(
+            "Recovery-only: with settle_into_source, where the judge-only recovery job writes its receipt. After the "
+            "settlement the source run's aggregate metrics and quality summary are recomputed from the settled rows, "
+            "and the receipt records what was selected, judged, settled and left as it was; a pass that fails leaves "
+            "a failed receipt naming the error."
+        ),
+    )
 
     retry_terminal_timeouts: bool = Field(
         default=False,
@@ -244,6 +254,8 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
             raise ValueError("`skip_spent_judge_failures` is only valid together with `settle_into_source`.")
         if self.withdraw_unresolved_admissions and not self.settle_into_source:
             raise ValueError("`withdraw_unresolved_admissions` is only valid together with `settle_into_source`.")
+        if self.settle_receipt_fpath is not None and not self.settle_into_source:
+            raise ValueError("`settle_receipt_fpath` is only valid together with `settle_into_source`.")
         if self.append and self.overwrite:
             raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
         if self.input_format == "gym":
@@ -1279,6 +1291,7 @@ async def _drop_unsupported_saved_results(binding: Dict[str, Any]) -> None:
     """Leave out the bound saved results whose verifier is not stateless: only a ``STATELESS`` verifier grades a saved
     answer again. Judge failures stay bound as before."""
     saved = binding["saved_results"]
+    binding["unsupported"] = []  # the saved results left out, for the pass's settlement record
     if not saved:
         return
     server_client = setup_server_client()
@@ -1297,6 +1310,7 @@ async def _drop_unsupported_saved_results(binding: Dict[str, Any]) -> None:
     for identity in skipped:
         saved.discard(identity)
         binding["failures"].pop(identity)
+    binding["unsupported"] = skipped
 
 
 def due_judge_failures(output: Path) -> List[str]:
@@ -1420,6 +1434,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
                 },
             )
         )
+    binding["withdrawn"] = [identity for identity, _ in withdrawn]  # for the pass's settlement record
     # Every row is validated before the first write, so a bad row commits nothing. Each write is one fsynced
     # outcome; after an interruption a rerun skips saved settlements (check_rejudgment returns None).
     for failure, result in planned:
@@ -1488,7 +1503,67 @@ def _settle_what_a_failed_pass_judged(
     return settle
 
 
+SETTLE_RECEIPT_VERSION = 1
+# The counts a settle_into_source pass records (``RolloutReverificationHelper.settlement``) and its receipt carries.
+_SETTLEMENT_COUNTS = ("selected", "judged", "settled", "withdrawn", "unsupported")
+
+
+def write_settle_receipt(
+    path: Path,
+    *,
+    state: str,
+    source: Optional[str],
+    job_id: Optional[str],
+    settlement: Optional[Dict[str, Any]],
+    started_at: str,
+    coverage: Optional[Dict[str, Any]] = None,
+    due_after: Optional[int] = None,
+    refreshed: Optional[Dict[str, bool]] = None,
+    error: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Write the judge-only recovery job's receipt at ``path`` (``settle_receipt_fpath``) and return it.
+
+    ``state`` is ``completed`` or ``failed``. The counts are the pass's settlement record (zeros when the pass ended
+    before it settled anything): the saved answers selected for grading again, those judged, those settled with a
+    grade bound to the same saved answer, run and attempt, those re-verified without a grade and left as they were,
+    and those not re-verified because their verifier is not stateless. ``coverage`` is the settled run's
+    ``RolloutStore.coverage()`` (its counts only), ``due_after`` how many saved answers a later pass would still grade
+    again, and ``refreshed`` whether the run's aggregate metrics and quality summary were recomputed. The receipt is
+    written whole and moved into place, so a reader never sees a partial one.
+    """
+    counts = {name: int((settlement or {}).get(name) or 0) for name in _SETTLEMENT_COUNTS}
+    receipt: Dict[str, Any] = {
+        "version": SETTLE_RECEIPT_VERSION,
+        "state": state,
+        "job_id": job_id,
+        "source": source,
+        "started_at": started_at,
+        "ended_at": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        **counts,
+        "due_after": due_after,
+        "coverage": {k: v for k, v in coverage.items() if type(v) is int} if coverage else None,
+        "metrics_recomputed": bool((refreshed or {}).get("metrics_recomputed")),
+        "health_summary_recomputed": bool((refreshed or {}).get("health_summary_recomputed")),
+        "error": error,
+    }
+    path = Path(path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.with_name(path.name + ".tmp")
+    temporary.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n")
+    os.replace(temporary, path)
+    return receipt
+
+
+def read_settle_receipt(path: Path) -> Dict[str, Any]:
+    """The receipt at ``path``, as ``write_settle_receipt`` wrote it."""
+    return json.loads(Path(path).read_text())
+
+
 class RolloutReverificationHelper(BaseModel):
+    # What the last ``settle_into_source`` pass did, in the counts ``write_settle_receipt`` records; None before a
+    # pass settled, or when the pass does not settle into its source.
+    settlement: Optional[Dict[str, Any]] = None
+
     async def run_from_config(self, config: RolloutReverificationConfig) -> List[Dict]:
         # With settle_into_source the source run lock is held from binding through judging to settlement, so a second
         # re-judgment of the same run is refused (non-blocking flock) instead of judging against the same budget.
@@ -1802,6 +1877,14 @@ class RolloutReverificationHelper(BaseModel):
         if config.settle_into_source:
             settled = settle_rejudgments(rollouts_jsonl_fpath, judged_results, settle_binding)
             print(f"Settled {settled} re-judged judge failure(s) into {rollouts_jsonl_fpath}")
+            unsupported = settle_binding.get("unsupported", [])
+            self.settlement = {
+                "selected": len(settle_binding["failures"]) + len(unsupported),
+                "unsupported": len(unsupported),
+                "judged": len(payloads_to_reverify),
+                "settled": settled,
+                "withdrawn": len(settle_binding.get("withdrawn", [])),
+            }
 
         # The full main jsonl (cached + newly re-verified successes), sorted by (task, rollout).
         return results

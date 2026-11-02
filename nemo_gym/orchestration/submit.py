@@ -100,10 +100,14 @@ def recover(
     unsafe_resume_reason: str | None = None,
     server_spinup_timeout_seconds: int | None = None,
     spinup_timeout_reason: str | None = None,
+    judge_partition: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
-    ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's.
+    ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's; a
+    judge-only job of the run runs at it too.
+    ``judge_partition`` names the CPU partition of the judge-only job that grades a model-served run's saved answers
+    again, when its saved config declares no CPU node pool and the launcher's reader placement names none.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
     ``unsafe_resume_reason`` resumes the job with ``allow_unsafe_resume``, past a refused run identity check; the
@@ -136,6 +140,7 @@ def recover(
         unsafe_resume_reason=unsafe_resume_reason,
         server_spinup_timeout_seconds=server_spinup_timeout_seconds,
         spinup_timeout_reason=spinup_timeout_reason,
+        judge_partition=judge_partition,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -209,6 +214,7 @@ def _recover(
     unsafe_resume_reason: str | None = None,
     server_spinup_timeout_seconds: int | None = None,
     spinup_timeout_reason: str | None = None,
+    judge_partition: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -384,7 +390,13 @@ def _recover(
     if decision.action == RecoveryAction.NOOP:
         return RecoveryOutcome(decision=decision, ok=True, dispatched=None, gate_task=gate_task, mlflow=mlflow)
     if decision.action == RecoveryAction.REVERIFY:
-        outcome = executor.reverify_judge_failures(record, benchmark, decision)
+        # Each option only when given, so an executor that predates it is called as before.
+        options: dict[str, Any] = {}
+        if judge_partition is not None:
+            options["judge_partition"] = judge_partition
+        if repin is not None:
+            options |= {"repin": repin, "repin_reason": repin_reason}
+        outcome = executor.reverify_judge_failures(record, benchmark, decision, **options)
         if not outcome.ok or outcome.dispatched is None:
             gate_task = {
                 **gate_task,
@@ -393,6 +405,9 @@ def _recover(
             }
         elif gate_task["status"] == "PLANNED":
             gate_task = {**gate_task, "status": "RESUMING"}
+        if outcome.judge_job is not None:
+            # The job just queued joins the run's judge-only jobs the evidence already reports.
+            gate_task = {**gate_task, "judge_jobs": [*(gate_task.get("judge_jobs") or []), outcome.judge_job]}
         return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
     if decision.action == RecoveryAction.RESUBMIT:
         operator = decision.operator_continuation

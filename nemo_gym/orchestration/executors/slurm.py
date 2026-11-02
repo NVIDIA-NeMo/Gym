@@ -37,6 +37,7 @@ from nemo_gym.config.global_config import DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
+    NodePool,
     SlurmComputeConfig,
     SubmitConfig,
     VllmPDServiceConfig,
@@ -44,6 +45,14 @@ from nemo_gym.orchestration.api import (
 from nemo_gym.orchestration.executors.base import BaseExecutor, SchedulerRefusedError
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
+from nemo_gym.orchestration.executors.judge_profile import (
+    JUDGE_POOL_NAME,
+    JudgeProfileUnsupported,
+    choose_judge_partition,
+    is_cpu_only_submission,
+    judge_execution_profile,
+    judge_job_config,
+)
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
@@ -88,11 +97,15 @@ from nemo_gym.orchestration.recovery import (
     FOLLOWUP_ACCOUNTING_FORMAT,
     INFRA_RETRIES_FILE,
     INFRA_RETRY_EXTENSION_FILE,
+    JUDGE_JOB_FAILURE_BOUND,
+    JUDGE_JOB_JOURNAL_NAME,
+    LIVE_JOB_STATES,
     NO_INVENTORY,
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
     READER_PLACEMENT_FIELDS,
     CollectedEvidence,
+    IdentityState,
     OperatorBudget,
     RecoveryAction,
     RecoveryDecision,
@@ -1163,6 +1176,21 @@ def _submission_exports(config: SubmitConfig) -> list[str]:
     return exports
 
 
+# Settings of the run's own collection that a judge-only job's `gym eval reverify` replaces with its own.
+_COLLECTION_ONLY_RUN_KEYS = (
+    "output_jsonl_fpath",
+    "materialized_inputs_jsonl_fpath",
+    "resume_from_cache",
+    "resubmit",
+    "require_complete",
+)
+# Appends one judge-job journal entry (argv: the journal, the entry as JSON, the job id or empty, an optional error).
+_JOURNAL_JUDGE_JOB = (
+    "import json,sys; entry=json.loads(sys.argv[2]); entry['job_id']=sys.argv[3] or None; "
+    "error=sys.argv[4] if len(sys.argv) > 4 else ''; entry.update({'error': error} if error else {}); "
+    "f=open(sys.argv[1],'a'); f.write(json.dumps(entry, sort_keys=True)+chr(10)); f.close()"
+)
+
 # Sets the job ID of the last operator journal entry from sbatch's reply (its last word), replacing the file atomically.
 _NAME_OPERATOR_JOB = (
     "import json,os,sys; p=sys.argv[1]; lines=open(p).read().splitlines(); entry=json.loads(lines[-1]); "
@@ -1366,6 +1394,10 @@ class SlurmExecutor(BaseExecutor):
                 rows = [row for row in scheduled if row[0] in collected.job_chain]
             # A job of the run that still waits or runs is live, wherever the scheduler runs it from.
             live_job_name = live_chain_job(scheduled, [*followups, *collected.job_chain])
+            # So is a judge-only job of the run that has no receipt yet; one that ended is reported as it ended.
+            judge_live = self._judge_job_states(conn, collected)
+            if live_job_name is None:
+                live_job_name = judge_live
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
                     allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
@@ -1440,13 +1472,24 @@ class SlurmExecutor(BaseExecutor):
         return self.recovery_evidence(record, benchmark)[0]
 
     def reverify_judge_failures(
-        self, record: SubmissionRecord, benchmark: str, decision: RecoveryDecision
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        decision: RecoveryDecision,
+        *,
+        judge_partition: str | None = None,
+        repin: str | None = None,
+        repin_reason: str | None = None,
     ) -> RecoveryOutcome:
-        """Admit a saved-answer CPU rejudge using the original chain's remaining allowance.
+        """Queue a judge-only job that grades the run's selected saved answers again, never the policy.
 
-        Only an already CPU-only submission with no deployed model services is supported. This never
-        invents a new compute profile, starts a policy service, or turns an unavailable judge into a model run.
-        Other deployments remain explicitly unsupported until they supply a judge-only execution capability.
+        A CPU-only submission (no service, no policy model, CPU node pools only) runs it on its own compute with the
+        chain's remaining walltime allowance, as before. Any other submission, one that served its policy on GPUs,
+        runs it on a CPU-only judge execution profile derived from its saved config (``_queue_judge_job``): the run's
+        own judge and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the
+        launcher's reader placement), for the run's segment walltime bounded by the partition's MaxTime, at the run's
+        pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
+        --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1458,7 +1501,9 @@ class SlurmExecutor(BaseExecutor):
                 unsupported=reason,
             )
 
-        current, evidence = self.recovery_evidence(record, benchmark)
+        current, evidence = self.recovery_evidence(
+            record, benchmark, **({"reader_ref": repin} if repin is not None else {})
+        )
         if current.action != RecoveryAction.REVERIFY or evidence is None:
             return stopped("saved-answer rejudge admission changed; collect the current evidence")
         job = record.benchmark_job(benchmark)
@@ -1470,14 +1515,18 @@ class SlurmExecutor(BaseExecutor):
             compute = config.compute[record.cluster]
             if not isinstance(compute, SlurmComputeConfig):
                 return stopped("saved rejudge compute is not Slurm")
-            if (
-                config.services
-                or config.driver.policy_model
-                or not compute.node_pools
-                or any(pool.gpus_per_node != 0 for pool in compute.node_pools.values())
-            ):
-                return stopped(
-                    "this submission has no existing CPU-only judge execution profile; policy services are not restarted"
+            if not is_cpu_only_submission(config):
+                # A run that served its policy on GPUs: a judge-only job on a derived CPU-only profile instead.
+                return self._queue_judge_job(
+                    conn,
+                    record,
+                    benchmark,
+                    current,
+                    evidence,
+                    config,
+                    judge_partition=judge_partition,
+                    repin=repin,
+                    repin_reason=repin_reason,
                 )
             install = config.driver.gym_install
             if (
@@ -1607,6 +1656,236 @@ class SlurmExecutor(BaseExecutor):
             updated = job.model_copy(update={"job_id": job_id, "error": None})
             self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(decision=current, ok=True, dispatched="reverify", job_id=job_id)
+
+    @staticmethod
+    def _judge_job_states(conn: Connection, collected: CollectedEvidence) -> str | None:
+        """Ask the scheduler about the run's judge-only jobs that have no receipt (``CollectedEvidence.judge_jobs``,
+        state ``queued``), set each one's ``state`` and ``scheduler_state`` from its record, and name the newest live
+        one as ``judge-only job <id> (STATE)``; None when none is live, or when the query failed or knows none."""
+        pending = [job for job in collected.judge_jobs if job.get("state") == "queued" and job.get("job_id")]
+        if not pending:
+            return None
+        ids = ",".join(str(job["job_id"]) for job in pending)
+        try:
+            output = conn.run([f"sacct -D -n -P -X -j {shlex.quote(ids)} --format={FOLLOWUP_ACCOUNTING_FORMAT}"])
+        except (RuntimeError, OSError):
+            return None
+        records: dict[str, tuple[str, str]] = {}
+        for line in output.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) != 4 or not parts[0]:
+                continue
+            state = parts[1].split()[0].rstrip("+") if parts[1].split() else ""
+            records[parts[0]] = (state, parts[3])
+        live = None
+        for job in pending:
+            record = records.get(str(job["job_id"]))
+            if record is None:
+                continue
+            state, exit_code = record
+            if state in LIVE_JOB_STATES:
+                job["state"] = "running" if state == "RUNNING" else "pending"
+                job["scheduler_state"] = state
+                live = f"judge-only job {job['job_id']} ({state})"
+            elif state:
+                # It ended and wrote no receipt: a failure of the job, with the scheduler's word on it.
+                job["state"] = "failed"
+                job["scheduler_state"] = f"{state} (exit {exit_code})"
+        return live
+
+    def _queue_judge_job(
+        self,
+        conn: Connection,
+        record: SubmissionRecord,
+        benchmark: str,
+        decision: RecoveryDecision,
+        evidence: CollectedEvidence,
+        config: SubmitConfig,
+        *,
+        judge_partition: str | None,
+        repin: str | None,
+        repin_reason: str | None,
+    ) -> RecoveryOutcome:
+        """Queue the judge-only job of a run that is not CPU-only, on the CPU-only judge execution profile derived from
+        its saved config (``judge_profile``), and journal it.
+
+        The job's command is the same ``gym eval reverify --judge-failed-only --settle-into-source`` as a CPU-only
+        run's, with the run's saved settings, the policy's ``--model-type`` so the run's config composes as it did
+        (the policy server it names is never called) and a receipt the job writes when it ends. Under the resubmit
+        lock, no job of the run may wait or run in its job dir, no allocation of the chain may be live, and the saved
+        sources, resolved config and chain accounting must be as the evidence saw them; then the script is staged
+        beside the run's and queued with ``--no-requeue``, and its id, partition, walltime, rows and receipt path are
+        appended to the job dir's judge-job journal. The job is not a segment of the policy chain: nothing is added
+        to ``.gym_job_chain`` and no retry or walltime budget is spent or needed. When the last
+        ``JUDGE_JOB_FAILURE_BOUND`` judge-only jobs ended without settling a saved answer, nothing is queued and the
+        stop names them.
+        """
+        from nemo_gym.orchestration.executors.utils import flatten_run_args
+
+        def stopped(reason: str) -> RecoveryOutcome:
+            return RecoveryOutcome(
+                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+                ok=False,
+                dispatched=None,
+                unsupported=reason,
+            )
+
+        job = record.benchmark_job(benchmark)
+        job_dir = Path(job.job_dir)
+        original = config.driver.benchmarks[benchmark]
+        recent = evidence.judge_jobs[-JUDGE_JOB_FAILURE_BOUND:]
+        if len(recent) == JUDGE_JOB_FAILURE_BOUND and all(
+            entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+            for entry in recent
+        ):
+            named = ", ".join(str(entry.get("job_id") or "(id unknown)") for entry in recent)
+            return stopped(
+                f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job(s) ({named}) ended without settling a saved "
+                f"answer; read their receipts and logs under {job_dir / 'reverification'} before another is queued"
+            )
+        try:
+            partition, source = choose_judge_partition(
+                config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
+            )
+        except JudgeProfileUnsupported as error:
+            return stopped(str(error))
+        install = config.driver.gym_install
+        ref = repin if repin is not None else (install.ref if install is not None else None)
+        if install is None or ref is None or ref != installed_gym_commit() or not re.fullmatch(r"[0-9a-f]{40}", ref):
+            return stopped(
+                "saved judge driver and installed recovery source must be the same immutable revision"
+                + (
+                    ""
+                    if repin is not None
+                    else "; --repin <this launcher's full commit> --repin-reason TEXT runs the judge-only job at it"
+                )
+            )
+        if repin is not None and not (repin_reason or "").strip():
+            raise ValueError("--repin needs a nonempty --repin-reason")
+        compute = config.compute[record.cluster]
+        probe = compute.model_copy(update={"node_pools": {JUDGE_POOL_NAME: NodePool(partition=partition)}})
+        profile = judge_execution_profile(
+            config, record.cluster, partition, source, _partition_time_limit(conn, probe)
+        )
+        if evidence.source_digests is None or evidence.accounting_snapshot is None:
+            return stopped("saved source or accounting snapshot is unavailable; collect the evidence again")
+        queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
+        run = {k: v for k, v in original.run.items() if k not in _COLLECTION_ONLY_RUN_KEYS}
+        nonce = new_gym_job_id(utc_now())
+        folder = job_dir / "reverification" / nonce
+        output, receipt = folder / "rollouts.jsonl", folder / "receipt.json"
+        policy_type = config.driver.policy_model_type
+        command = " ".join(
+            [
+                "gym eval reverify",
+                "--judge-failed-only",
+                "--settle-into-source",
+                "--settle-source-snapshot",
+                shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
+                "--rollouts",
+                shlex.quote(str(job_dir / "artifacts/rollouts.jsonl")),
+                "--inputs",
+                shlex.quote(str(job_dir / "artifacts/rollouts_materialized_inputs.jsonl")),
+                "--output",
+                shlex.quote(str(output)),
+                "--settle-receipt",
+                shlex.quote(str(receipt)),
+                *([f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []),
+                # A judge failure whose saved attempts are spent keeps its masked row; the rest are judged.
+                "+skip_spent_judge_failures=True",
+                *flatten_run_args(run),
+            ]
+        )
+        bound = judge_job_config(config, record.cluster, benchmark, profile, command, gym_ref=repin)
+        if repin is not None:
+            validate_gym_install_ref(bound)
+        bench = bound.driver.benchmarks[benchmark]
+        script = build_sbatch_script(bound, benchmark, bench, bound.compute[record.cluster], job_dir)
+        script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
+        script_path = job_dir / f"reverify-{nonce}.sh"
+        config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
+        config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
+        if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
+            return stopped("saved submission configuration digest is unknown")
+        expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
+        check = (
+            "import hashlib,json,os,sys; from pathlib import Path\n"
+            "expected=json.loads(sys.argv[1])\n"
+            "def digest(n):\n"
+            " p=Path(n)\n"
+            " if not p.exists(): return None\n"
+            " h=hashlib.sha256()\n"
+            " with p.open('rb') as f:\n"
+            "  for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)\n"
+            " return h.hexdigest()\n"
+            "names=set(expected)|{n for n in os.listdir('.') if n.startswith('.gym_followup_queued.')}\n"
+            f"source=json.loads({json.dumps(json.dumps(evidence.source_digests))})\n"
+            "if {n:digest('artifacts/'+n) for n in source} != source: raise ValueError('saved source changed')\n"
+            f"if digest({str(config_path)!r}) != {config_digest!r}: raise ValueError('saved configuration changed')\n"
+            "if {n:digest(n) for n in names} != expected: raise ValueError('stale accounting')\n"
+        )
+        entry = {
+            "at": utc_timestamp(utc_now()),
+            "job_id": None,
+            "nonce": nonce,
+            "partition": profile.partition,
+            "partition_source": profile.partition_source,
+            "walltime": profile.walltime,
+            "walltime_bounds": list(profile.walltime_bounds),
+            "rows": decision.counts.get(IdentityState.JUDGE_RECOVERABLE.value, 0),
+            "output": str(output),
+            "receipt": str(receipt),
+            "gym_commit": ref,
+            "actor": getpass.getuser(),
+            **({"repin_reason": repin_reason} if repin is not None else {}),
+        }
+        journal = (
+            f"python3 -c {shlex.quote(_JOURNAL_JUDGE_JOB)} {shlex.quote(JUDGE_JOB_JOURNAL_NAME)} "
+            f"{shlex.quote(json.dumps(entry, sort_keys=True))}"
+        )
+        commands = _submission_exports(config) + [
+            'fail() { echo "Error: $*" >&2; exit 1; }',
+            f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
+            f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
+            f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+            # No job of this run, a chain segment or an earlier judge-only job, may wait or run in its job dir.
+            "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'scheduler unknown'",
+            'for d in $workdirs; do [ "$d" != "$PWD" ] || '
+            'fail "a job of this run is still pending or running in $PWD"; done',
+            *(
+                [
+                    f"live=$(squeue --all --noheader -j {shlex.quote(','.join(evidence.job_chain))} --format=%A) "
+                    "|| fail 'scheduler unknown'",
+                    '[ -z "$live" ] || fail "an original allocation is still live"',
+                ]
+                if evidence.job_chain
+                else []
+            ),
+            f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} "
+            "|| fail 'saved sources or accounting changed since the evidence was collected; collect it again'",
+            "umask 077",
+            f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage the judge driver'",
+            _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
+            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+            "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
+            # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
+            # reports it and the next recovery's scheduler check finds the job by its working directory.
+            f'if [[ $jid =~ ^[0-9]+$ ]]; then {journal} "$jid" || fail "cannot journal the judge-only job"; '
+            f'else {journal} "" "acknowledgement unknown: $out"; fail "unknown job identity"; fi',
+        ]
+        try:
+            results = _parse_sbatch_results(conn.run(commands))
+        except (RuntimeError, OSError) as error:
+            text = str(error).strip()
+            return stopped(f"judge-only job was not queued: {text.splitlines()[-1] if text else type(error).__name__}")
+        job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
+        if job_id is None:
+            return stopped(f"judge-only job was not admitted: {error}")
+        updated = job.model_copy(update={"job_id": job_id, "error": None})
+        self.persist_record(record.with_benchmark(updated), conn.write_text)
+        return RecoveryOutcome(
+            decision=decision, ok=True, dispatched="reverify", job_id=job_id, judge_job={**entry, "job_id": job_id}
+        )
 
     def export_tracking(
         self, record: SubmissionRecord, benchmark: str, evidence: CollectedEvidence | None

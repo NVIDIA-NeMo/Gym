@@ -16,11 +16,13 @@ import asyncio
 import importlib
 import json
 import logging
+import os
 import signal
 import site
 import subprocess
 import sys
 import sysconfig
+import time
 from collections.abc import Mapping, Sequence
 from copy import deepcopy
 from multiprocessing import Pool
@@ -78,6 +80,7 @@ from nemo_gym.eval_plan import (
     eval_plan_json_schema,
     write_eval_plan,
 )
+from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
 
@@ -1149,6 +1152,160 @@ def _rejudge_saved_judge_failures(
         )
 
 
+class _SettledHealthSettings(RunHealthConfig):
+    """The health-check settings of a run config, read for the quality summary of a run a judge-only job settled."""
+
+    disable_health_check: bool = False
+    health_check_workers: int | None = None
+    health_check_ignored_checks: List[str] = Field(default_factory=list)
+
+
+def _refresh_settled_source(
+    run_config: DictConfig | Mapping[str, Any], output: Path, *, workdir: Path
+) -> dict[str, bool]:
+    """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
+    as the run's own completion does after its saved-answer pass.
+
+    A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it), which the
+    health check reads only through a selected-result projection: the Store's selected rows are written under
+    ``workdir`` for the check, which is bound to the run's own artifacts, and removed after it. A step that fails is
+    printed and reported in the receipt, never raised: the settlement stands, and the operator reruns the step the
+    message names.
+    """
+    from nemo_gym.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollout_health import (
+        capture_dirs_for_health,
+        format_health_report,
+        run_health_checks,
+        write_disabled_summary,
+    )
+    from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
+
+    if isinstance(run_config, DictConfig):
+        run_config = OmegaConf.to_container(run_config, resolve=True)
+    else:
+        run_config = dict(run_config)
+    refreshed = {"metrics_recomputed": False, "health_summary_recomputed": False}
+    try:
+        aggregation = RolloutAggregationConfig.model_validate(
+            run_config | {"input_glob": str(output), "output_jsonl_fpath": str(output), "merge_shards": False}
+        )
+        asyncio.run(RolloutAggregationHelper().run_from_config(aggregation))
+        refreshed["metrics_recomputed"] = True
+    except Exception as error:
+        print(
+            f"Metrics were not recomputed after the re-judgment ({type(error).__name__}: {error}); "
+            f"run `gym eval aggregate +input_glob={output} +output_jsonl_fpath={output} +merge_shards=false`.",
+            flush=True,
+        )
+    projection = None
+    try:
+        settings = _SettledHealthSettings.model_validate(run_config)
+        if settings.disable_health_check:
+            write_disabled_summary([output], output.parent)
+            return refreshed
+        store = RolloutStore.read(output, import_legacy=False)
+        # Until NVIDIA-NeMo/Gym#3881 lands (health reads the Store's selected attempts), the health check reads a
+        # history with superseded outcomes only through a selected projection; drop the projection once it has.
+        if store is not None and not raw_outcomes_are_selected(output, artifacts=(output,)):
+            workdir.mkdir(parents=True, exist_ok=True)
+            projection = workdir / "selected_rollouts.jsonl"
+            with projection.open("w", encoding="utf-8") as handle:
+                for row in store.selected("success"):
+                    handle.write(json.dumps(row) + "\n")
+        result = run_health_checks(
+            output,
+            selected_projection=projection,
+            output_dir=output.parent,
+            workers=settings.health_check_workers,
+            ignored_checks=settings.health_check_ignored_checks,
+            limits=settings.run_health_limits,
+            run_coverage=[store.coverage()] if store is not None else None,
+            model_call_capture_dirs=capture_dirs_for_health(run_config),
+        )
+        print(format_health_report(result))
+        refreshed["health_summary_recomputed"] = True
+    except Exception as error:
+        print(
+            f"The quality summary was not recomputed after the re-judgment ({type(error).__name__}: {error}); "
+            f"run `gym eval health-check {output.parent}`.",
+            flush=True,
+        )
+    finally:
+        if projection is not None:
+            projection.unlink(missing_ok=True)
+    return refreshed
+
+
+def _settled_source_state(output: Path) -> tuple[dict[str, Any] | None, int | None]:
+    """The settled run's coverage and how many saved answers a later pass would still grade again, for the receipt;
+    None for what cannot be read."""
+    from nemo_gym.rollout_reverification import due_judge_failures
+    from nemo_gym.rollout_store import RolloutStore
+
+    try:
+        store = RolloutStore.read(output, import_legacy=False)
+        coverage = store.coverage() if store is not None else None
+    except Exception:
+        coverage = None
+    try:
+        due = len(due_judge_failures(output))
+    except Exception:
+        due = None
+    return coverage, due
+
+
+def _reverify_with_receipt(global_config_dict: DictConfig | Mapping[str, Any], config: Any) -> None:
+    """Run a re-verification; for the judge-only recovery job (``settle_receipt_fpath``), settle, refresh and write
+    the receipt.
+
+    The job grades the selected saved results again through the run's own settle path (``settle_into_source``: a
+    grade replaces a saved result only when it binds the same saved answer, run and attempt, and the policy is never
+    called), then recomputes the source run's aggregate metrics and quality summary from the settled rows, and ends
+    with a receipt: what was selected, judged, settled and left as it was, the run's coverage, and whether the refresh
+    happened. A pass that fails (the source changed while the job was queued, a verifier that cannot be reached)
+    leaves a failed receipt naming the error, with the saved answers as they were, and the error is raised as before.
+    """
+    from nemo_gym.rollout_reverification import RolloutReverificationHelper, write_settle_receipt
+
+    started = time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
+    helper = RolloutReverificationHelper()
+    receipt = Path(config.settle_receipt_fpath) if config.settle_receipt_fpath else None
+    source = str(config.rollouts_jsonl_fpath) if config.rollouts_jsonl_fpath else None
+    job_id = os.environ.get("SLURM_JOB_ID")
+    try:
+        asyncio.run(helper.run_from_config(config))
+    except BaseException as error:
+        if receipt is not None:
+            write_settle_receipt(
+                receipt,
+                state="failed",
+                source=source,
+                job_id=job_id,
+                settlement=helper.settlement,
+                started_at=started,
+                error=f"{type(error).__name__}: {error}",
+            )
+        raise
+    if receipt is None:
+        return
+    output = Path(config.rollouts_jsonl_fpath)
+    refreshed = _refresh_settled_source(global_config_dict, output, workdir=receipt.parent)
+    coverage, due_after = _settled_source_state(output)
+    write_settle_receipt(
+        receipt,
+        state="completed",
+        source=source,
+        job_id=job_id,
+        settlement=helper.settlement,
+        started_at=started,
+        coverage=coverage,
+        due_after=due_after,
+        refreshed=refreshed,
+    )
+    print(f"Judge-only receipt: {receipt}", flush=True)
+
+
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
@@ -1264,15 +1421,15 @@ def export_run() -> None:  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reverify_rollouts():  # pragma: no cover
-    from nemo_gym.rollout_reverification import RolloutReverificationConfig, RolloutReverificationHelper
+    from nemo_gym.rollout_reverification import RolloutReverificationConfig
 
     rh = RunHelper()
     rh.start(None)
     try:
-        config = RolloutReverificationConfig.model_validate(get_global_config_dict())
-        rrh = RolloutReverificationHelper()
-
-        asyncio.run(rrh.run_from_config(config))
+        global_config_dict = get_global_config_dict()
+        config = RolloutReverificationConfig.model_validate(global_config_dict)
+        # The judge-only recovery job's pass settles, refreshes the run and ends with a receipt; any other runs as before.
+        _reverify_with_receipt(global_config_dict, config)
     finally:
         rh.shutdown()  # stop the servers this command started
 

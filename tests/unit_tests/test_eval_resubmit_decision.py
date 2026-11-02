@@ -191,12 +191,22 @@ class FakeExecutor:
 
     name = "fake"
     calls: list[str] = []
+    # The options each saved-answer re-judgment was asked with (a judge partition, a repin), in call order.
+    options: list[dict] = []
     job_dir: Path
     live = False
     supports_reverify = True
 
     def recovery_evidence(
-        self, record, benchmark, *, score_key=None, score_agent=None, score_environment=None, outcome_policy=None
+        self,
+        record,
+        benchmark,
+        *,
+        score_key=None,
+        score_agent=None,
+        score_environment=None,
+        outcome_policy=None,
+        **options,
     ):
         FakeExecutor.calls.append("decide")
         out = subprocess.run(
@@ -234,9 +244,10 @@ class FakeExecutor:
         )
         return decision, collected
 
-    def reverify_judge_failures(self, record, benchmark, decision):
+    def reverify_judge_failures(self, record, benchmark, decision, **options):
+        FakeExecutor.options.append(options)
         if not FakeExecutor.supports_reverify:
-            return BaseExecutor.reverify_judge_failures(self, record, benchmark, decision)
+            return BaseExecutor.reverify_judge_failures(self, record, benchmark, decision, **options)
         FakeExecutor.calls.append("reverify")
         return RecoveryOutcome(decision=decision, ok=True, dispatched="reverify")
 
@@ -248,6 +259,7 @@ class FakeExecutor:
 @pytest.fixture
 def fake_executor(monkeypatch):
     FakeExecutor.calls = []
+    FakeExecutor.options = []
     FakeExecutor.live = False
     FakeExecutor.supports_reverify = True
     monkeypatch.setitem(submit._EXECUTORS_BY_NAME, "fake", FakeExecutor)
@@ -2796,3 +2808,118 @@ def test_a_current_pin_run_with_uncovered_operations_stays_unknown(tmp_path) -> 
 def test_an_earlier_pin_run_at_the_failure_limit_still_fails(tmp_path) -> None:
     _, (passed, reason) = _trial_gate_of(tmp_path, expected=100, final_zeros=2, operations_field=False)
     assert passed is False and "is not below 2%" in reason
+
+
+# --- the judge-only job of a model-served run: its option, and what inspect reports of it --------------------------
+
+
+def _judge_job_dir(tmp_path: Path) -> Path:
+    return write_job_dir(
+        tmp_path / "job",
+        n=2,
+        results=[ident(0, reward=1.0), ident(1, _ng_failure_class="judge_failed", response=SAVED_ANSWER, reward=0.0)],
+        failures=[],
+    )
+
+
+def test_recover_passes_the_judge_partition_to_the_executor_only_when_given(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = _judge_job_dir(tmp_path)
+    assert submit.recover("gym-job-jp1", "bench").dispatched == "reverify"
+    assert fake_executor.options == [{}]  # an executor that predates the option is called as before
+    assert submit.recover("gym-job-jp2", "bench", judge_partition="cpu").dispatched == "reverify"
+    assert fake_executor.options == [{}, {"judge_partition": "cpu"}]
+
+
+def test_a_repin_reaches_the_saved_answer_rejudgment(tmp_path, fake_executor) -> None:
+    fake_executor.job_dir = _judge_job_dir(tmp_path)
+    submit.recover("gym-job-jp3", "bench", repin="b" * 40, repin_reason="launcher revision")
+    assert fake_executor.options == [{"repin": "b" * 40, "repin_reason": "launcher revision"}]
+
+
+def _journal_judge_jobs(job: Path, entries: list[dict]) -> None:
+    from nemo_gym.orchestration.recovery import JUDGE_JOB_JOURNAL_NAME
+
+    (job / JUDGE_JOB_JOURNAL_NAME).write_text("".join(json.dumps(entry) + "\n" for entry in entries))
+
+
+def test_inspect_reports_the_judge_only_jobs_of_the_run_and_their_outcomes(tmp_path, fake_executor) -> None:
+    from nemo_gym.rollout_reverification import write_settle_receipt
+
+    job = _judge_job_dir(tmp_path)
+    fake_executor.job_dir = job
+    done = job / "reverification" / "judge-a" / "receipt.json"
+    write_settle_receipt(
+        done,
+        state="completed",
+        source=str(job / "artifacts" / "rollouts.jsonl"),
+        job_id="77",
+        settlement={"selected": 2, "unsupported": 0, "judged": 2, "settled": 1, "withdrawn": 1},
+        started_at="2026-01-01T00:00:00Z",
+        coverage={"masked": 0, "expected": 2},
+        due_after=0,
+        refreshed={"metrics_recomputed": True, "health_summary_recomputed": True},
+    )
+    _journal_judge_jobs(
+        job,
+        [
+            {
+                "at": "2026-01-01T00:00:00Z",
+                "job_id": "77",
+                "partition": "cpu",
+                "walltime": "01:00:00",
+                "rows": 2,
+                "receipt": str(done),
+                "nonce": "judge-a",
+            },
+            {
+                "at": "2026-01-01T01:00:00Z",
+                "job_id": "78",
+                "partition": "cpu",
+                "walltime": "01:00:00",
+                "rows": 1,
+                "receipt": str(job / "reverification" / "judge-b" / "receipt.json"),
+                "nonce": "judge-b",
+            },
+        ],
+    )
+
+    out = submit.inspect_recovery("gym-job-jp4", "bench")
+
+    assert out.dispatched is None and fake_executor.calls == ["decide"]
+    first, second = out.gate_task["judge_jobs"]
+    assert (
+        first["job_id"] == "77" and first["state"] == "completed" and first["settled"] == 1 and first["withdrawn"] == 1
+    )
+    assert first["partition"] == "cpu" and first["rows"] == 2
+    assert second["job_id"] == "78" and second["state"] == "queued" and "settled" not in second
+    assert any("judge-only job 77" in w and "settled 1" in w for w in out.gate_task["warnings"])
+    assert any("judge-only job 78" in w and "no receipt" in w for w in out.gate_task["warnings"])
+    # The saved answer text never leaves the run host with the evidence.
+    assert "saved answer" not in json.dumps(out.gate_task["judge_jobs"])
+
+
+def test_the_cli_takes_a_judge_partition_with_recover_only(tmp_path, fake_executor, capsys) -> None:
+    fake_executor.job_dir = _judge_job_dir(tmp_path)
+    code, out = run_cli(["eval", "resubmit", "gym-job-jp5", "bench", "--recover", "--judge-partition", "cpu"], capsys)
+    assert code == 0 and out["dispatched"] == "reverify" and fake_executor.options == [{"judge_partition": "cpu"}]
+    for argv in (
+        ["eval", "resubmit", "gym-job-jp6", "bench", "--recover", "--inspect", "--judge-partition", "cpu"],
+        ["eval", "resubmit", "gym-job-jp7", "bench", "--judge-partition", "cpu"],
+    ):
+        assert _cli_refuses(argv, capsys) == 2
+    assert fake_executor.options == [{"judge_partition": "cpu"}]  # the refusals decided and dispatched nothing
+
+
+def _cli_refuses(argv: list[str], capsys) -> int:
+    """The parser's exit code for ``argv`` (its message goes to stderr, so ``run_cli`` cannot read a result)."""
+    from nemo_gym.cli.main import main
+
+    saved = sys.argv
+    sys.argv = ["gym", *argv]
+    try:
+        with pytest.raises(SystemExit) as refused:
+            main()
+    finally:
+        sys.argv = saved
+        capsys.readouterr()
+    return refused.value.code

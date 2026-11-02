@@ -771,6 +771,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--spinup-timeout-reason goes with --server-spinup-timeout-seconds")
     if spinup_timeout is not None and spinup_timeout < 0:
         args._parser.error("--server-spinup-timeout-seconds is a number of seconds, 0 for no limit")
+    judge_partition = getattr(args, "judge_partition", None)
+    if judge_partition is not None and (not getattr(args, "recover", False) or inspect_only):
+        args._parser.error("--judge-partition needs --recover and cannot be used with --inspect")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -808,6 +811,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 extra["unsafe_resume_reason"] = unsafe_reason
             if spinup_timeout is not None:
                 extra |= {"server_spinup_timeout_seconds": spinup_timeout, "spinup_timeout_reason": spinup_reason}
+            if judge_partition is not None:
+                extra["judge_partition"] = judge_partition
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1928,6 +1933,16 @@ COMMANDS = {
                     metavar="N",
                     help="With --recover: record N more infra retries for this run on top of its configured cap; "
                     "the spent count is kept, the extension is journaled in the job dir and named in the decision.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--judge-partition",
+                    metavar="NAME",
+                    help="With --recover: the CPU partition of the judge-only job that grades a model-served run's "
+                    "saved answers again, when its saved config declares no CPU node pool (gpus_per_node 0) and the "
+                    "launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN) names none. The job starts the run's "
+                    "judge and verifier servers on one CPU node, never the policy.",
                 ),
             ),
             Flag(

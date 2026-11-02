@@ -219,6 +219,12 @@ OPERATOR_CONTINUATION = "OPERATOR-CONTINUATION"
 OPERATOR_CONTINUATION_JOURNAL_NAME = "operator-continuation-journal.jsonl"
 # Written over the unknown-accounting marker just before the continuation is queued; it has no unknown prefix.
 OPERATOR_CONTINUATION_NOTE = f"Operator continuation: an explicit budget filled the unknown accounting; see {OPERATOR_CONTINUATION_JOURNAL_NAME}."
+# Appended in the job dir when a judge-only job is queued to grade the run's saved answers again (see
+# ``SlurmExecutor.reverify_judge_failures``): its id, partition, walltime, the rows it re-judges and its receipt path.
+# Such a job is not a segment of the policy chain: it is not recorded in the chain and spends none of its budget.
+JUDGE_JOB_JOURNAL_NAME = "judge-job-journal.jsonl"
+# How many judge-only jobs in a row may end without settling a saved answer before recovery stops and names them.
+JUDGE_JOB_FAILURE_BOUND = 2
 
 
 class OperatorBudget(BaseModel):
@@ -278,6 +284,9 @@ class RecoveryOutcome(BaseModel):
     mlflow: dict[str, Any] | None = None
     # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
     reverify: str | None = None
+    # The judge-only job a REVERIFY of a model-served run queued: its id, partition and its source, walltime and its
+    # bounds, the rows it re-judges, the Gym commit it runs and its receipt path (the job dir's judge-job journal entry).
+    judge_job: dict[str, Any] | None = None
     # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
     reader_token: str | None = None
     # A --max-walltime raise checked against the partition before any evidence is read: the partition, its MaxTime
@@ -1240,6 +1249,7 @@ COLLECT_SCRIPT = (
     + f"EPISODE_DEADLINE_REASON = {EPISODE_DEADLINE_REASON!r}\n"
     + f"UNREADABLE_CLAIM_REASON = {UNREADABLE_CLAIM_REASON!r}\n"
     + f"OPERATOR_CONTINUATION_JOURNAL_NAME = {OPERATOR_CONTINUATION_JOURNAL_NAME!r}\n"
+    + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
     + r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
@@ -1927,6 +1937,52 @@ def chain_continuation_note():
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
 collected["unreadable_files"] = sorted(unreadable)
+def judge_jobs():
+    # The judge-only jobs queued for this run's saved answers (JUDGE_JOB_JOURNAL_NAME, oldest first), each with its
+    # receipt's outcome when the job wrote one. Only bounded ids, names, counts and states leave the run host: never a
+    # saved answer, and only a receipt inside this job dir is read.
+    def text(value, limit):
+        return value[:limit] if isinstance(value, str) else None
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+    jobs = []
+    try:
+        lines = open(os.path.join(d, JUDGE_JOB_JOURNAL_NAME)).read().splitlines()
+    except OSError:
+        return jobs
+    for line in lines[-50:]:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        job = {"job_id": text(entry.get("job_id"), 64), "at": text(entry.get("at"), 40),
+               "nonce": text(entry.get("nonce"), 120), "partition": text(entry.get("partition"), 120),
+               "walltime": text(entry.get("walltime"), 40), "rows": count(entry.get("rows")),
+               "gym_commit": text(entry.get("gym_commit"), 64), "receipt": text(entry.get("receipt"), 1000),
+               "error": text(entry.get("error"), 500), "state": "queued"}
+        path = entry.get("receipt")
+        receipt = None
+        inside = isinstance(path, str) and os.path.isabs(path) and os.path.realpath(path).startswith(os.path.realpath(d) + os.sep)
+        if inside and os.path.exists(path):
+            try:
+                receipt = json.load(open(path))
+            except (OSError, ValueError):
+                receipt = "malformed"
+        if isinstance(receipt, dict) and receipt.get("version") == 1 and receipt.get("state") in ("completed", "failed"):
+            job["state"] = receipt["state"]
+            for name in ("selected", "judged", "settled", "withdrawn", "unsupported", "due_after"):
+                job[name] = count(receipt.get(name))
+            job["error"] = text(receipt.get("error"), 500)
+            job["ended_at"] = text(receipt.get("ended_at"), 40)
+            job["metrics_recomputed"] = receipt.get("metrics_recomputed") is True
+            job["health_summary_recomputed"] = receipt.get("health_summary_recomputed") is True
+        elif receipt is not None:
+            job["state"] = "unknown"  # a receipt that is not one this reader knows
+        jobs.append(job)
+    return jobs
+collected["judge_jobs"] = judge_jobs()
 print(json.dumps(collected))
 """
 )
@@ -1995,6 +2051,10 @@ class CollectedEvidence(BaseModel):
     resume_drift_keys: list[str] | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
+    # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
+    # walltime, rows, receipt path and ``state`` ("queued" without a receipt, else the receipt's "completed" or
+    # "failed" with its counts); the executor adds the scheduler's state of a job without a receipt.
+    judge_jobs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # The host sets the reader placement; a reader neither receives it nor replaces it.
@@ -2195,6 +2255,8 @@ STORE_READER_UNAVAILABLE = (
 
 
 def _live_reason(live_job_name: str | None) -> str:
+    if live_job_name and live_job_name.startswith("judge-only job"):
+        return f"{live_job_name} live: it grades the run's saved answers again; nothing to decide"
     if live_job_name:
         return f"continuation {live_job_name} live; nothing to decide"
     return "a job of this run is still pending or running; nothing to decide, it is not queued twice"
@@ -5527,6 +5589,9 @@ def gate_summary_from_collected(
         + ([f"health gate within the bounded failure policy: {trial_reason}"] if trial_passed else [])
         + [task["health_verdict"]]
     )
+    # The judge-only jobs queued for the run's saved answers, each with its outcome: facts, never a verdict.
+    task["judge_jobs"] = [dict(job) for job in collected.judge_jobs] or None
+    task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
         extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")
@@ -5551,6 +5616,42 @@ def gate_summary_from_collected(
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     return task
+
+
+def judge_job_note(job: Mapping[str, Any]) -> str:
+    """One line on a judge-only job of the run (``CollectedEvidence.judge_jobs``): queued, live, ended without a
+    receipt, or what its receipt says it settled."""
+    name = f"judge-only job {job.get('job_id') or '(id unknown)'}"
+    where = f" on {job['partition']}" if job.get("partition") else ""
+    state = job.get("state")
+    if state == "completed":
+        note = (
+            f"{name}{where} completed: settled {job.get('settled') or 0} of {job.get('selected') or 0} selected saved "
+            "answer(s)"
+        )
+        if job.get("withdrawn"):
+            note += f", {job['withdrawn']} re-verified without a grade and left as they were"
+        if job.get("unsupported"):
+            note += f", {job['unsupported']} not re-verified (verifier not stateless)"
+        if job.get("due_after"):
+            note += f"; {job['due_after']} still due"
+        return note
+    if state == "failed":
+        if job.get("ended_at"):
+            return (
+                f"{name}{where} failed: {job.get('error') or 'no error recorded'}; the saved answers it was to grade "
+                "again stay as they were"
+            )
+        return (
+            f"{name}{where} ended {job.get('scheduler_state') or 'in an unknown state'} with no receipt; the saved "
+            "answers it was to grade again stay as they were"
+        )
+    if state in ("running", "pending"):
+        return (
+            f"{name}{where} is {state} ({job.get('scheduler_state')}): it grades {job.get('rows')} saved answer(s) "
+            "again"
+        )
+    return f"{name}{where} queued at {job.get('at')} for {job.get('rows')} saved answer(s): no receipt yet"
 
 
 # --- Saved-answer re-verification --------------------------------------------------------------------------------- #
