@@ -302,6 +302,54 @@ def test_status_with_no_ids_only_shows_submissions_that_have_the_named_benchmark
     assert [result["record"]["gym_job_id"] for result in json.loads(out)] == ["gym-job-gpqa"]
 
 
+def test_the_pagination_note_counts_the_submissions_that_have_the_named_benchmark(
+    tmp_path, cluster, monkeypatch, capsys
+):
+    for n in range(3):
+        _submitted(tmp_path, f"gym-job-gpqa-{n}", {"gpqa": str(n)}, submitted_at=f"2026-10-0{n + 1}T00:00:00Z")
+    _submitted(tmp_path, "gym-job-ruler", {"ruler": "9"}, submitted_at="2026-10-29T00:00:00Z")
+
+    out, _ = _gym(monkeypatch, capsys, "status", "--benchmark", "gpqa", "--limit", "1")
+    assert "1 of 3 submissions shown (--all for the rest)." in out
+
+    out, _ = _gym(monkeypatch, capsys, "status", "--benchmark", "gpqa", "--limit", "5")
+    assert "submissions shown" not in out
+
+
+def test_json_output_is_only_the_json_and_an_error_goes_to_stderr(tmp_path, cluster, monkeypatch, capsys):
+    _submitted(tmp_path, "gym-job-a", {"gpqa": "1"}, submitted_at="2026-10-29T00:00:00Z")
+
+    out, _ = _gym(monkeypatch, capsys, "status", "--json")
+    assert [r["record"]["gym_job_id"] for r in json.loads(out)] == ["gym-job-a"]
+
+    out, err = _gym(monkeypatch, capsys, "status", "gym-job-nope", "--json", ok=False)
+    assert out == "" and "gym-job-nope" in err
+
+
+def test_a_detail_that_spans_lines_stays_in_its_table_row():
+    broken = _submission_status(
+        _record("gym-job-a", {"gpqa": "1"}),
+        [
+            JobStatus(
+                benchmark="gpqa",
+                state=JobState.UNKNOWN,
+                job_id="1",
+                detail="RuntimeError: SSH failed\nPermission denied",
+            )
+        ],
+    )
+    healthy = _submission_status(
+        _record("gym-job-b", {"ruler": "2"}),
+        [JobStatus(benchmark="ruler", state=JobState.SUCCEEDED, job_id="2", detail="COMPLETED")],
+    )
+
+    text = render_status([broken, healthy])
+
+    assert "RuntimeError: SSH failed Permission denied" in text
+    assert "gym-job-b" in text and "COMPLETED" in text
+    assert [line for line in text.splitlines() if "gpqa" in line][0].count("UNKNOWN") == 1
+
+
 def test_status_with_ids_is_strict_about_a_benchmark_a_submission_lacks(tmp_path, cluster, monkeypatch, capsys):
     _submitted(tmp_path, "gym-job-a", {"ruler": "1"}, submitted_at="2026-10-29T00:00:00Z")
 
@@ -364,7 +412,7 @@ def test_info_of_a_benchmark_the_submission_lacks_exits_with_the_known_ones(tmp_
 
 def test_the_commands_reject_overrides_and_both_a_limit_and_all(tmp_path, cluster, monkeypatch, capsys):
     _, err = _gym(monkeypatch, capsys, "list", "foo=bar", ok=False)
-    assert "does not accept Hydra overrides" in err
+    assert "job list does not accept Hydra overrides" in err
 
     _, err = _gym(monkeypatch, capsys, "status", "--limit", "2", "--all", ok=False)
     assert "not allowed with" in err
@@ -377,9 +425,9 @@ def test_only_the_verbose_override_is_let_through_and_a_stray_one_is_rejected():
 
     args = type("Args", (), {"_parser": _Parser()})()
 
-    _reject_overrides(args, ["+verbose=true"], "status")
-    with pytest.raises(SystemExit, match="status does not accept Hydra overrides"):
-        _reject_overrides(args, ["+verbose=true", "foo=bar"], "status")
+    _reject_overrides(args, ["+verbose=true"], "job status")
+    with pytest.raises(SystemExit, match="job status does not accept Hydra overrides"):
+        _reject_overrides(args, ["+verbose=true", "foo=bar"], "job status")
 
 
 def test_info_of_an_executor_without_the_capability_says_so(tmp_path, cluster, monkeypatch, capsys):

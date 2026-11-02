@@ -591,3 +591,15 @@ def test_a_file_that_is_not_a_readable_record_is_skipped_with_a_warning_and_the_
 
     assert [r.gym_job_id for r in listed] == ["good"]
     assert "broken.json" in caplog.text and "from-the-future.json" in caplog.text
+
+
+@pytest.mark.parametrize("payload", ["[]", "null", '"not a record"', "123"])
+def test_valid_json_that_is_not_a_record_is_skipped_with_a_warning(index, caplog, payload):
+    _indexed("good", "2026-10-01T00:00:00Z")
+    (index / "odd.json").write_text(payload)
+
+    with caplog.at_level(logging.WARNING, logger="nemo_gym.orchestration.jobs"):
+        assert [r.gym_job_id for r in list_submissions()] == ["good"]
+        assert [r.gym_job_id for r in list_submissions(limit=1)] == ["good"]
+
+    assert "odd.json" in caplog.text

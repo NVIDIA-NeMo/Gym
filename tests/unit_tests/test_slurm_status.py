@@ -159,6 +159,33 @@ def test_the_newest_job_of_a_resumed_run_says_how_it_ended(tmp_path, slurm_bin):
     assert (observed.state, observed.job_id) == (JobState.SUCCEEDED, "101")
 
 
+def test_a_failed_queue_query_is_not_overruled_by_an_old_completion_in_accounting(tmp_path, slurm_bin):
+    ref = _job(tmp_path, "gpqa", job_id="100")
+    (Path(ref.job.job_dir) / EVAL_EXIT_FILE).write_text("0\n")
+    (slurm_bin / "squeue_rc").write_text("1")
+    (slurm_bin / "sacct_rows").write_text("100|COMPLETED|0:0\n")
+
+    observed = _query(ref)[ref.key]
+
+    assert observed.state is JobState.UNKNOWN
+    assert "squeue failed" in observed.detail
+    assert observed.files == {EVAL_EXIT_FILE: "0\n"}
+
+
+@pytest.mark.parametrize("predecessor", ["100|TIMEOUT|0:0", "100|COMPLETED|0:0"])
+def test_the_outcome_of_an_older_job_is_not_borrowed_when_accounting_lags_behind_the_newest(
+    tmp_path, slurm_bin, predecessor
+):
+    ref = _job(tmp_path, "gpqa", job_id="100")
+    (Path(ref.job.job_dir) / JOB_CHAIN_NAME).write_text("100\n101\n")
+    (slurm_bin / "sacct_rows").write_text(f"{predecessor}\n")
+
+    observed = _query(ref)[ref.key]
+
+    assert observed.state is JobState.UNKNOWN
+    assert observed.job_ids == ["100", "101"]
+
+
 def test_one_squeue_and_one_sacct_serve_every_job_of_the_batch(tmp_path, slurm_bin):
     first, second = _job(tmp_path, "a", job_id="30"), _job(tmp_path, "b", job_id="10")
     (Path(first.job.job_dir) / JOB_CHAIN_NAME).write_text("30\n20\n")
@@ -224,6 +251,28 @@ def test_state_files_survive_quotes_newlines_and_unicode(tmp_path, slurm_bin):
     (Path(ref.job.job_dir) / CHAIN_INCOMPLETE_FILE).write_text(reason)
 
     assert _query(ref)[ref.key].files == {CHAIN_INCOMPLETE_FILE: reason}
+
+
+@pytest.mark.skipif(os.geteuid() == 0, reason="root can read a file with no permissions")
+def test_a_state_file_that_cannot_be_read_is_absent_not_empty(tmp_path, slurm_bin):
+    ref = _job(tmp_path, "gpqa", job_id="100")
+    job_dir = Path(ref.job.job_dir)
+    (job_dir / CHAIN_INCOMPLETE_FILE).write_text("stopped\n")
+    (job_dir / CHAIN_INCOMPLETE_FILE).chmod(0)
+    (job_dir / EVAL_EXIT_FILE).write_text("0\n")
+    (slurm_bin / "sacct_rows").write_text("100|COMPLETED|0:0\n")
+
+    observed = _query(ref)[ref.key]
+
+    assert observed.files == {EVAL_EXIT_FILE: "0\n"}
+    assert observed.state is JobState.SUCCEEDED
+
+
+def test_a_state_file_that_is_empty_is_still_reported_as_empty(tmp_path, slurm_bin):
+    ref = _job(tmp_path, "gpqa")
+    (Path(ref.job.job_dir) / CHAIN_INCOMPLETE_FILE).write_text("")
+
+    assert _query(ref)[ref.key].files == {CHAIN_INCOMPLETE_FILE: ""}
 
 
 def test_a_state_file_that_is_missing_is_absent(tmp_path, slurm_bin):

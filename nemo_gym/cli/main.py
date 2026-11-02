@@ -27,7 +27,7 @@ from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
 from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
-from nemo_gym.cli.utils import exit_cleanly_on_config_error
+from nemo_gym.cli.utils import exit_cleanly_on_config_error, exit_cleanly_on_job_error
 from nemo_gym.utils.text import did_you_mean
 from nemo_gym.utils.text import hydra_quote as _hydra_quote
 
@@ -722,37 +722,33 @@ def _add_limit_or_all(parser: argparse.ArgumentParser) -> None:
 
 
 def _job_list(args: argparse.Namespace, overrides: list[str]) -> None:
-    _reject_overrides(args, overrides, "list")
+    _reject_overrides(args, overrides, "job list")
     from nemo_gym.cli import job
 
     job.list_command(limit=args.limit, as_json=getattr(args, "json", False))
 
 
+@exit_cleanly_on_job_error
 def _job_status(args: argparse.Namespace, overrides: list[str]) -> None:
-    _reject_overrides(args, overrides, "status")
+    _reject_overrides(args, overrides, "job status")
     from nemo_gym.cli import job
 
-    try:
-        job.status_command(
-            args.gym_job_ids,
-            benchmarks=_split_names(args.benchmark),
-            limit=None if args.all else args.limit,
-            as_json=getattr(args, "json", False),
-        )
-    except (ValueError, RuntimeError) as error:
-        job.exit_with_error(error)
+    job.status_command(
+        args.gym_job_ids,
+        benchmarks=_split_names(args.benchmark),
+        limit=None if args.all else args.limit,
+        as_json=getattr(args, "json", False),
+    )
 
 
+@exit_cleanly_on_job_error
 def _job_info(args: argparse.Namespace, overrides: list[str]) -> None:
-    _reject_overrides(args, overrides, "info")
+    _reject_overrides(args, overrides, "job info")
     from nemo_gym.cli import job
 
-    try:
-        job.info_command(
-            args.gym_job_id, benchmark=args.benchmark, show_config=args.config, as_json=getattr(args, "json", False)
-        )
-    except (ValueError, RuntimeError) as error:
-        job.exit_with_error(error)
+    job.info_command(
+        args.gym_job_id, benchmark=args.benchmark, show_config=args.config, as_json=getattr(args, "json", False)
+    )
 
 
 def _eval_run(args: argparse.Namespace, overrides: list[str]) -> None:
