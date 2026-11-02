@@ -6233,7 +6233,7 @@ class TestRolloutCollection:
         resume_from_cache: bool,
         redact_payloads: bool,
     ) -> None:
-        from nemo_gym.base_responses_api_model import CaptureStore
+        from nemo_gym.models.model_call_capture import CaptureStore
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(
@@ -6302,8 +6302,8 @@ class TestRolloutCollection:
     async def test_run_from_config_keys_capture_by_an_explicit_rollout_id(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, empty_global_config: MagicMock
     ) -> None:
-        from nemo_gym.base_responses_api_model import CaptureStore
         from nemo_gym.config.global_config import ROLLOUT_ID_KEY_NAME
+        from nemo_gym.models.model_call_capture import CaptureStore
 
         capture_dir = tmp_path / "captures"
         monkeypatch.setattr(

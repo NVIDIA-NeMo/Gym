@@ -27,7 +27,6 @@ import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
@@ -35,6 +34,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 
 
 def _build_response(text: str, model: str = "downstream-model") -> NeMoGymResponse:
@@ -167,7 +167,8 @@ class TestDefaultMessagesRoute:
             raise ValueError("unrelated conversion failure")
 
         monkeypatch.setattr(
-            "nemo_gym.base_responses_api_model._ANTHROPIC_CONVERTER.anthropic_request_to_responses", invalid_request
+            "nemo_gym.models.base_responses_api_model._ANTHROPIC_CONVERTER.anthropic_request_to_responses",
+            invalid_request,
         )
         client, _ = _client(_BodyOnlyModel)
         with pytest.raises(ValueError, match="unrelated conversion failure"):

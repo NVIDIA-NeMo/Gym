@@ -12,7 +12,6 @@ import pytest
 from aiohttp import ClientResponseError
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
 from nemo_gym.client import ServerClient
 from nemo_gym.models import (
     ENGINE_REFUSED_CALL_REASON,
@@ -34,6 +33,7 @@ from nemo_gym.models import (
     select_terminal_call,
     verify_and_linearize,
 )
+from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import VLLMModelWithCompaction
 
