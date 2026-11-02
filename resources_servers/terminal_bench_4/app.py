@@ -25,9 +25,10 @@ from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY
-from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
+from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, sandbox_credentials_rejected
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
+    FailureBoundary,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -299,9 +300,18 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 session.persist()
                 session.expiry_task = asyncio.create_task(self._watch_agent_deadline(session))
             except (Exception, asyncio.CancelledError) as exc:
+                # A provider that refused the credentials refuses every attempt: the kind ends the run.
+                rejected = (
+                    sandbox_credentials_rejected(
+                        exc, boundary=FailureBoundary.ENVIRONMENT, operation="sandbox.setup", stage="seed"
+                    )
+                    if isinstance(exc, Exception)
+                    else None
+                )
                 session.termination = AgentTermination(
                     reason="cancelled" if isinstance(exc, asyncio.CancelledError) else "infrastructure_error",
                     detail=f"{type(exc).__name__}: {exc}",
+                    failure_kind=rejected.failure_kind if rejected is not None else None,
                 )
                 lifecycle.exception(session, exc)
                 await lifecycle.cleanup(session)
@@ -595,7 +605,7 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             failure_kind=(
                 VERIFIER_ERROR
                 if verifier_failure or ungraded_verifier
-                else _selected_failure_kind(extra)
+                else (session.termination.failure_kind or _selected_failure_kind(extra))
                 if failure
                 else None
             ),

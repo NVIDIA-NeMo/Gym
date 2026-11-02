@@ -74,6 +74,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    PROVIDER_CREDENTIALS_REJECTED,
     SERVER_START_FAILED,
     VERIFIER_ERROR,
     is_namespaced,
@@ -960,6 +961,9 @@ COLLECT_SCRIPT = (
     + "CANCELLED_FOLLOWUP_MARKER = "
     + repr(CANCELLED_FOLLOWUP_MARKER)
     + "\n"
+    + "PROVIDER_CREDENTIALS_REJECTED = "
+    + repr(PROVIDER_CREDENTIALS_REJECTED)
+    + "\n"
     + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
     + "\n"
@@ -1445,13 +1449,17 @@ def resume_drift_keys():
 collected["resume_drift_keys"] = resume_drift_keys()
 def chain_continuation_note():
     # A continuation's provisional line, left when it ended before queuing its follow-up, or a sentinel's line for a
-    # follow-up cancelled before it started (see resume_script).
+    # follow-up cancelled before it started, or the guard's stop on rejected sandbox credentials (see resume_script).
     try:
         text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
     except OSError:
         return None
     line = text.strip().splitlines()[0] if text.strip() else ""
-    named = line.startswith(PROVISIONAL_MARKER_PREFIX) or CANCELLED_FOLLOWUP_MARKER in line
+    named = (
+        line.startswith(PROVISIONAL_MARKER_PREFIX)
+        or CANCELLED_FOLLOWUP_MARKER in line
+        or PROVIDER_CREDENTIALS_REJECTED in line
+    )
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
 print(json.dumps(collected))

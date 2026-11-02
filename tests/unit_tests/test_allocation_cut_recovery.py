@@ -345,6 +345,11 @@ _INSTALL_LOG = (
     "error: No pyproject.toml found in the current directory\n"
 )
 _DRIVER_FAILURE_STOPS = {
+    "provider_credentials_rejected": (
+        "Previous job 100 ended FAILED: provider_credentials_rejected: the sandbox provider refused the "
+        "credentials; the chain does not retry it; fix the credentials, then continue with gym eval resubmit "
+        "--recover"
+    ),
     "server_spinup_timeout": (
         "Previous job 100 ended FAILED: server_spinup_timeout: the Gym servers did not become ready within "
         "server_spinup_timeout_seconds; the chain does not retry it; raise the limit with gym eval resubmit --recover "

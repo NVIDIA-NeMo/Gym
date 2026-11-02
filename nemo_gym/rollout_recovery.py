@@ -1011,10 +1011,14 @@ class IncompleteEvaluationError(RuntimeError):
 
     exit_code = 75
 
-    def __init__(self, message: str, *, retryable: bool = True, made_progress: bool = True) -> None:
+    def __init__(
+        self, message: str, *, retryable: bool = True, made_progress: bool = True, failure_kind: str | None = None
+    ) -> None:
         if retryable and not made_progress:
             message += " No retry progress was made; automatic restarts use the infrastructure retry limit."
         super().__init__(message)
         # 75 continues productive work; an empty invocation must spend a bounded
         # infrastructure retry. 76 stops when another attempt cannot help.
         self.exit_code = (75 if made_progress else 1) if retryable else 76
+        # The registered kind that ended the run, left for the next segment's guard (see record_failure_kind).
+        self.failure_kind = failure_kind

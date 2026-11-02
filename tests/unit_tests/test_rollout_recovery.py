@@ -2325,3 +2325,60 @@ def test_a_new_manifest_treats_a_null_setting_as_absent(tmp_path: Path) -> None:
 
     assert with_null.config_digest == without.config_digest
     assert validate_resume(path, without, materialized) is not None
+
+
+@pytest.mark.parametrize("succeeded", [0, 1], ids=["all-rejected", "one-succeeded"])
+async def test_rejected_sandbox_credentials_end_the_run_without_a_retry(runner_config, monkeypatch, succeeded):
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+    # An orchestrated run requires every rollout, so the run ends even after a rollout succeeded.
+    runner_config.require_complete = True
+    calls = []
+
+    async def post(**kwargs):
+        calls.append(kwargs["json"])
+        if len(calls) <= succeeded:
+            return FakeResponse(200, {"reward": 1.0, "response": {}})
+        return FakeResponse(
+            200,
+            {
+                "_ng_failure_class": "infrastructure_error",
+                "failure_kind": "provider_credentials_rejected",
+                "reward": 0,
+                "response": {},
+            },
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match="refused the credentials") as raised:
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    assert raised.value.exit_code == 76
+    assert raised.value.failure_kind == "provider_credentials_rejected"
+    assert "gym eval resubmit --recover" in str(raised.value)
+
+
+async def test_a_resume_after_the_credentials_are_fixed_retries_the_rejected_rollouts(runner_config, monkeypatch):
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError
+
+    runner_config.require_complete = True
+    rejected = {
+        "_ng_failure_class": "infrastructure_error",
+        "failure_kind": "provider_credentials_rejected",
+        "reward": 0,
+        "response": {},
+    }
+    reply = [rejected]
+
+    async def post(**kwargs):
+        return FakeResponse(200, dict(reply[0]))
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    with pytest.raises(IncompleteEvaluationError, match="refused the credentials"):
+        await RolloutCollectionHelper().run_from_config(runner_config)
+
+    # The credentials are fixed: the resumed run dispatches the rejected rollouts again and completes.
+    reply[0] = {"reward": 1.0, "response": {}}
+    runner_config.resume_from_cache = True
+    await RolloutCollectionHelper().run_from_config(runner_config)
+    assert RolloutStore.read(Path(runner_config.output_jsonl_fpath)).coverage()["complete"]

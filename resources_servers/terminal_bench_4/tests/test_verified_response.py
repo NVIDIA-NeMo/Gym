@@ -253,3 +253,57 @@ async def test_a_killed_agent_scores_zero_without_its_verifier(tmp_path, monkeyp
     assert (verified["reward"], verified["evaluation_completed"]) == (0.0, True)
     assert verified["infrastructure_error"] is None and verified["failure_reason"] is None
     assert "_ng_failure_class" not in verified
+
+
+@pytest.mark.parametrize("status", [401, 403])
+async def test_rejected_sandbox_credentials_at_setup_are_typed_and_reported_as_the_rows_kind(
+    tmp_path, monkeypatch, status
+):
+    import asyncio
+
+    from opensandbox.exceptions import SandboxApiException
+
+    async def refuse(session, loader):
+        raise SandboxApiException("Create sandbox failed: credentials are invalid", status_code=status)
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(lifecycle, "prepare_session", refuse)
+    monkeypatch.setattr(lifecycle, "exception", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lifecycle, "cleanup", nothing)
+    session = SimpleNamespace(
+        session_id="session-1", started=asyncio.Event(), request=SimpleNamespace(capture_rollout_id=None)
+    )
+
+    await TerminalBench4ResourcesServer._prepare_session(SimpleNamespace(_loader=None), session)
+
+    assert session.termination.reason == "infrastructure_error"
+    assert session.termination.failure_kind == "provider_credentials_rejected"
+    verified = _verified(tmp_path, {"exception_info": {"exception_type": "SandboxApiException"}}, session.termination)
+    assert verified["failure_kind"] == "provider_credentials_rejected"
+
+
+@pytest.mark.parametrize("status", [429, 500, None])
+async def test_other_sandbox_setup_failures_keep_no_kind(monkeypatch, status):
+    import asyncio
+
+    from opensandbox.exceptions import SandboxApiException
+
+    async def fail(session, loader):
+        raise SandboxApiException("Create sandbox failed", status_code=status)
+
+    async def nothing(*args, **kwargs):
+        return None
+
+    monkeypatch.setattr(lifecycle, "prepare_session", fail)
+    monkeypatch.setattr(lifecycle, "exception", lambda *args, **kwargs: None)
+    monkeypatch.setattr(lifecycle, "cleanup", nothing)
+    session = SimpleNamespace(
+        session_id="session-1", started=asyncio.Event(), request=SimpleNamespace(capture_rollout_id=None)
+    )
+
+    await TerminalBench4ResourcesServer._prepare_session(SimpleNamespace(_loader=None), session)
+
+    assert session.termination.reason == "infrastructure_error"
+    assert session.termination.failure_kind is None

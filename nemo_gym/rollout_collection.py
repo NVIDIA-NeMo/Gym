@@ -99,6 +99,7 @@ from nemo_gym.core.failure_kinds import (
     ENVIRONMENT_PROTOCOL_VIOLATION,
     ENVIRONMENT_SERVER_FAILED,
     JUDGE_FAILED,
+    PROVIDER_CREDENTIALS_REJECTED,
     is_namespaced,
     is_registered,
 )
@@ -1573,6 +1574,20 @@ class SharedRolloutCollectionConfig(
                 retryable=retryable,
                 made_progress=made_progress,
             )
+
+
+def _credentials_rejected_stop(failures: Sequence[Mapping[str, Any]]) -> IncompleteEvaluationError | None:
+    """The end of a run whose sandbox provider refused its credentials: no attempt succeeds until they are fixed."""
+    rejected = sum(row.get("failure_kind") == PROVIDER_CREDENTIALS_REJECTED for row in failures)
+    if not rejected:
+        return None
+    return IncompleteEvaluationError(
+        f"EVAL STOPPED: the sandbox provider refused the credentials ({PROVIDER_CREDENTIALS_REJECTED}) on {rejected} "
+        "rollout(s); another attempt cannot succeed until they are fixed. Fix the credentials, then continue "
+        "with gym eval resubmit --recover.",
+        retryable=False,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+    )
 
 
 class E2ERolloutCollectionConfig(SharedRolloutCollectionConfig):
@@ -4574,6 +4589,9 @@ class RolloutCollectionHelper(BaseModel):
                 if latency_tracker.drained
                 else ""
             )
+            stop = await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+            if stop is not None:
+                raise stop
             raise IncompleteEvaluationError(
                 f"None of the {len(input_rows)} dispatched rollouts produced a result "
                 f"{dict(failure_counts)}.{drained_note} Inspect {failures_fpath}; the run has no score to report.",
@@ -4696,6 +4714,10 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         # A producer-marked final zero settles its rollout: resume does not run it again, so it is complete and in
         # the denominator, while health still reports it as a failure and no verifier execution is recorded for it.
+        if config.require_complete and (
+            stop := await asyncio.to_thread(lambda: _credentials_rejected_stop(store.failures()))
+        ):
+            raise stop
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,

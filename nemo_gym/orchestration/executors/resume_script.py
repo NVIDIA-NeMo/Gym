@@ -29,7 +29,12 @@ import logging
 import os
 from pathlib import Path
 
-from nemo_gym.core.failure_kinds import COLLECTION_RESUME_REFUSED, DRIVER_INSTALL_FAILED, SERVER_SPINUP_TIMEOUT
+from nemo_gym.core.failure_kinds import (
+    COLLECTION_RESUME_REFUSED,
+    DRIVER_INSTALL_FAILED,
+    PROVIDER_CREDENTIALS_REJECTED,
+    SERVER_SPINUP_TIMEOUT,
+)
 from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.script_templates import DRIVER_FAILURE_ENV
 
@@ -94,6 +99,10 @@ DRIVER_FAILURE_NAME = ".gym_driver_failure"
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
     "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
+)
+CREDENTIALS_REJECTED_REASON = (
+    f"{PROVIDER_CREDENTIALS_REJECTED}: the sandbox provider refused the credentials; the chain does not retry it; "
+    "fix the credentials, then continue with gym eval resubmit --recover"
 )
 RESUME_REFUSED_REASON = (
     f"{COLLECTION_RESUME_REFUSED}: the saved rollouts do not verify against this run's inputs and configuration; "
@@ -334,6 +343,8 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {driver_install_failed}: ${{_gym_install_error:0:{install_error_max_chars}}}; the chain does not retry it; see logs/driver-$_prev_slurm_job_id.log" ;;
         {collection_resume_refused})
             _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {resume_refused_reason}" ;;
+        {provider_credentials_rejected})
+            _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended $_prev_state: {credentials_rejected_reason}" ;;
     esac
     # A segment that timed out before Gym wrote the task inventory saved nothing to resume, and the next one would
     # repeat the same startup under the same walltime: the chain ends and names the fresh restart instead.
@@ -626,6 +637,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         install_error_max_chars=INSTALL_ERROR_MAX_CHARS,
         collection_resume_refused=COLLECTION_RESUME_REFUSED,
         resume_refused_reason=RESUME_REFUSED_REASON,
+        provider_credentials_rejected=PROVIDER_CREDENTIALS_REJECTED,
+        credentials_rejected_reason=CREDENTIALS_REJECTED_REASON,
     )
 
 
