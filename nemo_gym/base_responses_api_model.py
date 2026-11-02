@@ -49,7 +49,7 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.anthropic_converter import AnthropicConverter, AnthropicRequestValidationError
 from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
 from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
@@ -896,7 +896,10 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         (the Claude Code CLI always does), the complete response is re-emitted as a synthesized
         Anthropic SSE event stream. Servers may override this for native Messages handling.
         """
-        params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        try:
+            params = _ANTHROPIC_CONVERTER.anthropic_request_to_responses(body)
+        except AnthropicRequestValidationError as error:
+            raise HTTPException(400, str(error)) from error
         response = await self._invoke_responses(request, params)
         model_name = body.get("model") or response.model
         anthropic_response = _ANTHROPIC_CONVERTER.responses_to_anthropic_response(response, model=model_name)

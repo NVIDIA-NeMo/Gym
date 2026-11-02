@@ -223,10 +223,11 @@ COMMON_RESPONSE_PARAMS = dict(
     status="completed",
     tool_choice="auto",
 )
-OPENAI_2_44_OPTIONAL_CHAT_FIELDS = {
+OPENAI_SDK_OPTIONAL_CHAT_FIELDS = {
     "moderation",
     "prompt_cache_key",
     "prompt_cache_retention",
+    "prompt_cache_options",
     "safety_identifier",
     "verbosity",
     *CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
@@ -4070,7 +4071,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output"]
-        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_SDK_OPTIONAL_CHAT_FIELDS)
 
     def test_round_trip_chat_completions_return_token_id_information(self) -> None:
         converter = VLLMConverter(return_token_id_information=True)
@@ -4176,7 +4177,7 @@ class TestVLLMConverter:
         )
 
         expected_output = test_data["expected_output_return_token_id_information"]
-        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
+        assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_SDK_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
@@ -8105,8 +8106,8 @@ class TestCodexRequests:
     @mark.parametrize(
         "overrides, reasoning, include, expected",
         [
-            # Defaults are unchanged: the SDK enum rejects "max", and the conversion refuses the rest.
-            ({}, {"effort": "max"}, None, 422),
+            # The SDK now accepts "max"; other unsupported fields still require their own options.
+            ({}, {"effort": "max"}, None, "max"),
             ({}, {"effort": "high"}, ["reasoning.encrypted_content"], "failed"),
             ({}, {"effort": "high", "summary": "auto"}, None, "failed"),
             ({}, {"effort": "high", "context": "all_turns"}, None, "failed"),
@@ -8125,7 +8126,7 @@ class TestCodexRequests:
                 ["reasoning.encrypted_content"],
                 "high",
             ),
-            ({"drop_unrepresentable_request_fields": True}, {"effort": "max"}, ["reasoning.encrypted_content"], 422),
+            ({"drop_unrepresentable_request_fields": True}, {"effort": "max"}, ["reasoning.encrypted_content"], "max"),
             (
                 {"drop_unrepresentable_request_fields": True},
                 {"effort": "high", "summary": "auto", "context": "all_turns"},
@@ -8214,6 +8215,7 @@ class TestCodexRequests:
             "id": "call_1",
             "name": "apply_patch",
             "input": self.PATCH,
+            "caller": None,
             "namespace": None,
             "status": "completed",
         }

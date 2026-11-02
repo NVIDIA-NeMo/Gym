@@ -206,6 +206,8 @@ def _preflight_conversation(conversation: Any, *, path: str) -> None:
             raise _path_error(f"{item_path}.type", "expected a non-empty supported conversation item type")
         if item_type not in {"message", "reasoning", "function_call", "function_call_output"}:
             raise _path_error(f"{item_path}.type", f"unsupported conversation item type {item_type!r}")
+        if item.get("caller") is not None:
+            raise _path_error(f"{item_path}.caller", "Responses tool callers are not representable in ATIF v1.7")
         if item_type == "message" and item.get("role") == "assistant":
             _reject_unknown_fields(
                 item,
@@ -246,7 +248,7 @@ def _preflight_conversation(conversation: Any, *, path: str) -> None:
         elif item_type == "function_call":
             _reject_unknown_fields(
                 item,
-                frozenset({"arguments", "call_id", "name", "type", "id", "status", "namespace"})
+                frozenset({"arguments", "call_id", "name", "type", "id", "status", "namespace", "caller"})
                 | _TRAINING_METADATA_FIELDS,
                 path=item_path,
             )
@@ -258,7 +260,7 @@ def _preflight_conversation(conversation: Any, *, path: str) -> None:
         elif item_type == "function_call_output":
             _reject_unknown_fields(
                 item,
-                frozenset({"call_id", "output", "type", "id", "status"}),
+                frozenset({"call_id", "output", "type", "id", "status", "caller"}),
                 path=item_path,
             )
             _preflight_parts(item.get("output"), path=f"{item_path}.output", supported_fields=input_part_fields)
