@@ -367,8 +367,11 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
         key = session.resources_request.resources_session_id
         await self._prepare_session(session)
         if session.seed_response.termination is not None:
-            # Provisioning failed and was cleaned up; the episode may be retried.
-            session.resources_error = (503, f"Task sandbox setup failed: {session.termination.detail}")
+            # Provisioning failed and was cleaned up. The episode may be retried, unless only a configuration change
+            # can fix the failure: a 4xx other than 408, 425 and 429 is final for the Environment Server.
+            failure_type = (session.result.get("exception_info") or {}).get("exception_type")
+            status = 422 if failure_type == ExecLimitConfigurationError.__name__ else 503
+            session.resources_error = (status, f"Task sandbox setup failed: {session.termination.detail}")
             self._remember_close(key, session)
             return
         with rollout_context(session.request.capture_rollout_id):
