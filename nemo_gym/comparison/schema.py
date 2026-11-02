@@ -102,6 +102,14 @@ class ComparisonConfig(BaseNeMoGymCLIConfig):
         default="both",
         description="Which report artifacts to write: `md`, `json`, or `both`.",
     )
+    confidence_level: float = Field(
+        default=0.95,
+        gt=0,
+        lt=1,
+        allow_inf_nan=False,
+        description="Confidence level for candidate-minus-baseline intervals, as a fraction between 0 and 1. "
+        "Baseline/candidate intervals remain the recorded 95% intervals.",
+    )
 
     @model_validator(mode="after")
     def _check_candidate_parallel_lists(self) -> "ComparisonConfig":
@@ -143,7 +151,7 @@ class CandidateMetricValue(MetricValue):
 
     delta: Optional[float] = None
     delta_pct: Optional[float] = None
-    # Two-sided 95% Welch t-interval for candidate minus baseline, computed from each run's
+    # Two-sided Welch t-interval for candidate minus baseline, computed from each run's
     # repeat-level values. Only available when both runs have `mean_across_repeats/<metric>`.
     delta_ci_low: Optional[float] = None
     delta_ci_high: Optional[float] = None
@@ -230,6 +238,13 @@ class ComparisonResult(BaseModel):
     generated_at: str
     nemo_gym_version: str
     command: str
+    confidence_level: float = Field(
+        default=0.95,
+        gt=0,
+        lt=1,
+        allow_inf_nan=False,
+        description="Confidence level of delta intervals. Baseline/candidate intervals are recorded at 95%.",
+    )
     baseline: RunFile
     candidates: List[RunFile]
     comparisons: List[AgentComparison] = Field(default_factory=list)
