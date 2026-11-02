@@ -356,7 +356,9 @@ class Blocklist:
             parts = urlsplit(url)
             host = normalize_hostname(parts.hostname) if parts.hostname else ""
         except (ValueError, UnicodeError):
-            return None  # the outer URL's parse failure is handled by url_block
+            # A wrapped or decoded URL Python cannot parse may still be one a fetcher reads (``https://[::1]@scale.com``
+            # is ``scale.com`` to a browser and to httpx): refuse it rather than skip its checks.
+            return Block(MALFORMED_URL_FAMILY, "parseable URL", url, where)
         if host:
             block = self.host_block(host, url, where)
             if block is not None:

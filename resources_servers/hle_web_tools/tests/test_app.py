@@ -347,6 +347,7 @@ OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
         ("https://arxiv.org\t/abs/2605.02442", "malformed_url"),
         ("https://@arxiv.org/abs/2605.02442", "malformed_url"),
         ("https://reader.example/?u=https://scale.com%5C.example.org/x", "domains"),
+        ("https://ok.example/go?u=https://[::1]@scale.com/leaderboard", "malformed_url"),  # unparseable inside
         # url_prefixes and serp_url_patterns on the canonical form.
         ("https://arxiv.org:443/abs/2605.02442", "url_prefixes"),
         ("https://arxiv.org./abs/2605.02442", "url_prefixes"),
