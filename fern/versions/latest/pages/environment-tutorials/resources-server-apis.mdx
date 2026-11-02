@@ -103,8 +103,52 @@ async def verify(
 - **`body` in `seed_session()`** contains fields used to initialize an episode. Define a `BaseSeedSessionRequest` subclass for fields such as an initial board, task ID, or sandbox image. The default implementation is a no-op.
 - **`body.responses_create_params` in `verify()`** is the original model request.
 - **`body.response` in `verify()`** is the completed `NeMoGymResponse`, including the trajectory assembled by the Agent Server.
-- **Custom task metadata** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model.
+- **Custom task data** requires a `BaseVerifyRequest` subclass. Declare fields such as `answer` or `expected_state`; undeclared fields are not retained by the base Pydantic model. Also declare the dataset-facing fields once in a flat `TaskData` schema so data tooling can validate them without starting the server.
 - **`request: Request`**, when added to either method signature, provides access to the per-rollout session ID.
+
+### Verification Data Convention
+
+A resources server owns the schema for task-specific inputs used by `seed_session()`, tools, or `verify()`. Define that schema in `resources_servers/<name>/task_data.py` as a Pydantic model named `TaskData`:
+
+```python
+from pydantic import BaseModel, ConfigDict, Field
+
+
+class TaskData(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
+    expected_answer: str = Field(
+        description="Reference answer used by verify().",
+        json_schema_extra={"consumed_by": ["verify"]},
+    )
+```
+
+Keep `TaskData` flat even if an existing wire request receives a field inside `verifier_metadata`. A server whose current request model reads a field exclusively from that legacy container records the placement explicitly:
+
+```python
+expected_answer: str = Field(
+    json_schema_extra={
+        "consumed_by": ["verify"],
+        "legacy_location": "verifier_metadata",
+    }
+)
+```
+
+Use these rules:
+
+1. Define field names, types, and requiredness once in the flat `TaskData` schema.
+2. Put new task fields at the row top level unless an existing request contract requires the legacy `verifier_metadata` container.
+3. Add `legacy_location: verifier_metadata` only when the current wire reads the field exclusively there. Do not add it if a request validator accepts both placements.
+4. Never choose between conflicting top-level and nested values. Task-data validation reports the row as ambiguous.
+5. Keep framework fields such as `responses_create_params` out of `TaskData`, and keep runtime-generated values out of dataset rows.
+
+Dataset authors can inspect the contract without importing the resources server's runtime dependencies:
+
+```bash
+gym env schema --resources-server <name>
+```
+
+The legacy marker is a migration map, not a second definition of the field. This keeps current servers usable while providing one typed shape for collation, schema inspection, and future row-format migration.
 
 ### Direct HTTP Tool-Calling Protocol
 
