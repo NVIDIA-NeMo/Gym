@@ -58,7 +58,7 @@ def _record(
     return SubmissionRecord(
         gym_job_id=gym_job_id,
         gym_version="0.4.0",
-        gym_commit="c155b77c8420283982ec30347a46b92ae6ee1af5",
+        gym_commit="c155b77c8420283982ec30347a46b92ae6ee1af5",  # pragma: allowlist secret
         submitted_at=submitted_at,
         run_dir=run_dir,
         cluster="cluster-a",
