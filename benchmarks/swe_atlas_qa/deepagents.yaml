@@ -1,0 +1,11 @@
+# Needs harness_agent to keep an explicit agent_kwargs working directory (#5051). With the task directory
+# /app, the DeepAgents virtual filesystem would write /logs/agent/answer.txt under /app.
+config_paths:
+  - benchmarks/swe_atlas_qa/config.yaml
+
+swe_atlas_qa_agent:
+  responses_api_agents:
+    harness_agent:
+      agent: deepagents
+      agent_kwargs:
+        cwd: /

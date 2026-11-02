@@ -21,8 +21,8 @@ from uuid import uuid4
 
 from openai.types.responses import ResponseInputTextParam
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
@@ -32,7 +32,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
@@ -40,7 +40,7 @@ from nemo_gym.rollout_observability import (
     ToolCallObservation,
     TrajectoryRecord,
 )
-from responses_api_agents.opencode_agent.observability import append_opencode_turns
+from responses_api_agents.opencode_agent.observability import append_opencode_turns, opencode_tool_outcome
 
 
 def _load_json(value: Any) -> dict[str, Any]:
@@ -65,6 +65,7 @@ def _parse_opencode_session(
     *,
     model_ref: ModelServerRef | None = None,
     require_terminal_finish: bool = False,
+    message_ids: set[str] | None = None,
 ) -> AgentObservationBundle:
     """Read OpenCode's persisted session tree before its workspace is removed."""
     if not db_path.is_file():
@@ -93,6 +94,14 @@ def _parse_opencode_session(
     finally:
         con.close()
 
+    all_part_rows = part_rows
+    if message_ids is not None:
+        all_messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
+        all_message_sessions = {row["id"]: row["session_id"] for row in message_rows}
+        message_rows = [row for row in message_rows if row["id"] in message_ids]
+        part_rows = [row for row in part_rows if row["message_id"] in message_ids]
+        active_sessions = {row["session_id"] for row in message_rows}
+        session_rows = [row for row in session_rows if row["id"] in active_sessions or row["parent_id"] is None]
     messages = {row["id"]: _load_json(row["data"]) for row in message_rows}
     message_sessions = {row["id"]: row["session_id"] for row in message_rows}
     conversations: dict[str, list[Any]] = {row["id"]: [] for row in session_rows}
@@ -105,6 +114,23 @@ def _parse_opencode_session(
     summary_text: dict[str, list[str]] = {}
     summaries_by_parent: dict[tuple[str, str], list[str]] = {}
     first_item_id_by_message: dict[tuple[str, str], str] = {}
+    if message_ids is not None:
+        # A compaction can retain an item from an earlier activation. Its identity
+        # remains valid context even though that old conversation is not emitted again.
+        for row in all_part_rows:
+            if row["message_id"] in message_ids or all_messages.get(row["message_id"], {}).get("role") != "assistant":
+                continue
+            part = _load_json(row["data"])
+            text = part.get("text")
+            if part.get("type") in {"text", "reasoning"} and isinstance(text, str) and text.strip():
+                item_id = row["id"]
+            elif part.get("type") == "tool":
+                item_id = part.get("callID")
+            else:
+                continue
+            session_id = row["session_id"] or all_message_sessions.get(row["message_id"])
+            if isinstance(session_id, str) and isinstance(item_id, str) and item_id:
+                first_item_id_by_message.setdefault((session_id, row["message_id"]), item_id)
 
     for row in message_rows:
         message = messages[row["id"]]
@@ -136,6 +162,8 @@ def _parse_opencode_session(
         part = _load_json(row["data"])
         if not part:
             gaps.append(ObservationGap(code="agent_artifact_record_unparseable"))
+            # The part may have been a tool call, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         ptype = part.get("type")
         message_id = row["message_id"]
@@ -143,9 +171,15 @@ def _parse_opencode_session(
         session_id = row["session_id"] or message_sessions.get(message_id)
         if not isinstance(session_id, str):
             gaps.append(ObservationGap(code="agent_artifact_record_unowned"))
+            if ptype == "tool":
+                # A tool part that belongs to no session is left out, so the tool history read is not complete.
+                gaps.append(ObservationGap(code="tool_timing_unavailable", detail=row["id"]))
             continue
         conversation = conversations.setdefault(session_id, [])
         role = message.get("role")
+        if ptype == "tool" and role not in ("assistant", "user"):
+            # A tool part whose message cannot say who sent it is left out, so the tool history read is not complete.
+            gaps.append(ObservationGap(code="tool_timing_unavailable", invocation_id=session_id, detail=row["id"]))
 
         if ptype == "step-finish":
             continue
@@ -196,19 +230,17 @@ def _parse_opencode_session(
             conversation.append(call)
             first_item_id_by_message.setdefault((session_id, message_id), call_id)
             opencode_time = state.get("time") if isinstance(state.get("time"), dict) else {}
-            # OpenCode retains raw output in SQLite but substitutes this literal in later model inputs after pruning.
-            if opencode_status == "completed" and opencode_time.get("compacted") is not None:
-                observed_tool_output = "[Old tool result content cleared]"
-            else:
-                observed_tool_output = state.get("output") if state.get("output") is not None else state.get("error")
-            if observed_tool_output is not None:
+            outcome = opencode_tool_outcome(part.get("tool"), state)
+            if outcome.output is not None:
                 result = NeMoGymFunctionCallOutput(
                     type="function_call_output",
                     call_id=call_id,
-                    output=str(observed_tool_output),
+                    output=outcome.output,
                     status=response_status,
                 )
                 conversation.append(result)
+            if outcome.gap is not None:
+                gaps.append(ObservationGap(code=outcome.gap, invocation_id=session_id, detail=observed_call_id))
 
             opencode_start = opencode_time.get("start")
             opencode_end = opencode_time.get("end")
@@ -222,26 +254,7 @@ def _parse_opencode_session(
             started_at = _milliseconds(opencode_start) if valid_interval else None
             completed_at = _milliseconds(opencode_end) if valid_interval else None
             duration_ms = float(opencode_end - opencode_start) if valid_interval else None
-            status = {
-                "completed": "completed",
-                "error": "failed",
-                "running": "incomplete",
-                "pending": "incomplete",
-            }.get(opencode_status, "unknown")
-            if opencode_status == "completed" and part.get("tool") == "bash":
-                # Completion describes the tool lifecycle, not shell success. Timeout/abort
-                # can complete that lifecycle with a null exit code in the native artifact.
-                metadata = state.get("metadata") if isinstance(state.get("metadata"), dict) else {}
-                exit_code = metadata.get("exit")
-                if type(exit_code) is int:
-                    status = "completed" if exit_code == 0 else "failed"
-                else:
-                    status = "unknown"
-                    gaps.append(
-                        ObservationGap(
-                            code="tool_outcome_unavailable", invocation_id=session_id, detail=observed_call_id
-                        )
-                    )
+            status = outcome.status
             if observed_call_id is not None:
                 tools.append(
                     ToolCallObservation(
@@ -253,13 +266,21 @@ def _parse_opencode_session(
                         duration_ms=duration_ms,
                         timing_source="artifact" if started_at is not None else None,
                         status=status,
-                        error_type="tool_error" if status == "failed" else None,
+                        error_type=outcome.error_type,
                     )
                 )
             else:
                 gaps.append(
                     ObservationGap(
                         code="tool_call_identity_unavailable",
+                        invocation_id=session_id,
+                        detail=row["id"],
+                    )
+                )
+                # The tool ran but has no observation to time, so the tool history read is not complete.
+                gaps.append(
+                    ObservationGap(
+                        code="tool_timing_unavailable",
                         invocation_id=session_id,
                         detail=row["id"],
                     )
@@ -280,7 +301,7 @@ def _parse_opencode_session(
             child_id = metadata.get("sessionId")
             if isinstance(child_id, str) and observed_call_id is not None:
                 child_tools.setdefault(child_id, set()).add(observed_call_id)
-                child_status[child_id] = status
+                child_status[child_id] = {"timeout": "incomplete", "cancelled": "incomplete"}.get(status, status)
             continue
         if ptype == "compaction":
             compaction_parts.append((session_id, message_id, _milliseconds(row["time_created"]), part))

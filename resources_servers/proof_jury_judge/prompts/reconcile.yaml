@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# Reconciliation round of the MathArena jury ("An Open Recipe for IMO Gold", Appendix B.6).
+# {judge_prompt} is the rendered judge prompt; {other_judgments} lists the first-round judgments.
+user: |-
+  {judge_prompt}
+
+  ---
+
+  You are additionally given the following judgments from other judges on the same solution.
+  They have all read the same problem and solution, but they significantly differ in the score they awarded in their analysis.
+  Your task is to analyze their judgments and the solution, and reconcile the differences in the scores.
+  Your judgment should not directly reference these other judgments, but should be self-contained and should provide a clear rationale for the score you give, which may be different from the scores given by the other judges.
+  Use the output format specified above, ending with the final IMO score in \boxed{{...}}.
+
+  {other_judgments}

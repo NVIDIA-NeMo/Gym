@@ -140,6 +140,7 @@ def prepare_from_hf_raw(
             meta = json.loads(meta) if meta else {}
 
         row = {
+            "task_id": example["question_id"],
             "question_content": example["question_content"],
             "verifier_metadata": {
                 "problem_id": example.get("question_id", ""),

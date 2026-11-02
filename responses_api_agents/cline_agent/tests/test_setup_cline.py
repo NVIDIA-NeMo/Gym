@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import os
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -26,6 +27,18 @@ def test_cline_version_parses_cli_output() -> None:
     result = SimpleNamespace(returncode=0, stdout="Cline CLI 3.0.55\n", stderr="")
     with patch("responses_api_agents.cline_agent.setup_cline.subprocess.run", return_value=result):
         assert _cline_version("/usr/bin/cline") == "3.0.55"
+
+
+def test_version_probe_disables_auto_update(monkeypatch: pytest.MonkeyPatch) -> None:
+    # Every `cline` call, `--version` included, arms Cline's self-update: on exit it spawns a
+    # detached `npm update -g cline` that replaces the pinned install and briefly removes the
+    # binary under concurrent task spawns. Only the exact value "1" turns it off.
+    monkeypatch.setenv("CLINE_NO_AUTO_UPDATE", "0")
+    result = SimpleNamespace(returncode=0, stdout="3.0.55\n", stderr="")
+    with patch("responses_api_agents.cline_agent.setup_cline.subprocess.run", return_value=result) as run:
+        assert _cline_version("/usr/bin/cline") == "3.0.55"
+    assert run.call_args.kwargs["env"]["CLINE_NO_AUTO_UPDATE"] == "1"
+    assert os.environ["CLINE_NO_AUTO_UPDATE"] == "0"
 
 
 def test_exact_existing_version_is_reused() -> None:

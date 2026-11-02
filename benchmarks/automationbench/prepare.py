@@ -63,6 +63,7 @@ def prepare(
                 info = json.loads(info) if info else {}
             output_row = {
                 "task_idx": i,
+                "task_id": f"{info['task_name']}/{row['example_id']}",
                 "vf_env_id": VF_ENV_ID,
                 "responses_create_params": {"input": prompt},
                 "agent_ref": {

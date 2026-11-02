@@ -21,7 +21,8 @@ gdpval_judge_model:
       # Must match the server's --served-model-name (defaults to the HF id).
       openai_model: ${oc.select:MINIMAX_MODEL,${oc.env:MINIMAX_MODEL,MiniMaxAI/MiniMax-M3}}
       # Ride out overload 502/503s instead of failing after 3 quick retries.
-      max_http_attempts: 1800
+      max_http_attempts: 36
+      max_rate_limit_wait_seconds: 0
       openai_default_headers: {}
 
 # --- Point the GDPVal resources server at that single self-hosted judge ------

@@ -25,7 +25,7 @@ provides two opposite-direction mappings:
   and ``anthropic_response_to_sse`` (synthesize Anthropic SSE from a complete response).
 
 The converter is **transport-free and SDK-free**: pure dict/Pydantic in, pure dict/Pydantic
-out. All HTTP stays in the servers via ``nemo_gym.server_utils.request()`` (the ``anthropic``
+out. All HTTP stays in the servers via ``nemo_gym.client.http_client.request()`` (the ``anthropic``
 SDK is avoided because it uses httpx, whose O(n^2) connection pooling hangs at high
 concurrency).
 
@@ -52,7 +52,7 @@ from uuid import uuid4
 from anthropic.types.message_create_params import MessageCreateParams
 
 from nemo_gym.anthropic_utils import NeMoGymAnthropicMessage
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -62,6 +62,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
+    NeMoGymResponseReasoningInputItem,
     NeMoGymResponseReasoningItem,
     NeMoGymResponseUsage,
     NeMoGymSummary,
@@ -392,8 +393,7 @@ class AnthropicConverter:
             elif block_type == "thinking":
                 flush_message()
                 items.append(
-                    NeMoGymResponseReasoningItem(
-                        id=f"rs_{uuid4().hex}",
+                    NeMoGymResponseReasoningInputItem(
                         summary=[NeMoGymSummary(text=block.get("thinking", ""), type="summary_text")],
                         encrypted_content=self._encrypted_content_from_carrier(block.get("signature")),
                         type="reasoning",
@@ -405,8 +405,7 @@ class AnthropicConverter:
                     continue
                 flush_message()
                 items.append(
-                    NeMoGymResponseReasoningItem(
-                        id=f"rs_{uuid4().hex}",
+                    NeMoGymResponseReasoningInputItem(
                         summary=[],
                         encrypted_content=encrypted_content,
                         type="reasoning",

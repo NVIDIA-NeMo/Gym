@@ -96,9 +96,9 @@ jobs:
     with:
       base-ref: ${{ needs.pre-flight.outputs.base_ref }}
 
-  # P0 is published separately; requiring that check is a repository rules decision.
+  # Conformance is published separately as an optional check.
   harness_conformance:
-    name: Harness conformance
+    name: Harness conformance (non-blocking)
     needs: [pre-flight]
     uses: ./.github/workflows/harness-conformance.yml
     permissions:
@@ -106,7 +106,9 @@ jobs:
       actions: read
       checks: write
     with:
-      base-ref: ${{ needs.pre-flight.outputs.base_ref }}
+      # Queue groups and main pushes can contain more than one commit.
+      # PR mirrors retain the full branch diff against the PR's base branch.
+      base-ref: ${{ github.event.merge_group.base_sha || (github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}
 
   container_build:
     name: Build Gym container
@@ -403,7 +405,7 @@ jobs:
         uses: NVIDIA-NeMo/FW-CI-templates/.github/actions/notify-ci-failure@631c404d00a9e60afc591cd071d35d2e18f82fc6
         with:
           needs-json: ${{ toJSON(needs) }}
-          webhook: ${{ secrets.SLACK_WEBHOOK }}
+          webhook: ${{ secrets.SLACK_TEAM_CHANNEL_WEBHOOK }}
 
   merge-queue-notification:
     name: Merge queue notification

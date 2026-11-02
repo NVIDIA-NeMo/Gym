@@ -1,2 +1,5 @@
--e nemo-gym[dev,ray] @ ../../
+-e nemo-gym[dev,ray,sandbox] @ ../../
 numpy==2.2.6
+# Candidates can import these on the Ray path; sandbox/Dockerfile pins the same versions.
+scipy==1.18.1
+pandas==3.0.6

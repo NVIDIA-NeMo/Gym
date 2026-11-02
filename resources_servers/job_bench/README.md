@@ -13,6 +13,11 @@ so scores are not an exact reproduction of published numbers:
 
 Judge API failures go to the failures file instead of being scored as zero.
 
+Each judge call asks for 200,000 completion tokens, as upstream does. A judge served with a smaller
+context window (for example a self-hosted 262k-context model) rejects every grading prompt longer than
+the remainder; lower the budget with `judge_max_completion_tokens` (or `JOB_BENCH_JUDGE_MAX_COMPLETION_TOKENS`)
+and keep it fixed across compared runs.
+
 ## Optional artifact retention
 
 Set `artifact_root` to save each trial's request, rubrics, output archive, judge receipts, and result. Passing a saved

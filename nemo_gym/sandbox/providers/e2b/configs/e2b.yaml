@@ -12,7 +12,7 @@
 #     --config nemo_gym/sandbox/providers/e2b/configs/e2b.yaml \
 #     --config responses_api_models/vllm_model/configs/vllm_model.yaml
 #
-# Requires the SDK: `pip install 'e2b>=2.36.0,<3.0.0'`.
+# Requires the SDK: `pip install 'e2b>=2.46.0,<3.0.0'`.
 #
 # Works against e2b.dev and against any e2b-compatible gateway -- point
 # `connection.api_url`/`connection.sandbox_url` at the gateway.
@@ -68,6 +68,17 @@ sandbox:
       secure: true
       # Permit outbound internet access. Set false for offline/untrusted workloads.
       allow_internet_access: true
+      # Outbound traffic rules (CIDRs, IPs or hostnames). deny_out 0.0.0.0/0
+      # with an allow_out list permits only the listed hosts, e.g.:
+      #   network:
+      #     deny_out: ["0.0.0.0/0"]
+      #     allow_out: [pypi.org, files.pythonhosted.org, deb.debian.org, security.debian.org]
+      network: null
+      # AgentEnv create parameters, sent as customExtensionParams. Setting this
+      # creates sandboxes through POST /sandboxes instead of the SDK, e.g.
+      # {sandbank: all} serves package registries from the node-local cache:
+      #   custom_extension_params: {sandbank: all}
+      custom_extension_params: null
       # Resource limits are fixed when a template is built. False warns when a
       # SandboxSpec requests resources; true rejects the request.
       strict_resources: false

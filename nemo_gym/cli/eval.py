@@ -16,6 +16,7 @@ import asyncio
 import importlib
 import json
 import logging
+import signal
 import site
 import subprocess
 import sys
@@ -32,6 +33,9 @@ from rich.table import Table
 from tqdm.auto import tqdm
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.artifacts.exporters import mark_run_failed
+from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME as QUALITY_SUMMARY_FILENAME
+from nemo_gym.artifacts.run_files import ROLLOUT_VERDICTS_FILENAME as ROLLOUT_VERDICTS_FILENAME
 from nemo_gym.benchmarks import (
     BenchmarkConfig,
     discover_benchmarks,
@@ -45,7 +49,7 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     BaseNeMoGymCLIConfig,
     BenchmarkDatasetConfig,
     ConfigError,
@@ -53,15 +57,7 @@ from nemo_gym.config_types import (
     DatasetConfig,
     ServerInstanceConfig,
 )
-from nemo_gym.discovery import read_config_metadata
-from nemo_gym.eval_plan import (
-    PlanBenchmark,
-    PlanGym,
-    build_eval_plan,
-    eval_plan_json_schema,
-    write_eval_plan,
-)
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     QUERY_KEY_NAME,
@@ -73,6 +69,14 @@ from nemo_gym.global_config import (
     get_global_config_dict,
     resolve_dataset_agent,
     taskset_environment_server_name,
+)
+from nemo_gym.discovery import read_config_metadata
+from nemo_gym.eval_plan import (
+    PlanBenchmark,
+    PlanGym,
+    build_eval_plan,
+    eval_plan_json_schema,
+    write_eval_plan,
 )
 from nemo_gym.orchestration.jobs import installed_gym_commit
 from nemo_gym.package_info import __version__
@@ -420,8 +424,7 @@ class PlanBenchmarkConfig(PrepareBenchmarkConfig):
     Prepare one benchmark and write its plan: every task once, with a stable id and a digest of its input.
 
     The plan file's format is versioned and printed by `--schema`.
-    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id`, and benchmarks with a prompt template,
-    are refused.
+    Benchmarks whose rows have no `task_id`/`problem_id`/`instance_id` are refused.
 
     Examples:
 
@@ -471,11 +474,6 @@ def plan_benchmark() -> None:
             f"{[benchmark.name for benchmark in benchmarks]}."
         )
     benchmark = benchmarks[0]
-    if benchmark.dataset.prompt_config is not None:
-        raise ConfigError(
-            f"Benchmark {benchmark.name!r} declares a prompt template ({benchmark.dataset.prompt_config}); "
-            "plans do not support prompt templates yet."
-        )
 
     _prepare_datasets([benchmark], plan_config)
     rows = [json.loads(line) for line in benchmark.dataset.jsonl_fpath.read_text().splitlines() if line.strip()]
@@ -544,6 +542,7 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
 
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
+    from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import (
         E2ERolloutCollectionConfig,
         RolloutCollectionConfig,
@@ -598,10 +597,13 @@ def e2e_rollout_collection():  # pragma: no cover
         OmegaConf.to_container(rollout_collection_config_dict)
     )
 
+    write_resolved_config(global_config_dict, output_fpath)
+
     rh = RunHelper()
     rh.start(None)
 
     rch = RolloutCollectionHelper()
+    rch._termination_requested = lambda: _terminated
 
     # A benchmark can plug in a custom rollout-collection procedure via the
     # ``rollout_collection_driver`` config field (a ``module.path:function``).
@@ -610,9 +612,10 @@ def e2e_rollout_collection():  # pragma: no cover
     health_check_enabled = (
         not rollout_collection_config.disable_aggregation and not rollout_collection_config.disable_health_check
     )
-    # This E2E entry point prints health only after its server-shutdown phase.
+    # This E2E entry point prints health before its server-shutdown phase.
     # The no-serve entry point calls the collection helper directly.
-    rollout_collection_config.disable_health_check = True
+    if driver_path:
+        rollout_collection_config.disable_health_check = True
 
     print(
         f"""Output artifacts:
@@ -622,7 +625,11 @@ def e2e_rollout_collection():  # pragma: no cover
 {f"Rollout collection driver: {driver_path}" if driver_path else ""}
 """
     )
+    if driver_path:
+        _remove_health_reports(output_fpath)
+    _interrupt_on_sigterm()
     collection_completed = False
+    interrupted = False
     try:
         if driver_path:
             module_name, _, fn_name = driver_path.partition(":")
@@ -635,35 +642,173 @@ def e2e_rollout_collection():  # pragma: no cover
             asyncio.run(rch.run_from_config(rollout_collection_config))
         collection_completed = True
     except KeyboardInterrupt:
+        interrupted = True
         if rollout_collection_config.require_complete:
-            raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.") from None
-        pass
+            mark_run_failed()
+    except BaseException:
+        # Includes an incomplete run that check_completion rejects: the tracking run must not read as finished.
+        mark_run_failed()
+        raise
     finally:
-        rh.shutdown()
-
-    if health_check_enabled and collection_completed:
-        from nemo_gym.rollout_health import format_health_report, run_health_checks
-
+        # Before the server shutdown, so a run Slurm stops writes its summary within KillWait.
+        # A failed or interrupted run reports health too, so its failed and missing rollouts are counted.
         try:
-            health_result = run_health_checks(
-                output_fpath,
-                workers=rollout_collection_config.health_check_workers,
-                ignored_checks=rollout_collection_config.health_check_ignored_checks,
+            if health_check_enabled and driver_path:
+                from nemo_gym.rollout_health import capture_dirs_for_health
+
+                # The built-in collector reports under its run lock, before shutdown.
+                _health_check_collected_rollouts(
+                    output_fpath,
+                    rollout_collection_config,
+                    None if driver_path else rch._landed_keys,
+                    model_call_capture_dirs=capture_dirs_for_health(global_config_dict),
+                )
+        finally:
+            rh.shutdown()
+    _exit_if_terminated()
+    try:
+        _check_collection_completion(
+            output_fpath,
+            require_complete=rollout_collection_config.require_complete,
+            completed=collection_completed,
+            interrupted=interrupted,
+        )
+    except BaseException:
+        # A custom driver can return normally while saved coverage still rejects completion.
+        mark_run_failed()
+        raise
+
+
+_terminated = False
+
+
+def _interrupt_on_sigterm() -> None:
+    """Make Slurm's SIGTERM (scancel, time limit, preemption) unwind like Ctrl-C, so ``finally`` blocks run.
+
+    Python's default SIGTERM action exits without unwinding, which would skip the quality summary.
+    """
+
+    def _on_sigterm(signum: int, frame: Any) -> None:
+        global _terminated
+        _terminated = True
+        # The run exits 143 (`_exit_if_terminated`) whatever `require_complete` says; its tracking run closes FAILED.
+        mark_run_failed()
+        raise KeyboardInterrupt
+
+    signal.signal(signal.SIGTERM, _on_sigterm)
+
+
+def _exit_if_terminated() -> None:
+    """A run stopped by SIGTERM exits as a SIGTERM kill would, so it never looks successful."""
+    if _terminated:
+        sys.exit(128 + signal.SIGTERM)
+
+
+def _remove_health_reports(output_fpath: Path) -> None:
+    from nemo_gym.rollout_health import _remove_health_reports as remove_reports
+
+    remove_reports(output_fpath)
+
+
+def _health_check_collected_rollouts(
+    output_fpath: Path,
+    config: Any,
+    landed_keys: set | None = None,
+    *,
+    coverage: dict | None = None,
+    model_call_capture_dirs: Sequence[Path] = (),
+) -> None:
+    """Report collected health using the CLI's shutdown state."""
+    from nemo_gym.rollout_health import _health_check_collected_rollouts as report
+
+    report(
+        output_fpath,
+        config,
+        landed_keys,
+        coverage=coverage,
+        model_call_capture_dirs=model_call_capture_dirs,
+        terminated=_terminated,
+    )
+
+
+def _check_collection_completion(
+    output: Path, *, require_complete: bool, completed: bool, interrupted: bool = False
+) -> None:
+    """Apply the same completion opt-in after successful or interrupted collection."""
+    if not require_complete:
+        return
+    if interrupted:
+        raise RuntimeError("EVAL FAILED: rollout collection interrupted; partial artifacts retained.")
+    if completed:
+        _check_saved_completion(output)
+
+
+def _check_saved_completion(output: Path) -> None:
+    """Distinguish a valid partial run from successful CLI completion."""
+    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.rollout_recovery import IncompleteEvaluationError, has_only_intentional_gaps
+
+    coverage = coverage_path_for(output.resolve())
+    if coverage.exists():
+        report = json.loads(coverage.read_text())
+        if report.get("complete") is False:
+            if has_only_intentional_gaps(
+                expected=report["expected"],
+                completed=report["successful"],
+                intentionally_omitted=report.get("intentionally_omitted", 0),
+            ):
+                return
+            retryable = report.get("retryable", 1) > 0
+            guidance = (
+                "Resume unfinished work after resolving failures."
+                if retryable
+                else "No tasks are eligible for retry: inspect terminal failures, omissions and exhausted budgets."
             )
-        except Exception:
-            logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
-        else:
-            print(format_health_report(health_result))
+            raise IncompleteEvaluationError(
+                f"{report['successful']}/{report['expected']} samples completed. "
+                f"Partial artifacts retained at {output}. {guidance}",
+                retryable=retryable,
+                # Older coverage reports predate per-invocation progress.
+                made_progress=report.get("progress_outcomes_recorded", report.get("outcomes_recorded", 1)) > 0,
+            )
 
 
 @exit_cleanly_on_config_error
 def collect_rollouts():  # pragma: no cover
+    from nemo_gym.artifacts.resolved_config import write_resolved_config
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
+    from nemo_gym.telemetry.setup import (
+        configure_telemetry_env,
+        init_telemetry,
+        shutdown_telemetry,
+        telemetry_config_from_global_config,
+    )
 
-    config = RolloutCollectionConfig.model_validate(get_global_config_dict())
+    global_config_dict = get_global_config_dict()
+    config = RolloutCollectionConfig.model_validate(global_config_dict)
+    write_resolved_config(global_config_dict, Path(config.output_jsonl_fpath))
     rch = RolloutCollectionHelper()
+    rch._termination_requested = lambda: _terminated
 
-    asyncio.run(rch.run_from_config(config))
+    # A standalone driver starts no supervisor, so it sets up its own telemetry for the `gym.job` span and driver metrics.
+    configure_telemetry_env(telemetry_config_from_global_config(global_config_dict))
+    init_telemetry(server_name="driver", server_type="driver")
+    _interrupt_on_sigterm()
+    try:
+        asyncio.run(rch.run_from_config(config))
+        _check_collection_completion(
+            Path(config.output_jsonl_fpath), require_complete=config.require_complete, completed=True
+        )
+    except KeyboardInterrupt:
+        mark_run_failed()
+        if not _terminated:
+            raise
+    except BaseException:
+        mark_run_failed()
+        raise
+    finally:
+        shutdown_telemetry()
+    _exit_if_terminated()
 
 
 @exit_cleanly_on_config_error
@@ -683,9 +828,16 @@ def health_check_rollouts(
     rollout_file: str | Path | None = None,
     workers: int | None = None,
     ignored_checks: Sequence[str] = (),
+    limits: Any = None,
     json_output: bool = False,
+    model_call_capture_dir: str | Path | None = None,
 ):
-    """Run rollout quality verification for an existing run directory."""
+    """Run rollout quality verification for an existing run directory.
+
+    By default the run's persisted limits judge it again. Each limit set explicitly on ``limits`` (a
+    ``RunHealthLimits``) overrides only that persisted limit, and ``None`` removes it; a limit not set keeps its
+    persisted value.
+    """
     from nemo_gym.rollout_health import health_check_run_dir
 
     return health_check_run_dir(
@@ -693,18 +845,33 @@ def health_check_rollouts(
         rollout_file=rollout_file,
         workers=workers,
         ignored_checks=ignored_checks,
+        limits=limits,
         json_output=json_output,
+        model_call_capture_dir=model_call_capture_dir,
     )
 
 
 @exit_cleanly_on_config_error
-def export_rollouts_as_atif() -> None:  # pragma: no cover
-    from nemo_gym.atif_export import ExportAtifConfig, export_rollouts_to_atif
+def export_run() -> None:  # pragma: no cover
+    from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER
+    from nemo_gym.artifacts.exporters import load_run_exporter_class
+    from nemo_gym.artifacts.exporters.base import ExportState
+    from nemo_gym.artifacts.run_artifacts import RunArtifacts
+    from nemo_gym.config.config_types import RunExportConfig
 
-    config = ExportAtifConfig.model_validate(get_global_config_dict())
-    result = export_rollouts_to_atif(config)
-    print(f"Exported {result.trajectory_count} ATIF trajectory file(s) to {result.output_dirpath}")
-    print(f"Manifest: {result.manifest_fpath}")
+    global_config_dict = get_global_config_dict(
+        global_config_dict_parser_config=GlobalConfigDictParserConfig(skip_exporters=True)
+    )
+    name = global_config_dict.get("exporter") or DEFAULT_RUN_EXPORTER
+    exporter = load_run_exporter_class(name).from_global_config(global_config_dict)
+    result = exporter.export(RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath))
+
+    print(f"Export {name}: {result.state.value}")
+    for key, value in result.detail.items():
+        print(f"  {key}: {value}")
+    if result.state is ExportState.FAILED:
+        print(f"Error: {result.error}", file=sys.stderr)
+        raise SystemExit(result.exit_code)
 
 
 @exit_cleanly_on_config_error
@@ -722,7 +889,7 @@ def reverify_rollouts():  # pragma: no cover
 
 @exit_cleanly_on_config_error
 def reward_profile():  # pragma: no cover
-    from nemo_gym.reward_profile import (
+    from nemo_gym.metrics.reward_profile import (
         RewardProfileConfig,
         RewardProfiler,
         coverage_by_agent,

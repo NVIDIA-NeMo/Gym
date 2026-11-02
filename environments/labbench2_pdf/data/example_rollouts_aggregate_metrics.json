@@ -1,0 +1,81 @@
+[
+  {
+    "agent_ref": {
+      "name": "labbench2_pdf_benchmark_harbor_agent"
+    },
+    "agent_metrics": {
+      "mean/reward": 1.0,
+      "mean/input_tokens": 74733.0,
+      "mean/output_tokens": 380.0,
+      "mean/total_tokens": 75113.0,
+      "max/reward": 1.0,
+      "max/input_tokens": 74733.0,
+      "max/output_tokens": 380.0,
+      "max/total_tokens": 75113.0,
+      "min/reward": 1.0,
+      "min/input_tokens": 74733.0,
+      "min/output_tokens": 380.0,
+      "min/total_tokens": 75113.0,
+      "median/reward": 1.0,
+      "median/input_tokens": 74733.0,
+      "median/output_tokens": 380.0,
+      "median/total_tokens": 75113.0,
+      "std/reward": 0.0,
+      "std/input_tokens": 0.0,
+      "std/output_tokens": 0.0,
+      "std/total_tokens": 0.0
+    },
+    "key_metrics": {
+      "mean/reward": 1.0,
+      "mean/input_tokens": 74733.0,
+      "mean/output_tokens": 380.0,
+      "mean/total_tokens": 75113.0
+    },
+    "group_level_metrics": [
+      {
+        "_ng_task_index": 0,
+        "mean/reward": 1.0,
+        "mean/input_tokens": 74733.0,
+        "mean/output_tokens": 380.0,
+        "mean/total_tokens": 75113.0,
+        "max/reward": 1.0,
+        "max/input_tokens": 74733.0,
+        "max/output_tokens": 380.0,
+        "max/total_tokens": 75113.0,
+        "min/reward": 1.0,
+        "min/input_tokens": 74733.0,
+        "min/output_tokens": 380.0,
+        "min/total_tokens": 75113.0,
+        "median/reward": 1.0,
+        "median/input_tokens": 74733.0,
+        "median/output_tokens": 380.0,
+        "median/total_tokens": 75113.0,
+        "std/reward": 0.0,
+        "std/input_tokens": 0.0,
+        "std/output_tokens": 0.0,
+        "std/total_tokens": 0.0,
+        "sample": {
+          "agent_ref": {
+            "name": "agent"
+          }
+        },
+        "num_rollouts": 1,
+        "expected_num_rollouts": 1,
+        "missing_num_rollouts": 0,
+        "reward_profile_completion_pct": 100.0,
+        "rollout_infos": [
+          {
+            "rollout_id": "0:0",
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "reward": 1.0,
+            "input_tokens": 74733,
+            "output_tokens": 380,
+            "total_tokens": 75113
+          }
+        ]
+      }
+    ],
+    "repeat_level_metrics": []
+  }
+]

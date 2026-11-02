@@ -231,6 +231,7 @@ export NCCL_MNNVL_ENABLE=1
 export NCCL_NVLS_ENABLE=1
 
 export ENABLE_MOONCAKE=$ENABLE_MOONCAKE
+export VLLM_ENGINES_PER_NODE=$VLLM_ENGINES_PER_NODE
 source "$VLLM_CONFIG"
 
 # Increase the number of file descriptors to 65k

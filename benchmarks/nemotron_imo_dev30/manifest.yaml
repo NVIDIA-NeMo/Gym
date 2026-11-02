@@ -1,0 +1,30 @@
+name: nemotron_imo_dev30
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: 30 olympiad proof problems graded 0-7 by a reference-free jury of three frontier LLM judges
+modality: text
+licensing: CC-BY-4.0 AND CC-BY-NC-SA-4.0
+authors:
+- i-vainn
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: proof_jury_judge
+agent_server: simple_agent
+datasets:
+- name: nemotron_imo_dev30
+  type: benchmark
+  jsonl_fpath: benchmarks/nemotron_imo_dev30/data/nemotron_imo_dev30_benchmark.jsonl
+  prepare_script: benchmarks/nemotron_imo_dev30/prepare.py
+  prompt_config: benchmarks/nemotron_imo_dev30/prompts/default.yaml
+  num_repeats: 4
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/nemotron_imo_dev30/prompts/default.yaml
+lifecycle: active

@@ -36,10 +36,21 @@ def _get_local_dp_ranks(placement_groups: list[PlacementGroup]) -> list[int]:
     return local_dp_ranks
 
 
-def _vllm_asyncio_task(server_args: Namespace):
-    from vllm.entrypoints.openai.api_server import run_server
+def _vllm_api_server_module():
+    """The module that defines vLLM's `run_server` and calls `serve_http`.
 
-    asyncio.run(run_server(server_args))
+    vLLM 0.29 moved it from vllm.entrypoints.openai.api_server to vllm.entrypoints.launchers.api_server.entry.
+    """
+    try:
+        import vllm.entrypoints.launchers.api_server.entry as api_server
+    except ImportError:  # Older vLLM, such as the macOS pin in setup.py.
+        import vllm.entrypoints.openai.api_server as api_server
+
+    return api_server
+
+
+def _vllm_asyncio_task(server_args: Namespace):
+    asyncio.run(_vllm_api_server_module().run_server(server_args))
 
 
 @ray.remote
@@ -88,13 +99,13 @@ class LocalVLLMModelActor:
         # See https://github.com/vllm-project/vllm/blob/275de34170654274616082721348b7edd9741d32/vllm/entrypoints/launcher.py#L94
         # This may be vLLM version specific!
         #
-        # api_server.py uses `from vllm.entrypoints.launcher import serve_http`,
-        # so we must patch the name in api_server's namespace (not launcher's).
+        # The module that defines run_server imports serve_http by name from the launcher module, so we must
+        # patch the name in that module's namespace (not the launcher's).
 
         import signal
         from asyncio import get_running_loop
 
-        import vllm.entrypoints.openai.api_server as api_server
+        api_server = _vllm_api_server_module()
 
         original_serve_http = api_server.serve_http
 
@@ -344,8 +355,8 @@ class LocalVLLMModelActor:
 
                 placement_groups.append(pg)
 
-            # vLLM 0.25.1 uses the node-local DP rank to select a disjoint TCPStore port window.
-            # Wait for placement so the rank reflects the node hosting each engine's first worker.
+            # Wait for placement so each engine's node-local DP rank reflects the node hosting its first worker.
+            # vLLM 0.25.1 also used that rank to select a disjoint TCPStore port window.
             ray.get([placement_group.ready() for placement_group in placement_groups])
             local_dp_ranks = _get_local_dp_ranks(placement_groups)
 

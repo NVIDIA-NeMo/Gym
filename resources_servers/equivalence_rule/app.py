@@ -25,7 +25,7 @@ from typing import ClassVar
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -73,6 +73,10 @@ def _normalize(text: str) -> str:
 
 
 class EquivalenceRuleResourcesServer(SimpleResourcesServer):
+    # Each verification compares the answers by rule: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: EquivalenceRuleResourcesServerConfig
 
     async def verify(self, body: EquivalenceRuleVerifyRequest) -> EquivalenceRuleVerifyResponse:

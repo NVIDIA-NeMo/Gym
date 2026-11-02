@@ -19,32 +19,32 @@ import threading
 
 import pytest
 
-from nemo_gym.token_id_capture import (
-    CaptureContext,
-    FileLineageStore,
-    InMemoryLineageStore,
-    ParentResolutionStatus,
-    TokenCaptureSnapshot,
+from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
-    compute_digest,
-    mask_incomplete_when_attributed_from_config,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
-    reset_token_sink,
-    set_token_sink,
-    stamp_continuation,
-    stamp_lineage,
+)
+from nemo_gym.token_id_capture.consumer import (
+    mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.records import TokenEntry
-from nemo_gym.token_id_capture.sink import commit_entry, resolve_parent
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, stamp_continuation
+from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest, stamp_lineage
+from nemo_gym.token_id_capture.sink import (
+    CaptureContext,
+    commit_entry,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+)
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 
-def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0):
+def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0, finish_reason=None):
     e = TokenEntry(
         rollout_id="t0-r0",
         model_call_id=mcid,
@@ -55,6 +55,7 @@ def _entry(mcid, prompt, gen, parent=None, lp=None, created_at=0.0):
         # Capture stamps this value when the call completes.
         # Chain selection uses this value.
         created_at=created_at,
+        finish_reason=finish_reason,
     )
     # Stamp the way a current writer does.
     # Every supported record carries a parent decision.
@@ -240,6 +241,52 @@ def test_projection_handles_content_only_leading_item():
     assert "prompt_token_ids" not in resp["output"][0]
     assert resp["usage"] == {"input_tokens": 3, "output_tokens": 2}  # Count the token-bearing item.
     assert_prefix_contiguity(resp)
+
+
+def test_projection_marks_a_terminal_call_cut_at_the_output_budget_incomplete():
+    """Mirror the Responses converter's verdict for the delivered chain's terminal call.
+
+    A ``length`` stop on the terminal call makes the rebuilt response incomplete.
+    A ``length`` stop on an earlier call does not; a later call extended the chain past it.
+    """
+    entries = [
+        _entry("c1", [1, 2, 3], [10, 11], finish_reason="stop"),
+        _entry("c2", [1, 2, 3, 10, 11, 4, 5], [12], parent="c1", finish_reason="length"),
+        _entry("c3", [1, 2, 3, 10, 11, 4, 5, 12, 6], [13, 14], parent="c2", finish_reason="stop"),
+    ]
+    complete = project_main_chain_response("t0-r0", prefix_merging(entries), model="m")
+    assert "status" not in complete and "incomplete_details" not in complete
+
+    # Terminal attribution ends the delivered chain at the truncated call.
+    truncated = project_main_chain_response("t0-r0", prefix_merging(entries, terminal_call_id="c2"), model="m")
+    assert [item["generation_token_ids"] for item in truncated["output"]] == [[10, 11], [12]]
+    assert truncated["status"] == "incomplete"
+    assert truncated["incomplete_details"] == {"reason": "max_output_tokens"}
+
+
+def test_projection_marks_a_content_filtered_terminal_call_incomplete():
+    # The converter's other incomplete verdict: a terminal call the engine stopped on its content
+    # filter is incomplete for that reason, so the delivered response says so too.
+    out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason="content_filter")])
+    resp = project_main_chain_response("t0-r0", out, model="m")
+    assert resp["status"] == "incomplete"
+    assert resp["incomplete_details"] == {"reason": "content_filter"}
+
+
+@pytest.mark.parametrize("finish_reason", ["stop", "tool_calls", None])
+def test_projection_leaves_the_status_unset_for_other_finish_reasons(finish_reason):
+    out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason=finish_reason)])
+    resp = project_main_chain_response("t0-r0", out, model="m")
+    assert "status" not in resp and "incomplete_details" not in resp
+
+
+def test_projection_withholds_the_verdict_when_the_finish_reason_is_unresolved():
+    # Terminal attribution reports an unresolved finish reason when the terminal call was chosen
+    # among token-identical retries that stopped for different reasons; the projection then leaves
+    # the status unset instead of reporting whichever twin drew the smaller call id.
+    out = prefix_merging([_entry("c1", [1, 2, 3], [10, 11], finish_reason="length")])
+    resp = project_main_chain_response("t0-r0", out, model="m", finish_reason_resolved=False)
+    assert "status" not in resp and "incomplete_details" not in resp
 
 
 def test_consumer_reads_store_and_builds(tmp_path):

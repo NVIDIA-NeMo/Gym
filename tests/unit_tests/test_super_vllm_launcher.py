@@ -150,9 +150,15 @@ getent() { printf '10.0.0.1 node0\n'; }
                     else:
                         self.assertNotIn("mooncake_endpoint", metrics)
 
-    def model_arguments(self, *, config_path: Path, enable_mooncake: bool, rank: int = 0) -> list[list[str]]:
+    def model_arguments(
+        self, *, config_path: Path, enable_mooncake: bool, rank: int = 0, engines_per_node: int = 1
+    ) -> list[list[str]]:
         _, command = self.generate_commands(
-            env={"VLLM_CONFIG": str(config_path), "ENABLE_MOONCAKE": str(int(enable_mooncake))}
+            env={
+                "VLLM_CONFIG": str(config_path),
+                "ENABLE_MOONCAKE": str(int(enable_mooncake)),
+                "VLLM_ENGINES_PER_NODE": str(engines_per_node),
+            }
         )
         # Execute model setup without installing packages or starting services.
         setup = command.split("# Increase the number of file descriptors", 1)[0]
@@ -171,10 +177,16 @@ printf '%s\0' "${VLLM_DECODE_ARGS[@]}" ''
         recipes = sorted((SCRIPT.parent / "vllm_configs").glob("*.sh"))
         self.assertTrue(recipes)
         for config_path in recipes:
+            # The TP1 Nano recipe refuses to serve unless the job runs four engines per node.
+            engines_per_node = 4 if config_path.name == "nemotron_3.5_lightning.sh" else 1
             for rank in (0, 4):
                 with self.subTest(model=config_path.name, rank=rank):
-                    original = self.model_arguments(config_path=config_path, enable_mooncake=False, rank=rank)
-                    with_store = self.model_arguments(config_path=config_path, enable_mooncake=True, rank=rank)
+                    original = self.model_arguments(
+                        config_path=config_path, enable_mooncake=False, rank=rank, engines_per_node=engines_per_node
+                    )
+                    with_store = self.model_arguments(
+                        config_path=config_path, enable_mooncake=True, rank=rank, engines_per_node=engines_per_node
+                    )
                     self.assertEqual(len(original), 3)
                     self.assertTrue(original[0])
                     for role_args in original[1:]:

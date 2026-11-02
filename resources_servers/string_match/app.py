@@ -18,7 +18,7 @@ from typing import Any, Literal, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -350,6 +350,10 @@ def _soft_numeric_grade(gt_answer: str, pred_answer: str) -> float:
 
 
 class StringMatchResourcesServer(SimpleResourcesServer):
+    # Each verification compares the extracted answer with the expected one: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: StringMatchResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

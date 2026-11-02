@@ -1,0 +1,83 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026, NVIDIA CORPORATION. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+#
+# AA-Omniscience (no tools): 600 questions x 10 repeats. A judge model (gpt-5.6-luna) grades
+# each answer as correct, incorrect, partially correct or not attempted.
+#
+#   nemotron_recipes/super-3.5/run.sh omniscience
+#
+# Tech report (key_metrics of omniscience_omniscience_simple_agent):
+#   AA-Omniscience Accuracy: pass@1[avg-of-10]/judge_correct
+#   AA-Omniscience Non-Hallucination: 100 - pass@1[avg-of-10]/judge_omni_hallucination
+#
+# Set in .env: POLICY_API_KEY, JUDGE_API_KEY
+#
+# Needs a judge endpoint (judge_base_url in env.yaml, or omniscience_judge_base_url for this
+# recipe only) serving gpt-5.6-luna on Chat Completions (<base_url>/chat/completions). The
+# endpoint must accept Gym's judge request as it is: max_tokens 32768, temperature 0.0 and top_p
+# 1.0 next to reasoning_effort medium. Gym always sends these three; config can change their
+# values (and then no longer matches the published run) but cannot drop them. If your endpoint
+# rejects them, use one that accepts or drops them.
+#
+# An answer whose judge call fails is left out of the score and written to
+# evaluator_rollouts_failures.jsonl; RESUME=1 retries it (the model answers again; 3 attempts
+# in all by default).
+
+# Gym commit the published number was produced with; run.sh pins to it.
+gym_commit: ae8d388dda62f40fe8b8105bf079be132383fe4d
+# Gym benchmark config this recipe builds on.
+benchmark_config: benchmarks/omniscience/config.yaml
+
+# 10 samples per question (the benchmark default is 8). Set on the dataset entry: repeats
+# are applied when the data is prepared, so a top-level num_repeats would multiply them.
+# Lists are replaced, not merged, hence the full entry.
+omniscience_omniscience_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      datasets:
+      - name: omniscience
+        type: benchmark
+        jsonl_fpath: benchmarks/omniscience/data/omniscience_benchmark.jsonl
+        prompt_config: benchmarks/omniscience/prompts/generation.yaml
+        prepare_script: benchmarks/omniscience/prepare.py
+        num_repeats: 10
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      # As in the published run (Gym's default is true): a conversation that ends with
+      # reasoning but no answer is not sent back to the model to continue.
+      sequential_reasoning_allowed: false
+
+# Judge: gpt-5.6-luna at reasoning effort medium. Endpoint and key come from env.yaml; set
+# omniscience_judge_model_name there only if your provider serves this model under a
+# different id.
+genrm_model:
+  responses_api_models:
+    openai_model:
+      openai_base_url: ${oc.select:omniscience_judge_base_url,${judge_base_url}}
+      openai_api_key: ${oc.select:omniscience_judge_api_key,${judge_api_key}}
+      openai_model: ${oc.select:omniscience_judge_model_name,gpt-5.6-luna}
+      extra_body:
+        reasoning_effort: medium
+      # At most 32 judge calls in flight; lower it if your endpoint rate-limits.
+      max_concurrent_requests: 32
+
+# Judge output cap (the benchmark default is 2048).
+omniscience_omniscience_resources_server:
+  resources_servers:
+    omniscience:
+      judge_responses_create_params:
+        max_output_tokens: 32768

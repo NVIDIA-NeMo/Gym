@@ -12,10 +12,10 @@ import pytest
 from omegaconf import OmegaConf
 
 from environments.nemo_user_sim import prepare as prepare_module
-from nemo_gym.config_types import DatasetConfig
+from nemo_gym.config import DatasetConfig
 from nemo_gym.task_materialization import materialize_task
 from resources_servers.nemo_user_sim.app import UserSimResourcesServerConfig
-from resources_servers.nemo_user_sim.episode_contracts import UserSimEpisodeRequest
+from resources_servers.nemo_user_sim.task_data import TaskData
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
@@ -49,6 +49,12 @@ def test_environment_config_declares_generated_validation_split() -> None:
     assert validation.jsonl_fpath == "environments/nemo_user_sim/data/nemo_user_sim.jsonl"
     assert validation.prepare_script == Path("environments/nemo_user_sim/prepare.py")
     assert validation.taskset == "nemo_user_sim:validation"
+
+
+def test_user_model_has_no_default_endpoint() -> None:
+    resources_config = OmegaConf.load(REPOSITORY_ROOT / "resources_servers/nemo_user_sim/configs/nemo_user_sim.yaml")
+    for key in ("user_model_base_url", "user_model_api_key", "user_model_name"):
+        assert OmegaConf.is_missing(resources_config, key), key
 
 
 def test_usersim_revision_pins_are_aligned() -> None:
@@ -296,12 +302,8 @@ def test_prepare_materializes_every_registered_probe_with_usersim(
     assert all("assets_dir" not in row["resolved_row"]["usersim_config"] for row in rows)
     for index, row in enumerate(rows):
         task = materialize_task(row, taskset="nemo_user_sim:validation", task_index=index)
-        request = UserSimEpisodeRequest.model_validate(
-            {"episode_id": {"rollout_id": f"rollout-{index}", "attempt": 0}, "task": task}
-        )
-        assert request.task.task_id.taskset == "nemo_user_sim:validation"
-        assert request.task.task_id.task_id == row["task_id"]
-        assert request.task.task_input.resolved_row == row["resolved_row"]
+        assert task["task_id"] == {"taskset": "nemo_user_sim:validation", "task_id": row["task_id"]}
+        assert TaskData.model_validate(task["task_input"]).resolved_row == row["resolved_row"]
     assert len(calls) == 1
     command, kwargs = calls[0]
     assert command[:9] == [

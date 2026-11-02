@@ -19,7 +19,7 @@ import json
 import pytest
 
 from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core.responses_api_types import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 
 
 PREFIX = "nemo_gym_responses_reasoning:"
@@ -89,6 +89,30 @@ def test_opaque_carrier_round_trips_without_duplication_or_reordering(encrypted,
     else:
         assert events[1]["content_block"] == blocks[0]
         assert deltas == []
+
+
+@pytest.mark.parametrize("exclude_unset", [False, True])
+@pytest.mark.parametrize(
+    "block,summaries",
+    [
+        (
+            {"type": "thinking", "thinking": "Readable.", "signature": PREFIX + CIPHERTEXT},
+            [{"type": "summary_text", "text": "Readable."}],
+        ),
+        ({"type": "redacted_thinking", "data": PREFIX + CIPHERTEXT}, []),
+    ],
+)
+def test_replayed_reasoning_serializes_without_inventing_an_id(block, summaries, exclude_unset):
+    request = AnthropicConverter().anthropic_request_to_responses(
+        {"max_tokens": 10, "messages": [{"role": "assistant", "content": [block]}]}
+    )
+    payload = request.model_dump(mode="json", exclude_unset=exclude_unset)
+    [item] = payload["input"]
+    assert "id" not in item
+    assert item["summary"] == summaries
+    assert item["encrypted_content"] == CIPHERTEXT
+    revalidated = NeMoGymResponseCreateParamsNonStreaming.model_validate(payload)
+    assert revalidated.model_dump(mode="json", exclude_unset=exclude_unset)["input"] == payload["input"]
 
 
 @pytest.mark.parametrize("encrypted", [None, ""])
