@@ -250,6 +250,8 @@ class IdentityEvidence(BaseModel):
     identity: Identity
     state: IdentityState
     failure_kind: str | None = None
+    # The HTTP status the selected failure recorded, when it recorded one.
+    http_status: int | None = None
     failure_id: str | None = None
     attempts: int = 0
     max_attempts: int | None = None
@@ -758,6 +760,7 @@ def decide_recovery(
                 identity=identity,
                 state=state,
                 failure_kind=kind,
+                http_status=_policy_evidence(last)[1],
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                 attempts=spent,
                 max_attempts=cap,
@@ -989,7 +992,7 @@ a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
-        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission")
+        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "ng_policy_model_server")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.
@@ -1204,7 +1207,7 @@ def rows(name, skip=0):
                                     if isinstance(item, dict) else None for item in trajectory.get("invocations")] if isinstance(trajectory.get("invocations"), list) else None,
                     "verifier_invocations": [({k: item.get(k) for k in ("invocation_id", "status", "failure_kind")} | {"model_calls": trial_refs(item.get("model_calls")), "grading_operations": trial_grading(item.get("grading_operations")), "grading_record": {k: item["grading_record"].get(k) for k in ("verifier", "score", "verdict", "result_binding_sha256")} if isinstance(item.get("grading_record"), dict) else None, "sandbox_observations": [{k: fact.get(k) for k in ("role", "provider", "sandbox_id", "outcome", "exit_code", "teardown_confirmed", "error_type")} if isinstance(fact, dict) else None for fact in item["sandbox_observations"]] if isinstance(item.get("sandbox_observations"), list) else item.get("sandbox_observations")})
                                             if isinstance(item, dict) else None for item in trajectory.get("verifier_invocations")] if isinstance(trajectory.get("verifier_invocations"), list) else None,
-                    "model_calls": [{"model_call_id": item.get("model_call_id"), "response_metadata": trial_metadata(item.get("response_metadata")),
+                    "model_calls": [{"model_call_id": item.get("model_call_id"), "started_at": finite(item.get("started_at")), "response_metadata": trial_metadata(item.get("response_metadata")),
                                      "output_items": trial_items(item.get("response"), "output", ("type", "role", "status", "call_id", "name")),
                                      "input_items": trial_items(item.get("request"), "input", ("type", "call_id"))}
                                     if isinstance(item, dict) else None for item in trajectory.get("model_calls")] if isinstance(trajectory.get("model_calls"), list) else None,
@@ -2731,6 +2734,7 @@ def _observed_trial_operations(
     verifier_recorded: list[Identity] | None = None,
     artifact_recorded: list[Identity] | None = None,
     trajectory_incomplete: dict[Identity, list[str]] | None = None,
+    agent_failed_graded: list[Identity] | None = None,
 ) -> bool:
     """Whether every expected trial that is not a counted failure is observed: its saved answer is bound to its grading.
 
@@ -2795,6 +2799,7 @@ def _observed_trial_operations(
     recorded_trials = []
     artifact_trials = []
     incomplete: dict[Identity, list[str]] = {}
+    agent_failed: list[Identity] = []
 
     def nonempty(value):
         return isinstance(value, str) and bool(value.strip())
@@ -3280,6 +3285,12 @@ def _observed_trial_operations(
             saved_response = row.get("response")
             if not isinstance(saved_response, dict) or saved_response.get("error") is not None:
                 return False
+            # The agent's own run failed, yet its saved answer was graded: observed, and reported as a fact.
+            if any(
+                isinstance(invocation, dict) and invocation.get("status") == "failed"
+                for invocation in (observed.get("invocations") or [])
+            ):
+                agent_failed.append(_identity(row))
             # Trajectory evidence: reported, never a coverage condition.
             if not trajectory_complete(row, observed, calls, artifact, truncated):
                 incomplete[_identity(row)] = _trajectory_kinds(observed) or ["operation_join_incomplete"]
@@ -3301,11 +3312,14 @@ def _observed_trial_operations(
         artifact_recorded.extend(artifact_trials)
     if trajectory_incomplete is not None:
         trajectory_incomplete.update(incomplete)
+    if agent_failed_graded is not None:
+        agent_failed_graded.extend(agent_failed)
     return True
 
 
-def _failed_request_kind(call: Any) -> str | None:
-    """The failure kind of a captured call whose final model operation failed with its own recorded request event."""
+def _failed_request(call: Any) -> tuple[str, Any] | None:
+    """The failure kind and HTTP status of a captured call whose final model operation failed with its own recorded
+    request event, or None."""
     meta = call.get("response_metadata") if isinstance(call, dict) else None
     operations = meta.get("model_operations") if isinstance(meta, dict) else None
     report = meta.get("failure_report") if isinstance(meta, dict) else None
@@ -3322,8 +3336,23 @@ def _failed_request_kind(call: Any) -> str | None:
         and event.get("operation_id") == final.get("operation_id")
         and isinstance(event.get("failure_kind"), str)
     ):
-        return event["failure_kind"]
+        return event["failure_kind"], event.get("http_status")
     return None
+
+
+def _last_captured_call(calls: list) -> Any:
+    """The call a rollout ended on, for an agent whose invocations reference none of its calls.
+
+    The highest capture position (``call_index``, the durable append order). When every call recorded its start
+    time, that call must also be the latest started; otherwise the end is ambiguous and there is none.
+    """
+    if not calls:
+        return None
+    last = calls[-1]
+    starts = [call.get("started_at") if isinstance(call, dict) else None for call in calls]
+    if all(type(start) in (int, float) for start in starts) and starts[-1] < max(starts):
+        return None
+    return last
 
 
 def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
@@ -3332,8 +3361,10 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
     has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
-    (its invocations reference none, so its last call is unknown) ended on a failed request when a captured call's
-    final operation failed that way and every such failure names the same kind.
+    (its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
+    failed that way; an earlier failed call is no end and stays unaccounted. The kind is keyed on the failure's HTTP
+    status (``status_fault_kind``): a 5xx reply is the server's fault, and another model's 4xx rejection is
+    evaluation-side.
     """
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
@@ -3349,9 +3380,14 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
             and all(isinstance(item, dict) and item.get("model_calls") == [] for item in invocations)
         )
         if unreferenced and isinstance(observed.get("model_calls"), list):
-            ended = {_failed_request_kind(call) for call in observed["model_calls"]} - {None}
-            if len(ended) == 1:
-                found[_identity(row)] = ended.pop()
+            last = _last_captured_call(observed["model_calls"])
+            failed = _failed_request(last)
+            if failed is not None:
+                policy = row.get("ng_policy_model_server")
+                model = ((last.get("response_metadata") or {}).get("model_ref") or {}).get("name")
+                found[_identity(row)] = status_fault_kind(
+                    failed[0], failed[1], policy=not isinstance(policy, str) or model == policy
+                )
             continue
         if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
             continue
@@ -3388,7 +3424,7 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
             and event.get("operation_id") == final.get("operation_id")
             and isinstance(event.get("failure_kind"), str)
         ):
-            found[_identity(row)] = event["failure_kind"]
+            found[_identity(row)] = status_fault_kind(event["failure_kind"], event.get("http_status"))
     return found
 
 
@@ -3687,6 +3723,10 @@ def _predates_operation_observations(decision: RecoveryDecision, collected: Coll
 # against the trial limit: server faults (a server that did not start, a model transport error, any provider failure)
 # are named as such, and any other kind is named by its kind alone.
 TRUNCATED_ANSWER = "truncated_answer"
+# A model server that replied with a 5xx status, whatever kind the failure names: the server's fault.
+MODEL_SERVER_ERROR = "model_server_error"
+# A model other than the evaluated policy (a simulated user, a tool's model) rejected its request with a 4xx status.
+NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
 EMPTY_ANSWER = "empty_answer"
 MALFORMED_ANSWER = "malformed_answer"
 GRADING_WITHOUT_VERDICT = "grading_without_verdict"
@@ -3703,7 +3743,26 @@ MODEL_FAULT_KINDS = frozenset(
         MALFORMED_ANSWER,
     }
 )
-SERVER_FAULT_KINDS = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR})
+SERVER_FAULT_KINDS = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR})
+
+
+def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> Any:
+    """A counted failure's kind for the trial gate's classes, keyed on the HTTP status the failure recorded.
+
+    A model-server reply with a 5xx status is the server's fault (``MODEL_SERVER_ERROR``) whatever the kind says. A
+    4xx rejection keeps its kind when the evaluated policy made the request (its context or request is the model's
+    own), and is ``NON_POLICY_MODEL_REJECTION`` (evaluation-side) for another model's request. Without a recorded
+    status the kind decides, as before.
+    """
+    if type(http_status) is not int:
+        return kind
+    if 500 <= http_status <= 599:
+        return MODEL_SERVER_ERROR
+    if 400 <= http_status <= 499 and not policy:
+        return NON_POLICY_MODEL_REJECTION
+    return kind
+
+
 UNVERIFIED_NOTE = "unverified: this withholds a pass and is no health failure"
 
 
@@ -4084,7 +4143,11 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed).
     """
     final_zero = final_zero_trials(decision, collected)
-    kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
+    kinds = Counter(
+        status_fault_kind(e.failure_kind, e.http_status)
+        for e in decision.evidence
+        if e.state == IdentityState.MODEL_FINAL
+    )
     kinds.update(final_zero.values())
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     kinds.update(
@@ -4184,6 +4247,7 @@ def trial_verdict(
     invalid_grades: list[str] = []
     recorded: list[Identity] = []
     incomplete: dict[Identity, list[str]] = {}
+    agent_failed: list[Identity] = []
     covered = _observed_trial_operations(
         decision,
         collected,
@@ -4192,6 +4256,7 @@ def trial_verdict(
         policy_recovery=policy_recovery,
         verifier_recorded=recorded,
         trajectory_incomplete=incomplete,
+        agent_failed_graded=agent_failed,
     )
     # A recovered attempt is no trial failure only when it joins the completed operation that recovered it, in a
     # scored trial's own call. That join is per attempt and does not wait on the coverage join above: a run whose
@@ -4239,6 +4304,9 @@ def trial_verdict(
             if recorded
             else "bound grading operations"
         )
+        # A reported fact, never a condition: trials whose agent run failed and whose answer was still graded.
+        facts = {"agent_invocation_failed_grading_recorded": len(agent_failed)} if agent_failed else {}
+        fact_text = f"; agent invocation failed, grading recorded: {len(agent_failed)}" if agent_failed else ""
         if incomplete:
             # Trajectory evidence is observability, never coverage: the grading bound to every answer decides.
             evidence = trajectory_evidence(incomplete, trials)
@@ -4246,17 +4314,18 @@ def trial_verdict(
                 report["evaluation"]["fraction"] < limit,
                 f"trial: {_fault_text(report, limit)}; exact count: {len(invalid_grades)} observed returned grading "
                 f"result(s) lack a valid verdict; {retried}recorded grading bound to the saved answer ({grading}) covers "
-                f"every identity and repeat that is not a recorded failure; {_trajectory_text(evidence)}",
+                f"every identity and repeat that is not a recorded failure; {_trajectory_text(evidence)}{fact_text}",
                 exact=True,
             )
-            return passed, reason, result | {"trajectory_evidence": evidence}
-        return verdict(
+            return passed, reason, result | {"trajectory_evidence": evidence} | ({"facts": facts} if facts else {})
+        passed, reason, result = verdict(
             report["evaluation"]["fraction"] < limit,
             f"trial: {_fault_text(report, limit)}; exact count: {len(invalid_grades)} observed returned grading "
             f"result(s) lack a valid verdict; {retried}actual model/tool and {grading} cover every identity and "
-            "repeat that is not a recorded failure",
+            f"repeat that is not a recorded failure{fact_text}",
             exact=True,
         )
+        return passed, reason, result | ({"facts": facts} if facts else {})
     observed = trial_counts(decision, collected)
     if observed is not None and observed["unobserved"]:
         return verdict(
