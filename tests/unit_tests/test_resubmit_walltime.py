@@ -163,8 +163,10 @@ def test_a_walltime_raise_whose_job_is_not_queued_restores_both_files(tmp_path, 
     job_dir = _timed_run(tmp_path)
     files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
     (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
-    with pytest.raises(RuntimeError, match="the run keeps its recorded walltime"):
-        recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="reason")
+    out = recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="reason")
+    assert not out.ok and out.dispatched is None
+    assert out.scheduler_refusal["scheduler_text"] == "sbatch: error: Batch job submission failed"
+    assert out.scheduler_refusal["job_dir_restored"] is True
     assert {path: path.read_bytes() for path in files} == files
     assert not (job_dir.parent / WALLTIME_JOURNAL_NAME).exists()
 

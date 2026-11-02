@@ -194,8 +194,10 @@ def test_a_continuation_whose_job_is_not_queued_changes_nothing(tmp_path, slurm_
     before = _accounting(job_dir)
     (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
 
-    with pytest.raises(RuntimeError, match="failed"):
-        recover(*_handle(job_dir), **BUDGET)
+    out = recover(*_handle(job_dir), **BUDGET)
+    assert not out.ok and out.dispatched is None
+    assert out.scheduler_refusal["scheduler_text"] == "sbatch: error: Batch job submission failed"
+    assert out.scheduler_refusal["job_dir_restored"] is True
 
     assert _accounting(job_dir) == before and not list(job_dir.glob("*.operator-previous"))
 

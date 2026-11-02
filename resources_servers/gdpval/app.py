@@ -1951,6 +1951,8 @@ class GDPValResourcesServer(SimpleResourcesServer):
         if staged:
             extra["comparison/num_stages"] = len(staged)
             stage_fits: Dict[int, tuple[Optional[float], Optional[float], int]] = {}
+            # Per stage, the rows its fit used: judged ones and losses imputed for a missing evaluation.
+            stage_fit_rows: Dict[int, int] = {}
             for stage_index in sorted(staged):
                 stage_responses = staged[stage_index]
                 _, _, _, stage_ref_totals = _accumulate(stage_responses)
@@ -1976,6 +1978,12 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 extra[f"{prefix}/judged_votes"] = sum(sum(_votes(vr)) for vr in judged_rows)
                 extra[f"{prefix}/imputed_loss_tasks"] = len({vr.get("task_id") for vr in imputed})
                 extra[f"{prefix}/imputed_loss_votes"] = sum(_votes(vr)[1] for vr in imputed)
+                stage_fit_rows[stage_index] = len(
+                    {
+                        (vr.get("_ng_task_index", vr.get("task_id")), vr.get("_ng_rollout_index", 0))
+                        for vr in judged_rows + imputed
+                    }
+                )
 
             headline_stage_index: Optional[int] = None
             headline: Optional[tuple[Optional[float], Optional[float], int]] = None
@@ -2026,6 +2034,10 @@ class GDPValResourcesServer(SimpleResourcesServer):
                 if final_stage_accepted and final_stage_fit:
                     headline_stage_index = expected_final_stage_index
                     headline = candidate
+                    if expected_final_stage_count is not None:
+                        # The headline ELO covers the final stage's fit rows of the rows that stage planned.
+                        extra["metric_coverage/trials"] = stage_fit_rows[expected_final_stage_index]
+                        extra["metric_coverage/expected"] = int(expected_final_stage_count)
                 extra["comparison/final_stage_present"] = int(final_stage_present)
                 extra["comparison/final_stage_complete"] = int(final_stage_complete)
                 extra["comparison/final_stage_partial_accepted"] = int(final_stage_partial_accepted)

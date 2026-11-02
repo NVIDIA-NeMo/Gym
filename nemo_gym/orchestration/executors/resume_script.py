@@ -110,6 +110,21 @@ RESUME_REFUSED_REASON = (
 )
 # The installer's first error line (else its last line) is cut to this many characters.
 INSTALL_ERROR_MAX_CHARS = 200
+# The typed line that ends the chain of a complete run whose required MLflow export has no current receipt.
+EXPORT_RECEIPT_MISSING = "run_complete_export_receipt_missing"
+EXPORT_RECEIPT_MISSING_REASON = (
+    f"{EXPORT_RECEIPT_MISSING}: the run is complete, but its MLflow export receipt "
+    "(artifacts/rollouts_mlflow_export_done) for the saved artifacts is missing; the chain does not export the run; "
+    "continue with gym eval resubmit --recover"
+)
+# The files an export receipt binds (`_artifact_version` in the exporters), by receipt key, in the job's artifacts.
+_RECEIPT_ARTIFACTS = (
+    ("rollouts_jsonl_fpath", "rollouts.jsonl"),
+    ("resolved_config_yaml_fpath", "rollouts_resolved_config.yaml"),
+    ("aggregate_metrics_json_fpath", "rollouts_aggregate_metrics.json"),
+    ("failures_jsonl_fpath", "rollouts_failures.jsonl"),
+    ("materialized_inputs_jsonl_fpath", "rollouts_materialized_inputs.jsonl"),
+)
 
 _PROLOGUE_TEMPLATE = """\
 # --- Auto-resume chain ---
@@ -135,6 +150,73 @@ _gym_stop_accounting_unknown() {{
     _gym_stop_incomplete "$1"
 }}
 
+# A run that is complete and exported needs no further segment, whatever the scheduler says about the last one: a
+# segment can finish its last rollout and its export seconds before its walltime and still end TIMEOUT.
+_gym_artifacts="$OUTPUT_DIR/artifacts"
+# A top-level scalar of a Store report: atomic_write_json writes two-space indented JSON, so a nested key never matches.
+_gym_report_value() {{
+    grep -m 1 '^  "'"$1"'": ' "$2" 2>/dev/null | cut -d: -f2- | tr -d ' ,"'
+}}
+# Collection's coverage report says complete only when every rollout of the inventory has a saved result or a settled
+# final zero. The Store writes it from the rows it has already appended, removes it when a run starts fresh and rewrites
+# it whenever it opens, so it must name this run (the manifest's run_id) and its inventory (one line per rollout).
+_gym_run_complete() {{
+    local _report="$_gym_artifacts/rollouts_coverage.json" _expected _inventory _run
+    [[ "$(_gym_report_value complete "$_report")" == true ]] || return 1
+    _expected=$(_gym_report_value expected "$_report")
+    [[ "$_expected" =~ ^[0-9]{{1,15}}$ ]] || return 1
+    _inventory=$(wc -l < "$_gym_artifacts/rollouts_materialized_inputs.jsonl" 2>/dev/null) || return 1
+    [[ "$_inventory" =~ ^[0-9]{{1,15}}$ ]] && (( 10#$_expected == 10#$_inventory )) || return 1
+    _run=$(_gym_report_value run_id "$_report")
+    [[ "$_run" =~ ^[0-9a-f]{{32}}$ && "$_run" == "$(_gym_report_value run_id "$_gym_artifacts/rollouts_manifest.json")" ]] || return 1
+    _gym_complete_rollouts=$((10#$_expected))
+}}
+# The saved config asks for an MLflow export unless it sets mlflow_tracking_required to false or leaves one of the three
+# MLflow names an exporter needs unset. An unreadable config, or an interpolated value, still asks for one.
+_gym_export_required() {{
+    local _config="$_gym_artifacts/rollouts_resolved_config.yaml" _key _value
+    [[ -r "$_config" ]] || return 0
+    if grep -qxE 'mlflow_tracking_required:[[:space:]]*false' "$_config" 2>/dev/null; then
+        _gym_export_note="it exports nothing by design (mlflow_tracking_required is false)"
+        return 1
+    fi
+    for _key in mlflow_tracking_uri mlflow_experiment_name mlflow_run_name; do
+        _value=$(grep -m 1 "^$_key:" "$_config" 2>/dev/null)
+        _value=${{_value#*:}}
+        _value=${{_value//[[:space:]]/}}
+        case "$_value" in
+            ''|null|'~'|"''"|'""')
+                _gym_export_note="it configures no MLflow export ($_key is unset)"
+                return 1 ;;
+        esac
+    done
+    return 0
+}}
+# The export receipt is current only when every file it binds still has the digest it records.
+_gym_receipt_current() {{
+    local _receipt _pair _re _have
+    _receipt=$(cat "$_gym_artifacts/rollouts_mlflow_export_done" 2>/dev/null) || return 1
+    for _pair in {receipt_artifacts}; do
+        _re='"'"${{_pair%%:*}}"'":"([0-9a-f]{{64}})"'
+        [[ "$_receipt" =~ $_re ]] || return 1
+        _have=$(sha256sum < "$_gym_artifacts/${{_pair#*:}}" 2>/dev/null) || return 1
+        [[ "${{_have%% *}}" == "${{BASH_REMATCH[1]}}" ]] || return 1
+    done
+    _gym_export_note="its MLflow export receipt is current"
+}}
+# Ends the chain of a complete run before any retry or budget decision. A deliberate stop already in the marker says
+# why the chain ended and stays; only a missing marker or a provisional line gives way to the run's completion.
+_gym_end_if_complete() {{
+    [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null || return 0
+    _gym_run_complete || return 0
+    if _gym_export_required && ! _gym_receipt_current; then
+        _gym_stop_incomplete "{export_receipt_missing_reason}"
+    fi
+    rm -f "$_incomplete_file"
+    echo "Run complete: the Store covers all $_gym_complete_rollouts expected rollouts and $_gym_export_note; job ${{SLURM_JOB_ID:-}} ends the chain with nothing to recover."
+    exit 0
+}}
+
 # The previous job queues a sentinel next to its follow-up F (afterany:F). F records itself in the chain before
 # anything else, so a sentinel only acts when F started and ended unrecorded: F died before its prologue ran.
 # The variable is read once and unset, so the follow-up and sentinel queued below are ordinary hops.
@@ -154,6 +236,8 @@ if [[ -n "$_gym_sentinel_for" ]]; then
         fi
         _gym_sentinel_recorded=1
     fi
+    # The follow-up did not get to ask whether the run is complete: ask before taking its place.
+    _gym_end_if_complete
     _gym_sentinel_elapsed=""
     for _sacct_try in 1 2 3 4 5 6; do
         _gym_sentinel_elapsed=$(sacct -X -P -n -j "$_gym_sentinel_for" --format=ElapsedRaw 2>/dev/null) || _gym_sentinel_elapsed=""
@@ -248,6 +332,8 @@ _gym_restart_count="${{SLURM_RESTART_COUNT:-0}}"
 if (( 10#$_gym_restart_count > 0 )); then
     _gym_stop_accounting_unknown "{requeue_unknown_reason}"
 fi
+# A follow-up first asks whether the run is already complete, before the previous job's state decides anything.
+[[ -z "$_prev_slurm_job_id" ]] || _gym_end_if_complete
 
 # A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget. One queued by
 # `--recover` keeps both, so a stopped chain points to `--recover`, which carries the budgets over. The variables
@@ -639,6 +725,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         resume_refused_reason=RESUME_REFUSED_REASON,
         provider_credentials_rejected=PROVIDER_CREDENTIALS_REJECTED,
         credentials_rejected_reason=CREDENTIALS_REJECTED_REASON,
+        export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
+        receipt_artifacts=" ".join(f"{key}:{name}" for key, name in _RECEIPT_ARTIFACTS),
     )
 
 

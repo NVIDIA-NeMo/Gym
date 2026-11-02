@@ -850,8 +850,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                     "mlflow_run_id",
                 )
             )
-            gate_failed = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
-            if not outcome.ok or gate_failed:
+            # Only SUCCESS is accepted: UNVERIFIED, like FAILED, PLANNED or RUNNING, exits non-zero.
+            gate_not_accepted = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
+            if not outcome.ok or gate_not_accepted:
                 sys.exit(1)
             return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)
@@ -2050,6 +2051,12 @@ COMMANDS = {
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
+                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+            ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
             _comma_list_flag(
                 "candidate-agents",

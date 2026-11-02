@@ -242,7 +242,14 @@ def test_only_masked_results_left_stop_and_say_they_are_kept(tmp_path):
         ("100|NODE_FAIL|300|0", "100", True),
         # A requeued id: only its first incarnation ran work; the requeued one stopped in the prologue.
         ("100|PREEMPTED|15000|0\n100|FAILED|14|1\n101|FAILED|16|0", "100", True),
-        ("100|FAILED|300|0", "100", False),
+        # Any ending counts: a failed driver, or one that completed through its no-progress exit.
+        ("100|FAILED|300|0", "100", True),
+        ("100|COMPLETED|16|0", "100", True),
+        ("100|OUT_OF_MEMORY|300|0", "100", True),
+        # Still alive, or its state is unknown: not an ending.
+        ("100|RUNNING|300|0", "100", False),
+        ("100|PENDING|0|0", "100", False),
+        ("101|FAILED|60|0", "100", False),
         ("100|TIMEOUT|14400|0", "101", False),
         ("100|TIMEOUT|14400|0", None, False),
     ],
@@ -268,18 +275,41 @@ def test_the_guard_continues_a_cut_allocation_from_its_saved_rows(tmp_path, stat
     assert _digests(tmp_path) == before
 
 
-def test_the_guard_stop_names_the_three_populations_when_the_cut_is_not_the_store_writer(tmp_path):
+def test_the_guard_stop_names_the_three_populations_when_the_chain_does_not_name_the_store_writer(tmp_path):
     _cut_run(tmp_path, allocation="99")
+    (tmp_path / ".gym_job_chain").write_text("98\n100\n")
     result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", prev_job_id="100")
     assert "REACHED_WORK" not in result.stdout
     marker = (tmp_path / ".gym_chain_incomplete").read_text()
     assert marker.startswith(
         "Saved recovery evidence has no eligible retries; 2 reservation(s) have no saved outcome and the allocation "
-        "that made them was not cut by the scheduler, so whether they ran is unknown"
+        "that made them is not known to have ended, so whether they ran is unknown"
     )
     assert "nobody owns them" not in marker
     assert "retryable 2 (resumed), unknown 2 (2 reservation_without_outcome)" in marker
+    # The guard's own provisional line is not quoted into its stop: its sentinel would read it as this allocation
+    # dying before its guard and run the same stop again.
+    assert "Continuation 200 started" not in marker and "the chain recorded" not in marker
     assert marker.rstrip().endswith("(previous job 100 ended TIMEOUT)")
+
+
+def test_the_guard_resumes_reservations_of_an_earlier_allocation_after_a_segment_that_saved_nothing(tmp_path):
+    # Allocation 99 made the reservations and timed out; 100 timed out before it opened the Store.
+    _cut_run(tmp_path, allocation="99")
+    (tmp_path / ".gym_job_chain").write_text("99\n100\n")
+    before = _digests(tmp_path)
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "TIMEOUT", exit_code="0:15", prev_job_id="100")
+    assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "Saved recovery evidence: 4 identity(ies) need the policy again" in result.stdout
+    assert _digests(tmp_path) == before
+
+
+def test_the_guard_resumes_reservations_of_a_driver_that_failed(tmp_path):
+    _cut_run(tmp_path)
+    result = _run_prologue(tmp_path, ResumeConfig(max_retries=2), "FAILED", exit_code="1:0", prev_job_id="100")
+    assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "Saved recovery evidence: 4 identity(ies) need the policy again" in result.stdout
+    assert (tmp_path / ".gym_infra_retries").read_text().strip() == "1"
 
 
 @pytest.mark.parametrize("state", ["CANCELLED by 1000", "NODE_FAIL"])
@@ -636,11 +666,25 @@ def test_the_inspect_and_the_guard_classify_a_cut_allocation_the_same_way(tmp_pa
     assert "Saved recovery evidence: 4 identity(ies) need the policy again" in result.stdout, result.stdout
 
 
-def test_reservations_without_a_cut_never_read_as_failures_nobody_owns(tmp_path, slurm_bin):
-    _, inspected = _inspected_cut(tmp_path, slurm_bin, "100|FAILED|7200|0\n101|FAILED|60|0\n")
+@pytest.mark.parametrize("state", ["FAILED", "COMPLETED"])
+def test_the_inspect_resumes_reservations_of_an_allocation_that_ended_by_any_path(tmp_path, slurm_bin, state):
+    _, inspected = _inspected_cut(tmp_path, slurm_bin, f"100|{state}|7200|0\n101|FAILED|60|0\n")
+    assert inspected.decision.action.value == "resubmit", inspected.decision.reason
+    assert inspected.decision.counts == {"scored": 2, "missing": 4}
+
+
+def test_reservations_of_an_allocation_still_running_are_not_decided(tmp_path, slurm_bin):
+    _, inspected = _inspected_cut(tmp_path, slurm_bin, "100|RUNNING|7200|0\n")
+    assert (inspected.decision.action.value, inspected.decision.scheduler_live) == ("noop", True)
+    assert inspected.decision.counts["unknown"] == 2
+
+
+def test_reservations_without_a_known_ending_never_read_as_failures_nobody_owns(tmp_path, slurm_bin):
+    # The accounting has no record of the allocation that made them.
+    _, inspected = _inspected_cut(tmp_path, slurm_bin, "101|FAILED|60|0\n")
     reason = inspected.decision.reason
     assert inspected.decision.action.value == "stop"
     assert reason.startswith(
-        "2 reservation(s) have no saved outcome and the allocation that made them was not cut by the scheduler"
+        "2 reservation(s) have no saved outcome and the allocation that made them is not known to have ended"
     )
     assert "nobody owns them" not in reason

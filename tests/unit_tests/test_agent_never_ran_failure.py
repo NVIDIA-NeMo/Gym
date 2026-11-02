@@ -26,6 +26,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as transport
 import nemo_gym.rollout_collection as collection
+from nemo_gym.artifacts.rollout_rows import NG_NO_GENERATION_METADATA
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
@@ -66,6 +67,39 @@ def test_an_empty_response_object_is_not_a_kept_answer():
     assert has_saved_generation({"_ng_failure_response": _EMPTY | {"status": "completed"}})
 
 
+# A model's legitimate blank answer: a completed response holding one empty assistant message.
+_BLANK_ANSWER = {
+    "id": "resp-blank",
+    "object": "response",
+    "output": [
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "id": "msg_0",
+            "content": [{"type": "output_text", "text": "", "annotations": []}],
+        }
+    ],
+    "error": None,
+    "status": "completed",
+    "model": "policy",
+}
+# The same shape built by an agent's failure path when no generation happened, carrying the explicit marker.
+_NO_GENERATION = _BLANK_ANSWER | {"id": "agent-failure", "metadata": dict(NG_NO_GENERATION_METADATA)}
+
+
+@pytest.mark.parametrize("key", ["response", "_ng_failure_response"])
+def test_a_marked_no_generation_placeholder_is_not_a_kept_answer_but_a_blank_answer_is(key):
+    assert not has_saved_generation({key: _NO_GENERATION})
+    assert has_saved_generation({key: _BLANK_ANSWER})
+
+
+def test_an_unmarked_placeholder_saved_before_the_marker_stays_a_kept_answer():
+    """Without the marker an old placeholder has the shape of a blank model answer, so it is kept, never rerun."""
+    legacy = _BLANK_ANSWER | {"id": "remote_agent_failure", "model": "remote_agent", "created_at": 0.0}
+    assert has_saved_generation({"_ng_failure_response": legacy})
+
+
 def test_a_completed_evaluation_is_a_recorded_grade():
     assert has_recorded_grade({"evaluation_completed": True})
     assert not has_recorded_grade({"evaluation_completed": False})
@@ -104,6 +138,44 @@ def test_the_store_retries_a_sandbox_failure_saved_with_an_empty_response(tmp_pa
         # Rows saved before this change still carry the empty response object.
         saved = _sandbox_credentials_rejected(_ng_failure_record=record, _ng_failure_response=_EMPTY)
         store.record_outcome(row | saved | {"evaluation_completed": graded})
+        assert [row["_ng_attempt_index"] for row in store.pending()] == pending
+
+
+@pytest.mark.parametrize(
+    "response,pending",
+    [(_NO_GENERATION, [1]), (_BLANK_ANSWER, [])],
+    ids=["no-generation-retried", "blank-answer-kept"],
+)
+def test_the_store_retries_an_infrastructure_failure_whose_agent_never_generated(tmp_path, response, pending):
+    """A retryable infrastructure failure retries past a no-generation placeholder; a real blank answer is kept."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    source = tmp_path / "source.jsonl"
+    source.write_text(json.dumps(rows[0]) + "\n")
+
+    def prepare():
+        return rows, RunManifest.create(source, rows, {}, {}).model_copy(update={"max_rollout_attempts": 2})
+
+    with RolloutStore.start_or_resume(artifacts / "rollouts.jsonl", prepare, resume=False) as store:
+        row = dict(rows[0])
+        store.allocate_attempt(row)
+        record = {
+            "schema_version": 1,
+            "episode_id": {"rollout_id": "0-0", "attempt": 0},
+            "run_id": store.manifest.run_id,
+            "source": "environment",
+            "delivery": "delivered",
+            "failure": {
+                "failure_reason": "SandboxApiException",
+                "terminal": False,
+                "failure_kind": "infrastructure_error",
+            },
+            "http_status": None,
+            "exception_type": "SandboxApiException",
+        }
+        saved = _sandbox_credentials_rejected(_ng_failure_record=record, _ng_failure_response=response)
+        store.record_outcome(row | saved)
         assert [row["_ng_attempt_index"] for row in store.pending()] == pending
 
 

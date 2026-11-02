@@ -346,7 +346,7 @@ def test_recover_queues_missing_and_retryable_work_once_through_the_existing_res
     assert fake_executor.calls == ["decide", "resubmit"]
 
 
-def test_recover_with_judge_failures_and_missing_work_stops_until_saved_answer_recovery_is_supported(
+def test_recover_with_judge_failures_and_missing_work_resubmits_with_the_saved_answers_reverified_first(
     tmp_path, fake_executor
 ) -> None:
     fake_executor.job_dir = write_job_dir(
@@ -357,8 +357,12 @@ def test_recover_with_judge_failures_and_missing_work_stops_until_saved_answer_r
         retries=0,
     )
     out = submit.recover("gym-job-d2", "bench")
-    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
+    # The resumed run re-verifies the saved answer first, while its servers are up; only the missing work is run.
+    assert out.dispatched == "resubmit" and out.decision.action == RecoveryAction.RESUBMIT
+    assert fake_executor.calls == ["decide", "resubmit"]
     assert out.decision.identities["judge_recoverable"] == [(1, 0)] and out.decision.identities["missing"] == [(2, 0)]
+    assert out.decision.reverify_first == [(1, 0)]
+    assert out.reverify.startswith(f"1 saved answer(s) are re-verified by resume job {out.job_id} first")
 
 
 def test_recover_does_not_queue_beside_a_live_job(tmp_path, fake_executor) -> None:
@@ -397,7 +401,7 @@ def test_gate_summary_never_equates_scored_with_expected_by_dropping_failures(tm
     )
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
     t = gate_task_summary(d, score=0.25, summary_valid=True, summary_reasons=[], health_passed=True, health_reasons=[])
-    assert (t["expected_samples"], t["scored_samples"], t["status"]) == (4, 1, "FAILED")
+    assert (t["expected_samples"], t["scored_samples"]) == (4, 1) and t["status"] != "SUCCESS"
     assert any("judge failures" in e for e in t["errors"]) and any("no row" in e for e in t["errors"])
 
 
@@ -408,7 +412,10 @@ def test_gate_summary_unknown_or_failed_validity_or_health_is_a_blocker(tmp_path
     t = gate_task_summary(
         d, score=1.0, summary_valid=summary_valid, summary_reasons=[], health_passed=health, health_reasons=[]
     )
-    assert t["status"] == "FAILED" and t["errors"]
+    # Unknown withholds the pass (UNVERIFIED, reason in warnings); only a failed part is FAILED with an error.
+    failed = False in (summary_valid, health)
+    assert t["status"] == ("FAILED" if failed else "UNVERIFIED") and bool(t["errors"]) is failed
+    assert failed or any("unknown" in w for w in t["warnings"])
 
 
 def test_gate_summary_complete_run_succeeds_and_keeps_model_zeros_as_warnings(tmp_path) -> None:
@@ -524,12 +531,13 @@ def test_gate_summary_from_collected_reads_the_named_score_and_passes_only_when_
         d, collected, max_unhealthy_fraction=0.02, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
     )
     assert (task["status"], task["score"], task["expected_samples"], task["scored_samples"], task["errors"]) == (
-        "FAILED",
+        "UNVERIFIED",
         0.75,
         4,
         4,
-        [HEALTH_UNKNOWN],
+        [],
     )
+    assert HEALTH_UNKNOWN in task["warnings"]
     missing_key = collect_with_score(job, json.dumps(["agent", "no_such_metric"]))
     assert gate_summary_from_collected(d, missing_key, max_unhealthy_fraction=0.02)["score"] is None
 
@@ -573,9 +581,10 @@ def test_final_model_zeros_stay_done_and_are_not_dispatched_again(tmp_path, fake
     assert out.ok and out.decision.action == RecoveryAction.NOOP and fake_executor.calls == ["decide"]
     assert out.decision.identities["model_final"] == [(4, 0), (5, 0), (6, 0)]
     assert out.gate_task["scored_samples"] == out.gate_task["expected_samples"] == 7
-    # Unknown health still stops acceptance, without creating missing work.
-    assert out.gate_task["status"] == "FAILED" and any("unknown" in e for e in out.gate_task["errors"])
+    # Unknown health is a warning, never missing work; the unread score fails the gate.
+    assert out.gate_task["status"] == "FAILED" and any("unknown" in w for w in out.gate_task["warnings"])
     assert "missing" not in out.decision.counts
+    assert out.gate_task["errors"][0] == "score unavailable: no requested metric was read"
 
 
 @pytest.mark.parametrize(
@@ -635,11 +644,12 @@ def test_cli_recover_emits_the_gate_task_and_dispatches_nothing_for_a_complete_r
         ],
         capsys,
     )
+    # UNVERIFIED is not accepted: the requested gate still exits non-zero.
     assert code == 1 and out["dispatched"] is None and fake_executor.calls == ["decide"]
-    assert out["gate_task"]["status"] == "FAILED" and out["gate_task"]["score"] == 0.5
-    assert out["gate_task"]["errors"] == [HEALTH_UNKNOWN]
-    assert out["gate_task"]["warnings"][0].startswith("per-rollout health not judged against the configured criterion")
-    assert "2 unobserved" in out["gate_task"]["warnings"][0]
+    assert out["gate_task"]["status"] == "UNVERIFIED" and out["gate_task"]["score"] == 0.5
+    assert out["gate_task"]["errors"] == [] and out["gate_task"]["warnings"][0] == HEALTH_UNKNOWN
+    assert out["gate_task"]["warnings"][1].startswith("per-rollout health not judged against the configured criterion")
+    assert "2 unobserved" in out["gate_task"]["warnings"][1]
 
 
 def test_cli_recover_without_score_or_criterion_fails_closed(tmp_path, fake_executor, capsys) -> None:
@@ -814,13 +824,15 @@ def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_exe
     )
     assert out.dispatched is None and fake_executor.calls == ["decide"]
     # Grade-only rows have unobserved response/trial health. Mutating a row also invalidates both content bindings.
-    health_errors = [HEALTH_UNKNOWN]
+    health_unknown = [HEALTH_UNKNOWN]
     if mode == "stale":
-        health_errors = [
+        health_unknown = [
             'summary validity unknown: ["quality summary is not bound to this run\'s sole rollouts.jsonl source"]',
             HEALTH_UNKNOWN,
         ]
-    assert out.gate_task["status"] == "FAILED" and out.gate_task["errors"] == health_errors + mlflow
+    # Unknown health alone is UNVERIFIED; any MLflow delivery error is a failure.
+    assert out.gate_task["status"] == ("FAILED" if mlflow else "UNVERIFIED") and out.gate_task["errors"] == mlflow
+    assert out.gate_task["warnings"][: len(health_unknown)] == health_unknown
 
 
 def test_mlflow_status_for_a_run_without_an_mlflow_id_is_contradictory(tmp_path, fake_executor) -> None:
@@ -1096,7 +1108,7 @@ def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path
     task = gate_summary_from_collected(
         d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
     )
-    assert task["status"] == "FAILED"
+    assert task["status"] == "UNVERIFIED"
     assert task["warnings"][-4].startswith("per-rollout health within the configured criterion")
     assert task["warnings"][-3:-1] == [
         "health-check issues (nonzero): model_call_runaway_generation 1, task_consistently_unhealthy 1",
@@ -1214,8 +1226,9 @@ def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_bel
     d, task = gate_of(job)
     # Settled answers stand: the action is NOOP whatever the health, and nothing rewrites the main output.
     assert d.action == RecoveryAction.NOOP and (job / "artifacts" / "rollouts.jsonl").read_bytes() == rollouts
-    assert task["status"] == "FAILED" and task["scored_samples"] == 100 and task["score"] == 0.5
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert task["status"] == ("FAILED" if failed else "UNVERIFIED")
+    assert task["scored_samples"] == 100 and task["score"] == 0.5
+    [health] = [e for e in task["errors"] + task["warnings"] if e.startswith("response/trial health")]
     rate = f"evaluation-side faults: {final_zeros} of 100 ({final_zeros / 100:.2%}) is not below 2%"
     if failed:
         assert health.startswith("response/trial health failed") and f"trial: {rate}" in health
@@ -1248,8 +1261,8 @@ def test_the_response_gate_reads_the_reported_population_strictly_below_two_perc
         gate_job(tmp_path, expected=100, final_zeros=0),
         quality=unit_quality(expected=100, responses=responses),
     )
-    assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED"
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    assert d.action == RecoveryAction.NOOP and task["status"] == "UNVERIFIED"
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     # Whatever the reported response population, it never decides health: only the unobserved trials do.
     assert health.startswith("response/trial health unknown") and "response:" not in health, state
     assert not any("response:" in w for w in task["warnings"])
@@ -1258,7 +1271,7 @@ def test_the_response_gate_reads_the_reported_population_strictly_below_two_perc
 def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
     d, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0, missing=1))
     assert d.action == RecoveryAction.RESUBMIT and not d.complete
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert "trial: not evaluated, the run is not complete" in health
 
 
@@ -1282,7 +1295,7 @@ def test_the_trial_boundary_names_the_run_provenance_and_the_open_protocol_quest
         verification_skipped={"true": 0, "false": 0, "absent": 100},
     )
     d, task = gate_of(job, quality=quality)
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert d.action == RecoveryAction.NOOP and health.startswith("response/trial health unknown")
     assert "trial: UNOBSERVED 99 of 100 expected trials" in health and "route_failures_to_sidecar None" in health
     assert "('scicode_agent', 'r', None)" in health and "rollouts ended on a failed model call at least 0" in health
@@ -1326,8 +1339,8 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
 ) -> None:
     job = gate_job(tmp_path, expected=100, final_zeros=0)
     d, task = gate_of(job, quality=unit_quality(expected=100, context_window_exceeded=counts))
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
-    assert d.action == RecoveryAction.NOOP and task["score"] == 0.5 and task["status"] == "FAILED"
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
+    assert d.action == RecoveryAction.NOOP and task["score"] == 0.5 and task["status"] == "UNVERIFIED"
     # A context-window signal is never read as proven clipping: the trial gate stays unknown, not failed.
     assert health.startswith("response/trial health unknown")
     assert f"records context_window_exceeded {reported} (a signal" in health and "not proof" in health
@@ -1504,8 +1517,9 @@ def test_review_mixed_judge_sidecar_never_replays_the_answer(tmp_path, fake_exec
         failures=[ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER, failure_kind="judge_failed")],
     )
     out = submit.recover("review", "bench")
-    assert out.decision.action == RecoveryAction.STOP
-    assert fake_executor.calls == ["decide"]
+    # The resume runs only the missing rollout: the saved answer is re-verified first, never replayed.
+    assert out.decision.action == RecoveryAction.RESUBMIT and out.decision.reverify_first == [(0, 0)]
+    assert fake_executor.calls == ["decide", "resubmit"]
     assert out.decision.identities["judge_recoverable"] == [(0, 0)]
 
 
@@ -1864,7 +1878,7 @@ def test_review_trial_criterion_is_configurable_without_changing_decision_or_row
         for limit in (0.02, 0.01)
     }
     health = {
-        limit: [e for e in t["errors"] if e.startswith("response/trial health")][0] for limit, t in tasks.items()
+        limit: [w for w in t["warnings"] if w.startswith("response/trial health")][0] for limit, t in tasks.items()
     }
     # The configured fraction is accepted and reported, never applied: 1 of 100 stays unverified under both.
     assert health[0.02] == health[0.01] and health[0.01].startswith("response/trial health unknown")
@@ -2615,14 +2629,14 @@ def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_
         "verifier_recorded": 0,
         "unobserved_reason": "no completed grading operation or grading record was recorded by the verifier (demo_verifier)",
     }
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert health.startswith("response/trial health unknown")
     assert (
         "trial: UNOBSERVED 6 of 6 expected trials: no completed grading operation or grading record was recorded "
         "by the verifier (demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0"
         in health
     )
-    assert task["status"] == "FAILED"
+    assert task["status"] == "UNVERIFIED"
 
 
 def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tmp_path) -> None:
@@ -2638,7 +2652,7 @@ def test_a_mixed_run_reports_observed_healthy_unhealthy_and_unobserved_trials(tm
         "unhealthy": 1,
         "unobserved": 50,
     }
-    [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert "trial: UNOBSERVED 50 of 100 expected trials" in health
     assert "observed healthy 49, unhealthy 1" in health
 

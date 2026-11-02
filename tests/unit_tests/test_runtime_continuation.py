@@ -11,6 +11,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.resume_script import EXPORT_RECEIPT_MISSING_REASON, INCOMPLETE_MARKER_NAME
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.rollout_recovery import RunManifest
 from nemo_gym.rollout_store import RolloutStore
@@ -31,7 +32,8 @@ from tests.unit_tests.test_rollout_recovery import runner_config as runner_confi
         ("final_zero", "75:0", False, False),
         ("judge", "75:0", False, False),
         ("judge_then_reservation", "75:0", False, False),
-        ("prior_reservation", "75:0", False, False),
+        # The allocation that made the reservation ended (FAILED): nothing was saved for it, so it runs again.
+        ("prior_reservation", "75:0", True, False),
         ("unknown_kill", "75:0", False, False),
         ("exhausted", "75:0", False, False),
         ("absent", "75:0", False, False),
@@ -77,7 +79,12 @@ def test_installed_runtime_authorizes_only_selected_remaining_work(
     assert retry.exists() is debit
     if debit:
         assert retry.read_text().strip() == "1"
-    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "60"
+    coverage = tmp_path / "artifacts" / "rollouts_coverage.json"
+    if coverage.exists() and json.loads(coverage.read_text()).get("complete") is True:
+        # A complete run ends its chain before the previous job's state is read; with no export receipt it says so.
+        assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == EXPORT_RECEIPT_MISSING_REASON + "\n"
+    else:
+        assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "60"
     if case != "absent":
         assert before == {
             str(f): hashlib.sha256(f.read_bytes()).hexdigest()
@@ -86,7 +93,7 @@ def test_installed_runtime_authorizes_only_selected_remaining_work(
         }
 
 
-def test_mixed_saved_judge_and_missing_never_runs_agent(tmp_path):
+def test_mixed_saved_judge_and_missing_resumes_the_missing_work(tmp_path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(2)]
@@ -109,8 +116,9 @@ def test_mixed_saved_judge_and_missing_never_runs_agent(tmp_path):
             }
         )
     result = _run_prologue(tmp_path, ResumeConfig(), "FAILED", exit_code="75:0")
-    assert "REACHED_WORK" not in result.stdout
-    assert not (tmp_path / "sbatch_calls").exists()
+    # The resumed run re-verifies the saved judge answer first (it is never replayed), then runs the missing rollout.
+    assert "1 saved answer(s) are re-verified first by the resumed run" in result.stdout
+    assert "REACHED_WORK" in result.stdout
 
 
 def test_generated_container_command_invokes_preinstalled_reader_before_services(tmp_path, monkeypatch):
