@@ -1738,6 +1738,59 @@ class TestListEnvironments:
         assert (payloads["beta"]["resources_server"], payloads["beta"]["agent_server"]) == ("beta", "simple_agent")
         assert (payloads["alpha"]["resources_server"], payloads["alpha"]["agent_server"]) == ("alpha", "simple_agent")
 
+    @pytest.mark.parametrize(
+        ("agents", "expected_agent"),
+        [
+            (["simple_agent"], "simple_agent"),
+            (["simple_agent", "simple_agent"], "simple_agent"),
+            # Two different agents: the file alone does not say which one runs.
+            (["simple_agent", "harness_agent"], None),
+        ],
+    )
+    def test_servers_fall_back_to_the_names_a_config_file_states(
+        self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path, agents: list[str], expected_agent: str | None
+    ) -> None:
+        config_path = tmp_path / "config.yaml"
+        config = {"beta_resources": {"resources_servers": {"beta": {}}}}
+        for index, agent in enumerate(agents):
+            config[f"beta_agent_{index}"] = {"responses_api_agents": {agent: {}}}
+        config_path.write_text(json.dumps(config))
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_config_servers", lambda config_path: None)
+        self._mock_catalog(
+            monkeypatch, overrides={"json": True}, entries=(replace(self._BETA, config_path=config_path),)
+        )
+
+        list_environments()
+
+        [payload] = json.loads(capsys.readouterr().out)
+        assert (payload["resources_server"], payload["agent_server"]) == ("beta", expected_agent)
+
+    def test_inspect_shows_resolved_servers_the_config_file_does_not_state(
+        self, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        # Like benchmarks/aime24: the file inherits its resources server from a config it loads.
+        self._mock_catalog(monkeypatch, overrides={"component_name": "beta"})
+        monkeypatch.setattr(
+            nemo_gym.cli.env,
+            "read_environment_details",
+            lambda cfg: {
+                "domain": "math",
+                "description": "Beta benchmark",
+                "value": None,
+                "resources_servers": [],
+                "agents": ["simple_agent"],
+                "datasets": ["beta"],
+            },
+        )
+        monkeypatch.setattr(
+            nemo_gym.cli.env, "resolve_config_servers", lambda config_path: ("math_with_judge", "simple_agent")
+        )
+
+        list_environments()
+
+        out = capsys.readouterr().out
+        assert "resources servers: math_with_judge" in out and "agent: simple_agent" in out
+
     def test_json_output_without_manifest_has_null_manifest_path(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
     ) -> None:
@@ -1826,7 +1879,7 @@ class TestListEnvironments:
                 "description": "Alpha env",
                 "value": "Some value",
                 "resources_servers": ["alpha_rs"],
-                "agent": "simple_agent",
+                "agents": ["simple_agent"],
                 "datasets": ["train", "example"],
             },
         )
@@ -1841,7 +1894,8 @@ class TestListEnvironments:
         assert "Value: Some value" in out
         assert "status: experimental" in out
         assert "manifest:" in out and "profile: custom-gym-verifier" in out
-        assert "resources servers: alpha_rs" in out and "agent: simple_agent" in out
+        # The manifest's servers, not the names the config file states.
+        assert "resources servers: alpha" in out and "alpha_rs" not in out and "agent: simple_agent" in out
         assert "datasets: train, example" in out
         assert "gym env start --environment alpha --model-type vllm_model" in out
 
@@ -1902,7 +1956,7 @@ class TestListEnvironments:
                 "modality": "text",
                 "licensing": "Apache-2.0",
                 "lifecycle": "active",
-                "resources servers": "alpha_rs",
+                "resources servers": "alpha",
                 "agent": "simple_agent",
                 "datasets": "train, example",
             },

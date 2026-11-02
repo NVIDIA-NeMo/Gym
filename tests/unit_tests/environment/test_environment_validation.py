@@ -143,7 +143,7 @@ def test_resolve_config_servers_is_unknown_when_the_config_needs_run_time_server
         encoding="utf-8",
     )
 
-    assert resolve_config_servers(config_path) == (None, None)
+    assert resolve_config_servers(config_path) is None
 
 
 def test_manifest_accepts_external_agent_without_resources(tmp_path: Path) -> None:

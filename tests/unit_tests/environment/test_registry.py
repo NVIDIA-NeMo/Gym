@@ -506,5 +506,5 @@ class TestReadEnvironmentDetails:
         assert details["domain"] == "agent" and details["description"] == "Desc"
         assert details["value"] == "The value"
         assert details["resources_servers"] == ["my_rs"]
-        assert details["agent"] == "simple_agent"
+        assert details["agents"] == ["simple_agent"]
         assert details["datasets"] == ["train", "example"]

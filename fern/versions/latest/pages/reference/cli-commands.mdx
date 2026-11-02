@@ -260,7 +260,7 @@ List the manifest-first catalog unioned with legacy environment and benchmark co
 | `--domain`, `--modality`, `--licensing` | Filter by catalog metadata. |
 | `--status experimental\|no-manifest` | Filter by the experimental annotation or missing manifest. |
 | `--lifecycle active\|deprecated` | Filter by lifecycle. |
-| `--json` | Output catalog entries as JSON, including the path fields described below and each entry's `resources_server` and `agent_server`. Without a manifest these servers are resolved from the config, and are `null` when the config needs values that only a run supplies, such as a judge model server. |
+| `--json` | Output catalog entries as JSON, including the path fields described below and each entry's `resources_server` and `agent_server` (see below). |
 
 ```bash
 gym list environments
@@ -277,6 +277,8 @@ The JSON output includes three path fields:
 
 All non-null paths are absolute with symlinks resolved. A path reached through a symlink therefore uses its target's location in the output.
 For example, the config for `aalcr/config_v1_1` is `benchmarks/aalcr/config_v1_1.yaml`, beside its entry directory `benchmarks/aalcr/config_v1_1/`.
+
+The inspect view and `--json` report the resources server and agent an entry runs with. An entry with a manifest takes them from the manifest. Otherwise Gym resolves the config the way a manifest's values are checked; when the config needs values that only a run supplies, such as a judge model server, it uses the names written in the config file, each only when the file names exactly one. A server that none of these identifies is omitted from the inspect view and `null` in `--json`.
 
 ### `gym list agents`
 

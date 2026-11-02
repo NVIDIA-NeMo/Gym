@@ -70,7 +70,7 @@ class EnvironmentCatalogEntry:
     lifecycle: Optional[str] = None
     resources_server_selector: Optional[str] = None
     # Set from the manifest. Entries without one leave these unset, because resolving every legacy config would
-    # slow discovery; `nemo_gym.environment.validation.resolve_config_servers` reads them when needed.
+    # slow discovery; the catalog views read them from the config when needed.
     resources_server: Optional[str] = None
     agent_server: Optional[str] = None
 
@@ -362,8 +362,9 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
     """Deep-parse an environment config for the ``gym list environments <name>`` inspect view.
 
     Returns ``domain``, ``description`` (via :func:`~nemo_gym.environment.discovery.read_config_metadata`), plus
-    ``value``, ``resources_servers`` (names), ``agent`` (the agent type), and dataset ``names`` read from
-    the config's server blocks. Never raises: an unreadable config yields empty/None fields.
+    ``value``, ``resources_servers`` and ``agents`` (the server names written in this file), and dataset
+    ``names`` read from the config's server blocks. Files the config loads or inherits from are not read.
+    Never raises: an unreadable config yields empty/None fields.
     """
     domain, description = read_config_metadata(config_path)
     try:
@@ -373,7 +374,7 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
 
     value: Optional[str] = None
     resources_servers: List[str] = []
-    agent: Optional[str] = None
+    agents: List[str] = []
     datasets: List[str] = []
     for group_key, server_name, server_config in iter_server_configs(raw):
         if group_key == "resources_servers":
@@ -381,8 +382,7 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
             if value is None and server_config.get("value"):
                 value = str(server_config["value"])
         elif group_key == "responses_api_agents":
-            if agent is None:
-                agent = server_name
+            agents.append(server_name)
             for dataset in server_config.get("datasets") or []:
                 if isinstance(dataset, (dict, DictConfig)) and dataset.get("name"):
                     datasets.append(str(dataset["name"]))
@@ -392,6 +392,6 @@ def read_environment_details(config_path: Path) -> Dict[str, object]:
         "description": description,
         "value": value,
         "resources_servers": resources_servers,
-        "agent": agent,
+        "agents": agents,
         "datasets": datasets,
     }
