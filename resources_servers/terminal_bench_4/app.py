@@ -314,6 +314,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     failure_kind=rejected.failure_kind if rejected is not None else None,
                 )
                 lifecycle.exception(session, exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    lifecycle.interrupted(session, "resources_shutdown")
                 await lifecycle.cleanup(session)
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id, termination=session.termination
