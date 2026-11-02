@@ -80,7 +80,12 @@ class DecisionIndexVerifier:
             status, response, error = llm_answers(text, questions)
         reward, scored = row_reward(di_row, response if status == OK else None)
         e = di_row["_evaluation"]
-        result = {"run_id": e["run_id"], "catalog_id": e["catalog_id"], "status": status, "total_wall_ms": float(wall_ms or 0.0)}
+        result = {
+            "run_id": e["run_id"],
+            "catalog_id": e["catalog_id"],
+            "status": status,
+            "total_wall_ms": float(wall_ms or 0.0),
+        }
         if status == OK:
             result["response"] = response
         extra: Dict[str, Any] = {}

@@ -127,10 +127,18 @@ def llm_answers(text: str, questions: Dict[str, Any]) -> Tuple[str, Optional[Dic
             return ERROR, None, f"question {key!r} not answered"
         value = parsed[key]
         if q["type"] == "choice":
-            choice = value if isinstance(value, str) else (str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None)
+            choice = (
+                value
+                if isinstance(value, str)
+                else (str(value) if isinstance(value, (int, float)) and not isinstance(value, bool) else None)
+            )
             if choice not in q["criteria"]:
                 return ERROR, None, f"question {key!r}: {value!r} is not one of its options"
-            answers[key] = {"type": "choice", "choice": choice, "probabilities": {o: float(o == choice) for o in q["criteria"]}}
+            answers[key] = {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": {o: float(o == choice) for o in q["criteria"]},
+            }
         elif q["type"] == "noul":
             if isinstance(value, bool):
                 flag = value

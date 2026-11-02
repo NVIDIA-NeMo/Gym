@@ -94,13 +94,21 @@ class TestRequestMapping:
             {"value": "tech", "description": "Bugs"},
         ]
         assert request["questions"][1] == {"type": "predicate", "name": "refund", "instructions": "Asks for a refund?"}
-        assert to_decisions_request("m", "plain text", {"q": {**QUESTIONS["refund"], "instructions": {"a": 1}}})["input"] == "plain text"
+        assert (
+            to_decisions_request("m", "plain text", {"q": {**QUESTIONS["refund"], "instructions": {"a": 1}}})["input"]
+            == "plain text"
+        )
         with pytest.raises(ValueError):
             to_decisions_request("m", STATE, {"s": {"type": "score", "criteria": ["a", "b"]}})
         raw = {
             "model": "decider",
             "answers": [
-                {"type": "choice", "name": "route", "choice": "billing", "probabilities": [{"value": "billing", "probability": 0.9}, {"value": "tech", "probability": 0.1}]},
+                {
+                    "type": "choice",
+                    "name": "route",
+                    "choice": "billing",
+                    "probabilities": [{"value": "billing", "probability": 0.9}, {"value": "tech", "probability": 0.1}],
+                },
                 {"type": "predicate", "name": "refund", "probability": 0.8},
             ],
         }
@@ -115,10 +123,16 @@ class TestEngineCalls:
         body = _body({"role": "user", "content": json.dumps({"state": STATE, "questions": QUESTIONS})})
         response = asyncio.run(model.responses(body))
         envelope = _envelope(response)
-        assert envelope["status"] == "ok" and envelope["response"] == {"model": "decider", "answers": ANSWERS, "usage": {"input_tokens": 42}}
+        assert envelope["status"] == "ok" and envelope["response"] == {
+            "model": "decider",
+            "answers": ANSWERS,
+            "usage": {"input_tokens": 42},
+        }
         # One answer position per question; the engine's own input-token count.
         assert (response.usage.input_tokens, response.usage.output_tokens) == (42, 2)
-        assert calls == [("/v1/systemone", {"model": "decider", "state": STATE, "questions": QUESTIONS, "packing": "shared"})]
+        assert calls == [
+            ("/v1/systemone", {"model": "decider", "state": STATE, "questions": QUESTIONS, "packing": "shared"})
+        ]
 
     def test_decisions_endpoint(self) -> None:
         model = _model(endpoint="decisions")
@@ -126,7 +140,10 @@ class TestEngineCalls:
         calls = _scripted(model, [(200, json.dumps(raw))])
         envelope = asyncio.run(model.call_engine(STATE, {"refund": QUESTIONS["refund"]}))
         assert engine_app.usage_of(None, envelope) is None
-        assert calls[0][0] == "/v1/decisions" and envelope["response"]["answers"]["refund"] == {"type": "noul", "noul": 0.3}
+        assert calls[0][0] == "/v1/decisions" and envelope["response"]["answers"]["refund"] == {
+            "type": "noul",
+            "noul": 0.3,
+        }
 
     def test_capacity_rejection_is_unsupported(self) -> None:
         model = _model()
@@ -144,7 +161,9 @@ class TestEngineCalls:
         _scripted(model, [(500, "boom"), (200, json.dumps({"answers": ANSWERS}))])
         assert asyncio.run(model.call_engine(STATE, QUESTIONS))["status"] == "ok"
 
-    @pytest.mark.parametrize(("status", "text", "message"), [(400, "bad request", "HTTP 400"), (200, "<html>", "non-JSON")])
+    @pytest.mark.parametrize(
+        ("status", "text", "message"), [(400, "bad request", "HTTP 400"), (200, "<html>", "non-JSON")]
+    )
     def test_client_errors_and_garbage_are_errors(self, status: int, text: str, message: str) -> None:
         model = _model()
         _scripted(model, [(status, text)])
@@ -171,6 +190,8 @@ class TestEngineCalls:
         monkeypatch.setattr(engine_app, "request", fake_request)
         model = _model()
         assert asyncio.run(model._post("/v1/systemone", {"a": 1})) == (200, "{}")
-        assert seen["url"] == "http://engine.test/v1/systemone" and seen["headers"]["Authorization"] == "Bearer test-key"
+        assert (
+            seen["url"] == "http://engine.test/v1/systemone" and seen["headers"]["Authorization"] == "Bearer test-key"
+        )
         model.config.api_key = None
         assert "Authorization" not in model._headers()

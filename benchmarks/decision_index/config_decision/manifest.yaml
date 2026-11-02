@@ -10,7 +10,7 @@ description: Decision Index 0.3 public suite, decision-model mode. The policy is
   (/v1/systemone or /v1/decisions) that returns a probability for every option of every question; the run is
   scored with the Decision Index kit's chance-corrected, coverage-adjusted public index.
 modality: text
-licensing: unknown
+licensing: MIT AND Apache-2.0 AND CC-BY-4.0 AND CC-BY-3.0 AND CC-BY-SA-4.0 AND CC-BY-NC-4.0 AND LicenseRef-DecisionIndex-Upstream-Terms
 authors:
 - pst2154
 reward:
