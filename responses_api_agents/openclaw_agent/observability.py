@@ -255,6 +255,7 @@ def build_openclaw_observations(
     *,
     transcript_available: bool,
     prefer_openclaw_session_id: bool = True,
+    capture_correlated: bool = False,
     model_ref: ModelServerRef | None = None,
 ) -> AgentObservationBundle:
     events = list(events)
@@ -278,7 +279,7 @@ def build_openclaw_observations(
         records=[invocation],
         gaps=[
             ObservationGap(code="subagent_hierarchy_unavailable"),
-            ObservationGap(code="model_call_ownership_unavailable"),
+            *([] if capture_correlated else [ObservationGap(code="model_call_ownership_unavailable")]),
             ObservationGap(code="context_compaction_unavailable"),
         ],
     )

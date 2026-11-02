@@ -12,6 +12,7 @@ from nemo_gym.orchestration.recovery import (
     ManagedRecoveryFact,
     decide_from_collected,
     trial_health,
+    trial_verdict,
 )
 
 
@@ -68,7 +69,7 @@ def test_session_consumer_boundary_keeps_ordinary_wrong_zero(case, reward):
         "skip",
     ],
 )
-def test_session_trial_rejects_incomplete_or_contradictory_metadata(mutation):
+def test_session_metadata_is_reported_and_only_grading_or_failures_reject(mutation):
     c = session_fixture()
     assert health(c) is True
     row = c.results[0]
@@ -105,7 +106,14 @@ def test_session_trial_rejects_incomplete_or_contradictory_metadata(mutation):
         t["invocations"][0]["in_session"] = False
     elif mutation == "skip":
         t["invocations"][0]["verification_skipped"] = True
-    assert health(c) is None
+    if mutation in {"missing_verifier", "failed_verifier", "recovered", "no_reader", "stale", "skip"}:
+        # No bound grading, a failure no recovery accounts for, or an unreadable source.
+        assert health(c) is None
+    else:
+        # Session metadata is trajectory evidence: reported, never a coverage condition.
+        d = decide_from_collected(c, max_infra_retries=3, max_walltime_s=None, live_job=False)
+        passed, reason, report = trial_verdict(d, c)
+        assert passed is True and report["trajectory_evidence"]["incomplete"] == 1, reason
 
 
 @pytest.mark.parametrize(

@@ -137,6 +137,7 @@ from nemo_gym.rollout_recovery import (
 from nemo_gym.rollout_recovery import (
     IncompleteEvaluationError,
     RunManifest,
+    _digest,
     atomic_write_json,
     has_only_intentional_gaps,
     is_answered_agent_deadline,
@@ -1608,9 +1609,8 @@ def _shard_record(
 
     A try that left no result (interrupted, or never started) is a marker, not an outcome: it keeps its identity and
     the writer turns it into an omitted-rollout row. Anything else goes through ``_collected_outcome``, so a failed
-    ``/run`` is saved as the typed failure row collection saves, never as the marker the dispatcher returned. A typed
-    failure names the run it belongs to; a row dispatched outside a collection run takes the shard's ``run_id`` for
-    that record only, so the shard's rows stay untagged and the Store imports them as it imports an earlier eval run.
+    ``/run`` is saved as the typed failure row collection saves, never as the marker the dispatcher returned. Every
+    record names the shard's run, as collection stamps its own, so the Store checks it against the shard's manifest.
     """
     row, result = completed.row, completed.result
     if isinstance(result, dict) and result.get(NG_NO_PERSIST_KEY):
@@ -1618,6 +1618,7 @@ def _shard_record(
         for key in _SHARD_IDENTITY_KEYS:
             if key in row:
                 record.setdefault(key, row[key])
+        record[RUN_ID_KEY] = run_id
         return record
     if _materialized_taskset(row) is not None and _is_episode_response(result):
         result = _native_episode_record(row, result)
@@ -1626,6 +1627,7 @@ def _shard_record(
     if RUN_ID_KEY not in row:
         completed = replace(completed, row={**row, RUN_ID_KEY: run_id})
     record = _collected_outcome(completed, result).record
+    record[RUN_ID_KEY] = run_id
     _record_policy_model_server(record, global_config, agent_name)
     return record
 
@@ -1640,7 +1642,7 @@ def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
 
 
 _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
-_RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs")
+_RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs", "_attempts")
 
 
 class _RunRecordWriter:
@@ -1650,9 +1652,9 @@ class _RunRecordWriter:
     the records the collector's own builder produced. A caller writing rows of its own would bypass that builder.
 
     A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
-    given, its materialized inputs, run manifest and saved progress (``rollouts-<shard>_batch_status.json``) beside
-    it, so a folder of shards is what ``gym eval aggregate``, the run health
-    check, the Store and EvalRDL's reader already read. The caller picks the shard label (for example a training step
+    given, its materialized inputs, a verified run manifest with every attempt reserved, and its saved progress
+    (``rollouts-<shard>_batch_status.json``) beside it, so a folder of shards is what ``gym eval aggregate``, the run
+    health check, the Store (including resume and recovery) and EvalRDL's reader already read. The caller picks the shard label (for example a training step
     and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
     the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
     sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
@@ -1668,11 +1670,13 @@ class _RunRecordWriter:
         rows: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
         status_rows: Optional[List[Dict[str, Any]]] = None,
+        source_rows: Optional[List[Dict[str, Any]]] = None,
+        config_identity: Optional[Dict[str, Any]] = None,
     ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
         if shard.endswith(_RESERVED_SHARD_ENDINGS):
-            # `rollouts-x_failures.jsonl` is shard `x`'s failures sidecar, and readers skip both endings.
+            # `rollouts-x_failures.jsonl` is shard `x`'s failures sidecar, and readers skip all three endings.
             raise ValueError(f"shard label {shard!r} must not end with {' or '.join(_RESERVED_SHARD_ENDINGS)}")
         self.rollouts_fpath = Path(record_output_dir) / f"rollouts-{shard}.jsonl"
         self.failures_fpath = failures_path_for(self.rollouts_fpath)
@@ -1712,7 +1716,18 @@ class _RunRecordWriter:
                 with self.materialized_fpath.open("wb") as file:
                     for row in rows:
                         file.write(orjson.dumps(row) + b"\n")
-                RunManifest.import_legacy(rows).model_copy(update={"run_id": self.run_id}).write(self.manifest_fpath)
+                # A verified run manifest with every row's attempt reserved before the first request, as collection
+                # writes its own: resume and recovery accept the shard, and the Store checks each record's identity
+                # against it. ``rows`` are the copies as dispatched (run id and attempt index stamped).
+                self.manifest = RunManifest(
+                    max_rollout_attempts=get_max_rollout_attempts(),
+                    run_id=self.run_id,
+                    source_digest=_digest(source_rows if source_rows is not None else rows),
+                    materialized_digest=_digest(rows),
+                    config_digest=_digest(config_identity or {}),
+                    next_attempt={logical_rollout_id(row): row.get(ATTEMPT_INDEX_KEY_NAME, 0) + 1 for row in rows},
+                )
+                self.manifest.write(self.manifest_fpath)
             # The shard's own saved progress, `rollouts-<shard>_batch_status.json`, read by `gym eval status` and
             # marked by aggregation like any run's. It counts the records this writer writes, which are what the
             # Store reads back, and is best-effort: an error disables it with its reason.
@@ -1783,16 +1798,23 @@ class _RunRecordWriter:
                 raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
             with fpath.open("ab") as f:
                 f.write(line + b"\n")
-        if self._status is not None and self._status.enabled:
-            status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
-            (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
-            last = self._status_expected is not None and self._status_written >= self._status_expected
-            self._status.write_status(self._status_completed, self._status_failures, force=last)
+            # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
+            # writer's counts.
+            if self._status is not None and self._status.enabled:
+                status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
+                (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
+                last = self._status_expected is not None and self._status_written >= self._status_expected
+                self._status.write_status(self._status_completed, self._status_failures, force=last)
         return fpath
 
     def flush_status(self) -> None:
         """Write the shard's status as it stands, for a caller that stops consuming before every row is in."""
-        if self._status is not None and self._status.enabled:
+        if self._status is None or not self._status.enabled:
+            return
+        with self._locked() as lock:
+            lock.seek(0)
+            if lock.read() != self._writer_token:
+                return  # another writer owns the shard now; its status stands
             self._status.write_status(self._status_completed, self._status_failures, force=True)
 
 
@@ -4610,6 +4632,7 @@ class RolloutCollectionHelper(BaseModel):
         completed_count = 0
         sources_dropped = False
         collection_succeeded = False
+        final_status_written = False
         latency_tracker = DispatchLatencyTracker()
         run_timing: Optional[RunTimingReport] = None
         if config.dispatch_start_report_within_s is not None:
@@ -4650,9 +4673,9 @@ class RolloutCollectionHelper(BaseModel):
             output_files.enter_context(store)
 
             def write_final_status() -> None:
-                # A run that stops before its final status write would otherwise leave the results persisted inside
-                # the write throttle out of the status file.
-                if collection_succeeded or batch_tracker is None:
+                # A run that stops before its final status write, during collection or in a step after it, would
+                # otherwise leave the results persisted inside the write throttle out of the status file.
+                if final_status_written or batch_tracker is None:
                     return
                 try:
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
@@ -5125,6 +5148,7 @@ class RolloutCollectionHelper(BaseModel):
                 aggregation_deferred=config.disable_aggregation,
                 force=True,
             )
+            final_status_written = True
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 
@@ -6019,7 +6043,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
         the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
         enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
-        is merged, and needs the payloads kept. With ``enrich_results`` off, results are exactly what `/run` returned.
+        is merged, and needs the payloads kept. With ``enrich_results`` the rows are dispatched as collection
+        dispatches them, on copies that name this call's run: results are validated, and under
+        ``route_failures_to_sidecar`` a failed `/run` comes back as the typed ``RolloutFailureRecord``, as
+        ``run_outcomes`` returns it; rows without a rollout identity keep the plain dispatch. With ``enrich_results``
+        off, results are exactly what `/run` returned.
 
         ``record_output_dir`` with ``record_shard`` also writes each rollout to that run folder through
         :class:`_RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
@@ -6074,10 +6102,16 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 missing = [key for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME) if key not in row]
                 if missing:
                     raise ValueError(f"Recording row {index} is missing required fields: {', '.join(missing)}")
-            # Recorded as collection dispatches: typed failure records under route_failures_to_sidecar and validated
-            # results, on rows that name the shard's run. The caller's rows are not modified.
+        if enrich_results and all(maybe_rollout_id_from_run_body(row) is not None for row in examples):
+            # Enriched or recorded, the rows are dispatched as collection dispatches: typed failure records under
+            # route_failures_to_sidecar and validated results, on copies that all name this call's run (a row reused
+            # from an earlier run included), so a recorded shard's records check against its manifest. The caller's
+            # rows are not modified. Rows without a rollout identity keep the plain dispatch and its legacy rows.
             run_id = uuid4().hex
-            dispatched = [dict(row, **{RUN_ID_KEY: row.get(RUN_ID_KEY) or run_id}) for row in examples]
+            dispatched = [
+                dict(row, **{RUN_ID_KEY: run_id, ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME, 0)})
+                for row in examples
+            ]
         completions = self._run_examples_with_metadata(
             dispatched,
             head_server_config=head_server_config,
@@ -6089,11 +6123,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             drain_margin_s=drain_margin_s,
             latency_tracker=latency_tracker,
             **({"retry_requests": False} if not retry_requests else {}),
-            **(
-                {"typed_outcomes": route_failures_to_sidecar, "validate_results": True}
-                if record_output_dir is not None
-                else {}
-            ),
+            **({"typed_outcomes": route_failures_to_sidecar, "validate_results": True} if run_id is not None else {}),
         )
         # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
         writer = None
@@ -6110,9 +6140,18 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 record_output_dir,
                 record_shard,
                 record_omitted_rollouts=record_omitted_rollouts,
-                rows=examples,
+                rows=dispatched,
                 run_id=run_id,
                 status_rows=status_rows,
+                source_rows=examples,
+                config_identity={
+                    "run_examples": {
+                        "route_failures_to_sidecar": route_failures_to_sidecar,
+                        "record_omitted_rollouts": record_omitted_rollouts,
+                        "include_model_call_payloads": include_model_call_payloads,
+                        "retry_requests": retry_requests,
+                    }
+                },
             )
         return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 
