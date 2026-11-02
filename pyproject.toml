@@ -667,9 +667,22 @@ include = [
     "nemo_gym",
     "nemo_gym.*",
 ]
-# SWE harnesses create mutable runtime trees inside their package directory.
-# Package discovery must never race or ship those caches and rollout outputs.
+# Include filters don't prune traversal. Exclude generated trees explicitly so
+# package discovery doesn't scan their contents, including on shared filesystems.
 exclude = [
+    "results",
+    "results.*",
+    "cache",
+    "cache.*",
+    "artifacts",
+    "artifacts.*",
+    "outputs",
+    "outputs.*",
+    "build",
+    "build.*",
+    "dist",
+    "dist.*",
+    # SWE harnesses also create mutable runtime trees inside package directories.
     "responses_api_agents.swe_agents.results",
     "responses_api_agents.swe_agents.results.*",
     "responses_api_agents.swe_agents.swe_openhands_setup",
