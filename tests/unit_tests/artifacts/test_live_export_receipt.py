@@ -205,6 +205,7 @@ def test_final_live_delivery_uses_same_run_and_existing_consumer(live):
 def test_live_finalization_never_certifies_incomplete_delivery(live, monkeypatch, fault):
     artifacts, exporter, client = live
     marker = artifacts.export_done_fpath("mlflow")
+    post = _post_run_client(monkeypatch)
     if fault == "async":
         failed = Future()
         failed.set_exception(RuntimeError("delivery failed"))
@@ -250,7 +251,107 @@ def test_live_finalization_never_certifies_incomplete_delivery(live, monkeypatch
     elif fault == "no_activation":
         exporter.client = None
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
-    assert marker.read_text() == "old-run" if fault == "old_receipt" else not marker.exists()
+    if fault == "old_receipt":
+        assert marker.read_text() == "old-run" and not post.runs
+    elif fault in ("missing_health", "stale_health"):
+        # Final coverage or health is not verified: nothing is certified or exported.
+        assert not marker.exists() and not post.runs
+    elif fault == "changed_source":
+        # The saved artifacts changed after their health was judged: the post-run export refuses them too.
+        assert not marker.exists()
+    else:
+        # The live run is never certified; the completed run gets a separate post-run export instead.
+        assert orjson.loads(marker.read_bytes())["run_id"] == "post-run" and post.runs == ["post-run"]
+
+
+def _post_run_client(monkeypatch) -> Client:
+    """The backend a post-run export opens: its runs are recorded, apart from the live run's client."""
+    post = Client()
+    post.runs = []
+
+    def create_run(*args, **kwargs):
+        post.runs.append("post-run")
+        return SimpleNamespace(info=SimpleNamespace(run_id="post-run"))
+
+    post.create_run = create_run
+    monkeypatch.setattr(module, "MlflowClient", lambda **kwargs: post)
+    return post
+
+
+def test_a_reopened_live_run_is_exported_after_the_run_with_a_bound_receipt(live, monkeypatch):
+    artifacts, exporter, client = live
+    from nemo_gym.orchestration.recovery import mlflow_errors
+
+    # A later segment reopened the live run an earlier segment opened, and completes the run.
+    exporter.reopened = True
+    post = _post_run_client(monkeypatch)
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    receipt = orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())
+    assert receipt == {
+        "version": 1,
+        "run_id": "post-run",
+        "artifacts": _artifact_version(artifacts),
+        "uploaded_rollouts": True,
+        "rollout_projection_version": 1,
+    }
+    assert post.runs == ["post-run"] and post.status == "FINISHED" and "rollouts.json" in post.artifacts
+    assert post.metrics["health/trial/known"] == 0
+    # The live run is left to its own teardown, and the scores are unchanged.
+    assert client.status == "RUNNING"
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific
+    assert not registry.run_failed()
+    collected = _collected_mlflow(artifacts)
+    assert collected["receipt"]["run_id"] == "post-run" and collected["receipt"]["current"] is True
+    assert mlflow_errors(collected, "FINISHED", observed_run_id="post-run") == []
+
+
+def test_an_existing_receipt_is_never_replaced_at_completion(live, monkeypatch):
+    artifacts, exporter, client = live
+    exporter.reopened = True
+    post = _post_run_client(monkeypatch)
+    marker = artifacts.export_done_fpath("mlflow")
+    marker.write_bytes(b'{"version": 1, "run_id": "earlier-export"}')
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert marker.read_bytes() == b'{"version": 1, "run_id": "earlier-export"}' and not post.runs
+
+
+def test_a_failed_post_run_export_warns_and_changes_no_score(live, monkeypatch, caplog):
+    artifacts, exporter, client = live
+    exporter.reopened = True
+    post = _post_run_client(monkeypatch)
+
+    def refused(*args, **kwargs):
+        raise RuntimeError("tracking server refused the table")
+
+    post.log_table = refused
+    scientific = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert not artifacts.export_done_fpath("mlflow").exists()
+    assert "Post-run mlflow export after live finalization failed" in caplog.text
+    assert "tracking server refused the table" in caplog.text
+    changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    changed[0].pop("_ng_run_health_metrics")
+    assert changed == scientific and not registry.run_failed()
+
+
+def test_a_run_without_a_configured_exporter_is_not_exported(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    monkeypatch.setattr(registry, "_EXPORTERS", [])
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert not artifacts.export_done_fpath("mlflow").exists() and not post.runs
+
+
+def test_an_exporter_that_never_certifies_live_runs_is_not_exported_again(live, monkeypatch):
+    artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
+    # A backend without live certification (the base `finalize_live`) keeps no receipt to complete.
+    monkeypatch.setattr(module.MLflowExporter, "finalize_live", registry.BaseExporter.finalize_live)
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert not artifacts.export_done_fpath("mlflow").exists() and not post.runs
 
 
 def test_teardown_alone_never_certifies_live_delivery(live):
@@ -289,8 +390,9 @@ def test_live_finalizer_streams_rollout_files_without_backend_table_download(liv
 
 
 @pytest.mark.parametrize("fault", ["wrong_source", "malformed_health", "wrong_backend_run", "new_reservation"])
-def test_live_finalizer_rejects_changed_completion_identity(live, fault):
+def test_live_finalizer_rejects_changed_completion_identity(live, monkeypatch, fault):
     artifacts, exporter, client = live
+    post = _post_run_client(monkeypatch)
     output = artifacts.rollouts_jsonl_fpath
     health = output.parent / "quality_summary.json"
     if fault == "wrong_source":
@@ -319,7 +421,11 @@ def test_live_finalizer_rejects_changed_completion_identity(live, fault):
             store.record_dispatch(row)
         assert RolloutStore.read(output).coverage()["complete"] is False
     _finalize_live_exporters(output)
-    assert not artifacts.export_done_fpath("mlflow").exists()
+    if fault == "wrong_backend_run":
+        # Verified saved artifacts whose live run cannot be certified get a separate post-run export.
+        assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "post-run"
+    else:
+        assert not artifacts.export_done_fpath("mlflow").exists() and not post.runs
 
 
 def test_live_delivery_retains_canonical_observations_without_raw_capture(live):
@@ -344,15 +450,17 @@ def test_live_delivery_retains_canonical_observations_without_raw_capture(live):
         assert uploaded["reward"] == original["reward"]
 
 
-def test_live_receipt_rejects_verifier_observations_not_in_acknowledged_rows(live):
+def test_live_receipt_rejects_verifier_observations_not_in_acknowledged_rows(live, monkeypatch):
     artifacts, exporter, client = live
+    _post_run_client(monkeypatch)
     output = artifacts.rollouts_jsonl_fpath
     rows = [orjson.loads(line) for line in output.read_bytes().splitlines()]
     rows[0]["ng_trajectory"]["verifier_invocations"].append({"invocation_id": "late-verifier", "status": "completed"})
     output.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
     run_health_checks(output, workers=1, run_coverage=[RolloutStore.read(output).coverage()])
     _finalize_live_exporters(output)
-    assert not artifacts.export_done_fpath("mlflow").exists()
+    # The live run is not certified; the post-run export sends the saved rows, late observation included.
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "post-run"
 
 
 @pytest.mark.parametrize("projection", [None, 0, 2, True, "1"])
@@ -445,8 +553,9 @@ def test_live_receipt_config_projection_preserves_capture_controls(live, enabled
 
 
 @pytest.mark.parametrize("field,value", [("enabled", True), ("sink", "other:Sink"), ("rebuild_response", True)])
-def test_live_receipt_rejects_changed_capture_controls(live, field, value):
+def test_live_receipt_rejects_changed_capture_controls(live, monkeypatch, field, value):
     artifacts, exporter, client = live
+    _post_run_client(monkeypatch)
     exporter.global_config_dict.token_id_capture = {
         "enabled": False,
         "sink": "example:Sink",
@@ -462,7 +571,8 @@ def test_live_receipt_rejects_changed_capture_controls(live, field, value):
         run_coverage=[RolloutStore.read(artifacts.rollouts_jsonl_fpath).coverage()],
     )
     _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
-    assert not artifacts.export_done_fpath("mlflow").exists()
+    # The live run is not certified; the post-run export sends the final saved config.
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "post-run"
 
 
 def test_live_config_projection_masks_secret_ancestry_without_mutating_config(live):

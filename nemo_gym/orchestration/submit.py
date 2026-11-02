@@ -268,52 +268,63 @@ def _recover(
         if max_walltime is not None and (walltime_reason or "").strip() and not inspect_only
         else None
     )
-    decision, collected = executor.recovery_evidence(
-        record,
-        benchmark,
-        score_key=score_key,
-        score_agent=score_agent,
-        score_environment=score_environment,
-        outcome_policy=outcome_policy,
-        # A repinned run resumes on the target's Store: its reader decides what that Store would run.
-        **({"reader_ref": repin} if repin is not None else {}),
-        **({"extend_retries": extend_retries} if extend_retries else {}),
-        # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
-        **({"max_walltime": max_walltime} if max_walltime is not None else {}),
-        **({"operator_budget": operator_budget} if operator_budget is not None else {}),
-        # The decision names a spin-up timeout raise the resubmit will render.
-        **(spinup if (spinup := _spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason)) else {}),
-    )
-    if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is None:
-        command = fresh_restart_command(gym_job_id, benchmark)
-        decision = decision.model_copy(update={"reason": f"{decision.reason}; --max-walltime is required: {command}"})
-    gate_task = (
-        gate_summary_from_collected(
-            decision,
-            collected,
-            max_unhealthy_fraction=max_unhealthy_fraction,
-            mlflow_status=mlflow_status,
-            mlflow_run_id=mlflow_run_id,
-            criteria=criteria,
+
+    def collect():
+        decision, collected = executor.recovery_evidence(
+            record,
+            benchmark,
+            score_key=score_key,
+            score_agent=score_agent,
+            score_environment=score_environment,
+            outcome_policy=outcome_policy,
+            # A repinned run resumes on the target's Store: its reader decides what that Store would run.
+            **({"reader_ref": repin} if repin is not None else {}),
+            **({"extend_retries": extend_retries} if extend_retries else {}),
+            # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
+            **({"max_walltime": max_walltime} if max_walltime is not None else {}),
+            **({"operator_budget": operator_budget} if operator_budget is not None else {}),
+            # The decision names a spin-up timeout raise the resubmit will render.
+            **(
+                spinup
+                if (spinup := _spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason))
+                else {}
+            ),
         )
-        if collected is not None
-        else gate_task_summary(
-            decision,
-            score=None,
-            summary_valid=None,
-            summary_reasons=["no evidence collected"],
-            health_passed=None,
-            health_reasons=["no evidence collected"],
+        if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is None:
+            command = fresh_restart_command(gym_job_id, benchmark)
+            decision = decision.model_copy(
+                update={"reason": f"{decision.reason}; --max-walltime is required: {command}"}
+            )
+        gate_task = (
+            gate_summary_from_collected(
+                decision,
+                collected,
+                max_unhealthy_fraction=max_unhealthy_fraction,
+                mlflow_status=mlflow_status,
+                mlflow_run_id=mlflow_run_id,
+                criteria=criteria,
+            )
+            if collected is not None
+            else gate_task_summary(
+                decision,
+                score=None,
+                summary_valid=None,
+                summary_reasons=["no evidence collected"],
+                health_passed=None,
+                health_reasons=["no evidence collected"],
+            )
         )
-    )
-    mlflow = {
-        "local": collected.mlflow if collected is not None else None,
-        "observed_status": mlflow_status,
-        "observed_run_id": mlflow_run_id,
-        "tracking_required": mlflow_tracking_required(collected),
-    }
-    if not mlflow["tracking_required"]:
-        mlflow["note"] = MLFLOW_NOT_REQUIRED_NOTE
+        mlflow = {
+            "local": collected.mlflow if collected is not None else None,
+            "observed_status": mlflow_status,
+            "observed_run_id": mlflow_run_id,
+            "tracking_required": mlflow_tracking_required(collected),
+        }
+        if not mlflow["tracking_required"]:
+            mlflow["note"] = MLFLOW_NOT_REQUIRED_NOTE
+        return decision, collected, gate_task, mlflow
+
+    decision, collected, gate_task, mlflow = collect()
     if inspect_only:
         if gate_task["status"] == "PLANNED":
             gate_task = {
@@ -329,6 +340,23 @@ def _recover(
             dispatched=None,
             gate_task=gate_task,
             mlflow=mlflow,
+        )
+    if decision.action == RecoveryAction.NOOP and _tracking_export_due(decision, collected, mlflow):
+        export = executor.export_tracking(record, benchmark, collected)
+        if export.get("state") == "unsupported":
+            reason = f"MLflow post-run export not performed: {export.get('error')}"
+        elif export.get("state") in ("succeeded", "skipped"):
+            # The receipt changes the MLflow evidence and the gate: collect both again, as a later recovery would.
+            decision, collected, gate_task, mlflow = collect()
+            reason = f"MLflow post-run export performed: receipt written for run {export.get('run_id')}"
+        else:
+            reason = f"MLflow post-run export failed: {export.get('error')}"
+        return RecoveryOutcome(
+            decision=decision.model_copy(update={"reason": f"{decision.reason}; {reason}"}),
+            ok=decision.action == RecoveryAction.NOOP and export.get("state") in ("succeeded", "skipped"),
+            dispatched=None if export.get("state") == "unsupported" else "export",
+            gate_task=gate_task,
+            mlflow={**mlflow, "export": export},
         )
     if decision.action == RecoveryAction.NOOP:
         return RecoveryOutcome(decision=decision, ok=True, dispatched=None, gate_task=gate_task, mlflow=mlflow)
@@ -389,6 +417,27 @@ def _recover(
             mlflow=mlflow,
         )
     return RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=gate_task, mlflow=mlflow)
+
+
+def _tracking_export_due(decision: Any, collected: Any, mlflow: dict[str, Any]) -> bool:
+    """Whether a complete run lacks the MLflow export receipt its saved config requires.
+
+    Only a run whose saved config configures MLflow (tracking URI, experiment and run name) and does not set
+    ``mlflow_tracking_required`` to false, with no post-run receipt at all and no live job, is exported. A run that
+    configured no exporter is never exported, and a receipt, current or not, is never replaced.
+    """
+    if collected is None or not decision.complete or decision.scheduler_live or not mlflow["tracking_required"]:
+        return False
+    provenance = (collected.quality or {}).get("provenance")
+    facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
+    local = collected.mlflow
+    return (
+        isinstance(facts, dict)
+        and facts.get("configured") is True
+        and isinstance(local, dict)
+        and "receipt" in local
+        and local["receipt"] is None
+    )
 
 
 def load_original_submission_record(path: str | Path) -> tuple[SubmissionRecord, str]:

@@ -71,7 +71,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     _walltime_to_seconds,
 )
 from nemo_gym.orchestration.executors.script_templates import render_driver_entrypoint
-from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
+from nemo_gym.orchestration.executors.slurm_script import _resolve_env, build_sbatch_script
 from nemo_gym.orchestration.jobs import (
     RESOLVED_CONFIG_NAME,
     BenchmarkJob,
@@ -921,6 +921,8 @@ _JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
 
 # Held by `gym eval resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
 _RESUBMIT_LOCK = RESUBMIT_LOCK_NAME
+# How long a recovery's post-run MLflow export may take on the login host, its Gym install included.
+_EXPORT_TIMEOUT_S = 3600
 
 
 def _validate_benchmark_names(benchmarks: list[str]) -> None:
@@ -1440,6 +1442,80 @@ class SlurmExecutor(BaseExecutor):
             updated = job.model_copy(update={"job_id": job_id, "error": None})
             self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(decision=current, ok=True, dispatched="reverify", job_id=job_id)
+
+    def export_tracking(
+        self, record: SubmissionRecord, benchmark: str, evidence: CollectedEvidence | None
+    ) -> dict[str, Any]:
+        """Run `gym eval export mlflow` on the run's saved artifacts from the login host, and report its result.
+
+        The export runs where the remote Store reader runs, with the run's saved pinned Gym install (and its MLflow
+        extra) in a temporary checkout: it only reads the saved artifacts and talks to the tracking server, so it needs
+        no allocation. It takes the benchmark's saved `mlflow_*` and `upload_rollouts` run settings, and its
+        credentials as the driver did: the submission's forwarded environment and the driver's env. Gym's export takes
+        the run lock, prepares the health metrics and writes the receipt bound to the artifact digests, and skips a run
+        that already has one. The resubmit lock is held and no job of the chain may be live meanwhile.
+        """
+        from nemo_gym.orchestration.executors.utils import flatten_run_args
+
+        def failed(error: str) -> dict[str, Any]:
+            return {"exporter": "mlflow", "host": "login", "state": "failed", "error": error}
+
+        job_dir = Path(record.benchmark_job(benchmark).job_dir)
+        try:
+            with get_connection(record.hostname) as conn:
+                config = self._saved_config(conn, Path(record.run_dir))
+                install = config.driver.gym_install
+                if install is None or re.fullmatch(r"[0-9a-fA-F]{40}", install.ref) is None:
+                    return failed("the post-run export requires the run's saved immutable Gym ref")
+                run = config.driver.benchmarks[benchmark].run
+                settings = {k: v for k, v in run.items() if k.startswith("mlflow_") or k == "upload_rollouts"}
+                rollouts = job_dir / "artifacts" / "rollouts.jsonl"
+                command = " ".join(
+                    ["gym eval export mlflow", shlex.quote(f"+rollouts_jsonl_fpath={rollouts}")]
+                    + flatten_run_args(settings)
+                )
+                entrypoint = render_driver_entrypoint(
+                    repo=install.repo,
+                    ref=install.ref,
+                    prepare_cmd=None,
+                    command=command,
+                    extras=("mlflow",),
+                    cleanup=True,
+                )
+                chain = evidence.job_chain if evidence is not None else []
+                commands = _submission_exports(config) + [
+                    'fail() { echo "Error: $*" >&2; exit 1; }',
+                    f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
+                    f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
+                    f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+                    *(
+                        [
+                            f"live=$(squeue --all --noheader -j {shlex.quote(','.join(chain))} --format=%A) "
+                            "|| fail 'scheduler unknown'",
+                            '[ -z "$live" ] || fail "a job of the chain is still live"',
+                        ]
+                        if chain
+                        else []
+                    ),
+                    "unset VIRTUAL_ENV UV_PYTHON PYTHONPATH PYTHONHOME",
+                    f"_gym_out=$({_resolve_env(config.driver.env)}timeout --kill-after=10s {_EXPORT_TIMEOUT_S}s "
+                    f"{entrypoint} 2>&1); _gym_rc=$?",
+                    "printf '%s\n' \"$_gym_out\" | tail -n 40",
+                    'echo "__GYM_EXPORT_RC:$_gym_rc"',
+                ]
+                output = conn.run(commands)
+        except (RuntimeError, OSError, ValueError) as error:
+            return failed(str(error))
+        state = re.findall(r"^Export mlflow: (\w+)$", output, re.MULTILINE)
+        run_id = re.findall(r"^  run_id: (\S+)$", output, re.MULTILINE)
+        rc = re.findall(r"^__GYM_EXPORT_RC:(\d+)$", output, re.MULTILINE)
+        result = {"exporter": "mlflow", "host": "login", "state": state[-1] if state else "failed"}
+        if run_id:
+            result["run_id"] = run_id[-1]
+        if result["state"] not in ("succeeded", "skipped") or rc != ["0"]:
+            tail = [line for line in output.splitlines() if not line.startswith("__GYM_EXPORT_RC:")][-5:]
+            result |= {"state": "failed", "error": f"exit code {rc[-1] if rc else 'unknown'}: " + " | ".join(tail)}
+        return result
 
     def resubmit(
         self,

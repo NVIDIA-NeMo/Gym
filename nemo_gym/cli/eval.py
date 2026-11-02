@@ -884,10 +884,41 @@ def _finalize_live_exporters(output: Path) -> None:
                 exporter.export_metrics(health_metrics)
                 if health.read_bytes() != health_bytes or _artifact_version(artifacts) != version:
                     raise RuntimeError("Final run artifacts changed before live finalization.")
-                exporter.finalize_live(artifacts, version)
+                try:
+                    exporter.finalize_live(artifacts, version)
+                except Exception as exc:
+                    logging.getLogger(__name__).warning(
+                        "Live tracking completion remains unverified: %s", exc, exc_info=True
+                    )
+                _export_without_receipt(exporter, artifacts)
     except Exception as exc:
         # Tracking failure never changes scores or requests another model attempt.
         logging.getLogger(__name__).warning("Live tracking completion remains unverified: %s", exc, exc_info=True)
+
+
+def _export_without_receipt(exporter, artifacts) -> None:
+    """Export the completed run after the fact when live finalization left it without a receipt.
+
+    A live run reopened by a later segment never certifies (`finalize_live` cannot vouch for rows an earlier segment
+    sent), nor does a live delivery it could not verify. Such a run gets Gym's post-run export, as `gym eval export`
+    sends it, from a fresh exporter of the same backend and config; the caller holds the run lock and has prepared the
+    health metrics. An exporter that never certifies a live run keeps no receipt, so it is not exported again, and an
+    existing receipt is never replaced. A failed export is logged; it never changes scores or the exit code.
+    """
+    from nemo_gym.artifacts.exporters.base import BaseExporter, ExportState
+
+    if (
+        type(exporter).finalize_live is BaseExporter.finalize_live
+        or artifacts.export_done_fpath(exporter.name).exists()
+    ):
+        return
+    result = type(exporter)(exporter.global_config_dict).export(artifacts)
+    if result.state is ExportState.FAILED:
+        logging.getLogger(__name__).warning(
+            "Post-run %s export after live finalization failed; the run has no export receipt: %s",
+            exporter.name,
+            result.error,
+        )
 
 
 _terminated = False
