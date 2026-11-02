@@ -19,6 +19,7 @@ import atexit
 import socket
 import time
 from collections.abc import Callable
+from contextlib import suppress
 from traceback import print_exc
 from typing import Any, NamedTuple, Optional, Type, Union, Unpack
 
@@ -38,6 +39,7 @@ from aiohttp.client import _RequestOptions
 from multidict import CIMultiDict
 from pydantic import BaseModel, Field
 
+from nemo_gym.client.http_retries import record_downstream_http_retries, record_http_retry_started
 from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -612,7 +614,13 @@ async def _request_with_retries(
         explicit_tries = 0
         retries = 0
         retry_start = time.monotonic()
+        attempts_started = 0
         while True:
+            if attempts_started:
+                # Counted as the next attempt starts: a failure that exhausts a budget raises before reaching here,
+                # and a cancelled backoff sleep starts nothing.
+                record_http_retry_started()
+            attempts_started += 1
             if _max_num_tries is not None:
                 explicit_tries += 1
             # A tracker belongs to exactly one request. Do not reuse a completed upload across retries.
@@ -622,6 +630,12 @@ async def _request_with_retries(
                 attempt_kwargs["upload_tracker"] = upload
             try:
                 response = await client.request(method=method, url=url, **attempt_kwargs)
+                if _internal:
+                    # Counted as the reply arrives, so a reply whose body is cut off below and retried still reports
+                    # the retries made for it. Any bookkeeping error is dropped here: it must never reach the retry
+                    # handling below and resend a request the server already accepted.
+                    with suppress(Exception):
+                        record_downstream_http_retries(response)
                 if (
                     _read_body
                     and _resend_after_disconnect
@@ -632,7 +646,6 @@ async def _request_with_retries(
                     # resend would start another episode, and an error reply is the caller's to read in full: such a
                     # reply goes back unread, so the caller's own read raises the original error, with its status.
                     await response.read()
-                return response
             except ServerDisconnectedError as error:
                 if _on_transport_failure is not None:
                     _on_transport_failure(error, _request_upload_complete(upload))
@@ -710,6 +723,8 @@ Sleeping 0.5s and retrying...
                     num_tries += 1
 
                 await asyncio.sleep(0.5)
+            else:
+                return response
     finally:
         if token is not None:
             reset_server_name(token)
