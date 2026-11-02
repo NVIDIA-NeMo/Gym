@@ -54,10 +54,10 @@ from PIL import Image, ImageDraw
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.agent_utils.verify_call import verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.failure_transport import observe_failure
-from nemo_gym.typed_exceptions import agent_route_failure
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,
@@ -597,18 +597,24 @@ class GdpPdfAgent(SimpleAgent):
                 verification_skipped=True,
             )
         else:
-            try:
+            request = result
+
+            async def verify() -> dict[str, Any]:
                 verified = await self.server_client.post(
-                    server_name=self.config.resources_server.name, url_path="/verify", json=result, cookies=cookies
+                    server_name=self.config.resources_server.name, url_path="/verify", json=request, cookies=cookies
                 )
                 await raise_for_status(verified)
-                result = await get_response_json(verified)
-            except Exception as error:
+                return await get_response_json(verified)
+
+            try:
+                # A reply lost in transport is tried again before the row is masked (verify_with_transport_retry).
+                result = await verify_with_transport_retry(
+                    verify, server_client=self.server_client, server_name=self.config.resources_server.name
+                )
+            except NgFailureEvent as failure:
                 # Return the real generated answer on the established masked-failure path. Raising
-                # here would discard it at the HTTP boundary and make a resume generate again.
-                failure = agent_route_failure(error, operation="verify", stage="verification")
-                failure.__cause__ = error
-                observe_failure(failure)
+                # here would discard it at the HTTP boundary and make a resume generate again. Every
+                # attempt was observed as its own agent route failure of operation verify.
                 result.update(
                     reward=0.0,
                     mask_sample=True,
