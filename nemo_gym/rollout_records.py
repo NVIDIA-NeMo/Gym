@@ -62,6 +62,8 @@ REJUDGED_FAILURE_ID_KEY = "_ng_rejudged_failure_id"
 REJUDGE_OPERATION_ID_KEY = "_ng_rejudge_operation_id"
 # The settled judge failure's own observations, kept on the selected result.
 REJUDGED_OBSERVATIONS_KEY = "_ng_rejudged_failure_observations"
+# A re-verified saved result is named by this prefix and the digest of the saved row (``rejudge_predecessor_id``).
+RESULT_PREDECESSOR_PREFIX = "result-sha256:"
 
 
 def journal_path_for(output: Path) -> Path:
@@ -445,17 +447,33 @@ def _holds_saved_answer(row: dict) -> bool:
     return has_saved_generation(row)
 
 
-def rejudgment_admission_closed_by(pending, outcome: dict, identity: str, failures_path: Path) -> bool:
+def rejudge_predecessor_id(row: dict) -> str | None:
+    """The id a re-judgment names its predecessor by: a failure's ``_ng_failure_id``, else, for a saved result whose
+    grading is re-verified from its saved answer, the digest of the whole saved row."""
+    if row.get("_ng_failure_class") is not None:
+        failure_id = row.get("_ng_failure_id")
+        return failure_id if isinstance(failure_id, str) and failure_id else None
+    return RESULT_PREDECESSOR_PREFIX + hashlib.sha256(orjson.dumps(row, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def rejudgment_admission_closed_by(
+    pending, outcome: dict, identity: str, failures_path: Path, results_path: Path | None = None
+) -> bool:
     """Whether outcome is the saved result of admission pending: operation, predecessor id and row hash, identity,
-    attempt and admission time all match. Cold readers and the close use this one check."""
+    attempt and admission time all match. Cold readers and the close use this one check.
+
+    A failure predecessor is found in ``failures_path``; a saved-result predecessor in ``results_path``."""
     if (
         outcome.get(REJUDGE_OPERATION_ID_KEY) != pending.operation_id
         or outcome.get(REJUDGED_FAILURE_ID_KEY) != pending.predecessor_failure_id
         or outcome.get("_ng_rejudge_admitted_at") != pending.admitted_at
     ):
         return False
-    for _, row in _indexed_records(failures_path):
-        if row.get("_ng_failure_id") == pending.predecessor_failure_id:
+    result_predecessor = pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX)
+    if result_predecessor and results_path is None:
+        return False
+    for _, row in _indexed_records(results_path if result_predecessor else failures_path):
+        if rejudge_predecessor_id(row) == pending.predecessor_failure_id:
             return (
                 logical_rollout_id(row) == identity
                 and row.get(ATTEMPT_INDEX_KEY_NAME, 0) == outcome.get(ATTEMPT_INDEX_KEY_NAME, 0)
@@ -466,11 +484,17 @@ def rejudgment_admission_closed_by(pending, outcome: dict, identity: str, failur
 
 
 def is_rejudgment_of(failure: dict, result: dict) -> bool:
-    """Whether ``result`` re-scores the saved answer of judge failure ``failure`` without a new model attempt."""
+    """Whether ``result`` re-scores the saved answer of ``failure`` without a new model attempt.
+
+    ``failure`` is a judge failure, or a saved result whose grading is re-verified from its saved answer (a result
+    masked by a judge or verify-transport failure, or one with no recorded grading). Which saved results are
+    re-verified is the caller's selection; this checks only that ``result`` binds the same saved answer and attempt.
+    """
+    predecessor_id = rejudge_predecessor_id(failure)
     return (
-        failure.get("_ng_failure_class") == "judge_failed"
+        failure.get("_ng_failure_class") in ("judge_failed", None)
         and _holds_saved_answer(failure)
-        and failure.get("_ng_failure_id") is not None
+        and predecessor_id is not None
         and result.get("_ng_failure_class") is None
         and type(result.get("reward")) in (int, float)
         and math.isfinite(result["reward"])
@@ -478,7 +502,7 @@ def is_rejudgment_of(failure: dict, result: dict) -> bool:
         and not result.get("mask_sample")
         and result.get(RUN_ID_KEY) == failure.get(RUN_ID_KEY)
         and result.get(ATTEMPT_INDEX_KEY_NAME, 0) == failure.get(ATTEMPT_INDEX_KEY_NAME, 0)
-        and result.get(REJUDGED_FAILURE_ID_KEY) == failure["_ng_failure_id"]
+        and result.get(REJUDGED_FAILURE_ID_KEY) == predecessor_id
         and result.get("response") == failure.get("response")
     )
 
@@ -717,7 +741,7 @@ class RolloutRecords:
         for identity, pending in manifest.pending_rejudge.items():
             latest = state.payloads.get((identity, state.latest.get(identity)))
             if latest is None or not rejudgment_admission_closed_by(
-                pending, latest.record.read(), identity, failures_path_for(output)
+                pending, latest.record.read(), identity, failures_path_for(output), output
             ):
                 # Admitted for re-judgment but no outcome saved: whether the judge ran is unknown.
                 state.unresolved_dispatches.add(identity)

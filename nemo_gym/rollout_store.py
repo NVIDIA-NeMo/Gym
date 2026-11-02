@@ -39,6 +39,7 @@ from nemo_gym.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
     REJUDGED_OBSERVATIONS_KEY,
+    RESULT_PREDECESSOR_PREFIX,
     RUN_ID_KEY,
     RolloutRecord,
     RolloutRecords,
@@ -52,6 +53,7 @@ from nemo_gym.rollout_records import (
     materialized_path_for,
     prepare_append,
     read_records,
+    rejudge_predecessor_id,
     rejudgment_admission_closed_by,
     resolve_rollout_owner,
     resolve_rollout_path,
@@ -329,7 +331,8 @@ class RolloutStore:
         """Durably admit a judge-only re-judgment of the selected judge failure before its judge call.
 
         The caller holds run_lock. Only the manifest changes: the failure stays selected with its debit, and no model
-        attempt is reserved.
+        attempt is reserved. ``failure`` may also be a selected saved result whose grading is re-verified from its
+        saved answer: a failed re-verification of it saves nothing, so it spends no failure attempt and needs none.
         """
         key = self._state._key(failure)
         current = self._state.payloads.get(key)
@@ -337,12 +340,15 @@ class RolloutStore:
             raise ConfigError(f"Rollout attempt {key!r}: the bound judge failure is no longer the selected outcome.")
         if key[0] in self.manifest.pending_rejudge:
             raise ConfigError(f"Rollout {key[0]!r} already has an admitted re-judgment whose outcome is unknown.")
+        predecessor_id = rejudge_predecessor_id(failure)
+        if predecessor_id is None:
+            raise ConfigError(f"Rollout attempt {key!r}: the bound failure has no failure id.")
         cap = self.manifest.max_rollout_attempts
-        if cap is None or self._state.failure_count(key[0]) >= cap:
+        if failure.get("_ng_failure_class") is not None and (cap is None or self._state.failure_count(key[0]) >= cap):
             raise ConfigError(f"Rollout {key[0]!r} has no saved failure attempt left for a re-judgment.")
         pending = PendingRejudge(
             operation_id=uuid.uuid4().hex,
-            predecessor_failure_id=failure["_ng_failure_id"],
+            predecessor_failure_id=predecessor_id,
             predecessor_sha256=hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest(),
             admitted_at=time.time(),
         )
@@ -356,11 +362,30 @@ class RolloutStore:
         if pending is None or pending.operation_id != operation_id:
             raise ConfigError(f"Rollout {identity!r} has no admitted re-judgment {operation_id!r}.")
         outcome = latest.record.read() if latest is not None else {}
-        if not rejudgment_admission_closed_by(pending, outcome, identity, failures_path_for(self.output)):
+        if not rejudgment_admission_closed_by(pending, outcome, identity, failures_path_for(self.output), self.output):
             raise ConfigError(
                 f"Rollout {identity!r}: no saved outcome matches admitted re-judgment {operation_id!r} "
                 "(operation, predecessor id or hash, identity, attempt or admission time differ)."
             )
+        self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
+        self._state.unresolved_dispatches.discard(identity)
+
+    def withdraw_rejudgment(self, identity: str, operation_id: str) -> None:
+        """Withdraw the admission of a saved result's re-verification that answered without a grade.
+
+        The verifier answered, so its outcome is known; nothing is saved and the saved result stays selected as it
+        was. Only a saved-result admission can be withdrawn: a judge failure's re-judgment saves its failed outcome.
+        """
+        pending = self.manifest.pending_rejudge.get(identity)
+        if (
+            pending is None
+            or pending.operation_id != operation_id
+            or not pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX)
+        ):
+            raise ConfigError(f"Rollout {identity!r} has no admitted saved-result re-verification {operation_id!r}.")
+        latest = self._state.payloads.get((identity, self._state.latest.get(identity)))
+        if latest is None or rejudge_predecessor_id(latest.record.read()) != pending.predecessor_failure_id:
+            raise ConfigError(f"Rollout {identity!r}: its re-verified saved result is no longer the selected outcome.")
         self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
         self._state.unresolved_dispatches.discard(identity)
 
@@ -371,7 +396,7 @@ class RolloutStore:
         if current is None or self._state.latest.get(key[0]) != key[1]:
             raise ConfigError(f"Rollout attempt {key!r} is not the selected outcome of this run.")
         for name in (RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME, REJUDGED_FAILURE_ID_KEY):
-            expected = failure.get("_ng_failure_id") if name == REJUDGED_FAILURE_ID_KEY else failure.get(name)
+            expected = rejudge_predecessor_id(failure) if name == REJUDGED_FAILURE_ID_KEY else failure.get(name)
             if result.get(name) != expected:
                 raise ConfigError(
                     f"Rollout attempt {key!r}: re-judged result has {name}={result.get(name)!r}, not {expected!r}."
@@ -413,13 +438,13 @@ class RolloutStore:
             pending is None
             or result.get(REJUDGE_OPERATION_ID_KEY) != pending.operation_id
             or result.get("_ng_rejudge_admitted_at") != pending.admitted_at
-            or pending.predecessor_failure_id != failure.get("_ng_failure_id")
+            or pending.predecessor_failure_id != rejudge_predecessor_id(failure)
             or hashlib.sha256(orjson.dumps(failure, option=orjson.OPT_SORT_KEYS)).hexdigest()
             != pending.predecessor_sha256
         ):
             raise ConfigError(f"Rollout attempt {key!r}: no matching admitted re-judgment for this result.")
         cap = self.manifest.max_rollout_attempts
-        if cap is None or self._state.failure_count(key[0]) >= cap:
+        if failure.get("_ng_failure_class") is not None and (cap is None or self._state.failure_count(key[0]) >= cap):
             raise ConfigError(f"Rollout attempt {key!r}: the saved failure cap does not admit another re-judgment.")
         if (
             saved != failure

@@ -262,6 +262,8 @@ class RecoveryOutcome(BaseModel):
     gate_task: dict[str, Any] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
+    # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
+    reverify: str | None = None
     # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
     reader_token: str | None = None
     # A --max-walltime raise checked against the partition before any evidence is read: the partition, its MaxTime
@@ -299,6 +301,9 @@ class RecoveryDecision(BaseModel):
     # The OPERATOR-CONTINUATION record a RESUBMIT under an operator budget carries: who, why, the budget, the unknown
     # fields, the counter values it fills with their previous states, and its epoch. The resubmit journals it.
     operator_continuation: dict[str, Any] | None = None
+    # A RESUBMIT of a run that also has saved answers to grade again names them: the resumed run re-verifies them
+    # from their saved answers first, while its servers are up, and then runs the policy work.
+    reverify_first: list[Identity] = Field(default_factory=list)
 
     @property
     def complete(self) -> bool:
@@ -612,6 +617,10 @@ def decide_recovery(
 
     evidence: list[IdentityEvidence] = []
     policy_stopped = False
+    # Masked results re-verified from their saved answers (``reverification_cause``): no failure attempt is spent. A
+    # scored result whose grading was never recorded stays SCORED here (the trial gate reports it unobserved); the
+    # run's completion pass grades it again.
+    saved_results: set[Identity] = set()
     for identity in sorted(expected_set):
         if identity in result_rows:
             row = result_rows[identity]
@@ -628,6 +637,18 @@ def decide_recovery(
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
             if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
+                if reverification_cause(row) is not None:
+                    # Masked by a judge or verify-transport failure: its saved answer is graded again, never rerun.
+                    saved_results.add(identity)
+                    evidence.append(
+                        IdentityEvidence(
+                            identity=identity,
+                            state=IdentityState.JUDGE_RECOVERABLE,
+                            failure_kind=row.get("failure_kind"),
+                            events=_events(row),
+                        )
+                    )
+                    continue
                 # Collection reuses a masked result as completed: it is retained, never run again, and not measured.
                 evidence.append(
                     IdentityEvidence(
@@ -800,7 +821,11 @@ def decide_recovery(
         if fact is None:
             continue
         item.attempts, item.max_attempts = fact.attempts, fact.max_attempts
-        if item.state == IdentityState.JUDGE_RECOVERABLE and fact.attempts >= fact.max_attempts:
+        if (
+            item.state == IdentityState.JUDGE_RECOVERABLE
+            and item.identity not in saved_results
+            and fact.attempts >= fact.max_attempts
+        ):
             item.state = IdentityState.EXHAUSTED
         elif item.state == IdentityState.MISSING and (fact.reserved or not fact.pending):
             # A reservation without an outcome stays unknown while the allocation that held it may be alive or its
@@ -821,7 +846,7 @@ def decide_recovery(
     counts = {state: len(ids) for state, ids in by_state.items()}
     duplicates = sorted(i for i, n in seen.items() if n > 1)
 
-    def decision(action: RecoveryAction, reason: str) -> RecoveryDecision:
+    def decision(action: RecoveryAction, reason: str, **fields: Any) -> RecoveryDecision:
         return RecoveryDecision(
             action=action,
             reason=reason,
@@ -830,6 +855,7 @@ def decide_recovery(
             identities=by_state,
             evidence=evidence,
             duplicate_results=duplicates,
+            **fields,
         )
 
     # A live job is still writing the files read above, whatever they show now: classify nothing from them.
@@ -892,6 +918,13 @@ def decide_recovery(
         )
     if not needs_policy:
         if counts.get(IdentityState.JUDGE_RECOVERABLE):
+            if saved_results:
+                return decision(
+                    RecoveryAction.REVERIFY,
+                    f"{counts[IdentityState.JUDGE_RECOVERABLE]} saved answer(s) only need grading again "
+                    f"({len(saved_results)} masked by a judge or verify-transport failure): re-verify "
+                    "the saved answers with `gym eval reverify --judge-failed-only --settle-into-source`",
+                )
             return decision(
                 RecoveryAction.REVERIFY,
                 f"{counts[IdentityState.JUDGE_RECOVERABLE]} judge failure(s) only: "
@@ -922,11 +955,9 @@ def decide_recovery(
                 f"{omission_summary(evidence)}",
             )
         return decision(RecoveryAction.NOOP, "every identity is scored or a final model failure")
-    if counts.get(IdentityState.JUDGE_RECOVERABLE):
-        return decision(
-            RecoveryAction.STOP,
-            "saved judge answers and policy work need separate recovery; mixed recovery is unsupported",
-        )
+    # Saved answers to grade again and policy work: the resumed run re-verifies the saved answers first, while its
+    # servers are up, and then runs the missing and retryable identities.
+    reverify_first = sorted(by_state.get(IdentityState.JUDGE_RECOVERABLE.value, []))
     if budget.live_job is None or budget.max_infra_retries is None or budget.infra_retries_used is None:
         return decision(RecoveryAction.STOP, UNKNOWN_BUDGET_REASON)
     segment = planned_missing_continuation and bool(managed_selection) and not counts.get(IdentityState.RETRYABLE)
@@ -945,8 +976,14 @@ def decide_recovery(
             )
     return decision(
         RecoveryAction.RESUBMIT,
-        f"{needs_policy} identity(ies) need the policy again: a Gym resume runs only missing and retryable ones"
+        (
+            f"{len(reverify_first)} saved answer(s) are re-verified first by the resumed run, then "
+            if reverify_first
+            else ""
+        )
+        + f"{needs_policy} identity(ies) need the policy again: a Gym resume runs only missing and retryable ones"
         + (f"; {populations}" if counts.get(IdentityState.UNKNOWN) or counts.get(IdentityState.MASKED) else ""),
+        reverify_first=reverify_first,
     )
 
 
@@ -1018,7 +1055,8 @@ a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
-        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "ng_policy_model_server")
+        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission",
+        "ng_policy_model_server", "_ng_rejudge_operation_id")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
 # attempts. Only their presence leaves the run host, never their content or the run id.
@@ -4780,3 +4818,127 @@ def gate_summary_from_collected(
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     return task
+
+
+# --- Saved-answer re-verification --------------------------------------------------------------------------------- #
+# A saved result whose grading failed for a judge or transport cause, or whose grading was never recorded, is graded
+# again from its saved answer: never by running the policy again. Collection settles it into the run at completion
+# (``rollout_reverification.bind_judge_failures``) and ``--recover`` decides REVERIFY for it. A masked result whose
+# verifier deterministically could not measure it (any other cause) is a model fact and is never re-verified.
+REVERIFY_JUDGE = "judge"
+REVERIFY_VERIFY_TRANSPORT = "verify_transport"
+REVERIFY_UNGRADED = "ungraded"
+_REVERIFY_JUDGE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE})
+
+
+def _transport_kind(kind: Any) -> bool:
+    return isinstance(kind, str) and kind.startswith("transport_")
+
+
+def _verify_transport_chain(events: Mapping[str, Any], event: Mapping[str, Any]) -> bool:
+    """Whether ``event`` and every explicit cause below it name only a lost verify call: an agent route failure or a
+    transport kind, with no reply status. A verifier's own failure or an HTTP reply anywhere in the chain is not one."""
+    from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED
+
+    seen: set[str] = set()
+    current: Any = event
+    while isinstance(current, Mapping):
+        kind = current.get("failure_kind")
+        foreign = current.get("foreign_error")
+        if not (kind == AGENT_ROUTE_FAILED or _transport_kind(kind)):
+            return False
+        if current.get("http_status") is not None or (
+            isinstance(foreign, Mapping) and foreign.get("http_status") is not None
+        ):
+            return False
+        cause = current.get("cause_id")
+        if cause is None:
+            return True
+        if not isinstance(cause, str) or cause in seen:
+            return False
+        seen.add(cause)
+        current = events.get(cause)
+    return False
+
+
+def _verify_transport_failure(row: Mapping[str, Any]) -> bool:
+    """Whether the row was masked because its verify call was lost in transport: its kind is an agent route failure
+    or a transport kind, and a saved failure event of the ``verify`` operation has a transport-only cause chain."""
+    from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED
+
+    kind = row.get("failure_kind")
+    events = row.get(FAILURE_EVENTS)
+    if not (kind == AGENT_ROUTE_FAILED or _transport_kind(kind)) or not isinstance(events, Mapping):
+        return False
+    return any(
+        isinstance(event, Mapping) and event.get("operation") == "verify" and _verify_transport_chain(events, event)
+        for event in events.values()
+    )
+
+
+def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
+    """Whether the row's verifier invocations were observed but recorded no grading: no grading operation, no
+    verifier grading record, no saved grading artifact (``grading_artifact``) and no model-failure rule
+    (``_model_failure``). A row from a pin without verifier observations proves nothing and is not selected."""
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
+    if not isinstance(verifiers, list) or not verifiers:
+        return False
+    if any(
+        not isinstance(verifier, Mapping) or verifier.get("grading_operations") or verifier.get("grading_record")
+        for verifier in verifiers
+    ):
+        return False
+    return grading_artifact(row) is None and not _model_failure(row)
+
+
+def reverification_cause(row: Mapping[str, Any]) -> str | None:
+    """Why a saved result row is re-verified from its saved answer, or None when it is not.
+
+    ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``).
+    ``REVERIFY_VERIFY_TRANSPORT``: masked because its verify call was lost in transport (``_verify_transport_failure``).
+    ``REVERIFY_UNGRADED``: scored, but no grading was recorded for it (``_grading_unrecorded``).
+    Only a result with a saved answer qualifies; a failures-sidecar row, a result a re-verification already settled
+    (its settlement is its grading) and every other masked result do not. ``row`` is a collector projection, or a
+    saved row passed through ``saved_row_evidence``.
+    """
+    if (
+        row.get(FAILURE_CLASS) is not None
+        or row.get("_ng_omitted_rollout") is True
+        or row.get("_ng_rejudge_operation_id") is not None
+        or not _saved_answer(row)
+    ):
+        return None
+    if row.get("mask_sample") is True:
+        if row.get("failure_kind") in _REVERIFY_JUDGE_KINDS:
+            return REVERIFY_JUDGE
+        return REVERIFY_VERIFY_TRANSPORT if _verify_transport_failure(row) else None
+    if row.get("evaluation_completed") is False or _reward(row) is None:
+        return None
+    return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
+
+
+_COLLECTOR_FUNCTIONS: dict[str, Any] = {}
+
+
+def _collector_grading_facts():
+    """``COLLECT_SCRIPT``'s own ``grading_facts``, so an in-process reader projects a saved row as the collector does."""
+    if not _COLLECTOR_FUNCTIONS:
+        start, end = COLLECT_SCRIPT.index("\ndef finite("), COLLECT_SCRIPT.index("\ndef grading_result_binding(")
+        namespace: dict[str, Any] = {"math": math}
+        exec(COLLECT_SCRIPT[start:end], namespace)  # noqa: S102 - this module's own constant source
+        _COLLECTOR_FUNCTIONS.update(namespace)
+    return _COLLECTOR_FUNCTIONS["grading_facts"]
+
+
+def saved_row_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
+    """A full saved row with the evidence fields ``COLLECT_SCRIPT`` projects for the grading predicates: its scalar
+    grading facts and its verifier invocations."""
+    evidence = dict(row)
+    facts = _collector_grading_facts()(row)
+    if any(value is not None and value is not False and value != [] for value in facts.values()):
+        evidence["_ng_collected_grading_facts"] = facts
+    trajectory = row.get("ng_trajectory")
+    if isinstance(trajectory, Mapping):
+        evidence["ng_trial_observations"] = {"verifier_invocations": trajectory.get("verifier_invocations")}
+    return evidence

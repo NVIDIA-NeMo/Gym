@@ -431,6 +431,7 @@ def _recover(
             gate_task=gate_task,
             mlflow=mlflow,
             walltime_plan=walltime_plan,
+            reverify=_reverify_first_note(decision, job.job_id),
         )
     if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is not None:
         if repin is not None or extend_retries:
@@ -506,6 +507,17 @@ def _refused(
         mlflow=mlflow,
         walltime_plan=walltime_plan,
         scheduler_refusal=error.detail,
+    )
+
+
+def _reverify_first_note(decision: RecoveryDecision, job_id: str | None) -> str | None:
+    """How a RESUBMIT re-verifies the saved answers it names before the policy work, or None when it names none."""
+    if not decision.reverify_first:
+        return None
+    return (
+        f"{len(decision.reverify_first)} saved answer(s) are re-verified by resume job {job_id} first, while its "
+        "servers are up, then its policy work runs; a saved answer whose verifier is not stateless, or whose "
+        "re-verification does not grade it, stays as it was and recoverable later"
     )
 
 

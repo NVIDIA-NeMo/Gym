@@ -93,7 +93,7 @@ def test_installed_runtime_authorizes_only_selected_remaining_work(
         }
 
 
-def test_mixed_saved_judge_and_missing_never_runs_agent(tmp_path):
+def test_mixed_saved_judge_and_missing_resumes_the_missing_work(tmp_path):
     artifacts = tmp_path / "artifacts"
     artifacts.mkdir()
     rows = [{"_ng_task_index": i, "_ng_rollout_index": 0} for i in range(2)]
@@ -116,8 +116,9 @@ def test_mixed_saved_judge_and_missing_never_runs_agent(tmp_path):
             }
         )
     result = _run_prologue(tmp_path, ResumeConfig(), "FAILED", exit_code="75:0")
-    assert "REACHED_WORK" not in result.stdout
-    assert not (tmp_path / "sbatch_calls").exists()
+    # The resumed run re-verifies the saved judge answer first (it is never replayed), then runs the missing rollout.
+    assert "1 saved answer(s) are re-verified first by the resumed run" in result.stdout
+    assert "REACHED_WORK" in result.stdout
 
 
 def test_generated_container_command_invokes_preinstalled_reader_before_services(tmp_path, monkeypatch):

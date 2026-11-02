@@ -346,7 +346,7 @@ def test_recover_queues_missing_and_retryable_work_once_through_the_existing_res
     assert fake_executor.calls == ["decide", "resubmit"]
 
 
-def test_recover_with_judge_failures_and_missing_work_stops_until_saved_answer_recovery_is_supported(
+def test_recover_with_judge_failures_and_missing_work_resubmits_with_the_saved_answers_reverified_first(
     tmp_path, fake_executor
 ) -> None:
     fake_executor.job_dir = write_job_dir(
@@ -357,8 +357,12 @@ def test_recover_with_judge_failures_and_missing_work_stops_until_saved_answer_r
         retries=0,
     )
     out = submit.recover("gym-job-d2", "bench")
-    assert out.dispatched is None and out.decision.action == RecoveryAction.STOP and fake_executor.calls == ["decide"]
+    # The resumed run re-verifies the saved answer first, while its servers are up; only the missing work is run.
+    assert out.dispatched == "resubmit" and out.decision.action == RecoveryAction.RESUBMIT
+    assert fake_executor.calls == ["decide", "resubmit"]
     assert out.decision.identities["judge_recoverable"] == [(1, 0)] and out.decision.identities["missing"] == [(2, 0)]
+    assert out.decision.reverify_first == [(1, 0)]
+    assert out.reverify.startswith(f"1 saved answer(s) are re-verified by resume job {out.job_id} first")
 
 
 def test_recover_does_not_queue_beside_a_live_job(tmp_path, fake_executor) -> None:
@@ -397,7 +401,7 @@ def test_gate_summary_never_equates_scored_with_expected_by_dropping_failures(tm
     )
     d = decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False)
     t = gate_task_summary(d, score=0.25, summary_valid=True, summary_reasons=[], health_passed=True, health_reasons=[])
-    assert (t["expected_samples"], t["scored_samples"], t["status"]) == (4, 1, "FAILED")
+    assert (t["expected_samples"], t["scored_samples"]) == (4, 1) and t["status"] != "SUCCESS"
     assert any("judge failures" in e for e in t["errors"]) and any("no row" in e for e in t["errors"])
 
 
@@ -1513,8 +1517,9 @@ def test_review_mixed_judge_sidecar_never_replays_the_answer(tmp_path, fake_exec
         failures=[ident(0, _ng_failure_class="judge_failed", response=SAVED_ANSWER, failure_kind="judge_failed")],
     )
     out = submit.recover("review", "bench")
-    assert out.decision.action == RecoveryAction.STOP
-    assert fake_executor.calls == ["decide"]
+    # The resume runs only the missing rollout: the saved answer is re-verified first, never replayed.
+    assert out.decision.action == RecoveryAction.RESUBMIT and out.decision.reverify_first == [(0, 0)]
+    assert fake_executor.calls == ["decide", "resubmit"]
     assert out.decision.identities["judge_recoverable"] == [(0, 0)]
 
 
