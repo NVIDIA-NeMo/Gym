@@ -29,6 +29,10 @@ def write(root, path, text):
     file.write_text(text)
 
 
+def _filter_findings(f: list[dict], rule: str) -> list[dict]:
+    return [finding for finding in f if finding["rule"] == rule]
+
+
 def test_a_changed_file_selects_its_existing_component_only(tmp_path):
     for component in ("responses_api_agents/pi_agent", "resources_servers/math", "responses_api_agents/kept"):
         write(tmp_path, f"{component}/app.py", "")
@@ -55,10 +59,40 @@ def test_run_defined_by_an_agent_is_reported_at_its_definition():
         pass
 
     path = "responses_api_agents/example/app.py"
-    [finding] = findings(path, [Agent, InheritingAgent], rules_for(AGENT_SERVER))
-    assert finding["rule"] == "A1" and finding["path"] == path
+    [finding] = _filter_findings(findings(path, [Agent, InheritingAgent], rules_for(AGENT_SERVER)), "A1")
+    assert finding["path"] == path
     assert finding["line"] == Agent.run.__code__.co_firstlineno
     assert findings(path, [Agent], rules_for(RESOURCES_SERVER)) == []
+
+
+def test_an_agent_without_session_seed_and_close_is_reported_at_its_class():
+    from nemo_gym.agents.base_responses_api_agent import SimpleResponsesAPIAgent
+
+    class Legacy(SimpleResponsesAPIAgent):
+        pass
+
+    class SeedOnly(SimpleResponsesAPIAgent):
+        async def _seed_agent_session_state(self, body):
+            pass
+
+    class Sessions(SimpleResponsesAPIAgent):
+        async def _seed_agent_session_state(self, body):
+            pass
+
+        async def _close_agent_session_state(self, state):
+            pass
+
+    class InheritingSessions(Sessions):
+        pass
+
+    path = "responses_api_agents/example/app.py"
+    results = _filter_findings(
+        findings(path, [Legacy, SeedOnly, Sessions, InheritingSessions], rules_for(AGENT_SERVER)), "A2"
+    )
+    assert [(f["path"], f["line"]) for f in results] == [
+        (path, Legacy.__firstlineno__),
+        (path, SeedOnly.__firstlineno__),
+    ]
 
 
 def test_an_unknown_component_kind_is_rejected():
@@ -103,7 +137,10 @@ def test_only_agent_classes_defined_in_app_py_are_inspected(tmp_path, monkeypatc
     finally:
         for name in [name for name in sys.modules if name.startswith("responses_api_agents.compliance_probe")]:
             del sys.modules[name]
-    assert [(f["rule"], f["path"], f["line"]) for f in results] == [("A1", f"{component}/app.py", 14)]
+    assert [(f["rule"], f["path"], f["line"]) for f in results] == [
+        ("A1", f"{component}/app.py", 14),
+        ("A2", f"{component}/app.py", 10),
+    ]
 
 
 def _inspect_written(tmp_path, monkeypatch, component, files):
