@@ -94,7 +94,7 @@ dependencies = [
     "openai==2.44.0",
 
     # Anthropic: We leverage the Anthropic Messages schemas (request/response Python types) for the
-    # /v1/messages <-> Responses mapping in nemo_gym/anthropic_converter.py. Types only — we never
+    # /v1/messages <-> Responses mapping in nemo_gym/models/anthropic_converter.py. Types only — we never
     # use the anthropic client (it uses httpx, whose O(n^2) connection pooling hangs at high
     # concurrency); all transport stays on aiohttp. Upper-bounded since the version bumps frequently,
     # mirroring how we pin openai.
@@ -547,7 +547,7 @@ nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c0318
 # files. (Adding `environments` to packages.find above is what makes that tree ship at all.) Bulk
 # train/validation JSONL is intentionally not committed to git, so it is excluded automatically.
 # Only nemo_gym's own non-package data files need an explicit entry here.
-nemo_gym = ["token_id_capture/staging/conformance/golden_vectors.json"]
+nemo_gym = ["models/token_capture/staging/conformance/golden_vectors.json"]
 
 [tool.setuptools.dynamic]
 version = {attr = "nemo_gym.__version__"}
@@ -876,9 +876,9 @@ layers = [
     # data/
     "nemo_gym.dataset_metrics : nemo_gym.dataset_orchestrator : nemo_gym.gitlab_utils : nemo_gym.hf_utils : nemo_gym.prompt : nemo_gym.task_data : nemo_gym.task_materialization : nemo_gym.tasks.harbor : nemo_gym.train_data_utils : nemo_gym.vision_input",
     # agents/
-    "nemo_gym.agent_activation_types : nemo_gym.agent_outcome : nemo_gym.agent_utils : nemo_gym.base_responses_api_agent : nemo_gym.sandbox.agent_tools : nemo_gym.skills",
+    "nemo_gym.agents",
     # models/
-    "nemo_gym.models._checkpoint : nemo_gym.models._checkpoint_workers : nemo_gym.anthropic_converter : nemo_gym.anthropic_utils : nemo_gym.base_responses_api_model : nemo_gym.chat_streaming : nemo_gym.openai_utils : nemo_gym.responses_converter : nemo_gym.responses_streaming : nemo_gym.token_id_capture",
+    "nemo_gym.models",
     # server_runtime/
     "nemo_gym.server_runtime._checkpoint : nemo_gym.server_runtime.base_environment_server : nemo_gym.server_runtime.base_resources_server : nemo_gym.server_runtime.base_server : nemo_gym.server_runtime.entrypoint_flags : nemo_gym.server_runtime.mcp_auto_exposure : nemo_gym.server_runtime.ray_support : nemo_gym.server_runtime.registry_server : nemo_gym.server_runtime.request_handling : nemo_gym.server_runtime.runtime_dir : nemo_gym.server_runtime.server_status : nemo_gym.server_runtime.single_agent_turn_types : nemo_gym.server_runtime.tool_access : nemo_gym.server_runtime.verifier_observability",
     # artifacts/
@@ -890,7 +890,7 @@ layers = [
     # trajectory/
     "nemo_gym.trajectory",
     # sandbox/
-    "nemo_gym.sandbox.access : nemo_gym.sandbox.adapters : nemo_gym.sandbox.api : nemo_gym.sandbox.attribution : nemo_gym.sandbox.compose_config : nemo_gym.sandbox.compose_fields : nemo_gym.sandbox.compose_volumes : nemo_gym.sandbox.config : nemo_gym.sandbox.observability : nemo_gym.sandbox.providers : nemo_gym.sandbox.shell : nemo_gym.sandbox.transfer : nemo_gym.sandbox.utils",
+    "nemo_gym.sandbox",
     # client/
     "nemo_gym.client",
     # telemetry/

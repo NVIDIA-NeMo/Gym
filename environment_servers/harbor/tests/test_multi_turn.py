@@ -42,7 +42,7 @@ from environment_servers.harbor.tests.conftest import (
     write_image_config,
 )
 from environment_servers.harbor.verifier import COLLECT_HOOK_GRACE_S
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY
 from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.digest import context_digest

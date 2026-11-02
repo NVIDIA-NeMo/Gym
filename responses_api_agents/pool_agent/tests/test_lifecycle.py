@@ -14,8 +14,9 @@ from unittest.mock import MagicMock, patch
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agents import SandboxSession
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.pool_agent.configuration import pool_config
