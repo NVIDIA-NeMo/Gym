@@ -168,14 +168,15 @@ uses all of them). Local calls ignore them.
   inner quotes escaped, when it contains a space.
 - `raise_oom_score_adj`: make OpenCode and its tools the memory-cgroup OOM killer's preferred victims
   (`oom_score_adj` 1000, or 0 when the sandbox starts below zero), not the exec daemon or the supervisor.
-- `verify_after_agent_error`: return a failed run (a nonzero exit, an error on the last assistant turn,
-  no terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error
-  is in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed,
-  the run's output was captured, its last error is not a transient model-endpoint failure (a retryable
-  API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers a command. A model
-  error OpenCode reported itself (an API error or context overflow on a completed turn) is not graded here:
-  it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's outcome policy. Anything
-  else stays an execution error and the episode is retried.
+- `verify_after_agent_error`: return a failed run (a nonzero exit, an error on the last assistant turn, no
+  terminal assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is
+  in `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
+  harness runner started OpenCode (not its own exit 125, 126 or 127), the required Gym MCP tools connected
+  and were confirmed, the run's output was captured, its last error is not a transient model-endpoint
+  failure (a retryable API error, 429 or 5xx, or a lost connection) and the sandbox still runs and answers
+  a command. A model error OpenCode reported itself (an API error or context overflow on a completed turn)
+  is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's
+  outcome policy. Anything else stays an execution error and the episode is retried.
 
 ## Configuration compatibility
 

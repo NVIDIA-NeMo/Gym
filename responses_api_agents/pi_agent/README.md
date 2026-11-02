@@ -260,10 +260,11 @@ uses all of them):
 - `verify_after_agent_error`: return a failed run (nonzero or signalled exit, a terminal error, no terminal
   assistant result) as a gradable `failed` response (`incomplete` at the deadline; the error is in
   `metadata.graded_agent_error`), as Harbor grades after any agent exit, when cleanup is confirmed, the
-  terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as Pi's retry
-  classifier names them) and the sandbox still runs and answers a command. A model error Pi reported itself
-  is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment Server's outcome
-  policy. Anything else stays an execution error and the episode is retried.
+  harness runner started Pi (not its own exit 125, 126 or 127), any granted Gym MCP tools loaded (not exit
+  78), the terminal error is not a transient model-endpoint failure (connection, timeout, 429 or 5xx, as
+  Pi's retry classifier names them) and the sandbox still runs and answers a command. A model error Pi
+  reported itself is not graded here: it keeps its classified cause (`ng_agent_outcome`) for the Environment
+  Server's outcome policy. Anything else stays an execution error and the episode is retried.
 
 Sandbox sessions drop Pi's streaming events (`message_update`, `tool_execution_update`), which repeat the
 whole partial message or tool output on every delta: the harness runner leaves them out of the event log that

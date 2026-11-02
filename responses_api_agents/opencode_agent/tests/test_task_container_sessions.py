@@ -14,6 +14,7 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
+from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
 from nemo_gym.sandbox import SandboxStatus
 from responses_api_agents.opencode_agent.app import _REMAINING_CONTEXT_PLUGIN as REMAINING_CONTEXT_PLUGIN
 from responses_api_agents.opencode_agent.app import _is_model_endpoint_failure, _sandbox_prepare_command, argv_prompt
@@ -324,6 +325,47 @@ def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, tmp_path, case,
         assert invocation["status"] == expected
     probes = [call for call in sandbox.exec.await_args_list if call.args[0] == "true"]
     assert len(probes) == int(case in ("killed", "rejected", "timeout"))
+
+
+@pytest.mark.parametrize(
+    "case,detail",
+    [
+        # The harness runner failed before starting OpenCode, or could not start it.
+        ("runner_failed", "OpenCode exited with code 125"),
+        ("not_started_126", "OpenCode exited with code 126"),
+        ("not_started_127", "OpenCode exited with code 127"),
+        # A required Gym MCP tool did not connect, or nothing confirmed it before the model ran.
+        ("mcp_failed", "Required Gym MCP tools could not be initialized: task_tools: failed (connection refused)"),
+        ("mcp_unconfirmed", "Required Gym MCP tools were not confirmed before the model call: task_tools"),
+    ],
+)
+def test_setup_failure_is_not_graded(setup, case, detail):
+    # The sandbox still runs, but a run that never got going is a Gym or setup failure, not the agent's result.
+    agent, sandbox = setup
+    agent.config.verify_after_agent_error = True
+    sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
+    body = seed()
+    if case.startswith("mcp_"):
+        grant = {"kind": "mcp", "name": "task_tools", "required": True, "connection": {"url": "http://r.example/mcp"}}
+        body = AgentSeedSessionRequest.model_validate({**body.model_dump(mode="json"), "tool_accesses": [grant]})
+        wait_exit = sandbox.wait_exit
+
+        async def record_status_then_exit():
+            # mcp_unconfirmed: the plugin never replaces the null status the adapter staged.
+            if case == "mcp_failed":
+                status = {"task_tools": {"status": "failed", "error": "connection refused"}}
+                sandbox.files[f"{sandbox.directory}/mcp-status.json"] = json.dumps(status)
+            return await wait_exit()
+
+        sandbox.wait_exit = record_status_then_exit
+    else:
+        # OpenCode never ran: no session to export.
+        sandbox.events = json.dumps({"messages": []})
+        sandbox.result["return_code"] = int(case.rsplit("_", 1)[-1]) if case.startswith("not_started") else 125
+    response, _, _ = run_session(agent, sandbox, body)
+    assert response.status_code == 502, response.text
+    assert response.json()["detail"] == detail
+    assert not [call for call in sandbox.exec.await_args_list if call.args[0] == "true"]
 
 
 def test_model_endpoint_failures_are_recognized():
