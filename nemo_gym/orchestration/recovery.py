@@ -243,6 +243,7 @@ class RecoveryOutcome(BaseModel):
     job_id: str | None = None
     unsupported: str | None = None
     # The acceptance gate task entry (status, expected/scored samples, score, errors, warnings); None without evidence.
+    # Its status is RUNNING, PLANNED, RESUMING, FAILED, UNVERIFIED or SUCCESS (``gate_task_summary``).
     gate_task: dict[str, Any] | None = None
     # What was known about MLflow: the local files, and the server status only as the caller observed it.
     mlflow: dict[str, Any] | None = None
@@ -2341,10 +2342,16 @@ def gate_task_summary(
 
     ``expected_samples`` is always the full materialized inventory; ``scored_samples`` counts only scored and
     final-model identities, so a judge, infra, terminal or missing identity can never make them equal. Summary validity
-    and response/trial health stay separate; ``None`` (unknown or missing) is a blocker, never a pass.
+    and response/trial health stay separate. ``False`` is a failure and an error; ``None`` (unknown or missing) is no
+    failure but never a pass: its reason is a warning and it withholds SUCCESS.
+
+    ``status``, first match wins: RUNNING (a job is live); PLANNED (recovery work is eligible; only a caller that
+    dispatches it reports RESUMING); FAILED (anything in ``errors``, or the run is not a complete NOOP); UNVERIFIED
+    (nothing failed, but summary validity or response/trial health is unknown, so acceptance is not proven); SUCCESS.
     """
     errors: list[str] = []
     warnings: list[str] = []
+    unverified = summary_valid is None or health_passed is None
     states = decision.counts
     for state, label in (
         (IdentityState.JUDGE_RECOVERABLE, "judge failures awaiting re-judgment"),
@@ -2364,13 +2371,13 @@ def gate_task_summary(
     if decision.action == RecoveryAction.STOP:
         errors.append(f"recovery stopped: {decision.reason}")
     if summary_valid is not True:
-        errors.append(
+        (errors if summary_valid is False else warnings).append(
             "summary validity "
             + ("unknown" if summary_valid is None else "failed")
             + (f": {summary_reasons}" if summary_reasons else "")
         )
     if health_passed is not True:
-        errors.append(
+        (errors if health_passed is False else warnings).append(
             "response/trial health "
             + ("unknown" if health_passed is None else "failed")
             + (f": {health_reasons}" if health_reasons else "")
@@ -2389,7 +2396,7 @@ def gate_task_summary(
         # A plan, not a dispatch: only the caller that dispatches it reports RESUMING.
         status = "PLANNED"
     elif decision.action == RecoveryAction.NOOP and decision.complete and not errors:
-        status = "SUCCESS"
+        status = "UNVERIFIED" if unverified else "SUCCESS"
     else:
         status = "FAILED"
     return {
@@ -4601,6 +4608,8 @@ def gate_summary_from_collected(
     ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
     ``criteria`` are accepted and reported under ``criteria`` but not applied (``GateCriteria``). The only health
     verdict is ``evaluation_health``; ``failures`` reports response and trial failures by cause, never a verdict.
+    ``status`` follows ``gate_task_summary``: an UNVERIFIED evaluation health with nothing failed is UNVERIFIED, and
+    a chain or MLflow error turns SUCCESS or UNVERIFIED into FAILED.
     """
     criteria = criteria or GateCriteria()
     summary_valid, summary_reasons, rollout_health, rollout_reasons = quality_inputs(
@@ -4663,6 +4672,6 @@ def gate_summary_from_collected(
             task["warnings"] = task["warnings"] + mlflow_notes(collected.mlflow)
     if extra:
         task["errors"] = task["errors"] + extra
-        if task["status"] == "SUCCESS":
+        if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     return task

@@ -178,8 +178,10 @@ def test_unverified_coverage_withholds_a_pass_without_a_health_failure():
     assert passed is None and report["status"] == "UNVERIFIED" and report["exact"] is False
     assert reason.startswith("trial: UNOBSERVED 10 of 100 expected trials")
     assert "unverified: this withholds a pass and is no health failure" in reason
-    [health] = _health_errors(task)
+    assert not _health_errors(task)
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert health.startswith("response/trial health unknown")
+    # FAILED only for this fixture's missing score and MLflow evidence; health alone is UNVERIFIED, not a failure.
     assert task["status"] == "FAILED" and task["health_verdict"].startswith("evaluation health: UNVERIFIED")
 
 

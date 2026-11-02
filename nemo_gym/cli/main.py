@@ -850,8 +850,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                     "mlflow_run_id",
                 )
             )
-            gate_failed = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
-            if not outcome.ok or gate_failed:
+            # Only SUCCESS is accepted: UNVERIFIED, like FAILED, PLANNED or RUNNING, exits non-zero.
+            gate_not_accepted = requested_gate and (outcome.gate_task or {}).get("status") != "SUCCESS"
+            if not outcome.ok or gate_not_accepted:
                 sys.exit(1)
             return
         print(resubmit(args.gym_job_id, args.benchmark).job_id)

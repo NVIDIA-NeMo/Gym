@@ -125,8 +125,9 @@ on that host reuse the cache. Read:
 - the decision's action and `reason`. When the run's latest resume crossed operational
   configuration drift, the reason ends with `resumed across operational drift: <settings>`.
 - `gate_task.status`: `RUNNING` (a job is live), `PLANNED` (eligible work, nothing dispatched),
-  `FAILED` (stopped, unsupported, or a gate failed: read `errors`), `SUCCESS` (complete and every
-  gate passed).
+  `FAILED` (stopped, unsupported, or a gate failed: read `errors`), `UNVERIFIED` (complete and
+  nothing failed, but acceptance is not proven, such as evaluation health UNVERIFIED: read
+  `warnings`), `SUCCESS` (complete and every gate passed). Only `SUCCESS` exits 0.
 - `gate_task.trial_counts`: `observed_healthy`, `unhealthy`, `unobserved`. Unobserved trials are
   unverified, not healthy.
 
