@@ -51,9 +51,23 @@ BATCH_STATUS_FNAME = "batch_status.json"
 BATCH_STATUS_WRITE_INTERVAL_SECONDS = 5.0
 _DATASET_DIGEST_DOMAIN = b"nemo-gym-batch-dataset-v1\0"
 _FAILURE_CLASS_KEY = "_ng_failure_class"
-# Mirrors of rollout_collection's omitted-rollout markers (that module imports this one).
+# Mirrors of rollout_collection's status-row markers (that module imports this one): omitted rollouts, the failure
+# kind beside the class, and the rows that are the evaluated model's final result.
 _OMITTED_ROLLOUT_KEY = "_ng_omitted_rollout"
 _DISPATCH_DRAINED_KEY = "_ng_dispatch_drained"
+_FAILURE_KIND_KEY = "failure_kind"
+_MODEL_FINAL_KEY = "_ng_model_final"
+
+
+def _status_kind(row: Mapping[str, Any]) -> str:
+    """The kind a status row counts under: its failure kind, else its class."""
+    return row.get(_FAILURE_KIND_KEY) or row.get(_FAILURE_CLASS_KEY) or "unknown"
+
+
+def _counts(counter: Counter) -> Dict[str, int]:
+    return dict(sorted((key, count) for key, count in counter.items() if count))
+
+
 _HEX_SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _MISSING = object()
 
@@ -478,11 +492,16 @@ class BatchStatusTracker:
             latest_failures[identity] = failure
 
         failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        kinds_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        model_final_by_agent: Dict[str, Counter] = defaultdict(Counter)
         for (agent_name, task_index, rollout_index), failure in latest_failures.items():
             # An interrupted latest attempt hides the older failure, as the run health check reads it.
             if (task_index, rollout_index) in completed_by_agent[agent_name] or failure.get(_OMITTED_ROLLOUT_KEY):
                 continue
             failures_by_agent[agent_name][failure.get(_FAILURE_CLASS_KEY) or "unknown"] += 1
+            kinds_by_agent[agent_name][_status_kind(failure)] += 1
+            if failure.get(_MODEL_FINAL_KEY):
+                model_final_by_agent[agent_name][_status_kind(failure)] += 1
 
         aggregate_entries, aggregate_artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
         members = {}
@@ -527,6 +546,8 @@ class BatchStatusTracker:
                 "completed_rollout_count": completed_count,
                 "remaining_rollout_count": max(expected.expected_rollout_count - completed_count, 0),
                 "failures_by_class": dict(sorted(failures_by_agent[agent_name].items())),
+                "failures_by_kind": _counts(kinds_by_agent[agent_name]),
+                "model_final_by_kind": _counts(model_final_by_agent[agent_name]),
                 "repeat_policy": observed.repeat_policy.model_dump(),
                 "expected_metric_keys": sorted(expected.metric_keys),
                 "observed_metric_keys": observed_metric_keys,
@@ -611,11 +632,24 @@ class RunStatusTracker(BatchStatusTracker):
         self.enabled = True
         self._expected_by_agent = Counter(agent for agent, _, _ in self._expected_rollout_identities)
         self._completed: set[tuple[str, int, int]] = set()
-        self._failures: Dict[tuple[str, int, int], str] = {}
+        # The latest outstanding failure of each rollout: its class, its kind, and whether it is model-final.
+        self._failures: Dict[tuple[str, int, int], tuple[str, str, bool]] = {}
         self._completed_by_agent: Counter[str] = Counter()
         self._failures_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        self._kinds_by_agent: Dict[str, Counter] = defaultdict(Counter)
+        self._model_final_by_agent: Dict[str, Counter] = defaultdict(Counter)
         self._completed_cursor = 0
         self._failure_cursor = 0
+
+    def _forget_failure(self, identity: tuple[str, int, int]) -> None:
+        previous = self._failures.pop(identity, None)
+        if previous is None:
+            return
+        failure_class, kind, model_final = previous
+        self._failures_by_agent[identity[0]][failure_class] -= 1
+        self._kinds_by_agent[identity[0]][kind] -= 1
+        if model_final:
+            self._model_final_by_agent[identity[0]][kind] -= 1
 
     def build_status(
         self,
@@ -625,7 +659,7 @@ class RunStatusTracker(BatchStatusTracker):
         aggregate_metrics_fpath: Optional[Path] = None,
         aggregation_deferred: bool = False,
     ) -> Dict[str, Any]:
-        """Count unique completions and the latest outstanding failure for each rollout."""
+        """Count unique completions and the latest outstanding failure for each rollout, by class and by kind."""
         if len(completed_results) < self._completed_cursor or len(failure_rows) < self._failure_cursor:
             raise ConfigError("Run status progress must be append-only")
         for position in range(self._completed_cursor, len(completed_results)):
@@ -635,9 +669,7 @@ class RunStatusTracker(BatchStatusTracker):
             if identity not in self._completed:
                 self._completed.add(identity)
                 self._completed_by_agent[identity[0]] += 1
-                previous = self._failures.pop(identity, None)
-                if previous is not None:
-                    self._failures_by_agent[identity[0]][previous] -= 1
+                self._forget_failure(identity)
         for position in range(self._failure_cursor, len(failure_rows)):
             row = failure_rows[position]
             # A never-started row is no execution and changes nothing.
@@ -646,17 +678,18 @@ class RunStatusTracker(BatchStatusTracker):
             identity = self._validated_rollout_identity(row, record_kind="failure", row_index=position)
             if identity in self._completed:
                 continue
-            previous = self._failures.get(identity)
-            if previous is not None:
-                self._failures_by_agent[identity[0]][previous] -= 1
+            self._forget_failure(identity)
             if row.get(_OMITTED_ROLLOUT_KEY):
                 # An interrupted attempt is the latest execution: it hides the older failure, as the run health check
                 # reads it, and is no failure itself.
-                self._failures.pop(identity, None)
                 continue
             failure_class = row.get(_FAILURE_CLASS_KEY) or "unknown"
-            self._failures[identity] = failure_class
+            kind, model_final = _status_kind(row), bool(row.get(_MODEL_FINAL_KEY))
+            self._failures[identity] = (failure_class, kind, model_final)
             self._failures_by_agent[identity[0]][failure_class] += 1
+            self._kinds_by_agent[identity[0]][kind] += 1
+            if model_final:
+                self._model_final_by_agent[identity[0]][kind] += 1
         self._completed_cursor = len(completed_results)
         self._failure_cursor = len(failure_rows)
         aggregates, artifact_error = _read_aggregate_entries(aggregate_metrics_fpath)
@@ -675,9 +708,9 @@ class RunStatusTracker(BatchStatusTracker):
                 "expected_rollout_count": expected,
                 "completed_rollout_count": self._completed_by_agent[agent],
                 "remaining_rollout_count": expected - self._completed_by_agent[agent],
-                "failures_by_class": dict(
-                    sorted((key, count) for key, count in self._failures_by_agent[agent].items() if count)
-                ),
+                "failures_by_class": _counts(self._failures_by_agent[agent]),
+                "failures_by_kind": _counts(self._kinds_by_agent[agent]),
+                "model_final_by_kind": _counts(self._model_final_by_agent[agent]),
                 "aggregation_status": aggregation_status,
             }
         return {
