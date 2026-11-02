@@ -126,6 +126,25 @@ def from_decisions_response(raw: Dict[str, Any]) -> Dict[str, Any]:
     return {"model": raw.get("model"), "answers": answers, "usage": raw.get("usage")}
 
 
+def usage_of(input_tokens: Optional[int], envelope: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Responses-API usage for one engine read.
+
+    Input tokens are what the engine reports (``usage.input_tokens``); without that report the usage is left unknown.
+    A decision engine reads one answer position per question and generates no text, so output tokens are the number
+    of answers returned (0 when the read failed).
+    """
+    if not isinstance(input_tokens, int):
+        return None
+    answers = len((envelope.get("response") or {}).get("answers") or {})
+    return {
+        "input_tokens": input_tokens,
+        "input_tokens_details": {"cached_tokens": 0},
+        "output_tokens": answers,
+        "output_tokens_details": {"reasoning_tokens": 0},
+        "total_tokens": input_tokens + answers,
+    }
+
+
 class DecisionEngineModel(SimpleResponsesAPIModel):
     config: DecisionEngineModelConfig
 
@@ -193,6 +212,8 @@ class DecisionEngineModel(SimpleResponsesAPIModel):
         payload = decision_request(body)
         envelope = await self.call_engine(payload["state"], payload["questions"])
         text = json.dumps({ENVELOPE_KEY: envelope}, ensure_ascii=False, separators=(",", ":"))
+        engine_usage = (envelope.get("response") or {}).get("usage") or {}
+        input_tokens = engine_usage.get("input_tokens")
         output: List[Dict[str, Any]] = [
             {
                 "id": f"msg_{uuid4().hex}",
@@ -211,6 +232,7 @@ class DecisionEngineModel(SimpleResponsesAPIModel):
             tool_choice="none",
             parallel_tool_calls=False,
             tools=[],
+            usage=usage_of(input_tokens, envelope),
         )
 
     async def chat_completions(
