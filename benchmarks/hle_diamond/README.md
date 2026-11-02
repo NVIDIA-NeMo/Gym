@@ -727,12 +727,14 @@ that the remaining ones can be measured one at a time:
   a local Docker host).
 
 What stays, and belongs next to every number: the OpenCode harness and its system prompt, the Tavily
-search and page tools in place of exactly `web_search` and `web_fetch` (the preset will switch to the
-`hle_web_tools` server when it exists; the note names neither), the weaker leakage policy (Search
-exclusions), 728/1000 text rows, and the judge alias. The preset restates the dataset block because
-Gym's `_inherit_from` is a single-step rename (a chained `_inherit_from` leaves the agent without an
-entrypoint), which is also why it appears in `gym list benchmarks`; a test holds its agent equal to
-`opencode_search`'s apart from the image and the note.
+search and page tools in place of exactly `web_search` and `web_fetch` (the note names neither; the
+`hle_web_tools` server that provides exactly those two tools is its own preset, `opencode_hle_tools`
+on the science image (Upstream web tools), and running it on this preset's image and egress policy is
+a follow-up change), the weaker leakage policy (Search exclusions), 728/1000 text rows, and the judge
+alias. The preset restates the dataset block because Gym's `_inherit_from` is a single-step rename
+(a chained `_inherit_from` leaves the agent without an entrypoint), which is also why it appears in
+`gym list benchmarks`; a test holds its agent equal to `opencode_search`'s apart from the image and
+the note.
 
 **OpenSandbox gate: open.** No OpenSandbox run of this preset or image exists; the only run is the
 acknowledged local Docker pilot below, whose egress was not restricted. The reference image has been
