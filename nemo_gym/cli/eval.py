@@ -1412,10 +1412,13 @@ def export_run() -> None:  # pragma: no cover
     artifacts = RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath)
     from nemo_gym.artifacts.exporters.base import BaseExporter
 
-    if isinstance(exporter, BaseExporter):
+    if isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():
+        # An exported run's repeat only verifies its receipt and writes nothing: it must not take the run lock, whose
+        # holder record it would overwrite.
+        result = exporter.export(artifacts)
+    elif isinstance(exporter, BaseExporter):
         with run_lock(artifacts.rollouts_jsonl_fpath):
-            if not artifacts.export_done_fpath(name).exists():
-                _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+            _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
             result = exporter.export(artifacts)
     else:
         result = exporter.export(artifacts)
