@@ -173,7 +173,7 @@ def test_recovered_observations_remain_unknown_and_keep_both_counters():
     collected.quality["observed_upstream_recovery"] = counters.copy()
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     passed, reason = trial_health(decision, collected)
-    assert passed is None and "not defined" in reason
+    assert passed is None and "recovered attempts not joined" in reason
     assert collected.quality["observed_upstream_recovery"] == counters
     assert decision.action.value == "noop"
 

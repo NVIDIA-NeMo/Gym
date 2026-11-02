@@ -164,7 +164,7 @@ def test_recovered_model_counters_remain_distinct_and_unknown():
     counters = {"recovered_attempt_errors": 2, "recovered_operations": 1}
     c.quality["observed_upstream_recovery"] = counters.copy()
     decision, (passed, reason) = health(c)
-    assert passed is None and "not defined" in reason
+    assert passed is None and "recovered attempts not joined" in reason
     assert c.quality["observed_upstream_recovery"] == counters
     assert decision.action.value == "noop"
 

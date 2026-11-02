@@ -3569,6 +3569,117 @@ def _truncated_zero(row: Mapping[str, Any]) -> bool:
     return type(row.get("reward")) in (int, float) and row["reward"] == 0 and _truncated_answer(row)
 
 
+def recovered_attempt_joins(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
+    """Failed model attempts each joined to the completed operation that recovered them, in a scored trial's own call.
+
+    Counted like the run's observed upstream recovery (``observed_upstream_recovery``): a model-request failure event
+    whose operation completed in an answered call. Here the event must be in the failure report of the same call
+    whose one completed operation it names, as a failed attempt other than the answer, and the operation's attempts
+    must account for every failed attempt of it (``http_attempts - 1 + transport_failures``, the HTTP-less ones being
+    the transport failures). A copy the row saved must agree, and no event, attempt or operation joins twice. The
+    join holds for any model the trial called (its policy, a judge or a simulated user). It says nothing about how
+    the trial was graded: whether the final answer is bound to its grading is the coverage join's question
+    (``_observed_trial_operations``).
+    """
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    events_seen: set[str] = set()
+    attempts_seen: set[str] = set()
+    operations_seen: set[str] = set()
+    joined = {"attempts": 0, "operations": 0}
+
+    def nonempty(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    for row in (collected.results or []) if collected is not None else []:
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        if _identity(row) not in scored or not isinstance(calls, list):
+            continue
+        saved = row.get(FAILURE_EVENTS)
+        saved = saved if isinstance(saved, dict) else {}
+        for call in calls:
+            meta = call.get("response_metadata") if isinstance(call, dict) else None
+            report = meta.get("failure_report") if isinstance(meta, dict) else None
+            events = report.get("events") if isinstance(report, dict) else None
+            operations = meta.get("model_operations") if isinstance(meta, dict) else None
+            status = meta.get("status_code") if isinstance(meta, dict) else None
+            # The health counter's own test of an answered call: a success status and no failure recorded on it.
+            if (
+                not isinstance(events, dict)
+                or not events
+                or not isinstance(operations, list)
+                or type(status) is not int
+                or not 200 <= status < 400
+                or meta.get("error_category")
+                or meta.get("response_status") in ("failed", "error", "cancelled")
+            ):
+                continue
+            for operation in operations:
+                op_id = operation.get("operation_id") if isinstance(operation, dict) else None
+                if not nonempty(op_id) or operation.get("outcome") != "completed" or op_id in operations_seen:
+                    continue
+                owned = {
+                    key: event
+                    for key, event in events.items()
+                    if isinstance(event, dict) and event.get("operation_id") == op_id
+                }
+                tries, transport = operation.get("http_attempts"), operation.get("transport_failures")
+                answer = operation.get("final_attempt_id")
+                ids = {event.get("attempt_id") for event in owned.values()}
+                if (
+                    not owned
+                    or type(tries) is not int
+                    or type(transport) is not int
+                    or tries < 1
+                    or transport < 0
+                    or len(owned) != tries - 1 + transport
+                    or sum(event.get("http_status") is None for event in owned.values()) != transport
+                    or not nonempty(answer)
+                    or answer in ids
+                    or len(ids) != len(owned)
+                    or operation.get("failure_id") is not None
+                    or any(
+                        key != event.get("event_id")
+                        or key in events_seen
+                        or not nonempty(event.get("attempt_id"))
+                        or event["attempt_id"] in attempts_seen
+                        or event.get("boundary") != "model"
+                        or event.get("operation") != "model_request"
+                        or event.get("failure_kind") != MODEL_REQUEST_ERROR
+                        or event.get("cause_id") is not None
+                        or not (
+                            event.get("http_status") is None
+                            or (type(event["http_status"]) is int and 400 <= event["http_status"] <= 599)
+                        )
+                        or (
+                            key in saved
+                            and (
+                                not isinstance(saved[key], dict)
+                                or any(saved[key].get(name) != value for name, value in event.items())
+                            )
+                        )
+                        for key, event in owned.items()
+                    )
+                ):
+                    continue
+                events_seen.update(owned)
+                attempts_seen.update(ids)
+                operations_seen.add(op_id)
+                joined["attempts"] += len(owned)
+                joined["operations"] += 1
+    return joined
+
+
+def _recovered_note(joined: Mapping[str, int]) -> str:
+    """``N failed model attempt(s) were retried and completed in the same operation (...)``, or empty."""
+    if not joined["attempts"]:
+        return ""
+    return (
+        f"{joined['attempts']} failed model attempt(s) in {joined['operations']} operation(s) were retried and "
+        "completed in the same operation (recovered, no trial failure); "
+    )
+
+
 def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None) -> Counter:
     """The trial gate's counted failures by kind.
 
@@ -3681,20 +3792,36 @@ def trial_verdict(
         policy_recovery=policy_recovery,
         verifier_recorded=recorded,
     )
-    # A recovered attempt is no trial failure only when it joins a completed policy or grading operation.
+    # A recovered attempt is no trial failure only when it joins the completed operation that recovered it, in a
+    # scored trial's own call. That join is per attempt and does not wait on the coverage join above: a run whose
+    # coverage is incomplete is judged on its coverage below, never on its recovered attempts. One the run counted
+    # but no trial's call joins cannot be ruled out as a trial failure: the run is unverified. When the coverage join
+    # holds, its own count stands too: it also joins a failed grading operation to the completed one after it.
     recovered_policy = policy_recovery.get("policy_recovered_attempts", 0)
+    joined = recovered_attempt_joins(decision, collected)
+    joined = {
+        "attempts": max(
+            joined["attempts"], judge_recovery.get("observed_grading_attempt_errors", 0) + recovered_policy
+        ),
+        "operations": max(
+            joined["operations"],
+            judge_recovery.get("observed_grading_failed_operations", 0)
+            + policy_recovery.get("policy_recovered_operations", 0),
+        ),
+    }
     if isinstance(recovery, dict) and (
-        recovery["recovered_attempt_errors"]
-        > judge_recovery.get("observed_grading_attempt_errors", 0) + recovered_policy
-        or recovery["recovered_operations"]
-        > judge_recovery.get("observed_grading_failed_operations", 0)
-        + policy_recovery.get("policy_recovered_operations", 0)
+        recovery["recovered_attempt_errors"] > joined["attempts"]
+        or recovery["recovered_operations"] > joined["operations"]
     ):
         return verdict(
             None,
-            "trial: recovered failures are not fully joined to a completed policy or grading operation; "
-            "treatment is not defined",
+            f"trial: UNVERIFIED, recovered attempts not joined: the run counted {recovery['recovered_attempt_errors']} "
+            f"recovered model attempt error(s) in {recovery['recovered_operations']} operation(s), and "
+            f"{joined['attempts']} in {joined['operations']} join the completed operation of a scored trial's own "
+            "call; the others cannot be ruled out as trial failures; known so far: "
+            f"{_fault_text(report, limit)}; {UNVERIFIED_NOTE}",
         )
+    recovered = _recovered_note(joined) if isinstance(recovery, dict) else ""
     if covered:
         if invalid_grades:
             report = fault_report(kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}), trials)
@@ -3723,15 +3850,15 @@ def trial_verdict(
         return verdict(
             None,
             f"trial: UNOBSERVED {observed['unobserved']} of {trials} expected trials: "
-            f"{observed['unobserved_reason']}, so the run is unverified, not healthy; observed healthy "
+            f"{observed['unobserved_reason']}, so the run is unverified, not healthy; {recovered}observed healthy "
             f"{observed['observed_healthy']}"
             + (f" ({observed['verifier_recorded']} verifier-recorded)" if observed["verifier_recorded"] else "")
             + f", unhealthy {observed['unhealthy']}; known so far: {_fault_text(report, limit)}; {UNVERIFIED_NOTE}",
         )
     return verdict(
         None,
-        f"trial: UNVERIFIED, known failures are a lower bound: {_fault_text(report, limit)}; failures recorded only "
-        f"as zero rewards cannot be ruled out; {UNVERIFIED_NOTE}",
+        f"trial: UNVERIFIED, known failures are a lower bound: {_fault_text(report, limit)}; {recovered}failures "
+        f"recorded only as zero rewards cannot be ruled out; {UNVERIFIED_NOTE}",
     )
 
 

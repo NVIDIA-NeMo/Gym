@@ -2764,7 +2764,7 @@ def test_a_current_pin_run_with_unjoined_recovered_attempts_stays_unknown(tmp_pa
         tmp_path, expected=50, final_zeros=0, operations_field=True, recovery=_RECOVERED
     )
     assert passed is None
-    assert reason.startswith("trial: recovered failures are not fully joined to a completed policy or grading")
+    assert reason.startswith("trial: UNVERIFIED, recovered attempts not joined: the run counted 3 recovered")
 
 
 def test_a_current_pin_run_with_uncovered_operations_stays_unknown(tmp_path) -> None:
