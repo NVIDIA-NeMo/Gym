@@ -72,6 +72,7 @@ def select_harnesses(paths: list[str]) -> list[str]:
                     "environments/",
                     "docker/",
                     ".agents/",
+                    "scripts/environment_server_compliance/",
                     "fern/",
                     "docs/",
                 )
