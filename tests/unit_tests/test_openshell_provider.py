@@ -752,7 +752,7 @@ async def test_exec_user_warns(make_provider, fake_client: FakeClient, caplog) -
     assert "no user field" in caplog.text
 
 
-async def test_exec_gateway_timeout_kill_maps_to_timeout(make_provider, fake_client: FakeClient) -> None:
+async def test_exec_gateway_timeout_maps_to_timeout(make_provider, fake_client: FakeClient) -> None:
     provider = make_provider()
     fake_client.exec_delay_s = 1.0
     fake_client.exec_results = [make_exec_result(exit_code=124, stdout="partial", stderr="")]
@@ -761,6 +761,7 @@ async def test_exec_gateway_timeout_kill_maps_to_timeout(make_provider, fake_cli
     assert result.return_code == 124
     assert result.stdout == "partial"
     assert "timed out after 1s" in result.stderr
+    assert "did not kill the process" in result.stderr
 
 
 async def test_exec_own_exit_124_is_not_a_timeout(make_provider, fake_client: FakeClient) -> None:

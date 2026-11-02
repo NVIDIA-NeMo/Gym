@@ -234,9 +234,10 @@ class OpenShellConnectionConfig:
 
 
 def _killed_at_timeout(return_code: int, elapsed_s: float | None, timeout_s: int | None) -> bool:
-    """Whether the gateway killed the command at the ``timeout_seconds`` the provider passed it.
+    """Whether the exec stream ended at the ``timeout_seconds`` the provider passed it.
 
-    The 0.1.x exec stream reports the kill as exit code 124 with no timeout flag. Only elapsed time
+    The 0.1.x exec stream reports the timeout as exit code 124 with no timeout flag. The gateway
+    only ends the stream; it does not kill the process, which may keep running in the sandbox. Only elapsed time
     tells it from a command that exits 124 on its own, so a quick ``exit 124`` is not a timeout.
     """
     if not timeout_s or return_code != 124 or elapsed_s is None:
@@ -868,7 +869,10 @@ class OpenShellProvider:
                 )
             raise
         if _killed_at_timeout(result.exit_code, elapsed_s, timeout_seconds):
-            note = f"Command timed out after {timeout_seconds}s; the OpenShell gateway killed it"
+            note = (
+                f"Command timed out after {timeout_seconds}s; the OpenShell gateway ended the exec "
+                "but did not kill the process, which may still be running in the sandbox"
+            )
             stderr = f"{result.stderr}\n{note}" if result.stderr else note
             return SandboxExecResult(stdout=result.stdout, stderr=stderr, return_code=124, error_type="timeout")
         return SandboxExecResult(stdout=result.stdout, stderr=result.stderr, return_code=result.exit_code)
