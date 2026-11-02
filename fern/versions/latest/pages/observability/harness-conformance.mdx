@@ -27,8 +27,10 @@ results remain visible when a probe reports execution errors. Expand the details
 to see each harness's passing and not-passing scenarios by tier, followed by the
 full check matrix. Follow the linked CI results to investigate individual failures.
 
-These measurements cover local execution, independently of benchmark accuracy.
-Remote sandboxes, agent sessions, multimodal inputs, compaction, and parallel
+These measurements cover local execution, including P1 compaction evidence,
+independently of benchmark accuracy. Compaction usage is synthetic; these checks
+do not measure compression quality or before/after context tokens, or validate
+boundary references. Remote sandboxes, agent sessions, multimodal inputs, and parallel
 execution require separate qualification. See
 [Rollout Evidence](/main/observability/rollout-evidence) for collection setup.
 
