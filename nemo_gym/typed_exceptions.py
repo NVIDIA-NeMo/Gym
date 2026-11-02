@@ -21,7 +21,13 @@ if TYPE_CHECKING:
 
 from nemo_gym.core.failure_kinds import AGENT_ROUTE_FAILED, FailureStage, require_failure_kind
 from nemo_gym.exception_inspection import bounded_text, error_to_http_status, explicit_causes, qualified_type_name
-from nemo_gym.server_runtime.episode_types import FailureBoundary, FailureEvent, FailureReport, SdkErrorDetails
+from nemo_gym.server_runtime.episode_types import (
+    FailureBoundary,
+    FailureEvent,
+    FailureReport,
+    SandboxFailureDetails,
+    SdkErrorDetails,
+)
 
 
 _EVENT_FIELDS = (
@@ -37,6 +43,7 @@ _EVENT_FIELDS = (
     "http_status",
     "request_upload_complete",
     "foreign_error",
+    "sandbox",
 )
 
 
@@ -63,6 +70,7 @@ class NgFailureEvent(Exception):
         http_status: int | None = None,
         request_upload_complete: bool | None = None,
         foreign_error: SdkErrorDetails | None = None,
+        sandbox: SandboxFailureDetails | None = None,
         event_id: str | None = None,
         operation: str | None = None,
         operation_id: str | None = None,
@@ -78,6 +86,7 @@ class NgFailureEvent(Exception):
             http_status=http_status,
             request_upload_complete=request_upload_complete,
             foreign_error=foreign_error,
+            sandbox=sandbox,
             event_id=event_id,
             operation=operation,
             operation_id=operation_id,

@@ -337,25 +337,31 @@ Sandbox create failures use provider-neutral exception classes:
 - `SandboxCreateError` for sandbox allocation or readiness failures.
 - `SandboxCreateVerificationError` when a created sandbox fails Gym readiness verification.
 
-Command process exits, including nonzero exits, return `SandboxExecResult`. A provider may instead raise these
-provider-neutral runtime errors when it cannot return a trustworthy command result:
+Command process exits, including nonzero exits, return `SandboxExecResult`. OpenSandbox runtime failures
+raise the shared `NgFailureEvent` with `boundary="sandbox"`. Its registered `failure_kind`, `operation`,
+HTTP status when observed, `sandbox` details and explicit cause carry the evidence; callers apply their
+own outcome policy. A failure kind does not decide attribution, retryability, health or a zero score.
 
-| Error | Contract |
+| Failure kind | Observed condition |
 | --- | --- |
-| `SandboxLostError` | Common base for the runtime errors below. It is a `RuntimeError`, not a command timeout. |
-| `SandboxBackendUnreachableError` | The command backend stopped responding during submission or execution; the command outcome is unconfirmed. |
-| `SandboxCommandStatusTimeoutError` | An already-submitted command's status remained unavailable after bounded recovery. This is distinct from `TimeoutError`, which means the command exceeded its execution budget. |
-| `SandboxIOTimeoutError` | A provider request or file transfer timed out before a trustworthy outcome was available. The command or transfer outcome is unconfirmed. |
-| `SandboxOOMKilledError` | The provider confirmed an OOM kill of the current sandbox. It carries `sandbox_id` when available. Exit code 137, a generic failed state, historical container state, or a sidecar OOM alone is insufficient evidence. |
+| `provider_request_failed` | A provider request failed without a more specific classification. |
+| `provider_unavailable` | A transport failure or unavailable-backend HTTP response. |
+| `provider_credentials_rejected` | An observed HTTP 401 or 403 from the provider. |
+| `provider_io_timeout` | A provider request or file transfer timed out; remote completion is unknown. |
+| `provider_status_unavailable` | The budget for obtaining an already-submitted command's status expired. |
+| `provider_command_timeout` | Gym observed its own command-session deadline expire; cleanup is handled separately. |
+| `provider_command_outcome_unknown` | Command outcome fields are absent/contradictory, or a PTY connection was lost. |
+| `provider_oom_killed` | Explicit terminal `OOMKilled` lifecycle reason or current-container inspect evidence. |
 
-OpenSandbox currently raises these typed runtime errors for the corresponding failures. Docker, Daytona, and E2B
-do not currently raise them. Callers that turn an execution timeout into a score should catch `TimeoutError`
-specifically and allow these runtime errors to propagate as ungraded infrastructure failures unless a benchmark
-explicitly defines another policy.
+A command exit code of 137, a signal kill near a deadline, an error message, or a sidecar's OOM does not
+establish the command's cause. Forward `NgFailureEvent` unchanged when only forwarding; when reporting
+a distinct failure at a caller's boundary, create its event and use `raise ... from error`.
 
-In resources servers and agents, handle sandbox creation errors at the task boundary and preserve the cause in
-the rollout error. An uncertain command outcome should remain an ungraded runtime failure unless the benchmark
-explicitly defines a scoring policy for it.
+This migration covers OpenSandbox command execution, runtime file requests and PTY loss diagnostics.
+Allocation/readiness, other lifecycle operations and other providers retain their existing contracts.
+The proposed runtime exception subclasses from earlier revisions of this PR are replaced by registered kinds.
+
+In resources servers and agents, preserve creation failures and their causes at the task boundary:
 
 ```python
 from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError

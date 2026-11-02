@@ -6,7 +6,7 @@
 import uuid
 from collections.abc import Mapping
 from enum import StrEnum
-from typing import Generic, TypeVar
+from typing import Generic, Literal, TypeVar
 
 from pydantic import (
     BaseModel,
@@ -35,11 +35,13 @@ def is_materialized_task_row(row: Mapping[str, object]) -> bool:
 
 
 class FailureBoundary(StrEnum):
-    """The six places a failure is observed, as the failure-boundaries RFC names them.
+    """Component boundaries that report their own observed failures.
 
     Each one reports what it observed; none of them chooses retries, terminality or scores.
     """
 
+    SANDBOX = "sandbox"
+    """A sandbox provider operation; does not attribute the failure to the model."""
     MODEL = "model"
     """A model client's request or one HTTP attempt of it."""
     HARNESS = "harness"
@@ -68,6 +70,15 @@ class SdkErrorDetails(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
 
 
+class SandboxFailureDetails(BaseModel):
+    """Provider-selected runtime evidence, without command contents or SDK objects."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    sandbox_id: str = Field(min_length=1, max_length=256)
+    execution_id: str | None = Field(default=None, max_length=256)
+    evidence_source: Literal["lifecycle_status", "inspect_current_container"] | None = None
+
+
 class FailureEvent(BaseModel):
     """One observed failure: who observed it, what failed, and which failure caused it.
 
@@ -94,6 +105,7 @@ class FailureEvent(BaseModel):
     http_status: int | None = Field(default=None, ge=100, le=599)
     request_upload_complete: bool | None = Field(default=None, strict=True)
     foreign_error: SdkErrorDetails | None = None
+    sandbox: SandboxFailureDetails | None = None
     cause_id: str | None = Field(default=None, max_length=128)
 
     @field_validator("failure_kind")

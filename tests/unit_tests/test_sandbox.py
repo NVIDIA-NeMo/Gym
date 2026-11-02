@@ -27,18 +27,14 @@ import pytest
 from pydantic import ValidationError
 
 import nemo_gym.sandbox.providers.registry as provider_registry
+from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, _AsyncLoopRunner
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, resolve_provider_metadata
 from nemo_gym.sandbox.providers.base import (
-    SandboxBackendUnreachableError,
-    SandboxCommandStatusTimeoutError,
     SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
-    SandboxIOTimeoutError,
-    SandboxLostError,
-    SandboxOOMKilledError,
     SandboxResources,
     SandboxSpec,
     SandboxStatus,
@@ -48,6 +44,7 @@ from nemo_gym.sandbox.providers.base import (
 )
 from nemo_gym.sandbox.providers.registry import create_provider, get_provider_class, list_providers, register_provider
 from nemo_gym.sandbox.utils import rewrite_image
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.mini_swe_agent_2.sandbox_environment import MiniSWESandboxEnvironment
 
 
@@ -407,22 +404,6 @@ async def _assert_sandbox_facade_uses_public_provider_api(tmp_path: Path) -> Non
 
 def test_async_sandbox_initial_file_error_paths() -> None:
     asyncio.run(_assert_async_sandbox_initial_file_error_paths())
-
-
-def test_sandbox_runtime_errors_keep_distinct_outcomes() -> None:
-    status_loss = SandboxCommandStatusTimeoutError("status unavailable")
-    backend_loss = SandboxBackendUnreachableError("backend unavailable")
-    io_loss = SandboxIOTimeoutError("provider read timed out")
-    oom = SandboxOOMKilledError("current container OOMKilled", sandbox_id="fake-1")
-
-    assert isinstance(status_loss, SandboxLostError)
-    assert not isinstance(status_loss, TimeoutError)
-    assert isinstance(backend_loss, SandboxLostError)
-    assert isinstance(io_loss, SandboxLostError)
-    assert not isinstance(io_loss, TimeoutError)
-    assert isinstance(oom, SandboxLostError)
-    assert not isinstance(oom, SandboxBackendUnreachableError)
-    assert oom.sandbox_id == "fake-1"
 
 
 async def _assert_async_sandbox_initial_file_error_paths() -> None:
@@ -1271,7 +1252,7 @@ def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
 
 
 @requires_tenacity
-def test_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -> None:
+def test_opensandbox_exec_does_not_replay_uncertain_delivery(monkeypatch) -> None:
     asyncio.run(_assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch))
 
 
@@ -1328,11 +1309,11 @@ async def _assert_opensandbox_exec_retries_retryable_sdk_failures(monkeypatch) -
     raw = FakeRaw()
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=raw)
 
-    result = await provider.exec(handle, "echo hello", timeout_s=30)
-
-    assert result.stdout == "ok"
-    assert result.return_code == 0
-    assert raw.commands.calls == 3
+    with pytest.raises(NgFailureEvent) as caught:
+        await provider.exec(handle, "echo hello", timeout_s=30)
+    assert caught.value.failure_kind == PROVIDER_UNAVAILABLE
+    assert isinstance(caught.value.__cause__, ConnectionError)
+    assert raw.commands.calls == 1
 
 
 @requires_tenacity
@@ -1379,8 +1360,9 @@ async def _assert_opensandbox_command_retries_default_to_disabled(monkeypatch) -
 
     try:
         await provider.exec(handle, "echo hello", timeout_s=30)
-    except ConnectionError:
-        pass
+    except NgFailureEvent as failure:
+        assert failure.failure_kind == PROVIDER_UNAVAILABLE
+        assert isinstance(failure.__cause__, ConnectionError)
     else:
         raise AssertionError("expected provider.exec to propagate the command failure")
 

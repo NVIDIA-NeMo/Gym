@@ -104,6 +104,11 @@ JUDGE_UNPARSEABLE = "judge_unparseable"
 VERIFIER_ERROR = "verifier_error"
 
 # --- provider: sandboxes, browsers, containers ----------------------------------------- #
+PROVIDER_REQUEST_FAILED = "provider_request_failed"
+PROVIDER_IO_TIMEOUT = "provider_io_timeout"
+PROVIDER_COMMAND_TIMEOUT = "provider_command_timeout"
+PROVIDER_COMMAND_OUTCOME_UNKNOWN = "provider_command_outcome_unknown"
+PROVIDER_STATUS_UNAVAILABLE = "provider_status_unavailable"
 PROVIDER_UNAVAILABLE = "provider_unavailable"
 PROVIDER_QUOTA_EXHAUSTED = "provider_quota_exhausted"
 PROVIDER_OOM_KILLED = "provider_oom_killed"
@@ -156,6 +161,11 @@ FAILURE_KINDS: frozenset[str] = frozenset(
         JUDGE_FAILED,
         JUDGE_UNPARSEABLE,
         VERIFIER_ERROR,
+        PROVIDER_REQUEST_FAILED,
+        PROVIDER_IO_TIMEOUT,
+        PROVIDER_COMMAND_OUTCOME_UNKNOWN,
+        PROVIDER_COMMAND_TIMEOUT,
+        PROVIDER_STATUS_UNAVAILABLE,
         PROVIDER_UNAVAILABLE,
         PROVIDER_QUOTA_EXHAUSTED,
         PROVIDER_OOM_KILLED,

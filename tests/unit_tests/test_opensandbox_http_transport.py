@@ -292,3 +292,12 @@ async def test_cancelling_rate_limit_sleep_closes_response_without_retrying(monk
         with pytest.raises(asyncio.CancelledError):
             await client.post("https://sandbox.example/sandboxes", content=b"create sandbox")
     send.assert_awaited_once()
+
+
+async def test_opensandbox_runtime_policy_sees_rate_limit_without_hidden_retries(shared_server):
+    shared_server.replies.append((429, {"Retry-After": "0"}))
+    provider = OpenSandboxProvider()
+    async with httpx.AsyncClient(transport=provider._get_transport()) as client:
+        response = await client.post(shared_server.url + "/command", content=b"increment-counter")
+    assert response.status_code == 429
+    assert len(shared_server.calls) == 1

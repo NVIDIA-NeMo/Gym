@@ -39,6 +39,7 @@ from urllib.parse import urlencode
 import aiohttp
 
 from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 LOGGER = logging.getLogger(__name__)
@@ -106,7 +107,7 @@ class OpenSandboxPtySession:
         request_timeout_s: float | None,
         owned: bool = True,
         takeover: bool = False,
-        diagnose: Callable[[], Awaitable[str | None]] | None = None,
+        diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
     ) -> None:
         self._client = client
         self._ws = ws
@@ -131,7 +132,7 @@ class OpenSandboxPtySession:
         self._stderr: asyncio.Queue[bytes | None] = asyncio.Queue()
         self._exit: asyncio.Future[int] = asyncio.get_running_loop().create_future()
         self._connected: asyncio.Future[None] = asyncio.get_running_loop().create_future()
-        self._error: SandboxPtyError | None = None
+        self._error: SandboxPtyError | NgFailureEvent | None = None
         self._closed = False
         self._detached = False
         self._received = 0  # bytes of the session's retained stream seen so far
@@ -268,11 +269,10 @@ class OpenSandboxPtySession:
                     # sandbox is gone. Ask the provider for a real cause (an
                     # OOM kill, typically) instead of a bare close code.
                     try:
-                        notice = await asyncio.wait_for(self._diagnose(), timeout=8.0)
+                        self._error = await self._diagnose(self._close_error())
                     except Exception:
-                        notice = None
-                    if notice is not None:
-                        self._error = SandboxPtyError(notice)
+                        # Diagnosis failure must preserve the observed socket failure.
+                        pass
                 if not self._exit.done():
                     self._exit.set_exception(self._close_error())
                     self._exit.exception()  # retrieved; silences never-retrieved warnings
@@ -284,7 +284,7 @@ class OpenSandboxPtySession:
                 await self._output.put(None)
                 await self._stderr.put(None)
 
-    def _close_error(self) -> SandboxPtyError:
+    def _close_error(self) -> SandboxPtyError | NgFailureEvent:
         if self._error is not None:
             return self._error
         code = self._ws.close_code
@@ -511,7 +511,7 @@ async def open_pty_session(
     headers: dict[str, str],
     spec: SandboxPtySpec,
     request_timeout_s: float | None,
-    diagnose: Callable[[], Awaitable[str | None]] | None = None,
+    diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
 ) -> OpenSandboxPtySession:
     """Create an execd PTY session and attach its WebSocket.
 
@@ -602,7 +602,7 @@ async def attach_pty_session(
     takeover: bool = True,
     since: int | None = None,
     request_timeout_s: float | None,
-    diagnose: Callable[[], Awaitable[str | None]] | None = None,
+    diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
 ) -> OpenSandboxPtySession:
     """Attach to an existing execd PTY session. Owns ``client`` as above."""
     query: dict[str, str] = {}
@@ -688,7 +688,7 @@ async def _start_session(
     request_timeout_s: float | None,
     owned: bool = True,
     takeover: bool = False,
-    diagnose: Callable[[], Awaitable[str | None]] | None = None,
+    diagnose: Callable[[BaseException], Awaitable[NgFailureEvent]] | None = None,
 ) -> OpenSandboxPtySession:
     session = OpenSandboxPtySession(
         client=client,
