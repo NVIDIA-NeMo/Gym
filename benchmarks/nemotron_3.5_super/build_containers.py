@@ -219,7 +219,7 @@ class FlashInferBuilder(BaseBuilder):
             # Scan all architectures, including cached specializations not used at startup.
             module_roots = set(env.FLASHINFER_AOT_DIRS)
             cache_roots = {Path((root / "old-cache-root").read_text()), env.FLASHINFER_CACHE_DIR,
-                           Path("/opt/super-vl-evals/flashinfer-warmup-workspace")}
+                           Path("/opt/flashinfer-warmup-workspace")}
             for cache_root in cache_roots:
                 module_roots.update(cache_root.glob("**/cached_ops"))
             for module_root in sorted(module_roots):
@@ -249,16 +249,16 @@ class FlashInferBuilder(BaseBuilder):
             (root / "flashinfer-slim.json").write_text(json.dumps(record, indent=2) + "\n")
             print(f"Invalidated {len(removed)} native cache entries; selected modules will JIT on first use", flush=True)
             PY
-            mkdir -p /opt/super-vl-evals
-            cp "$BUILD_DIR/flashinfer-slim.json" /opt/super-vl-evals/flashinfer-slim.json
+            mkdir -p /opt
+            cp "$BUILD_DIR/flashinfer-slim.json" /opt/flashinfer-slim.json
             # These derived caches/plans describe the previous installation. Recreate
             # them during warmup instead of validating stale manifests or reusing graphs.
-            rm -rf /opt/super-vl-evals/flashinfer-autotune-cache \
-                /opt/super-vl-evals/vllm-cache /opt/super-vl-evals/prims-cute-cache
+            rm -rf /opt/flashinfer-autotune-cache \
+                /opt/vllm-cache /opt/prims-cute-cache
             # A previous full-build verifier describes the old Python sources/modules.
             # Keep it for reference, but don't let the launcher apply it to this build.
-            if [[ -f /opt/super-vl-evals/flashinfer-build.env ]]; then
-                mv /opt/super-vl-evals/flashinfer-build.env /opt/super-vl-evals/flashinfer-build.before-slim.env
+            if [[ -f /opt/flashinfer-build.env ]]; then
+                mv /opt/flashinfer-build.env /opt/flashinfer-build.before-slim.env
             fi
             exit 0
             """
