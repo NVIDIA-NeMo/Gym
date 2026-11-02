@@ -891,6 +891,10 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             self.config.verbatim_span_words,
         )
 
+    def multiple_workers_unsupported_reason(self) -> Optional[str]:
+        # A rollout's seed and its searches could reach different workers, and the module defines no worker app.
+        return "seeded questions, session bindings and the page cache live in one process"
+
     # ---- routes and MCP exposure ----
 
     def setup_webserver(self) -> FastAPI:

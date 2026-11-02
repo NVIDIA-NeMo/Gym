@@ -20,6 +20,7 @@ from pydantic import ValidationError
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.server_utils import refuse_unsupported_num_workers
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.hle_web_tools import app as module
 from resources_servers.hle_web_tools.app import (
@@ -707,6 +708,11 @@ async def test_rejected_keys_do_not_spend_the_retry_budget(monkeypatch, key_pool
     tried = [c.kwargs["headers"]["authorization"] for c in post.await_args_list]
     assert tried == ["Bearer key-one", "Bearer key-two", "Bearer key-two"]
     module.sleep.assert_awaited_once()
+
+
+def test_a_launch_with_several_workers_is_refused():
+    with pytest.raises(ValueError, match="hle_tools needs num_workers=1: seeded questions"):
+        refuse_unsupported_num_workers(make_server(num_workers=2))
 
 
 def test_shipped_blocklist_is_the_pinned_upstream_snapshot(tmp_path):
