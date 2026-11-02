@@ -126,6 +126,10 @@ jobs:
           HARNESS: ${{ matrix.harness }}
           PROBE_EXIT_CODE: ${{ steps.probes.outputs.exit_code || '2' }}
         run: |
+          # Restore access even when a root-run Terminus probe stops partway through.
+          if [[ "$HARNESS" == "terminus_2_sandboxed" && -d "$PROBE_OUTPUT" ]]; then
+            sudo chown -R "$(id -u):$(id -g)" "$PROBE_OUTPUT"
+          fi
           python3 -m scripts.harness_conformance.ci report --harness "$HARNESS" \
             --output "$PROBE_OUTPUT" --exit-code "$PROBE_EXIT_CODE"
       - name: Upload conformance evidence

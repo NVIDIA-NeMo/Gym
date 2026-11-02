@@ -131,6 +131,10 @@ class Probe:
                 marker = self.directory / f"tool-{index}.txt"
                 code = self.scenario.tool_exit_code if index == 0 else 0
                 command = f"printf %s {shlex.quote(token)} > {shlex.quote(str(marker))}; printf %s {shlex.quote(token)}; exit {code}"
+                if self.harness == "terminus_2_sandboxed":
+                    # Terminal panes echo keystrokes. Only stdout may contain the intact witness token.
+                    parts = f"{shlex.quote(token[:6])} {shlex.quote(token[6:])}"
+                    command = f"printf %s%s {parts} > {shlex.quote(str(marker))}; printf %s%s {parts}; exit {code}"
                 if bare == "python_cell" and "code" in properties:
                     args = {
                         "code": (

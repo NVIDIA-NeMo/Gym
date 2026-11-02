@@ -84,6 +84,32 @@ def test_auxiliary_title_does_not_consume_retry_sequence_but_is_captured(tmp_pat
     assert not probe.finished and not probe.violations
 
 
+@pytest.mark.parametrize("scenario_name", ["tool_success", "tool_failure"])
+@pytest.mark.parametrize("stdout_visible", [False, True])
+def test_terminus_requires_stdout_not_just_echoed_keystrokes(tmp_path, scenario_name, stdout_visible):
+    probe = Probe(SCENARIOS_BY_NAME[scenario_name], tmp_path, harness="terminus_2_sandboxed")
+    body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
+    with TestClient(probe.model_app()) as client:
+        response = client.post("/v1/responses", json=body)
+        assert response.status_code == 200
+        message = response.json()["output"][0]
+        command = json.loads(message["content"][0]["text"])["commands"][0]["keystrokes"]
+        execution = subprocess.run(command, shell=True, capture_output=True, text=True)
+        call = probe.tool_calls[0]
+        assert execution.returncode == probe.scenario.tool_exit_code
+        assert execution.stdout == call["token"]
+        assert (tmp_path / "tool-0.txt").read_text() == call["token"]
+        terminal_content = command + (execution.stdout if stdout_visible else "")
+        body["input"].extend([message, {"role": "user", "content": terminal_content}])
+        response = client.post("/v1/responses", json=body)
+    assert response.status_code == (200 if stdout_visible else 409)
+    assert call["executed"] is True
+    assert call["result_seen"] is stdout_visible
+    assert call["outputs"] == ([terminal_content] if stdout_visible else [])
+    assert len(probe.tool_calls) == (2 if stdout_visible else 1)
+    assert call["token"] not in command
+
+
 def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path):
     probe = Probe(SCENARIOS_BY_NAME["tool_failure"], tmp_path, harness="terminus_2_sandboxed")
     body = {"model": "probe", "input": [{"role": "user", "content": "Run checks"}]}
@@ -95,6 +121,7 @@ def test_terminus_executes_json_commands_and_confirms_completion_twice(tmp_path)
             instruction = json.loads(message["content"][0]["text"])
             body["input"].append(message)
             if index < 2:
+                assert probe.tool_calls[index]["token"] not in instruction["commands"][0]["keystrokes"]
                 execution = subprocess.run(
                     instruction["commands"][0]["keystrokes"], shell=True, capture_output=True, text=True
                 )
