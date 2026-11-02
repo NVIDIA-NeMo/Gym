@@ -80,9 +80,9 @@ from nemo_gym.server_runtime.base_resources_server import (
     BaseRunRequest,
     BaseVerifyResponse,
 )
+from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims, SessionKind
 from nemo_gym.server_runtime.tool_access import ToolAccess
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint, traced_rollout_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle, TrajectoryRecord
@@ -1067,7 +1067,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         For a caller that enforces its own budget (agent time, tokens, cost) or an operator's cancel.
         ``rollout_id`` is the id in ``/ng-rollout/<id>``. A stop that arrives while the session is still
         seeding takes effect when the harness would launch. With several workers, the request reaches the
-        worker running the rollout without the session cookie (see nemo_gym.session_routing).
+        worker running the rollout without the session cookie (see nemo_gym.server_runtime.request_handling.session_routing).
         """
         if type(self)._rollout_sandbox_session is SimpleResponsesAPIAgent._rollout_sandbox_session:
             raise HTTPException(501, "This agent cannot stop a rollout")
