@@ -30,6 +30,7 @@ gdp_pdf_opencode:
   responses_api_agents:
     opencode_agent:
       opencode_version: 1.17.11
+      supports_images: true
       concurrency: 8
       context_window: 262144
       max_output_tokens: 16384  # Per model call, not the whole episode.

@@ -72,6 +72,9 @@ create an agent-owned sandbox; it is destroyed on close. Verifiers that inspect
 task files must use a Resources-owned sandbox. Missing access and provider is an
 error, never a fallback to local execution.
 
+Set `supports_images: true` for a vision model so OpenCode retains images read
+from tool outputs. This does not add image attachments to the task's input API.
+
 Session setup installs the pinned OpenCode runtime inside the sandbox. The image
 needs Linux and Bash; it does not need Python. Missing Bash can be installed with
 apt-get or apk when running as root; otherwise preinstall it.
