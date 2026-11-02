@@ -3764,16 +3764,19 @@ class RolloutCollectionHelper(BaseModel):
             has_recorded_grade,
             has_saved_generation,
             has_unclassified_execution_failure,
+            is_infrastructure_agent_timeout,
             keeps_partial_response,
         )
 
+        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
         unclassified = {
             k
             for k, row in latest_by_key.items()
             if has_unclassified_execution_failure(row)
-            or has_saved_generation(row)
-            or has_recorded_grade(row)
-            or keeps_partial_response(row)
+            or (
+                (has_saved_generation(row) or has_recorded_grade(row) or keeps_partial_response(row))
+                and not is_infrastructure_agent_timeout(row)
+            )
         }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 

@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_recovery import (
     RunManifest,
@@ -45,6 +46,7 @@ from nemo_gym.rollout_recovery import (
     has_saved_generation,
     has_unclassified_execution_failure,
     is_answered_agent_deadline,
+    is_infrastructure_agent_timeout,
     is_terminal_failure,
     keeps_partial_response,
     load_resubmit_offset,
@@ -619,10 +621,16 @@ class RolloutRecords:
             self.attempt_counts[key[0]] += 1
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
         interruption = is_interruption_failure(row)
+        infrastructure = is_infrastructure_agent_timeout(row)
+        failure_class = row.get("_ng_failure_class")
+        if failure_class is None and infrastructure:
+            # A graded result of an agent timeout whose window held a server-side fault (Harbor's graded zero) is not
+            # the model's result: it is selected as a failure, spends an attempt and runs again under the cap.
+            failure_class = AGENT_TIMEOUT_INFRASTRUCTURE
         if (
             count_failure
             and key not in self.payloads
-            and row.get("_ng_failure_class") is not None
+            and failure_class is not None
             and not interruption
             and not row.get("_ng_failure_terminal")
         ):
@@ -630,7 +638,7 @@ class RolloutRecords:
         if (
             count_failure
             and key not in self.payloads
-            and row.get("_ng_failure_class") is not None
+            and failure_class is not None
             and not interruption
             and row.get("_ng_failure_terminal")
             and not is_terminal_failure(row, retry_terminal_timeouts=True)
@@ -640,7 +648,7 @@ class RolloutRecords:
             self.omitted.add(key)
         self.payloads[key] = _Outcome(
             record=replace(record, expected_identity=(row.get(RUN_ID_KEY), key[0], key[1])),
-            failure_class=row.get("_ng_failure_class"),
+            failure_class=failure_class,
             legacy_failure_class=row.get("_ng_failure_legacy_class"),
             terminal=bool(row.get("_ng_failure_terminal")),
             masked=bool(row.get("mask_sample")),
@@ -653,8 +661,9 @@ class RolloutRecords:
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
-            # replace it.
-            saved_answer=row.get("_ng_failure_class") is not None
+            # replace it. Not when a server-side fault cut the agent's window short: that answer is not its result.
+            saved_answer=failure_class is not None
+            and not infrastructure
             and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
         )
         outcome = self.payloads[key]

@@ -200,8 +200,18 @@ EMPTY_ANSWER = "empty_answer"
 MALFORMED_ANSWER = "malformed_answer"
 MODEL_SERVER_ERROR = "model_server_error"
 NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
+# An ``agent_timeout`` whose window held a recorded server-side fault (``is_infrastructure_agent_timeout`` in
+# ``nemo_gym.rollout_recovery``): the deadline was spent on our servers, so it is not the model's result.
+AGENT_TIMEOUT_INFRASTRUCTURE = "agent_timeout_infrastructure"
 GATE_DERIVED_KINDS: frozenset[str] = frozenset(
-    {TRUNCATED_ANSWER, EMPTY_ANSWER, MALFORMED_ANSWER, MODEL_SERVER_ERROR, NON_POLICY_MODEL_REJECTION}
+    {
+        TRUNCATED_ANSWER,
+        EMPTY_ANSWER,
+        MALFORMED_ANSWER,
+        MODEL_SERVER_ERROR,
+        NON_POLICY_MODEL_REJECTION,
+        AGENT_TIMEOUT_INFRASTRUCTURE,
+    }
 )
 
 
@@ -211,7 +221,8 @@ GATE_DERIVED_KINDS: frozenset[str] = frozenset(
 # ``policy_timeout_counts_as_model`` setting can move it to the server class), its context limit, its agent's limit, timeout, invalid output or a command the
 # harness refused (the model issued it), or an answer it left cut off, empty or malformed. The evaluation gate counts
 # these by kind and never fails health on them; RL treats them as the policy's own failures. A server fault is a
-# server that did not start, a model transport error or a model server's 5xx reply: evaluation-side. Any other kind is
+# server that did not start, a model transport error, a model server's 5xx reply or an agent timeout whose window held
+# such a fault (``AGENT_TIMEOUT_INFRASTRUCTURE``): evaluation-side. Any other kind is
 # evaluation-side by its kind alone. A recorded HTTP status refines the class: the gate keys it on the status first.
 MODEL_FAULT_KINDS: frozenset[str] = frozenset(
     {
@@ -227,7 +238,14 @@ MODEL_FAULT_KINDS: frozenset[str] = frozenset(
         MALFORMED_ANSWER,
     }
 )
-SERVER_FAULT_KINDS: frozenset[str] = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR})
+SERVER_FAULT_KINDS: frozenset[str] = frozenset(
+    {SERVER_START_FAILED, MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR, AGENT_TIMEOUT_INFRASTRUCTURE}
+)
+
+
+def is_server_status(status: object) -> bool:
+    """Whether a recorded HTTP status is a server's own failure: an integer in the 5xx class."""
+    return type(status) is int and 500 <= status <= 599
 
 
 def is_gate_derived(name: str) -> bool:

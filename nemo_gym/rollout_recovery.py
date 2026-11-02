@@ -23,6 +23,7 @@ import fcntl
 import hashlib
 import json
 import logging
+import math
 import os
 import re
 import socket
@@ -42,7 +43,17 @@ from pydantic import BaseModel, ConfigDict, Field, ValidationError
 from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
-from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, COLLECTION_RESUME_REFUSED
+from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT,
+    COLLECTION_RESUME_REFUSED,
+    MODEL_SERVER_ERROR,
+    MODEL_TRANSPORT_ERROR,
+    PROVIDER_OOM_KILLED,
+    SESSION_RELEASE_FAILED,
+    TRANSPORT_PEER_DROP,
+    TRANSPORT_UNREACHABLE,
+    is_server_status,
+)
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
@@ -109,23 +120,177 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     return row.get("evaluation_completed") is True
 
 
+def _row_failure_kind(row: Mapping[str, Any]) -> Any:
+    """The selected failure event's kind when the row selects one (None when that event is missing), else the row's."""
+    events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
+    selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
+    if isinstance(selected, Mapping):
+        return selected.get("failure_kind")
+    if "_ng_failure_id" in row:
+        return None
+    return row.get("failure_kind") if row.get("failure_kind") is not None else row.get("_ng_failure_class")
+
+
 def is_answered_agent_deadline(row: Mapping[str, Any]) -> bool:
     """Whether the agent ran out of its own deadline and kept its answer: the evaluated model's final result.
 
     The deadline belongs to the agent, so what it kept is its result, scored by the benchmark's rule (a recorded
     grade, else a settled zero). Recovery classifies it as final, and no resume or in-process retry runs it again:
     that would replace the model's answer. The kind is the selected failure event's when the row selects one, else
-    the row's own. A timeout that kept no answer keeps its retry policy.
+    the row's own. A timeout that kept no answer keeps its retry policy, and so does one whose window held a recorded
+    server-side fault (``is_infrastructure_agent_timeout``): what it kept was cut short by us, not by its deadline.
     """
-    events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
-    selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
-    if isinstance(selected, Mapping):
-        kind = selected.get("failure_kind")
-    elif "_ng_failure_id" in row:
-        return False  # The selected event is missing, so the row names no kind.
+    return (
+        _row_failure_kind(row) == AGENT_TIMEOUT
+        and (has_saved_generation(row) or keeps_partial_response(row))
+        and not is_infrastructure_agent_timeout(row)
+    )
+
+
+# The collector's minimal projection of a saved row's captured model calls (``COLLECT_SCRIPT`` in
+# ``nemo_gym.orchestration.recovery`` writes it in ``captured_model_calls``'s normalized shape).
+COLLECTED_MODEL_CALLS_KEY = "_ng_collected_model_calls"
+# Faulted model calls own an agent's deadline when they took at least this share of its window.
+AGENT_TIMEOUT_FAULT_SHARE = 0.25
+# Capture error categories of a server-side failure: a 5xx class reply or an upstream error event, and a connection
+# that failed. ``timeout``, ``cancelled``, ``stream_truncated`` and client errors are not: a slow model is the model's
+# result under its time limit, and the agent's own deadline cancels the call it was waiting on.
+SERVER_FAULT_CATEGORIES = frozenset({"upstream_error", "connection"})
+# Failure-report kinds of a server-side failure; ``transport_timeout`` is left out for the same reason.
+SERVER_FAULT_EVENT_KINDS = frozenset(
+    {MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR, TRANSPORT_UNREACHABLE, TRANSPORT_PEER_DROP}
+)
+
+
+def captured_model_calls(row: Mapping[str, Any]) -> list[dict[str, Any]]:
+    """The row's captured model calls in capture order, each reduced to the facts a server fault is read from.
+
+    ``status_code``, ``upstream_status_code``, ``error_category``, ``failure_events`` (each failure-report event's
+    ``failure_kind`` and ``http_status``), ``started_at`` and ``duration_ms``. Read from the collector's projection
+    when the row is one, else from ``ng_model_call_capture.calls``, else from ``ng_trajectory.model_calls``.
+    """
+    collected = row.get(COLLECTED_MODEL_CALLS_KEY)
+    if isinstance(collected, list):
+        return [call for call in collected if isinstance(call, dict)]
+    capture = row.get("ng_model_call_capture")
+    raw = capture.get("calls") if isinstance(capture, Mapping) else None
+    if not isinstance(raw, list):
+        trajectory = row.get("ng_trajectory")
+        raw = trajectory.get("model_calls") if isinstance(trajectory, Mapping) else None
+    calls = []
+    for item in raw if isinstance(raw, list) else []:
+        if not isinstance(item, Mapping):
+            continue
+        meta = item.get("response_metadata")
+        meta = meta if isinstance(meta, Mapping) else item
+        report = meta.get("failure_report")
+        events = report.get("events") if isinstance(report, Mapping) else None
+        duration = item.get("latency_total_ms", item.get("duration_ms"))
+        calls.append(
+            {
+                "status_code": meta.get("status_code"),
+                "upstream_status_code": meta.get("upstream_status_code"),
+                "error_category": meta.get("error_category"),
+                "failure_events": [
+                    {"failure_kind": event.get("failure_kind"), "http_status": event.get("http_status")}
+                    for event in (events.values() if isinstance(events, Mapping) else ())
+                    if isinstance(event, Mapping)
+                ],
+                "started_at": item.get("started_at"),
+                "duration_ms": duration,
+            }
+        )
+    return calls
+
+
+def is_server_fault_call(call: Mapping[str, Any]) -> bool:
+    """Whether a captured model call recorded a server-side fault of the model server or the path to it.
+
+    Any of: ``status_code`` or ``upstream_status_code`` in the 5xx class (``is_server_status``); ``error_category``
+    ``upstream_error`` or ``connection``; a failure-report event of kind ``model_transport_error``,
+    ``model_server_error``, ``transport_unreachable`` or ``transport_peer_drop``, or with a 5xx ``http_status``.
+    A timeout, a cancellation, a truncated stream and a 4xx rejection are not (``SERVER_FAULT_CATEGORIES``).
+    """
+    if is_server_status(call.get("status_code")) or is_server_status(call.get("upstream_status_code")):
+        return True
+    if call.get("error_category") in SERVER_FAULT_CATEGORIES:
+        return True
+    events = call.get("failure_events")
+    return any(
+        isinstance(event, Mapping)
+        and (event.get("failure_kind") in SERVER_FAULT_EVENT_KINDS or is_server_status(event.get("http_status")))
+        for event in (events if isinstance(events, list) else ())
+    )
+
+
+def _number(value: Any) -> float | None:
+    return float(value) if type(value) in (int, float) and math.isfinite(value) and value >= 0 else None
+
+
+def _material_model_call_faults(row: Mapping[str, Any]) -> bool:
+    """Whether server-faulted model calls own the window: the agent's last call faulted, or faulted calls took at
+    least ``AGENT_TIMEOUT_FAULT_SHARE`` of it. The window is the attempt's recorded elapsed time, else the span of its
+    captured calls; an early fault that a retry recovered within a long window is the model's time, not ours."""
+    calls = captured_model_calls(row)
+    if not calls:
+        return False
+    starts = [_number(call.get("started_at")) for call in calls]
+    if all(start is not None for start in starts):
+        # Capture order is append order; when every call recorded its start, the last started is the last call.
+        order = sorted(range(len(calls)), key=lambda index: (starts[index], index))
+        calls, starts = [calls[index] for index in order], [starts[index] for index in order]
+    if is_server_fault_call(calls[-1]):
+        return True
+    faulted = sum(_number(call.get("duration_ms")) or 0.0 for call in calls if is_server_fault_call(call))
+    if not faulted:
+        return False
+    elapsed = _number(row.get("_ng_elapsed_s")) or observed_elapsed(dict(row))
+    if elapsed:
+        window_ms = elapsed * 1000
     else:
-        kind = row.get("failure_kind") if row.get("failure_kind") is not None else row.get("_ng_failure_class")
-    return kind == AGENT_TIMEOUT and (has_saved_generation(row) or keeps_partial_response(row))
+        spans = [
+            (start, start + (_number(call.get("duration_ms")) or 0.0) / 1000)
+            for start, call in zip(starts, calls)
+            if start is not None
+        ]
+        window_ms = (max(end for _, end in spans) - min(start for start, _ in spans)) * 1000 if spans else 0.0
+    return window_ms > 0 and faulted >= AGENT_TIMEOUT_FAULT_SHARE * window_ms
+
+
+def _sandbox_or_tool_fault(row: Mapping[str, Any]) -> bool:
+    """Whether the row recorded a sandbox or tool-server failure event, selected or not.
+
+    A sandbox provider's or session's failure (``provider_*``, ``session_*``) other than an out-of-memory kill (the
+    model's own command can exhaust it) or a release failure after the episode; or a resources server's tool call
+    that failed with a 5xx status or a server-side transport kind. A verification failure is not one.
+    """
+    events = row.get("_ng_failure_events")
+    for event in events.values() if isinstance(events, Mapping) else ():
+        if not isinstance(event, Mapping) or not isinstance(event.get("failure_kind"), str):
+            continue
+        kind = event["failure_kind"]
+        if kind.startswith(("provider_", "session_")) and kind not in (PROVIDER_OOM_KILLED, SESSION_RELEASE_FAILED):
+            return True
+        if (
+            event.get("boundary") == "resources_server"
+            and event.get("operation") != "verify"
+            and (kind in SERVER_FAULT_EVENT_KINDS or is_server_status(event.get("http_status")))
+        ):
+            return True
+    return False
+
+
+def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
+    """Whether an ``agent_timeout`` row's window held a recorded server-side fault: the evaluation's failure.
+
+    The row (a failure row, or a graded result such as Harbor's) names ``agent_timeout`` and either recorded a sandbox
+    or tool-server failure event (``_sandbox_or_tool_fault``), or its captured model calls show a server fault
+    (``is_server_fault_call``) that owns the window (``_material_model_call_faults``). A clean agent timeout stays the
+    model's result under the benchmark's time limit. Read from saved rows alone, so it applies to existing runs.
+    """
+    return _row_failure_kind(row) == AGENT_TIMEOUT and (
+        _sandbox_or_tool_fault(row) or _material_model_call_faults(row)
+    )
 
 
 def holds_response(row: Mapping[str, Any]) -> bool:

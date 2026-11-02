@@ -62,6 +62,7 @@ from nemo_gym.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
     HARBOR_FAILED,
@@ -84,6 +85,7 @@ from nemo_gym.core.failure_kinds import (
     VERIFIER_ERROR,
     is_namespaced,
     is_registered,
+    is_server_status,
 )
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.executors.resume_script import (
@@ -500,12 +502,15 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
         has_recorded_grade,
         has_saved_generation,
         has_unclassified_execution_failure,
+        is_infrastructure_agent_timeout,
         keeps_partial_response,
     )
 
-    if has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row):
+    # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
+    infrastructure = is_infrastructure_agent_timeout(row)
+    if not infrastructure and (has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row)):
         return "the row kept an answer that a rerun would replace"
-    if has_recorded_grade(row):
+    if not infrastructure and has_recorded_grade(row):
         return "the verifier recorded a grade that a rerun would replace"
     if has_unclassified_execution_failure(row):
         return "its recorded cause does not permit another agent run"
@@ -585,7 +590,7 @@ def decide_recovery(
         is_omitted_rollout_row,
         is_terminal_failure,
     )
-    from nemo_gym.rollout_recovery import is_answered_agent_deadline
+    from nemo_gym.rollout_recovery import is_answered_agent_deadline, is_infrastructure_agent_timeout
 
     policy = outcome_policy or RecoveryOutcomePolicyConfig()
     managed = {fact.identity: fact for fact in managed_selection or []}
@@ -640,6 +645,24 @@ def decide_recovery(
                 )
                 continue
             judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
+            if not judge and identity in managed and is_infrastructure_agent_timeout(row):
+                # A graded agent timeout whose window held a server-side fault (Harbor's graded zero): the Store
+                # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
+                # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
+                fact = managed[identity]
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity,
+                        state=IdentityState.RETRYABLE
+                        if fact.attempts < fact.max_attempts
+                        else IdentityState.EXHAUSTED,
+                        failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE,
+                        attempts=fact.attempts,
+                        max_attempts=fact.max_attempts,
+                        events=_events(row),
+                    )
+                )
+                continue
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
             if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
@@ -815,7 +838,8 @@ def decide_recovery(
             IdentityEvidence(
                 identity=identity,
                 state=state,
-                failure_kind=kind,
+                # The kind its retry selects on stays agent_timeout; the counted kind names the server-side fault.
+                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE if is_infrastructure_agent_timeout(last) else kind,
                 http_status=_policy_evidence(last)[1],
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                 attempts=spent,
@@ -1065,7 +1089,7 @@ a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
         "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
-        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission",
+        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "_ng_elapsed_s",
         "ng_policy_model_server", "_ng_rejudge_operation_id")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
@@ -1077,6 +1101,30 @@ def trial_refs(items):
     return [{"model_call_id": item.get("model_call_id"), "response_id": item.get("response_id"),
              "model_ref": {k: item["model_ref"].get(k) for k in ("type", "name")} if isinstance(item.get("model_ref"), dict) else None}
             if isinstance(item, dict) else None for item in items]
+def model_call_facts(r):
+    # Each captured model call's server-fault facts and timing only, in rollout_recovery.captured_model_calls's shape.
+    capture = r.get("ng_model_call_capture")
+    raw = capture.get("calls") if isinstance(capture, dict) else None
+    if not isinstance(raw, list):
+        trajectory = r.get("ng_trajectory")
+        raw = trajectory.get("model_calls") if isinstance(trajectory, dict) else None
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("response_metadata") if isinstance(item.get("response_metadata"), dict) else item
+        report = meta.get("failure_report")
+        events = report.get("events") if isinstance(report, dict) else None
+        category = meta.get("error_category")
+        out.append({"status_code": count(meta.get("status_code")), "upstream_status_code": count(meta.get("upstream_status_code")),
+                    "error_category": category[:64] if isinstance(category, str) else None,
+                    "failure_events": [{"failure_kind": event.get("failure_kind") if isinstance(event.get("failure_kind"), str) else None,
+                                        "http_status": count(event.get("http_status"))}
+                                       for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
+                    "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
+    return out
 def trial_metadata(value):
     if not isinstance(value, dict):
         return None
@@ -1249,6 +1297,10 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if name in ("rollouts.jsonl", "rollouts_failures.jsonl"):
+                calls = model_call_facts(r)
+                if calls is not None:
+                    selected["_ng_collected_model_calls"] = calls
             if name == "rollouts.jsonl":
                 binding = grading_result_binding(r)
                 if binding is not None:
@@ -1777,8 +1829,9 @@ def _managed_trial_metadata(
         return results, None
 
 
-# Row values the Store selection never reads, and the largest ones in agent runs.
-STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_model_call_capture", "ng_agent_observations"})
+# Row values the Store selection never reads, and the largest ones in agent runs. The model-call capture is read: an
+# agent timeout's captured calls decide whether its window held a server-side fault (is_infrastructure_agent_timeout).
+STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_agent_observations"})
 
 
 def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:
@@ -3553,6 +3606,22 @@ def _last_captured_call(calls: list) -> Any:
     return last
 
 
+def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> set[Identity]:
+    """Scored identities whose graded result is an agent timeout with a server-side fault in its window.
+
+    A Harbor graded zero a run without a Store cannot reopen (``is_infrastructure_agent_timeout``): it stays in the
+    results, and the trial gate counts it once, as ``AGENT_TIMEOUT_INFRASTRUCTURE``, an evaluation-side fault.
+    """
+    from nemo_gym.rollout_recovery import is_infrastructure_agent_timeout
+
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    return {
+        _identity(row)
+        for row in ((collected.results or []) if collected is not None else [])
+        if _identity(row) in scored and is_infrastructure_agent_timeout(row)
+    }
+
+
 def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
     """Scored identities whose rollout ended on a failed policy request and was scored zero, with the failure kind.
 
@@ -3566,11 +3635,14 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     """
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
+    infrastructure = infrastructure_timeouts(decision, collected)
     for row in (collected.results or []) if collected is not None else []:
         observed = row.get("ng_trial_observations")
         reward = row.get("reward")
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
             continue
+        if _identity(row) in infrastructure:
+            continue  # Counted once, as its agent timeout's server-side fault.
         invocations = observed.get("invocations") if isinstance(observed, dict) else None
         unreferenced = (
             isinstance(invocations, list)
@@ -4003,7 +4075,7 @@ def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> An
     """
     if type(http_status) is not int:
         return kind
-    if 500 <= http_status <= 599:
+    if is_server_status(http_status):
         return MODEL_SERVER_ERROR
     if 400 <= http_status <= 499 and not policy:
         return NON_POLICY_MODEL_REJECTION
@@ -4416,18 +4488,21 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     once (``_scored_fault``).
     """
     final_zero = final_zero_trials(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected)
     kinds = Counter(
         status_fault_kind(e.failure_kind, e.http_status)
         for e in decision.evidence
         if e.state == IdentityState.MODEL_FINAL
     )
     kinds.update(final_zero.values())
+    kinds[AGENT_TIMEOUT_INFRASTRUCTURE] += len(infrastructure)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     kinds.update(
         fault
         for row in (collected.results or [] if collected is not None else [])
         if _identity(row) in scored
         and _identity(row) not in final_zero
+        and _identity(row) not in infrastructure
         and (fault := _scored_fault(row, collected)) is not None
     )
     return +kinds
@@ -4696,10 +4771,11 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     if population <= 0:
         return None
     final_zero = final_zero_trials(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     responses: Counter = Counter()
     for row in (collected.results or []) if collected is not None else []:
-        if _identity(row) not in scored or _identity(row) in final_zero:
+        if _identity(row) not in scored or _identity(row) in final_zero or _identity(row) in infrastructure:
             continue
         # A cut-off answer scored zero is truncated, also when a recorded grade scored it.
         if _answer_fault(row, collected) == TRUNCATED_ANSWER:
@@ -4733,9 +4809,11 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         for row in ((collected.results or []) if collected is not None else [])
         if _identity(row) in scored
         and _identity(row) not in final_zero
+        and _identity(row) not in infrastructure
         and (fault := _scored_fault(row, collected)) is not None
         and fault != _answer_fault(row, collected)
     )
+    causes[trial_failure_cause(AGENT_TIMEOUT_INFRASTRUCTURE)] += len(infrastructure)
     causes["judge"] += len(invalid_grades)
 
     def family(found: Counter, names: tuple[str, ...]) -> dict[str, Any]:
