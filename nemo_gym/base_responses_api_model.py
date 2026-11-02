@@ -1594,6 +1594,7 @@ class _CaptureMiddleware:
         configured_sink: Any = None,
         lineage_store: LineageResolver | None = None,
         delta_records: bool = False,
+        unresolved_as_root: bool = False,
         external_staging: bool = False,
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
         token_capture_enabled: bool = False,
@@ -1612,6 +1613,7 @@ class _CaptureMiddleware:
         self._configured_sink = configured_sink
         self._lineage_store: LineageResolver | None = lineage_store
         self._delta_records = delta_records
+        self._unresolved_as_root = unresolved_as_root
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._external_staging = external_staging
@@ -1757,6 +1759,7 @@ class _CaptureMiddleware:
                 token_sink=token_sink,
                 lineage_store=self._capture_ledger if self._external_staging else self._lineage_store,
                 delta_records=self._delta_records,
+                unresolved_as_root=self._unresolved_as_root,
                 external_staging=self._external_staging,
                 parent_resolution_mode=self._parent_resolution_mode,
                 admitted_at=time.time(),
@@ -2074,6 +2077,9 @@ def install_model_call_capture(
         configured_sink=configured_sink,
         lineage_store=lineage_store,
         delta_records=(capture_settings.token_id_capture.delta_records if capture_settings is not None else False),
+        unresolved_as_root=(
+            capture_settings.token_id_capture.unresolved_as_root if capture_settings is not None else False
+        ),
         external_staging=external_staging,
         parent_resolution_mode=(
             capture_settings.token_id_capture.parent_resolution if capture_settings is not None else "fingerprint"
