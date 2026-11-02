@@ -296,3 +296,44 @@ def test_without_a_usable_interpreter_the_command_runs_on_the_fallback_environme
     assert result.returncode == 0, result.stderr
     assert (tmp_path / "stdout.log").read_text().split() == ["None", "http://model.example/v1"]
     assert (tmp_path / "relay" / "unavailable").exists()
+
+
+@pytest.mark.skipif(not Path("/proc/uptime").exists(), reason="the runner times the relay start from /proc/uptime")
+def test_a_freeze_while_the_relay_starts_does_not_use_up_its_wait(tmp_path: Path) -> None:
+    # A checkpoint can stop the runner while it starts the relay, for longer than the wait. The relay must still
+    # come up once the runner runs again, not leave the command on the fallback environment.
+    script = 'import os; print(os.environ.get("NEMO_GYM_MODEL_RELAY"), os.environ.get("MODEL_BASE_URL"))'
+    entered = tmp_path / "entered"
+    slow_python = tmp_path / "slow-python"
+    slow_python.write_text(f'#!/bin/sh\n: >{entered}\nsleep 1\nexec {sys.executable} "$@"\n')
+    slow_python.chmod(0o755)
+    params, _ = _relay_params(
+        tmp_path,
+        script,
+        MODEL_RELAY_PYTHONS=[str(slow_python)],
+        MODEL_RELAY_FALLBACK_ENV={"MODEL_BASE_URL": "http://model.example/v1"},
+    )
+    runner = subprocess.Popen(
+        ["bash", str(HARNESS_RUNNER_SCRIPT), str(params)],
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        start_new_session=True,
+    )
+    try:
+        deadline = time.monotonic() + 10
+        while not entered.exists():
+            assert time.monotonic() < deadline, "the runner never looked for an interpreter"
+            time.sleep(0.01)
+        os.killpg(runner.pid, signal.SIGSTOP)
+        time.sleep(11)
+        os.killpg(runner.pid, signal.SIGCONT)
+        _, stderr = runner.communicate(timeout=20)
+    finally:
+        if runner.poll() is None:
+            os.killpg(runner.pid, signal.SIGKILL)
+            runner.wait()
+
+    assert runner.returncode == 0, stderr
+    assert (tmp_path / "stdout.log").read_text().split() == ["1", "None"]
+    assert not (tmp_path / "relay" / "unavailable").exists()
