@@ -38,6 +38,7 @@ from omegaconf import OmegaConf
 from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
@@ -47,7 +48,8 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
 
     A diagnostic error object or an empty mapping is not generation. A typed response counts when it has at least
     one output item or a status: a producer finished it, even with no assistant text. A response object with no
-    output and no status is a placeholder, for example from an agent that never ran.
+    output and no status is a placeholder, for example from an agent that never ran. So is a response an agent
+    marked with ``NG_NO_GENERATION_METADATA``: its empty assistant message was built without any generation.
     """
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
@@ -59,6 +61,8 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
         # The agent outcome policy already rejected this failed response as an answer. Retain its
         # diagnostic output without vetoing RETRY; cleanup/verification responses keep their protection.
         if stage == "agent" and answer.get("status") == "failed":
+            continue
+        if is_no_generation_placeholder(answer):
             continue
         output = answer.get("output")
         if not isinstance(output, list):
