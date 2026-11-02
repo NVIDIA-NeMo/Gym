@@ -12,19 +12,18 @@ from shlex import quote
 from tempfile import TemporaryDirectory
 from time import perf_counter
 
+from nemo_gym.agent_utils import SandboxCommand, SandboxSession
 from nemo_gym.agent_utils.sandbox_session import (
     HARNESS_COMMAND_NOT_STARTED,
     HARNESS_RUNNER_FAILED,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    SandboxCommand,
-    SandboxSession,
     shell_assignments,
 )
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseUsage
-from nemo_gym.rollout_observability import AgentObservationBundle
 from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 from responses_api_agents.kilocode_agent.observability import read_kilo_snapshot
 
 

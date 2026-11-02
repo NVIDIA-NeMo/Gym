@@ -1,3 +1,1 @@
 -e nemo-gym[dev] @ ../../
-langchain-core
-langgraph

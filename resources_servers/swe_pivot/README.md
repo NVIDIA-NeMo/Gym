@@ -260,7 +260,7 @@ swe_pivot:
 
 ```python
 reward_mode = "binary"
-enable_target_match = False           # Only tool name match, like the paper
+enable_target_match = False  # Only tool name match, like the paper
 enable_argument_similarity = False
 enable_diff_size_shaping = False
 ```
@@ -272,7 +272,7 @@ reward_mode = "binary"
 enable_target_match = True
 enable_argument_similarity = True
 similarity_full_credit = 0.8
-enable_diff_size_shaping = False      # Binary mode ignores this anyway
+enable_diff_size_shaping = False  # Binary mode ignores this anyway
 ```
 
 **Fine-grained**:

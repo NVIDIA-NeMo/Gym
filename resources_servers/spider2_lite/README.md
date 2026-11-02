@@ -19,6 +19,7 @@ To trigger the download manually:
 
 ```python
 from resources_servers.spider2_lite.setup_spider2 import ensure_spider2_lite
+
 ensure_spider2_lite()
 ```
 

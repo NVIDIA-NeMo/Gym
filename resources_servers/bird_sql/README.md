@@ -26,6 +26,7 @@ To trigger the download manually:
 
 ```python
 from resources_servers.bird_sql.setup_bird_sql import ensure_bird_sql
+
 ensure_bird_sql()
 ```
 

@@ -33,29 +33,60 @@ Start the server and drive the endpoint directly — a `requests.Session` preser
 import requests
 
 s = requests.Session()
-meta = s.post("http://127.0.0.1:<port>/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).json()["mcp"]
+meta = s.post("http://127.0.0.1:<port>/seed_session", json={"verifier_metadata": {"expected_city": "Paris"}}).json()[
+    "mcp"
+]
 token = meta["headers"]["X-NeMo-Gym-Session-Token"]
 
 # call the tool over the auto-exposed /mcp endpoint, carrying the per-rollout token
 s.post(
     f"http://127.0.0.1:<port>{meta['url_path']}",
     headers={"Accept": "application/json, text/event-stream", "X-NeMo-Gym-Session-Token": token},
-    json={"jsonrpc": "2.0", "id": 1, "method": "tools/call",
-          "params": {"name": "get_weather", "arguments": {"city": "Paris"}}},
+    json={
+        "jsonrpc": "2.0",
+        "id": 1,
+        "method": "tools/call",
+        "params": {"name": "get_weather", "arguments": {"city": "Paris"}},
+    },
 )
 
 # the same tool is still a plain HTTP route (the cookie carries the session here)
 s.post("http://127.0.0.1:<port>/get_weather", json={"city": "Paris"})
 
 # verify in the same session -> reward 1.0
-print(s.post("http://127.0.0.1:<port>/verify", json={
-    "responses_create_params": {"input": [{"role": "user", "content": "use the weather tool"}]},
-    "verifier_metadata": {"expected_city": "Paris"},
-    "response": {"id": "r", "created_at": 0, "model": "t", "object": "response", "output": [
-        {"id": "m", "type": "message", "role": "assistant", "status": "completed",
-         "content": [{"type": "output_text", "text": "The weather in Paris is sunny and 72 F.", "annotations": []}]}],
-        "parallel_tool_calls": False, "tool_choice": "none", "tools": []},
-}).json()["reward"])
+print(
+    s.post(
+        "http://127.0.0.1:<port>/verify",
+        json={
+            "responses_create_params": {"input": [{"role": "user", "content": "use the weather tool"}]},
+            "verifier_metadata": {"expected_city": "Paris"},
+            "response": {
+                "id": "r",
+                "created_at": 0,
+                "model": "t",
+                "object": "response",
+                "output": [
+                    {
+                        "id": "m",
+                        "type": "message",
+                        "role": "assistant",
+                        "status": "completed",
+                        "content": [
+                            {
+                                "type": "output_text",
+                                "text": "The weather in Paris is sunny and 72 F.",
+                                "annotations": [],
+                            }
+                        ],
+                    }
+                ],
+                "parallel_tool_calls": False,
+                "tool_choice": "none",
+                "tools": [],
+            },
+        },
+    ).json()["reward"]
+)
 ```
 
 ## Tests

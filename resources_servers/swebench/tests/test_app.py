@@ -21,9 +21,9 @@ import pytest
 from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
+from nemo_gym.client import ServerClient
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
 from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import ServerClient
 from resources_servers.swebench.app import (
     DockerContainer,
     SwebenchResourcesServer,

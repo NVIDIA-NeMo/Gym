@@ -136,9 +136,11 @@ def ssh_like_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         LocalConnection,
         "run",
-        lambda self, commands: subprocess.run(
-            ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
-        ).stdout,
+        lambda self, commands: (
+            subprocess.run(
+                ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
+            ).stdout
+        ),
     )
 
 
@@ -348,8 +350,8 @@ def _run_args(script: str, job_dir: Path, env: dict[str, str]) -> list[str]:
 
 
 def _recorded_tracking_ids(args: list[str]) -> dict[str, str | None]:
-    from nemo_gym.exporters.mlflow import MLflowExporter
-    from nemo_gym.exporters.wandb import WandbExporter
+    from nemo_gym.artifacts.exporters.mlflow import MLflowExporter
+    from nemo_gym.artifacts.exporters.wandb import WandbExporter
 
     config = OmegaConf.from_dotlist([arg.lstrip("+") for arg in args if "=" in arg])
     output = Path(config.output_jsonl_fpath)

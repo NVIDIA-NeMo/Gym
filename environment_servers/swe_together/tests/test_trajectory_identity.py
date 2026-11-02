@@ -15,7 +15,7 @@ from nemo_gym.config import (
 )
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.rollout_collection import _build_trajectory_record, _episode_record, _episode_request_body
-from nemo_gym.rollout_observability import TrajectoryRecord
+from nemo_gym.trajectory import TrajectoryRecord
 
 
 @pytest.mark.parametrize("reverse_task_keys", [False, True])

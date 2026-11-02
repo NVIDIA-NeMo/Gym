@@ -37,8 +37,8 @@ def test_shipped_config_parses_offline_with_strict_routing():
         )
     )
     assert "critpt_custom_grader_environment_server" in resolved
-    relay = resolved["critpt_custom_grader_environment_server"]["environment_servers"]["legacy_agent"]
-    assert relay["agent_server"]["name"] == "critpt_custom_grader_simple_agent"
+    server = resolved["critpt_custom_grader_environment_server"]["environment_servers"]["single_agent_turn_legacy"]
+    assert server["agent_server"]["name"] == "critpt_custom_grader_simple_agent"
     block = resolved["critpt_custom_grader"]["resources_servers"]["critpt_custom_grader"]
     assert block["sandbox_provider"] == "sandbox" and block["execution"]["exec_user"] == "grader"
     assert "???" not in OmegaConf.to_yaml(resolved["critpt_custom_grader"])

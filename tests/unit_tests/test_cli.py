@@ -802,8 +802,8 @@ class TestRunHelperServerReadiness:
         """Each probe used to wait its full 5s, so the deadline was checked only after every server had been tried."""
         import socket
 
+        from nemo_gym.client.server_client import ServerClient
         from nemo_gym.config.config_types import BaseServerConfig
-        from nemo_gym.server_utils import ServerClient
 
         # A listening socket that never accepts completes the TCP handshake and then never answers.
         stalled_sockets = []
@@ -1269,10 +1269,9 @@ class TestValidate:
         out = capsys.readouterr().out
         assert (
             "'my_env' (environment_servers/single_agent_turn_legacy/app.py) does not match "
-            "SingleAgentTurnEnvironmentServerConfig:" in out
+            "SingleAgentTurnLegacyEnvironmentServerConfig:" in out
         )
         block_path = "my_env.environment_servers.single_agent_turn_legacy"
-        assert f"{block_path}.cleanup_timeout_seconds: Field required" in out
         assert f"{block_path}.resources_tool_transport: Extra inputs are not permitted" in out
         assert "Config is valid" not in out
 

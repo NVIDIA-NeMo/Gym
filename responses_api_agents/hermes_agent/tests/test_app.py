@@ -22,8 +22,7 @@ import pytest
 import yaml
 from fastapi import HTTPException
 
-from nemo_gym.agent_utils import uv_bootstrap
-from nemo_gym.agent_utils.sandbox_session import SandboxSession
+from nemo_gym.agent_utils import SandboxSession, uv_bootstrap
 from nemo_gym.base_responses_api_agent import (
     AGENT_SESSION_COOKIE_KEY,
     AgentCloseSessionRequest,
@@ -31,6 +30,7 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     _AgentSessionRecord,
 )
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     EpisodeId,
     NeMoGymEasyInputMessage,
@@ -42,11 +42,10 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     TaskId,
 )
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult, SandboxSpec
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.trajectory import AgentEpisode, AgentObservationBundle
 from responses_api_agents.hermes_agent.app import (
     HermesAgent,
     HermesAgentConfig,

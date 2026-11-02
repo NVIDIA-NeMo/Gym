@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY
 
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes
@@ -460,8 +460,8 @@ class Inspector:
                 evidence=("TE-4", "TE-7"),
                 location="$.ng_trajectory.model_calls",
                 reason="external, encrypted or invalid media is unavailable to this reader",
-                predicate=lambda: not any(
-                    (_missing_content(c.get(k)) for c in self.calls for k in ("request", "response"))
+                predicate=lambda: (
+                    not any((_missing_content(c.get(k)) for c in self.calls for k in ("request", "response")))
                 ),
                 available=self.available,
                 depends_on=("model_calls.present", "calls.request", "calls.response"),
@@ -1041,10 +1041,12 @@ class Inspector:
                 evidence=("TE-9",),
                 location="$.ng_trajectory.turns[*].model_calls",
                 reason="every policy response needs one step; HTTP errors may be unbound and auxiliary calls stay separate",
-                predicate=lambda: bool(policy)
-                and all((refs[i] == 1 for i in policy - http_errors))
-                and all((refs[i] <= 1 for i in http_errors))
-                and (not any((refs[i] for i in helpers))),
+                predicate=lambda: (
+                    bool(policy)
+                    and all((refs[i] == 1 for i in policy - http_errors))
+                    and all((refs[i] <= 1 for i in http_errors))
+                    and (not any((refs[i] for i in helpers)))
+                ),
                 available=self.available,
                 applies=self.scope.steps,
                 depends_on=("steps.call_target", "steps.compaction_target", "ownership.call_target"),
@@ -1189,8 +1191,10 @@ class Inspector:
                 evidence=("TE-1", "TE-4", "TE-7", "TE-8", "TE-9"),
                 location="$.ng_trajectory.gaps",
                 reason="producer explicitly reports unavailable evidence",
-                predicate=lambda: not any(
-                    (c.startswith("model_call_capture") or c == "agent_observation_join_failed" for c in codes)
+                predicate=lambda: (
+                    not any(
+                        (c.startswith("model_call_capture") or c == "agent_observation_join_failed" for c in codes)
+                    )
                 ),
                 available=self.available,
                 applies=True,
@@ -1204,8 +1208,13 @@ class Inspector:
                 evidence=("TE-8",),
                 location="$.ng_trajectory.gaps",
                 reason="producer explicitly reports unavailable evidence",
-                predicate=lambda: not any(
-                    (c.startswith("model_call_reference") or c == "model_call_ownership_unavailable" for c in codes)
+                predicate=lambda: (
+                    not any(
+                        (
+                            c.startswith("model_call_reference") or c == "model_call_ownership_unavailable"
+                            for c in codes
+                        )
+                    )
                 ),
                 available=self.available,
                 applies=True,
@@ -1219,10 +1228,12 @@ class Inspector:
                 evidence=("TE-3",),
                 location="$.ng_trajectory.gaps",
                 reason="producer explicitly reports unavailable evidence",
-                predicate=lambda: not any(
-                    (
-                        c in {"turns_unavailable", "turn_evidence_incomplete", "trajectory_projection_failed"}
-                        for c in codes
+                predicate=lambda: (
+                    not any(
+                        (
+                            c in {"turns_unavailable", "turn_evidence_incomplete", "trajectory_projection_failed"}
+                            for c in codes
+                        )
                     )
                 ),
                 available=self.available,

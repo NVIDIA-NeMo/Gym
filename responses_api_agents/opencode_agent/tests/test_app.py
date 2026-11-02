@@ -22,6 +22,7 @@ from uuid import uuid4
 import pytest
 from omegaconf import OmegaConf
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import GlobalConfigDictParser, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -31,14 +32,13 @@ from nemo_gym.core import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,

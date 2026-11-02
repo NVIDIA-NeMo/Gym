@@ -23,8 +23,7 @@ import orjson
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.atif_reverification import AtifProjectionError
-from nemo_gym.base_resources_server import ReverifyMode
+from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
@@ -34,7 +33,7 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
     rollout_run_key,
 )
-from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
+from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY, NG_TERMINAL_KEY
 from nemo_gym.rollout_reverification import (
     _RECOVERY_TWO_SOURCES_WARNING,
     ATIF_PROVENANCE_KEY,
@@ -73,6 +72,8 @@ from nemo_gym.rollout_reverification import (
     _yield_inputs_and_rollouts_paired,
     summarize_cache_usage,
 )
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
+from nemo_gym.trajectory.atif_reverification import AtifProjectionError
 from nemo_gym.utils.path_utils import aggregation_sources_path_for
 
 
@@ -949,6 +950,11 @@ class TestIsJudgeFailure:
     def test_true_only_for_judge_failed_class(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: JUDGE_FAILED_FAILURE_CLASS}) is True
 
+    def test_preserved_producer_judge_class_is_recoverable(self) -> None:
+        row = {NG_FAILURE_CLASS_KEY: "judge_timeout", "_ng_failure_legacy_class": "judge_failed"}
+        assert _is_judge_failure(row)
+        assert _recovery_rollout_predicate()({**row, TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+
     def test_false_for_other_failure_classes(self) -> None:
         assert _is_judge_failure({NG_FAILURE_CLASS_KEY: "timeout_exceeded"}) is False
 
@@ -1370,7 +1376,7 @@ class TestPrepareAtifPayloads:
         return OutputPaths(output=tmp_path / "out.jsonl", failures=tmp_path / "out_failures.jsonl")
 
     def _write_inputs_and_manifest(self, tmp_path: Path) -> tuple[Path, Path]:
-        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
+        fixture = Path(__file__).parent / "trajectory" / "fixtures" / "relay_atif_v1_7_tool_trajectory.json"
         trajectory = tmp_path / "trajectory.json"
         trajectory.write_bytes(fixture.read_bytes())
         materialized = tmp_path / "materialized.jsonl"
@@ -2284,7 +2290,7 @@ class TestRolloutReverificationRunFromConfig:
     ) -> None:
         """Exercise public ATIF mode while an unrelated configured verifier is unsupported."""
 
-        fixture = Path(__file__).parent / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
+        fixture = Path(__file__).parent / "trajectory" / "fixtures" / "relay_atif_v1_7_responses_tool_trajectory.json"
         materialized = tmp_path / "inputs.jsonl"
         materialized.write_bytes(
             orjson.dumps(

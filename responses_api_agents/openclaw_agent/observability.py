@@ -11,7 +11,7 @@ from typing import Any
 
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponseInputItem
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,

@@ -26,8 +26,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
+from nemo_gym.artifacts.exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
-from nemo_gym.run_exporter_registry import DEFAULT_RUN_EXPORTER, RUN_EXPORTERS
 from nemo_gym.utils.text import did_you_mean
 
 
@@ -798,6 +798,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
     if overrides != expected_overrides:
         args._parser.error("health-check does not accept Hydra overrides")
     from nemo_gym.cli.eval import health_check_rollouts
+    from nemo_gym.config.config_types import ConfigError
     from nemo_gym.health.types import RunHealthLimits
 
     # A limit flag that is not given is absent from args, so the limit stays unset and keeps the run's persisted
@@ -820,7 +821,7 @@ def _eval_health_check(args: argparse.Namespace, overrides: list[str]) -> None:
             json_output=args.json,
             model_call_capture_dir=args.model_call_capture_dir,
         )
-    except (FileNotFoundError, ValueError) as exc:
+    except (FileNotFoundError, ValueError, ConfigError) as exc:
         args._parser.error(str(exc))
 
 

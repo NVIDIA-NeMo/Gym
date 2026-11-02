@@ -13,17 +13,13 @@ from shlex import quote
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import (
-    HARNESS_RUNNER_FILE,
-    SandboxCommand,
-    SandboxSession,
-    shell_assignments,
-)
+from nemo_gym.agent_utils import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, shell_assignments
 from nemo_gym.base_responses_api_agent import AgentSessionState
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap, TrajectoryRecord
 from responses_api_agents.opencode_agent.artifacts import parse_opencode_observations
 from responses_api_agents.opencode_agent.observability import scope_opencode_activation
 from responses_api_agents.opencode_agent.snapshot import snapshot

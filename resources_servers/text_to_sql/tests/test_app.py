@@ -17,6 +17,7 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 import pytest
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
@@ -24,7 +25,6 @@ from nemo_gym.core import (
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.text_to_sql.app import (
     FailureCode,
     TextToSqlResourcesServer,

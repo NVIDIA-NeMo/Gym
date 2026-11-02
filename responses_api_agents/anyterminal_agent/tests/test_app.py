@@ -33,11 +33,11 @@ import pytest
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
+from nemo_gym.client import ServerClient
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, TOKEN_ID_CAPTURE_BLOCK
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import ApptainerProvider, DockerProvider
 from nemo_gym.sandbox.providers.apptainer import provider as apptainer_provider
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.anyterminal_agent import app
 from responses_api_agents.anyterminal_agent.app import (
     _RUNNER_TEMPLATE,
@@ -270,9 +270,8 @@ class TestSetupParams:
 
     def test_model_url_carries_trace_context_without_rollout_id(self, tmp_path: Path, monkeypatch) -> None:
         # Capture off, traces on: the harness still gets the current span in the URL.
-        from nemo_gym import server_utils
 
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: self.SEGMENT)
         agent = _make_setup_agent(tmp_path, model_server_url="http://model-host:8000")
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 
@@ -283,9 +282,7 @@ class TestSetupParams:
 
     @pytest.mark.parametrize("relay_url", ["http://relay:9000", "http://relay:9000/v1", "http://relay:9000/v1/"])
     def test_sandbox_model_url_keeps_the_rollout_path(self, tmp_path: Path, monkeypatch, relay_url: str) -> None:
-        from nemo_gym import server_utils
-
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: self.SEGMENT)
         agent = _make_setup_agent(tmp_path, model_server_url=relay_url, sandbox_model_base_url=relay_url)
         body = _make_body(metadata={"task_name": "fix-git", "task_dir": str(tmp_path)})
 

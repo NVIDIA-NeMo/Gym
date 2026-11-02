@@ -9,6 +9,10 @@ langgraph_agent:
       #   --agent langgraph_agent/reflection_agent
       #   --agent langgraph_agent/rewoo_agent
       entrypoint: ???
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: ubuntu:24.04
+        workdir: /workspace
       resources_server: null
       model_server:
         type: responses_api_models

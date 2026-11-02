@@ -229,7 +229,7 @@ def _report_invalid_arguments() -> None:
 INVOCATION_ID = "root"
 
 
-# Values of ``AgentInvocation.status`` and ``ToolCallObservation.status`` in ``nemo_gym.rollout_observability``,
+# Values of ``AgentInvocation.status`` and ``ToolCallObservation.status`` in ``nemo_gym.trajectory.trajectory_record``,
 # which the sandbox cannot import.
 class InvocationStatus(StrEnum):
     COMPLETED = "completed"

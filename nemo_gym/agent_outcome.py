@@ -8,7 +8,6 @@ from typing import TYPE_CHECKING, Annotated
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, ValidationInfo, field_validator, model_validator
 
-from nemo_gym.base_environment_server import is_retryable_dependency_status
 from nemo_gym.core.failure_kinds import (
     AGENT_INVALID_OUTPUT,
     AGENT_LIMIT,
@@ -16,6 +15,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
 )
+from nemo_gym.server_runtime.base_environment_server import is_retryable_dependency_status
 
 
 if TYPE_CHECKING:

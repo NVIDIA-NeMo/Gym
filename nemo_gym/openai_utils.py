@@ -40,16 +40,16 @@ from pydantic import (
 )
 
 from nemo_gym._moved_paths import moved_names_getattr
-from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.server_utils import (
+from nemo_gym.client.http_client import (
     MAX_NUM_TRIES,
     ClientResponse,
-    ClientResponseError,
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
     raise_for_status,
     request,
 )
+from nemo_gym.core.episode import current_rollout_id
+from nemo_gym.server_utils import ClientResponseError
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors

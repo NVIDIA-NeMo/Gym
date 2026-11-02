@@ -1,59 +1,92 @@
 # LangGraph Agent
 
-The adapter runs four in-process LangGraph workflows: iterative reflection,
-subagent orchestration, parallel thinking, and ReWOO. The workflows use only the
-Gym Model Server; they do not execute environment tools or use task sandboxes.
-The framework dependencies are declared in `requirements.txt` (currently unpinned).
-The session migration was tested with LangGraph 1.2.18 and langchain-core 1.7.3
-on Python 3.13.14.
+Reflection, orchestration, parallel thinking and ReWOO execute their complete graph
+inside a task sandbox. The Agent Server manages sessions, installs the runtime,
+transfers requests/results and supervises the graph process. Each graph calls the
+Gym Model Server directly from the sandbox. Graph prompts and model-only behavior
+are unchanged: these workflows do not execute environment tools or model-requested
+function calls.
 
-## Sessions and capabilities
+## Configure and run
 
-**Capability level: Evaluation.** The adapter serves agent sessions for
-`single_agent_turn` and flat-row `single_agent_turn_legacy` environments. Pairings
-are provided for `reasoning_gym` and `math_with_judge` in `environments/langgraph_*`.
-Each activation runs the complete graph. Identical retries join or replay that
-activation; changed requests, wrong rollout identities, and closed sessions return
-409. Use the seeded episode's `/ng-rollout/<capture_key>/v1/responses` route.
-Close cancels and drains active graph execution before verification.
-
-Required HTTP/MCP grants and any sandbox access return a final 422. Optional grants
-are ignored. Set `resources_tool_transports: []` and `num_workers: 1` in the pairing.
-An unbound agent config has `resources_server: null`; the Environment Server owns
-resource setup, verification and cleanup. Select a workflow with
-`--agent langgraph_agent/<flavor>_agent`.
-
-All graph model calls preserve evaluation and training-capture URL prefixes.
-Agent/resource cookies are never forwarded to the Model Server. Response usage is
-the sum of every graph model call only when all calls report usage; otherwise it is
-unknown. Close always returns an observation bundle with an explicit gap: this
-adapter does not record native invocation or turn evidence. Rollout health can be
-`unobserved`, and the strict evidence inspector is not expected to pass. Shell-tool
-harness conformance probes do not apply because these graphs have no shell tools.
-
-Checkpoint recovery remains `restart_only`. Non-monotonic trajectories, including
-parallel reasoning and synthesis, are not directly compatible with NeMo RL's
-monotonically increasing trajectory assumption. Preserving the capture route does
-not establish training qualification. Sampling fields are forwarded to each model
-call; `max_output_tokens` is a per-call limit, not a whole-graph budget. The graph
-uses its own prompts and does not execute model-requested function calls.
-
-## Quick start
+Select a flavor config, a Model Server and a sandbox provider. For example, from the
+Gym repository root, with the model endpoint configured:
 
 ```bash
 gym env start \
-    --resources-server reasoning_gym/reflection_agent \
-    --model-type vllm_model
+    --config environments/langgraph_reflection_reasoning_gym/config.yaml \
+    --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+    --model-type vllm_model \
+    ++use_absolute_ip=true
 
 gym eval run --no-serve \
-    --agent reasoning_gym_langgraph_agent \
-    --input resources_servers/reasoning_gym/data/example.jsonl \
-    --output example_rollouts.jsonl \
-    --limit 1
+    --config environments/langgraph_reflection_reasoning_gym/config.yaml \
+    --config nemo_gym/sandbox/providers/docker/configs/docker.yaml \
+    --model-type vllm_model \
+    --agent langgraph_reflection_reasoning_gym_agent \
+    --input environments/langgraph_reflection_reasoning_gym/data/example.jsonl \
+    --output example_rollouts.jsonl --limit 1
 ```
 
-Configure the model endpoint as described in the model server documentation. The
-existing twelve pairing configs now use `single_agent_turn_legacy` while retaining
-their dataset formats and agent names. Legacy callers can still post to the
-agent's `/run` when `resources_server` is configured; it preserves resource cookies
-and verifier metadata. Sessionless `/v1/responses` also remains available.
+Use the agent name declared by the selected environment config. The four flavors
+retain their individual entrypoints (`reflection_agent.py`, `orchestrator_agent.py`,
+`parallel_thinking_agent.py`, `rewoo_agent.py`); each is a thin adapter. The graph
+implementations live in `workflows.py`, imported only by `sandbox_runner.py`.
+
+Resources may supply `sandbox_access` during agent session setup. In that case the
+agent connects to the existing task sandbox, honors its workdir/user/environment,
+and leaves sandbox destruction to Resources. The provider must support reconnecting
+from its descriptor. Otherwise `sandbox_provider` selects an agent-owned sandbox;
+checked-in pairings use the named `sandbox` provider. Configure a provider block as
+shown above, or override that name and `sandbox_config` for your deployment.
+
+The default agent-owned image is `ubuntu:24.04`, with workdir `/workspace`. On a
+cluster, select a supported provider/image and writable workdir. The task sandbox
+must reach the Model Server and Python package/download endpoints. A model URL
+reachable only on the Agent Server's loopback interface is usually insufficient.
+
+## Runtime installation
+
+Host `requirements.txt` installs Gym only. At seed time the adapter bundles the
+serving Gym source, graph implementations and runner, then installs them in a
+session-local Python 3.13.14 environment inside the sandbox. `runtime-requirements.txt`
+pins LangGraph and langchain-core. The source archive contains no server configuration,
+model-provider keys or resource cookies. Only the Gym model URL and request/graph
+settings are sent to the runner. Each session has its own install directory, avoiding
+shared installation races; close removes it from a borrowed sandbox.
+
+The sandbox supervisor bounds execution and confirms process cleanup before output
+collection. Agent close drains the graph, disconnects a borrowed sandbox or stops
+an owned one, then the Environment Server verifies and closes Resources. Identical
+activation retries join/replay one graph; changed requests or paths return 409.
+Required HTTP/MCP grants are refused before setup; optional grants are ignored.
+
+| Setting | Default | Purpose |
+| --- | --- | --- |
+| `sandbox_provider` | `null` in the config class; `sandbox` in recipes | Used only when Resources does not supply a sandbox |
+| `sandbox_config` | Ubuntu 24.04, `/workspace` | Specification for an agent-owned sandbox |
+| `sandbox_install_timeout_seconds` | 900 | Bounds runtime installation |
+| `sandbox_runner_timeout_seconds` | 600 | Graph activation ceiling; a shorter episode/request budget wins |
+| `session_close_timeout_seconds` | 30 | Bounds supervised cleanup and connection release |
+
+## Compatibility and evidence
+
+**Capability level: Evaluation.** Both agent sessions and direct `/v1/responses`
+requests execute inside sandboxes. Direct requests create and close a temporary
+agent-owned sandbox and therefore require `sandbox_provider`; there is no host
+execution fallback. Compatibility `/run` still requires `resources_server` and
+preserves verifier extras and resource cookies. Existing flat-row pairings use
+`single_agent_turn_legacy`, `resources_tool_transports: []` and one agent worker.
+
+All model calls preserve rollout and training-capture URL prefixes. Output metadata
+reports `harness_execution: sandbox` and the runner's hostname, PID and interpreter.
+Usage is aggregated only when every model call reports it; otherwise it stays unknown.
+Native invocation/turn evidence remains absent, so health can be `unobserved` and
+strict evidence inspection is not expected to pass. Process identity is not a claim
+of native observability or training qualification.
+
+Checkpoint recovery remains `restart_only`. Non-monotonic trajectories, including
+parallel reasoning and synthesis, are not directly compatible with NeMo RL's
+monotonically increasing trajectory assumption. `max_output_tokens` remains a
+per-model-call limit rather than a whole-graph budget. Moving the graph into the
+sandbox does not change its prompts, tool capabilities or these training limits.
