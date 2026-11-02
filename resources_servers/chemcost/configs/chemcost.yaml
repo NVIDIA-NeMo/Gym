@@ -1,0 +1,35 @@
+chemcost:
+  resources_servers:
+    chemcost:
+      entrypoint: app.py
+      domain: knowledge
+      description: ChemCost -- estimate the procurement cost of a chemical reaction with supplier-quote tools (NeurIPS 2026)
+      value: Tests multi-step scientific tool use with a judge-free numeric label, scored with the authors' CTA@k
+      verified: false
+      # null downloads the pinned YoungerWu/ChemCost pricing database into resources_servers/chemcost/.data/.
+      pricing_db_path: null
+chemcost_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      # Upstream's reference harness (Codex) sets no tool-call limit; this cap only stops a looping agent.
+      max_steps: 100
+      resources_server:
+        type: resources_servers
+        name: chemcost
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/chemcost/data/example.jsonl
+        license: Creative Commons Attribution-ShareAlike 4.0 International
+
+chemcost_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: chemcost_simple_agent
