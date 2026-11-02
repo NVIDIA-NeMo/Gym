@@ -515,3 +515,85 @@ async def test_cached_close_does_not_bind_a_fresh_request_to_the_closed_session(
     seeded = await agent.seed_agent_session(fresh_request, second)
     assert seeded.agent_session_id == second.agent_session_id
     await agent.close_agent_session(fresh_request, _close(second))
+
+
+@pytest.mark.parametrize("failed_seed_release", [False, True], ids=["close", "failed-seed-release"])
+async def test_cleanup_after_handled_caller_cancellation_preserves_the_original_cancellation(
+    agent, failed_seed_release
+):
+    seed = _seed()
+    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
+    record = agent._session_records[seed.agent_session_id]
+    if failed_seed_release:
+        agent._keep_failed_seed(seed.agent_session_id, record)
+    cleaned = asyncio.Event()
+
+    async def operation():
+        task = asyncio.current_task()
+        task.cancel("caller cancellation")
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            assert task.cancelling() == 1
+            if failed_seed_release:
+                await agent._release_failed_seed(seed.agent_session_id, record)
+            else:
+                receipt = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
+                assert receipt.agent_observations.source == "test"
+            assert task.cancelling() == 1
+            cleaned.set()
+            raise
+
+    task = asyncio.create_task(operation())
+    with pytest.raises(asyncio.CancelledError, match="caller cancellation"):
+        await task
+    assert cleaned.is_set()
+    assert task.cancelling() == 1
+    assert record.state is None
+    if failed_seed_release:
+        assert seed.agent_session_id not in agent._session_records
+    else:
+        assert record.close_response is not None
+    agent._close_agent_session_state.assert_awaited_once()
+
+
+@pytest.mark.parametrize("failed_seed_release", [False, True], ids=["close", "failed-seed-release"])
+@pytest.mark.parametrize("inherited_cancellation", [False, True], ids=["fresh-task", "canceled-caller"])
+async def test_cleanup_cannot_discard_a_new_cancellation_suppressed_by_its_hook(
+    agent, failed_seed_release, inherited_cancellation
+):
+    seed = _seed()
+    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
+    record = agent._session_records[seed.agent_session_id]
+    if failed_seed_release:
+        agent._keep_failed_seed(seed.agent_session_id, record)
+
+    async def cleanup(state):
+        asyncio.current_task().cancel("cleanup cancellation")
+        try:
+            await asyncio.sleep(0)
+        except asyncio.CancelledError:
+            return AgentCloseSessionResponse(agent_session_id=seed.agent_session_id)
+
+    agent._close_agent_session_state.side_effect = cleanup
+
+    async def operation():
+        if inherited_cancellation:
+            asyncio.current_task().cancel("caller cancellation")
+            try:
+                await asyncio.sleep(0)
+            except asyncio.CancelledError:
+                pass
+        if failed_seed_release:
+            await agent._release_failed_seed(seed.agent_session_id, record)
+        else:
+            await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
+
+    task = asyncio.create_task(operation())
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert task.cancelling() == 1 + inherited_cancellation
+    assert record.state is not None
+    assert record.close_response is None
+    assert agent._session_records[seed.agent_session_id] is record
+    agent._close_agent_session_state.assert_awaited_once()

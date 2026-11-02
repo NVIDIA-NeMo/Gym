@@ -567,6 +567,8 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
         The hook runs under the session's own rollout, as it would for the caller's close.
         If it fails, the record keeps its state for a later close, and the release is tried again a window later.
         """
+        task = asyncio.current_task()
+        cancellations_at_entry = task.cancelling()
         async with self._locked_agent_session(agent_session_id) as current:
             if current is not record or record.close_response is not None or record.state is None:
                 return
@@ -584,7 +586,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 self._failed_seed_records[agent_session_id] = record
                 return
             # The lock's exit drops the record, now that it holds no state.
-            if asyncio.current_task().cancelling():
+            if task.cancelling() > cancellations_at_entry:
                 raise asyncio.CancelledError
             record.state = None
 
@@ -868,6 +870,9 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
     async def _close_agent_session_id(
         self, session_id: str, episode_id: EpisodeId, *, current: str | None = None
     ) -> tuple[AgentCloseSessionResponse, bool]:
+        # A caller may already be handling cancellation while running its final cleanup.
+        task = asyncio.current_task()
+        cancellations_at_entry = task.cancelling()
         async with self._locked_agent_session(session_id) as record:
             if record.episode_id is not None and record.episode_id != episode_id:
                 raise HTTPException(409, "episode_id does not match the seeded agent session")
@@ -879,7 +884,7 @@ class SimpleResponsesAPIAgent(BaseResponsesAPIAgent, AggregateMetricsMixin, Simp
                 result = AgentCloseSessionResponse(agent_session_id=session_id)
             else:
                 result = await self._close_session_state(session_id, record)
-            if asyncio.current_task().cancelling():
+            if task.cancelling() > cancellations_at_entry:
                 raise asyncio.CancelledError
             record.state = None
             record.episode_id = episode_id
