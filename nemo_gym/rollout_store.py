@@ -370,17 +370,20 @@ class RolloutStore:
         self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
         self._state.unresolved_dispatches.discard(identity)
 
-    def withdraw_rejudgment(self, identity: str, operation_id: str) -> None:
+    def withdraw_rejudgment(self, identity: str, operation_id: str, *, unsaved_judge_failure: bool = False) -> None:
         """Withdraw the admission of a saved result's re-verification that answered without a grade.
 
         The verifier answered, so its outcome is known; nothing is saved and the saved result stays selected as it
         was. Only a saved-result admission can be withdrawn: a judge failure's re-judgment saves its failed outcome.
+        With ``unsaved_judge_failure`` the caller saves no outcome for this judge failure's re-judgment (its verifier
+        answered without a grade or a judge failure, or its pass raised before it answered), so its admission is
+        withdrawn too: the failure stays selected, and a later pass judges its saved answer again.
         """
         pending = self.manifest.pending_rejudge.get(identity)
         if (
             pending is None
             or pending.operation_id != operation_id
-            or not pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX)
+            or not (unsaved_judge_failure or pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX))
         ):
             raise ConfigError(f"Rollout {identity!r} has no admitted saved-result re-verification {operation_id!r}.")
         latest = self._state.payloads.get((identity, self._state.latest.get(identity)))

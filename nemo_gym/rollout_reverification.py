@@ -797,7 +797,8 @@ def _run_verification_payloads(
             }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
-            # settle_into_source its admission stays pending, so recovery stops instead of grading again.
+            # settle_into_source the outcomes already answered are settled and its admission is withdrawn, so a
+            # later pass grades it again (see _settle_what_a_failed_pass_judged).
             res = await server_client.post(
                 server_name=rs_name, url_path="/verify", json=request_row, _resend_after_disconnect=False
             )
@@ -1375,8 +1376,11 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         failure = binding["failures"].get(identity)
         if failure is None:
             raise ConfigError(f"Re-judged rollout {identity!r} is not a bound judge failure of {source}.")
-        if identity in saved_results and _ungraded_reverification(result):
-            # The verifier answered without a grade: the saved result stays as it was, and nothing is saved.
+        if _ungraded_reverification(result) and (
+            identity in saved_results or result.get(NG_FAILURE_CLASS_KEY) != "judge_failed"
+        ):
+            # The verifier answered without a grade or a judge failure: the bound row stays as it was, and nothing
+            # is saved. A judge failure that failed to judge again is saved below as its re-judgment's outcome.
             withdrawn.append((identity, binding["admitted"][identity].operation_id))
             continue
         # /verify returns task and rollout indices only; the bound failure supplies its run and attempt identity.
@@ -1409,9 +1413,9 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
             settled += store.record_rejudgment(failure, result)
             store.close_rejudgment(logical_rollout_id(result), result["_ng_rejudge_operation_id"])
         for identity, operation_id in withdrawn:
-            store.withdraw_rejudgment(identity, operation_id)
+            store.withdraw_rejudgment(identity, operation_id, unsaved_judge_failure=identity not in saved_results)
     if withdrawn:
-        print(f"{len(withdrawn)} re-verified saved result(s) were not graded again and stay as they were")
+        print(f"{len(withdrawn)} re-verified result(s) were not graded again and stay as they were")
     return settled
 
 
@@ -1425,6 +1429,46 @@ def _ungraded_reverification(result: Dict[str, Any]) -> bool:
         or type(reward) not in (int, float)
         or not math.isfinite(reward)
     )
+
+
+def _settle_what_a_failed_pass_judged(
+    source: Path, identities: List[str], judged: List[Dict], binding: Dict[str, Any]
+) -> Callable[..., bool]:
+    """An exit callback for a pass that raised in-process after admitting its re-judgments, run under the run lock.
+
+    The outcomes the pass already received are settled as usual, then each admission still without a saved outcome
+    is withdrawn: its row stays selected, so a later pass grades it again and recovery decides REVERIFY instead of
+    stopping on an outcome it cannot know. At worst a /verify call that did reach its server is made again for the
+    same saved answer. An interrupted or killed pass leaves its admissions for recovery as before.
+    """
+
+    def settle(exc_type, exc, traceback) -> bool:
+        if exc_type is None or not issubclass(exc_type, Exception):
+            return False
+        if judged:
+            try:
+                settle_rejudgments(source, judged, binding)
+            except Exception as error:  # what cannot be settled is withdrawn below; a settled row is never touched
+                print(f"Re-judged results of a failed pass were not settled: {type(error).__name__}: {error}")
+        withdrawn = 0
+        try:
+            store = RolloutStore.open_for_rejudgment(source)
+            for identity in identities:
+                pending = store.manifest.pending_rejudge.get(identity)
+                if pending is None:
+                    continue
+                try:
+                    store.withdraw_rejudgment(identity, pending.operation_id, unsaved_judge_failure=True)
+                except ConfigError:  # an outcome was saved for it: the next binding closes its admission
+                    continue
+                withdrawn += 1
+        except Exception as error:  # the pass error stands; recovery sees the admissions as before
+            print(f"Re-judgment admissions were not withdrawn: {type(error).__name__}: {error}", flush=True)
+        if withdrawn:
+            print(f"Withdrew {withdrawn} re-judgment admission(s) with no outcome; their rows stay as they were")
+        return False
+
+    return settle
 
 
 class RolloutReverificationHelper(BaseModel):
@@ -1586,12 +1630,18 @@ class RolloutReverificationHelper(BaseModel):
                         f"{rollouts_jsonl_fpath} with the same saved answer; nothing was judged."
                     )
 
+        judged_results: List[Dict] = []  # results and judge failures of this run, kept apart from the seeded ones
         if config.settle_into_source:
             # Durable admissions just before the judge calls; the run lock is held until settlement.
             identities = [logical_rollout_id(row) for row in payloads_to_reverify]
             if len(identities) != len(set(identities)):
                 raise ConfigError("Judge inputs name a rollout more than once; nothing was judged.")
             settle_binding["admitted_monotonic"] = time.monotonic()
+            # Runs before the run lock is released, so a pass that raises from here on settles what it judged and
+            # withdraws what it admitted with no outcome.
+            settle_lock.push(
+                _settle_what_a_failed_pass_judged(rollouts_jsonl_fpath, identities, judged_results, settle_binding)
+            )
             admit_store = RolloutStore.open_for_rejudgment(rollouts_jsonl_fpath)
             settle_binding["admitted"] = {
                 logical_rollout_id(row): admit_store.admit_rejudgment(
@@ -1610,7 +1660,6 @@ class RolloutReverificationHelper(BaseModel):
         counts_left = Counter(run_labels.get(rollout_run_key(r)) for r in payloads_to_reverify)
         results_file = output_fpaths.output.open("ab")
         failures_file = output_fpaths.failures.open("ab")
-        judged_results: List[Dict] = []  # results and judge failures of this run, kept apart from the seeded ones
         failure_counts: Counter = Counter()
         completed = 0  # number of rows re-verified this run (for progress reporting)
         sources_dropped = False
@@ -1666,7 +1715,7 @@ class RolloutReverificationHelper(BaseModel):
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
                     if failure_class == "judge_failed" or (
-                        config.settle_into_source and logical_rollout_id(row) in settle_binding["saved_results"]
+                        config.settle_into_source and logical_rollout_id(row) in settle_binding["failures"]
                     ):
                         judged_results.append(result)
                 else:
