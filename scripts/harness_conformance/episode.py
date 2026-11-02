@@ -25,7 +25,7 @@ from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
 from nemo_gym.base_responses_api_model import NeMoGymResponse
 from nemo_gym.harness_capabilities.cli import digest_file
 
-from .provider import Probe
+from .provider import OpenClawProbe, Probe
 from .registry import HARNESSES
 from .scenarios import SCENARIOS
 
@@ -178,7 +178,8 @@ async def run_episode(*, harness: str, scenario_name: str, directory: Path, time
     )
     (directory / "runtime.json").write_text(json.dumps(runtime, indent=2) + "\n")
     scenario = next(s for s in SCENARIOS if s.name == scenario_name)
-    probe = Probe(scenario, directory)
+    probe_cls = {"openclaw": OpenClawProbe}.get(harness, Probe)
+    probe = probe_cls(scenario, directory)
     probe.save()
     tasks = []
     servers = []

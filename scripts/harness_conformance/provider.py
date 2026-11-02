@@ -96,7 +96,7 @@ class Probe:
                     args["description"] = "Run conformance shell check"
                 self.tool_calls.append(
                     {
-                        "id": f"call{uuid4().hex}",
+                        "id": f"call_{uuid4().hex}",
                         "name": name,
                         "arguments": args,
                         "token": token,
@@ -132,24 +132,27 @@ class Probe:
                 return name, args, namespaces
         return None
 
+    def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
+        """Require the original ID unless a provider-specific replay rule applies."""
+        return {call["id"]}
+
     def _observe_tool_results(self, body: dict) -> None:
         history = body.get("messages", body.get("input", []))
+        if not isinstance(history, list):
+            history = []
         for call in self.tool_calls:
-            results = (
-                [
-                    item
-                    for item in history
-                    if isinstance(item, dict)
-                    and (
-                        item.get("role") == "tool"
-                        and item.get("tool_call_id") == call["id"]
-                        or item.get("type") == "function_call_output"
-                        and item.get("call_id") == call["id"]
-                    )
-                ]
-                if isinstance(history, list)
-                else []
-            )
+            result_ids = self._accepted_result_ids(call, history)
+            results = [
+                item
+                for item in history
+                if isinstance(item, dict)
+                and (
+                    item.get("role") == "tool"
+                    and item.get("tool_call_id") in result_ids
+                    or item.get("type") == "function_call_output"
+                    and item.get("call_id") in result_ids
+                )
+            ]
             call["result_seen"] = call["result_seen"] or any(
                 call["token"] in json.dumps(item.get("content", item.get("output"))) for item in results
             )
@@ -196,7 +199,7 @@ class Probe:
                     ]
                 elif (finish := self._finish(body)) is not None:
                     name, arguments, namespaces = finish
-                    self.finish_call = {"id": f"call{uuid4().hex}", "name": name, "arguments": arguments}
+                    self.finish_call = {"id": f"call_{uuid4().hex}", "name": name, "arguments": arguments}
                     output = [
                         {
                             "type": "function_call",
@@ -417,3 +420,29 @@ class Probe:
             app.post(prefix + "/verify")(observe_verifier(verify, enabled=True))
             app.post(prefix + "/bash")(bash)
         return app
+
+
+class OpenClawProbe(Probe):
+    """Match OpenClaw replay IDs while retaining the original captured identities."""
+
+    def _accepted_result_ids(self, call: dict, history: list) -> set[str]:
+        result_ids = super()._accepted_result_ids(call, history)
+        # The pinned custom-provider replay strips the underscore from our short
+        # UUID IDs. Require the matching assistant call as well as the tool result.
+        replay_id = call["id"].replace("_", "")
+        for item in history:
+            if not isinstance(item, dict) or item.get("role") != "assistant":
+                continue
+            for replay in item.get("tool_calls") or []:
+                function = replay.get("function") or {}
+                try:
+                    arguments = json.loads(function.get("arguments", ""))
+                except (TypeError, ValueError):
+                    continue
+                if (
+                    replay.get("id") == replay_id
+                    and function.get("name") == call["name"]
+                    and arguments == call["arguments"]
+                ):
+                    result_ids.add(replay_id)
+        return result_ids
