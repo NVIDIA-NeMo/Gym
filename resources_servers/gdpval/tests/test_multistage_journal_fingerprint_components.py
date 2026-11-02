@@ -36,7 +36,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
 
 
 # ``compute_fingerprint`` of ``_fixture()``, computed before the component digests existed.
-PINNED_FINGERPRINT = "b6aa4f2214e9208ee727dfc35486e2a787887549a38a27b69ec09d9f62f7c804"
+PINNED_FINGERPRINT = "b6aa4f2214e9208ee727dfc35486e2a787887549a38a27b69ec09d9f62f7c804"  # pragma: allowlist secret
 
 UNKNOWN = "components unknown (the journal predates component digests)"
 
