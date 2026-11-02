@@ -38,6 +38,7 @@ NO_FACTS = {
     "invalid_model_response": False,
     "test_run": None,
     "substep_tests": None,
+    "unit_tests": None,
 }
 
 

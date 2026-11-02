@@ -1308,6 +1308,15 @@ def substep_tests(r):
             "environment_results": len(environments) if isinstance(environments, list) else None}
 import re
 JUDGE_VERDICT = re.compile(r"^(?:\[\[(A=B|A!=B)\]\]|judgement:\s*(yes|no))$", re.IGNORECASE)
+def unit_tests(r):
+    # Saved per-test unit test results of the answer's extracted code (True passes; False or an error code does
+    # not): counts only, with the reasoning-format violation rate. Code, tests and their output stay local.
+    tests = r.get("result")
+    if not isinstance(tests, list) or not all(type(test) in (bool, int) for test in tests):
+        return None
+    return {"tests": len(tests), "passed": sum(test is True for test in tests),
+            "all_passed": all(test is True for test in tests), "code": isinstance(r.get("extracted_model_code"), str),
+            "reasoning_format_violation_rate": finite(r.get("reasoning_format_violation_rate"))}
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1357,6 +1366,7 @@ def grading_facts(r):
         "invalid_model_response": r.get("invalid_model_response") is True,
         "test_run": test_run(r),
         "substep_tests": substep_tests(r),
+        "unit_tests": unit_tests(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -4113,6 +4123,27 @@ def _substep_tests(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _unit_test_results(row: Mapping[str, Any]) -> bool:
+    """Saved unit test results of the answer's extracted code: at least one test, and the row's reward 1.0 exactly
+    when every test passed (0.0 otherwise), or 0.0, the default penalty, for an answer whose reasoning format
+    violated the rule (``reasoning_format_violation_rate`` 1.0). A configured non-zero penalty is not saved on the row,
+    so such a row stays unobserved. The saved answer and score are bound."""
+    tests = _grading_facts(row).get("unit_tests")
+    if not (
+        isinstance(tests, dict)
+        and type(tests.get("tests")) is int
+        and tests["tests"] >= 1
+        and type(tests.get("all_passed")) is bool
+        and tests.get("code") is True
+    ):
+        return False
+    violation = tests.get("reasoning_format_violation_rate")
+    if violation not in (None, 0.0, 1.0):
+        return False
+    expected = 0.0 if violation == 1.0 else float(tests["all_passed"])
+    return _reward(row) == expected and _bound_answer(row)
+
+
 def _environment_reward(row: Mapping[str, Any]) -> bool:
     """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
     recorded = _grading_facts(row).get("environment_reward")
@@ -4131,6 +4162,7 @@ GRADING_ARTIFACTS = (
     ("environment_reward", _environment_reward),
     ("repository_test_run", _repository_test_run),
     ("substep_tests", _substep_tests),
+    ("unit_test_results", _unit_test_results),
 )
 
 
