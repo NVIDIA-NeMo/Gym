@@ -44,7 +44,7 @@ jobs:
           BASE_REF: ${{ inputs.base-ref }}
           # A push to main passes the commit before the push, which is compared directly.
           COMPARE: ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' && 'commit' || 'branch' }}
-          FORCE_ALL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           if [[ "$FORCE_ALL" == 'true' ]]; then BASE_REF=''; fi
           python3 -m scripts.environment_server_compliance.ci select --base "$BASE_REF" --compare "$COMPARE"

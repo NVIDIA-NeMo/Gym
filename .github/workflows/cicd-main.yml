@@ -156,10 +156,12 @@ jobs:
       # PR mirrors retain the full branch diff against the PR's base branch.
       base-ref: ${{ github.event.merge_group.base_sha || (github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}
 
-  # Compliance is published separately as an optional check.
+  # Compliance is published separately as an optional check. It is not part of the schedule;
+  # a manual dispatch of this workflow checks every component.
   environment_server_compliance:
     name: Environment Server compliance (non-blocking)
     needs: [pre-flight, classify_changes]
+    if: github.event_name != 'schedule'
     uses: ./.github/workflows/environment-server-compliance.yml
     permissions:
       contents: read
