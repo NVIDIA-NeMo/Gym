@@ -20,7 +20,6 @@ from urllib.request import Request, urlopen
 
 
 MAX_RATE_LIMIT_RETRIES = 2
-COMPACTION_PROMPT = "You are performing a CONTEXT CHECKPOINT COMPACTION."
 _MAX_COMPACTION_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -39,11 +38,19 @@ def _compaction_request(body: bytes) -> bool:
         payload = json.loads(body)
     except (ValueError, UnicodeError):
         return False
-    history = payload.get("input") if isinstance(payload, dict) else None
-    if not isinstance(history, list) or not history or not isinstance(history[-1], dict):
+    client_metadata = payload.get("client_metadata") if isinstance(payload, dict) else None
+    if not isinstance(client_metadata, dict):
         return False
-    last = history[-1]
-    return last.get("role") == "user" and _message_text(last.get("content")).startswith(COMPACTION_PROMPT)
+    # Codex 0.144.4 declares the request purpose independently of its compaction prompt.
+    # https://github.com/openai/codex/blob/rust-v0.144.4/codex-rs/core/src/responses_metadata.rs
+    metadata = client_metadata.get("x-codex-turn-metadata")
+    if not isinstance(metadata, str):
+        return False
+    try:
+        metadata = json.loads(metadata)
+    except ValueError:
+        return False
+    return isinstance(metadata, dict) and metadata.get("request_kind") == "compaction"
 
 
 def _compaction_response(body: bytearray) -> dict[str, str] | None:

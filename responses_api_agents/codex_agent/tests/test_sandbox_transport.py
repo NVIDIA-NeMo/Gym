@@ -17,7 +17,7 @@ from responses_api_agents.codex_agent.sandbox_transport import rate_limit_proxy
 
 
 @pytest.mark.parametrize(
-    "damage", [None, "policy", "quoted", "failed", "missing_id", "duplicate", "oversize", "truncated"]
+    "damage", [None, "policy", "prompt_only", "failed", "missing_id", "duplicate", "oversize", "truncated"]
 )
 def test_forwarder_retains_only_completed_compaction_identity_without_changing_stream(tmp_path, monkeypatch, damage):
     from responses_api_agents.codex_agent import sandbox_transport
@@ -59,12 +59,17 @@ def test_forwarder_retains_only_completed_compaction_identity_without_changing_s
     thread = Thread(target=upstream.serve_forever, daemon=True)
     thread.start()
     attempts_path = tmp_path / "attempts.jsonl"
-    prompt = sandbox_transport.COMPACTION_PROMPT
-    if damage == "policy":
-        prompt = "Continue the task"
-    elif damage == "quoted":
-        prompt = f"The earlier conversation quoted: {prompt}"
-    body = json.dumps({"input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]}).encode()
+    prompt = (
+        "You are performing a CONTEXT CHECKPOINT COMPACTION."
+        if damage in {"policy", "prompt_only"}
+        else "Summarize the current conversation using a different prompt."
+    )
+    payload = {"input": [{"role": "user", "content": [{"type": "input_text", "text": prompt}]}]}
+    if damage != "prompt_only":
+        payload["client_metadata"] = {
+            "x-codex-turn-metadata": json.dumps({"request_kind": "turn" if damage == "policy" else "compaction"})
+        }
+    body = json.dumps(payload).encode()
     try:
         with rate_limit_proxy(
             f"http://127.0.0.1:{upstream.server_port}", "invocation", attempts_path, timeout=10
@@ -80,6 +85,41 @@ def test_forwarder_retains_only_completed_compaction_identity_without_changing_s
     assert attempt.get("compaction_response") == (
         {"response_id": "helper-id", "summary": "Summary café"} if damage is None else None
     )
+
+
+@pytest.mark.parametrize(
+    "body",
+    [
+        b"not json",
+        b"\xff",
+        b"null",
+        b"[]",
+        b"{}",
+        b'{"client_metadata":null}',
+        b'{"client_metadata":[]}',
+        b'{"client_metadata":{}}',
+        *[
+            json.dumps({"client_metadata": {"x-codex-turn-metadata": value}}).encode()
+            for value in (
+                None,
+                {},
+                1,
+                '{"request_kind":',
+                "null",
+                "[]",
+                '"compaction"',
+                "{}",
+                '{"request_kind":"turn"}',
+                '{"request_kind":"prewarm"}',
+                '{"request_kind":["compaction"]}',
+            )
+        ],
+    ],
+)
+def test_compaction_request_rejects_missing_or_malformed_metadata(body):
+    from responses_api_agents.codex_agent.sandbox_transport import _compaction_request
+
+    assert not _compaction_request(body)
 
 
 @pytest.mark.parametrize("statuses", [[429, 429, 200], [429, 429, 429], [400], [500]])
