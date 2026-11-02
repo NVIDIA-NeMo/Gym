@@ -2913,13 +2913,14 @@ def _observed_trial_operations(
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     # A settled model failure (MODEL_FINAL) or a rollout that ended on a failed policy request is a counted trial
-    # failure with its recorded kind; only the other trials need their operations and grading observed.
+    # failure with its recorded kind; only the other trials need their operations and grading observed. A row an
+    # accepted partial stage omitted is no trial (``trial_population``), so it needs no observation.
     if (
         collected is None
         or not collected.quality
         or collected.quality.get("source_matches") is not True
         or decision.counts.get(IdentityState.SCORED, 0) + decision.counts.get(IdentityState.MODEL_FINAL, 0)
-        != decision.expected
+        != trial_population(decision)
     ):
         return False
     rows = collected.results

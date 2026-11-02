@@ -242,3 +242,22 @@ def test_trial_counts_follow_the_gates_classification_of_a_grading_without_a_ver
     assert passed is None
     assert trial_counts(decision, collected) == task["trial_counts"]
     assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
+
+
+def test_an_accepted_omission_leaves_a_fully_observed_run_exact():
+    from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
+
+    run = _run(1).model_dump()
+    omitted = {"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_collected_task_id": "1"}
+    omitted[ACCEPTED_STAGE_OMISSION] = {"stage_index": 1, "tolerate_unresolved": True}
+    run["materialized"].append(omitted)
+    run["managed_selection"].append(
+        {"identity": [1, 0], "attempts": 0, "max_attempts": 3, "pending": False, "reserved": True}
+    )
+    run["quality"]["artifacts"]["expected"] = 2
+    collected = CollectedEvidence.model_validate(run)
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.complete and decision.counts == {"scored": 1, "omitted": 1}, decision.reason
+    # The omission is no trial: the one observed healthy trial is the whole population, so health passes exactly.
+    assert passed is True and report["status"] == "PASS" and report["exact"] is True, reason
+    assert task["trial_counts"] == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 0}
