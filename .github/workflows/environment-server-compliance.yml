@@ -32,7 +32,7 @@ jobs:
         id: select
         env:
           BASE_REF: ${{ inputs.base-ref }}
-          FORCE_ALL: ${{ github.event_name == 'schedule' || github.event_name == 'workflow_dispatch' }}
+          FORCE_ALL: ${{ github.event_name == 'workflow_dispatch' }}
         run: |
           if [[ "$FORCE_ALL" == 'true' ]]; then BASE_REF=''; fi
           python3 -m scripts.environment_server_compliance.ci select --base "$BASE_REF"
