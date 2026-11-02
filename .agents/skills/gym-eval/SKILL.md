@@ -78,7 +78,7 @@ over only if the successor dies before its own prologue, then reads its predeces
 
 | Predecessor ended | The chain |
 | --- | --- |
-| `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout cut in flight is rerun from the start and is charged no attempt. |
+| `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout in flight when its allocation ends is rerun from the start: the first such cut is free, every later one charges one attempt of that identity as the failure kind `rollout_allocation_ended` (evaluation-side, counted in health; at the attempt cap it is final). The Store cannot tell a walltime cut from a preemption or a node failure, so the rule covers any ended allocation. |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Retries, spending one of `max_retries`. |
 | `COMPLETED` | Ends. |
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. |
