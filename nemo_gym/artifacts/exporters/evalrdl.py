@@ -12,6 +12,7 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import os
 from pathlib import Path
 from typing import Any, ClassVar, Optional
 
@@ -26,6 +27,27 @@ from nemo_gym.config.config_types import RunExportConfig
 
 # Time the upload itself may take, before the wait for a verdict; past it the worker is killed.
 UPLOAD_ALLOWANCE_S = 3600
+# The configuration identity a resume compares, saved beside the run manifest. It is resume bookkeeping, not a result.
+RESUME_IDENTITY_SUFFIX = "manifest.identity.json"
+
+
+def _without_resume_identity(run_dir: Path, workdir: Path) -> Path:
+    """The run directory to upload: as it is, or, when it holds a resume identity, a mirror without that file.
+
+    The mirror, under `workdir` and named like the run directory, has the run's directories and a link to each of its
+    files, so nothing is copied and the run directory is left as it is.
+    """
+    if not any(path.name.endswith(RESUME_IDENTITY_SUFFIX) for path in run_dir.iterdir()):
+        return run_dir
+    mirror = workdir / "upload" / run_dir.name
+    for directory, subdirectories, names in os.walk(run_dir):
+        relative = Path(directory).relative_to(run_dir)
+        (mirror / relative).mkdir(parents=True, exist_ok=True)
+        for name in names + [name for name in subdirectories if (Path(directory) / name).is_symlink()]:
+            if relative == Path(".") and name.endswith(RESUME_IDENTITY_SUFFIX):
+                continue
+            (mirror / relative / name).symlink_to(Path(directory, name).absolute())
+    return mirror
 
 
 class EvalRDLExportConfig(RunExportConfig):
@@ -79,7 +101,8 @@ class EvalRDLExporter(IsolatedExporter):
         """Describe the upload for the worker: the directory the rollouts are in, uploaded as it is.
 
         Everything in that directory is part of the run (the rollouts and their sidecars, health reports,
-        model-call captures, benchmark-specific files), so nothing is picked out, staged or copied. The saved
+        model-call captures, benchmark-specific files), so nothing is copied; only the resume identity beside the
+        run manifest is left out, through a mirror of links (see `_without_resume_identity`). The saved
         config and the aggregate metrics are still required first, as Gym's own rule for a complete run.
         """
         unexportable = unexportable_reason(artifacts)
@@ -99,7 +122,7 @@ class EvalRDLExporter(IsolatedExporter):
             )
         config = self.config
         return {
-            "run_dir": str(rollouts.parent),
+            "run_dir": str(_without_resume_identity(rollouts.parent, workdir)),
             "label": config.label,
             "tags": list(config.tags),
             "meta": config.meta,

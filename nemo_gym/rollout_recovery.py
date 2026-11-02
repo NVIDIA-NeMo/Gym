@@ -36,10 +36,12 @@ from typing import Annotated, Any, BinaryIO, Literal
 from uuid import uuid4
 
 from omegaconf import OmegaConf
-from omegaconf.errors import InterpolationResolutionError
+from omegaconf.errors import InterpolationResolutionError, OmegaConfBaseException
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
+from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, COLLECTION_RESUME_REFUSED
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
@@ -49,7 +51,8 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
 
     A diagnostic error object or an empty mapping is not generation. A typed response counts when it has at least
     one output item or a status: a producer finished it, even with no assistant text. A response object with no
-    output and no status is a placeholder, for example from an agent that never ran.
+    output and no status is a placeholder, for example from an agent that never ran. So is a response an agent
+    marked with ``NG_NO_GENERATION_METADATA``: its empty assistant message was built without any generation.
     """
     record = row.get("_ng_failure_record")
     failure = record.get("failure") if isinstance(record, Mapping) else None
@@ -61,6 +64,8 @@ def has_saved_generation(row: Mapping[str, Any]) -> bool:
         # The agent outcome policy already rejected this failed response as an answer. Retain its
         # diagnostic output without vetoing RETRY; cleanup/verification responses keep their protection.
         if stage == "agent" and answer.get("status") == "failed":
+            continue
+        if is_no_generation_placeholder(answer):
             continue
         output = answer.get("output")
         if not isinstance(output, list):
@@ -424,11 +429,71 @@ def _normalize_runtime_references(value: Any) -> Any:
     return value
 
 
-def _configuration_identity(config: dict, global_config: dict, rows: list[dict]) -> dict:
+# A setting holding a credential, matched on its name lower-cased with `-`, `.`, spaces and case changes as `_`:
+# `exa_api_key`, `X-Api-Key`, `Authorization`, `X_TOKEN`, `my_service_pw`, but not `max_tokens` or `author`.
+_CREDENTIAL_NAME = re.compile(
+    r"api_?key|secret|passw(or)?d|credential|private_?key|access_?key|cookie"
+    r"|(^|_)(token|pw|pwd|pass|bearer|o?auth)$|(^|_)o?auth(orization|entication)?(_|$)"
+)
+_REDACTED = "<redacted>"
+# An environment variable or config reference by name, a `NAME=value` assignment, and an HTTP credential scheme.
+_ENV_REFERENCE = re.compile(r"\$\{oc\.env:\s*([A-Za-z_][A-Za-z0-9_]*)[^{}]*\}")
+_CONFIG_REFERENCE = re.compile(r"\$\{([A-Za-z_][\w.\-]*)\}")
+_ASSIGNMENT = re.compile(r"^([A-Za-z_][A-Za-z0-9_]*)=(.+)$", re.DOTALL)
+_HTTP_CREDENTIAL = re.compile(r"(?i)^(bearer|basic)\s+\S+$")
+
+
+def _is_credential_name(name: object) -> bool:
+    normalized = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", str(name))
+    return bool(_CREDENTIAL_NAME.search(re.sub(r"[\s.\-]", "_", normalized).lower()))
+
+
+def _credential_safe(value: Any, *, secret: bool = False) -> Any:
+    """The value with every credential replaced by a fixed marker; it is what a run persists for its identity.
+
+    A credential is any value below a credential-named key (every value of a ``secrets`` mapping, an ``Authorization``
+    header), the ``value`` of a ``{name: SOME_TOKEN, value: ...}`` entry, the value of a ``SOME_TOKEN=...`` string, an
+    HTTP ``Bearer``/``Basic`` credential, a URL password, and an interpolation of a credential-named environment variable
+    or setting. Applied before interpolations are resolved, so such a credential is never read from the environment.
+    """
+    if isinstance(value, dict):
+        named = value.get("name", value.get("key"))
+        pair = isinstance(named, str) and _is_credential_name(named)
+        return {
+            key: _credential_safe(item, secret=secret or _is_credential_name(key) or (pair and key == "value"))
+            for key, item in value.items()
+        }
+    if isinstance(value, list):
+        return [_credential_safe(item, secret=secret) for item in value]
+    if value is None:
+        return None
+    if secret:
+        return _REDACTED
+    if not isinstance(value, str):
+        return value
+    value = _ENV_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1]) else m[0], value)
+    value = _CONFIG_REFERENCE.sub(lambda m: _REDACTED if _is_credential_name(m[1].split(".")[-1]) else m[0], value)
+    assignment = _ASSIGNMENT.match(value)
+    if assignment and _is_credential_name(assignment[1]):
+        return f"{assignment[1]}={_REDACTED}"
+    credential = _HTTP_CREDENTIAL.match(value)
+    return f"{credential[1]} {_REDACTED}" if credential else mask_url_passwords(value)
+
+
+def _configuration_identity(
+    config: dict, global_config: dict, rows: list[dict], *, credential_safe: bool = True
+) -> dict:
+    """The configuration a run's results depend on, compared on resume.
+
+    Credentials are redacted (see ``_credential_safe``): they do not change what a run measures, and the identity is
+    persisted beside the manifest. ``credential_safe=False`` is the form an earlier Gym took its digest from; it is only
+    ever compared in memory, to resume such a run.
+    """
     # Resolve only the servers reachable from the materialized agents. Keep the
     # original root as interpolation context, but do not evaluate unused servers
     # (which may require credentials/environment variables unavailable here).
-    raw = _normalize_runtime_references(_plain(global_config))
+    safe = _credential_safe if credential_safe else lambda value: value
+    raw = safe(_normalize_runtime_references(_plain(global_config)))
     context = OmegaConf.create(raw)
     filtered = _without_runtime_options(raw)
     servers = {
@@ -497,14 +562,17 @@ def _configuration_identity(config: dict, global_config: dict, rows: list[dict])
         references(selected[name])
     # Collection overrides may themselves contain DictConfig/ListConfig values.
     collection = {key: _plain(value) for key, value in config.items() if key not in _COLLECTION_OPTIONS}
-    context["_collection_identity"] = _normalize_runtime_references(collection)
+    context["_collection_identity"] = safe(_normalize_runtime_references(collection))
     capture = raw.get("token_id_capture", {})
     context["_capture_identity"] = {key: value for key, value in capture.items() if key != "dir"}
-    return {
-        "collection": OmegaConf.to_container(context._collection_identity, resolve=True),
-        "servers": selected,
-        "token_id_capture": OmegaConf.to_container(context._capture_identity, resolve=True),
-    }
+    # Again after resolution: a resolved value can carry a credential its reference did not name (a URL password).
+    return safe(
+        {
+            "collection": OmegaConf.to_container(context._collection_identity, resolve=True),
+            "servers": selected,
+            "token_id_capture": OmegaConf.to_container(context._capture_identity, resolve=True),
+        }
+    )
 
 
 # Null defaults a server config once declared and later dropped. Null and absent resolve alike, so a run saved while a
@@ -654,6 +722,9 @@ _SEMANTIC_PARTS = (
 
 def _is_semantic(key: str) -> bool:
     segments = key.split(".")
+    # A credential is redacted, so only its presence can differ; the key used does not change what is measured.
+    if any(_is_credential_name(segment) for segment in segments):
+        return False
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
         return True
@@ -690,7 +761,8 @@ def _configuration_drift(
         return None
     if current.config_digest not in _CONFIG_IDENTITIES or _digest(identity) != saved.config_digest:
         return None
-    keys = _differing_keys(identity, _CONFIG_IDENTITIES[current.config_digest])
+    # An identity an earlier Gym saved may hold credentials: compare on its credential-safe form.
+    keys = _differing_keys(_credential_safe(identity), _CONFIG_IDENTITIES[current.config_digest])
     return [key for key in keys if _is_semantic(key)], [key for key in keys if not _is_semantic(key)]
 
 
@@ -725,8 +797,8 @@ def _file_digest(path: Path) -> str:
 
 
 @contextmanager
-def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
-    """Replace a file after a successful write, retaining its sharing permissions."""
+def atomic_output_file(path: Path, mode: int | None = None) -> Iterator[BinaryIO]:
+    """Replace a file after a successful write, retaining its sharing permissions unless ``mode`` sets them."""
     temporary = None
     try:
         temporary = path.with_name(f".{path.name}.{uuid4().hex}.tmp")
@@ -734,7 +806,9 @@ def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
         # sharing permissions instead of inheriting NamedTemporaryFile's 0600.
         descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o666)
         with os.fdopen(descriptor, "wb") as file:
-            if path.exists():
+            if mode is not None:
+                os.fchmod(file.fileno(), mode)
+            elif path.exists():
                 os.fchmod(file.fileno(), stat.S_IMODE(path.stat().st_mode))
             yield file
             file.flush()
@@ -750,9 +824,9 @@ def atomic_output_file(path: Path) -> Iterator[BinaryIO]:
             temporary.unlink(missing_ok=True)
 
 
-def atomic_write_json(path: Path, value: dict) -> None:
+def atomic_write_json(path: Path, value: dict, mode: int | None = None) -> None:
     """Publish JSON metadata without exposing a partial rewrite to readers."""
-    with atomic_output_file(path) as file:
+    with atomic_output_file(path, mode) as file:
         file.write((json.dumps(value, indent=2, allow_nan=False) + "\n").encode("utf-8"))
 
 
@@ -789,9 +863,15 @@ class RunManifest(BaseModel):
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
         identity = _configuration_identity(config, global_config, rows)
         config_digest = _digest(_without_null_settings(identity))
-        _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(config_digest, {}) | _legacy_config_digests(
-            identity
-        )
+        legacy = _legacy_config_digests(identity)
+        try:
+            # The digest an earlier Gym took over resolved credentials, compared in memory only, so its runs resume.
+            earlier = _configuration_identity(config, global_config, rows, credential_safe=False)
+        except (ConfigError, OmegaConfBaseException):
+            earlier = None
+        if earlier is not None:
+            legacy = {_digest(_without_null_settings(earlier)): ()} | _legacy_config_digests(earlier) | legacy
+        _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(config_digest, {}) | legacy
         manifest = cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
             run_id=uuid4().hex,
@@ -817,7 +897,7 @@ class RunManifest(BaseModel):
         # The identity behind config_digest, so a later resume can name the settings that differ. Readers trust it only
         # while its digest is the manifest's config_digest.
         if self.config_digest in _CONFIG_IDENTITIES:
-            atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[self.config_digest])
+            atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[self.config_digest], mode=0o600)
 
     @classmethod
     def import_legacy(cls, rows: list[dict]) -> "RunManifest":
@@ -904,7 +984,9 @@ def validate_resume(
                 and not config_identity_path_for(path).exists()
             ):
                 # The same configuration: save its identity now, so a later resume of this run can name any drift.
-                atomic_write_json(config_identity_path_for(path), _CONFIG_IDENTITIES[current.config_digest])
+                atomic_write_json(
+                    config_identity_path_for(path), _CONFIG_IDENTITIES[current.config_digest], mode=0o600
+                )
         if not mismatches:
             if operational_drift or resume_drift_path_for(path).exists():
                 # Once a run has drifted, every later resume adds a line, so the last one is the latest resume's.

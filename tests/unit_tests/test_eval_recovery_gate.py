@@ -182,7 +182,8 @@ def test_mixed_cache_keeps_every_class_apart() -> None:
         "terminal": 1,
         "missing": 1,
     }
-    assert d.action == RecoveryAction.STOP and not d.complete
+    # A saved judge answer beside policy work no longer stops it: the resumed run re-verifies it first.
+    assert d.action == RecoveryAction.RESUBMIT and d.reverify_first == [(1, 0)] and not d.complete
     assert sum(d.counts.values()) == d.expected == 6
 
 
@@ -242,7 +243,8 @@ def test_the_decision_reads_saved_files_without_changing_a_byte(tmp_path: Path) 
     d = decide_recovery(
         materialized=loaded["materialized"], results=loaded["results"], failures=loaded["failures"], budget=OK_BUDGET
     )
-    assert d.action == RecoveryAction.STOP
+    # The saved judge answer is re-verified first by the resumed run, then the retryable rollout runs.
+    assert d.action == RecoveryAction.RESUBMIT and d.reverify_first == [(1, 0)]
     assert {n: hashlib.sha256(p.read_bytes()).hexdigest() for n, p in paths.items()} == before
     assert loaded["results"][1]["response"] == rows["results"][1]["response"]
 

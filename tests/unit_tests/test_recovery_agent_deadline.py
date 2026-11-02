@@ -30,8 +30,10 @@ from nemo_gym.orchestration.recovery import (
     RecoveryAction,
     decide_from_collected,
     decide_recovery,
+    failure_facts,
+    gate_summary_from_collected,
 )
-from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, scored
+from tests.unit_tests.test_eval_recovery_gate import OK_BUDGET, ident, infra_failure, inventory, model_final, scored
 from tests.unit_tests.test_recovery_saved_generation import persist_producer_result, response
 
 
@@ -112,6 +114,58 @@ def test_the_cluster_projection_of_a_legacy_run_keeps_the_answered_deadline_fina
     assert d.identities[IdentityState.MODEL_FINAL] == [(1, 0)]
     assert d.identities[IdentityState.MISSING] == [(2, 0)]
     assert IdentityState.UNKNOWN not in d.counts
+    # No coverage report: the metric covered the one scored result, not the kept answer of the agent deadline.
+    assert failure_facts(d, collected)["metric_coverage"] == {"trials": 1, "expected": 3, "source": "saved_rows"}
+
+
+def test_metric_coverage_counts_a_producer_marked_zero_and_leaves_out_an_answered_deadline() -> None:
+    collected = CollectedEvidence(
+        materialized=inventory(4), results=[scored(0)], failures=[model_final(1), deadline(2), deadline(3, kept=False)]
+    )
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    assert d.identities[IdentityState.MODEL_FINAL] == [(1, 0), (2, 0)]
+    assert failure_facts(d, collected)["metric_coverage"] == {"trials": 2, "expected": 4, "source": "saved_rows"}
+    # Collection's own count, when its coverage report is for this inventory, is the source.
+    report = collected.model_copy(update={"coverage_scored": (3, 4)})
+    assert failure_facts(d, report)["metric_coverage"] == {"trials": 3, "expected": 4, "source": "coverage_report"}
+    stale = collected.model_copy(update={"coverage_scored": (3, 5)})
+    assert failure_facts(d, stale)["metric_coverage"]["source"] == "saved_rows"
+
+
+def test_a_benchmark_declared_metric_coverage_is_preferred_and_named(tmp_path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory(3)))
+    (artifacts / "rollouts.jsonl").write_text(json.dumps(scored(0)) + "\n")
+    (artifacts / "rollouts_failures.jsonl").write_text(json.dumps(deadline(1)) + "\n")
+    (artifacts / "rollouts_coverage.json").write_text(json.dumps({"scored": 1, "expected": 3}))
+
+    def gate(metrics):
+        aggregate = [{"agent_ref": {"name": "a"}, "agent_metrics": {"mean/reward": 1.0, **metrics}, "key_metrics": {}}]
+        (artifacts / "rollouts_aggregate_metrics.json").write_text(json.dumps(aggregate))
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        collected = CollectedEvidence.model_validate_json(raw.stdout)
+        d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+        return gate_summary_from_collected(d, collected, max_unhealthy_fraction=None)
+
+    task = gate({"metric_coverage/trials": 212, "metric_coverage/expected": 220})
+    assert task["failures"]["metric_coverage"] == {
+        "trials": 212,
+        "expected": 220,
+        "source": "benchmark",
+        "name": "metric",
+    }
+    assert task["health_verdict"].endswith("; metric over 212 of 220 trials")
+    named = gate({"metric_coverage/trials": 212, "metric_coverage/expected": 220, "metric_coverage/name": "ELO"})
+    assert named["health_verdict"].endswith("; ELO over 212 of 220 trials")
+    # A malformed declaration is not one: collection's report is the source.
+    for bad in ({"metric_coverage/trials": 221, "metric_coverage/expected": 220}, {"metric_coverage/trials": 1.5}):
+        assert gate(bad)["failures"]["metric_coverage"] == {"trials": 1, "expected": 3, "source": "coverage_report"}
 
 
 async def test_collection_keeps_an_answered_agent_deadline_and_a_resume_does_not_dispatch_it(
@@ -129,3 +183,16 @@ async def test_collection_keeps_an_answered_agent_deadline_and_a_resume_does_not
     assert store.pending() == []
     assert decision.counts == {IdentityState.MODEL_FINAL: 1}
     assert decision.action == RecoveryAction.NOOP
+    # The Store settles it where recovery does: a final model result, so the run is complete.
+    coverage = store.coverage()
+    assert coverage["final_zeros"] == 1 and coverage["retryable"] == 0
+    assert coverage["complete"] is True and coverage["completion_fraction"] == 1.0
+    # Collection's report, written when the resume ended, says the metric covered none of the one expected trial.
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    collected = CollectedEvidence.model_validate_json(raw.stdout)
+    assert collected.coverage_scored == (0, 1)
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
+    assert task["failures"]["metric_coverage"] == {"trials": 0, "expected": 1, "source": "coverage_report"}
+    assert task["health_verdict"].endswith("; metric over 0 of 1 trials")

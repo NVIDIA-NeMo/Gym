@@ -15,6 +15,7 @@
 import asyncio
 import hashlib
 import json
+import math
 import re
 import time
 import uuid
@@ -71,12 +72,14 @@ from nemo_gym.rollout_collection import (
     matches_failure_class,
 )
 from nemo_gym.rollout_records import (
+    REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
     RUN_ID_KEY,
     coverage_path_for,
     journal_path_for,
     logical_rollout_id,
     materialized_path_for,
+    rejudge_predecessor_id,
     resolve_rollout_owner,
     resolve_rollout_path,
 )
@@ -573,10 +576,12 @@ def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path) -> None:
                 )
 
 
-def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> set[tuple[int, int]]:
+def _seed_output_with_successes(
+    successes_fpath: Path, output_fpath: Path, exclude: frozenset[tuple[int, int]] = frozenset()
+) -> set[tuple[int, int]]:
     """Copy the already-successful rollout rows into the output file so the final aggregate covers
     successes + recovered rows, and return the set of (task, rollout) keys ALREADY PRESENT in the output
-    afterward"""
+    afterward. Rows whose key is in ``exclude`` (saved results that are re-verified) are not seeded."""
     present: set[tuple[int, int]] = set()
     if output_fpath.exists():
         with output_fpath.open("rb") as f:
@@ -588,7 +593,7 @@ def _seed_output_with_successes(successes_fpath: Path, output_fpath: Path) -> se
                 continue
             key = _parse_output_line_key(line)
             if key is not None:
-                if key in present:
+                if key in present or key in exclude:
                     continue
                 present.add(key)
             if seeded == 0:
@@ -1188,12 +1193,23 @@ def validate_settle_source_snapshot(source: Path, raw: str) -> None:
             raise ConfigError(f"Rejudge source artifact {name} changed while queued; nothing was judged.")
 
 
+def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
+    """Whether a selected saved result is graded again from its saved answer (``reverification_cause``)."""
+    from nemo_gym.orchestration.recovery import reverification_cause, saved_row_evidence
+
+    return reverification_cause(saved_row_evidence(row)) is not None
+
+
 def bind_judge_failures(source: Path, *, skip_spent: bool = False) -> Dict[str, Any]:
     """Snapshot the source run's selected judge failures and provenance before any judge call; the caller holds run_lock.
 
     A failed re-judgment spends the run's failure budget (``attempt_counts`` against the saved
     ``max_rollout_attempts``); a rollout that has spent it, or a run without a saved cap, is refused before judging.
     With ``skip_spent`` a rollout that has spent it is left out of the binding, and the others are bound.
+
+    The selected saved results whose grading failed for a judge or verify-transport cause, or was never recorded
+    (``_reverifiable_saved_result``), are bound too, under ``saved_results``: a failed re-verification of one saves
+    nothing, so it spends no failure attempt.
     """
     store = RolloutStore.open_for_rejudgment(source)
     for identity, pending in dict(store.manifest.pending_rejudge).items():
@@ -1215,6 +1231,9 @@ def bind_judge_failures(source: Path, *, skip_spent: bool = False) -> Dict[str, 
                     f"Rollout {identity!r} has spent its {cap} saved failure attempts; nothing was judged."
                 )
             spent.add(identity)
+    saved_results = {
+        logical_rollout_id(row): row for row in store.selected("success") if _reverifiable_saved_result(row)
+    }
     return {
         "manifest": store.manifest.model_dump_json(),
         "materialized": materialized_path_for(store.output).read_bytes(),
@@ -1222,7 +1241,9 @@ def bind_judge_failures(source: Path, *, skip_spent: bool = False) -> Dict[str, 
             logical_rollout_id(row): row
             for row in store.failures()
             if row.get("_ng_failure_class") == "judge_failed" and logical_rollout_id(row) not in spent
-        },
+        }
+        | saved_results,
+        "saved_results": set(saved_results),
     }
 
 
@@ -1236,11 +1257,36 @@ _COLLECTION_ONLY_KEYS = (
 )
 
 
-def due_judge_failures(output: Path) -> List[str]:
-    """The rollouts of a managed run whose selected judge failure a re-judgment can still settle.
+async def _drop_unsupported_saved_results(binding: Dict[str, Any]) -> None:
+    """Leave out the bound saved results whose verifier is not stateless: only a ``STATELESS`` verifier grades a saved
+    answer again. Judge failures stay bound as before."""
+    saved = binding["saved_results"]
+    if not saved:
+        return
+    server_client = setup_server_client()
+    agent_to_rs = _build_agent_to_resources_server_mapping(server_client.global_config_dict)
+    routes = {
+        identity: _rs_for_row(binding["failures"][identity], agent_to_rs, server_client.global_config_dict)
+        for identity in saved
+    }
+    unsupported = set(await _check_reverify_mode(server_client, dict(routes)))
+    skipped = sorted(identity for identity, name in routes.items() if name in unsupported)
+    if skipped:
+        print(
+            f"{len(skipped)} saved result(s) are not re-verified because their resources server(s) "
+            f"{sorted(unsupported)} report reverify_mode UNSUPPORTED or UNKNOWN; they stay as they were."
+        )
+    for identity in skipped:
+        saved.discard(identity)
+        binding["failures"].pop(identity)
 
-    A rollout whose saved failure attempts are spent, a run without a manifest and a run without a saved failure
-    cap have none.
+
+def due_judge_failures(output: Path) -> List[str]:
+    """The rollouts of a managed run whose selected judge failure, or saved result to grade again
+    (``_reverifiable_saved_result``), a re-judgment can still settle.
+
+    A judge failure whose saved failure attempts are spent, a run without a manifest and a run without a saved
+    failure cap have none.
     """
     store = RolloutStore.read(output, import_legacy=False)
     if store is None or store.manifest.legacy_import or store.manifest.max_rollout_attempts is None:
@@ -1252,11 +1298,21 @@ def due_judge_failures(output: Path) -> List[str]:
             for row in store.failures()
             if _is_judge_failure(row) and store._state.failure_count(logical_rollout_id(row)) < cap
         }
+        | {logical_rollout_id(row) for row in store.selected("success") if _reverifiable_saved_result(row)}
     )
 
 
+def _settled_count(output: Path) -> int:
+    """How many selected results of the run a re-judgment settled."""
+    store = RolloutStore.read(output, import_legacy=False)
+    return sum(REJUDGE_OPERATION_ID_KEY in row for row in store.selected("success")) if store is not None else 0
+
+
 async def rejudge_saved_judge_failures(run_config: Dict[str, Any], output: Path) -> int:
-    """Re-judge the saved judge failures of the run ``output`` in place; return how many rollouts it scored.
+    """Re-judge the saved judge failures of the run ``output`` in place; return how many rollouts it settled.
+
+    The saved results whose grading failed for a judge or verify-transport cause, or was never recorded, are graded
+    again from their saved answers too (``bind_judge_failures``); only stateless verifiers grade them.
 
     A run's driver calls it at the end of collection, and so again at the end of each resumed collection, while the
     run's servers are up. Only the saved answers go to /verify again: no policy call, no new model attempt. It is the
@@ -1268,8 +1324,7 @@ async def rejudge_saved_judge_failures(run_config: Dict[str, Any], output: Path)
     """
     if not due_judge_failures(output):
         return 0
-    store = RolloutStore.read(output, import_legacy=False)
-    scored_before = store.coverage()["successful"]
+    settled_before = _settled_count(output)
     rejudge_pass = f"auto-{time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())}-{uuid.uuid4().hex[:6]}"
     config = RolloutReverificationConfig.model_validate(
         {key: value for key, value in run_config.items() if key not in _COLLECTION_ONLY_KEYS}
@@ -1284,7 +1339,7 @@ async def rejudge_saved_judge_failures(run_config: Dict[str, Any], output: Path)
         }
     )
     await RolloutReverificationHelper().run_from_config(config)
-    return RolloutStore.read(output, import_legacy=False).coverage()["successful"] - scored_before
+    return _settled_count(output) - settled_before
 
 
 def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]) -> int:
@@ -1292,7 +1347,9 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
 
     The caller holds the run lock taken for the binding, so no other writer ran in between. The source must still match
     the binding. A judged identity that the binding does not hold, a changed manifest or materialized input, or a
-    failure that is no longer the selected outcome is refused.
+    failure that is no longer the selected outcome is refused. A bound saved result replaces its grade only with a
+    result that binds the same saved answer and attempt (``is_rejudgment_of``); one whose re-verification answered
+    without a grade keeps its saved row, and its admission is withdrawn.
     """
     store = RolloutStore.open_for_rejudgment(source)
     own = store.manifest.pending_rejudge  # must equal this run's admissions exactly
@@ -1311,11 +1368,17 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         raise ConfigError(
             f"Re-judged results name a rollout more than once; nothing was settled: {sorted(identities)}"
         )
+    saved_results = binding.get("saved_results", set())
+    withdrawn = []
     for result in judged:
         identity = logical_rollout_id(result)
         failure = binding["failures"].get(identity)
         if failure is None:
             raise ConfigError(f"Re-judged rollout {identity!r} is not a bound judge failure of {source}.")
+        if identity in saved_results and _ungraded_reverification(result):
+            # The verifier answered without a grade: the saved result stays as it was, and nothing is saved.
+            withdrawn.append((identity, binding["admitted"][identity].operation_id))
+            continue
         # /verify returns task and rollout indices only; the bound failure supplies its run and attempt identity.
         for name in (RUN_ID_KEY, ATTEMPT_INDEX_KEY_NAME):
             if name in result and result[name] != failure.get(name):
@@ -1327,7 +1390,7 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
                 | {
                     RUN_ID_KEY: failure.get(RUN_ID_KEY),
                     ATTEMPT_INDEX_KEY_NAME: failure.get(ATTEMPT_INDEX_KEY_NAME, 0),
-                    REJUDGED_FAILURE_ID_KEY: failure.get("_ng_failure_id"),
+                    REJUDGED_FAILURE_ID_KEY: rejudge_predecessor_id(failure),
                     "_ng_rejudge_operation_id": binding["admitted"][identity].operation_id,
                     "_ng_rejudge_admitted_at": binding["admitted"][identity].admitted_at,
                     # In-process monotonic interval of the whole admitted batch (admission to settlement). It is the
@@ -1345,7 +1408,23 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
         for failure, result in planned:
             settled += store.record_rejudgment(failure, result)
             store.close_rejudgment(logical_rollout_id(result), result["_ng_rejudge_operation_id"])
+        for identity, operation_id in withdrawn:
+            store.withdraw_rejudgment(identity, operation_id)
+    if withdrawn:
+        print(f"{len(withdrawn)} re-verified saved result(s) were not graded again and stay as they were")
     return settled
+
+
+def _ungraded_reverification(result: Dict[str, Any]) -> bool:
+    """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
+    reward = result.get("reward")
+    return (
+        result.get(NG_FAILURE_CLASS_KEY) is not None
+        or bool(result.get("mask_sample"))
+        or result.get("evaluation_completed") is False
+        or type(reward) not in (int, float)
+        or not math.isfinite(reward)
+    )
 
 
 class RolloutReverificationHelper(BaseModel):
@@ -1451,9 +1530,20 @@ class RolloutReverificationHelper(BaseModel):
                     settle_binding = bind_judge_failures(
                         rollouts_jsonl_fpath, skip_spent=config.skip_spent_judge_failures
                     )
+                    await _drop_unsupported_saved_results(settle_binding)
                 reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)
-                # Seed the successes and dedup so the re-verification doesn't judge successes again.
-                skip_keys = _seed_output_with_successes(rollouts_jsonl_fpath, output_fpaths.output)
+                saved_results = settle_binding["saved_results"] if config.settle_into_source else set()
+                # Seed the successes and dedup so the re-verification doesn't judge successes again. A saved result
+                # that is re-verified is not seeded: its re-verified row takes its place.
+                skip_keys = _seed_output_with_successes(
+                    rollouts_jsonl_fpath,
+                    output_fpaths.output,
+                    exclude=frozenset(
+                        (settle_binding["failures"][identity][TASK_INDEX_KEY_NAME],)
+                        + (settle_binding["failures"][identity][ROLLOUT_INDEX_KEY_NAME],)
+                        for identity in saved_results
+                    ),
+                )
                 rollout_predicate = _recovery_rollout_predicate(skip_keys)
                 if config.settle_into_source:
                     # Judge exactly the bound selected failure rows, never a superseded row of the same attempt.
@@ -1474,6 +1564,18 @@ class RolloutReverificationHelper(BaseModel):
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
             )
+            if config.settle_into_source and settle_binding["saved_results"]:
+                # The bound saved results are read from the run's results, exactly as bound.
+                bound_results = {
+                    identity: settle_binding["failures"][identity] for identity in settle_binding["saved_results"]
+                }
+                payloads_to_reverify += _prepare_payloads(
+                    materialized_inputs_jsonl_fpath,
+                    rollouts_jsonl_fpath,
+                    output_fpaths,
+                    config.resume_from_cache,
+                    rollout_predicate=lambda row: bound_results.get(logical_rollout_id(row)) == row,
+                )
 
         if config.settle_into_source:
             for row in payloads_to_reverify:
@@ -1563,7 +1665,9 @@ class RolloutReverificationHelper(BaseModel):
                     )
                     failures_file.write(serialized + b"\n")
                     failures_file.flush()
-                    if failure_class == "judge_failed":
+                    if failure_class == "judge_failed" or (
+                        config.settle_into_source and logical_rollout_id(row) in settle_binding["saved_results"]
+                    ):
                         judged_results.append(result)
                 else:
                     # Success → main jsonl.

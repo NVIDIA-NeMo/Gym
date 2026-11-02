@@ -121,7 +121,7 @@ def test_a_run_of_answers_truncated_at_the_output_cap_passes_evaluation_health_w
     assert task["failures"]["response_failures"]["by_cause"]["truncated"] == {"count": 123, "rate": 0.123}
     assert task["health_verdict"] == (
         "evaluation health: PASS; response failures: 12.30% (truncated 123 of 1000); "
-        "trial failures: 0.00% (none of 1000)"
+        "trial failures: 0.00% (none of 1000); metric over 1000 of 1000 trials"
     )
     assert "model_health" not in task
 
@@ -153,7 +153,7 @@ def test_a_mixed_run_fails_on_its_evaluation_share_and_reports_both_classes():
     )
     assert task["health_verdict"] == (
         "evaluation health: FAIL; response failures: 5.00% (truncated 5 of 100); "
-        "trial failures: 10.00% (request 10 of 100)"
+        "trial failures: 10.00% (request 10 of 100); metric over 100 of 100 trials"
     )
 
 
@@ -178,8 +178,10 @@ def test_unverified_coverage_withholds_a_pass_without_a_health_failure():
     assert passed is None and report["status"] == "UNVERIFIED" and report["exact"] is False
     assert reason.startswith("trial: UNOBSERVED 10 of 100 expected trials")
     assert "unverified: this withholds a pass and is no health failure" in reason
-    [health] = _health_errors(task)
+    assert not _health_errors(task)
+    [health] = [w for w in task["warnings"] if w.startswith("response/trial health")]
     assert health.startswith("response/trial health unknown")
+    # FAILED only for this fixture's missing score and MLflow evidence; health alone is UNVERIFIED, not a failure.
     assert task["status"] == "FAILED" and task["health_verdict"].startswith("evaluation health: UNVERIFIED")
 
 
@@ -224,7 +226,7 @@ def test_response_failures_are_reported_and_never_a_second_verdict():
     assert passed is True, reason
     assert task["health_verdict"] == (
         "evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); "
-        "trial failures: 0.00% (none of 1000)"
+        "trial failures: 0.00% (none of 1000); metric over 1000 of 1000 trials"
     )
     assert task["failures"]["response_failures"]["rate"] == 0.047
     assert not _health_errors(task) and "PASS" not in str(task["failures"])

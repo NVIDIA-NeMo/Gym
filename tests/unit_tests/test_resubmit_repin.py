@@ -165,8 +165,10 @@ def test_a_repin_whose_job_is_not_queued_restores_both_files(tmp_path, slurm_bin
     job_dir = _repinnable_run(tmp_path)
     files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
     (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
-    with pytest.raises(RuntimeError, match="the run stays on its recorded Gym commit"):
-        recover(*_handle(job_dir), repin=NEW, repin_reason="reason")
+    out = recover(*_handle(job_dir), repin=NEW, repin_reason="reason")
+    assert not out.ok and out.dispatched is None
+    assert out.scheduler_refusal["scheduler_text"] == "sbatch: error: Batch job submission failed"
+    assert out.scheduler_refusal["job_dir_restored"] is True
     assert {path: path.read_bytes() for path in files} == files
     assert not (job_dir.parent / REPIN_JOURNAL_NAME).exists()
 

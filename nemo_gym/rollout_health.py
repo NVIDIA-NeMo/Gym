@@ -77,7 +77,7 @@ from nemo_gym.health.types import (
     _WorkerInput,
 )
 from nemo_gym.rollout_records import RUN_ID_KEY, logical_rollout_id, resolve_rollout_path
-from nemo_gym.rollout_recovery import manifest_path_for
+from nemo_gym.rollout_recovery import is_answered_agent_deadline, manifest_path_for
 from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import (
     aggregation_sources_path_for,
@@ -812,7 +812,8 @@ def _rollout_accounting(
         else:
             expected += len(legacy.owed)
             missing += len(legacy.owed - landed_here - legacy.rows.keys())
-        final_here = sum(is_terminal_failure(row) for row in legacy.rows.values())
+        # An agent deadline that kept its answer is the model's final result here too, as in the Store's coverage.
+        final_here = sum(is_terminal_failure(row) or is_answered_agent_deadline(row) for row in legacy.rows.values())
         final += final_here
         not_final += len(legacy.rows) - final_here
         by_class.update(row.get(NG_FAILURE_CLASS_KEY) or "unknown" for row in legacy.rows.values())
