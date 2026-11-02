@@ -79,44 +79,45 @@ From the client this is an ordinary command failure:
 
 ### The whole sandbox died
 
-Kubernetes group-OOM can kill the sandbox's user container, so the next operation cannot reach the exec daemon.
-The provider briefly polls sandbox status and, when enabled, checks authenticated control-plane inspect output.
-It raises `SandboxOOMKilledError` only after confirming `OOMKilled` for the current sandbox:
+OpenSandbox reports confirmed OOM as `NgFailureEvent(boundary="sandbox", failure_kind="provider_oom_killed")`.
+Both command execution and PTY loss use the same evidence collector: an explicit terminal `OOMKilled` lifecycle
+reason, or the opt-in inspect fallback's current user-container state. Message text, exit 137, historical state
+and sidecar OOMs are insufficient.
 
 ```python
-from nemo_gym.sandbox import (
-    SandboxBackendUnreachableError,
-    SandboxCommandStatusTimeoutError,
-    SandboxIOTimeoutError,
-    SandboxOOMKilledError,
-)
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 try:
     result = await sandbox.exec(cmd, timeout_s=120)
-except SandboxOOMKilledError as error:
-    ...  # confirmed current-sandbox OOM; error.sandbox_id identifies it
-except (SandboxBackendUnreachableError, SandboxCommandStatusTimeoutError, SandboxIOTimeoutError):
-    ...  # outcome unknown; preserve as an ungraded infrastructure failure
+except NgFailureEvent as error:
+    if error.boundary == "sandbox" and error.failure_kind == PROVIDER_OOM_KILLED:
+        print(error.sandbox.sandbox_id, error.sandbox.evidence_source)
+    raise  # Preserve the event and cause for the caller's policy.
 ```
 
-`await sandbox.status()` can show `SandboxStatus.ERROR` or `SandboxStatus.STOPPED`, but a terminal
-status alone does not establish OOM. PTY diagnostics may include an OOM notice based on status text;
-that notice is useful for debugging but is not the strict evidence used to score an OOM.
+`provider_io_timeout` means a request expired; `provider_status_unavailable` means bounded status recovery
+ended without an outcome. Neither establishes that the command stopped. The session execution path can report
+its own expired deadline as a `provider_command_timeout` observation and, after cleanup,
+`SandboxExecResult(error_type="timeout")`; elapsed time and a signal exit alone
+are not used to infer a command timeout.
 
-<Note>
-Do not confuse OOM with a timeout. A command that exceeds its `timeout_s` raises `TimeoutError`;
-losing the status of an already-submitted command raises `SandboxCommandStatusTimeoutError` after
-recovery is exhausted. An expired provider request with an unknown outcome raises `SandboxIOTimeoutError`.
-None of these establish OOM.
-</Note>
+### Inspect fallback
+
+`diagnostics.inspect_oom` defaults to `false`. Enable it only for a deployment with the OpenSandbox **1.1.0**
+plain-text `/sandboxes/{id}/diagnostics/inspect` format. This deprecated endpoint is a compatibility fallback,
+not a supported structured API: Kubernetes requires the unique `sandbox` container's current `State` to be
+`Terminated (..., reason=OOMKilled)`; Docker requires one container, `Running: False` and `OOMKilled: True`.
+Unknown layouts, duplicate states, failed requests and bodies over 64 KiB provide no OOM evidence.
+
+Lifecycle reads and optional inspect requests share the remaining diagnostic/recovery budget. A failed diagnostic
+lookup cannot replace the original failure. Confirm support with the deployment operator before enabling this route.
 
 ### Counting OOMs across a run
 
-Rollout records carry sandbox observations under `ng_agent_observations`: each record has
-`outcome` (`completed`, `failed`, `timeout`, `sandbox_error`), `exit_code`, and `error_type`.
-`outcome: sandbox_error` with `error_type: SandboxBackendUnreachableError`, or `exit_code: 137`, is
-your OOM census. Join it on the task id: OOMs clustered on a few tasks mean fan-out or runaway code
-in those repos; OOMs spread evenly mean the limit is genuinely too small.
+Count distinct saved failure-event IDs whose kind is `provider_oom_killed`. Do not count backend disconnects,
+legacy `sandbox_error` outcomes or exit code 137 as confirmed OOMs. Failed read attempts may also accompany a
+successful command: they remain observations and do not change its result or automatically make it unhealthy.
 
 ## Cluster-side checks
 
@@ -127,7 +128,7 @@ returned with `-0` appended; sandboxes also carry the `opensandbox.io/id` label.
 kubectl top pod <sandbox-id>-0 -n <namespace>          # live CPU/memory as the node sees it
 kubectl get pod <sandbox-id>-0 -n <namespace> \
   -o jsonpath='{.spec.containers[0].resources}'        # requests AND limits actually applied
-kubectl describe pod <sandbox-id>-0 -n <namespace> | grep -A3 'Last State'
+kubectl describe pod <sandbox-id>-0 -n <namespace>
 #   Confirm Reason: OOMKilled on the current sandbox user container, not a sidecar or old state.
 ```
 
