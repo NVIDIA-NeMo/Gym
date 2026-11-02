@@ -25,9 +25,9 @@ from nemo_gym.agents import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     RolloutStopRequest,
+    is_harness_termination_failure,
     parse_cleanup_receipt,
 )
-from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import SandboxStatus

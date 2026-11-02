@@ -30,9 +30,9 @@ from nemo_gym.agents import (
     HARNESS_RUNNER_SCRIPT,
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
+    is_harness_termination_failure,
     parse_cleanup_receipt,
 )
-from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.tasks.harbor.materialize import materialize_task

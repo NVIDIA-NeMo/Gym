@@ -19,8 +19,12 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agents import AgentCloseSessionRequest, AgentSeedSessionRequest, parse_cleanup_receipt
-from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.agents import (
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+    is_harness_termination_failure,
+    parse_cleanup_receipt,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseOutputMessage, TaskId
 from nemo_gym.sandbox import SandboxExecResult

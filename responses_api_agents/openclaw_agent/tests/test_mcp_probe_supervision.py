@@ -198,7 +198,7 @@ async def test_unconfirmed_probe_termination_fails_close(probe_env, tmp_path):
 
 
 async def test_final_negative_probe_receipt_releases_unconfirmed(probe_env, tmp_path):
-    from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
+    from nemo_gym.agents import harness_termination_failure
 
     agent, runtime, pid_dir, workdir = probe_env
     owner, state, release = await borrowed_state(tmp_path, runtime, workdir)
