@@ -128,8 +128,10 @@ Beyond the families, the protocol's own refusals:
   any data URI is removed and before any cut, and then the sanitized Markdown as well; a match anywhere,
   even past the 60,000 characters the model would read, refuses the page whole. That scan is bounded: a
   page longer than `max_page_chars` (1,000,000) is refused unread with the family `oversized_page`, and
-  the regex work (sanitizing, the heading fallback for the title, the content checks) runs in a worker
-  thread rather than on the event loop. A refused page is never cached. The page cache
+  the page work (sanitizing, the heading fallback for the title, the content checks, and the rechecks on
+  a cache hit) runs in a pool of two worker processes started with `spawn`, not on the event loop. A
+  thread would not do: Python's `re` keeps the GIL for a whole scan, and one scan of an adversarial page
+  takes seconds (about 4 s for 1,000,000 characters of `抱抱脸` against the pinned blocklist). A refused page is never cached. The page cache
   (`max_cached_pages`, keyed by requested URL) keeps the sanitized Markdown whole and runs the same
   final-URL, title and content checks on a hit, so a policy that changes after a page was cached still
   applies; those cache-hit rechecks see the sanitized cached Markdown, not the provider's raw page. A
@@ -219,7 +221,7 @@ pool, malformed provider bodies, including a 200 whose body is not JSON (a tool 
 spellings from review (expansion overflow, a fourth decoded form, backslash, whitespace and userinfo,
 canonical-form prefixes, archive.org variants) must be refused before the fetch while ordinary redirect and
 query URLs stay allowed; `site:` operands are parsed to hostnames; long URLs and a 100,000-character heading
-are handled within a second; data URIs are stripped on fresh and cached fetches without eating the prose
+are handled within a second; a slow page check leaves the event loop free; data URIs are stripped on fresh and cached fetches without eating the prose
 after them; and a blocked span past every cut still refuses the page.
 
 ## Licensing

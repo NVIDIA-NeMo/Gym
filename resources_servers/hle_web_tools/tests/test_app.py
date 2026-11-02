@@ -2,6 +2,7 @@
 # SPDX-License-Identifier: Apache-2.0
 """Model-free tests of the HLE web tools: the Tavily transport is stubbed, every rule uses upstream's blocklist."""
 
+import asyncio
 import hashlib
 import json
 import logging
@@ -471,6 +472,7 @@ async def test_site_operands_are_read_as_hostnames(server, caplog, query, family
     ids=["url-under-cap", "url-over-cap", "heading-100k"],
 )
 async def test_long_urls_and_headings_are_handled_in_linear_time(server, url, page):
+    await warm_page_checks(server)
     backend = stub_backend(server, page=page)
     started = time.perf_counter()
     response = await fetch(server, url)
@@ -488,6 +490,34 @@ async def test_long_result_titles_are_checked_in_linear_time(server, title):
     response = await search(server, "spin structures")
     assert time.perf_counter() - started < 1.0
     assert response.result_count == 1 and len(response.text) < 2_000  # the title is shown cut
+
+
+async def warm_page_checks(server) -> None:
+    """One small fetch, so a timed fetch after it does not include starting the page-check processes."""
+    stub_backend(server, page="warm-up")
+    await fetch(server, "https://example.com/warm-up")
+
+
+async def test_page_checks_do_not_stall_the_event_loop(server):
+    """Python's re keeps the GIL for a whole search, so a slow scan of an adversarial page (about 1.2 s here) in a
+    thread would hold up every other request; the page work must leave the event loop free."""
+    await warm_page_checks(server)
+    stub_backend(server, page="抱抱脸" * 100_000)
+    gaps = []
+
+    async def heartbeat():
+        last = time.perf_counter()
+        while True:
+            await asyncio.sleep(0.005)
+            now = time.perf_counter()
+            gaps.append(now - last)
+            last = now
+
+    beat = asyncio.create_task(heartbeat())
+    response = await fetch(server, "https://example.com/slow")
+    beat.cancel()
+    assert not response.refused and gaps
+    assert max(gaps) < 0.5
 
 
 async def test_fetched_markdown_is_capped_at_60000_characters_with_a_marker(server):

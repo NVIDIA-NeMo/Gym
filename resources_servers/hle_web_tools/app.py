@@ -33,10 +33,13 @@ authenticated (README, residual: sandbox-seeded sessions).
 import hashlib
 import json
 import logging
+import multiprocessing
 import re
 import unicodedata
-from asyncio import sleep, to_thread
+from asyncio import get_running_loop, sleep
 from collections import OrderedDict
+from concurrent.futures import ProcessPoolExecutor
+from concurrent.futures.process import BrokenProcessPool
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
@@ -841,12 +844,56 @@ class CachedPage:
     markdown: str
 
 
+# The page work (removing data URIs, the heading fallback for the title, the content families) runs in worker
+# processes, not threads: Python's ``re`` keeps the GIL for a whole ``search()`` or ``sub()`` call, so one scan of
+# an adversarial page (about 4 s for 1,000,000 characters of ``抱抱脸`` against the pinned blocklist) would stall
+# the event loop from a thread just as from the loop itself. One pool per process, shared by every server instance;
+# ``spawn`` starts each worker as a fresh interpreter, which imports this module once.
+PAGE_CHECK_PROCESSES = 2
+_page_check_pool: Optional[ProcessPoolExecutor] = None
+
+
+async def run_page_check(function, *args):
+    """``function(*args)`` in the page-check pool; a pool whose worker died is replaced for the next call."""
+    global _page_check_pool
+    if _page_check_pool is None:
+        _page_check_pool = ProcessPoolExecutor(
+            max_workers=PAGE_CHECK_PROCESSES, mp_context=multiprocessing.get_context("spawn")
+        )
+    pool = _page_check_pool
+    try:
+        return await get_running_loop().run_in_executor(pool, function, *args)
+    except BrokenProcessPool:
+        if _page_check_pool is pool:
+            _page_check_pool = None
+        raise
+
+
 def build_page(raw: str, title: Any, final_url: str) -> CachedPage:
     """The page as served and cached: data URIs removed, the provider's title or else the first heading."""
     markdown = _DATA_URI_RE.sub("[data URI removed]", raw)
     if not isinstance(title, str) or not title.strip():
         title = markdown_heading_title(markdown)
     return CachedPage(final_url=final_url, title=cap_title(title.strip()), markdown=markdown)
+
+
+def content_block(blocklist: Blocklist, page: CachedPage, raw: Optional[str]) -> Optional[Block]:
+    """The text families against the fetched title, the provider's raw page (fresh fetches) and the sanitized
+    Markdown (unless it is the raw page unchanged)."""
+    block = blocklist.text_block(page.title, "fetched title")
+    if block is None and raw is not None:
+        block = blocklist.text_block(raw, "fetched content")
+    if block is None and page.markdown != raw:
+        block = blocklist.text_block(page.markdown, "fetched content")
+    return block
+
+
+def check_fetched_page(
+    blocklist: Blocklist, raw: str, title: Any, final_url: str
+) -> Tuple[CachedPage, Optional[Block]]:
+    """A fresh page as served, and the content block that refuses it (if any): one page-check call."""
+    page = build_page(raw, title, final_url)
+    return page, content_block(blocklist, page, raw)
 
 
 class HLEWebToolsResourcesServer(SimpleResourcesServer):
@@ -1105,15 +1152,19 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
                 self._log_block("web_fetch", session_id, block)
                 return WebFetchResponse(text=block.refusal(), truncated=False, refused=True)
             final_url = result.get("url") if isinstance(result.get("url"), str) else url
-            page = await to_thread(build_page, raw, result.get("title"), final_url)
 
         # Cached or fresh, every response is checked: the reported final URL, then the title and the content.
         # A fresh page's content is the provider's whole page before any data URI is removed or anything is cut;
-        # a cached page's is its sanitized Markdown. The regex scans run off the event loop.
-        block = None
-        if page.final_url != url:
-            block = self._blocklist.url_block(page.final_url, "fetched URL")
-        block = block or await to_thread(self._content_block, page, raw)
+        # a cached page's is its sanitized Markdown. The page work runs in the page-check processes.
+        if page is None:
+            block = None if final_url == url else self._blocklist.url_block(final_url, "fetched URL")
+            if block is None:
+                page, block = await run_page_check(
+                    check_fetched_page, self._blocklist, raw, result.get("title"), final_url
+                )
+        else:
+            block = None if page.final_url == url else self._blocklist.url_block(page.final_url, "fetched URL")
+            block = block or await run_page_check(content_block, self._blocklist, page, None)
         if block is not None:
             self._page_cache.pop(url, None)
             self._log_block("web_fetch", session_id, block)
@@ -1148,16 +1199,6 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         )
 
     # ---- policy helpers ----
-
-    def _content_block(self, page: CachedPage, raw: Optional[str]) -> Optional[Block]:
-        """The text families against the fetched title, the provider's raw page (fresh fetches) and the
-        sanitized Markdown (unless it is the raw page unchanged)."""
-        block = self._blocklist.text_block(page.title, "fetched title")
-        if block is None and raw is not None:
-            block = self._blocklist.text_block(raw, "fetched content")
-        if block is None and page.markdown != raw:
-            block = self._blocklist.text_block(page.markdown, "fetched content")
-        return block
 
     def _result_block(self, url: str, title: str, snippet: str) -> Optional[Block]:
         block = self._blocklist.url_block(url, "result URL")
