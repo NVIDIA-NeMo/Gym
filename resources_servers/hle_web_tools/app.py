@@ -44,7 +44,8 @@ from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY, request
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
@@ -56,7 +57,6 @@ from nemo_gym.base_resources_server import (
     ResourcesSessionConflictError,
     SimpleResourcesServer,
 )
-from nemo_gym.server_utils import SESSION_ID_KEY, request
 
 
 logger = logging.getLogger(__name__)

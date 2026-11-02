@@ -14,7 +14,7 @@ import pytest
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from resources_servers.hle_web_tools import app as module
 from resources_servers.hle_web_tools.app import (
     UPSTREAM_BLOCKLIST_SHA256,
@@ -329,7 +329,7 @@ async def test_cached_pages_are_rechecked_on_every_fetch(server):
 
 def test_exactly_web_search_and_web_fetch_are_offered_over_mcp():
     pytest.importorskip("mcp")
-    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
     server = make_server(expose_tools_over_mcp=True)
     app = server.setup_webserver()

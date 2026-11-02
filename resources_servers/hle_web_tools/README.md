@@ -37,7 +37,7 @@ Tavily is the backend for both, which is the one residual difference from upstre
 protocol does not name a search or extraction provider, so which pages a query surfaces, how they are
 ranked and how a page is turned into Markdown are Tavily's. The protocol's filtering, caps and refusals
 are all applied here, after Tavily returns. The provider is reached through Gym's shared aiohttp client
-(`nemo_gym.server_utils.request`) rather than the `tavily-python` SDK: two JSON endpoints need no SDK,
+(`nemo_gym.client.http_client.request`) rather than the `tavily-python` SDK: two JSON endpoints need no SDK,
 and the server keeps the key pool, retry budget and body redaction that `resources_servers/tavily_search`
 also implements over its own transport.
 
