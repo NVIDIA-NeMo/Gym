@@ -61,9 +61,9 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 | `answer_title_allow_hosts` | 7 | result titles | hosts (and subdomains) exempt from `answer_title_patterns` only; every other family still applies |
 
 The canonical form is the URL as a fetcher resolves it: the host UTS #46-mapped and IDNA-encoded, lower-cased and without a
-trailing dot, userinfo and a default port (`:443`, `:80`) dropped, `.` and `..` path segments resolved, the
-fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./abs/...` and `arxiv.org/x/../abs/...` all match the
-prefix `arxiv.org/abs/...`.
+trailing dot, userinfo and a default port (`:443`, `:80`) dropped, `.` and `..` path segments resolved, runs
+of `/` collapsed, the fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./abs/...`,
+`arxiv.org/x/../abs/...` and `arxiv.org//abs/...` all match the prefix `arxiv.org/abs/...`.
 
 Beyond the families, the protocol's own refusals:
 

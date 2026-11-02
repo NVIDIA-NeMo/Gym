@@ -138,6 +138,7 @@ _BARE_URL_RE = re.compile(r"^(?:https?:)?(?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}\.?(?:
 # The operand is host characters only, so ``(site:a.org OR site:b.org)``, ``site:a.org|site:b.org`` and
 # ``site:b.org,`` yield the bare hosts; one leading dot (``site:.b.org``) is dropped.
 _SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re.IGNORECASE)
+_SLASH_RUN_RE = re.compile(r"/{2,}")
 _WAYBACK_PATH_RE = re.compile(r"^/web/[^/]*/(.+)$", re.IGNORECASE | re.DOTALL)
 _GOOGLE_CACHE_RE = re.compile(r"cache:(?:[A-Za-z0-9_-]+:)?(.+)$", re.DOTALL)
 _WORD_RE = re.compile(r"\w+")
@@ -209,7 +210,8 @@ def remove_dot_segments(path: str) -> str:
 
 def canonical_schemeless(url: str) -> Optional[str]:
     """The scheme-less URL as a fetcher resolves it: IDNA, lower-cased host without a trailing dot, userinfo
-    and a default port dropped, dot segments resolved, fragment dropped. None when it has no parseable host."""
+    and a default port dropped, dot segments resolved, runs of ``/`` collapsed (as nginx's ``merge_slashes``
+    serves them), fragment dropped. None when it has no parseable host. Used for matching only, never fetched."""
     try:
         parts = urlsplit(url)
         if not parts.hostname:
@@ -219,7 +221,8 @@ def canonical_schemeless(url: str) -> Optional[str]:
     except (ValueError, UnicodeError):
         return None
     netloc = host if port in (None, DEFAULT_PORTS.get(parts.scheme.lower())) else f"{host}:{port}"
-    return netloc + remove_dot_segments(parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+    path = _SLASH_RUN_RE.sub("/", remove_dot_segments(parts.path or "/"))
+    return netloc + path + (f"?{parts.query}" if parts.query else "")
 
 
 def url_shape_problem(url: str) -> Optional[str]:
