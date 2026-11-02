@@ -25,7 +25,7 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FAILED, HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
@@ -34,6 +34,7 @@ from nemo_gym.sandbox import SandboxStatus
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.pi_agent.app import (
+    MCP_SETUP_ERROR_EXIT_CODE,
     PiAgent,
     PiAgentConfig,
     PiAgentRunRequest,
@@ -2828,6 +2829,49 @@ async def test_failed_run_is_graded_only_while_its_sandbox_runs(setup, case, sta
             assert record["status"] == ("failed" if expected.startswith("{") else expected)
     probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
     assert len(probed) == int(case == "killed")
+
+
+@pytest.mark.parametrize(
+    "return_code,granted,graded",
+    [
+        # The harness runner failed before starting Pi, or could not start it.
+        (HARNESS_RUNNER_FAILED, False, False),
+        (126, False, False),
+        (127, False, False),
+        # Gym's MCP tools did not load (gym_mcp.mjs exits 78).
+        (MCP_SETUP_ERROR_EXIT_CODE, True, False),
+        # Without a grant, gym_mcp.mjs is not loaded: exit 78 is Pi's own, an ordinary failed run.
+        (MCP_SETUP_ERROR_EXIT_CODE, False, True),
+    ],
+)
+def test_setup_failure_is_not_graded(setup, return_code, granted, graded):
+    # The sandbox still runs, but a run that never got going is a Gym or setup failure, not the agent's result.
+    agent, sandbox = setup
+    configure_direct(agent)
+    sandbox.status = AsyncMock(return_value=SandboxStatus.RUNNING)
+    sandbox.result["return_code"] = return_code
+    sandbox.events = (
+        json.dumps([0.0, {"type": "ng_gym_mcp_setup_failed", "error": "resources: TypeError (ECONNREFUSED)"}])
+        if granted
+        else ""
+    )
+    body = seed_with_tools(mcp_grant("resources")) if granted else seed()
+    app = agent.setup_webserver()
+    agent.setup_exception_middleware(app)
+    with TestClient(app) as client:
+        assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 200
+        response = client.post("/ng-rollout/pi-smoke-a2/v1/responses", json={"input": "task"})
+        if graded:
+            assert response.status_code == 200, response.text
+            assert response.json()["status"] == "failed"
+            assert response.json()["metadata"]["graded_agent_error"] == "exit 78: Pi exited with code 78"
+        else:
+            assert response.status_code == 500, response.text
+            assert "Pi agent failed" in response.text
+            assert "graded_agent_error" not in response.text
+        assert client.post("/v1/agent_sessions/close", json=close_body(body.agent_session_id)).status_code == 200
+    probed = [call.args[0] for call in sandbox.exec.await_args_list if call.args[0] == "true"]
+    assert len(probed) == int(graded)
 
 
 @pytest.mark.parametrize(

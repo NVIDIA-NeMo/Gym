@@ -32,7 +32,13 @@ from fastapi import HTTPException, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator, model_validator
 
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    SandboxSession,
+)
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -729,9 +735,10 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
     raise_oom_score_adj: bool = False
     # Sandbox sessions: return a failed run (nonzero or signalled exit, a terminal error, no terminal
     # assistant result) as a gradable `failed` response, as Harbor grades after any agent exit, when
-    # the supervisor confirmed cleanup, the terminal error is not a transient model-endpoint failure,
-    # and the sandbox still runs and answers a command. A model error Pi reported itself keeps its
-    # classified cause for the outcome policy instead. Anything else stays an execution error.
+    # the supervisor confirmed cleanup, the runner started Pi and any granted Gym MCP tools loaded, the
+    # terminal error is not a transient model-endpoint failure, and the sandbox still runs and answers a
+    # command. A model error Pi reported itself keeps its classified cause for the outcome policy
+    # instead. Anything else stays an execution error.
     verify_after_agent_error: bool = False
 
     @field_validator("sandbox_env", mode="before")
@@ -1064,16 +1071,23 @@ class PiAgent(SimpleResponsesAPIAgent):
             "stderr": f"{logs}/pi_stderr.txt" if logs else None,
         }
 
-    async def _gradable_agent_error(self, state: PiSandboxSession, error: str, *, cleanup: Any) -> Optional[str]:
+    async def _gradable_agent_error(
+        self, state: PiSandboxSession, error: str, *, cleanup: Any, mcp_failed: bool
+    ) -> Optional[str]:
         """Describe a failed Pi run that Resources can still grade, or return None.
 
-        The supervisor's confirmed cleanup means Pi ended and nothing it started still runs. A
-        transient model-endpoint failure, or a sandbox that no longer runs or answers, keeps the run
-        an execution error, so the episode is retried rather than graded.
+        The supervisor's confirmed cleanup means Pi ended and nothing it started still runs. A setup
+        failure (the runner did not start Pi, or Gym's MCP tools did not load), a transient
+        model-endpoint failure, or a sandbox that no longer runs or answers keeps the run an execution
+        error, so the episode is retried rather than graded.
         """
         if cleanup is None or cleanup["error"]:
             return None
-        detail = f"exit {cleanup['return_code']}: {error}"
+        return_code = cleanup["return_code"]
+        detail = f"exit {return_code}: {error}"
+        if mcp_failed or return_code == HARNESS_RUNNER_FAILED or return_code in HARNESS_COMMAND_NOT_STARTED:
+            LOG.warning("Pi failed in setup; not grading it: %s", detail)
+            return None
         if _MODEL_ENDPOINT_ERROR.search(error):
             LOG.warning("Pi failed on a model endpoint error; not grading it: %s", detail)
             return None
@@ -1246,7 +1260,8 @@ class PiAgent(SimpleResponsesAPIAgent):
             # invalidate partial work. They must not erase an independently confirmed worker or cleanup failure.
             terminal_error = None
         execution_error = cleanup["error"]
-        if mcp_servers and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE:
+        mcp_failed = bool(mcp_servers) and cleanup["return_code"] == MCP_SETUP_ERROR_EXIT_CODE
+        if mcp_failed:
             cause = f": {mcp_setup_failure}" if mcp_setup_failure else ""
             execution_error = execution_error or f"Required Gym MCP tools could not be initialized{cause}"
         ended_on_finish_tool = _ends_on_finish_tool(messages)
@@ -1274,7 +1289,7 @@ class PiAgent(SimpleResponsesAPIAgent):
         graded_error = None
         # A failure Pi reported from the model endpoint is classified below, not graded here.
         if error and not reported_error and self.config.verify_after_agent_error:
-            graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup)
+            graded_error = await self._gradable_agent_error(state, error, cleanup=cleanup, mcp_failed=mcp_failed)
             if graded_error is not None:
                 error = None
         if graded_error is not None:

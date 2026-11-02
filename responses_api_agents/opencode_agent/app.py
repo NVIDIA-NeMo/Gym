@@ -38,7 +38,13 @@ from nemo_gym.agent_activation_types import (
     AgentContinuationCapabilities,
 )
 from nemo_gym.agent_outcome import AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
+    HARNESS_RUNNER_FILE,
+    HARNESS_RUNNER_SCRIPT,
+    SandboxSession,
+)
 from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
 from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
@@ -326,10 +332,10 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     raise_oom_score_adj: bool = False
     # Sandbox sessions: return a failed run (a nonzero exit, an error on the last assistant turn, no
     # terminal assistant result) as a gradable `failed` response, as Harbor grades after any agent exit,
-    # when the supervisor confirmed cleanup, the run's output was captured, its last error is not a
-    # transient model-endpoint failure, and the sandbox still runs and answers a command. A model error
-    # OpenCode reported itself keeps its classified cause for the outcome policy instead. Anything else
-    # stays an execution error.
+    # when the supervisor confirmed cleanup, the runner started OpenCode, any required Gym MCP tools
+    # connected, the run's output was captured, its last error is not a transient model-endpoint failure,
+    # and the sandbox still runs and answers a command. A model error OpenCode reported itself keeps its
+    # classified cause for the outcome policy instead. Anything else stays an execution error.
     verify_after_agent_error: bool = False
 
     @property
@@ -1457,6 +1463,8 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         mcp_unconfirmed = None
         if mcp_servers and not isinstance(failure, asyncio.CancelledError):
             error, mcp_unconfirmed = await self._check_mcp_grants(state, mcp_grants, observations)
+        # Required Gym MCP tools that did not connect, or (below) were never confirmed: a setup failure.
+        mcp_failed = error is not None
         if state.session.artifacts is not None:
             try:
                 parsed = json.loads(state.session.artifacts)
@@ -1522,7 +1530,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             and not (error or failure or reported_error)
             and (model_called or outcome.status == "completed")
         ):
-            error = mcp_unconfirmed
+            error, mcp_failed = mcp_unconfirmed, True
         if context_limit:
             outcome = OpenCodeRunOutcome(status="incomplete")
         graded_error = None
@@ -1535,7 +1543,9 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             and self.config.verify_after_agent_error
         ):
             last_error = native_result.get("error")
-            graded_error = await self._gradable_agent_error(state, error, result=result, last_error=last_error)
+            graded_error = await self._gradable_agent_error(
+                state, error, result=result, last_error=last_error, mcp_failed=mcp_failed
+            )
             if graded_error is not None:
                 error = None
                 # A run that also hit its time limit is graded as a timeout.
@@ -1637,17 +1647,28 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
         return self.report_outcome(response, native_result)
 
     async def _gradable_agent_error(
-        self, state: OpenCodeSandboxSession, error: str, *, result: Optional[dict[str, Any]], last_error: object
+        self,
+        state: OpenCodeSandboxSession,
+        error: str,
+        *,
+        result: Optional[dict[str, Any]],
+        last_error: object,
+        mcp_failed: bool,
     ) -> Optional[str]:
         """Describe a failed OpenCode run that Resources can still grade, or return None.
 
-        The supervisor's confirmed cleanup means OpenCode ended. A transient model-endpoint failure, or a
-        sandbox that no longer runs or answers, keeps the run an execution error, so the episode is
-        retried rather than graded.
+        The supervisor's confirmed cleanup means OpenCode ended. A setup failure (the runner did not start
+        OpenCode, or required Gym MCP tools did not connect), a transient model-endpoint failure, or a
+        sandbox that no longer runs or answers keeps the run an execution error, so the episode is retried
+        rather than graded.
         """
         if result is None or result["error"]:
             return None
-        detail = f"exit {result['return_code']}: {error}"
+        return_code = result["return_code"]
+        detail = f"exit {return_code}: {error}"
+        if mcp_failed or return_code == HARNESS_RUNNER_FAILED or return_code in HARNESS_COMMAND_NOT_STARTED:
+            LOG.warning("OpenCode failed in setup; not grading it: %s", detail)
+            return None
         if _is_model_endpoint_failure(last_error):
             LOG.warning("OpenCode failed on a model endpoint error; not grading it: %s", detail)
             return None
