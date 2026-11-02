@@ -3978,7 +3978,12 @@ def _observed_trial_operations(
                 )
             ):
                 return False
-            if grade is not None and judge_calls is not None and grade["outcome"] == "unknown":
+            if (
+                grade is not None
+                and judge_calls is not None
+                and grade["outcome"] == "unknown"
+                and not _unknown_grading_outcome(row)  # counted once, as ``judge_unparseable`` (``_scored_fault``)
+            ):
                 invalid_grades.append(_identity(row))
             # An agent invocation that says verification was skipped contradicts any recorded grading.
             if any(
@@ -4259,16 +4264,46 @@ def _unparsed_verdict(facts: Mapping[str, Any]) -> bool:
     )
 
 
-def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
-    """Whether a scored row's grading is ``judge_unparseable``: unmasked, with a reward and no failure kind, while a
-    saved judge evaluation recorded no verdict (``_unparsed_verdict``). Its reward is no grade."""
+def _scored_unmasked(row: Mapping[str, Any]) -> bool:
+    """A scored row: unmasked, with a reward and no failure kind."""
     return (
         row.get(FAILURE_CLASS) is None
         and row.get("failure_kind") is None
         and row.get("mask_sample") is not True
         and _reward(row) is not None
-        and _unparsed_verdict(_grading_facts(row))
     )
+
+
+def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row's grading is ``judge_unparseable`` because a saved judge evaluation recorded no verdict
+    (``_unparsed_verdict``). Its reward is no grade."""
+    return _scored_unmasked(row) and _unparsed_verdict(_grading_facts(row))
+
+
+def _unknown_grading_outcome(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row's verifier record reports a judge grading operation with outcome ``unknown``: the grading
+    did not resolve, so its reward is no grade. Read from the verifier invocations the row already saves."""
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
+    return (
+        isinstance(verifiers, list)
+        and _scored_unmasked(row)
+        and any(
+            isinstance(verifier, Mapping)
+            and isinstance(verifier.get("grading_operations"), list)
+            and any(
+                isinstance(op, Mapping) and op.get("kind") == "llm_judge" and op.get("outcome") == "unknown"
+                for op in verifier["grading_operations"]
+            )
+            for verifier in verifiers
+        )
+    )
+
+
+def _judge_unparseable(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row is ``judge_unparseable``: its judge gave no verdict (``_unparsed_judge_verdict``) or its
+    verifier's grading did not resolve (``_unknown_grading_outcome``). Judges are stateless: it is re-judged."""
+    return _unparsed_judge_verdict(row) or _unknown_grading_outcome(row)
 
 
 def _judge_evaluations(facts: Mapping[str, Any], reward: float | None) -> bool:
@@ -4747,7 +4782,7 @@ def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     (``_answer_fault``), else ``judge_unparseable`` when its saved judge evaluation recorded no verdict
     (``_unparsed_judge_verdict``)."""
     fault = _scored_kind(row) or _answer_fault(row, collected)
-    if fault is None and _unparsed_judge_verdict(row):
+    if fault is None and _judge_unparseable(row):
         return JUDGE_UNPARSEABLE
     return fault
 
@@ -5761,7 +5796,7 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     """Why a saved result row is re-verified from its saved answer, or None when it is not.
 
     ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``), or scored while
-    its saved judge evaluation recorded no verdict (``_unparsed_judge_verdict``).
+    its judge gave no verdict or its grading did not resolve (``_judge_unparseable``).
     ``REVERIFY_VERIFY_TRANSPORT``: masked because its verify call was lost in transport (``_verify_transport_failure``).
     ``REVERIFY_UNGRADED``: scored, but no grading was recorded for it (``_grading_unrecorded``).
     Only a result with a saved answer qualifies; a failures-sidecar row, a result a re-verification already settled
@@ -5781,7 +5816,7 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
         return REVERIFY_VERIFY_TRANSPORT if _verify_transport_failure(row) else None
     if row.get("evaluation_completed") is False or _reward(row) is None:
         return None
-    if _unparsed_judge_verdict(row):
+    if _judge_unparseable(row):
         return REVERIFY_JUDGE
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 

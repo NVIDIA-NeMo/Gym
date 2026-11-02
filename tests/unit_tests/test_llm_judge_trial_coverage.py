@@ -367,7 +367,7 @@ def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish
     d = decide_from_collected(c, max_infra_retries=1, max_walltime_s=None, live_job=False)
     counters, faults = {}, []
     assert _observed_trial_operations(d, c, judge_recovery=counters, grading_failures=faults) is True
-    assert len(faults) == 1
+    assert faults == []  # the row is counted once, as its own judge_unparseable fault
     assert counters == {
         "judge_recovered_attempts": 0,
         "judge_recovered_operations": 0,
@@ -382,9 +382,10 @@ def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish
     assert trial_counts(d, c) == expected_counts
     task = gate_summary_from_collected(d, c, max_unhealthy_fraction=None)
     assert task["trial_counts"] == expected_counts
-    assert task["evaluation_health"]["evaluation"]["kinds"] == {"grading_without_verdict": 1}
+    assert task["evaluation_health"]["evaluation"]["kinds"] == {"judge_unparseable": 1}
     assert task["failures"]["trial_failures"]["by_cause"]["judge"] == {"count": 1, "rate": 1.0}
     assert d.expected == 1 and d.action.value == "noop"
     assert c.model_dump() == before
+    # The unknown outcome alone counts the trial (a known lower bound over the limit), whatever joins its calls.
     grade["dependencies"] = []
-    assert trial_health(d, c)[0] is None
+    assert trial_health(d, c)[0] is False

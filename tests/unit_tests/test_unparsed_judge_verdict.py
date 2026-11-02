@@ -100,3 +100,54 @@ def test_a_judge_record_needs_its_captured_judge_reply_to_have_completed(truncat
         assert passed is None and report["status"] == "UNVERIFIED", reason
     else:
         assert passed is True and report["exact"] is True, reason
+
+
+def _verifier(outcome):
+    """The verifier invocation a judged row saves in ``ng_trajectory``; its one grading operation has this outcome."""
+    grade = {"operation_id": "grade", "kind": "llm_judge", "outcome": outcome, "result_binding_sha256": None}
+    return {
+        "invocation_id": "verify-0",
+        "status": "completed",
+        "failure_kind": None,
+        "model_calls": [],
+        "grading_operations": [grade | {"dependencies": []}],
+        "grading_record": None,
+        "sandbox_observations": [],
+    }
+
+
+def _single_judge_row(outcome):
+    """A scored row as a single-judge benchmark saves it: a reward, no failure kind, and the verifier record's grading
+    outcome; its judge reply is not kept as a labelled evaluation."""
+    return ident(0, reward=0.0, response=COMPLETED, ng_trajectory={"verifier_invocations": [_verifier(outcome)]})
+
+
+@pytest.mark.parametrize(
+    "outcome,kind,cause",
+    [
+        ("unknown", "llm_judge", "judge"),
+        ("completed", "llm_judge", None),
+        ("unknown", "programmatic_calculation", None),
+    ],
+)
+def test_a_judge_grading_whose_verifier_record_outcome_is_unknown_is_selected_for_rejudging(
+    tmp_path, outcome, kind, cause
+):
+    row = _single_judge_row(outcome)
+    row["ng_trajectory"]["verifier_invocations"][0]["grading_operations"][0]["kind"] = kind
+    assert reverification_cause(_collected(tmp_path, row)) == cause
+    assert reverification_cause(saved_row_evidence(row)) == cause
+
+
+def test_the_gate_counts_a_grading_with_an_unknown_outcome_as_judge_unparseable():
+    from nemo_gym.orchestration.recovery import decide_from_collected, gate_summary_from_collected, trial_counts
+    from tests.unit_tests.test_llm_judge_trial_coverage import _recovered_fixture
+
+    collected, _, grade = _recovered_fixture()
+    grade["outcome"] = "unknown"
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    expected = {"observed_healthy": 0, "unhealthy": 1, "unobserved": 0, "verifier_recorded": 0}
+    assert trial_counts(decision, collected) == expected
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
+    assert task["trial_counts"] == expected
+    assert task["evaluation_health"]["evaluation"]["kinds"] == {"judge_unparseable": 1}
