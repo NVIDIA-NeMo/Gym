@@ -332,7 +332,22 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
             _gym_stop_accounting_unknown "Previous exit accounting is unknown."
         [[ "$_gym_exit_code" =~ ^[0-9]+:[0-9]+$ ]] || _gym_stop_accounting_unknown "Previous exit accounting is malformed."
         {runtime_admission_marker}
-        _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "Installed recovery runtime failed."
+        # The installer's stderr goes to a file while it runs; on failure its first error or fatal line joins
+        # the stop text. Either way the whole stderr is copied to the job log through the saved descriptor.
+        _gym_admission_err=$(mktemp 2>/dev/null) || _gym_admission_err=/dev/null
+        _gym_admission_error() {{
+            cat "$_gym_admission_err" >&9 2>/dev/null
+            local _gym_error
+            _gym_error=$(grep -m 1 -iE 'error|fatal' "$_gym_admission_err" 2>/dev/null || tail -n 1 "$_gym_admission_err" 2>/dev/null)
+            _gym_error=$(printf '%s' "$_gym_error" | tr -d '\\000-\\037')
+            [[ -z "$_gym_error" ]] || printf ': %s' "${{_gym_error:0:{install_error_max_chars}}}"
+            printf '; the chain does not retry it'
+        }}
+        exec 9>&2 2>"$_gym_admission_err"
+        _gym_admission_output=$({admission_command}) || _gym_stop_incomplete "Installed recovery runtime failed$(_gym_admission_error)"
+        exec 2>&9 9>&-
+        cat "$_gym_admission_err" >&2 2>/dev/null
+        [[ "$_gym_admission_err" == /dev/null ]] || rm -f -- "$_gym_admission_err"
         _gym_admission=$(printf '%s\n' "$_gym_admission_output" | grep '^__GYM_CONTINUATION:' || true)
         # The installed reader's own decision, when it gives one, replaces the scheduler-state guess above.
         _gym_admission_reason=$(printf '%s\n' "$_gym_admission_output" | grep -m 1 '^{continuation_reason_prefix}' || true)

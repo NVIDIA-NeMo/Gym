@@ -326,3 +326,27 @@ def test_known_scheduler_event_preserves_untouched_work_semantics(tmp_path, stat
     result = _run_prologue(tmp_path, ResumeConfig(), state)
     assert "REACHED_WORK" in result.stdout, result.stdout + result.stderr
     assert (tmp_path / ".gym_infra_retries").exists() is debit
+
+
+def test_a_failing_installed_runtime_names_its_first_error_and_stops(tmp_path):
+    prepare_managed(tmp_path, "missing", n=2)
+    installer = tmp_path / "failing_installer.sh"
+    installer.write_text(
+        "#!/bin/bash\n"
+        "echo 'Resolved 12 packages'\n"
+        "echo '  x No solution found when resolving dependencies:' >&2\n"
+        "echo 'error: your requirements are unsatisfiable' >&2\n"
+        "exit 1\n"
+    )
+    installer.chmod(0o755)
+    result = _run_prologue(
+        tmp_path, ResumeConfig(max_retries=3), "FAILED", exit_code="1:0", admission_command=str(installer)
+    )
+    assert "REACHED_WORK" not in result.stdout
+    assert not (tmp_path / "sbatch_calls").exists()
+    stop = (tmp_path / ".gym_chain_incomplete").read_text().strip()
+    assert stop == (
+        "Installed recovery runtime failed: error: your requirements are unsatisfiable; the chain does not retry it"
+    )
+    # The whole installer error still reaches the job log.
+    assert "No solution found when resolving dependencies" in result.stderr
