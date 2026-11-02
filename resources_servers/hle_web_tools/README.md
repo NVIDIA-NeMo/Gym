@@ -101,9 +101,12 @@ Beyond the families, the protocol's own refusals:
   each is checked against the URL-shaped families and the text families: the path remainder of the
   Wayback Machine and every other `*.archive.org` host (`web.archive.org/web/<timestamp>/<url>`,
   `wayback.archive.org/...`), of `r.jina.ai` and of Google's cache
-  (`webcache.googleusercontent.com/search?q=cache:<url>`); every query-string value that names a host
-  (`?url=`, `?u=`, `?q=`, ...), with or without a scheme; and any `http(s):/` found inside the URL, each
-  taken up to the next one. A wrapped `https:/host`, `https:///host` or `https:host` is read as
+  (`webcache.googleusercontent.com/search?q=cache:<url>`), each read as a URL with or without a scheme
+  and whatever the spelling of its host (`scale.com./x`, `x@scale.com/x` and full-width letters all name
+  `scale.com`); every query-string value that names a host (`?url=`, `?u=`, `?q=`, ...), with or without
+  a scheme; and any `http(s):/` found inside the URL, each taken up to the next one. A wrapped or decoded
+  URL that Python cannot parse (`https://[::1]@scale.com/`, which browsers read as `scale.com`) is refused
+  as `malformed_url`. A wrapped `https:/host`, `https:///host` or `https:host` is read as
   `https://host`, and a wrapped or decoded URL is also read as a WHATWG fetcher reads it (backslash as
   `/`, tab and newlines deleted). The expansion checks the original and four further rounds of decoding
   and unwrapping, and at most 64 distinct candidates; a URL that still has unexplored candidates when

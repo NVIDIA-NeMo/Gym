@@ -359,6 +359,10 @@ OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
         ("https://web.archive.org/web/2024/https:/scale.com/leaderboard", "domains"),
         ("https://web.archive.org/web/2024/https:///scale.com/leaderboard", "domains"),
         ("https://wayback.archive.org/web/2024/scale.com/leaderboard", "domains"),
+        # A wrapper's remainder is a URL however its host is spelled; a query value may end its host with a dot.
+        ("https://web.archive.org/web/2024/scale.com./leaderboard", "domains"),
+        ("https://web.archive.org/web/2024/x@scale.com/leaderboard", "domains"),
+        ("https://ok.example/?u=scale.com./leaderboard", "domains"),
         # Ordinary URLs, redirects and query strings stay allowed.
         ("https://www.google.com/url?q=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSpin_structure&sa=D&ust=17", None),
         ("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSpin_structure&rut=ab", None),

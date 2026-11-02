@@ -133,8 +133,8 @@ _EMBEDDED_URL_END_RE = re.compile(r"[\s\"'<>]|https?:/", re.IGNORECASE)
 # ``https:/host``, ``https:///host`` and ``https:host``: WHATWG parsers (and archive.org) read all of them as
 # ``https://host``.
 _LOOSE_SCHEME_RE = re.compile(r"^(https?):/*", re.IGNORECASE)
-# A query value or path remainder that names a host, with or without a scheme: ``hf.co/datasets/x``.
-_BARE_URL_RE = re.compile(r"^(?:https?:)?(?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)", re.IGNORECASE)
+# A query value that names a host, with or without a scheme: ``hf.co/datasets/x``, ``scale.com./x``.
+_BARE_URL_RE = re.compile(r"^(?:https?:)?(?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}\.?(?:[:/?#]|$)", re.IGNORECASE)
 # The operand is host characters only, so ``(site:a.org OR site:b.org)``, ``site:a.org|site:b.org`` and
 # ``site:b.org,`` yield the bare hosts; one leading dot (``site:.b.org``) is dropped.
 _SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re.IGNORECASE)
@@ -449,7 +449,14 @@ def _embedded_urls(url: str) -> List[str]:
 
 def _wrapped_urls(url: str) -> List[str]:
     """URLs a proxy or archive wrapper carries: the path remainder of known wrappers, ``cache:`` targets,
-    every query value that names a host and every URL embedded in the string."""
+    every query value that names a host and every URL embedded in the string.
+
+    A wrapper fetches its remainder (and Google's cache its ``cache:`` target) whatever its spelling, so each is
+    read as a URL even without a scheme, and ``urlsplit`` and ``normalize_hostname`` decide its host:
+    ``scale.com./x``, ``x@scale.com/x`` and ``ｓｃａｌｅ.com/x`` all name ``scale.com``. Any other query value is
+    read as a URL only when it has a scheme or starts with a hostname.
+    """
+    targets: List[str] = []
     found: List[str] = []
     try:
         parts = urlsplit(url)
@@ -466,22 +473,23 @@ def _wrapped_urls(url: str) -> List[str]:
         if parts.query and host != "webcache.googleusercontent.com":
             remainder += "?" + parts.query
         if remainder:
-            found.append(remainder)
+            targets.append(remainder)
     for _, value in parse_qsl(parts.query, keep_blank_values=False):
         cache = _GOOGLE_CACHE_RE.search(value)
         if cache:
-            found.append(cache.group(1))
+            targets.append(cache.group(1))
         found.append(value)
     found.extend(_embedded_urls(url))
     urls: List[str] = []
-    for item in found:
+    for index, item in enumerate(targets + found):
+        is_target = index < len(targets)
         # ``https:/host`` and ``https:///host`` reach the same page as ``https://host``.
         item = _LOOSE_SCHEME_RE.sub(lambda m: m.group(1) + "://", item.strip(), count=1)
         if not item:
             continue
         if _SCHEME_RE.match(item):
             urls.append(item)
-        elif _BARE_URL_RE.match(item):
+        elif is_target or _BARE_URL_RE.match(item):
             urls.append("https://" + item.lstrip("/"))
     return urls
 
