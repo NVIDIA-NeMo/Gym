@@ -1,0 +1,45 @@
+lc_interleaved_qa_resources_server:
+  resources_servers:
+    lc_interleaved_qa:
+      entrypoint: app.py
+      domain: long_context
+      description: >-
+        Interleaved long-context document QA: a question follows each part of a document and may
+        only be answered from the parts read so far. Rule checks plus an LLM grounding judge, with
+        an optional no-document guessability gate.
+      verified: false
+      # Defaults to the policy model so the environment starts on its own. Point this at a
+      # separate, stronger judge for real generation runs.
+      judge_model_server:
+        type: responses_api_models
+        name: policy_model
+      judge_responses_create_params_overrides: {}
+      # Omit guess_model_server to skip the guessability gate; point it at a cheaper
+      # model than the grounding judge when you enable it.
+      guess_model_server: null
+      guess_responses_create_params_overrides: {}
+      min_rubric: 3
+      min_evidence_distance_chars: 0
+lc_interleaved_qa_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      resources_server:
+        type: resources_servers
+        name: lc_interleaved_qa_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/lc_interleaved_qa/data/example.jsonl
+        num_repeats: 1
+
+lc_interleaved_qa_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: lc_interleaved_qa_simple_agent
