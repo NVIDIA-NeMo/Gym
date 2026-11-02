@@ -58,6 +58,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     ALLOCATION_ACCOUNTING_MARKER,
     BOUNDED_BUDGET_MARKER,
+    CHAIN_ACCOUNTING_FORMAT,
     INCOMPLETE_MARKER_NAME,
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
@@ -83,7 +84,6 @@ from nemo_gym.orchestration.jobs import (
 )
 from nemo_gym.orchestration.recovery import (
     ACCUMULATED_WALLTIME_FILE,
-    CHAIN_ACCOUNTING_FORMAT,
     COLLECT_SCRIPT,
     FOLLOWUP_ACCOUNTING_FORMAT,
     INFRA_RETRIES_FILE,
@@ -100,11 +100,11 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
-    accounted_requeued_chain_walltime,
     allocation_cut_from_accounting,
     chain_accounting,
     decide_from_collected,
     live_chain_job,
+    reconcile_requeued_chain,
     requeue_note,
     select_managed_evidence,
     stopped_followup,
@@ -403,36 +403,6 @@ def _plan_walltime(
             f"{plan['segment']} and the chain continues under the {max_walltime} cap"
         )
     return plan
-
-
-def _reconcile_requeued_chain(
-    collected: CollectedEvidence, rows: list[tuple[str, str, int, int]]
-) -> CollectedEvidence:
-    """Know a requeued chain's budget again once every incarnation has a terminal scheduler record.
-
-    Only the requeue marker is reconciled: the counters themselves stayed readable and the missing fact is the elapsed
-    time of the requeued incarnations, which complete terminal records give. Any other unknown reason stays unknown.
-    """
-    states = collected.counter_states or {}
-    if (
-        collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON
-        or states.get("infra_retries") not in ("absent", "ok")
-        or states.get("walltime") not in ("absent", "ok")
-    ):
-        return collected
-    total = accounted_requeued_chain_walltime(
-        collected.job_chain, rows, stored_walltime_s=collected.walltime_used_s or 0
-    )
-    if total is None:
-        return collected
-    return collected.model_copy(
-        update={
-            "infra_retries_state": states["infra_retries"],
-            "walltime_state": states["walltime"],
-            "accounted_walltime_s": total,
-            "accounting_reconciled": True,
-        }
-    )
 
 
 # The size-aware reader bound: bootstrap plus a floor, then time per GB of saved rollout files, up to a ceiling.
@@ -1336,7 +1306,7 @@ class SlurmExecutor(BaseExecutor):
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
                     allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
-                    collected = _reconcile_requeued_chain(collected, rows)
+                    collected = reconcile_requeued_chain(collected, rows)
                 if resume.max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
                     collected.accounted_walltime_s = (

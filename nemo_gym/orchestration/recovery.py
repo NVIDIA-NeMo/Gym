@@ -91,10 +91,14 @@ from nemo_gym.core.failure_kinds import (
 )
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTED_WALLTIME_PREFIX,
     ACCOUNTING_UNKNOWN_PREFIX,
     CANCELLED_FOLLOWUP_MARKER,
+    CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
     PROVISIONAL_MARKER_PREFIX,
+    REQUEUE_RECONCILE_STATE,
+    REQUEUE_UNKNOWN_REASON,
 )
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.task_materialization import TASK_ID_FIELDS
@@ -2468,6 +2472,8 @@ def continuation_admission(
     import sys
 
     job = Path(job_dir)
+    if previous_state == REQUEUE_RECONCILE_STATE:
+        return _requeue_continuation(job, max_retries, max_walltime_s)
     if exit_code == "76:0":
         print(
             f"{CONTINUATION_REASON_PREFIX}the previous driver exited 76: none of its saved failures is eligible for "
@@ -2547,8 +2553,57 @@ def continuation_admission(
         return "stop"
 
 
-# What the executor reads for a chain: every incarnation of every allocation, a requeued one included.
-CHAIN_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,Restarts"
+def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | None) -> str:
+    """In a sentinel: reconcile a requeued chain from the terminal records in ``CHAIN_ACCOUNTING_ENV`` and decide.
+
+    The same reconcile and decision as ``gym eval resubmit --recover``: nothing else of the chain runs or waits (the
+    sentinel checks the queue), and every allocation ended. Prints the reconciled walltime when the run continues.
+    """
+    import subprocess
+    import sys
+
+    try:
+        rows = chain_accounting(os.environ.get(CHAIN_ACCOUNTING_ENV, ""))
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+        )
+        collected = CollectedEvidence.model_validate_json(raw.stdout)
+        if collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON:
+            print(f"{CONTINUATION_REASON_PREFIX}the chain's accounting is not the requeue marker")
+            return "stop"
+        if not rows:
+            print(f"{CONTINUATION_REASON_PREFIX}the requeued chain's scheduler records are malformed")
+            return "stop"
+        if not collected.managed_store:
+            print(f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from")
+            return "stop"
+        collected = select_managed_evidence(collected, job)
+        if collected.managed_selection is None:
+            print(
+                f"{CONTINUATION_REASON_PREFIX}the Store could not verify the saved artifacts: "
+                f"{collected.managed_reader_error or 'no authoritative selection'}"
+            )
+            return "stop"
+        collected = reconcile_requeued_chain(collected, rows)
+        if not collected.accounting_reconciled or collected.accounted_walltime_s is None:
+            print(f"{CONTINUATION_REASON_PREFIX}the terminal scheduler records do not account for the requeued chain")
+            return "stop"
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=max_retries,
+            max_walltime_s=max_walltime_s,
+            live_job=False,
+            allocation_cut=allocation_cut_from_accounting(rows, collected.coverage_allocation_id),
+        )
+        requeued = requeue_note(collected.job_chain, rows)
+        print(CONTINUATION_REASON_PREFIX + decision.reason + (f"; {requeued}" if requeued else ""))
+        if decision.action != RecoveryAction.RESUBMIT:
+            return "stop"
+        print(f"{ACCOUNTED_WALLTIME_PREFIX}{int(collected.accounted_walltime_s)}")
+        return "retry"
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
+        return "stop"
 
 
 def chain_accounting(accounting: str) -> list[tuple[str, str, int, int]] | None:
@@ -2660,6 +2715,34 @@ def accounted_requeued_chain_walltime(
     if stored_walltime_s != sum(elapsed for job_id, _, elapsed, _ in rows if job_id in before):
         return None
     return float(sum(elapsed for _, _, elapsed, _ in rows))
+
+
+def reconcile_requeued_chain(collected: CollectedEvidence, rows: list[tuple[str, str, int, int]]) -> CollectedEvidence:
+    """Know a requeued chain's budget again once every incarnation has a terminal scheduler record.
+
+    Only the requeue marker is reconciled: the counters themselves stayed readable and the missing fact is the elapsed
+    time of the requeued incarnations, which complete terminal records give. Any other unknown reason stays unknown.
+    """
+    states = collected.counter_states or {}
+    if (
+        collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON
+        or states.get("infra_retries") not in ("absent", "ok")
+        or states.get("walltime") not in ("absent", "ok")
+    ):
+        return collected
+    total = accounted_requeued_chain_walltime(
+        collected.job_chain, rows, stored_walltime_s=collected.walltime_used_s or 0
+    )
+    if total is None:
+        return collected
+    return collected.model_copy(
+        update={
+            "infra_retries_state": states["infra_retries"],
+            "walltime_state": states["walltime"],
+            "accounted_walltime_s": total,
+            "accounting_reconciled": True,
+        }
+    )
 
 
 def requeue_note(job_chain: list[str], rows: list[tuple[str, str, int, int]]) -> str | None:

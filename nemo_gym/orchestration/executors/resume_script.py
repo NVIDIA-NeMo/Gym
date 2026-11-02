@@ -77,6 +77,18 @@ REQUEUE_UNKNOWN_REASON = (
 REQUEUE_RECONCILED_NOTE = (
     "Requeued allocation accounting was reconciled from terminal scheduler records; recovery resubmitted."
 )
+# How a sentinel waits for every incarnation of a requeued chain to have a terminal scheduler record before it
+# reconciles the chain: it polls every REQUEUE_SETTLE_POLL_S seconds for up to REQUEUE_SETTLE_BOUND_S seconds. The
+# sentinel is the job script, so it holds the run's allocation while it waits; the bound keeps that short.
+REQUEUE_SETTLE_POLL_S = 30
+REQUEUE_SETTLE_BOUND_S = 300
+# The sacct fields of every incarnation of every allocation of a chain (see recovery.chain_accounting).
+CHAIN_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,Restarts"
+# The previous state a sentinel gives the installed continuation reader to reconcile a requeued chain, with the
+# chain's records in CHAIN_ACCOUNTING_ENV; the reader prints the reconciled walltime after ACCOUNTED_WALLTIME_PREFIX.
+REQUEUE_RECONCILE_STATE = "REQUEUED"
+CHAIN_ACCOUNTING_ENV = "GYM_CHAIN_ACCOUNTING"
+ACCOUNTED_WALLTIME_PREFIX = "__GYM_ACCOUNTED_WALLTIME:"
 ALLOCATION_ACCOUNTING_MARKER = "# --- Durable allocation accounting v1 ---"
 RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 ---"
 # The first words of the line a continuation writes to the incomplete marker as soon as it records itself, before
@@ -217,6 +229,105 @@ _gym_end_if_complete() {{
     exit 0
 }}
 
+# A Slurm requeue stops the requeued allocation and then its follow-up on the requeue marker: inside the job, the
+# elapsed time of the earlier incarnation is unknown. The follow-up's sentinel starts after both have ended. Once every
+# incarnation of the chain has a terminal record, it reconciles the chain's walltime from them through the installed
+# continuation reader, as gym eval resubmit --recover does, and when the budget allows it queues the recovery the same
+# way: under the resubmit lock, with the reconciled note written over the marker before sbatch, so no later sentinel
+# or operator queues it again. Otherwise the chain stays stopped on the marker, exactly as before. The sentinel runs no
+# work, so it stays out of the chain.
+_gym_chain_settled() {{
+    awk -F'|' -v chain="$1" '
+        BEGIN {{ n = split(chain, ids, ","); for (i = 1; i <= n; i++) want[ids[i]] = 1 }}
+        NF != 4 || !($1 in want) || $3 !~ /^[0-9]+$/ || $4 !~ /^[0-9]+$/ {{ bad = 1; next }}
+        {{
+            split($2, words, " "); state = words[1]; sub(/[+]$/, "", state)
+            if (state !~ /^(COMPLETED|FAILED|CANCELLED|TIMEOUT|OUT_OF_MEMORY|NODE_FAIL|BOOT_FAIL|DEADLINE|PREEMPTED)$/) bad = 1
+            rows[$1]++; seen[$1, $4 + 0]++
+        }}
+        END {{
+            if (bad) exit 1
+            for (id in want) {{
+                if (!(id in rows)) exit 1
+                for (r = 0; r < rows[id]; r++) if (seen[id, r] != 1) exit 1
+                if (rows[id] > 1) requeued = 1
+            }}
+            exit requeued ? 0 : 1
+        }}' <<< "$2"
+}}
+_gym_requeue_stop() {{
+    echo "Requeued chain: $1; sentinel ${{SLURM_JOB_ID:-}} leaves the chain stopped. Continue with gym eval resubmit --recover."
+    exit 0
+}}
+_gym_requeue_unlock() {{
+    rm -f "$OUTPUT_DIR/{resubmit_lock_name}"
+    _gym_requeue_stop "$1"
+}}
+_gym_reconcile_requeue() {{
+    local _ids _waited=0 _output _total _reason _old _pending _id _deps _cwd _claim _claimed _out _queued
+    _ids=$(paste -sd, "$OUTPUT_DIR/{job_chain_name}" 2>/dev/null) || _ids=""
+    [[ "$_ids" =~ ^[0-9]+(,[0-9]+)*$ ]] || _gym_requeue_stop "the recorded chain is unreadable"
+    _gym_requeue_poll() {{
+        _gym_requeue_rows=$(sacct -D -n -P -X -j "$_ids" --format={chain_accounting_format} 2>/dev/null) || _gym_requeue_rows=""
+    }}
+    _gym_requeue_poll
+    until _gym_chain_settled "$_ids" "$_gym_requeue_rows"; do
+        (( _waited < {requeue_settle_bound_s} )) || \
+            _gym_requeue_stop "its terminal scheduler records did not settle within {requeue_settle_bound_s}s"
+        sleep {requeue_settle_poll_s}
+        _waited=$((_waited + {requeue_settle_poll_s}))
+        _gym_requeue_poll
+    done
+    # The installed reader decides as a recovery would, on the saved rows and the reconciled budget.
+    _prev_state={requeue_reconcile_state}
+    _gym_exit_code=""
+    export {chain_accounting_env}="$_gym_requeue_rows"
+    _output=$({admission_command}) || _output=""
+    unset {chain_accounting_env}
+    _reason=$(printf '%s\n' "$_output" | grep -m 1 '^{continuation_reason_prefix}' || true)
+    _reason=${{_reason#{continuation_reason_prefix}}}
+    _total=$(printf '%s\n' "$_output" | grep -m 1 '^{accounted_walltime_prefix}' || true)
+    _total=${{_total#{accounted_walltime_prefix}}}
+    if ! printf '%s\n' "$_output" | grep -qx '__GYM_CONTINUATION:retry' || [[ ! "$_total" =~ ^[0-9]{{1,15}}$ ]]; then
+        _gym_requeue_stop "${{_reason:-the installed reader did not reconcile it}}"
+    fi
+    echo "Requeued chain reconciled: $_reason"
+    # The resubmit lock, as gym eval resubmit takes it; one that is held belongs to someone else and stays.
+    (set -C; : > "$OUTPUT_DIR/{resubmit_lock_name}") 2>/dev/null || _gym_requeue_stop "another resubmit holds the lock"
+    grep -qxF -- "{requeue_unknown_marker}" "$_incomplete_file" 2>/dev/null || \
+        _gym_requeue_unlock "the requeue marker changed: another recovery already handled it"
+    _pending=$(squeue --me --all --noheader --format='%i|%E|%Z' 2>/dev/null) || _gym_requeue_unlock "squeue failed"
+    while IFS='|' read -r _id _deps _cwd; do
+        [[ -n "$_cwd" && "$_cwd" -ef "$OUTPUT_DIR" && "$_id" != "${{SLURM_JOB_ID:-}}" ]] || continue
+        _gym_requeue_unlock "job $_id of this run is still pending or running"
+    done <<< "$_pending"
+    for _claim in "$OUTPUT_DIR"/.gym_followup_queued.*; do
+        [[ -e "$_claim" ]] || continue
+        _claimed=$(cat "$_claim" 2>/dev/null) || _claimed=""
+        [[ "$_claimed" =~ ^[0-9]+$ ]] || _gym_requeue_unlock "a follow-up submission identity is unknown"
+    done
+    # Terminal accounting of the complete recorded chain, never less than what is stored.
+    _old=0
+    if [[ -e "$_walltime_file" ]]; then _old=$(cat "$_walltime_file") || _gym_requeue_unlock "the stored walltime is unreadable"; fi
+    [[ "$_old" =~ ^[0-9]{{1,15}}$ ]] || _gym_requeue_unlock "the stored walltime is malformed"
+    (( 10#$_total >= 10#$_old )) || _total=$((10#$_old))
+    {{ echo "$((10#$_total))" > "$_walltime_file.tmp" && mv -f "$_walltime_file.tmp" "$_walltime_file"; }} || \
+        _gym_requeue_unlock "cannot preserve the accounted walltime"
+    echo "{requeue_reconciled_note}" > "$_incomplete_file" || _gym_requeue_unlock "cannot record the reconciled accounting"
+    _queued=""
+    if _out=$({resubmit_env}=1 {keep_budget_env}=1 sbatch "$_this_script" 2>&1); then
+        _queued="${{_out##* }}"
+    fi
+    if [[ "$_queued" =~ ^[0-9]+$ ]]; then
+        echo "Requeued chain: sentinel ${{SLURM_JOB_ID:-}} queued recovery $_queued; the walltime spent is ${{_total}}s."
+    else
+        echo "{accounting_unknown_prefix} Resubmit acknowledgement was not confirmed." > "$_incomplete_file"
+        echo "WARNING: the recovery submission may have succeeded without an observed reply: $_out"
+    fi
+    rm -f "$OUTPUT_DIR/{resubmit_lock_name}"
+    exit 0
+}}
+
 # The previous job queues a sentinel next to its follow-up F (afterany:F). F records itself in the chain before
 # anything else, so a sentinel only acts when F started and ended unrecorded: F died before its prologue ran.
 # The variable is read once and unset, so the follow-up and sentinel queued below are ordinary hops.
@@ -227,6 +338,10 @@ _gym_sentinel_debit=0
 _gym_sentinel_recorded=""
 if [[ -n "$_gym_sentinel_for" ]]; then
     if grep -qxF -- "$_gym_sentinel_for" "$OUTPUT_DIR/{job_chain_name}" 2>/dev/null; then
+        # The follow-up recorded itself and stopped on a requeue marker: reconcile the requeued chain (see above).
+        if grep -qxF -- "{requeue_unknown_marker}" "$_incomplete_file" 2>/dev/null; then
+            _gym_reconcile_requeue
+        fi
         # A follow-up that recorded itself died before its guard only when it made no follow-up claim and its own
         # provisional line is still the marker: a deliberate stop replaced that line with its reason.
         if [[ -e "$OUTPUT_DIR/.gym_followup_queued.$_gym_sentinel_for" ]] || \
@@ -711,6 +826,14 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         retry_extension_marker=RETRY_EXTENSION_MARKER,
         retry_extension_name=RETRY_EXTENSION_NAME,
         requeue_unknown_reason=REQUEUE_UNKNOWN_REASON,
+        requeue_unknown_marker=f"{ACCOUNTING_UNKNOWN_PREFIX} {REQUEUE_UNKNOWN_REASON}",
+        requeue_reconciled_note=REQUEUE_RECONCILED_NOTE,
+        requeue_settle_poll_s=REQUEUE_SETTLE_POLL_S,
+        requeue_settle_bound_s=REQUEUE_SETTLE_BOUND_S,
+        chain_accounting_format=CHAIN_ACCOUNTING_FORMAT,
+        requeue_reconcile_state=REQUEUE_RECONCILE_STATE,
+        chain_accounting_env=CHAIN_ACCOUNTING_ENV,
+        accounted_walltime_prefix=ACCOUNTED_WALLTIME_PREFIX,
         pre_inventory_reason=PRE_INVENTORY_REASON,
         rows_at_start_name=ROWS_AT_START_NAME,
         no_progress_segment_reason=NO_PROGRESS_SEGMENT_REASON,

@@ -115,6 +115,13 @@ _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
 # The node dies under the job: kill the job's shell, found by its script path (never the test runner).
 if [[ -n "${FAKE_SACCT_KILLS_JOB:-}" ]]; then pkill -KILL -f "$FAKE_LOG_DIR/job.sh"; exit 1; fi
+# A chain query (a sentinel waiting on a requeued chain) reads chain_accounting.<poll>, else chain_accounting.
+if [[ "$*" == *Restarts* ]]; then
+    _poll=$(( $(cat "$FAKE_LOG_DIR/chain_polls" 2>/dev/null || echo 0) + 1 )); echo "$_poll" > "$FAKE_LOG_DIR/chain_polls"
+    if [[ -e "$FAKE_LOG_DIR/chain_accounting.$_poll" ]]; then cat "$FAKE_LOG_DIR/chain_accounting.$_poll"
+    else cat "$FAKE_LOG_DIR/chain_accounting" 2>/dev/null; fi
+    exit 0
+fi
 if [[ -n "${FAKE_FOLLOWUP:-}" && " $* " == *" -j ${FAKE_FOLLOWUP} "* ]]; then echo "${FAKE_FOLLOWUP_ELAPSED:-}"; exit 0; fi
 if [[ "$*" == *State,ElapsedRaw* ]]; then echo "${FAKE_STATE:-}|${FAKE_ELAPSED:-}";
 elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}";
@@ -122,6 +129,7 @@ elif [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAK
 """
 _FAKE_SBATCH = """#!/bin/bash
 echo "$* sentinel=${GYM_FOLLOWUP_SENTINEL:-}" >> "$FAKE_LOG_DIR/sbatch_calls"
+echo "${GYM_RESUBMIT:-}|${GYM_RESUBMIT_KEEP_BUDGET:-}" >> "$FAKE_LOG_DIR/sbatch_env"
 if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
 # The queued follow-up waits on its dependency in this job dir, as squeue would list it. In a hidden partition
 # squeue lists it only with --all.
