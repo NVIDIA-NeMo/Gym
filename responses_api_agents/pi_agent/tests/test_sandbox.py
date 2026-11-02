@@ -564,8 +564,10 @@ async def test_sandbox_runtime_guards_reach_the_pi_invocation(setup):
     sandbox.stop.assert_not_awaited()
 
 
-async def test_mcp_grants_reach_pi_through_the_gym_extension(setup):
+@pytest.mark.parametrize("enable_tools", [True, False])
+async def test_mcp_grants_reach_pi_through_the_gym_extension(setup, enable_tools):
     agent, sandbox = setup
+    agent.config.enable_tools = enable_tools
     agent.config.sandbox_mcp_timeout_seconds = 120
     agent.config.finish_tool_names = ["finish"]
     body = seed_with_tools(
@@ -1035,9 +1037,13 @@ async def test_worker_diagnostics_never_override_exit_or_cleanup(setup, artifact
     sandbox.stop.assert_not_awaited()
 
 
-def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials(setup):
+@pytest.mark.parametrize("mode", ["append", "replace"])
+@pytest.mark.parametrize("enable_tools", [True, False])
+def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials(setup, mode, enable_tools):
     agent, sandbox = setup
     agent.config.system_prompt = "config instruction"
+    agent.config.system_prompt_mode = mode
+    agent.config.enable_tools = enable_tools
     agent.config.models_config = {"providers": {"unrelated": {"apiKey": "must-not-copy"}}}
     with TestClient(agent.setup_webserver()) as client:
         session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
@@ -1053,8 +1059,10 @@ def test_instructions_and_text_parts_reach_pi_without_other_provider_credentials
         )
         assert response.status_code == 200, response.text
         payload = staged(sandbox)
+        assert ("--no-builtin-tools" in payload["command"]) is (not enable_tools)
+        assert (f"{sandbox.directory}/runtime-guards.mjs" in payload["command"]) is enable_tools
         assert payload["command"][-2:] == [
-            "--append-system-prompt",
+            "--system-prompt" if mode == "replace" else "--append-system-prompt",
             "config instruction\n\nrequest instruction\n\ninput instruction",
         ]
         assert payload["prompt"] == "task"
