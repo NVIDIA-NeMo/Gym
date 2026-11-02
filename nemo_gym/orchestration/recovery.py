@@ -1006,6 +1006,25 @@ def trial_metadata(value):
                        if isinstance(event, dict) else None for event_id, event in report["events"].items()}}
     return result
 import hashlib
+def finite(value):
+    return value if type(value) in (int, float) and math.isfinite(value) else None
+def grading_facts(r):
+    # Scalar facts of the grading artifacts a verifier or environment saved on the row; their contents stay local.
+    judgments, result = r.get("judgments"), r.get("result")
+    info = result.get("reward_info") if isinstance(result, dict) else None
+    return {
+        "judge_response": r.get("judge_response") is not None,
+        "judgments": isinstance(judgments, list) and bool(judgments),
+        "judge_score": finite(r.get("judge_score")) is not None or (isinstance(judgments, list) and any(
+            isinstance(item, dict) and finite(item.get("judge_score")) is not None for item in judgments)),
+        "judge_evaluations": r.get("judge_evaluations") is not None,
+        "library_reward": finite(r.get("library_reward")),
+        "sentence_metrics": sorted(k for k, v in r.items() if k.startswith("sentence_") and finite(v) is not None),
+        "verifier_exit_code": r.get("verifier_exit_code") if type(r.get("verifier_exit_code")) is int else None,
+        "verifier_error": r.get("verifier_error") is not None,
+        "environment_reward": finite(info.get("reward")) if isinstance(info, dict) else None,
+        "invalid_model_response": r.get("invalid_model_response") is True,
+    }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
     if not isinstance(result, dict) or not isinstance(result.get("response"), dict):
@@ -1089,6 +1108,10 @@ def rows(name, skip=0):
                 binding = grading_result_binding(r)
                 if binding is not None:
                     selected["_ng_collected_grading_binding"] = binding
+                facts = grading_facts(r)
+                # A zero is a fact (a wrong answer's library_reward, a passing exit code), so compare by identity.
+                if any(value is not None and value is not False and value != [] for value in facts.values()):
+                    selected["_ng_collected_grading_facts"] = facts
             record = r.get("_ng_failure_record")
             if isinstance(record, dict):
                 failure = record.get("failure")
@@ -2657,8 +2680,14 @@ def _observed_trial_operations(
     grading_failures: list[str] | None = None,
     policy_recovery: dict[str, int] | None = None,
     verifier_recorded: list[Identity] | None = None,
+    artifact_recorded: list[Identity] | None = None,
 ) -> bool:
     """Join observed model/tool operations and the outer verifier invocation for every expected trial.
+
+    A trial whose verifier recorded no grading operation and no grading record of its own is observed through a
+    saved grading artifact (``GRADING_ARTIFACTS``) or through the model's own failed answer the benchmark's rule
+    scored (``_model_failure``); those trials go to ``artifact_recorded``, and the verifier's captured calls are its
+    own. An environment reward record stands in for a missing verifier invocation.
 
     A source-reviewed programmatic grading operation must bind the saved response and score. A verifier that
     recorded no grading operation and owns no model call is observed through its own grading record instead
@@ -2705,6 +2734,7 @@ def _observed_trial_operations(
     recovered_events = {}
     invalid_grades = []
     recorded_trials = []
+    artifact_trials = []
 
     def nonempty(value):
         return isinstance(value, str) and bool(value.strip())
@@ -2958,6 +2988,22 @@ def _observed_trial_operations(
             judge_calls = None
             single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
             graded = single.get("grading_operations") if isinstance(single, dict) else None
+            # Without a grading operation, a saved grading artifact or the model's own failed answer records the
+            # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
+            artifact = None
+            if not graded and not (single is not None and _verifier_recorded(single, row, agent["resources_server"])):
+                artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
+            if artifact is not None and single is not None and isinstance(calls, list):
+                owned = single.get("model_calls")
+                if not isinstance(owned, list):
+                    return False
+                judge_calls = []
+                for ref in owned:
+                    hit = [call for call in calls if matches(ref, call)]
+                    if len(hit) != 1 or any(hit[0] is seen for seen in judge_calls):
+                        return False
+                    judge_calls.append(hit[0])
+                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
             if isinstance(graded, list) and len(graded) == 1 and (graded[0] or {}).get("kind") == "llm_judge":
                 # Every dependency is exactly one captured call owned by this verifier invocation, every owned call is
                 # a dependency, and only the remaining calls are the policy's.
@@ -2980,7 +3026,7 @@ def _observed_trial_operations(
             if (
                 not all(isinstance(items, list) for items in (invocations, verifiers, calls, turns, tools))
                 or len(invocations) != 1
-                or len(verifiers) != 1
+                or len(verifiers) != (0 if artifact == "environment_reward" and not verifiers else 1)
                 or not calls
                 or len(turns) != len(calls)
                 or type(observed["tool_call_count"]) is not int
@@ -2989,7 +3035,7 @@ def _observed_trial_operations(
                 or any(gap.get("code") != "resolution_unavailable" for gap in observed["gaps"])
             ):
                 return False
-            invocation, verifier = invocations[0], verifiers[0]
+            invocation, verifier = invocations[0], (verifiers[0] if verifiers else None)
             session = invocation["in_session"]
             task_id = row.get("materialized_task_id") if session else input_task_ids.get(_identity(row))
             if (
@@ -3005,17 +3051,25 @@ def _observed_trial_operations(
                 or invocation.get("stop_reason") is not None
                 or invocation["verification_skipped"] is not (None if session else False)
                 or (session and invocation["invocation_id"] != "root")
-                or verifier["status"] != "completed"
-                or verifier["failure_kind"] is not None
-                or verifier.get("sandbox_observations") not in (None, [])
-                or (judge_calls is None and verifier["model_calls"] != [])
-                or not nonempty(verifier["invocation_id"])
-                or verifier["invocation_id"] in populations[3]
+                or (
+                    verifier is not None
+                    and (
+                        verifier["status"] != "completed"
+                        or verifier["failure_kind"] is not None
+                        or verifier.get("sandbox_observations") not in (None, [])
+                        or (judge_calls is None and verifier["model_calls"] != [])
+                        or not nonempty(verifier["invocation_id"])
+                        or verifier["invocation_id"] in populations[3]
+                    )
+                )
                 or len(invocation["model_calls"]) != len(calls)
             ):
                 return False
-            grading = verifier.get("grading_operations")
-            if judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
+            grading = verifier.get("grading_operations") if verifier is not None else None
+            if artifact is not None:
+                grade = None
+                artifact_trials.append(_identity(row))
+            elif judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
                 grade = None
                 recorded_trials.append(_identity(row))
             elif not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
@@ -3041,9 +3095,15 @@ def _observed_trial_operations(
                 return False
             if grade is not None:
                 grading_ids.add(grade["operation_id"])
-            populations[3].add(verifier["invocation_id"])
-            if judge_calls is not None and not all(
-                completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed") for call in judge_calls
+            if verifier is not None:
+                populations[3].add(verifier["invocation_id"])
+            if (
+                grade is not None
+                and judge_calls is not None
+                and not all(
+                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed")
+                    for call in judge_calls
+                )
             ):
                 return False
             ordered = []
@@ -3102,10 +3162,10 @@ def _observed_trial_operations(
                 if type(turn["step_count"]) is not int or turn["step_count"] < 0:
                     return False
                 if number == len(ordered):
-                    # A truncated final answer may hold only reasoning or a cut-off message.
+                    # A truncated or empty final answer may hold only reasoning or a cut-off message.
                     if (
                         emitted
-                        or not truncated
+                        or not (truncated or artifact == "model_failure")
                         and not any(
                             item.get("type") == "message"
                             and item.get("role") == "assistant"
@@ -3125,7 +3185,7 @@ def _observed_trial_operations(
                     or any(event.get(key) != value for key, value in recovered_events[event_id].items())
                 ):
                     return False
-            if judge_calls is not None and grade["outcome"] == "unknown":
+            if grade is not None and judge_calls is not None and grade["outcome"] == "unknown":
                 invalid_grades.append(_identity(row))
             saved_response = row.get("response")
             if (
@@ -3146,6 +3206,8 @@ def _observed_trial_operations(
         policy_recovery.update(recovered_policy)
     if verifier_recorded is not None:
         verifier_recorded.extend(recorded_trials)
+    if artifact_recorded is not None:
+        artifact_recorded.extend(artifact_trials)
     return True
 
 
@@ -3201,6 +3263,89 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
         ):
             found[_identity(row)] = event["failure_kind"]
     return found
+
+
+def _grading_facts(row: Mapping[str, Any]) -> Mapping[str, Any]:
+    facts = row.get("_ng_collected_grading_facts")
+    return facts if isinstance(facts, dict) else {}
+
+
+def _reward(row: Mapping[str, Any]) -> float | None:
+    reward = row.get("reward")
+    return reward if type(reward) in (int, float) and math.isfinite(reward) else None
+
+
+def _judge_record(row: Mapping[str, Any]) -> bool:
+    """A saved judge verdict: a ``judge_response``, a non-empty ``judgments`` list with a ``judge_score``, or
+    ``judge_evaluations``."""
+    facts = _grading_facts(row)
+    return bool(facts.get("judge_response") or (facts.get("judgments") and facts.get("judge_score"))) or bool(
+        facts.get("judge_evaluations")
+    )
+
+
+def _symbolic_match(row: Mapping[str, Any]) -> bool:
+    """A saved symbolic answer check: a ``library_reward`` the row's reward equals, or one beside a judge verdict
+    (the judge fallback)."""
+    library = _grading_facts(row).get("library_reward")
+    return library is not None and (_reward(row) == library or _judge_record(row))
+
+
+def _metric_record(row: Mapping[str, Any]) -> bool:
+    """Saved in-process metric scores: numeric ``sentence_*`` fields (``sentence_chrf``, ``sentence_spbleu``)."""
+    return bool(_grading_facts(row).get("sentence_metrics"))
+
+
+def _test_execution(row: Mapping[str, Any]) -> bool:
+    """A saved test run: ``evaluation_completed`` true with an integer ``verifier_exit_code`` and no
+    ``verifier_error``."""
+    facts = _grading_facts(row)
+    return (
+        row.get("evaluation_completed") is True
+        and facts.get("verifier_exit_code") is not None
+        and facts.get("verifier_error") is False
+    )
+
+
+def _environment_reward(row: Mapping[str, Any]) -> bool:
+    """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
+    recorded = _grading_facts(row).get("environment_reward")
+    return recorded is not None and _reward(row) == recorded
+
+
+# The saved grading artifacts that record how a trial was graded when its verifier recorded no grading operation and
+# no grading record of its own. Each reads the scalar facts the collector projects (``_ng_collected_grading_facts``);
+# a bare reward is never one.
+GRADING_ARTIFACTS = (
+    ("judge_record", _judge_record),
+    ("symbolic_match", _symbolic_match),
+    ("metric_record", _metric_record),
+    ("test_execution", _test_execution),
+    ("environment_reward", _environment_reward),
+)
+
+
+def grading_artifact(row: Mapping[str, Any]) -> str | None:
+    """The name of the first saved grading artifact (``GRADING_ARTIFACTS``) that records the row's grading."""
+    return next((name for name, holds in GRADING_ARTIFACTS if holds(row)), None)
+
+
+def _empty_answer(row: Mapping[str, Any]) -> bool:
+    answer = row.get("response")
+    output = answer.get("output") if isinstance(answer, dict) else None
+    return isinstance(output, list) and not any(
+        isinstance(item, dict) and item.get("role") == "assistant" for item in output
+    )
+
+
+def _model_failure(row: Mapping[str, Any]) -> bool:
+    """The benchmark's rule scored the model's own failed answer without grading it: the verifier marked the answer
+    invalid (``invalid_model_response``), or the model left it incomplete, or it is empty and scored zero."""
+    return (
+        _grading_facts(row).get("invalid_model_response") is True
+        or _truncated_answer(row)
+        or (_empty_answer(row) and _reward(row) == 0)
+    )
 
 
 def _graded(row: Mapping[str, Any]) -> bool:
@@ -3287,7 +3432,8 @@ def trial_population(decision: RecoveryDecision) -> int:
 def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any] | None:
     """Acceptance's trial counts: observed healthy, unhealthy and unobserved, over the expected trials.
 
-    ``unhealthy`` are the failures the trial gate counts (``trial_faults``, model and evaluation-side). When the
+    A saved grading artifact or the model's own failed answer (``grading_artifact``, ``_model_failure``) resolves a
+    trial too. ``unhealthy`` are the failures the trial gate counts (``trial_faults``, model and evaluation-side). When the
     gate's observation join covers every other trial, its observed gradings without a valid verdict are unhealthy
     too and nothing is unobserved. Otherwise ``unobserved`` are the other scored trials whose verifier recorded
     neither completed grading operations bound to the saved row nor its own grading record: nothing resolved their
@@ -3316,7 +3462,14 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
         if _identity(row) in scored and _identity(row) not in final_zero and not _truncated_zero(row)
     ]
     recorded = sum(1 for row in rows if not _graded(row) and _recorded_by_verifier(row, collected))
-    unobserved = sum(1 for row in rows if not _graded(row)) - recorded
+    artifacts = sum(
+        1
+        for row in rows
+        if not _graded(row)
+        and not _recorded_by_verifier(row, collected)
+        and (grading_artifact(row) or _model_failure(row))
+    )
+    unobserved = sum(1 for row in rows if not _graded(row)) - recorded - artifacts
     counts: dict[str, Any] = {
         "observed_healthy": trials - unhealthy - unobserved,
         "unhealthy": unhealthy,
@@ -3606,7 +3759,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     omitted are no rollout of the run and are reported separately as ``omitted``.
 
     A response failure is a scored rollout whose saved answer is truncated (left incomplete), empty (no assistant
-    output) or malformed (no response with an output list). A trial failure is a rollout in a failed, masked or
+    output) or malformed (no response with an output list, or an answer the verifier marked invalid). A trial failure is a rollout in a failed, masked or
     unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, or an observed
     grading without a valid verdict, by the cause its failure kind names (``trial_failure_cause``).
     """
@@ -3627,6 +3780,8 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
             responses["truncated"] += 1
         elif not any(isinstance(item, dict) and item.get("role") == "assistant" for item in output):
             responses["empty"] += 1
+        elif _grading_facts(row).get("invalid_model_response") is True:
+            responses["malformed"] += 1
     invalid_grades: list[Identity] = []
     _observed_trial_operations(decision, collected, grading_failures=invalid_grades)
     causes = Counter(
