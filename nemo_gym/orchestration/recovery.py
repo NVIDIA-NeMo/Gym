@@ -3887,11 +3887,14 @@ def _observed_trial_operations(
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
-            resource = servers[agent["resources_server"]]
+            owner = _verification_owner(row["agent_ref"]["name"], agent)
+            # An agent without a resources server grades its own rollouts (verifiers_agent); it has no resources
+            # server to look up, and only its own grading record can observe such a trial (below).
+            resource = servers[owner] if owner == agent.get("resources_server") else None
             environment = servers[row["_ng_environment_server"]]
             if (
                 agent.get("kind") != "responses_api_agents"
-                or resource.get("kind") != "resources_servers"
+                or (resource is not None and resource.get("kind") != "resources_servers")
                 or environment.get("kind") != "environment_servers"
                 or row.get("_ng_result_type") != environment.get("implementation")
                 or row.get(FAILURE_CLASS) is not None
@@ -3909,7 +3912,10 @@ def _observed_trial_operations(
             # Without a grading operation, a saved grading artifact or the model's own failed answer records the
             # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
             artifact = None
-            if not graded and not (single is not None and _verifier_recorded(single, row, agent["resources_server"])):
+            recorded = single is not None and _verifier_recorded(single, row, owner)
+            if resource is None and not recorded:
+                return False
+            if not graded and not recorded:
                 artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
             if artifact is not None and single is not None and isinstance(calls, list):
                 owned = single.get("model_calls")
@@ -3967,7 +3973,7 @@ def _observed_trial_operations(
                     return False
                 grade = None
                 artifact_trials.append(_identity(row))
-            elif judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
+            elif judge_calls is None and _verifier_recorded(verifier, row, owner):
                 grade = None
                 recorded_trials.append(_identity(row))
             elif not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
@@ -4548,11 +4554,20 @@ def _bound_artifact(row: Mapping[str, Any]) -> bool:
     return grading_artifact(row) is None and _model_failure(row)
 
 
+def _verification_owner(agent_name: Any, agent: Mapping[str, Any]) -> Any:
+    """Who verifies an agent's rollouts: its resources server, or the agent itself when it names none.
+
+    An agent that runs its own rubric (verifiers_agent) has no resources server; its grading record names the agent.
+    """
+    server = agent.get("resources_server")
+    return server if server is not None else agent_name
+
+
 def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
     """Whether the row's verifier saved its own grading record for it, in place of a recorded grading operation.
 
     The shared verify path records it only for a verify execution that completed without asking any model. It must
-    name the row's resources server, carry the saved score with a ``scored`` verdict and bind the saved response and
+    name the row's resources server (or the agent, for an agent that verifies its own rollouts), carry the saved score with a ``scored`` verdict and bind the saved response and
     score. A verifier that recorded a grading operation or owns a model call is judged by those, never by the record.
     """
     record = verifier.get("grading_record") if isinstance(verifier, dict) else None
@@ -4588,7 +4603,7 @@ def _recorded_by_verifier(row: Mapping[str, Any], collected: CollectedEvidence) 
         isinstance(agent, dict)
         and isinstance(verifiers, list)
         and len(verifiers) == 1
-        and _verifier_recorded(verifiers[0], row, agent.get("resources_server"))
+        and _verifier_recorded(verifiers[0], row, _verification_owner(agent_ref.get("name"), agent))
     )
 
 
