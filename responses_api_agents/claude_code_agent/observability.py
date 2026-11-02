@@ -55,7 +55,7 @@ _COMPACTION_SUFFIX_RE = re.compile(
     r"(?:\n\nYour REPL VM state has been cleared as part of this compaction\. "
     r"Variables defined in REPL calls before this point are no longer accessible "
     r"— redefine any you still need\.)?"
-    r"(?:\n\nContinue the conversation from where it left off without asking the user "
+    r"(?:\n{1,2}Continue the conversation from where it left off without asking the user "
     r"any further questions\. Resume directly — do not acknowledge the summary, do not recap "
     r'what was happening, do not preface with "I\'ll continue" or similar\. '
     r"Pick up the last task as if the break never happened\.)?"
