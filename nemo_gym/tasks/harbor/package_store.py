@@ -34,7 +34,7 @@ from pathlib import Path
 from typing import Any
 
 from nemo_gym.tasks.harbor.digest import archive_hash, content_hash
-from nemo_gym.tasks.harbor.hub import contained_path, refuse_unrecorded_folders, validate_task_name
+from nemo_gym.tasks.harbor.hub import REF_PREFIX, HubRef, contained_path, refuse_unrecorded_folders, validate_task_name
 from nemo_gym.tasks.harbor.manifest import MANIFEST_FILE, Manifest, ManifestError, UnsupportedManifestError
 
 
@@ -61,6 +61,12 @@ class PackageRef:
     name: str
     ref: str = "latest"
 
+    @classmethod
+    def of(cls, ref: HubRef) -> "PackageRef":
+        """The store's reading of a ``harbor:<org>/<name>[@<ref>]`` reference: without ``@<ref>`` it is ``latest``."""
+        org, _, name = ref.name.partition("/")
+        return cls(org=org, name=name, ref=ref.version or "latest")
+
     @property
     def package(self) -> str:
         return f"{self.org}/{self.name}"
@@ -69,6 +75,12 @@ class PackageRef:
     def digest(self) -> str | None:
         match = _DIGEST.fullmatch(self.ref)
         return match.group(2) if match else None
+
+    @property
+    def reference(self) -> str:
+        """The reference as a manifest records it: ``harbor:<org>/<name>@<tag | latest | sha256:digest>``, so that
+        ``harbor:org/name`` and ``@latest``, or a digest with and without its ``sha256:`` prefix, read as one."""
+        return f"{REF_PREFIX}{self.package}@{'sha256:' + self.digest if self.digest else self.ref}"
 
     def folder_name(self, resolved_digest: str) -> str:
         """``<name>`` for ``latest``, ``<name>-<tag>`` for a tag, ``<name>-<12 digest chars>`` for a digest pin.
@@ -348,7 +360,8 @@ def _read_manifest(folder: Path) -> Manifest | None:
 
 
 def _build_manifest(folder: Path, dataset: ResolvedDataset, digests: dict[str, str]) -> Manifest:
-    """Derived facts only: per-task digests and package pins; name and version stay in ``dataset.toml``.
+    """Derived facts only: per-task digests and package pins, and the reference this fetch was made from
+    (:attr:`PackageRef.reference`); the dataset's name and version stay in ``dataset.toml``.
 
     Every task of the store's version is pinned; a digest is recorded only for the tasks in ``digests``, the
     folders this fetch has verified (or trusts from the previous manifest, see :func:`_checkpoint_digests`).
@@ -366,6 +379,7 @@ def _build_manifest(folder: Path, dataset: ResolvedDataset, digests: dict[str, s
         },
         digests=digests,
         names=list(digests),
+        ref=dataset.ref.reference,
     )
 
 
@@ -422,7 +436,8 @@ def _claim_folder(folder: Path, dataset: ResolvedDataset, digests: dict[str, str
 def _check_recorded_identity(folder: Path, previous: Manifest | None, dataset: ResolvedDataset) -> None:
     """Refuse ``folder`` when its manifest was written for another package than ``dataset``.
 
-    The manifest holds no copy of the dataset's name (that lives in ``dataset.toml``), but every task it
+    The manifest holds no copy of the dataset's name (that lives in ``dataset.toml``), and one written before the
+    fetch's reference was recorded has no ``ref`` either, but every task it
     pins carries the task's own package, ``<org>/<task>``, as the store names it. A dataset may collect
     tasks published under any org (Harbor's ``dataset.toml`` pins each task as ``org/name``, and the store
     resolves each to its own package), so a pin is compared with the package ``dataset`` resolved that task
@@ -489,8 +504,16 @@ def _check_recorded_dataset(folder: Path, previous: Manifest | None, dataset: Re
         )
 
 
-def fetch_package_dataset(ref: PackageRef, root: Path, store: PackageStore | None = None) -> Path:
+def fetch_package_dataset(
+    ref: PackageRef, root: Path, store: PackageStore | None = None, *, folder: Path | None = None
+) -> Path:
     """Fetch every task of a package-store dataset into ``root/<folder>/<task>/``.
+
+    The dataset folder is ``root/<name>[-<tag | 12 digest chars>]/`` (:meth:`PackageRef.folder_name`) unless
+    ``folder`` names it: the folder of a committed entry under ``environments/harbor/`` that declares this
+    dataset as its ``[gym] source`` (:mod:`nemo_gym.tasks.harbor.entries`). The entry's own files there (README,
+    YAML overlays, ``dataset.toml``) are not task folders and are left alone; the manifest's claim and the
+    per-task checks below are the same whichever folder the tasks land in.
 
     A task folder whose digest already matches is kept, so a rerun after a partial
     fetch completes it: a folder the manifest records is compared with the digest recorded
@@ -519,7 +542,7 @@ def fetch_package_dataset(ref: PackageRef, root: Path, store: PackageStore | Non
     duplicates = sorted(name for name, count in counts.items() if count > 1)
     if duplicates:
         raise PackageStoreError(f"{ref.package}@{ref.ref} has tasks sharing a folder name: {', '.join(duplicates)}")
-    folder = Path(root) / ref.folder_name(dataset.content_hash)
+    folder = Path(folder) if folder is not None else Path(root) / ref.folder_name(dataset.content_hash)
     if folder.is_symlink():
         raise PackageStoreError(f"Dataset folder must not be a symlink: {folder}")
     folder.mkdir(parents=True, exist_ok=True)

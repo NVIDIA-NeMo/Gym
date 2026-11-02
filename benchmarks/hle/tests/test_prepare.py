@@ -24,7 +24,7 @@ SOURCE = Dataset.from_dict(
 
 def _prepared_rows(monkeypatch, tmp_path) -> list[dict]:
     monkeypatch.setattr("datasets.load_dataset", lambda *args, **kwargs: SOURCE)
-    monkeypatch.setattr("nemo_gym.global_config.get_global_config_dict", lambda: {})
+    monkeypatch.setattr("nemo_gym.config.global_config.get_global_config_dict", lambda: {})
     monkeypatch.setattr(prepare, "DATA_DIR", tmp_path)
     monkeypatch.setattr(prepare, "OUTPUT_FPATH", tmp_path / "hle_benchmark.jsonl")
 

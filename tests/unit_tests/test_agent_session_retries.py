@@ -18,9 +18,10 @@ from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.rollout_correlation import current_rollout_id, rollout_context
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.episode import current_rollout_id, rollout_context
+from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
+from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 
 
 class _Agent(SimpleResponsesAPIAgent):
@@ -357,6 +358,22 @@ async def test_shutdown_closes_partial_state_after_canceled_seed(agent):
             await agent.seed_agent_session(SimpleNamespace(session={}), seed)
     agent._close_agent_session_state.assert_awaited_once_with(state)
     assert agent._session_records[seed.agent_session_id].state is None
+
+
+async def test_shutdown_releases_rollout_claim_but_retains_close_receipt(agent, tmp_path):
+    app = agent.setup_webserver()
+    claims = SessionClaims(str(tmp_path), "a" * 32, agent.holds_agent_session)
+    agent.use_agent_session_claims(claims)
+    seed = _seed()
+    rollout_key = f"/rollouts/{seed.episode_id.capture_key}"
+    async with app.router.lifespan_context(app):
+        await agent.seed_agent_session(SimpleNamespace(session={}), seed)
+        assert claims.claimant(rollout_key) == claims.routing_id
+    assert claims.claimant(rollout_key) is None
+    assert not agent.holds_agent_session(rollout_key)
+    receipt = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
+    assert receipt.agent_observations.source == "test"
+    agent._close_agent_session_state.assert_awaited_once()
 
 
 async def test_shutdown_budget_is_shared_and_failures_keep_handles(agent, caplog):

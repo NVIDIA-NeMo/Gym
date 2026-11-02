@@ -89,7 +89,7 @@ docker:
 | `start_timeout_s` | `600` | Max seconds for `docker run` (covers an implicit image pull; `None` = no timeout). |
 | `use_init` | `true` | Add `--init` (tini) to reap zombies from many short `docker exec` processes. |
 | `network` | `None` | `None` = default bridge (egress); `"none"` = no network; else a named network. |
-| `read_only` | `false` | Mount the container root filesystem read-only (`--read-only`). |
+| `read_only` | `false` | Mount the container root filesystem read-only (`--read-only`). `/tmp` is then read-only too unless a tmpfs is mounted there (`extra_run_args: ["--tmpfs", "/tmp"]`); PTY sessions keep working, their pid record moves to `/dev/shm` (see PTY sessions). |
 | `cap_drop` | `[]` | Linux capabilities to drop (`--cap-drop`), e.g. `["ALL"]`. |
 | `security_opt` | `[]` | `--security-opt` values, e.g. `["no-new-privileges"]` (blocks setuid escalation). |
 | `pids_limit` | `None` | Cap the container's process count (`--pids-limit`). |
@@ -133,6 +133,7 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
 |---|---|
 | Create | `docker run -d --name nemo-gym-<uuid> --label nemo-gym.sandbox=1 --init [flags] --entrypoint <sh> <image> -c <keepalive>` |
 | Exec | `docker exec [-w cwd] [--env…] [--user…] <name> <shell> -c <command>` |
+| PTY session | `docker exec -i [-t] [-w cwd] [--env…] --env NEMO_GYM_PTY_SESSION=<id> [--user…] <name> <shell> -c <launcher> <pid file> <fallback pid file> <program>`, the client under a host pty |
 | Upload | `mkdir -p <parent>` (via exec), then `docker cp <src> <name>:<dst>` |
 | Download | `docker cp <name>:<src> <local>` |
 | Status | `docker inspect -f '{{.State.Status}}' <name>` |
@@ -151,6 +152,41 @@ to skip. Same fields as the other providers: `command`, `expected_stdout`, `time
   not 2x via swap), and `--gpus <n>`. `disk_gib` / `gpu_type` have no direct flag and are ignored.
 - **Status**: `running`/`paused`→`RUNNING`, `created`/`restarting`→`STARTING`,
   `exited`/`dead`/`removing`→`STOPPED`, missing container→`STOPPED`, timeout/other→`UNKNOWN`.
+- **PTY sessions** (`sandbox.pty.create` / `sandbox.pty.exec`, `SupportsSandboxPty`): one `docker exec -i -t`
+  client per session, run under a host pseudo-terminal so the CLI allocates a terminal in the container;
+  `rows`/`cols` size it before start and `resize()` re-sizes it through `SIGWINCH`; `pty=False` uses pipes
+  with stdout and stderr split. The program starts through a launcher that writes its pid to
+  `/tmp/.nemo-gym-pty-<id>.pid` in the container, or to `/dev/shm/.nemo-gym-pty-<id>.pid` when `/tmp`
+  refuses the write (`read_only: true` without a tmpfs on `/tmp`; `/dev/shm` is a writable tmpfs in every
+  container not run with `--ipc=none`), which `send_signal()` (`kill` through a second exec, as
+  root, to the terminal's foreground process group in PTY mode, so it reaches the job an interactive shell
+  is running as a key press would; to the process's own group and the process on pipes) and `close()`
+  (of a live session: `SIGHUP` to the group, up to a second for a shell to relay it to its jobs, then
+  `SIGKILL` to every process left in the recorded process's session; both paths are removed either way) use.
+  A session whose pid can be recorded in neither place is not started: the launcher prints
+  `nemo-gym: cannot record the pid of this PTY session in ...` on stderr (the terminal in PTY mode) and exits 1,
+  so the session ends at once with that message rather than running where it could be neither signalled nor
+  cleaned up (`create_pty` itself returns as soon as the client is spawned). The read of the record waits up to two
+  seconds for the launcher to write it, since a `send_signal()`/`close()` issued right after `create_pty()` reaches
+  the container through a second exec that races the session's own. It reads a regular file only (a FIFO or a
+  device at the path is refused at once, the open file is tested again on its own descriptor, 32 bytes at most are
+  read) under a 30 s exec timeout of its own (`PID_READ_TIMEOUT_S`), so the session's user cannot stall
+  `send_signal()`/`close()` on the record.
+  The file is the session user's (content and owner alike are forgeable: a hard link to a file of
+  another user keeps that user as owner), so it is read once, as the session's own user (its process's
+  `/proc/<pid>/environ` is readable by that uid, not by a root without `CAP_SYS_PTRACE`, which Docker does not
+  grant by default; the `kill` and the cleanup run as root), and followed only to a plain pid above 1
+  whose process carries the session's `NEMO_GYM_PTY_SESSION=<id>` marker in its environment (set by the
+  exec's own `--env`, so only the session's own tree has it), has `PPid` 0 (injected by the runtime, so
+  not a child started inside the container) and, in PTY mode, leads its session; the `kill` lines are
+  busybox-compatible (`kill -INT -<pgid>`). `wait_exit()` returns the program's exit status as `docker exec`
+  reports it; a client that exits without having started the program (the daemon refused the exec: the container
+  paused or gone, the daemon unreachable, told by the client's stderr with the same lines that make `exec()` return
+  `error_type="sandbox"`) ends the session with `SandboxPtyError` from `wait_exit()` and `read()` instead, so
+  `sandbox.pty.exec()` raises where `sandbox.exec()` returns the runtime sentinel. In PTY mode the client's own
+  stderr is a pipe of the session's, kept out of the terminal's output for that; in pipe mode it is the program's
+  stderr too, classified as `exec()` classifies its stderr. Sessions live in the Gym process: no re-attach by id,
+  and a detached exec runs attached. See [`pty.py`](./pty.py).
 - **Errors**: `exec` never raises for command failure — it returns a `SandboxExecResult` with
   the real `return_code`; a timeout or a docker-runtime failure (daemon down, container gone —
   detected via stderr markers) returns `return_code=125` with `error_type` `"timeout"` /
@@ -190,14 +226,31 @@ microVM). For that reason:
   with the container at `close()` (`docker rm -f` stops the whole process tree); resource limits bound
   it in the meantime.
 
+- **PTY sessions are local** to the process that opened them: another process cannot attach to one by
+  id (`SupportsSandboxPtyAttach` is not implemented), and a session dies with the Gym process. The
+  container's own process is ended at `close()` through its recorded pid; a session the process never
+  closed leaves that process running until the container is removed. The recorded pid is trusted only
+  for a process with `PPid` 0 (the runtime's execs), so a container sharing the host's pid namespace
+  (`--pid=host` in `extra_run_args`) cannot be signalled or cleaned up through `send_signal()`/`close()`, nor can a
+  session whose program changes its user or `exec`s a setuid program (`su`, `sudo -i`): its environment is no
+  longer readable by the session's user, so `send_signal()` raises and `close()` leaves it to the container.
+  A record the session's user has made unusable (rewritten, relinked, or no longer a regular file) is refused, not
+  waited on: `send_signal()` raises within the two-second wait and `close()` only removes it.
+  The pid record needs a writable `/tmp` or `/dev/shm` in the container: under `read_only: true` without a
+  tmpfs on `/tmp` it goes to `/dev/shm`, and a container with neither (`--ipc=none` as well) cannot host a PTY
+  session at all; the session then ends at once with `nemo-gym: cannot record the pid of this PTY session`
+  on its terminal. Under `--ipc=host` the `/dev/shm` record is a file on the host's `/dev/shm` for the session's
+  life.
+
 ## Development
 
-Source: [`provider.py`](./provider.py). It implements the `SandboxProvider` protocol from
+Source: [`provider.py`](./provider.py) and [`pty.py`](./pty.py). It implements the `SandboxProvider` protocol from
 [`../base.py`](../base.py) structurally (no subclassing) and is registered under the name
 `docker` in [`../registry.py`](../registry.py).
 
 Unit tests live in
-[`tests/unit_tests/test_docker_provider.py`](../../../../tests/unit_tests/test_docker_provider.py)
+[`tests/unit_tests/test_docker_provider.py`](../../../../tests/unit_tests/test_docker_provider.py) and
+[`tests/unit_tests/test_docker_pty.py`](../../../../tests/unit_tests/test_docker_pty.py)
 and run as part of the core suite — **no Docker required**:
 
 ```bash

@@ -6,7 +6,7 @@ import io
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.stirrup_agent.stirrup_utils import messages_from_input
 
 
