@@ -312,30 +312,38 @@ def _slurm_duration(seconds: int) -> str:
 def _partition_time_limit(conn: Connection, compute: SlurmComputeConfig) -> dict[str, Any]:
     """The partition a job of ``compute`` queues on and its MaxTime, read with sinfo over ``conn``.
 
-    ``partition`` is the node pools' partition, else ``extra_args.partition``, else the cluster's default one;
+    The partitions are the node pools' ones, else ``extra_args.partition`` (a list ``a,b`` allowed), else the
+    cluster's default one. Every one must be listed, and the lowest limit applies: ``partition`` names it,
     ``max_time`` is sinfo's text and ``max_time_s`` its seconds (None when unlimited); ``error`` says why they are
-    unknown. A partition list (``a,b``) takes the lowest limit.
+    unknown.
     """
-    pools = {pool.partition for pool in compute.node_pools.values()}
-    partition = next(iter(pools)) if len(pools) == 1 else compute.extra_args.get("partition")
+    pools = sorted({pool.partition for pool in compute.node_pools.values()})
+    partition = ",".join(pools) if pools else compute.extra_args.get("partition")
     limit: dict[str, Any] = {"partition": partition, "max_time": None, "max_time_s": None, "error": None}
     try:
         if partition is not None:
-            lines = conn.run([f"sinfo -h -p {shlex.quote(str(partition))} -o %l"]).split()
+            names = str(partition).split(",")
+            rows = [
+                line.split()
+                for line in conn.run([f"sinfo -h -p {shlex.quote(str(partition))} -o '%P %l'"]).splitlines()
+            ]
+            listed = {row[0].rstrip("*"): row[1] for row in rows if len(row) == 2}
+            missing = [name for name in names if name not in listed]
+            if missing:
+                raise ValueError(f"sinfo lists no partition {', '.join(missing)}")
+            parsed = [(_slurm_time_limit_seconds(listed[name]), listed[name], name) for name in names]
         else:
             rows = [line.split() for line in conn.run(["sinfo -h -o '%P %l'"]).splitlines()]
             default = [row for row in rows if len(row) == 2 and row[0].endswith("*")]
             if not default:
                 raise ValueError("sinfo names no default partition")
-            limit["partition"], lines = default[0][0].rstrip("*"), [default[0][1]]
-        if not lines:
-            raise ValueError(f"sinfo lists no partition {limit['partition']}")
-        parsed = [(_slurm_time_limit_seconds(line), line) for line in lines]
+            name, text = default[0][0].rstrip("*"), default[0][1]
+            parsed = [(_slurm_time_limit_seconds(text), text, name)]
     except (RuntimeError, OSError, ValueError) as error:
         return limit | {"error": str(error).strip().splitlines()[-1] if str(error).strip() else type(error).__name__}
     bounded = [item for item in parsed if item[0] is not None]
-    seconds, text = min(bounded) if bounded else (None, parsed[0][1])
-    return limit | {"max_time": text, "max_time_s": seconds}
+    seconds, text, name = min(bounded) if bounded else (None, parsed[0][1], parsed[0][2])
+    return limit | {"partition": name, "max_time": text, "max_time_s": seconds}
 
 
 def _plan_walltime(

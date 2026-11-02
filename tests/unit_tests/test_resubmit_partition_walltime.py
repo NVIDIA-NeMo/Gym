@@ -241,13 +241,44 @@ def test_partition_max_time_rejects_an_unknown_limit_and_reads_the_pool_partitio
     compute = sm.SlurmComputeConfig.model_validate(
         {"type": "slurm", "account": "a", "node_pools": {"gpu": {"partition": "batch"}}}
     )
-    conn = Conn("4:00:00\n")
+    conn = Conn("batch* 4:00:00\n")
     assert sm._partition_time_limit(conn, compute) == {
         "partition": "batch",
         "max_time": "4:00:00",
         "max_time_s": 14400,
         "error": None,
     }
-    assert conn.commands == ["sinfo -h -p batch -o %l"]
-    assert sm._partition_time_limit(Conn("UNLIMITED\n"), compute)["max_time_s"] is None
+    assert conn.commands == ["sinfo -h -p batch -o '%P %l'"]
+    assert sm._partition_time_limit(Conn("batch UNLIMITED\n"), compute)["max_time_s"] is None
     assert sm._partition_time_limit(Conn(""), compute)["error"] == "sinfo lists no partition batch"
+
+
+def test_node_pools_on_several_partitions_take_the_lowest_max_time():
+    class Conn:
+        def __init__(self, answer):
+            self.answer, self.commands = answer, []
+
+        def run(self, commands):
+            self.commands += commands
+            return self.answer
+
+    compute = sm.SlurmComputeConfig.model_validate(
+        {
+            "type": "slurm",
+            "account": "a",
+            "extra_args": {"partition": "ignored"},
+            "node_pools": {"gpu": {"partition": "long"}, "cpu": {"partition": "batch"}, "io": {"partition": "open"}},
+        }
+    )
+    conn = Conn("long 2-00:00:00\nbatch 4:00:00\nopen UNLIMITED\n")
+    assert sm._partition_time_limit(conn, compute) == {
+        "partition": "batch",
+        "max_time": "4:00:00",
+        "max_time_s": 14400,
+        "error": None,
+    }
+    assert conn.commands == ["sinfo -h -p batch,long,open -o '%P %l'"]
+    # Every pool's partition must be listed; one sinfo does not know leaves the limit unknown.
+    assert sm._partition_time_limit(Conn("long 2-00:00:00\nbatch 4:00:00\n"), compute)["error"] == (
+        "sinfo lists no partition open"
+    )
