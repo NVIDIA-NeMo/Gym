@@ -73,6 +73,8 @@ if TYPE_CHECKING:
         SUPERVISOR_SCRIPT,
         CleanupReceipt,
         exec_timeout,
+        harness_termination_failure,
+        is_harness_termination_failure,
         parse_cleanup_receipt,
     )
     from nemo_gym.agents.utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
@@ -122,6 +124,8 @@ _PUBLIC_API = {
     "agent_outcome_policy": "agent_outcome",
     "assert_model_url_reachable_from_sandbox": "base_responses_api_agent",
     "exec_timeout": "utils.supervisor_client",
+    "harness_termination_failure": "utils.supervisor_client",
+    "is_harness_termination_failure": "utils.supervisor_client",
     "parse_cleanup_receipt": "utils.supervisor_client",
     "resolve_agent_timeout": "utils.task_timeout",
     "restricted_network_policy": "agent_tools",
