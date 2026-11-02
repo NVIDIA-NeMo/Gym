@@ -70,6 +70,11 @@ jobs:
           ref: ${{ inputs.checkout-ref }}
           submodules: recursive
           persist-credentials: false
+      - name: Set the result directory
+        run: |
+          # Artifact names cannot contain "/".
+          echo "SUBJECT=${COMPONENT//\//__}" >> "$GITHUB_ENV"
+          echo "RESULTS=$RUNNER_TEMP/environment-server-compliance-${COMPONENT//\//__}" >> "$GITHUB_ENV"
       - name: Install Gym
         timeout-minutes: 10
         run: |
@@ -78,4 +83,37 @@ jobs:
           dirname "$(command -v uv)" >> "$GITHUB_PATH"
       - name: Check the component
         timeout-minutes: 15
-        run: .venv/bin/python -m scripts.environment_server_compliance.ci check "$COMPONENT"
+        run: |
+          mkdir -p "$RESULTS"
+          .venv/bin/python -m scripts.environment_server_compliance.ci check "$COMPONENT" \
+            --output "$RESULTS" 2>&1 | tee "$RESULTS/check.log"
+      - name: Upload evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: environment-server-compliance-${{ env.SUBJECT }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ env.RESULTS }}
+          if-no-files-found: warn
+          retention-days: 14
+
+  report:
+    name: Publish check
+    needs: [select, check]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+        with:
+          ref: ${{ inputs.checkout-ref }}
+          persist-credentials: false
+      - name: Publish result from this attempt's evidence
+        env:
+          GH_TOKEN: ${{ github.token }}
+          SELECTED_COMPONENTS: ${{ needs.select.outputs.components }}
+          CHECK_JOB_RESULT: ${{ needs.check.result }}
+        run: python3 -m scripts.environment_server_compliance.checks

@@ -3,10 +3,13 @@
 
 """Component selection and rules of the Environment Server compliance suite."""
 
+import json
+import subprocess
 import sys
 
 import pytest
-from scripts.environment_server_compliance import ci
+from scripts.check_suites.github_actions import read_ci_result, write_ci_result
+from scripts.environment_server_compliance import checks, ci
 from scripts.environment_server_compliance.ci import all_components, select_components
 from scripts.environment_server_compliance.component import _base_class, default_agent_config
 from scripts.environment_server_compliance.engine import (
@@ -337,10 +340,104 @@ def test_check_reports_a_component_it_could_not_inspect(monkeypatch, capsys):
 @pytest.mark.parametrize("path", ["responses_api_agents/pi_agent/", "./responses_api_agents/pi_agent"])
 def test_component_path_from_the_command_line_is_normalized(monkeypatch, path):
     checked = []
-    monkeypatch.setattr(ci, "check", checked.append)
+    monkeypatch.setattr(ci, "check", lambda component, *, output: checked.append(component))
     monkeypatch.setattr("sys.argv", ["ci", "check", path])
     ci.main()
     assert checked == ["responses_api_agents/pi_agent"]
+
+
+def _write_result(artifacts, component, status, findings=()):
+    name = ci.subject(component)
+    write_ci_result(artifacts / name, subject=name, status=status)
+    (artifacts / name / ci.FINDINGS_FILE).write_text(json.dumps(list(findings)))
+
+
+def test_check_writes_the_findings_and_result_of_a_component(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_SHA", "sha")
+    finding = {"rule": "A1", "path": "responses_api_agents/legacy/app.py", "line": 3, "message": "m"}
+    results = {"responses_api_agents/legacy": [finding], "responses_api_agents/broken": None}
+    monkeypatch.setattr(ci, "inspect_component", lambda component: results[component])
+    for component, status, findings in [
+        ("responses_api_agents/legacy", "failed", [finding]),
+        ("responses_api_agents/broken", "unavailable", []),
+    ]:
+        output = tmp_path / ci.subject(component)
+        ci.check(component, output=output)
+        assert read_ci_result(output / "ci-result.json", subject=ci.subject(component), sha="sha")["status"] == status
+        assert json.loads((output / ci.FINDINGS_FILE).read_text()) == findings
+
+
+def test_the_check_summarizes_every_component_from_this_commits_evidence(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_SHA", "sha")
+    finding = {"rule": "A1", "path": "responses_api_agents/legacy/app.py", "line": 3, "message": "Do | not"}
+    _write_result(tmp_path, "responses_api_agents/clean", "passed")
+    _write_result(tmp_path, "responses_api_agents/legacy", "failed", [finding, {**finding, "rule": "A3", "line": 9}])
+    monkeypatch.setenv("GITHUB_SHA", "other-sha")
+    _write_result(tmp_path, "responses_api_agents/stale", "passed")
+    components = [f"responses_api_agents/{name}" for name in ("clean", "legacy", "stale", "missing")]
+    check = checks.compliance_check(components, artifacts=tmp_path, sha="sha")
+    assert check["conclusion"] == "failure"
+    assert check["output"]["title"] == "1 compliant, 1 with findings, 2 unavailable"
+    summary = check["output"]["summary"]
+    assert "| responses_api_agents/legacy | with findings | A1, A3 | See workflow artifacts/logs |" in summary
+    assert "| responses_api_agents/stale | unavailable | - |" in summary
+    assert "- `responses_api_agents/legacy/app.py:3` **A1**: Do &#124; not" in summary
+    assert "- `responses_api_agents/legacy/app.py:9` **A3**: Do &#124; not" in summary
+
+
+def test_the_check_succeeds_when_nothing_is_changed_or_every_component_is_compliant(tmp_path, monkeypatch):
+    monkeypatch.setenv("GITHUB_SHA", "sha")
+    _write_result(tmp_path, "responses_api_agents/clean", "passed")
+    check = checks.compliance_check(["responses_api_agents/clean"], artifacts=tmp_path, sha="sha")
+    assert (check["conclusion"], check["output"]["title"]) == (
+        "success",
+        "1 compliant, 0 with findings, 0 unavailable",
+    )
+    check = checks.compliance_check([], artifacts=tmp_path, sha="sha")
+    assert (check["conclusion"], check["output"]["title"]) == ("success", "No changed components")
+
+
+def test_the_reporter_reads_evidence_of_the_tested_merge_and_posts_to_the_event_head(tmp_path, monkeypatch):
+    monkeypatch.setenv("TESTED_SHA", "merge-sha")
+    _write_result(tmp_path / "compliance-evidence", "responses_api_agents/clean", "passed")
+    for key, value in {
+        "GITHUB_SHA": "head-sha",
+        "GITHUB_REPOSITORY": "example/Gym",
+        "GITHUB_RUN_ID": "12",
+        "GITHUB_RUN_ATTEMPT": "1",
+        "GITHUB_SERVER_URL": "https://github.com",
+        "RUNNER_TEMP": str(tmp_path),
+        "GITHUB_STEP_SUMMARY": str(tmp_path / "summary.md"),
+        "SELECTED_COMPONENTS": json.dumps(["responses_api_agents/clean"]),
+    }.items():
+        monkeypatch.setenv(key, value)
+    posted = []
+    monkeypatch.setattr(checks, "download_artifacts", lambda *args, **kwargs: None)
+    monkeypatch.setattr(checks, "artifact_download_urls", lambda *args, **kwargs: {})
+    monkeypatch.setattr(checks, "post_check_run", lambda payload, *, repo: posted.append(payload))
+    assert checks.main() == 0
+    [check] = posted
+    assert check["head_sha"] == "head-sha"
+    assert check["output"]["title"] == "1 compliant, 0 with findings, 0 unavailable"
+    assert "Tested commit: `merge-sha`" in check["output"]["summary"]
+
+
+def test_the_check_fails_when_component_selection_failed(tmp_path):
+    check = checks.compliance_check(None, artifacts=tmp_path, sha="sha")
+    assert (check["conclusion"], check["output"]["title"]) == ("failure", "Could not select components")
+
+
+def test_the_reporter_imports_without_gym_or_site_packages():
+    subprocess.run(
+        [
+            sys.executable,
+            "-S",
+            "-c",
+            "import sys; from scripts.environment_server_compliance import checks; "
+            "assert not any(name.startswith(('nemo_gym', 'psutil')) for name in sys.modules)",
+        ],
+        check=True,
+    )
 
 
 def _rule(id, check, *requires):
