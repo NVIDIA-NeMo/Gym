@@ -94,7 +94,9 @@ Beyond the families, the protocol's own refusals:
   or task, or a close naming another episode, gets HTTP 409, and after a close the ID is fenced for
   `session_close_retry_window_seconds`, so a delayed seed cannot recreate it. At most 10,000 seeded
   sessions are held; past that the least recently seeded one is forgotten, question and episode binding
-  together, with a WARNING naming it, and its searches are refused as `unseeded_session`. The words of a blocked span are never
+  together, with a WARNING naming it, and its searches are refused as `unseeded_session`; a forgotten
+  typed session's ID is fenced as if its episode had closed it, so a later seed of that ID gets HTTP 409.
+  The cap must therefore exceed the peak number of rollouts open at once. The words of a blocked span are never
   logged, only their count.
 - **Fetch URLs** must be `http(s)` URLs with a host, at most 4,096 characters long, with no userinfo
   (no `@` anywhere in the authority, even an empty `https://@host`) and no backslash, whitespace or

@@ -964,11 +964,17 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             self._forget_sessions_over_cap()
 
     def _forget_sessions_over_cap(self) -> None:
-        """Forget the least recently seeded sessions, question and identity together, beyond the cap."""
+        """Forget the least recently seeded sessions, question and identity together, beyond the cap.
+
+        A forgotten typed session is fenced as if closed by its episode, so a later seed of its ID for any episode
+        gets 409 instead of binding a session whose question is gone.
+        """
         for table in (self._session_spans, self._session_identity):
             while len(table) > MAX_SESSION_QUESTIONS:
                 session_id = next(iter(table))
-                self._session_identity.pop(session_id, None)
+                identity = self._session_identity.pop(session_id, None)
+                if identity is not None:
+                    self._fence.mark_closed(session_id, identity[0])
                 if self._session_spans.pop(session_id, None) is not None:
                     logger.warning(
                         "hle_web_tools forgot the question of session %s: more than %d seeded sessions are held; "

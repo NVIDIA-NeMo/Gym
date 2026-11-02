@@ -319,8 +319,8 @@ def test_typed_sessions_follow_the_resources_session_contract():
 
 
 async def test_sessions_past_the_cap_are_forgotten_with_a_warning(server, monkeypatch, caplog):
-    """Past the cap the least recently seeded session loses its question and its episode binding together, and the
-    loss is logged, since its later searches are refused as unseeded."""
+    """Past the cap the least recently seeded session loses its question and its episode binding together, the
+    loss is logged, since its later searches are refused as unseeded, and its typed ID is fenced."""
     monkeypatch.setattr(module, "MAX_SESSION_QUESTIONS", 1)
     for session_id in ("first", "second"):
         typed = {
@@ -333,6 +333,18 @@ async def test_sessions_past_the_cap_are_forgotten_with_a_warning(server, monkey
             await seed(server, typed, session_id)
     assert "forgot the question of session first" in caplog.text
     assert list(server._session_spans) == list(server._session_identity) == ["second"]
+    # The forgotten ID is fenced: a seed binding it to another episode answers 409 rather than binding it.
+    with pytest.raises(module.ResourcesSessionConflictError):
+        await seed(
+            server,
+            {
+                "resources_session_id": "first",
+                "episode_id": {"rollout_id": "another"},
+                "task_id": {"taskset": "hle_diamond", "task_id": "first"},
+                "task_data": {"question": QUESTION},
+            },
+            "first",
+        )
 
 
 @pytest.mark.parametrize(
