@@ -1909,8 +1909,8 @@ class TestMultiReference:
         """
         import asyncio as _asyncio
 
-        from nemo_gym.base_resources_server import lost_session_verification
         from nemo_gym.config import AggregateMetricsRequest
+        from nemo_gym.server_runtime import lost_session_verification
 
         server = _server(
             reward_mode="comparison",

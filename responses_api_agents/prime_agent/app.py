@@ -32,7 +32,6 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
@@ -54,6 +53,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from responses_api_agents.prime_agent.setup_prime_agent import ensure_prime_agent
 
 

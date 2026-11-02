@@ -4,7 +4,7 @@
 
 import pytest
 
-from nemo_gym.verifier_fixture import exercise_verifier_fixture
+from nemo_gym.verification import exercise_verifier_fixture
 from resources_servers.agentic_if.app import VERIFIER_FIXTURE
 
 

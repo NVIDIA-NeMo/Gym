@@ -11,8 +11,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from nemo_gym.client import ServerClient
-from nemo_gym.mcp_auto_exposure import harvest_tools
 from nemo_gym.prompt import load_prompt_config
+from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
 from resources_servers.gdpval import app
 from resources_servers.gdpval.app import GDPValResourcesServer, GDPValResourcesServerConfig
 

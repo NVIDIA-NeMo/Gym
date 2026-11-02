@@ -10,7 +10,7 @@ from fastapi import HTTPException
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentCloseSessionResponse
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ObservationGap
 from responses_api_agents.nooa_agent.app import NOOAAgent, NOOASessionState
 from responses_api_agents.nooa_agent.result import finalize_run_result

@@ -21,8 +21,8 @@ import numpy as np
 from fastapi import HTTPException
 from pydantic import Field
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.grl_tetris.tetris_env import TetrisEnv
 from resources_servers.gymnasium import GymnasiumServer, extract_text
 

@@ -24,7 +24,6 @@ from unittest.mock import MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.responses_api_types import (
@@ -32,6 +31,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponseCreateParamsNonStreaming,
 )
 from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,
     AtifReverifyManifestEntry,

@@ -181,7 +181,7 @@ def _rpc(client: TestClient, method: str, params: dict | None = None, token: str
 
 
 def _mcp_client(server: ExampleMCPWeatherResourcesServer) -> TestClient:
-    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
     app = server.setup_webserver()
     maybe_auto_expose(server, app)

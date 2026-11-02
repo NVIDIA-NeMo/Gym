@@ -29,6 +29,7 @@ if TYPE_CHECKING:
         AggregateMetricsRequest,
         BaseServerConfig,
         BenchmarkDatasetConfig,
+        ConfigError,
         DatasetConfig,
         Domain,
         DownloadJsonlDatasetGitlabConfig,
@@ -38,6 +39,7 @@ if TYPE_CHECKING:
     )
     from nemo_gym.config.global_config import (
         AGENT_REF_KEY_NAME,
+        AGENT_SESSION_AGENT_TYPES,
         ATTEMPT_INDEX_KEY_NAME,
         CACHE_DIR_KEY_NAME,
         DISALLOWED_PORTS_KEY_NAME,
@@ -67,6 +69,7 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "AGENT_REF_KEY_NAME": "global_config",
+    "AGENT_SESSION_AGENT_TYPES": "global_config",
     "ATTEMPT_INDEX_KEY_NAME": "global_config",
     "AgentServerRef": "config_types",
     "AggregateMetrics": "config_types",
@@ -74,6 +77,7 @@ _PUBLIC_API = {
     "BaseServerConfig": "config_types",
     "BenchmarkDatasetConfig": "config_types",
     "CACHE_DIR_KEY_NAME": "global_config",
+    "ConfigError": "config_types",
     "DISALLOWED_PORTS_KEY_NAME": "global_config",
     "DatasetConfig": "config_types",
     "Domain": "config_types",

@@ -25,7 +25,7 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     agent_tools,
 )
-from nemo_gym.tool_access import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess, MCPStreamableHTTPConnection, MCPToolAccess
 from responses_api_agents.stirrup_agent import app, sandbox
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig
 from responses_api_agents.stirrup_agent.tests.fakes import _TOOLS, _call, _ModelServer, _Resources, _resources_app

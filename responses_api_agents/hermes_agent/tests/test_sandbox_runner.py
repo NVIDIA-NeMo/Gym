@@ -24,7 +24,7 @@ from tools.mcp_tool import shutdown_mcp_servers
 from nemo_gym.agent_utils.supervisor_client import STOP_REQUEST_FILE, SUPERVISOR_SCRIPT
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
+from nemo_gym.server_runtime.mcp_auto_exposure import TOKEN_HEADER, maybe_auto_expose
 from nemo_gym.trajectory import AgentInvocation
 from resources_servers.example_mcp_weather.app import (
     ExampleMCPWeatherResourcesServer,

@@ -21,7 +21,7 @@ from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import MODEL_REQUEST_ERROR, EpisodeId, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.stirrup_agent.app import StirrupAgentWrapper, StirrupAgentWrapperConfig, _observations
 from responses_api_agents.stirrup_agent.nemo_agent import NeMoAgent, NeMoUserMessage
 from responses_api_agents.stirrup_agent.nemo_client import DynamicMaxTokensChatCompletionsClient

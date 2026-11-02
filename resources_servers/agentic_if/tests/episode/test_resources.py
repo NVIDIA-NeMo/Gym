@@ -8,8 +8,8 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.base_resources_server import ResourcesSeedSessionRequest
 from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
 from resources_servers.agentic_if.episode import resources
 from resources_servers.agentic_if.tests.support import Transport, response, seeded
 

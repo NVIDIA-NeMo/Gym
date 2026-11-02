@@ -118,7 +118,10 @@ Removing the custom wrapper has these limits:
   retain that evidence. The observability test asserts this gap until it is fixed.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
-  trajectory. Gym model-server capture remains independent of that file.
+  trajectory. Gym model-server capture remains independent of that file. A run
+  that exits abnormally with a saved trajectory but no exit status was killed
+  mid-run and is reported as `killed`; without a saved trajectory it stays an
+  infrastructure error.
 - Wrapper-specific runtime metadata and `OutputTokenLimitExceeded` normalization
   are removed. Native termination names and CLI logs are retained.
 - MCP tools remain available through a persistent task-local CLI session, but

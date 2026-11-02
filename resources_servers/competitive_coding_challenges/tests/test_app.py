@@ -44,7 +44,7 @@ import resources_servers.competitive_coding_challenges.app as ccc_app
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import ServerClient
 from nemo_gym.core import PROVIDER_UNAVAILABLE, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.verifier_utils.sandbox_verification import SandboxVerificationError
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.app import (
     CompetitiveCodingChallengesResourcesServer,
     CompetitiveCodingChallengesResourcesServerConfig,

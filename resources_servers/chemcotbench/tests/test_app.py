@@ -313,7 +313,7 @@ async def test_real_upstream_task_specific_predictions(subtask, reference, text,
 
 
 async def test_workload_verifier_fixture():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification import exercise_verifier_fixture
     from resources_servers.chemcotbench.app import VERIFIER_FIXTURE
 
     results = await exercise_verifier_fixture(

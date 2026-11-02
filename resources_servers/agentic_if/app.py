@@ -24,7 +24,11 @@ from fastapi import FastAPI, HTTPException, Request
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr, ValidationError, field_validator
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, rollout_context
+from nemo_gym.sandbox import SandboxAccess
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
@@ -36,12 +40,7 @@ from nemo_gym.base_resources_server import (
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.client import SESSION_ID_KEY
-from nemo_gym.config import ModelServerRef, ResourcesServerRef
-from nemo_gym.core import SESSION_LOST, EpisodeId, NeMoGymResponse, rollout_context
-from nemo_gym.judge import JudgeError, call_judge
-from nemo_gym.sandbox import SandboxAccess
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import JudgeError, VerifierFixture, call_judge
 from resources_servers.agentic_if.episode import bundle
 from resources_servers.agentic_if.episode.agent_user import is_root_agent_user
 from resources_servers.agentic_if.episode.artifacts import (

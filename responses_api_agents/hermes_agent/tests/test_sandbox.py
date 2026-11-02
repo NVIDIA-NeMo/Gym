@@ -1363,7 +1363,7 @@ def test_text_history_and_system_message_are_preserved(agent):
 
 
 async def test_required_resources_tools_are_rejected_before_connect(agent, state):
-    from nemo_gym.tool_access import DirectHTTPToolAccess
+    from nemo_gym.server_runtime import DirectHTTPToolAccess
 
     state.request.tool_accesses = [DirectHTTPToolAccess(name="required", required=True, base_url="http://tools")]
     with pytest.raises(HTTPException, match="only MCP tool grants"):

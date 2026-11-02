@@ -73,7 +73,7 @@ def test_gym_task_data_tooling_validates_the_same_contract(dataset, native_field
 
 def test_the_swe_row_carries_every_task_field_of_its_wire():
     # So the swe case above fails when the SWE wire gains a field that the schema does not declare.
-    from nemo_gym.base_resources_server import BaseVerifyRequest
+    from nemo_gym.server_runtime import BaseVerifyRequest
     from resources_servers.partner_if.swe_app import SWEIFVerifyRequest
 
     wire = SWEIFVerifyRequest.model_fields.keys() - BaseVerifyRequest.model_fields.keys() - {"verifier_metadata"}

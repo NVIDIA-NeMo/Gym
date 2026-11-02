@@ -187,15 +187,15 @@ from nemo_gym.package_info import (
 # Maps each public name to its defining submodule. Existing deep import paths continue to work.
 _LAZY_EXPORTS: dict[str, str] = {
     # Resources server extension points and contracts
-    "BaseResourcesServerConfig": "base_resources_server",
-    "SimpleResourcesServer": "base_resources_server",
-    "BaseRunRequest": "base_resources_server",
-    "BaseVerifyRequest": "base_resources_server",
-    "BaseVerifyResponse": "base_resources_server",
-    "BaseMultiRewardVerifyResponse": "base_resources_server",
-    "BaseSeedSessionRequest": "base_resources_server",
-    "BaseSeedSessionResponse": "base_resources_server",
-    "ReverifyMode": "base_resources_server",
+    "BaseResourcesServerConfig": "server_runtime.base_resources_server",
+    "SimpleResourcesServer": "server_runtime.base_resources_server",
+    "BaseRunRequest": "server_runtime.base_resources_server",
+    "BaseVerifyRequest": "server_runtime.base_resources_server",
+    "BaseVerifyResponse": "server_runtime.base_resources_server",
+    "BaseMultiRewardVerifyResponse": "server_runtime.base_resources_server",
+    "BaseSeedSessionRequest": "server_runtime.base_resources_server",
+    "BaseSeedSessionResponse": "server_runtime.base_resources_server",
+    "ReverifyMode": "server_runtime.base_resources_server",
     # Agent and model extension points
     "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",

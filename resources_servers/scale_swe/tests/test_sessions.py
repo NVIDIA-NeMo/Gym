@@ -14,15 +14,15 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
-import nemo_gym.base_resources_server as base_resources_server
 import nemo_gym.client.http_client as http_client
+import nemo_gym.server_runtime.base_resources_server as base_resources_server
 import resources_servers.scale_swe.app as scale_swe_app
 import resources_servers.scale_swe.verification as verification
 import resources_servers.swebench.patch_capture as patch_capture
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.scale_swe.app import (
     ScaleSWEResourcesServer,

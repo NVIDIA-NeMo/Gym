@@ -27,9 +27,9 @@ import pytest
 from app import MolDeToxResourcesServer, MolDeToxStatus, MolDeToxVerifyRequest
 from metrics import decode_safe, exact_match, fragment_levenshtein, parse_fragments, score_fragments, score_safe
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))

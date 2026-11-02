@@ -12,11 +12,17 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from starlette.requests import Request
 
-from nemo_gym._checkpoint.agent import ActivationOutOfOrderError, AgentSessionRecord
-from nemo_gym._checkpoint.control import CheckpointRequest, CommitRequest, ParticipantControlPlane, RestoreRequest
-from nemo_gym._checkpoint.errors import StaleAttemptError
 from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
+from nemo_gym.server_runtime import ActivationOutOfOrderError
+from nemo_gym.server_runtime._checkpoint.agent import AgentSessionRecord
+from nemo_gym.server_runtime._checkpoint.control import (
+    CheckpointRequest,
+    CommitRequest,
+    ParticipantControlPlane,
+    RestoreRequest,
+)
+from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from resources_servers.single_step_tool_use_with_argument_comparison.app import (
     SingleStepToolUseArgumentComparisonResourcesServer,
     SingleStepToolUseArgumentComparisonResourcesServerConfig,

@@ -458,7 +458,7 @@ def test_session_decisions_of_a_failed_run_survive_saved_failure_projection(
     recovery call before the aborted summarization, which a rebuild from the captured calls counts as a decision.
     """
     from nemo_gym.rollout_collection import _episode_record
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnFailure, SingleAgentTurnResponse
+    from nemo_gym.server_runtime import SingleAgentTurnFailure, SingleAgentTurnResponse
 
     execution.mode.value = mode
     turn, close = execution.session_run()

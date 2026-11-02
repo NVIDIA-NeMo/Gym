@@ -21,10 +21,10 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from nemo_gym.client import ServerClient
-from nemo_gym.mcp_auto_exposure import harvest_tools
 from nemo_gym.sandbox import AsyncSandbox, SandboxEndpoint, SandboxExecResult, SandboxHandle, SandboxStatus
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
+from nemo_gym.server_runtime.mcp_auto_exposure import harvest_tools
 from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.partner_if import mock_tools_app as api
 from resources_servers.partner_if import tool_sandbox

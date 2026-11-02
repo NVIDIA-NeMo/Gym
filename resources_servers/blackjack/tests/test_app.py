@@ -21,9 +21,9 @@ import httpx
 import pytest
 from omegaconf import DictConfig
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseOutputMessage, NeMoGymResponseOutputText
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 from resources_servers.blackjack import app as blackjack_app
 from resources_servers.blackjack.app import BlackjackEnv, _hand_value
 

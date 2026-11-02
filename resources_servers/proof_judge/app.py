@@ -24,12 +24,6 @@ from typing import Any, Optional
 import yaml
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.client import get_response_json
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
@@ -37,7 +31,13 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import reraise_judge_errors
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.verification import reraise_judge_errors
 
 
 LOG = logging.getLogger(__name__)
