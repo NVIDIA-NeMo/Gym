@@ -109,7 +109,13 @@ async def normalize_tree(sandbox: Any, workdir: str) -> None:
 
 
 async def assert_unreachable(sandbox: Any, workdir: str, original: str) -> None:
-    """The anti-cheat scrub is best-effort; a surviving original commit would hold the fix."""
+    """The anti-cheat scrub is best-effort; a surviving original commit would hold the fix.
+
+    Squashing a parentless base without a setup patch rebuilds the very same commit, which
+    reveals nothing and so may remain.
+    """
+    if await seeded_head(sandbox, workdir) == original:
+        return
     result = await sandbox.exec(f"git -C {shlex.quote(workdir)} cat-file -e {shlex.quote(original)}^{{commit}}")
     if result.return_code == 0:
         raise RuntimeError("The original base commit survived the anti-cheat scrub")

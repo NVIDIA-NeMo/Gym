@@ -112,6 +112,22 @@ async def test_without_a_start_state_only_the_configured_scrub_runs(repo):  # no
 
 
 @pytest.mark.asyncio
+async def test_squashing_a_snapshot_root_without_a_patch_seeds(repo):  # noqa: F811
+    """swe_next's git-init snapshot: squashing it rebuilds the identical commit."""
+    Path(start_state.SETUP_PATCH_PATH).unlink()
+    git(repo, "checkout", "-q", "--orphan", "snapshot")
+    git(repo, "-c", "user.name=nemo-gym", "-c", "user.email=n@e", "commit", "-qm", "nemo_gym: initial snapshot")
+    git(repo, "tag", "-d", "v1")
+    git(repo, "branch", "-D", git(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads").split()[0])
+    head = git(repo, "rev-parse", "HEAD")
+    await start_state.seed_start_state(
+        LocalSandbox(), str(repo), "toy", "test", setup_patch="", squash_history=True, apply_anti_cheating=False
+    )
+    assert git(repo, "rev-parse", "HEAD") == head
+    assert git(repo, "rev-list", "--all", "--count").strip() == "1"
+
+
+@pytest.mark.asyncio
 @pytest.mark.parametrize("name", SERVERS)
 async def test_seeding_keeps_the_image_tree_and_extracts_only_the_agent_work(name, repo, tmp_path, monkeypatch):  # noqa: F811
     app = importlib.import_module(f"resources_servers.{name}.app")
