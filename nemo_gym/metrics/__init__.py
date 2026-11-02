@@ -30,6 +30,7 @@ if TYPE_CHECKING:
         compute_pass_majority_metrics,
         compute_subset_metrics,
         highest_k_metrics,
+        select_measured,
     )
 
 
@@ -44,6 +45,7 @@ _PUBLIC_API = {
     "compute_pass_majority_metrics": "reward_profile",
     "compute_subset_metrics": "reward_profile",
     "highest_k_metrics": "reward_profile",
+    "select_measured": "reward_profile",
 }
 __getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
 __all__ = sorted(_PUBLIC_API)

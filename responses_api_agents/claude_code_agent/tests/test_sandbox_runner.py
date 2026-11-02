@@ -13,7 +13,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
+from nemo_gym.agents import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from responses_api_agents.claude_code_agent import sandbox as adapter
 from responses_api_agents.claude_code_agent.parsing import _invocation_outcome, parse_stream_json
 from responses_api_agents.claude_code_agent.tests.test_sandbox import seed

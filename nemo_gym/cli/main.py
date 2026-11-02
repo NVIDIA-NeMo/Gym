@@ -1679,6 +1679,12 @@ COMMANDS = {
                 metavar="PATH[,PATH...]",
             ),
             _value_flag("agent", "agent_name", "Agent to compare on both sides (default: all shared agents)."),
+            _value_flag(
+                "confidence-level",
+                "confidence_level",
+                "Delta confidence level as a fraction between 0 and 1 (default: 0.95). "
+                "Baseline/candidate intervals remain the recorded 95%% intervals.",
+            ),
             _value_flag("baseline-agent", "baseline_agent_name", "Agent to read from the baseline's metrics."),
             _comma_list_flag(
                 "candidate-agents",

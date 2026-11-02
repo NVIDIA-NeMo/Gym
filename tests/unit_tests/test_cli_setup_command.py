@@ -656,6 +656,7 @@ class TestCLISetupCommandRunCommand:
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -676,6 +677,7 @@ class TestCLISetupCommandRunCommand:
             env={"PYTHONPATH": "/my path:existing pythonpath", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -740,6 +742,7 @@ class TestCLISetupCommandRunCommand:
             },
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -777,6 +780,7 @@ class TestCLISetupCommandRunCommand:
             env={"PYTHONPATH": "/my path", "UV_CACHE_DIR": "my uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -953,12 +957,13 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
 
         expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
+            "set -o pipefail; (my command) 2>&1 | tee -i -a /tmp/gym_logs/my_resources_my_server.log",
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
@@ -977,12 +982,13 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
 
         expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_server.log",
+            "set -o pipefail; (my command) 2>&1 | tee -i -a /tmp/gym_logs/my_server.log",
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
             stdout="stdout",
             stderr="stderr",
+            start_new_session=False,
         )
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args

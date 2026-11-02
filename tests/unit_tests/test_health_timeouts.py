@@ -23,7 +23,6 @@ import pytest
 import nemo_gym.artifacts.exporters
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.artifacts.run_files import QUALITY_SUMMARY_FILENAME
-from nemo_gym.base_responses_api_model import CaptureStore
 from nemo_gym.cli.eval import _health_check_collected_rollouts
 from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
@@ -40,6 +39,7 @@ from nemo_gym.health.timeouts import (
 )
 from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.metrics.reward_profile import compute_aggregate_metrics
+from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollout_collection import (
     RolloutAggregationConfig,
     RolloutAggregationHelper,
