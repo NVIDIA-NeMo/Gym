@@ -36,7 +36,7 @@ from pydantic import ValidationError
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
-from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE
+from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE, ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_recovery import (
     RunManifest,
@@ -858,6 +858,44 @@ class RolloutRecords:
                 identity
             ) >= max_attempts
         return exhausted
+
+    def allocation_end_charges(self) -> list[dict]:
+        """The failure rows that charge a rollout for each later end of an allocation it was in flight in.
+
+        A reserved attempt with no saved outcome was in flight when the allocation that made it ended: the writer that
+        loads the Store holds run_lock, so no other allocation of the run is alive. The first such end of an identity
+        re-runs for free, and every later one spends an attempt of its cap: the earliest reservation without an
+        outcome stays as it is and each later one gets a non-terminal ``rollout_allocation_ended`` failure. Only an
+        identity a resume would run again is charged; a finished, settled or blocked one is never touched. The count
+        is derived from the manifest's reservations each time, so a saved charge is never charged again.
+        """
+        if self.manifest.legacy_import:
+            return []
+        charges = []
+        for identity, original in self.expected.items():
+            if not self._retryable(identity):
+                continue
+            ended = [
+                index
+                for index in range(self.manifest.next_attempt.get(identity, 0))
+                if (identity, index) not in self.payloads
+            ]
+            for index in ended[1:]:
+                charges.append(
+                    dict(original)
+                    | {
+                        ATTEMPT_INDEX_KEY_NAME: index,
+                        RUN_ID_KEY: self.manifest.run_id,
+                        "_ng_failure_class": ROLLOUT_ALLOCATION_ENDED,
+                        "_ng_failure_terminal": False,
+                        "failure_kind": ROLLOUT_ALLOCATION_ENDED,
+                        "_ng_failure_message": (
+                            f"attempt {index} was in flight when its allocation ended; this rollout's first such end "
+                            "re-ran for free and each later one spends an attempt"
+                        ),
+                    }
+                )
+        return charges
 
     def pending(self, max_attempts: int) -> list[dict]:
         pending = []

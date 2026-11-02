@@ -81,6 +81,7 @@ from nemo_gym.core.failure_kinds import (
     MODEL_TRANSPORT_ERROR,
     NON_POLICY_MODEL_REJECTION,
     PROVIDER_CREDENTIALS_REJECTED,
+    ROLLOUT_ALLOCATION_ENDED,
     SERVER_FAULT_KINDS,
     SERVER_START_FAILED,
     TRUNCATED_ANSWER,
@@ -5292,13 +5293,18 @@ _TRIAL_FAILURE_STATES = (
     IdentityState.UNKNOWN,
 )
 RESPONSE_FAILURE_CAUSES = ("truncated", "empty", "malformed")
-TRIAL_FAILURE_CAUSES = ("request", "judge", "sandbox", "harness", "timeout", "other")
+TRIAL_FAILURE_CAUSES = ("request", "judge", "sandbox", "harness", "timeout", "allocation", "other")
 
 
 def trial_failure_cause(kind: Any) -> str:
-    """A trial failure's cause from its failure kind: request, judge, sandbox, harness, timeout, or other."""
+    """A trial failure's cause from its failure kind: request, judge, sandbox, harness, timeout, allocation, or other.
+
+    ``allocation``: the rollout was in flight at repeated ends of its allocation (``ROLLOUT_ALLOCATION_ENDED``).
+    """
     if not isinstance(kind, str):
         return "other"
+    if kind == ROLLOUT_ALLOCATION_ENDED:
+        return "allocation"
     if "timeout" in kind:
         return "timeout"
     if kind in (JUDGE_FAILED, JUDGE_UNPARSEABLE, VERIFIER_ERROR, GRADING_WITHOUT_VERDICT):

@@ -632,7 +632,7 @@ async def test_failure_sidecar_preserves_producer_diagnostics(runner_config, mon
     assert next(row for row in returned if row["_ng_task_index"] == 1) == saved
 
 
-async def test_repeated_interruption_reserves_new_identities_without_spending_retries(tmp_path, monkeypatch):
+async def test_repeated_interruption_reserves_new_identities_and_charges_only_the_later_ends(tmp_path, monkeypatch):
     from nemo_gym.rollout_store import RolloutStore
 
     rows = [failing_row(index) for index in range(4)]
@@ -677,11 +677,21 @@ async def test_repeated_interruption_reserves_new_identities_without_spending_re
 
     reader = RolloutStore.read(output)
     assert reader.coverage()["missing"] == len(rows)
-    assert reader.coverage()["counted_failures"] == 0
+    # Three allocations ended with every row in flight. The first end was free; the resume after the second charged
+    # attempt 1 of each, and the end of the third is charged by the next writer.
+    assert reader.coverage()["counted_failures"] == len(rows)
     retry = reader.pending(3)
     assert len(retry) == len(rows)
     assert all(row["_ng_attempt_index"] == 3 for row in retry)
-    assert reader.selected("success") == [] and reader.failures() == []
+    assert reader.selected("success") == []
+    # The charge is a saved outcome of the earlier attempt; the newest attempt is the reservation with no outcome.
+    from nemo_gym.rollout_records import read_records
+    from nemo_gym.utils.path_utils import failures_path_for
+
+    assert {
+        (row["_ng_task_index"], row["_ng_attempt_index"], row["failure_kind"])
+        for row in read_records(failures_path_for(output))
+    } == {(index, 1, "rollout_allocation_ended") for index in range(len(rows))}
 
 
 async def test_runner_accepts_nested_hydra_overrides_and_unused_unresolved_server(runner_config, monkeypatch):

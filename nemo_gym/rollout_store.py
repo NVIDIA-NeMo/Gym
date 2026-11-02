@@ -35,6 +35,7 @@ from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.core.failure_kinds import ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
@@ -226,6 +227,17 @@ class RolloutStore:
                 manifest.write(manifest_path)
             elif manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
+            charges = state.allocation_end_charges()
+            if charges:
+                # Saved before a resubmit resets the budget, so a resubmit gives these identities a fresh one. A
+                # separate writer, so the charges count neither as outcomes nor as progress of this allocation.
+                with cls(output, state) as charging:
+                    for row in charges:
+                        charging.record_outcome(row, sync=True)
+                print(
+                    f"Charged {len(charges)} attempt(s) to rollouts in flight at a second or later allocation end "
+                    f"({ROLLOUT_ALLOCATION_ENDED}). Failures: {failures_path_for(output)}."
+                )
             if resubmit:
                 # Validate before resetting anything, and repair an interrupted
                 # final write before counting physical sidecar lines.
