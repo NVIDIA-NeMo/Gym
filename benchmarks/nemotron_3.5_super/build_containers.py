@@ -30,7 +30,7 @@ class FlashInferConfig(BaseNeMoGymCLIConfig):
 class BuildContainerConfig(BaseNeMoGymCLIConfig):
     input_container_fpath: Path
     output_container_fpath: Path
-    log_file: Path
+    log_file: Optional[Path] = None
 
     slurm: Dict[str, Any] = Field(default_factory=dict)
     flashinfer: Optional[FlashInferConfig] = None
@@ -40,6 +40,9 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
 
         self.input_container_fpath = self.input_container_fpath.resolve()
         self.output_container_fpath = self.output_container_fpath.resolve()
+
+        if not self.log_file:
+            self.log_file = self.output_container_fpath.with_suffix(".log")
         self.log_file = self.log_file.resolve()
 
         print(f"""Resolved fpaths:
@@ -273,6 +276,8 @@ class FlashInferBuilder(BaseBuilder):
             "FLASHINFER_REPO": self.config.repo,
             "FLASHINFER_HEAD_SHA": self._head_sha,
             "FLASHINFER_INVALIDATE_MODULES": ",".join(self.config.invalidate_modules),
+            "FLASHINFER_NVCC_THREADS": "1",
+            "MAX_JOBS": "64",
         }
 
     def get_srun_slurm_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:

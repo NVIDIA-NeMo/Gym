@@ -1,0 +1,14 @@
+input_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___mooncakemetricstry2___kvcacheremoveintermediatemamba.sqsh
+output_container_fpath: results/vllm/vllm-openai:v0.32.0___with_gym_vllmfixes___prims.sqsh
+
+slurm:
+  account: nemotron_n4_post
+  partition: batch
+  qos: interactive
+
+flashinfer:
+  repo: https://github.com/bxyu-nvidia/flashinfer
+  branch: bxyu/v0.7.0.post1-bxyudev
+  invalidate_modules:
+  - fused_moe_trtllm_sm100
+  cpus_per_task: 128
