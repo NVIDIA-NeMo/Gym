@@ -51,7 +51,7 @@ from pydantic import ValidationError
 import nemo_gym.batch_status
 import nemo_gym.client.http_client
 import nemo_gym.rollout_collection
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 import nemo_gym.token_id_capture.delivery
 from nemo_gym.artifacts.rollout_rows import (
     NG_DISPATCH_DRAINED_KEY,
@@ -130,7 +130,7 @@ from nemo_gym.rollout_records import prepare_append as _drop_truncated_tail
 from nemo_gym.rollout_recovery import manifest_path_for, matches_failure_class
 from nemo_gym.rollout_reverification import RolloutReverificationConfig, _is_judge_failure
 from nemo_gym.server_runtime.base_resources_server import AggregateMetrics, AggregateMetricsRequest
-from nemo_gym.server_utils import ClientDisconnectCancellationMiddleware
+from nemo_gym.server_runtime.request_handling.disconnect import ClientDisconnectCancellationMiddleware
 from nemo_gym.telemetry.gym_metrics import ROLLOUT_COMPLETED_INSTRUMENT
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture.config import TokenIdCaptureConfig
