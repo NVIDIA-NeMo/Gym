@@ -757,6 +757,20 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--allow-unsafe-resume needs a nonempty --unsafe-resume-reason")
     if unsafe_reason is not None and not allow_unsafe:
         args._parser.error("--unsafe-resume-reason goes with --allow-unsafe-resume")
+    spinup_timeout, spinup_reason = (
+        getattr(args, "server_spinup_timeout_seconds", None),
+        getattr(args, "spinup_timeout_reason", None),
+    )
+    if (spinup_timeout is not None or spinup_reason is not None) and (
+        not getattr(args, "recover", False) or inspect_only
+    ):
+        args._parser.error("--server-spinup-timeout-seconds needs --recover and cannot be used with --inspect")
+    if spinup_timeout is not None and not (spinup_reason or "").strip():
+        args._parser.error("--server-spinup-timeout-seconds needs a nonempty --spinup-timeout-reason")
+    if spinup_reason is not None and spinup_timeout is None:
+        args._parser.error("--spinup-timeout-reason goes with --server-spinup-timeout-seconds")
+    if spinup_timeout is not None and spinup_timeout < 0:
+        args._parser.error("--server-spinup-timeout-seconds is a number of seconds, 0 for no limit")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -791,6 +805,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 extra |= {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
             if allow_unsafe:
                 extra["unsafe_resume_reason"] = unsafe_reason
+            if spinup_timeout is not None:
+                extra |= {"server_spinup_timeout_seconds": spinup_timeout, "spinup_timeout_reason": spinup_reason}
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1872,6 +1888,23 @@ COMMANDS = {
                     "--unsafe-resume-reason",
                     metavar="TEXT",
                     help="Why --allow-unsafe-resume overrides the run identity check; recorded with who asked.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--server-spinup-timeout-seconds",
+                    type=int,
+                    metavar="N",
+                    help="With --recover: raise how long the run's Gym servers may take to become ready (0 for "
+                    "no limit; never lowered); job.sh and the saved config are rendered again and journaled.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--spinup-timeout-reason",
+                    metavar="TEXT",
+                    help="Why --server-spinup-timeout-seconds raises the limit; recorded in the job dir's "
+                    "spinup-timeout-journal.jsonl with who asked.",
                 ),
             ),
             Flag(

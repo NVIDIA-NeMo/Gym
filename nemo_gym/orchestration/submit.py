@@ -18,6 +18,7 @@ import hashlib
 import json
 import math
 from pathlib import Path
+from typing import Any
 
 from pydantic import ValidationError
 
@@ -94,6 +95,8 @@ def recover(
     max_walltime: str | None = None,
     walltime_reason: str | None = None,
     unsafe_resume_reason: str | None = None,
+    server_spinup_timeout_seconds: int | None = None,
+    spinup_timeout_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
@@ -102,6 +105,8 @@ def recover(
     ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
     ``unsafe_resume_reason`` resumes the job with ``allow_unsafe_resume``, past a refused run identity check; the
     reason and the user are journaled.
+    ``server_spinup_timeout_seconds`` (with ``spinup_timeout_reason``) raises how long the run's Gym servers may
+    take to become ready, never below the recorded limit; 0 removes it. The raise is journaled in the job dir.
     For a run whose chain accounting is unknown, the two are also an operator's explicit budget: the run continues
     as an OPERATOR-CONTINUATION with ``extend_retries`` (one when not given) infra retries remaining, recorded in the
     decision and the job dir's operator journal (see ``decide_from_collected``).
@@ -125,6 +130,8 @@ def recover(
         max_walltime=max_walltime,
         walltime_reason=walltime_reason,
         unsafe_resume_reason=unsafe_resume_reason,
+        server_spinup_timeout_seconds=server_spinup_timeout_seconds,
+        spinup_timeout_reason=spinup_timeout_reason,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -165,6 +172,13 @@ def inspect_recovery(
     return outcome.model_copy(update={"reader_token": reader_token()})
 
 
+def _spinup_timeout_raise(seconds: int | None, reason: str | None) -> dict[str, Any]:
+    """The executor keywords of a spin-up timeout raise, none without one, so executors that predate it work."""
+    if seconds is None:
+        return {}
+    return {"server_spinup_timeout_seconds": seconds, "spinup_timeout_reason": reason}
+
+
 def _recover(
     gym_job_id: str,
     benchmark: str,
@@ -186,6 +200,8 @@ def _recover(
     max_walltime: str | None = None,
     walltime_reason: str | None = None,
     unsafe_resume_reason: str | None = None,
+    server_spinup_timeout_seconds: int | None = None,
+    spinup_timeout_reason: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -257,6 +273,8 @@ def _recover(
         # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
         **({"max_walltime": max_walltime} if max_walltime is not None else {}),
         **({"operator_budget": operator_budget} if operator_budget is not None else {}),
+        # The decision names a spin-up timeout raise the resubmit will render.
+        **(spinup if (spinup := _spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason)) else {}),
     )
     if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is None:
         command = fresh_restart_command(gym_job_id, benchmark)
@@ -332,6 +350,7 @@ def _recover(
             **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
             **({"max_walltime": max_walltime, "walltime_reason": walltime_reason} if max_walltime is not None else {}),
             **({"unsafe_resume_reason": unsafe_resume_reason} if unsafe_resume_reason is not None else {}),
+            **_spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason),
             **({"operator_continuation": operator} if operator is not None else {}),
         )
         if gate_task["status"] == "PLANNED":
@@ -349,6 +368,7 @@ def _recover(
             accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
             max_walltime=max_walltime,
             walltime_reason=walltime_reason,
+            **_spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason),
         )
         if gate_task["status"] == "PLANNED":
             gate_task = {**gate_task, "status": "RESUMING"}

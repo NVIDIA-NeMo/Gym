@@ -93,7 +93,7 @@ NO_PROGRESS_SEGMENT_REASON = (
 DRIVER_FAILURE_NAME = ".gym_driver_failure"
 SPINUP_TIMEOUT_REASON = (
     f"{SERVER_SPINUP_TIMEOUT}: the Gym servers did not become ready within server_spinup_timeout_seconds; "
-    "the chain does not retry it; raise the limit"
+    "the chain does not retry it; raise the limit with gym eval resubmit --recover --server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
 )
 RESUME_REFUSED_REASON = (
     f"{COLLECTION_RESUME_REFUSED}: the saved rollouts do not verify against this run's inputs and configuration; "

@@ -33,6 +33,7 @@ from typing import Any
 import yaml
 
 from nemo_gym import __version__
+from nemo_gym.config.global_config import SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
@@ -196,6 +197,8 @@ REPIN_JOURNAL_NAME = "repin-journal.jsonl"
 WALLTIME_JOURNAL_NAME = "walltime-extension-journal.jsonl"
 # Appended in the run dir when `gym eval resubmit --recover --allow-unsafe-resume` overrides the run identity check.
 UNSAFE_RESUME_JOURNAL_NAME = "unsafe-resume-journal.jsonl"
+# Appended in the job dir when `gym eval resubmit --recover --server-spinup-timeout-seconds` raises the limit.
+SPINUP_TIMEOUT_JOURNAL_NAME = "spinup-timeout-journal.jsonl"
 
 
 def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitConfig:
@@ -224,6 +227,41 @@ def _unsafe_resume_config(config: SubmitConfig, benchmark: str) -> SubmitConfig:
     """``config`` with the benchmark's job resuming past a refused run identity check; every other field as saved."""
     bench = config.driver.benchmarks[benchmark]
     run = {**bench.run, "allow_unsafe_resume": True}
+    driver = config.driver.model_copy(
+        update={"benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update={"run": run})}}
+    )
+    return config.model_copy(update={"driver": driver})
+
+
+def _recorded_spinup_timeout_seconds(config: SubmitConfig, benchmark: str) -> float:
+    """The benchmark's server spin-up limit in seconds as the run starts its servers; 0 or less is no limit."""
+    from nemo_gym.cli.env import _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC
+
+    value = config.driver.benchmarks[benchmark].run.get(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
+    return _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC if value is None else float(value)
+
+
+def _spinup_timeout_raise_refusal(recorded: float, seconds: int) -> str | None:
+    """Why ``seconds`` is not a raise of the ``recorded`` limit (0 is no limit), or None when it is."""
+    if seconds < 0:
+        return f"--server-spinup-timeout-seconds is a number of seconds, 0 for no limit, not {seconds}"
+    if recorded <= 0:
+        return "the run's server spin-up has no limit already"
+    if seconds != 0 and seconds <= recorded:
+        return f"--server-spinup-timeout-seconds {seconds} does not raise the recorded limit of {recorded:g} s"
+    return None
+
+
+def _spinup_timeout_raise_text(recorded: float, seconds: int, reason: str | None) -> str:
+    """The sentence a decision carries for a spin-up timeout raise."""
+    to = "0 s (no limit)" if seconds == 0 else f"{seconds} s"
+    return f"server spin-up timeout raised from {recorded:g} s to {to}: {reason}"
+
+
+def _spinup_timeout_config(config: SubmitConfig, benchmark: str, seconds: int) -> SubmitConfig:
+    """``config`` with the benchmark's server spin-up limit ``seconds``; every other field as saved."""
+    bench = config.driver.benchmarks[benchmark]
+    run = {**bench.run, SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME: seconds}
     driver = config.driver.model_copy(
         update={"benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update={"run": run})}}
     )
@@ -1073,11 +1111,15 @@ class SlurmExecutor(BaseExecutor):
         extend_retries: int = 0,
         max_walltime: str | None = None,
         operator_budget: OperatorBudget | None = None,
+        server_spinup_timeout_seconds: int | None = None,
+        spinup_timeout_reason: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
         """Collect the job dir's identities, failures, quality summary, named score and chain budget over SSH.
 
         ``reader_ref`` runs the Store reader at that full commit instead of the saved one: a repinned run resumes there.
         ``max_walltime`` is a walltime raise the resubmit will render: the plan checks the chain cap it renders.
+        ``server_spinup_timeout_seconds`` (with ``spinup_timeout_reason``) is a spin-up limit raise the resubmit
+        will render: the decision names it.
         ``operator_budget`` lets a run whose chain accounting is unknown continue (see ``decide_from_collected``); with
         it, a failed scheduler query is a stop that names it instead of an error.
         """
@@ -1223,6 +1265,10 @@ class SlurmExecutor(BaseExecutor):
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {requeued}"})
         if raised_cap is not None:
             raised = f"walltime cap raised from {resume.max_walltime} to {raised_cap} for this plan"
+            decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})
+        if server_spinup_timeout_seconds is not None:
+            recorded = _recorded_spinup_timeout_seconds(config, benchmark)
+            raised = _spinup_timeout_raise_text(recorded, server_spinup_timeout_seconds, spinup_timeout_reason)
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})
         return decision, collected
 
@@ -1413,6 +1459,8 @@ class SlurmExecutor(BaseExecutor):
         walltime_reason: str | None = None,
         operator_continuation: Mapping[str, Any] | None = None,
         unsafe_resume_reason: str | None = None,
+        server_spinup_timeout_seconds: int | None = None,
+        spinup_timeout_reason: str | None = None,
         fresh_restart: bool = False,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
@@ -1437,6 +1485,9 @@ class SlurmExecutor(BaseExecutor):
         ``unsafe_resume_reason`` (with ``keep_budget``) renders the job with ``allow_unsafe_resume`` the same way, so
         its resume proceeds past a refused run identity check; the run dir's unsafe-resume journal records the reason
         and the user once the job is queued.
+        ``server_spinup_timeout_seconds`` (with ``spinup_timeout_reason``) renders the job with that server
+        spin-up limit the same way; it only raises the recorded limit (0 removes it), and the job dir's
+        spin-up timeout journal records both limits, the reason and the user once the job is queued.
         ``operator_continuation`` (with ``keep_budget``) is a decision's OPERATOR-CONTINUATION record for a run whose
         accounting is unknown: under the lock it fills the counters the record names, replaces the unknown-accounting
         marker with a note and keeps the readable counters; each step is undone unless the job is queued, and the job
@@ -1475,9 +1526,14 @@ class SlurmExecutor(BaseExecutor):
                     max_walltime=max_walltime,
                     walltime_reason=walltime_reason,
                     unsafe_resume_reason=unsafe_resume_reason,
+                    server_spinup_timeout_seconds=server_spinup_timeout_seconds,
+                    spinup_timeout_reason=spinup_timeout_reason,
                     fresh_restart=fresh_restart,
                 )
-                if repin is not None or max_walltime is not None or unsafe_resume_reason is not None
+                if repin is not None
+                or max_walltime is not None
+                or unsafe_resume_reason is not None
+                or server_spinup_timeout_seconds is not None
                 else ([], {})
             )
             exports = _submission_exports(config)
@@ -1690,6 +1746,7 @@ class SlurmExecutor(BaseExecutor):
                 journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
                 conn.run([f"printf '%s\\n' {entry} >> {journal}"])
             for name, entry in journals.items():
+                # A name is in the run dir; a job-dir journal is keyed by its absolute path.
                 journal = Path(record.run_dir) / name
                 conn.run([f"printf '%s\\n' {shlex.quote(entry)} >> {shlex.quote(str(journal))}"])
             self.persist_record(record.with_benchmark(job), conn.write_text)
@@ -1771,6 +1828,8 @@ class SlurmExecutor(BaseExecutor):
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         unsafe_resume_reason: str | None = None,
+        server_spinup_timeout_seconds: int | None = None,
+        spinup_timeout_reason: str | None = None,
         fresh_restart: bool = False,
     ) -> tuple[list[str], dict[str, str]]:
         """The locked shell steps that render one benchmark's job.sh and saved config again, with a repin, a walltime
@@ -1847,6 +1906,30 @@ class SlurmExecutor(BaseExecutor):
                 sort_keys=True,
             )
         job_dir = Path(record.benchmark_job(benchmark).job_dir)
+        if server_spinup_timeout_seconds is not None:
+            if not keep_budget and not fresh_restart:
+                raise RuntimeError(
+                    "--server-spinup-timeout-seconds needs --recover: the run continues with its spent budgets"
+                )
+            if not (spinup_timeout_reason or "").strip():
+                raise ValueError("--server-spinup-timeout-seconds needs a nonempty --spinup-timeout-reason")
+            recorded = _recorded_spinup_timeout_seconds(config, benchmark)
+            refusal = _spinup_timeout_raise_refusal(recorded, server_spinup_timeout_seconds)
+            if refusal is not None:
+                raise ValueError(refusal)
+            target = _spinup_timeout_config(target, benchmark, server_spinup_timeout_seconds)
+            journals[str(job_dir / SPINUP_TIMEOUT_JOURNAL_NAME)] = json.dumps(
+                {
+                    "ts": stamp,
+                    "user": getpass.getuser(),
+                    "from_seconds": recorded,
+                    "to_seconds": server_spinup_timeout_seconds,
+                    "reason": spinup_timeout_reason,
+                    "gym_job_id": record.gym_job_id,
+                    "benchmark": benchmark,
+                },
+                sort_keys=True,
+            )
         run_dir = Path(record.run_dir)
         script = build_sbatch_script(
             target, benchmark, target.driver.benchmarks[benchmark], target.compute[record.cluster], job_dir
@@ -1859,6 +1942,7 @@ class SlurmExecutor(BaseExecutor):
                 ("repin", repin is not None),
                 ("walltime", max_walltime is not None),
                 ("unsafe-resume", unsafe_resume_reason is not None),
+                ("spinup-timeout", server_spinup_timeout_seconds is not None),
             )
             if wanted
         ]

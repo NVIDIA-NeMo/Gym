@@ -347,7 +347,8 @@ _INSTALL_LOG = (
 _DRIVER_FAILURE_STOPS = {
     "server_spinup_timeout": (
         "Previous job 100 ended FAILED: server_spinup_timeout: the Gym servers did not become ready within "
-        "server_spinup_timeout_seconds; the chain does not retry it; raise the limit"
+        "server_spinup_timeout_seconds; the chain does not retry it; raise the limit with gym eval resubmit --recover "
+        "--server-spinup-timeout-seconds N --spinup-timeout-reason TEXT"
     ),
     "driver_install_failed": (
         "Previous job 100 ended FAILED: driver_install_failed: fatal: unable to access "
