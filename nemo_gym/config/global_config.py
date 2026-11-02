@@ -219,6 +219,7 @@ AGENT_SESSION_AGENT_TYPES = frozenset(
         "openclaw_agent",
         "opencode_agent",
         "pi_agent",
+        "pool_agent",
         "simple_agent",
         "stirrup_agent",
         "terminus_2_sandboxed_agent",
