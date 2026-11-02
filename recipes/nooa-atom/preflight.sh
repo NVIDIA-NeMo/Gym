@@ -127,7 +127,7 @@ for instance_name, block in cfg.items():
         label = f"{dataset.get('name')} -> {agent_name}"
         if nooa.get("agent_class") != "nooa_atom.gym:AtomHarness":
             problems.append(f"{label}: nooa.agent_class = {nooa.get('agent_class')!r}")
-        for key in ("runtime_wheelhouse_required", "trace_jsonl"):
+        for key in ("runtime_wheelhouse_required",):
             if agent.get(key) is not True:
                 problems.append(f"{label}: {key} = {agent.get(key)!r}, want true")
         print(f"route {label}: {nooa.get('agent_class')}")

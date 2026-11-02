@@ -21,6 +21,7 @@ import inspect
 import logging
 from collections.abc import Callable
 from dataclasses import dataclass, field
+from pathlib import Path
 from threading import Lock
 from typing import Any, Protocol
 from uuid import uuid4
@@ -108,6 +109,27 @@ def _validate_agent_llm_bindings(agent_class: type) -> None:
         )
 
 
+_PROCESS_TRACE_DIR: Path | None = None
+
+
+def _enable_process_trace_export(trace_dir: Path) -> None:
+    """Route this process's NOOA spans and message journal to ``trace_dir``, one file per NOOA session.
+
+    Embedded NOOA runs in the agent server process, so the exporter is process-wide and enabled once; a sandboxed
+    run enables it in its worker instead (``sandbox_entrypoint``). Failure to enable is logged, not raised.
+    """
+    global _PROCESS_TRACE_DIR
+    if _PROCESS_TRACE_DIR is not None:
+        return
+    try:
+        from responses_api_agents.nooa_agent.sandbox_entrypoint import enable_trace_export
+
+        enable_trace_export(str(trace_dir))
+    except Exception:  # noqa: BLE001 - the trace is evidence for later reading; the rollout must still run
+        logger.warning("NOOA trace export could not be enabled in %s", trace_dir, exc_info=True)
+    _PROCESS_TRACE_DIR = trace_dir
+
+
 class InProcessNOOARunner:
     """Construct and invoke one isolated NOOA agent instance per Gym rollout."""
 
@@ -121,6 +143,7 @@ class InProcessNOOARunner:
         on_progress: Callable[[NOOARunResult], None] | None = None,
         context_window: int | None = None,
         media_inputs: tuple[str, ...] = (),
+        trace_dir: Path | None = None,
     ) -> None:
         self._invocation = invocation
         self._server_client = server_client
@@ -129,10 +152,13 @@ class InProcessNOOARunner:
         self._on_progress = on_progress
         self._context_window = context_window
         self._media_inputs = media_inputs
+        self._trace_dir = trace_dir
         self._agent_class, self._invocation_adapter = validate_invocation(invocation)
         _validate_agent_llm_bindings(self._agent_class)
 
     async def run(self, request: NOOARunRequest) -> NOOARunResult:
+        if self._trace_dir is not None:
+            _enable_process_trace_export(self._trace_dir)
         state = RolloutLLMState(max_policy_calls=self._max_policy_calls)
         progress_lock = Lock()
 

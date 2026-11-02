@@ -70,17 +70,14 @@ class NOOAAgentConfig(BaseResponsesAPIAgentConfig):
     context_window: int | None = Field(
         default=None, gt=0, description="Known policy context window used by NOOA's context planner."
     )
-    trace_jsonl: bool = Field(
-        default=False,
-        description=(
-            "Write NOOA's JSONL trace (OTLP spans plus the message journal NOOA's viewer imports) in the sandbox for "
-            "each rollout and copy it to <artifacts_dir>/<rollout_id>/traces.jsonl on this host. A debugging "
-            "artifact, not evidence: Gym's own capture and the rollout record remain authoritative."
-        ),
-    )
     artifacts_dir: Path = Field(
         default=Path("nooa-artifacts"),
-        description="Host directory for per-rollout NOOA artifacts such as the trace file; relative to the server's cwd.",
+        description=(
+            "Host directory for per-rollout NOOA artifacts, relative to the server's cwd. Every rollout's NOOA trace "
+            "(OpenTelemetry spans plus the message journal that reconstructs each model call) is copied to "
+            "<artifacts_dir>/<rollout_id>/traces.jsonl; a rollout whose trace could not be captured says so in its "
+            "observation gaps."
+        ),
     )
     media_inputs: tuple[Literal["image", "audio", "video", "pdf"], ...] = Field(
         default=(),

@@ -77,13 +77,17 @@ interrupted by session close returns HTTP 409 to a caller whose request was not 
 
 ### NOOA trace files
 
-`trace_jsonl: true` makes the worker route NOOA's OpenTelemetry spans to OTLP JSONL files (one per NOOA session,
-so an Atom root and its children are separate files) and join them into `traces.jsonl` beside `result.json` before
-the result is published. The runner copies that file to `<artifacts_dir>/<rollout_id>/traces.jsonl` on the agent
-server host (`artifacts_dir` defaults to `nooa-artifacts/`, gitignored). It is a debugging artifact for reading
-what the harness did inside the sandbox; Gym's model-call capture and the rollout's observation bundle remain the
-evidence that grading, export and training use. A worker that dies before flushing leaves no file and the rollout
-is collected as usual.
+Every rollout keeps a NOOA trace: the worker routes NOOA's OpenTelemetry spans and message journal to one JSONL
+file per NOOA session (an Atom root and its children are separate sessions) and joins them into `traces.jsonl`
+beside `result.json` before the result is published. The runner copies that file to
+`<artifacts_dir>/<rollout_id>/traces.jsonl` on the agent server host (`artifacts_dir` defaults to
+`nooa-artifacts/`, gitignored). The journal records, for each model call, the exact messages sent and the reply
+received as content-addressed blocks, plus the Gym response id, so any call in the rollout record can be
+reconstructed from the trace of the rollout named by its `rollout_id`; `nooa import-traces` loads the file into
+NOOA's viewer as is. Gym's rollout record remains the evidence that grading, export and training use. A worker
+that dies before flushing leaves no file: the rollout is collected as usual and its observations carry a
+`trace_unavailable` gap. Embedded runs enable the same exporter once in the agent server process and write under
+`<artifacts_dir>/embedded/`.
 
 
 ## Sandbox worker supervision

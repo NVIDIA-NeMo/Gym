@@ -57,7 +57,6 @@ gdpval_nooa_agent:
       # Atom's context accounting; the sealed endpoint's window. Identical for every run of this recipe.
       context_window: 1048576
       # Keep NOOA's own OTLP JSONL trace per rollout under <artifacts_dir>/<rollout_id>/ for debugging.
-      trace_jsonl: true
       artifacts_dir: ${oc.env:NOOA_ARTIFACTS_DIR,nooa-artifacts}
       # GDPval tasks ship PDFs, spreadsheets and images as reference files; let the policy see what it accepts.
       media_inputs: [image, pdf]

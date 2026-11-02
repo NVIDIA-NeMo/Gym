@@ -116,6 +116,7 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
                 media_inputs=self.config.media_inputs,
+                trace_dir=self.config.artifacts_dir / "embedded",
             )
         else:
             if body.sandbox_access is None:
@@ -141,7 +142,6 @@ class NOOAAgent(SimpleResponsesAPIAgent):
                 close_timeout=self.config.session_close_timeout_seconds,
                 max_policy_calls=self.config.max_policy_calls,
                 context_window=self.config.context_window,
-                trace_jsonl=self.config.trace_jsonl,
                 artifacts_dir=self.config.artifacts_dir,
                 media_inputs=self.config.media_inputs,
             )

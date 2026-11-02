@@ -1000,11 +1000,10 @@ async def test_provider_execution_failure_is_not_replaced_by_a_capture_error() -
 
 
 @pytest.mark.asyncio
-async def test_trace_jsonl_is_requested_and_copied_per_rollout(tmp_path: Path) -> None:
-    """With trace_jsonl on, the worker is told where to write traces and the joined file lands under
-    <artifacts_dir>/<rollout_id>/traces.jsonl; the sandbox files stay the collector's only source."""
+async def test_every_rollout_requests_and_keeps_its_trace(tmp_path: Path) -> None:
+    """The worker is always told where to write the trace (spans plus the message journal that reconstructs each
+    model call) and the joined file lands under <artifacts_dir>/<rollout_id>/traces.jsonl."""
     r, s = runner()
-    r.trace_jsonl = True
     r.artifacts_dir = tmp_path / "artifacts"
     complete_files(r, s)
     s.files[r.directory + "/traces.jsonl"] = '{"resourceSpans":[{"a":1}]}\n{"resourceSpans":[{"a":2}]}\n'
@@ -1015,28 +1014,20 @@ async def test_trace_jsonl_is_requested_and_copied_per_rollout(tmp_path: Path) -
     copied = tmp_path / "artifacts" / request.rollout_id / "traces.jsonl"
     assert r.trace_file == copied
     assert copied.read_text().count("\n") == 2
+    assert not [gap for gap in r.observations.gaps if gap.code == "trace_unavailable"]
 
 
 @pytest.mark.asyncio
-async def test_trace_jsonl_off_sends_no_trace_dir_and_reads_no_trace(tmp_path: Path) -> None:
+async def test_missing_trace_file_is_a_gap_not_a_failed_rollout(tmp_path: Path) -> None:
+    """A worker that died before flushing leaves no traces.jsonl; the result is still collected and graded, and
+    the rollout's observations say its model calls cannot be reconstructed from a trace."""
     r, s = runner()
-    complete_files(r, s)
-    request = payload().request
-    await r.run(request)
-    launch = SandboxInput.model_validate_json(s.files[r.directory + "/input.json"])
-    assert launch.trace_dir is None
-    assert r.trace_file is None
-    assert not (tmp_path / "artifacts").exists()
-
-
-@pytest.mark.asyncio
-async def test_missing_trace_file_does_not_fail_the_rollout(tmp_path: Path) -> None:
-    """A worker that died before flushing leaves no traces.jsonl; the result is still collected and graded."""
-    r, s = runner()
-    r.trace_jsonl = True
     r.artifacts_dir = tmp_path / "artifacts"
     complete_files(r, s)
     request = payload().request
     result = await r.run(request)
     assert result.episode.response is not None
     assert r.trace_file is None
+    gaps = [gap for gap in r.observations.gaps if gap.code == "trace_unavailable"]
+    assert len(gaps) == 1
+    assert "no traces.jsonl" in gaps[0].detail

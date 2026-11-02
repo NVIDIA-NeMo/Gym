@@ -42,7 +42,6 @@ class SandboxNOOARunner:
         context_window: int | None = None,
         timeout: float = 21600,
         close_timeout: float = 30,
-        trace_jsonl: bool = False,
         artifacts_dir: Path | None = None,
         media_inputs: tuple[str, ...] = (),
     ) -> None:
@@ -56,7 +55,6 @@ class SandboxNOOARunner:
         self.media_inputs = media_inputs
         self.timeout = timeout
         self.close_timeout = close_timeout
-        self.trace_jsonl = trace_jsonl
         self.artifacts_dir = artifacts_dir
         self.rollout_id: str | None = None
         self.trace_file: Path | None = None
@@ -93,7 +91,7 @@ class SandboxNOOARunner:
             model_server_name=self.model_server_name,
             max_policy_calls=self.max_policy_calls,
             context_window=self.context_window,
-            trace_dir=f"{self.directory}/traces" if self.trace_jsonl else None,
+            trace_dir=f"{self.directory}/traces",
             media_inputs=self.media_inputs,
         )
         await upload_text(self.sandbox, path=f"{self.directory}/input.json", text=payload.model_dump_json())
@@ -209,26 +207,37 @@ class SandboxNOOARunner:
             LOGGER.warning("Retrying NOOA %s capture after %s", name, type(error).__name__)
         return await read_text(self.sandbox, path=f"{self.directory}/{name}")
 
-    async def _collect_trace(self) -> None:
-        """Copy the worker's joined OTLP JSONL trace to the host; diagnostics only, so failures are logged."""
-        if not self.trace_jsonl or self.artifacts_dir is None or self.rollout_id is None:
-            return
+    async def _collect_trace(self) -> ObservationGap | None:
+        """Copy the worker's trace (spans plus the message journal) to the host.
+
+        The trace is how a model call is reconstructed after the run, so every rollout keeps one. It never fails the
+        rollout: a missing or unreadable trace is returned as the gap the rollout's observations will carry.
+        """
+        if self.artifacts_dir is None or self.rollout_id is None:
+            return None
         try:
             text = await self._read_artifact("traces.jsonl")
         except FileNotFoundError:
             LOGGER.info("NOOA rollout %s left no trace file", self.rollout_id)
-            return
-        except Exception:  # noqa: BLE001 - a trace is never allowed to fail the rollout
+            return ObservationGap(code="trace_unavailable", detail="NOOA worker left no traces.jsonl")
+        except Exception as error:  # noqa: BLE001 - a trace is never allowed to fail the rollout
             LOGGER.warning("NOOA rollout %s trace capture failed", self.rollout_id, exc_info=True)
-            return
+            return ObservationGap(code="trace_unavailable", detail=f"trace capture failed ({type(error).__name__})")
         target = self.artifacts_dir / self.rollout_id / "traces.jsonl"
         target.parent.mkdir(parents=True, exist_ok=True)
         target.write_text(text, encoding="utf-8")
         self.trace_file = target
+        return None
 
     async def _collect_artifacts(self) -> None:
+        """Collect the trace and the result; a trace that could not be kept is a gap on the result's observations."""
+        trace_gap = await self._collect_trace()
+        await self._collect_result()
+        if trace_gap is not None and self.observations is not None:
+            self.observations = self.observations.model_copy(update={"gaps": [*self.observations.gaps, trace_gap]})
+
+    async def _collect_result(self) -> None:
         """Prefer terminal evidence; recovered checkpoints can never establish completion."""
-        await self._collect_trace()
         capture_error: Exception | None = None
         try:
             artifact = SandboxResult.model_validate_json(await self._read_artifact("result.json"))
