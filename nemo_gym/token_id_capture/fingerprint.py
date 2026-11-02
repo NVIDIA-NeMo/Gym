@@ -320,9 +320,9 @@ def _served_tool_name(name: str, arguments: str) -> str:
     keeps its name, so a renamed call still cannot match.
 
     This only moves the unversioned whole-turn key, never the strict fingerprint, so
-    ``FINGERPRINT_VERSION`` stays. A served output can itself hold a model-emitted call of exactly
-    this shape (rare: 4 of 118,502 served Terminal-Bench 2.1 calls); its turn key changes too, so a
-    lineage store written before this mapping disagrees with one replayed after it on such a call.
+    ``FINGERPRINT_VERSION`` stays. In the rare case that a served output itself holds a model-emitted
+    call of exactly this shape, its turn key changes too, so a lineage store written before this
+    mapping disagrees with one replayed after it on such a call.
     """
     if name != _UNAVAILABLE_TOOL_PLACEHOLDER:
         return name
