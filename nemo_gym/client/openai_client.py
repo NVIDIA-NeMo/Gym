@@ -31,7 +31,7 @@ from typing import (
     Optional,
 )
 
-from aiohttp import ClientTimeout
+from aiohttp import ClientResponseError, ClientTimeout
 from pydantic import (
     BaseModel,
     Field,
@@ -49,7 +49,6 @@ from nemo_gym.client.http_client import (
     request,
 )
 from nemo_gym.core.episode import current_rollout_id
-from nemo_gym.server_runtime.base_server import ClientResponseError
 
 
 # See https://platform.openai.com/docs/guides/error-codes/api-errors

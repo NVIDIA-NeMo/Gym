@@ -789,7 +789,7 @@ def test_invalid_explicit_identity_is_a_configuration_error(identity):
 async def test_failure_sidecar_retains_observations_and_captured_model_calls(
     runner_config, monkeypatch, route_failures
 ):
-    from nemo_gym.base_responses_api_model import CaptureStore
+    from nemo_gym.models.model_call_capture import CaptureStore
 
     runner_config.route_failures_to_sidecar = route_failures
     capture_dir = Path(runner_config.output_jsonl_fpath).parent / "captures"

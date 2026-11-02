@@ -28,6 +28,14 @@ if TYPE_CHECKING:
         note_generation_request,
     )
     from nemo_gym.models.anthropic_converter import AnthropicConverter
+    from nemo_gym.models.base_responses_api_model import (
+        PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
+        BaseResponsesAPIModelConfig,
+        Body,
+        SimpleResponsesAPIModel,
+        context_overflow_error_fields,
+        is_propagated_refusal,
+    )
     from nemo_gym.models.chat_completions_converter import (
         ResponsesConverter,
         VLLMConverter,
@@ -35,13 +43,12 @@ if TYPE_CHECKING:
         chat_completion_usage_to_response_usage,
         split_responses_input_output_items,
     )
-    from nemo_gym.models.chat_streaming import SSE_KEEPALIVE, synthesize_chat_completion_sse
-    from nemo_gym.models.openai_utils import (
-        MAX_NUM_TRIES,
-        RATE_LIMIT_ERROR_CODES,
-        RETRY_ERROR_CODES,
-        NeMoGymAsyncOpenAI,
-        PermanentEndpointError,
+    from nemo_gym.models.chat_streaming import synthesize_chat_completion_sse
+    from nemo_gym.models.model_call_capture import (
+        CaptureStore,
+        ModelCallCaptureConfig,
+        install_model_call_capture,
+        start_model_execution,
     )
     from nemo_gym.models.responses_streaming import (
         flatten_namespace_tools,
@@ -70,6 +77,7 @@ if TYPE_CHECKING:
         TokenSource,
     )
     from nemo_gym.models.token_capture.records import (
+        CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
         ENGINE_REFUSED_CALL_REASON,
         UNCOMMITTED_CALL_REASON,
         ParentResolutionStatus,
@@ -105,31 +113,32 @@ if TYPE_CHECKING:
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "AnthropicConverter": "anthropic_converter",
+    "BaseResponsesAPIModelConfig": "base_responses_api_model",
+    "Body": "base_responses_api_model",
     "CAPTURE_REFUSAL_HEADER": "token_capture.protocols",
+    "CONTEXT_LENGTH_EXCEEDED_ERROR_CODE": "token_capture.records",
     "CaptureAdmission": "token_capture.staging.records",
     "CaptureAdmissionError": "token_capture.protocols",
     "CaptureContext": "token_capture.sink",
     "CaptureInputError": "token_capture.protocols",
+    "CaptureStore": "model_call_capture",
     "ENGINE_REFUSED_CALL_REASON": "token_capture.records",
     "ExternalCaptureHandler": "token_capture.external_capture",
     "FileLineageStore": "token_capture.lineage",
     "INVALID_COMMIT_COORDS_REASON": "token_capture.staging.records",
     "InMemoryLineageStore": "token_capture.lineage",
     "LineageResolver": "token_capture.protocols",
-    "MAX_NUM_TRIES": "openai_utils",
+    "ModelCallCaptureConfig": "model_call_capture",
     "NG_CAPTURE_FIELD": "token_capture.sink",
     "NG_COMMIT_COORDS_FIELD": "token_capture.sink",
-    "NeMoGymAsyncOpenAI": "openai_utils",
+    "PROPAGATED_REFUSAL_CODE_ATTRIBUTE": "base_responses_api_model",
     "ParentResolutionStatus": "token_capture.records",
-    "PermanentEndpointError": "openai_utils",
     "PolicyModelParticipant": "_checkpoint",
-    "RATE_LIMIT_ERROR_CODES": "openai_utils",
-    "RETRY_ERROR_CODES": "openai_utils",
     "ResponsesConverter": "chat_completions_converter",
     "RolloutManifest": "token_capture.staging.records",
     "RolloutReceipt": "token_capture.staging.records",
     "RolloutTokenCapture": "token_capture.staging.capture",
-    "SSE_KEEPALIVE": "chat_streaming",
+    "SimpleResponsesAPIModel": "base_responses_api_model",
     "StageResult": "token_capture.staging.records",
     "StagedCallBaseSnapshot": "token_capture.staging.records",
     "TokenCaptureSnapshot": "token_capture.protocols",
@@ -145,9 +154,12 @@ _PUBLIC_API = {
     "WORKER_MISSING_COMMIT_COORDS_REASON": "token_capture.staging.records",
     "capture_engine_refusal": "token_capture.sink",
     "chat_completion_usage_to_response_usage": "chat_completions_converter",
+    "context_overflow_error_fields": "base_responses_api_model",
     "current_capture_context": "token_capture.sink",
     "flatten_namespace_tools": "responses_streaming",
     "generation_cut_requester": "_checkpoint",
+    "install_model_call_capture": "model_call_capture",
+    "is_propagated_refusal": "base_responses_api_model",
     "is_responses_lifecycle_chunk": "responses_streaming",
     "make_external_capture_handler": "token_capture.external_capture",
     "note_generation_backend": "_checkpoint",
@@ -161,6 +173,7 @@ _PUBLIC_API = {
     "set_token_sink": "token_capture.sink",
     "split_responses_input_output_items": "chat_completions_converter",
     "stamp_continuation": "token_capture.lineage",
+    "start_model_execution": "model_call_capture",
     "synthesize_chat_completion_sse": "chat_streaming",
     "synthesize_responses_sse": "responses_streaming",
     "token_capture_config": "token_capture.config",

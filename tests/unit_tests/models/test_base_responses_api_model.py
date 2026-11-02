@@ -26,17 +26,6 @@ from omegaconf import OmegaConf
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_agent import SimpleResponsesAPIAgent
-from nemo_gym.base_responses_api_model import (
-    BaseResponsesAPIModel,
-    BaseResponsesAPIModelConfig,
-    CaptureStore,
-    ModelCallCaptureConfig,
-    SimpleResponsesAPIModel,
-    _orjson_dispatch_response,
-    _request_messages,
-    install_model_call_capture,
-    make_capture_store,
-)
 from nemo_gym.client.server_client import ServerClient, apply_rollout_prefix, rollout_path_prefix
 from nemo_gym.config.global_config import NEMO_GYM_RESERVED_TOP_LEVEL_KEYS, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER
@@ -44,6 +33,19 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.models.base_responses_api_model import (
+    BaseResponsesAPIModel,
+    BaseResponsesAPIModelConfig,
+    SimpleResponsesAPIModel,
+    _orjson_dispatch_response,
+    _request_messages,
+)
+from nemo_gym.models.model_call_capture import (
+    CaptureStore,
+    ModelCallCaptureConfig,
+    install_model_call_capture,
+    make_capture_store,
 )
 from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.observability.model_calls import read_model_call_records
@@ -117,13 +119,20 @@ class TestBaseResponsesAPIModel:
         ("read_model_call_records", "nemo_gym.observability.model_calls"),
         ("aggregate_model_call_metrics", "nemo_gym.observability.model_calls"),
         ("maybe_rollout_id_from_run_body", "nemo_gym.core.episode"),
+        ("token_id_capture_config", "nemo_gym.models.token_capture.config:token_capture_config"),
     ],
 )
 def test_model_call_legacy_import_resolves_with_deprecation(name, module):
-    legacy = importlib.import_module("nemo_gym.base_responses_api_model")
-    with pytest.warns(DeprecationWarning, match=re.escape(f"has moved to `{module}.{name}`")):
+    legacy_path = "nemo_gym.base_responses_api_model"  # path before nemo_gym 0.8.0
+    legacy = importlib.import_module(legacy_path)
+    module, _, new_name = module.partition(":")
+    new_name = new_name or name
+    # The warning names the path the caller imported, not the module that now serves it.
+    with pytest.warns(
+        DeprecationWarning, match=re.escape(f"`{legacy_path}.{name}` has moved to `{module}.{new_name}`")
+    ):
         value = getattr(legacy, name)
-    assert value is getattr(importlib.import_module(module), name)
+    assert value is getattr(importlib.import_module(module), new_name)
 
 
 class _DispatchPayload(BaseModel):
@@ -279,7 +288,7 @@ def test_capture_store_raises_on_malformed_nonblank_json(tmp_path):
     ],
 )
 def test_unique_request_header_requires_one_value(headers, expected):
-    from nemo_gym.base_responses_api_model import _unique_request_header
+    from nemo_gym.models.model_call_capture import _unique_request_header
 
     assert _unique_request_header(headers, b"x-session-id") == expected
 
@@ -309,7 +318,7 @@ def test_unique_request_header_requires_one_value(headers, expected):
 def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected):
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
 
     store = CaptureStore(tmp_path)
     forwarded_headers = []
@@ -358,7 +367,7 @@ def test_capture_assistant_message_header_round_trip(tmp_path, headers, expected
 def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
 
     store = CaptureStore(tmp_path)
     durable_call_counts = []
@@ -415,7 +424,7 @@ def test_capture_is_durable_before_stream_terminal_event_is_sent(tmp_path):
 def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
 
     store = CaptureStore(tmp_path)
     partial = b'data: {"type":"response.output_text.delta","delta":"partial"}\n\n'
@@ -460,7 +469,7 @@ def test_capture_retains_partial_stream_when_downstream_raises(tmp_path):
 
 
 def test_stream_error_events_are_terminal():
-    from nemo_gym.base_responses_api_model import _consume_terminal_sse_event
+    from nemo_gym.models.model_call_capture import _consume_terminal_sse_event
 
     for dialect in ("responses", "messages"):
         assert _consume_terminal_sse_event(bytearray(b'event: error\ndata: {"error":"boom"}\n\n'), dialect) == "error"
@@ -569,7 +578,7 @@ def test_raised_call_is_captured_then_reraised(tmp_path):
 def test_cancelled_call_is_captured_then_reraised(tmp_path):
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
 
     store = CaptureStore(tmp_path)
     seen_paths: list[str] = []
@@ -757,7 +766,7 @@ def test_maybe_rollout_id_from_run_body_reads_canonical_indices():
 
 # --- error classification ---
 def test_classify_status_branches():
-    from nemo_gym.base_responses_api_model import _classify_status
+    from nemo_gym.models.model_call_capture import _classify_status
 
     assert _classify_status(200) is None
     assert _classify_status(408) == "timeout"
@@ -773,7 +782,7 @@ def test_classify_status_branches():
 def test_classify_exception_branches():
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _classify_exception
+    from nemo_gym.models.model_call_capture import _classify_exception
 
     class _ReadTimeout(Exception):
         pass
@@ -786,7 +795,7 @@ def test_classify_exception_branches():
 
 
 def test_exception_http_details_tolerates_lazy_response_failure():
-    from nemo_gym.base_responses_api_model import _exception_http_details
+    from nemo_gym.models.model_call_capture import _exception_http_details
 
     class _Response:
         status_code = 503
@@ -805,7 +814,7 @@ def test_exception_http_details_tolerates_lazy_response_failure():
 
 
 def test_context_overflow_error_fields_reads_the_engine_body_and_the_marked_code():
-    from nemo_gym.base_responses_api_model import (
+    from nemo_gym.models.base_responses_api_model import (
         CONTEXT_LENGTH_EXCEEDED_ERROR_CODE,
         PROPAGATED_REFUSAL_CODE_ATTRIBUTE,
         context_overflow_error_fields,
@@ -885,7 +894,7 @@ def test_model_call_capture_config_requires_absolute_dir_when_enabled(tmp_path, 
 
 
 def test_make_capture_store_init_failure_returns_none(monkeypatch):
-    import nemo_gym.base_responses_api_model as obs
+    import nemo_gym.models.model_call_capture as obs
 
     def _boom(_root):
         raise OSError("cannot create")
@@ -896,7 +905,7 @@ def test_make_capture_store_init_failure_returns_none(monkeypatch):
 
 
 def test_record_swallows_store_failure_and_marks_capture_incomplete(tmp_path, monkeypatch):
-    from nemo_gym.base_responses_api_model import _record
+    from nemo_gym.models.model_call_capture import _record
 
     store = CaptureStore(tmp_path)
     monkeypatch.setattr(store, "record", MagicMock(side_effect=RuntimeError("disk full")))
@@ -920,7 +929,7 @@ def test_record_swallows_store_failure_and_marks_capture_incomplete(tmp_path, mo
 
 
 def test_record_falls_back_to_raw_when_request_parser_raises(tmp_path, monkeypatch):
-    import nemo_gym.base_responses_api_model as obs
+    import nemo_gym.models.model_call_capture as obs
 
     monkeypatch.setattr(obs.json, "loads", MagicMock(side_effect=RecursionError))
     store = CaptureStore(tmp_path)
@@ -969,7 +978,7 @@ def test_capture_records_non_json_response_as_none(tmp_path):
 
 # --- base-agent correlation helpers ---
 def test_leading_rollout_prefix_round_trips_with_server_parser():
-    from nemo_gym.base_responses_api_model import _ROLLOUT_PATH_RE
+    from nemo_gym.models.model_call_capture import _ROLLOUT_PATH_RE
 
     assert apply_rollout_prefix("http://h:1", "r1") == "http://h:1/ng-rollout/r1"
     assert apply_rollout_prefix("http://h:1/", None) == "http://h:1/"
@@ -1264,7 +1273,7 @@ def test_capture_reassembles_streamed_anthropic_sse(tmp_path):
 
 
 def test_reconstruct_chat_sse():
-    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+    from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
 
     chunks = [
         {
@@ -1304,7 +1313,7 @@ def test_reconstruct_chat_sse():
 
 
 def test_reconstruct_responses_sse_uses_terminal_envelope():
-    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+    from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
 
     raw = b"".join(
         _sse(c["type"], c)
@@ -1329,7 +1338,7 @@ def test_reconstruct_responses_sse_uses_terminal_envelope():
 
 
 def test_reconstruct_streamed_response_best_effort_none():
-    from nemo_gym.base_responses_api_model import _reconstruct_streamed_response
+    from nemo_gym.models.model_call_capture import _reconstruct_streamed_response
 
     assert _reconstruct_streamed_response(b"", "chat") is None  # no events
     assert _reconstruct_streamed_response(b"event: ping\ndata: not-json\n\n", "messages") is None  # unparseable
@@ -1532,7 +1541,7 @@ def _run_capture_middleware_on(path: str, *, token_store, sent: list | None = No
     """Drive _CaptureMiddleware over one request to ``path`` with a token store."""
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
 
     forwarded = forwarded if forwarded is not None else []
     sent = sent if sent is not None else []
@@ -1663,7 +1672,7 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
     """
     import asyncio
 
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
     from nemo_gym.observability.model_calls import await_model_call_capture_quiescence
 
     store = CaptureStore(tmp_path)
@@ -1717,7 +1726,7 @@ def test_capture_claim_is_visible_while_the_call_is_still_in_flight(tmp_path):
 
 @pytest.mark.asyncio
 async def test_verifier_capture_keeps_retry_ownership_separate_from_agent_observations(tmp_path):
-    from nemo_gym.base_responses_api_model import _CaptureMiddleware
+    from nemo_gym.models.model_call_capture import _CaptureMiddleware
     from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 
     store = CaptureStore(tmp_path)
