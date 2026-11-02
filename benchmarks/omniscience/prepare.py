@@ -27,7 +27,7 @@ Source: https://huggingface.co/datasets/ArtificialAnalysis/AA-Omniscience-Public
 import json
 from pathlib import Path
 
-from nemo_gym.global_config import get_hf_token
+from nemo_gym.config import get_hf_token
 
 
 BENCHMARK_DIR = Path(__file__).parent

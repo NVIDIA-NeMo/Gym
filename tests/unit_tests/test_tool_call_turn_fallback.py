@@ -18,9 +18,8 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.token_id_capture import stamp_lineage
 from nemo_gym.token_id_capture.lineage import RolloutLineage, stamp_continuation
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.token_id_capture.terminal import resolve_terminal
 
 

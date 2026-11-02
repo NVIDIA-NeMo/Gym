@@ -11,9 +11,9 @@ from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import PrivateAttr
 
-from nemo_gym.base_resources_server import SimpleResourcesServer, lost_session_verification
-from nemo_gym.failure_kinds import VERIFIER_ERROR
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
+from nemo_gym.core import VERIFIER_ERROR
+from nemo_gym.server_runtime import SimpleResourcesServer, lost_session_verification
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import (
     OSWorldCloseResponse,

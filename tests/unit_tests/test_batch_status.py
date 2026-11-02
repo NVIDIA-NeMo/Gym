@@ -19,15 +19,10 @@ from pathlib import Path
 import orjson
 import pytest
 
-from nemo_gym.batch_status import (
-    AGGREGATION_ERROR_KEY,
-    BatchManifest,
-    BatchStatusTracker,
-    observe_materialized_rows,
-    validate_batch_manifest,
-)
-from nemo_gym.config_types import ConfigError
-from nemo_gym.global_config import (
+from nemo_gym.artifacts.run_files import AGGREGATION_ERROR_KEY
+from nemo_gym.batch_status import BatchManifest, BatchStatusTracker, observe_materialized_rows, validate_batch_manifest
+from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.global_config import (
     AGENT_REF_KEY_NAME,
     ATTEMPT_INDEX_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,

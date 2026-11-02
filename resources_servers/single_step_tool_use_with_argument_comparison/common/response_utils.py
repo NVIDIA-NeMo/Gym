@@ -14,7 +14,7 @@
 # limitations under the License.
 from typing import Optional
 
-from nemo_gym.openai_utils import NeMoGymResponse
+from nemo_gym.core import NeMoGymResponse
 from resources_servers.single_step_tool_use_with_argument_comparison.common.verification_utils import (
     ExpectedAction,
     FunctionCallAction,

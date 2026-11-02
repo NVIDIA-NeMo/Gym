@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from resources_servers.osworld.app import OSWorldResourcesServer
 from resources_servers.osworld.config import OSWorldResourcesServerConfig
 from resources_servers.osworld.models import OSWorldEvaluateResponse, OSWorldVerifyRequest

@@ -15,8 +15,8 @@ from fastapi.responses import JSONResponse
 from fastapi.testclient import TestClient
 
 from nemo_gym.base_responses_api_model import ModelCallCaptureConfig, install_model_call_capture
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessContext, MiniSWEConfig

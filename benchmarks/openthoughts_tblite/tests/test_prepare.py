@@ -11,8 +11,8 @@ import yaml
 from omegaconf import OmegaConf
 
 from benchmarks.openthoughts_tblite import prepare as preparation
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]
@@ -253,7 +253,7 @@ def test_terminus_2_profile_uses_the_one_provider_the_run_names(
     provider: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """The README's command adds a provider config; agent and resources server both resolve to it alone."""
-    from nemo_gym.sandbox.config import resolve_provider_config
+    from nemo_gym.sandbox import resolve_provider_config
 
     monkeypatch.setenv("OPENSANDBOX_API_KEY", "unused")
     config = _resolve(

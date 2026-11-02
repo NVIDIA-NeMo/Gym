@@ -17,8 +17,8 @@ from uuid import uuid4
 
 from aiohttp import ClientTimeout
 
+from nemo_gym.client import request
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult
-from nemo_gym.server_utils import request
 
 
 CACHE_DIR = Path.home() / ".cache" / "nemo_gym" / "claude"

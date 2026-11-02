@@ -46,7 +46,7 @@ RUN_KEY = "run"
 TEAM_ENV_VARS = ("NEMO_GYM_TEAM", "SLURM_JOB_ACCOUNT")
 USER_ENV_VARS = ("NEMO_GYM_USER", "SLURM_JOB_USER")
 # NEMO_GYM_CONFIG_PATH is set by the gym CLI on every server process it spawns
-# (see nemo_gym.global_config.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, not imported
+# (see nemo_gym.config.global_config.NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME, not imported
 # here to keep this module dependency-free) and names the server instance,
 # which is the best automatic description of the workload.
 WORKLOAD_ENV_VARS = ("NEMO_GYM_WORKLOAD", "SLURM_JOB_NAME", "NEMO_GYM_CONFIG_PATH")
