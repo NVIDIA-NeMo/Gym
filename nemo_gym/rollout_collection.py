@@ -6067,7 +6067,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         (``ng_model_call_capture``, with request and response bodies unless ``include_model_call_payloads`` is false),
         the standardized ``ng_trajectory`` and ``ng_perf``. Model calls are captured only when the global config
         enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
-        is merged, and needs the payloads kept. With ``enrich_results`` off, results are exactly what `/run` returned.
+        is merged, and needs the payloads kept. With ``enrich_results`` the rows are dispatched as collection
+        dispatches them, on copies that name this call's run: results are validated, and under
+        ``route_failures_to_sidecar`` a failed `/run` comes back as the typed ``RolloutFailureRecord``, as
+        ``run_outcomes`` returns it; rows without a rollout identity keep the plain dispatch. With ``enrich_results``
+        off, results are exactly what `/run` returned.
 
         ``record_output_dir`` with ``record_shard`` also writes each rollout to that run folder through
         :class:`_RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
@@ -6122,9 +6126,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 missing = [key for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME) if key not in row]
                 if missing:
                     raise ValueError(f"Recording row {index} is missing required fields: {', '.join(missing)}")
-            # Recorded as collection dispatches: typed failure records under route_failures_to_sidecar and validated
-            # results, on copies that all name the shard's run, a row reused from an earlier run included, so every
-            # record checks against the shard's manifest. The caller's rows are not modified.
+        if enrich_results and all(maybe_rollout_id_from_run_body(row) is not None for row in examples):
+            # Enriched or recorded, the rows are dispatched as collection dispatches: typed failure records under
+            # route_failures_to_sidecar and validated results, on copies that all name this call's run (a row reused
+            # from an earlier run included), so a recorded shard's records check against its manifest. The caller's
+            # rows are not modified. Rows without a rollout identity keep the plain dispatch and its legacy rows.
             run_id = uuid4().hex
             dispatched = [
                 dict(row, **{RUN_ID_KEY: run_id, ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME, 0)})
@@ -6141,11 +6147,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             drain_margin_s=drain_margin_s,
             latency_tracker=latency_tracker,
             **({"retry_requests": False} if not retry_requests else {}),
-            **(
-                {"typed_outcomes": route_failures_to_sidecar, "validate_results": True}
-                if record_output_dir is not None
-                else {}
-            ),
+            **({"typed_outcomes": route_failures_to_sidecar, "validate_results": True} if run_id is not None else {}),
         )
         # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
         writer = None

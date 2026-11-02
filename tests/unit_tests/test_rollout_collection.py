@@ -14429,6 +14429,33 @@ class TestEnrichRunResult:
 
         assert reply[ATTEMPT_INDEX_KEY_NAME] == 2
 
+    async def test_enrichment_returns_the_typed_failure_record_for_a_failed_run(self, monkeypatch) -> None:
+        """Through the real dispatcher: with enrichment a judge failure is the typed record, not the legacy dict."""
+        from nemo_gym.rollout_outcomes import RolloutFailureRecord
+
+        judge_failed = {
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge unavailable",
+            "reward": 0.0,
+            "response": {"output": []},
+        }
+
+        async def post(*args, **kwargs):
+            return FakeResponse(200, dict(judge_failed))
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        _, typed = await next(
+            RolloutCollectionHelper().run_examples(
+                [failing_row()], route_failures_to_sidecar=True, enrich_results=True
+            )
+        )
+        assert isinstance(typed, RolloutFailureRecord)
+        assert typed.failure.failure_kind == "judge_failed"
+        # Without enrichment the dispatcher's legacy row is returned, as before.
+        _, legacy = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+        assert isinstance(legacy, dict) and legacy[NG_FAILURE_CLASS_KEY] == "judge_failed"
+
 
 class TestRunRecordWriter:
     """``_RunRecordWriter`` lays out a shard the way ``ng_collect_rollouts`` lays out a run."""
