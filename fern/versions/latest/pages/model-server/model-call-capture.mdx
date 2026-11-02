@@ -78,7 +78,7 @@ No content is delivered during generation, so buffered SSE does not reduce time 
 Worker streaming with external capture remains unsupported. Training reconstruction reads
 the external staged tokens, not the SSE text.
 
-The staging ledger's wire models (`nemo_gym/token_id_capture/staging/records.py`) forbid unknown
+The staging ledger's wire models (`nemo_gym/models/token_capture/staging/records.py`) forbid unknown
 fields, so the model server that stages a call and the framework that rebuilds the rollout from
 the staged rows must run the same Gym version. A framework whose Gym predates a column the model
 server writes, such as `source_capture_key` or `finish_reason`, rejects every manifest row as
@@ -387,7 +387,7 @@ varies by producer and execution path; the
 
 ## Framework-owned media staging
 
-Training frameworks using `nemo_gym.token_id_capture.staging` can hand a framework's
+Training frameworks using `nemo_gym.models.token_capture.staging` can hand a framework's
 processed media (for example an inference worker's pixel tensors) to
 `RolloutTokenCapture.complete_call` or `complete_call_from_response` through the
 keyword-only `attachments` mapping. Gym forwards the mapping unchanged to

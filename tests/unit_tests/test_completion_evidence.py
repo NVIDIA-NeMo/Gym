@@ -8,13 +8,13 @@ from copy import deepcopy
 import pytest
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.token_id_capture.completion import (
+from nemo_gym.models.token_capture.completion import (
     completion_items,
     completion_metadata,
     output_item_fingerprint,
     output_validation_item,
 )
-from nemo_gym.token_id_capture.staging.records import CallRecord
+from nemo_gym.models.token_capture.staging.records import CallRecord
 
 
 @pytest.mark.parametrize("text", ["<think>work</think>answer", "literal <think> tag", "ordinary answer"])

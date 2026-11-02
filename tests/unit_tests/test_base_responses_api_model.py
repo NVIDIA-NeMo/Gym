@@ -45,8 +45,8 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
+from nemo_gym.models.token_capture.replay import replay_context
 from nemo_gym.observability.model_calls import read_model_call_records
-from nemo_gym.token_id_capture.replay import replay_context
 
 
 @pytest.mark.parametrize("text", ["What is 2 + 2?", ""])
@@ -1564,7 +1564,7 @@ def _run_capture_middleware_on(path: str, *, token_store, sent: list | None = No
 def test_unobserved_dialect_under_capture_prefix_marks_incomplete(tmp_path):
     # The middleware cannot capture tokens from /v1/completions.
     # Its output can still feed later prompts.
-    from nemo_gym.token_id_capture.store import TokenCaptureStore
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, sent = _run_capture_middleware_on(
@@ -1590,7 +1590,7 @@ def test_unobserved_dialect_marking_failure_still_forwards(tmp_path):
 
 
 def test_observed_dialect_under_capture_prefix_is_not_marked_incomplete(tmp_path):
-    from nemo_gym.token_id_capture.store import TokenCaptureStore
+    from nemo_gym.models.token_capture.store import TokenCaptureStore
 
     token_store = TokenCaptureStore(tmp_path)
     forwarded, _sent = _run_capture_middleware_on(

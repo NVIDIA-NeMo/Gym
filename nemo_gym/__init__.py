@@ -214,7 +214,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AggregateMetricsRequest": "config.config_types",
     "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
-    "NeMoGymAsyncOpenAI": "openai_utils",
+    "NeMoGymAsyncOpenAI": "models.openai_utils",
     "NeMoGymResponse": "core.responses_api_types",
     "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
     "NeMoGymChatCompletion": "core.responses_api_types",
