@@ -43,7 +43,7 @@ def _encoded(value: Any) -> bytes:
 
 
 class DeltaState:
-    """Track accepted history for one sequential conversation."""
+    """Track submitted history for one sequential conversation."""
 
     def __init__(self) -> None:
         self.conversation_id = uuid4().hex
@@ -69,7 +69,8 @@ class DeltaState:
         }
         return _encoded(payload), identity, items
 
-    def accepted(self, identity: str, items: list[bytes]) -> None:
+    def submitted(self, identity: str, items: list[bytes]) -> None:
+        """Keep a candidate base after sending; Gym rejects it if it was not stored."""
         self.version, self.items = identity, items
 
 
@@ -205,6 +206,11 @@ class HistoryTransport:
             for attempt in range(2):
                 headers["Content-Length"] = str(len(wire))
                 connection.request(handler.command, handler.path, body=wire, headers=headers)
+                if prepared:
+                    # Gym stores history before inference. A lost response does not
+                    # imply a lost base; let the next request try that version.
+                    # A missing base still triggers the explicit 409/full fallback.
+                    state.submitted(prepared[1], prepared[2])
                 response = connection.getresponse()
                 if response.status == 409 and prepared and attempt == 0:
                     rejection = response.read(MAX_HISTORY_BODY_BYTES + 1)
@@ -221,8 +227,6 @@ class HistoryTransport:
                     buffered = None
                 break
             with response:
-                if prepared and 200 <= response.status < 300:
-                    state.accepted(prepared[1], prepared[2])
                 handler.send_response(response.status)
                 response_hop = {value.strip().lower() for value in response.getheader("Connection", "").split(",")}
                 for key, value in response.getheaders():

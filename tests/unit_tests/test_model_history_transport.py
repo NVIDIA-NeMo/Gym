@@ -32,6 +32,8 @@ def model_server():
         upstream_clients=set(),
         status=200,
         stream=False,
+        disconnect_before_history=False,
+        disconnect_after_history=False,
         first=threading.Event(),
         release=threading.Event(),
     )
@@ -46,6 +48,10 @@ def model_server():
             model.upstream_clients.add(self.client_address)
             body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
             model.wire.append((deepcopy(body), dict(self.headers)))
+            if model.disconnect_before_history:
+                model.disconnect_before_history = False
+                self.close_connection = True
+                return
             field = "input" if self.path.endswith("/responses") else "messages"
             try:
                 restored = (
@@ -61,6 +67,10 @@ def model_server():
                 self.wfile.write(data)
                 return
             model.restored.append(restored)
+            if model.disconnect_after_history:
+                model.disconnect_after_history = False
+                self.close_connection = True
+                return
             if model.stream:
                 self.send_response(200)
                 self.send_header("Content-Type", "text/event-stream")
@@ -161,6 +171,102 @@ def test_model_errors_are_not_retried(post_model, model_server):
     assert len(model_server.wire) == 1
 
 
+def test_lost_first_response_preserves_history_for_retry(post_model, model_server):
+    request = {"input": [{"role": "user", "content": "task"}]}
+
+    model_server.disconnect_after_history = True
+    lost_response = post_model(endpoint="responses", json=request)
+    assert lost_response.status_code == 502
+    assert len(model_server.wire) == 1
+
+    retry_response = post_model(endpoint="responses", json=request)
+    assert retry_response.status_code == 200
+    assert retry_response.json() == {"unchanged": True}
+    assert model_server.restored == [request, request]
+    first_wire, retry_wire = [body for body, _ in model_server.wire]
+    assert first_wire["_gym_history"]["mode"] == "full"
+    assert retry_wire["_gym_history"]["mode"] == "append"
+    assert retry_wire["_gym_history"]["base_version"] == first_wire["_gym_history"]["request_id"]
+    assert retry_wire["input"] == []
+
+
+def test_lost_append_response_preserves_history_for_next_request(post_model, model_server):
+    user = {"role": "user", "content": "task"}
+    assistant = {"role": "assistant", "content": "answer"}
+    follow_up = {"role": "user", "content": "continue"}
+    first_request = {"input": [user]}
+    appended_request = {"input": [user, assistant]}
+    next_request = {"input": [user, assistant, follow_up]}
+
+    first_response = post_model(endpoint="responses", json=first_request)
+    assert first_response.status_code == 200
+
+    model_server.disconnect_after_history = True
+    lost_response = post_model(endpoint="responses", json=appended_request)
+    assert lost_response.status_code == 502
+    assert len(model_server.wire) == 2
+
+    next_response = post_model(endpoint="responses", json=next_request)
+    assert next_response.status_code == 200
+    assert model_server.restored == [first_request, appended_request, next_request]
+    first_wire, appended_wire, next_wire = [body for body, _ in model_server.wire]
+    assert first_wire["_gym_history"]["mode"] == "full"
+    assert appended_wire["input"] == [assistant]
+    assert next_wire["_gym_history"]["mode"] == "append"
+    assert next_wire["_gym_history"]["base_version"] == appended_wire["_gym_history"]["request_id"]
+    assert next_wire["input"] == [follow_up]
+
+
+def test_repeated_lost_responses_do_not_resend_full_history(post_model, model_server):
+    request = {"input": [{"role": "user", "content": "task"}]}
+
+    model_server.disconnect_after_history = True
+    first_response = post_model(endpoint="responses", json=request)
+    assert first_response.status_code == 502
+
+    model_server.disconnect_after_history = True
+    second_response = post_model(endpoint="responses", json=request)
+    assert second_response.status_code == 502
+
+    third_response = post_model(endpoint="responses", json=request)
+    assert third_response.status_code == 200
+    assert model_server.restored == [request, request, request]
+    first_wire, second_wire, third_wire = [body for body, _ in model_server.wire]
+    assert first_wire["_gym_history"]["mode"] == "full"
+    assert second_wire["_gym_history"]["mode"] == "append"
+    assert second_wire["input"] == []
+    assert third_wire["_gym_history"]["mode"] == "append"
+    assert third_wire["input"] == []
+    assert third_wire["_gym_history"]["base_version"] == second_wire["_gym_history"]["request_id"]
+
+
+def test_unstored_history_is_resent_only_after_explicit_resync(post_model, model_server):
+    user = {"role": "user", "content": "task"}
+    assistant = {"role": "assistant", "content": "answer"}
+    first_request = {"input": [user]}
+    appended_request = {"input": [user, assistant]}
+
+    first_response = post_model(endpoint="responses", json=first_request)
+    assert first_response.status_code == 200
+
+    model_server.disconnect_before_history = True
+    lost_response = post_model(endpoint="responses", json=appended_request)
+    assert lost_response.status_code == 502
+    assert len(model_server.wire) == 2
+
+    retry_response = post_model(endpoint="responses", json=appended_request)
+    assert retry_response.status_code == 200
+    assert model_server.restored == [first_request, appended_request]
+    first_wire, lost_wire, rejected_wire, full_wire = [body for body, _ in model_server.wire]
+    assert first_wire["_gym_history"]["mode"] == "full"
+    assert lost_wire["input"] == [assistant]
+    assert rejected_wire["_gym_history"]["mode"] == "append"
+    assert rejected_wire["_gym_history"]["base_version"] == lost_wire["_gym_history"]["request_id"]
+    assert rejected_wire["input"] == []
+    assert full_wire["_gym_history"]["mode"] == "full"
+    assert full_wire["input"] == [user, assistant]
+
+
 def test_chunked_upload_and_streaming_reply_are_relayed_incrementally(post_model, model_server):
     model_server.stream = True
     body = {"input": [{"role": "user", "content": "task"}], "stream": True}
@@ -183,7 +289,7 @@ def test_stale_delta_is_rejected_and_full_resync_restores_request():
 
     first_wire, first_identity, first_items = history_state.prepare(first_request, "input")
     assert upstream_history.reconstruct("rollout", json.loads(first_wire), history_field="input") == first_request
-    history_state.accepted(first_identity, first_items)
+    history_state.submitted(first_identity, first_items)
 
     accepted_wire, _, _ = history_state.prepare(appended_request, "input")
     stale_wire, _, _ = history_state.prepare(appended_request, "input")
