@@ -269,3 +269,36 @@ def test_a_rollout_whose_attempts_went_to_judge_failures_keeps_its_cap(tmp_path)
     assert (recorded.action.value, recorded.counts) == ("stop", {"exhausted": 1})
     assert recorded.evidence[0].max_attempts == 3
     assert due_judge_failures(output) == []
+
+
+def test_an_extension_whose_job_is_not_queued_restores_the_record_and_journals_nothing(tmp_path, slurm_bin):
+    from nemo_gym.orchestration.submit import recover
+
+    job, _, _ = _resumable_run(tmp_path)
+    prepare_managed(job, "exhausted", n=2)
+    record = job / "artifacts" / EXTENSION
+    record.write_text("1\n")  # an earlier recovery's extension
+    (slurm_bin / "sbatch").write_text("#!/bin/bash\necho 'sbatch: error: Batch job submission failed'; exit 1\n")
+
+    out = recover(*_handle(job), extend_attempts=2)
+
+    assert not out.ok and out.dispatched is None
+    assert out.scheduler_refusal["job_dir_restored"] is True
+    assert "attempt extension" in out.scheduler_refusal["restored"]
+    assert record.read_text() == "1\n"
+    assert not (job / RETRY_EXTENSION_JOURNAL_NAME).exists()
+
+
+def test_the_journal_names_the_user_who_extended_the_attempts(tmp_path, slurm_bin, monkeypatch):
+    from nemo_gym.orchestration.executors import slurm as slurm_module
+    from nemo_gym.orchestration.submit import recover
+
+    monkeypatch.setattr(slurm_module.getpass, "getuser", lambda: "operator-a")
+    job, _, _ = _resumable_run(tmp_path)
+    prepare_managed(job, "exhausted", n=2)
+
+    out = recover(*_handle(job), extend_attempts=1)
+
+    assert out.dispatched == "resubmit", out.decision.reason
+    [entry] = [json.loads(line) for line in (job / RETRY_EXTENSION_JOURNAL_NAME).read_text().splitlines()]
+    assert entry["user"] == "operator-a" and entry["kind"] == "attempts"
