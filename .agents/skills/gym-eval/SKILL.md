@@ -220,6 +220,10 @@ per-rollout attempt allowance. It is not a substitute for a recovery STOP.
 - A resume keeps every finished row and runs only the missing and retriable ones. A rollout in
   flight when an allocation ends starts again from its beginning: the first such cut is free, and
   each later one charges one attempt of that row.
+- `--recover --extend-attempts N` raises the per-identity attempt cap for the rows
+  that spent their attempts on infrastructure or on allocation cuts, never for rows that ended on
+  a model failure. Like `--extend-retries`, it is journaled with its reason and keeps the spent
+  counts. Inspect first: it names the rows it would reopen.
 - None of this retries a model failure. A scored zero, a clean agent timeout and a typed model
   failure are final (step 7).
 - When the launcher's Gym revision differs from the run's pin, the recovery needs
