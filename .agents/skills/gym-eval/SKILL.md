@@ -55,11 +55,10 @@ and for reading health while you build a benchmark or a harness, follow
    `gym eval submit --config submit.yaml --dry-run ++compute.cluster.walltime=00:40:00
    ++driver.benchmarks.<name>.run.limit=2`. Check the result with `--resolve-only` or `--dry-run`.
 7. An evaluation you do not track in MLflow on purpose: set `mlflow_tracking_required: false` in
-   each benchmark's `run`. It waives only the delivery requirement of the acceptance gate (step
-   9); health checks still run, and a configured MLflow export still happens. Without it, the
-   gate of a complete, healthy run stays `FAILED` on "no MLflow run evidence". A Gym pinned
-   before this skill does not know the key; a pin that does makes the inspection say `no MLflow
-   export by design`.
+   each benchmark's `run`. Delivery to MLflow is reported beside the acceptance gate as
+   `gate_task.mlflow_delivery` (step 4), and this key makes its state `not_required`: no delivery
+   evidence is expected. Health checks still run, and a configured MLflow export still happens.
+   A Gym pinned before this skill does not know the key.
 
 ## 2. Submit and let the chain run
 
@@ -156,8 +155,8 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 - `gate_task.status`: `RUNNING` (a job is live), `PLANNED` (eligible work, nothing dispatched; a
   dispatching call reports `RESUMING`), `FAILED` (stopped, unsupported, or something failed: read
   `errors`), `UNVERIFIED` (complete, nothing failed, acceptance not proven: read `warnings`),
-  `SUCCESS` (complete and every gate passed). A chain or MLflow error turns `SUCCESS` or
-  `UNVERIFIED` into `FAILED`.
+  `SUCCESS` (complete and every gate passed). A chain error turns `SUCCESS` or
+  `UNVERIFIED` into `FAILED`; MLflow delivery never does.
 - `gate_task.evaluation_health` (null until the run is complete): `status` (`PASS`, `FAIL`,
   `UNVERIFIED`), `evaluation_failure_rate`, `exact`, `trials`, `evaluation` (`count`, `fraction`,
   `kinds`, `server`), `model` (`count`, `fraction`, `kinds`), `policy_timeout_counts_as_model`
@@ -170,6 +169,12 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
   `verifier_recorded` (the observed-healthy trials known only through the verifier's own grading
   record) and `unobserved_reason` when `unobserved` is not 0. Unobserved trials are unverified,
   not healthy.
+- `gate_task.mlflow_delivery`: `state` and `reasons`. `not_required` (`mlflow_tracking_required` is
+  false), `verified` (no delivery problem), `pending` (no run evidence yet, or only the run's
+  status unread) or `unverified` (with its reasons). It is a fact, not a verdict: it changes
+  neither the status nor evaluation health, and `pending` and `unverified` add the warning
+  `MLflow delivery <state>: <reasons>`. A run that stated no `tracking_required` is read from its
+  saved config.
 - `gate_task.health_verdict` (one line), `criteria`, `mlflow_tracking_required`,
   `expected_samples`, `scored_samples`, `omitted_samples`, `score`, `errors`, `warnings`, and where
   the read ran (`reader_host`, `collector_host`, each with a `*_fallback_reason` when a reader
@@ -190,7 +195,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
-| NOOP, `FAILED`, and the only error starts with `no MLflow run evidence` | The results are complete, but no delivery is on record: no live MLflow run id and no post-run export receipt. The rest of the error says which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then run the same command without `--inspect`: on a complete run that requires tracking and has no receipt, `--recover` runs the post-run export itself and reads the run again. Then inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status. "does not name all of the tracking URI, experiment and run name": the run was never tracked; read `trial_counts`, coverage and the score yourself, and set `mlflow_tracking_required: false` next time (step 1). |
+| NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (the warning reads `MLflow delivery <state>: <reasons>`) | The results are complete and the status is whatever they decide: delivery is reported beside the gate, never inside it. Close the delivery: run `gym eval export mlflow` on the run with the current Gym (a repeat on an exported run verifies without touching the run lock); `--recover` on a complete run that requires tracking and has no receipt runs the export too. The reasons say which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then export. "does not name all of the tracking URI, experiment and run name": the run was never tracked; set `mlflow_tracking_required: false` next time (step 1). The inspection asks the tracking server the saved config names for the status of the receipt's run (up to about 10 seconds, one retry); from a host without access it reports `unverified` with `status query failed: ...`, so inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status yourself; passing the two flags avoids the call. |
 | `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`): once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
@@ -357,7 +362,7 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   its checks and rewrites it, so run it on a copy, never on the run's own `artifacts/` (step 3).
 - What decides acceptance: complete results, the score gate (`--score-key`, a JSON path, with
   `--score-agent` and, when an agent has several entries, `--score-environment`), a readable
-  health summary, the MLflow delivery when it is required (step 1), and evaluation health.
+  health summary, and evaluation health.
   Evaluation health is `gate_task.evaluation_health`: `PASS` when evaluation-side trial failures
   (judge, verifier, sandbox and harness faults, a server that did not start, transport faults and
   model-server 5xx replies) are strictly below 2% of the expected trials and every trial's
@@ -386,6 +391,11 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `UNVERIFIED` means the answers were scored, but the grading evidence was not recorded on this
   stack version. A resubmit cannot change it, and no flag does: it needs a run on a stack version
   that records grading. Report it with the reason and do not present the run as verified.
+- Evaluation health is the gate on the collected results. Delivery to MLflow is reported separately
+  as `mlflow_delivery` (pending until the export receipt exists, then verified or unverified with
+  reasons) and does not fail the gate. A run with `mlflow_tracking_required: false` needs no
+  delivery evidence. To close a pending delivery on a finished run, run `gym eval export mlflow` on
+  the run with the current Gym.
   The fix is that server's grading record, in Gym.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
@@ -397,10 +407,11 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - `warnings` also carries facts that fail nothing: `no response-health criterion configured` when
   `--max-unhealthy-fraction` was not given, and `health checks not fully evaluated` with the checks
   a small run gave too little to judge.
-- The MLflow part passes only with a current export receipt (`mlflow.receipt.current`, with
-  `uploaded_rollouts` true and `rollout_projection_version` 1) and `--mlflow-status FINISHED`
-  observed by you for `--mlflow-run-id` equal to the receipt's `run_id`. A live run id alone is
-  never accepted, and the two flags export nothing. The receipt, `artifacts/rollouts_mlflow_export_done`,
+- MLflow delivery is `verified` only with a current export receipt (`mlflow.receipt.current`, with
+  `uploaded_rollouts` true and `rollout_projection_version` 1) and a `FINISHED` status of the
+  receipt's run, read from the tracking server the saved config names, or given by you with
+  `--mlflow-status FINISHED` for `--mlflow-run-id` equal to the receipt's `run_id`. A live run id
+  alone is never accepted, and the two flags export nothing. The receipt, `artifacts/rollouts_mlflow_export_done`,
   binds the sha256 of five run files; a file that changes after the export makes it stale.
 - With MLflow configured, the post-run export logs the same facts as metrics: `health/response/*`,
   `health/trial/*` (`known`, `passed`, `counts_known`, `expected`, `failed` or
@@ -437,5 +448,6 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   explained.
 - [ ] Any `resumed across operational drift` settings are listed with the result.
 - [ ] The run is final on its receipts: `rollouts_coverage.json` says complete, the export
-  receipt `rollouts_mlflow_export_done` is current (or `mlflow_tracking_required: false` was set
-  on purpose), and `.gym_chain_incomplete` is absent or explained.
+  receipt `rollouts_mlflow_export_done` is current and `gate_task.mlflow_delivery.state` is
+  `verified` (or `not_required`, with `mlflow_tracking_required: false` set on purpose), and
+  `.gym_chain_incomplete` is absent or explained.
