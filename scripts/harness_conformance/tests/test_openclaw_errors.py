@@ -36,8 +36,12 @@ CONTEXT_ERROR = "This model's maximum context length is 32768 tokens. However, y
 )
 @pytest.mark.parametrize("case", CASES)
 def test_openclaw_failure_reaches_environment(case: str, tmp_path: Path) -> None:
+    # CI runs the suite after pytest; its PROBE_OUTPUT must not exist yet.
+    # Keep regression evidence beside it so the same artifact upload retains both.
     output = (
-        Path(os.environ["PROBE_OUTPUT"]) / "error-regressions" / case if "PROBE_OUTPUT" in os.environ else tmp_path
+        Path(os.environ["PROBE_OUTPUT"]).parent / "error-regressions" / case
+        if "PROBE_OUTPUT" in os.environ
+        else tmp_path
     )
     output.mkdir(parents=True, exist_ok=True)
     result = run_process(
