@@ -31,7 +31,9 @@ from ..verifier import (
 )
 
 
-EXAMPLES = [json.loads(line) for line in (Path(__file__).parents[1] / "data" / "example.jsonl").read_text().splitlines()]
+EXAMPLES = [
+    json.loads(line) for line in (Path(__file__).parents[1] / "data" / "example.jsonl").read_text().splitlines()
+]
 MMLU_PRO, GSM8K, BFCL, WHEN2CALL, HOME = EXAMPLES
 
 CHOICE = {"type": "choice", "instructions": "Pick one.", "criteria": {"A": "first", "B": "second", "1": "third"}}
@@ -61,7 +63,11 @@ def _response(text: str) -> dict:
 
 def _request(row: dict, text: str) -> DecisionIndexVerifyRequest:
     return DecisionIndexVerifyRequest.model_validate(
-        {"responses_create_params": {"input": "x"}, "response": _response(text), "verifier_metadata": row["verifier_metadata"]}
+        {
+            "responses_create_params": {"input": "x"},
+            "response": _response(text),
+            "verifier_metadata": row["verifier_metadata"],
+        }
     )
 
 
@@ -71,7 +77,11 @@ def _gold_answers(di_row: dict) -> dict:
         gold = di_row["expected"][key]
         if q["type"] == "choice":
             choice = gold if gold is not None else next(iter(q["criteria"]))
-            answers[key] = {"type": "choice", "choice": choice, "probabilities": {o: float(o == choice) for o in q["criteria"]}}
+            answers[key] = {
+                "type": "choice",
+                "choice": choice,
+                "probabilities": {o: float(o == choice) for o in q["criteria"]},
+            }
         else:
             answers[key] = {"type": "noul", "noul": 1.0 if gold else 0.0}
     return answers
@@ -143,8 +153,13 @@ class TestRowReward:
     def test_reward_needs_every_scored_question(self) -> None:
         di_row = HOME["verifier_metadata"]["di_row"]
         answers = _gold_answers(di_row)
-        assert row_reward(di_row, {"answers": answers}) == (1.0, len([g for g in di_row["expected"].values() if g is not None]))
-        key = next(k for k, q in di_row["questions"].items() if q["type"] == "choice" and di_row["expected"][k] is not None)
+        assert row_reward(di_row, {"answers": answers}) == (
+            1.0,
+            len([g for g in di_row["expected"].values() if g is not None]),
+        )
+        key = next(
+            k for k, q in di_row["questions"].items() if q["type"] == "choice" and di_row["expected"][k] is not None
+        )
         other = next(o for o in di_row["questions"][key]["criteria"] if o != di_row["expected"][key])
         answers[key] = {**answers[key], "choice": other}
         assert row_reward(di_row, {"answers": answers})[0] == 0.0
@@ -184,7 +199,9 @@ class TestVerify:
         assert not unsupported.mask_sample and unsupported.di_status == "unsupported"
         answers = {"model": "x", "answers": _gold_answers(HOME["verifier_metadata"]["di_row"])}
         ok = asyncio.run(server.verify(_request(HOME, _envelope("ok", response=answers, wall_ms=12.5))))
-        assert ok.reward == 1.0 and ok.di_result["total_wall_ms"] == 12.5 and "verifier_metadata" not in ok.model_dump()
+        assert (
+            ok.reward == 1.0 and ok.di_result["total_wall_ms"] == 12.5 and "verifier_metadata" not in ok.model_dump()
+        )
 
     def test_llm_mode_never_reads_envelopes(self) -> None:
         answers = {"model": "x", "answers": _gold_answers(MMLU_PRO["verifier_metadata"]["di_row"])}
@@ -222,7 +239,9 @@ class TestRunScore:
         # MMLU-Pro answered right: skill 100. BFCL's only request failed: skill 0 (unanswered counts as wrong).
         assert metrics["decision_index_skill/57:MMLU-Pro"] == pytest.approx(100.0)
         assert metrics["decision_index_skill/1:BFCL"] == pytest.approx(0.0)
-        assert "decision_index" in result.key_metrics and any(k.startswith("decision_index_area/") for k in result.key_metrics)
+        assert "decision_index" in result.key_metrics and any(
+            k.startswith("decision_index_area/") for k in result.key_metrics
+        )
 
     def test_score_index_keeps_one_answer_per_request(self) -> None:
         records = self._records("llm", lambda row: "{}")

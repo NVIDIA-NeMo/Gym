@@ -108,9 +108,9 @@ def to_decisions_request(model: str, state: Any, questions: Dict[str, Any]) -> D
             items.append({"type": "predicate", "name": name, "instructions": _text(q.get("instructions", ""))})
         else:
             raise ValueError(f"question type {q['type']!r} has no /v1/decisions mapping")
-    source = state if isinstance(state, str) else [
-        {"role": "user", "content": [{"type": "input_json", "data": state}]}
-    ]
+    source = (
+        state if isinstance(state, str) else [{"role": "user", "content": [{"type": "input_json", "data": state}]}]
+    )
     return {"model": model, "input": source, "questions": items}
 
 
@@ -175,9 +175,15 @@ class DecisionEngineModel(SimpleResponsesAPIModel):
     async def call_engine(self, state: Any, questions: Dict[str, Any]) -> Dict[str, Any]:
         """One engine read with retries. Returns the envelope body (never raises for engine-side failures)."""
         if self.config.endpoint == "decisions":
-            path, payload = "/v1/decisions", {**to_decisions_request(self.config.model, state, questions), **self.config.extra_body}
+            path, payload = (
+                "/v1/decisions",
+                {**to_decisions_request(self.config.model, state, questions), **self.config.extra_body},
+            )
         else:
-            path, payload = "/v1/systemone", {"model": self.config.model, "state": state, "questions": questions, **self.config.extra_body}
+            path, payload = (
+                "/v1/systemone",
+                {"model": self.config.model, "state": state, "questions": questions, **self.config.extra_body},
+            )
         error: Optional[str] = None
         start = time.perf_counter()
         for attempt in range(self.config.max_attempts):
