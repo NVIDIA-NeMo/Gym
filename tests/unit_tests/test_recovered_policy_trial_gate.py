@@ -151,7 +151,7 @@ def test_a_recovery_that_does_not_join_one_completed_policy_operation_stays_unkn
     break_join(collected, event)
     passed, reason = trial_health(_decide(collected), collected)
     assert passed is None, reason
-    assert "treatment is not defined" in reason
+    assert "recovered attempts not joined" in reason
 
 
 def _end_on_a_failed_request(collected: CollectedEvidence, *, reward: float = 0.0, recorded: bool = True) -> None:

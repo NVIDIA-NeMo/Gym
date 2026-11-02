@@ -36,6 +36,7 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.agent_utils.sandbox_session import (
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
@@ -57,6 +58,9 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
+    MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -546,6 +550,23 @@ class OpenClawAgentVerifyResponse(BaseVerifyResponse):
 class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
+    def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
+        """Read pinned assistant errors or the CLI's typed context-overflow envelope."""
+        context_overflow = native_result.get("kind") == "context_overflow"
+        message = str(native_result.get("message" if context_overflow else "errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if context_overflow:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if native_result.get("stopReason") in {"error", "aborted"}:
+            if message in {"Connection error.", "terminated"} or re.fullmatch(
+                r"LLM idle timeout \(\d+(?:\.\d+)?s\): no response from model", message
+            ):
+                return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
+        if native_result.get("stopReason") == "error":
+            if match:
+                return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
+        return AgentOutcome(failure_kind="unknown")
+
     config: OpenClawAgentConfig
     # Sandbox sessions run the CLI inside the task sandbox, which calls the model server from there.
     calls_model_from_sandbox: ClassVar[bool] = True
@@ -752,6 +773,9 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         # The pinned CLI reads configuration directly; onboarding would create
         # workspace bootstrap files and unrelated provider/channel state.
         session_config = self._build_openclaw_config({}, state.request.episode_id.capture_key)
+        session_id = state.session.session_dir.rsplit("/", 1)[-1]
+        # Capture rejected attempts too: they have no responseId in the transcript.
+        session_config["models"]["providers"]["nemo"]["headers"] = {"x-session-id": session_id}
         # OpenClaw conservatively disables stream usage for custom origins. Gym
         # supports it; request the final usage chunk instead of retaining zero counters.
         session_config["models"]["providers"]["nemo"]["models"][0]["compat"] = {
@@ -787,7 +811,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             "--agent",
             "main",
             "--session-id",
-            state.session.session_dir.rsplit("/", 1)[-1],
+            session_id,
             "--thinking",
             self.config.thinking,
             "--model",
@@ -829,12 +853,16 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             # Cancellation/cleanup failure still leaves useful transcript evidence
             # for the subsequent close. Never convert uncertain cleanup to success.
             try:
-                await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
+                await self._collect_sandbox_response(
+                    state, body, prompt=prompt, system=system, capture_correlated=True
+                )
                 state.observations.gaps.extend(mcp_gaps)
             except Exception:
                 LOG.exception("Could not salvage interrupted OpenClaw observations")
             raise
-        response = await self._collect_sandbox_response(state, body, prompt=prompt, system=system)
+        response = await self._collect_sandbox_response(
+            state, body, prompt=prompt, system=system, capture_correlated=True
+        )
         # A grant can pass the probe and still fail at agent startup: OpenClaw 2026.6.11 then logs
         # `bundle-mcp: failed to start server "<name>"`, runs on without its tools and exits 0.
         stderr = _ANSI.sub("", (state.session.artifacts or {}).get("stderr.log", ""))
@@ -846,9 +874,8 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         ]
         if state.observations is not None:
             state.observations.gaps.extend(mcp_gaps)
-        if response.error is not None:
-            # Preserve the transcript in session observations, but let the environment
-            # classify runtime/provider failures before it invokes the verifier.
+        if response.error is not None and AGENT_OUTCOME_METADATA_KEY not in (response.metadata or {}):
+            # Runtime and cleanup failures must not become gradable model outcomes.
             raise HTTPException(502, response.error.message)
         if lost_required := [name for name in lost if name in required_grants]:
             raise HTTPException(
@@ -995,6 +1022,7 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
         *,
         prompt: str,
         system: str,
+        capture_correlated: bool = False,
     ) -> NeMoGymResponse:
         gaps = []
         artifacts = state.session.artifacts or {}
@@ -1107,6 +1135,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
+        envelope_error = meta.get("error") if isinstance(meta, dict) else None
+        context_error = (
+            envelope_error
+            if isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow"
+            else None
+        )
+        terminal_result = context_error if context_error is not None else last
+        if context_error is not None:
+            error = error or str(context_error.get("message") or "OpenClaw context overflow")
         if last.get("stopReason") == "error" or (
             last.get("stopReason") == "aborted" and not (result and result["timed_out"])
         ):
@@ -1150,10 +1187,11 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 openclaw_session_conversation(events, input_items=input_items, fallback_output=output),
                 events,
                 transcript_available=bool(events),
+                prefer_openclaw_session_id=False,
+                capture_correlated=capture_correlated,
                 model_ref=self.config.model_server,
             )
-            # Sandbox sessions enable only local file/process tools, so there is
-            # exactly one invocation; child sessions cannot be spawned.
+            # Sandbox sessions disable child agents, so there is exactly one invocation.
             state.observations.gaps = [
                 gap for gap in state.observations.gaps if gap.code != "subagent_hierarchy_unavailable"
             ]
@@ -1165,6 +1203,33 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
                 source=OPENCLAW_OBSERVATION_SOURCE,
                 gaps=[ObservationGap(code="observation_capture_failed"), *gaps],
             )
+        if (
+            result
+            and (
+                result["return_code"] == 0
+                or (
+                    result["return_code"] == 1
+                    and artifacts.get("stderr.log", "").strip().rsplit("\n", 1)[-1].startswith("FailoverError: ")
+                )
+            )
+            and not result["timed_out"]
+            and not result["error"]
+            and (
+                context_error is not None
+                or last.get("stopReason") == "error"
+                or (
+                    last.get("stopReason") == "aborted"
+                    and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
+                )
+            )
+        ):
+            # 2026.6.11 can surface model errors by throwing FailoverError and
+            # exiting 1. Require its terminal diagnostic as well as the assistant
+            # error; an unrelated worker exit must still raise. The environment
+            # owns verify/retry/fail policy for the preserved model response.
+            # An idle watchdog abort is a model failure; the supervisor's whole-run
+            # deadline and unrelated aborts must not be classified as transport errors.
+            return self.report_outcome(response, terminal_result)
         return response
 
     def model_post_init(self, __context: Any) -> None:

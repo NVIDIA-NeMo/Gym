@@ -131,6 +131,11 @@ the job still installs the pinned one. Site `#SBATCH` directives (a QoS, a node 
 `extra_args` is passed to `vllm serve` verbatim: check each flag against the vLLM version in the
 image. Gym does not validate them.
 
+Two readiness limits: the job waits `health_check.timeout_seconds` for the policy service, and
+the driver then waits `server_spinup_timeout_seconds` (under the benchmark's `run`, 600 s by
+default) for the Gym servers it starts for the benchmark. A benchmark whose servers start slowly
+ends the chain typed `server_spinup_timeout`; gym-eval says how to raise the limit on a saved run.
+
 ## 3. The reasoning toggle
 
 A model whose chat template has a reasoning switch takes it through `chat_template_kwargs` on the

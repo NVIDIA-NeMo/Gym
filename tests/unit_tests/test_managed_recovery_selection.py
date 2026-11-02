@@ -4,6 +4,7 @@
 
 import hashlib
 import json
+import os
 import subprocess
 from pathlib import Path
 
@@ -376,6 +377,12 @@ def test_hashing_rejects_mid_read_file_mutation(tmp_path, monkeypatch, reader, m
                 else:
                     with original(path, "ab" if mutation == "append" else "r+b") as stream:
                         stream.write(b"b")
+                    if mutation == "rewrite":
+                        # A same-size rewrite is visible to a single pass only through its timestamps, which a
+                        # coarse filesystem may leave unchanged within one tick; move them past any tick here. The
+                        # same-tick case is caught at the collector's run level (test_collector_source_reads).
+                        stat = os.stat(path)
+                        os.utime(path, ns=(stat.st_atime_ns, stat.st_mtime_ns + 2_000_000_000))
             return block
 
     def instrumented_open(target, mode="r", *args, **kwargs):

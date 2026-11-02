@@ -792,6 +792,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             or getattr(args, "max_unhealthy_fraction", None) is not None
             or getattr(args, "max_response_failure_fraction", None) is not None
             or getattr(args, "max_trial_failure_fraction", None) is not None
+            or getattr(args, "policy_timeout_counts_as_model", None) is not None
             or getattr(args, "mlflow_status", None) is not None
             or getattr(args, "mlflow_run_id", None) is not None
         ) and not getattr(args, "recover", False):
@@ -821,6 +822,11 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 max_unhealthy_fraction=getattr(args, "max_unhealthy_fraction", None),
                 max_response_failure_fraction=getattr(args, "max_response_failure_fraction", None),
                 max_trial_failure_fraction=getattr(args, "max_trial_failure_fraction", None),
+                policy_timeout_counts_as_model=(
+                    None
+                    if getattr(args, "policy_timeout_counts_as_model", None) is None
+                    else args.policy_timeout_counts_as_model == "true"
+                ),
                 mlflow_status=getattr(args, "mlflow_status", None),
                 mlflow_run_id=getattr(args, "mlflow_run_id", None),
             )
@@ -839,6 +845,7 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                     "max_unhealthy_fraction",
                     "max_response_failure_fraction",
                     "max_trial_failure_fraction",
+                    "policy_timeout_counts_as_model",
                     "mlflow_status",
                     "mlflow_run_id",
                 )
@@ -1968,7 +1975,7 @@ COMMANDS = {
                     "--max-unhealthy-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the per-rollout health criterion; independent response/trial gates still apply.",
+                    help="With --recover: the per-rollout health criterion, reported in warnings; it does not change the verdict.",
                 ),
             ),
             Flag(
@@ -1976,7 +1983,7 @@ COMMANDS = {
                     "--max-response-failure-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the response gate passes only strictly below this fraction (default 0.02).",
+                    help="With --recover: reported under criteria with applied: false; it does not change the verdict.",
                 ),
             ),
             Flag(
@@ -1984,7 +1991,18 @@ COMMANDS = {
                     "--max-trial-failure-fraction",
                     type=float,
                     metavar="FRACTION",
-                    help="With --recover: the trial gate fails at or above this fraction (default 0.02).",
+                    help="With --recover: reported under criteria with applied: false; it does not change the verdict.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--policy-timeout-counts-as-model",
+                    type=str.lower,
+                    choices=("true", "false"),
+                    help=(
+                        "With --recover: whether a policy-model response timeout is the model's fault (default true; "
+                        "a self-hosted evaluation may set false to count it as a server fault)."
+                    ),
                 ),
             ),
             Flag(
