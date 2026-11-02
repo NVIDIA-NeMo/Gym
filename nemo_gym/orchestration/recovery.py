@@ -287,6 +287,9 @@ class IdentityEvidence(BaseModel):
     events: list[tuple[str | None, str | None, str | None, str | None, str | None]] = Field(default_factory=list)
     # Why an unknown identity has no supported action, when a specific rule refused it.
     reason: str | None = None
+    # A settled final outcome the metric does not score: an answered agent deadline that its producer did not mark
+    # as a counted zero. It is never run again, but it is no scored sample.
+    unscored: bool = False
 
 
 class RecoveryDecision(BaseModel):
@@ -732,6 +735,7 @@ def decide_recovery(
         ]
         kind = _retry_kind(last)
         reason = None
+        unscored = False
         if is_omitted_rollout_row(last):
             # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
             interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
@@ -759,7 +763,9 @@ def decide_recovery(
             policy_stopped |= state == IdentityState.TERMINAL
         elif is_answered_agent_deadline(last):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
+            # Collection's metrics score it only when its producer marked it a counted zero.
             state = IdentityState.MODEL_FINAL
+            unscored = last.get(COUNTS_AS_ZERO) is not True
         elif last.get(COUNTS_AS_ZERO) is True:
             # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
             model_cause, _ = _policy_evidence(last)
@@ -813,6 +819,7 @@ def decide_recovery(
                 max_attempts=cap,
                 events=_events(last),
                 reason=reason if state == IdentityState.UNKNOWN else None,
+                unscored=unscored,
             )
         )
 
@@ -2454,7 +2461,8 @@ def gate_task_summary(
     """One task entry of the acceptance gate's run summary, filled from the decision and the existing validators.
 
     ``expected_samples`` is always the full materialized inventory; ``scored_samples`` counts only scored and
-    final-model identities, so a judge, infra, terminal or missing identity can never make them equal. Summary validity
+    final-model identities, so a judge, infra, terminal or missing identity can never make them equal. A settled
+    final outcome the metric does not score (``IdentityEvidence.unscored``) is stated, not counted as scored. Summary validity
     and response/trial health stay separate. ``False`` is a failure and an error; ``None`` (unknown or missing) is no
     failure but never a pass: its reason is a warning and it withholds SUCCESS.
 
@@ -2495,10 +2503,14 @@ def gate_task_summary(
             + ("unknown" if health_passed is None else "failed")
             + (f": {health_reasons}" if health_reasons else "")
         )
-    if states.get(IdentityState.MODEL_FINAL):
+    unscored = [e.identity for e in decision.evidence if e.state == IdentityState.MODEL_FINAL and e.unscored]
+    if states.get(IdentityState.MODEL_FINAL, 0) > len(unscored):
+        final = [e.identity for e in decision.evidence if e.state == IdentityState.MODEL_FINAL and not e.unscored]
+        warnings.append(f"{len(final)} final evaluated-model failures scored zero: {final[:5]}")
+    if unscored:
         warnings.append(
-            f"{states[IdentityState.MODEL_FINAL]} final evaluated-model failures scored zero: "
-            f"{decision.identities[IdentityState.MODEL_FINAL.value][:5]}"
+            f"{len(unscored)} answered agent deadlines settled with their kept answer, not scored by the metric: "
+            f"{unscored[:5]}"
         )
     if states.get(IdentityState.OMITTED):
         # Complete by the stage's own policy: stated, never folded into the scored or failed counts.
@@ -2515,7 +2527,9 @@ def gate_task_summary(
     return {
         "status": status,
         "expected_samples": decision.expected,
-        "scored_samples": states.get(IdentityState.SCORED, 0) + states.get(IdentityState.MODEL_FINAL, 0),
+        "scored_samples": states.get(IdentityState.SCORED, 0)
+        + states.get(IdentityState.MODEL_FINAL, 0)
+        - len(unscored),
         "omitted_samples": states.get(IdentityState.OMITTED, 0),
         "score": score,
         "errors": errors,
