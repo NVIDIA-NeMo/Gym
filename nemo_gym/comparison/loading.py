@@ -36,6 +36,7 @@ from nemo_gym.config.global_config import (
     ROLLOUT_INFOS_KEY_NAME,
 )
 from nemo_gym.metrics.metrics_config import Stat
+from nemo_gym.rollout_records import resolve_rollout_path
 from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 from nemo_gym.utils.text import did_you_mean
 
@@ -69,7 +70,8 @@ def resolve_aggregate_metrics_fpath(rollouts_jsonl_fpath: str, override: Optiona
     """The `*_aggregate_metrics.json` to read: the explicit override, else the derived sibling."""
     if override:
         return _resolve_under_cwd_or_install(override)
-    return aggregate_metrics_path_for(_resolve_under_cwd_or_install(rollouts_jsonl_fpath))
+    output = resolve_rollout_path(_resolve_under_cwd_or_install(rollouts_jsonl_fpath), read_only=True)
+    return aggregate_metrics_path_for(output)
 
 
 def _read_agent_entries(metrics_fpath: Path) -> Dict[str, Dict[str, Any]]:

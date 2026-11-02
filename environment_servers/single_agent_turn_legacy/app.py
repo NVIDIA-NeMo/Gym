@@ -6,6 +6,7 @@
 from typing import Any
 
 from fastapi import FastAPI
+from pydantic import ConfigDict, PositiveFloat
 
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
@@ -19,6 +20,7 @@ from nemo_gym.config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
     EpisodeId,
     maybe_rollout_id_from_run_body,
 )
@@ -31,10 +33,20 @@ from nemo_gym.trajectory import NG_AGENT_OBSERVATIONS_KEY, NG_TRAJECTORY_KEY, NG
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
+class SingleAgentTurnLegacyEnvironmentServerConfig(SingleAgentTurnEnvironmentServerConfig):
+    """Keep the migrated relay's timeout defaults for flat-row episodes."""
+
+    # Existing callers can still pass a typed SingleAgentTurnEnvironmentServerConfig, including its explicit limits.
+    model_config = ConfigDict(from_attributes=True)
+
+    default_episode_timeout_seconds: PositiveFloat | None = 21600
+    cleanup_timeout_seconds: PositiveFloat = 180
+
+
 class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
     """Expose the old flat `/run` contract for one migrated pairing."""
 
-    config: SingleAgentTurnEnvironmentServerConfig
+    config: SingleAgentTurnLegacyEnvironmentServerConfig
 
     def setup_webserver(self) -> FastAPI:
         app = FastAPI()
@@ -89,7 +101,8 @@ class SingleAgentTurnLegacyEnvironmentServer(SingleAgentTurnEnvironmentServer):
         agent_ref = {"name": self.config.agent_server.name}
         if response.failure is not None:
             failure = {
-                "_ng_failure_class": "environment_server_failed",
+                "_ng_failure_class": response.failure.failure_kind or ENVIRONMENT_SERVER_FAILED,
+                "_ng_failure_kind": response.failure.failure_kind,
                 "_ng_failure_terminal": response.failure.terminal,
                 "_ng_failure_message": response.failure.failure_reason,
                 "_ng_failure_stage": response.failure.stage,

@@ -15,7 +15,7 @@ from urllib.request import Request, urlopen
 
 import pytest
 
-from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 from responses_api_agents.pool_agent import sandbox_runner
 from responses_api_agents.pool_agent.configuration import pool_config
 from responses_api_agents.pool_agent.trajectory import parse_trajectory

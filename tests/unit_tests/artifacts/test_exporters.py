@@ -1122,6 +1122,10 @@ _CLI_OUTCOMES = [
     ("success", False),
     ("failure", True),
     ("failure", False),
+    ("partial_retryable", True),
+    ("partial_retryable", False),
+    ("partial_exhausted", True),
+    ("partial_exhausted", False),
     ("interrupt", True),
     ("sigterm", True),
     ("sigterm", False),
@@ -1141,6 +1145,7 @@ def test_cli_collection_failure_status(
     require_complete: bool,
 ) -> None:
     import asyncio
+    import json
     import os
     import signal
 
@@ -1148,6 +1153,7 @@ def test_cli_collection_failure_status(
     import nemo_gym.cli.eval as cli
     import nemo_gym.telemetry.setup as telemetry
     from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollout_records import coverage_path_for
 
     output = tmp_path / "output.jsonl"
     prepared = tmp_path / "output" / "preprocessed_datasets" / "train.jsonl"
@@ -1182,6 +1188,19 @@ def test_cli_collection_failure_status(
     run_id = exporter.run_id
 
     async def collect(_self, _config):
+        if outcome.startswith("partial_"):
+            # The collector returns, but its saved coverage still makes the CLI reject an incomplete run.
+            coverage_path_for(output).write_text(
+                json.dumps(
+                    {
+                        "complete": False,
+                        "expected": 2,
+                        "successful": 1,
+                        "retryable": int(outcome == "partial_retryable"),
+                        "progress_outcomes_recorded": 1,
+                    }
+                )
+            )
         if outcome == "failure":
             raise RuntimeError("EVAL FAILED: 0/1 rollouts completed")
         if outcome == "interrupt":
@@ -1195,15 +1214,19 @@ def test_cli_collection_failure_status(
     command = cli.e2e_rollout_collection if serve else cli.collect_rollouts
     previous_handler = signal.getsignal(signal.SIGTERM)
     try:
-        if outcome == "success":
+        if outcome == "success" or (outcome.startswith("partial_") and not require_complete):
             command()
-        elif outcome == "failure" or (serve and require_complete):
-            with pytest.raises(RuntimeError):
-                command()
         elif outcome == "sigterm":
             with pytest.raises(SystemExit) as stopped:
                 command()
             assert stopped.value.code == 143
+        elif outcome.startswith("partial_"):
+            with pytest.raises(SystemExit) as incomplete:
+                command()
+            assert incomplete.value.code == (75 if outcome == "partial_retryable" else 76)
+        elif outcome == "failure" or (serve and require_complete):
+            with pytest.raises(RuntimeError):
+                command()
         else:
             with pytest.raises(KeyboardInterrupt):
                 command()
@@ -1212,4 +1235,5 @@ def test_cli_collection_failure_status(
 
     teardown_exporters()  # what the atexit hook does when the process exits
     status = mlflow_module.MlflowClient(tracking_uri=mlflow_store["mlflow_tracking_uri"]).get_run(run_id).info.status
-    assert status == ("FINISHED" if outcome == "success" else "FAILED")
+    tolerated_partial = outcome.startswith("partial_") and not require_complete
+    assert status == ("FINISHED" if outcome == "success" or tolerated_partial else "FAILED")

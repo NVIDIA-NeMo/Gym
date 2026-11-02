@@ -16,7 +16,7 @@
 import json
 from typing import Any, Dict, Literal, Optional
 
-from nemo_gym.config import ModelServerRef
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
@@ -87,23 +87,38 @@ class AALCRVerifyResponse(AALCRVerifyRequest, BaseVerifyResponse):
     reward_128k_plus: Optional[float] = None
 
 
+# The reward key of each input_tokens_band.
+INPUT_TOKENS_BAND_REWARD_KEYS = {
+    "<80k": "reward_lt_80k",
+    "80k-100k": "reward_80k_100k",
+    "100k-110k": "reward_100k_110k",
+    "110k-128k": "reward_110k_128k",
+    "128k+": "reward_128k_plus",
+}
+
+
 class AalcrResourcesServer(SimpleResourcesServer):
     config: AalcrResourcesServerConfig
+
+    async def aggregate_metrics(self, body: AggregateMetricsRequest) -> AggregateMetrics:
+        """As the base, with each scored row's reward under its input band.
+
+        verify() writes it there. A row rollout collection scores without verifying it (a failed rollout counted as
+        0) carries only its reward and dataset fields, so without this its band's reward would leave it out while
+        mean reward counts it. Fields only verify() computes, such as invalid_model_response, keep their own rows.
+        """
+        rows = []
+        for row in body.verify_responses:
+            band_key = INPUT_TOKENS_BAND_REWARD_KEYS.get(row.get("input_tokens_band"))
+            if band_key is not None and row.get(band_key) is None and isinstance(row.get("reward"), (int, float)):
+                row = {**row, band_key: row["reward"]}
+            rows.append(row)
+        return await super().aggregate_metrics(body.model_copy(update={"verify_responses": rows}))
 
     async def verify(self, body: AALCRVerifyRequest) -> AALCRVerifyResponse:
         _validate_protocol_metadata(body, self.config.judge_protocol)
 
-        match body.input_tokens_band:
-            case "<80k":
-                input_tokens_band_key = "reward_lt_80k"
-            case "80k-100k":
-                input_tokens_band_key = "reward_80k_100k"
-            case "100k-110k":
-                input_tokens_band_key = "reward_100k_110k"
-            case "110k-128k":
-                input_tokens_band_key = "reward_110k_128k"
-            case "128k+":
-                input_tokens_band_key = "reward_128k_plus"
+        input_tokens_band_key = INPUT_TOKENS_BAND_REWARD_KEYS[body.input_tokens_band]
 
         candidate_answer = body.response.output_text.strip()
         if not candidate_answer:

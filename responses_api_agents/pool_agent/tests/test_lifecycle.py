@@ -15,7 +15,7 @@ from unittest.mock import MagicMock, patch
 import pytest
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox.providers.base import SandboxExecResult
 from responses_api_agents.pool_agent.configuration import pool_config
 from responses_api_agents.pool_agent.sandbox import PoolSession

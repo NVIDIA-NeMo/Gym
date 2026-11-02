@@ -77,9 +77,39 @@ class FakeCommandResult:
 class FakeConnectionConfig:
     integrations: list[str] = []
 
+    def __init__(self, **kwargs) -> None:
+        self.kwargs = kwargs
+
     @classmethod
     def set_integration(cls, integration: str) -> None:
         cls.integrations.append(integration)
+
+
+class FakeHttpResponse:
+    def __init__(self, status_code: int, payload: object) -> None:
+        self.status_code = status_code
+        self.text = str(payload)
+        self._payload = payload
+
+    def json(self) -> object:
+        return self._payload
+
+
+class FakeApiClient:
+    """The SDK's REST API client: records each POST and answers with ``response``."""
+
+    calls: list[dict] = []
+    response = FakeHttpResponse(201, {"sandboxID": "sbx-rest"})
+
+    def __init__(self, config: FakeConnectionConfig) -> None:
+        self.config = config
+
+    def get_async_httpx_client(self) -> "FakeApiClient":
+        return self
+
+    async def post(self, url: str, json: dict) -> FakeHttpResponse:
+        FakeApiClient.calls.append({"url": url, "json": json, "config": self.config.kwargs})
+        return FakeApiClient.response
 
 
 # The real SDK's sandbox-scoped methods take `request_timeout` only -- they are
@@ -212,6 +242,7 @@ def _fake_sdk() -> types.SimpleNamespace:
     return types.SimpleNamespace(
         AsyncSandbox=FakeSandbox,
         ConnectionConfig=FakeConnectionConfig,
+        api=types.SimpleNamespace(client_async=types.SimpleNamespace(get_api_client=FakeApiClient)),
         SandboxNotFoundException=FakeSandboxNotFound,
         NotFoundException=FakeSandboxNotFound,
         TimeoutException=FakeTimeout,
@@ -232,11 +263,15 @@ def _fake_sdk_module() -> types.ModuleType:
 def fake_e2b_sdk(monkeypatch: pytest.MonkeyPatch) -> None:
     FakeSandbox.instances.clear()
     FakeConnectionConfig.integrations.clear()
+    FakeApiClient.calls.clear()
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", _fake_sdk)
 
 
 def _spec(**kwargs) -> SandboxSpec:
     return SandboxSpec(**kwargs)
+
+
+_NETWORK = {"deny_out": ["0.0.0.0/0"], "allow_out": ["pypi.org", "deb.debian.org"]}
 
 
 # --------------------------------------------------------------------------
@@ -366,9 +401,16 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     products = connection.headers["User-Agent"].split()
     assert f"nemo-gym/{nemo_gym_version}" in products
     envd_client = sandbox_async.get_envd_api(connection, "https://sandbox.example")
-    for transport in (client_async.get_transport(connection), envd_client._transport):
+    # The REST create path posts through the SDK's API client.
+    api_client = client_async.get_api_client(
+        e2b.ConnectionConfig(api_key="k", api_url="http://gw:8080", api_headers={"Authorization": "Bearer t"})
+    ).get_async_httpx_client()
+    assert str(api_client.base_url) == "http://gw:8080"
+    assert (api_client.headers["X-API-KEY"], api_client.headers["Authorization"]) == ("k", "Bearer t")
+    for transport in (client_async.get_transport(connection), envd_client._transport, api_client._transport):
         assert isinstance(transport, GymAiohttpTransport)
     await envd_client.aclose()
+    await api_client.aclose()
 
     inspect.signature(e2b.AsyncSandbox.create).bind(
         template="base",
@@ -378,13 +420,16 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
         metadata={},
         secure=True,
         allow_internet_access=True,
+        network={"allow_out": ["pypi.org"], "deny_out": ["0.0.0.0/0"]},
     )
-    inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", request_timeout=30)
+    inspect.signature(e2b.AsyncSandbox.connect).bind("sbx-existing", timeout=60, request_timeout=30)
     inspect.signature(e2b.AsyncSandbox.kill).bind(
         object(),
         **dict.fromkeys(_API_PARAM_KEYS),
         request_timeout=30,
     )
+    # AsyncSandbox.kill(sandbox_id, ...) called on the class dispatches here.
+    inspect.signature(e2b.AsyncSandbox._cls_kill).bind("sbx-id", **dict.fromkeys(_API_PARAM_KEYS), request_timeout=30)
     inspect.signature(e2b.AsyncSandbox.is_running).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
@@ -804,6 +849,73 @@ class TestCreateAndLifecycle:
         with pytest.raises(E2BCreateError, match="gateway exploded"):
             await provider.create(_spec())
 
+    async def test_network_is_passed_to_sdk_create_only_when_set(self) -> None:
+        default = await E2BProvider(create={"template": "base"}).create(_spec())
+        assert "network" not in default.raw.create_kwargs
+
+        handle = await E2BProvider(create={"template": "base", "network": _NETWORK}).create(_spec())
+        assert handle.raw.create_kwargs["network"] == _NETWORK
+
+    async def test_extension_params_create_through_rest_api_then_connect(self) -> None:
+        provider = E2BProvider(
+            connection={"api_key": "secret-key", "api_url": "http://gw:8080", "request_timeout_s": 30.0},
+            create={"template": "base", "network": _NETWORK, "custom_extension_params": {"sandbank": "all"}},
+        )
+        handle = await provider.create(
+            _spec(ttl_s=120, ready_timeout_s=90, env={"FOO": "bar"}, metadata={"run": "1"}),
+        )
+
+        [call] = FakeApiClient.calls
+        assert call["url"] == "/sandboxes"
+        # The SDK's API client takes URL, auth headers and timeout from this config.
+        assert call["config"] == {"api_key": "secret-key", "api_url": "http://gw:8080", "request_timeout": 90.0}
+        assert call["json"] == {
+            "templateID": "base",
+            "timeout": 120,
+            "secure": True,
+            "allow_internet_access": True,
+            "network": {"denyOut": ["0.0.0.0/0"], "allowOut": ["pypi.org", "deb.debian.org"]},
+            "envVars": {"FOO": "bar"},
+            "metadata": {"run": "1"},
+            "customExtensionParams": {"sandbank": "all"},
+        }
+        # Attached with connect (keeping the create timeout), not created twice.
+        assert [sandbox.sandbox_id for sandbox in FakeSandbox.instances] == ["sbx-rest"]
+        assert handle.sandbox_id == "sbx-rest"
+        assert handle.raw.create_kwargs["timeout"] == 120
+        assert handle.raw.create_kwargs["api_key"] == "secret-key"
+        assert handle.raw.killed is False
+
+    async def test_rest_create_failure_is_wrapped_and_not_retried(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setattr(FakeApiClient, "response", FakeHttpResponse(400, "unknown template"))
+        provider = E2BProvider(
+            create={"template": "base", "custom_extension_params": {"sandbank": "all"}},
+            operations={"retries": 3, "retry_delay_s": 0},
+        )
+        with pytest.raises(E2BCreateError, match="HTTP 400: unknown template"):
+            await provider.create(_spec())
+
+        assert len(FakeApiClient.calls) == 1
+        assert FakeSandbox.instances == []
+
+    async def test_failed_connect_kills_the_created_sandbox(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        killed: list[str] = []
+
+        async def connect(cls, sandbox_id, **kwargs):
+            raise FakeTimeout("connect timed out")
+
+        async def kill(sandbox_id, **kwargs):
+            killed.append(sandbox_id)
+            return True
+
+        monkeypatch.setattr(FakeSandbox, "connect", classmethod(connect))
+        monkeypatch.setattr(FakeSandbox, "kill", staticmethod(kill))
+        provider = E2BProvider(create={"template": "base", "custom_extension_params": {"sandbank": "all"}})
+        with pytest.raises(E2BCreateError, match="connect timed out"):
+            await provider.create(_spec())
+
+        assert killed == ["sbx-rest"]
+
     async def test_status_and_close(self) -> None:
         provider = E2BProvider(create={"template": "base"})
         handle = await provider.create(_spec())
@@ -1052,6 +1164,20 @@ def test_unknown_config_keys_are_rejected() -> None:
 )
 def test_invalid_template_config_is_rejected(create: dict[str, object]) -> None:
     with pytest.raises((TypeError, ValueError), match=r"create\.template"):
+        E2BProvider(create=create)
+
+
+@pytest.mark.parametrize(
+    ("create", "message"),
+    [
+        ({"network": ["0.0.0.0/0"]}, "create.network must be a mapping"),
+        ({"network": {"allow": ["pypi.org"]}}, "Unknown create.network keys: allow"),
+        ({"network": {"deny_out": "0.0.0.0/0"}}, "create.network.deny_out must be a list of strings"),
+        ({"custom_extension_params": "sandbank"}, "create.custom_extension_params must be a mapping"),
+    ],
+)
+def test_invalid_network_config_is_rejected(create: dict[str, object], message: str) -> None:
+    with pytest.raises((TypeError, ValueError), match=re.escape(message)):
         E2BProvider(create=create)
 
 

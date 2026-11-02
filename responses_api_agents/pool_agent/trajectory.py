@@ -5,7 +5,7 @@
 import json
 from dataclasses import dataclass, field
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputItem,
