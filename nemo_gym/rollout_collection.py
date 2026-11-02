@@ -34,7 +34,7 @@ from collections import Counter, defaultdict, deque
 from collections.abc import Collection, Iterable, Mapping, Sequence
 from contextlib import AsyncExitStack, contextmanager, nullcontext
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import timedelta
 from difflib import get_close_matches
 from math import isfinite
@@ -1446,38 +1446,19 @@ _ENRICHMENT_KEYS = ("ng_model_call_capture", NG_TRAJECTORY_KEY, NG_PERF_KEY)
 
 
 async def _enrich_returned_result(
-    row: dict[str, Any],
-    result: dict[str, Any],
-    rollout_latency_ms: Optional[float],
-    *,
-    stamp: Optional[Callable[[dict[str, Any]], None]] = None,
-    **options: Any,
+    row: dict[str, Any], result: dict[str, Any], rollout_latency_ms: Optional[float], **options: Any
 ) -> dict[str, Any]:
     """``enrich_run_result`` for a result ``run_examples`` returns, keeping its public shape.
 
     An Environment Server reply to a materialized task is a ``BaseEpisodeResponse`` whose evidence is nested; it is
     enriched through the record the collector stores, and the enrichment keys are added to the reply's top level.
-    Returns the record ``ng_collect_rollouts`` would store for this rollout. ``stamp``, when given, adds the
-    collector's identity and routing fields to that record before enrichment, in the collector's order, so the capture
-    joined is the one the stored record names.
+    Returns the enriched record.
     """
     if _materialized_taskset(row) is not None and _is_episode_response(result):
         record = _episode_record(copy.deepcopy(result))
-        for key, value in _task_data_provenance(row).items():
-            record.setdefault(key, value)
-        if stamp is not None:
-            stamp(record)
         await enrich_run_result(row, record, rollout_latency_ms=rollout_latency_ms, **options)
-        identity = (ROLLOUT_ID_KEY_NAME, TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, ATTEMPT_INDEX_KEY_NAME)
-        for key in (*_ENRICHMENT_KEYS, *identity):
-            if key in record and key not in result:
-                result[key] = record[key]
+        _reflect_enrichment(result, record)
         return record
-    if stamp is not None:
-        if _materialized_taskset(row) is not None:
-            for key, value in _task_data_provenance(row).items():
-                result.setdefault(key, value)
-        stamp(result)
     await enrich_run_result(row, result, rollout_latency_ms=rollout_latency_ms, **options)
     return result
 
@@ -1509,9 +1490,119 @@ def _stamp_collector_fields(completed: "_CompletedRollout", result: dict[str, An
         result[NG_RESULT_TYPE_KEY] = completed.environment_server_type
 
 
-def _failure_row_bytes(result: Mapping[str, Any]) -> bytes:
-    """A failures-sidecar row: the failed result with the attempt cap it ran under, for offline aggregation."""
-    return orjson.dumps({**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()})
+@dataclass
+class _CollectedOutcome:
+    """A finished dispatch as collection stores it, with the facts the collector's loop still reads."""
+
+    record: Dict[str, Any]
+    structured_failure: bool
+    diagnostics: Dict[str, Any]
+    metric_result: Dict[str, Any]
+    verification_response: Optional[Dict[str, Any]]
+
+
+def _collected_outcome(
+    completed: "_CompletedRollout", result: Dict[str, Any] | RolloutFailureRecord
+) -> _CollectedOutcome:
+    """Build the record ``ng_collect_rollouts`` stores for a finished dispatch, success or failure.
+
+    ``result`` is ``completed.result`` after the caller's episode translation and legacy sanitizing. A failure, typed
+    or marked, becomes the failures-sidecar row: the typed record's compatibility fields beside the producer's
+    diagnostics and the judge reply it kept, then the identity and routing stamps and the causal failure report.
+    ``RunRecordWriter`` builds its rows here as well, so an RL shard reads like an eval run.
+    """
+    row = completed.row
+    verification_response = completed.verification_response
+    diagnostics = completed.diagnostics or _failure_diagnostics(result)
+    metric_result = diagnostics
+    if isinstance(result, RolloutFailureRecord) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
+        # Custom typed dispatchers may provide diagnostics without
+        # legacy routing labels; use the typed failure for those.
+        metric_result = {
+            NG_FAILURE_CLASS_KEY: result.sidecar_failure_class,
+            "_ng_failure_kind": result.failure.failure_kind,
+            "_ng_failure_type": result.exception_type,
+        }
+    if verification_response is None:
+        verification_response = _judge_failure_response(result)
+    # HTTP results were validated at the request boundary. Custom
+    # drivers returning _CompletedRollout own their completed schema.
+    if isinstance(result, dict):
+        if "failure" in result and "episode_id" in result:
+            result = _normalize_rollout_outcome(row, result)
+        elif result.get(NG_FAILURE_CLASS_KEY) is not None:
+            result = _failure_outcome(row, result, "agent")
+    structured_failure = isinstance(result, RolloutFailureRecord)
+    if structured_failure:
+        compatibility = _failure_compatibility_row(result, verification_response)
+        # The canonical alias must agree with the typed record. Keep a distinct
+        # producer class as collector-owned evidence for existing score selectors.
+        legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
+        if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
+            compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
+        if verification_response is not None and matches_failure_class(
+            compatibility, {"judge_failed", "judge_invalid"}
+        ):
+            compatibility["response"] = verification_response
+        # Keep producer evidence without making it the canonical failure reason.
+        if diagnostics.get("error"):
+            compatibility.pop("error")
+        result = diagnostics | compatibility
+    if _materialized_taskset(row) is not None and isinstance(result, dict):
+        # Result or failure, the record names the inputs it ran (task and dataset digests).
+        for key, value in _task_data_provenance(row).items():
+            result.setdefault(key, value)
+    _stamp_collector_fields(completed, result)
+    if completed.failure_report is not None:
+        result = FailureReportRow.merged_into(result, completed.failure_report)
+    return _CollectedOutcome(result, structured_failure, diagnostics, metric_result, verification_response)
+
+
+_SHARD_IDENTITY_KEYS = (
+    ROLLOUT_ID_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
+    ROLLOUT_INDEX_KEY_NAME,
+    ATTEMPT_INDEX_KEY_NAME,
+    AGENT_REF_KEY_NAME,
+)
+
+
+def _shard_record(
+    completed: "_CompletedRollout", *, run_id: str, global_config: Any, agent_name: str | None
+) -> Dict[str, Any]:
+    """The record ``ng_collect_rollouts`` would store for ``completed``, for a ``run_examples`` call recording a shard.
+
+    A try that left no result (interrupted, or never started) is a marker, not an outcome: it keeps its identity and
+    the writer turns it into an omitted-rollout row. Anything else goes through ``_collected_outcome``, so a failed
+    ``/run`` is saved as the typed failure row collection saves, never as the marker the dispatcher returned. A typed
+    failure names the run it belongs to; a row dispatched outside a collection run takes the shard's ``run_id`` for
+    that record only, so the shard's rows stay untagged and the Store imports them as it imports an earlier eval run.
+    """
+    row, result = completed.row, completed.result
+    if isinstance(result, dict) and result.get(NG_NO_PERSIST_KEY):
+        record = dict(result)
+        for key in _SHARD_IDENTITY_KEYS:
+            if key in row:
+                record.setdefault(key, row[key])
+        return record
+    if _materialized_taskset(row) is not None and _is_episode_response(result):
+        result = _native_episode_record(row, result)
+    elif isinstance(result, dict) and _materialized_taskset(row) is None:
+        _sanitize_legacy_result(result)
+    if RUN_ID_KEY not in row:
+        completed = replace(completed, row={**row, RUN_ID_KEY: run_id})
+    record = _collected_outcome(completed, result).record
+    _record_policy_model_server(record, global_config, agent_name)
+    return record
+
+
+def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
+    """Add a stored record's enrichment and identity keys to the reply ``run_examples`` returns in its own shape."""
+    if record is result or not isinstance(result, dict):
+        return
+    for key in (*_ENRICHMENT_KEYS, *_SHARD_IDENTITY_KEYS):
+        if key in record and key not in result:
+            result[key] = record[key]
 
 
 _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
@@ -1521,15 +1612,24 @@ _RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs")
 class RunRecordWriter:
     """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
 
-    A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar beside it, so a folder of
-    shards is what ``gym eval aggregate``, the run health check and EvalRDL's reader already read. The caller picks
-    the shard label (for example a training step and worker); Gym owns the file names. A result goes to the rollouts
-    file, a failed one to the failures sidecar with its attempt cap, and an interrupted or never-started try to the
+    A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
+    given, its materialized inputs beside it, so a folder of shards is what ``gym eval aggregate``, the run health
+    check, the Store and EvalRDL's reader already read. The caller picks the shard label (for example a training step
+    and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
+    the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
     sidecar as an omitted-rollout row only when ``record_omitted_rollouts`` is set. Opening a shard replaces what an
     earlier run wrote under the same label, so a replayed step does not duplicate rows.
     """
 
-    def __init__(self, record_output_dir: Path | str, shard: str, *, record_omitted_rollouts: bool = False) -> None:
+    def __init__(
+        self,
+        record_output_dir: Path | str,
+        shard: str,
+        *,
+        record_omitted_rollouts: bool = False,
+        rows: Optional[List[Dict[str, Any]]] = None,
+        run_id: Optional[str] = None,
+    ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
         if shard.endswith(_RESERVED_SHARD_ENDINGS):
@@ -1537,11 +1637,16 @@ class RunRecordWriter:
             raise ValueError(f"shard label {shard!r} must not end with {' or '.join(_RESERVED_SHARD_ENDINGS)}")
         self.rollouts_fpath = Path(record_output_dir) / f"rollouts-{shard}.jsonl"
         self.failures_fpath = failures_path_for(self.rollouts_fpath)
+        self.materialized_fpath = materialized_path_for(self.rollouts_fpath)
         self.record_omitted_rollouts = record_omitted_rollouts
+        # The run a typed failure record written here belongs to. The shard's rows and records are not tagged with
+        # it, so the Store imports the shard as it imports an eval run written before run manifests.
+        self.run_id = run_id or uuid4().hex
         self.rollouts_fpath.parent.mkdir(parents=True, exist_ok=True)
         self._lock_fpath = self.rollouts_fpath.with_name(f".{self.rollouts_fpath.name}.lock")
         with self._locked():
             self.failures_fpath.unlink(missing_ok=True)
+            self.materialized_fpath.unlink(missing_ok=True)
             # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
             # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
             # inode, which write() checks to notice a later writer of the same shard.
@@ -1549,6 +1654,13 @@ class RunRecordWriter:
             os.close(fd)
             Path(partial).replace(self.rollouts_fpath)
             self._generation = self.rollouts_fpath.stat().st_ino
+            # As in a collection run, the failures sidecar exists from the start, and the rows this call dispatches
+            # are the shard's materialized inputs: what the Store and the health check expect to find.
+            self.failures_fpath.touch()
+            if rows is not None:
+                with self.materialized_fpath.open("wb") as file:
+                    for row in rows:
+                        file.write(orjson.dumps(row) + b"\n")
 
     @contextmanager
     def _locked(self) -> Iterator[None]:
@@ -1571,7 +1683,13 @@ class RunRecordWriter:
                 return None
             fpath, line = self.failures_fpath, orjson.dumps(omitted_rollout_record(result))
         elif result.get(NG_FAILURE_CLASS_KEY) is not None:
-            fpath, line = self.failures_fpath, _failure_row_bytes(result)
+            # The cap this attempt ran under travels with it, as collection stamps it from the run manifest.
+            fpath = self.failures_fpath
+            line = orjson.dumps(
+                result
+                if NG_FAILURE_MAX_ATTEMPTS_KEY in result
+                else {**result, NG_FAILURE_MAX_ATTEMPTS_KEY: get_max_rollout_attempts()}
+            )
         else:
             fpath, line = self.rollouts_fpath, orjson.dumps(result)
         with self._locked():
@@ -4465,54 +4583,15 @@ class RolloutCollectionHelper(BaseModel):
                     continue
                 if isinstance(result, dict) and _materialized_taskset(row) is None:
                     _sanitize_legacy_result(result)
-                verification_response = completed.verification_response
-                diagnostics = completed.diagnostics or _failure_diagnostics(result)
-                metric_result = diagnostics
-                if isinstance(result, RolloutFailureRecord) and metric_result.get(NG_FAILURE_CLASS_KEY) is None:
-                    # Custom typed dispatchers may provide diagnostics without
-                    # legacy routing labels; use the typed failure for those.
-                    metric_result = {
-                        NG_FAILURE_CLASS_KEY: result.sidecar_failure_class,
-                        "_ng_failure_kind": result.failure.failure_kind,
-                        "_ng_failure_type": result.exception_type,
-                    }
-                if verification_response is None:
-                    verification_response = _judge_failure_response(result)
                 # Custom dispatch implementations may return an already-completed
                 # future. Associate those outcomes too; normal HTTP dispatch records
                 # its event before the request through on_dispatch above.
                 store.record_dispatch(row)
-                # HTTP results were validated at the request boundary. Custom
-                # drivers returning _CompletedRollout own their completed schema.
-                if isinstance(result, dict):
-                    if "failure" in result and "episode_id" in result:
-                        result = _normalize_rollout_outcome(row, result)
-                    elif result.get(NG_FAILURE_CLASS_KEY) is not None:
-                        result = _failure_outcome(row, result, "agent")
-                structured_failure = isinstance(result, RolloutFailureRecord)
-                if structured_failure:
-                    compatibility = _failure_compatibility_row(result, verification_response)
-                    # The canonical alias must agree with the typed record. Keep a distinct
-                    # producer class as collector-owned evidence for existing score selectors.
-                    legacy_class = diagnostics.get(NG_FAILURE_CLASS_KEY)
-                    if isinstance(legacy_class, str) and legacy_class != result.sidecar_failure_class:
-                        compatibility[NG_FAILURE_LEGACY_CLASS_KEY] = legacy_class
-                    if verification_response is not None and matches_failure_class(
-                        compatibility, {"judge_failed", "judge_invalid"}
-                    ):
-                        compatibility["response"] = verification_response
-                    # Keep producer evidence without making it the canonical failure reason.
-                    if diagnostics.get("error"):
-                        compatibility.pop("error")
-                    result = diagnostics | compatibility
-                if _materialized_taskset(row) is not None and isinstance(result, dict):
-                    # Result or failure, the record names the inputs it ran (task and dataset digests).
-                    for key, value in _task_data_provenance(row).items():
-                        result.setdefault(key, value)
-                _stamp_collector_fields(completed, result)
+                collected = _collected_outcome(completed, result)
+                result = collected.record
+                structured_failure = collected.structured_failure
+                metric_result = collected.metric_result
                 result[RUN_ID_KEY] = store.manifest.run_id
-                if completed.failure_report is not None:
-                    result = FailureReportRow.merged_into(result, completed.failure_report)
 
                 # Set below for a rollout whose trajectory is health-evaluated once the bookkeeping is done.
                 health_outcome: Optional[str] = None
@@ -5790,9 +5869,12 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         enables ``observability_enabled``. ``delete_model_call_capture`` removes each rollout's capture file after it
         is merged, and needs the payloads kept. With ``enrich_results`` off, results are exactly what `/run` returned.
 
-        ``record_output_dir`` with ``record_shard`` also writes each enriched rollout to that run folder through
-        :class:`RunRecordWriter`, as ``ng_collect_rollouts`` would (``rollouts-<shard>.jsonl`` and its failures
-        sidecar; omitted-rollout rows with ``record_omitted_rollouts``). It implies ``enrich_results``.
+        ``record_output_dir`` with ``record_shard`` also writes each rollout to that run folder through
+        :class:`RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
+        with the typed failure rows collection writes, and the rows as the shard's materialized inputs (omitted-rollout
+        rows with ``record_omitted_rollouts``). It implies ``enrich_results``, dispatches as collection does (typed
+        failure records under ``route_failures_to_sidecar``, validated results) on copies of the rows that name the
+        shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
         """
         if record_output_dir is not None and not record_shard:
             raise ValueError("record_output_dir needs a record_shard label naming this call's shard")
@@ -5805,30 +5887,41 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             capture_dirs = model_call_capture_dirs_from_config(global_config)
             observability_enabled = observability_enabled_from_config(global_config)
 
-            def stamp_for(completed: _CompletedRollout) -> Callable[[dict[str, Any]], None]:
-                def stamp(record: dict[str, Any]) -> None:
-                    _stamp_collector_fields(completed, record)
-                    agent_name = self._agent_name_for_row(completed.row, global_config)
-                    _record_policy_model_server(record, global_config, agent_name)
-
-                return stamp
-
             async def enrich(completed: _CompletedRollout) -> None:
-                record = await _enrich_returned_result(
-                    completed.row,
-                    completed.result,
-                    completed.rollout_latency_ms,
-                    stamp=stamp_for(completed) if writer is not None else None,
+                options = dict(
                     capture_dirs=capture_dirs,
                     observability_enabled=observability_enabled,
                     include_payloads=include_model_call_payloads,
                     delete_capture=delete_model_call_capture,
                 )
-                if writer is not None:
-                    writer.write(record)
+                if writer is None:
+                    await _enrich_returned_result(
+                        completed.row, completed.result, completed.rollout_latency_ms, **options
+                    )
+                    return
+                # The shard holds what collection would store: the stamped record, or the typed failure row for a
+                # failed /run, with the same enrichment, so the Store and the health check read it like an eval run.
+                record = _shard_record(
+                    completed,
+                    run_id=writer.run_id,
+                    global_config=global_config,
+                    agent_name=self._agent_name_for_row(completed.row, global_config),
+                )
+                await enrich_run_result(
+                    completed.row, record, rollout_latency_ms=completed.rollout_latency_ms, **options
+                )
+                _reflect_enrichment(completed.result, record)
+                writer.write(record)
 
+        dispatched = examples
+        run_id = None
+        if record_output_dir is not None:
+            # Recorded as collection dispatches: typed failure records under route_failures_to_sidecar and validated
+            # results, on rows that name the shard's run. The caller's rows are not modified.
+            run_id = uuid4().hex
+            dispatched = [dict(row, **{RUN_ID_KEY: row.get(RUN_ID_KEY) or run_id}) for row in examples]
         completions = self._run_examples_with_metadata(
-            examples,
+            dispatched,
             head_server_config=head_server_config,
             semaphore=semaphore,
             route_failures_to_sidecar=route_failures_to_sidecar,
@@ -5838,10 +5931,21 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             drain_margin_s=drain_margin_s,
             latency_tracker=latency_tracker,
             **({"retry_requests": False} if not retry_requests else {}),
+            **(
+                {"typed_outcomes": route_failures_to_sidecar, "validate_results": True}
+                if record_output_dir is not None
+                else {}
+            ),
         )
         # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
         writer = (
-            RunRecordWriter(record_output_dir, record_shard, record_omitted_rollouts=record_omitted_rollouts)
+            RunRecordWriter(
+                record_output_dir,
+                record_shard,
+                record_omitted_rollouts=record_omitted_rollouts,
+                rows=examples,
+                run_id=run_id,
+            )
             if record_output_dir is not None
             else None
         )

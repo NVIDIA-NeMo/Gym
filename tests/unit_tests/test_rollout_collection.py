@@ -14583,3 +14583,77 @@ class TestRunRecordWriter:
         with pytest.raises(ValueError, match="unknown agent"):
             Helper().run_examples([TestEnrichRunResult._row()], record_output_dir=tmp_path, record_shard="s")
         assert [row["reward"] for row in self._lines(tmp_path / "rollouts-s.jsonl")] == [1.0]
+
+    async def test_the_store_reads_a_shard_like_an_eval_run(self, tmp_path: Path, monkeypatch) -> None:
+        """A failed /run lands as the typed failure row collection writes, and the Store recovers from the shard."""
+        from nemo_gym.rollout_collection import RUN_ID_KEY, RolloutStore, _failure_diagnostics
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        scored_row = TestEnrichRunResult._row("g1_g0_a0")
+        failed_row = {**TestEnrichRunResult._row("g2_g0_a0"), TASK_INDEX_KEY_NAME: 4, ROLLOUT_INDEX_KEY_NAME: 0}
+        failure = {
+            NG_FAILURE_CLASS_KEY: "agent_request_failed",
+            "_ng_failure_type": "ClientConnectorError",
+            "_ng_failure_message": "connection refused",
+            "_ng_failure_http_status": None,
+        }
+        dispatched: list[dict] = []
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                dispatched.extend(examples)
+                futures = []
+                for row in examples:
+                    future = Future()
+                    if row[TASK_INDEX_KEY_NAME] == 3:
+                        result = _CompletedRollout(
+                            row=row, result={"reward": 1.0, "response": {}}, rollout_latency_ms=1.0
+                        )
+                    else:
+                        result = _CompletedRollout(
+                            row=row,
+                            result=dict(failure),
+                            rollout_latency_ms=None,
+                            diagnostics=_failure_diagnostics(failure),
+                        )
+                    future.set_result(result)
+                    futures.append(future)
+                return iter(futures)
+
+        run_dir = tmp_path / "run"
+        completions = list(
+            Helper().run_examples(
+                [scored_row, failed_row],
+                record_output_dir=run_dir,
+                record_shard="step_1",
+                route_failures_to_sidecar=True,
+            )
+        )
+        results = {
+            row[TASK_INDEX_KEY_NAME]: result for row, result in [await completion for completion in completions]
+        }
+        # Dispatch ran on copies that name the shard's run; the caller's rows are untouched.
+        assert all(RUN_ID_KEY in row for row in dispatched) and RUN_ID_KEY not in scored_row
+        assert results[3]["reward"] == 1.0
+        assert results[4][NG_FAILURE_CLASS_KEY] == "agent_request_failed"
+
+        [written_failure] = self._lines(run_dir / "rollouts-step_1_failures.jsonl")
+        assert written_failure["_ng_failure_record"]["failure"]["failure_kind"] == "agent_request_failed"
+        assert written_failure[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
+        assert written_failure[NG_FAILURE_MAX_ATTEMPTS_KEY] == 3
+        assert (written_failure[TASK_INDEX_KEY_NAME], written_failure[ROLLOUT_INDEX_KEY_NAME]) == (4, 0)
+        assert RUN_ID_KEY not in written_failure
+        materialized = self._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
+        assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4] and RUN_ID_KEY not in materialized[0]
+
+        # The Store reads the shard as it reads an eval run: the expected rows, the selected successes, the failures,
+        # and the rollouts it would run again.
+        store = RolloutStore.read(run_dir / "rollouts-step_1.jsonl")
+        assert store is not None
+        assert [record.read()["reward"] for record in store.selected_records("success").values()] == [1.0]
+        [failed] = store.failures()
+        assert failed[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
+        assert [row[TASK_INDEX_KEY_NAME] for row in store.pending()] == [4]
