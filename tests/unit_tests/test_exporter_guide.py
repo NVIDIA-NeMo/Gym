@@ -27,9 +27,9 @@ import pytest
 from omegaconf import OmegaConf
 from pytest import MonkeyPatch
 
-import nemo_gym.exporters.isolated as isolated
-from nemo_gym.exporters.base import ExportState
-from nemo_gym.run_artifacts import RunArtifacts
+import nemo_gym.artifacts.exporters.isolated as isolated
+from nemo_gym.artifacts.exporters.base import ExportState
+from nemo_gym.artifacts.run_artifacts import RunArtifacts
 
 
 REPO_ROOT = Path(__file__).parents[2]
