@@ -940,11 +940,13 @@ def test_health_export_projects_validated_collector_facts_without_changing_score
     assert collected.model_dump() == before
     assert values["health/response/known"] == 1
     assert values["health/trial/known"] == 1
-    assert values["health/trial/counts_known"] == 1
+    # An unknown grading outcome is a counted judge_unparseable fault; one over the gate limit is a known lower bound.
+    exact = "" if case != "invalid" else "_lower_bound"
+    assert values["health/trial/counts_known"] == int(case != "invalid")
     assert values["health/trial/expected"] == 1
-    assert values["health/trial/failed"] == int(case == "invalid")
+    assert values[f"health/trial/failed{exact}"] == int(case == "invalid")
     assert values["health/trial/passed"] == int(case != "invalid")
-    assert values["health/trial/failure_rate"] == int(case == "invalid")
+    assert values[f"health/trial/failure_rate{exact}"] == int(case == "invalid")
     assert values["health/upstream_recovery/known"] == 1
     assert values["health/grading_recovery/judge_recovered_attempts"] == int(case == "recovered")
     assert values["health/grading_recovery/judge_recovered_operations"] == int(case == "recovered")
