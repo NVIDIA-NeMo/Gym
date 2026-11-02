@@ -128,7 +128,7 @@ A clean exit is not guaranteed. A server that is slow to stop, such as one waiti
 
 ## HTTP Request Flow: Example
 
-During a single rollout, servers communicate via HTTP. This example shows a math problem with tool use. The Environment Server here is `legacy_agent`, which relays `/run` to an agent that runs the whole episode:
+During a single rollout, servers communicate via HTTP. This example shows a math problem with tool use for an agent that runs the whole episode itself. Its Environment Server is `legacy_agent`, which relays `/run` to the agent. Most shipped `simple_agent` configurations use `single_agent_turn_legacy` instead, which makes the seed, agent, verify, and close calls itself; see [Environment Server](/main/about/architecture#environment-server):
 
 ```mermaid
 %%{init: {'theme': 'default', 'themeVariables': { 'lineColor': '#5c6bc0', 'primaryTextColor': '#333'}}}%%

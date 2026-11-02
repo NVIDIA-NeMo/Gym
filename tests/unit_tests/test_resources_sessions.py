@@ -4,9 +4,13 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.base_resources_server import BaseSeedSessionResponse, BaseVerifyResponse, ResourcesSeedSessionResponse
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.single_agent_turn_types import SingleAgentTurnResult
+from nemo_gym.core.responses_api_types import NeMoGymResponse
+from nemo_gym.server_runtime.base_resources_server import (
+    BaseSeedSessionResponse,
+    BaseVerifyResponse,
+    ResourcesSeedSessionResponse,
+)
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnResult
 
 
 def test_empty_seed_response_preserves_legacy_wire_shape() -> None:

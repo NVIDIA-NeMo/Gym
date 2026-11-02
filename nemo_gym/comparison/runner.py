@@ -25,8 +25,8 @@ from nemo_gym.comparison.diff import compare_runs
 from nemo_gym.comparison.loading import build_loaded_run, load_agg_metrics_file, resolve_agent_selections
 from nemo_gym.comparison.report import write_reports
 from nemo_gym.comparison.schema import ComparisonConfig, ComparisonResult
+from nemo_gym.config.secret_utils import hide_secrets_in_overrides
 from nemo_gym.package_info import __version__
-from nemo_gym.secret_utils import hide_secrets_in_overrides
 
 
 def invoked_command() -> str:

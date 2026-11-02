@@ -14,8 +14,8 @@ from pathlib import Path
 import pytest
 from aiohttp import web
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, NeMoGymResponseFunctionToolCall
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.nooa_agent.config import NOOAInvocationConfig
 from responses_api_agents.nooa_agent.runner import NOOARunFailure, NOOARunRequest
 from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxCheckpoint, write_checkpoint
@@ -53,7 +53,7 @@ class LocalWorkerSandbox:
     async def exec(
         self, command: str, *, cwd: str, timeout_s: float | None, preserve_background_services: bool = False
     ) -> SandboxExecResult:
-        if "process_supervisor" in command:
+        if "process_supervisor.sh" in command:
             # Run the actual entrypoint from this checkout. The installed sandbox's
             # isolated interpreter and Linux descendant reaper are not under test.
             with (self.directory / "output.log").open("wb") as stdout:
