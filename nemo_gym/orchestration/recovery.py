@@ -107,10 +107,25 @@ FAILURE_ID = "_ng_failure_id"
 
 Identity = tuple[int, int]
 
-# Scheduler states that end an allocation from outside the run: its in-flight requests died with it and saved nothing.
-# An operator's cancel counts only for an explicit `gym eval resubmit --recover`: the in-job guard never continues it.
-ALLOCATION_CUT_STATES = frozenset({"TIMEOUT", "PREEMPTED", "NODE_FAIL", "CANCELLED"})
-# The kind a reservation without a saved outcome gets when no scheduler cut explains it.
+# Scheduler states of an allocation that has ended, by any path: a scheduler cut, a failed or completed driver
+# (its no-progress exit included), or a cancel. Its in-flight requests ended with it, and a reservation with no saved
+# row saved nothing a rerun could duplicate. An operator's cancel counts only for an explicit
+# `gym eval resubmit --recover`: the in-job guard never continues it.
+ALLOCATION_ENDED_STATES = frozenset(
+    {
+        "TIMEOUT",
+        "PREEMPTED",
+        "NODE_FAIL",
+        "BOOT_FAIL",
+        "CANCELLED",
+        "FAILED",
+        "COMPLETED",
+        "OUT_OF_MEMORY",
+        "DEADLINE",
+    }
+)
+# The kind a reservation without a saved outcome gets while the allocation that made it may be alive or its end is
+# unknown.
 RESERVATION_WITHOUT_OUTCOME = "reservation_without_outcome"
 # Why a failure the policy retries is unknown: the Store does not select it as pending, so a resume never runs it.
 STORE_DOES_NOT_REPLAY = "the policy retries it but the run's Store does not plan it again"
@@ -543,9 +558,9 @@ def decide_recovery(
     ``is_non_superseding_rollout_row`` names are skipped, and an interrupted omitted row means the rollout is missing.
     Only rows at or after ``resubmit_offset`` count towards the attempt cap. The rows are only read.
 
-    ``allocation_cut`` says that the scheduler ended the allocation that last wrote the Store (one of
-    ``ALLOCATION_CUT_STATES``) and no allocation of the run is live: a reservation with no saved row was in flight at
-    the cut, so it is not started for recovery purposes and the Store runs it again.
+    ``allocation_cut`` says that the allocation that last wrote the Store has ended, by any path (one of
+    ``ALLOCATION_ENDED_STATES``), and no allocation of the run is live: a reservation with no saved row was in flight
+    when it ended and saved nothing, so it is not started for recovery purposes and the Store runs it again.
     """
     from nemo_gym.rollout_collection import (
         NG_UNROUTED_RUN_ERROR_KEY,
@@ -782,8 +797,8 @@ def decide_recovery(
         if item.state == IdentityState.JUDGE_RECOVERABLE and fact.attempts >= fact.max_attempts:
             item.state = IdentityState.EXHAUSTED
         elif item.state == IdentityState.MISSING and (fact.reserved or not fact.pending):
-            # A reservation without an outcome is not proof that work never reached the agent, unless the scheduler
-            # cut the allocation that held it: then no row of that attempt exists and the Store runs it again.
+            # A reservation without an outcome stays unknown while the allocation that held it may be alive or its
+            # end is unknown. Once it has ended, no row of that attempt exists and the Store runs it again.
             if not (allocation_cut and fact.reserved and fact.pending):
                 item.state = IdentityState.UNKNOWN
                 item.failure_kind = item.failure_kind or RESERVATION_WITHOUT_OUTCOME
@@ -855,8 +870,8 @@ def decide_recovery(
                 )
             if reserved:
                 parts.append(
-                    f"{reserved} reservation(s) have no saved outcome and the allocation that made them was not cut "
-                    "by the scheduler, so whether they ran is unknown"
+                    f"{reserved} reservation(s) have no saved outcome and the allocation that made them is not known "
+                    "to have ended, so whether they ran is unknown"
                 )
             return decision(
                 RecoveryAction.STOP,
@@ -2109,6 +2124,12 @@ def continuation_admission(
             print(f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from")
             return "stop"
         collected = select_managed_evidence(collected, job)
+        # The marker holds this allocation's own provisional line until it queues its follow-up. It says nothing about
+        # the run: quoted into a stop, it would read as this allocation dying before its guard, so its sentinel would
+        # run the same stop again.
+        own = f"{PROVISIONAL_MARKER_PREFIX}{os.environ.get('SLURM_JOB_ID', '')} started"
+        if os.environ.get("SLURM_JOB_ID") and (collected.chain_continuation_note or "").startswith(own):
+            collected.chain_continuation_note = None
         if collected.walltime_state != "ok":
             print(f"{CONTINUATION_REASON_PREFIX}the chain's accumulated walltime is {collected.walltime_state}")
             return "stop"
@@ -2153,11 +2174,7 @@ def continuation_admission(
             max_walltime_s=max_walltime_s,
             live_job=False,
             planned_missing_continuation=segment,
-            # The cut allocation must be the one that last wrote the Store: an older allocation's reservations
-            # keep their own, unknown, ending.
-            allocation_cut=previous_state in ALLOCATION_CUT_STATES - {"CANCELLED"}
-            and bool(previous_job_id)
-            and collected.coverage_allocation_id == previous_job_id,
+            allocation_cut=_store_writer_ended(collected, previous_job_id),
         )
         print(CONTINUATION_REASON_PREFIX + decision.reason)
         if decision.action != RecoveryAction.RESUBMIT:
@@ -2222,12 +2239,26 @@ def stopped_followup(job_id: str, accounting: str) -> str | None:
 
 
 def allocation_cut_from_accounting(rows: list[tuple[str, str, int, int]], allocation_id: str | None) -> bool:
-    """Whether the first incarnation of ``allocation_id`` ended in a cut state.
+    """Whether the first incarnation of ``allocation_id`` has ended, by any path (``ALLOCATION_ENDED_STATES``).
 
-    Only the first incarnation (no restarts) runs work: the prologue stops a requeued one before any.
+    Only the first incarnation (no restarts) runs work: the prologue stops a requeued one before any. A state that is
+    absent, ambiguous or not terminal is not an ending.
     """
     states = {state for job_id, state, _, restarts in rows if job_id == allocation_id and restarts == 0}
-    return allocation_id is not None and len(states) == 1 and states <= ALLOCATION_CUT_STATES
+    return allocation_id is not None and len(states) == 1 and states <= ALLOCATION_ENDED_STATES
+
+
+def _store_writer_ended(collected: CollectedEvidence, previous_job_id: str) -> bool:
+    """In the in-job guard: whether the allocation that last wrote the Store has ended.
+
+    The guard runs after its predecessor ended, and a chain runs one allocation at a time: every allocation the chain
+    recorded before this one has ended. The writer is often an earlier allocation than the predecessor, for example
+    when the predecessor timed out before it opened the Store. A writer the chain does not name stays unknown.
+    """
+    writer = collected.coverage_allocation_id
+    if not writer or not previous_job_id:
+        return False
+    return writer == previous_job_id or (writer in collected.job_chain and writer != os.environ.get("SLURM_JOB_ID"))
 
 
 def accounted_requeued_chain_walltime(

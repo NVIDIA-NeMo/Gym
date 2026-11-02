@@ -31,7 +31,8 @@ from tests.unit_tests.test_rollout_recovery import runner_config as runner_confi
         ("final_zero", "75:0", False, False),
         ("judge", "75:0", False, False),
         ("judge_then_reservation", "75:0", False, False),
-        ("prior_reservation", "75:0", False, False),
+        # The allocation that made the reservation ended (FAILED): nothing was saved for it, so it runs again.
+        ("prior_reservation", "75:0", True, False),
         ("unknown_kill", "75:0", False, False),
         ("exhausted", "75:0", False, False),
         ("absent", "75:0", False, False),
