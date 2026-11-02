@@ -14,7 +14,11 @@
 # limitations under the License.
 """Contract tests for framework-owned token staging."""
 
+import hashlib
 import math
+import random
+import re
+import struct
 import subprocess
 import sys
 from pathlib import Path
@@ -22,6 +26,7 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.token_id_capture.staging import digest as digest_module
 from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
@@ -526,3 +531,62 @@ def test_staging_digest_rejects_boolean_lengths(field: str, boolean: bool) -> No
     error = f"{field} must be an unsigned 64-bit integer" if boolean else "staged call delta|cum_len"
     with pytest.raises(ValueError, match=error):
         compute_staging_digest(**args)
+
+
+@pytest.mark.parametrize(
+    "extras",
+    [
+        None,
+        {},
+        {"": None, "é": [True, False, -(2**63), 2**63 - 1, -0.0, 1.25]},
+        {"\ue000": "one", "\U00010000": "two", "empty": [[], {}]},
+        {"router": {"data": "abcd" * (1024 * 1024), "shape": [32768, 26, 6]}},
+    ],
+)
+def test_streamed_extras_preserve_frozen_bytes_and_metrics(extras, monkeypatch) -> None:
+    payload = struct.pack(">B", digest_module.EXTRAS_DIGEST_VERSION) + digest_module._encode_extra(extras)
+    metrics = []
+    monkeypatch.setattr(digest_module.capture_metrics, "digest", lambda kind, size: metrics.append((kind, size)))
+    assert compute_extras_digest(extras) == hashlib.sha256(digest_module._EXTRAS_DIGEST_DOMAIN + payload).hexdigest()
+    assert metrics == [("extras", len(payload))]
+    assert b"".join(digest_module._iter_encoded_extra(extras)) == payload[1:]
+
+
+def test_streamed_extras_random_nested_encoding() -> None:
+    rng = random.Random(7)
+
+    def value(depth: int):
+        scalars = [None, True, False, 0, -1, 2**63 - 1, -0.0, 0.5, "é\x00text"]
+        if depth == 0 or rng.random() < 0.5:
+            return rng.choice(scalars)
+        if rng.random() < 0.5:
+            return [value(depth - 1) for _ in range(rng.randrange(6))]
+        return {f"key-{index}": value(depth - 1) for index in range(rng.randrange(6))}
+
+    for _ in range(200):
+        extras = {"nested": value(5)}
+        payload = bytes([digest_module.EXTRAS_DIGEST_VERSION]) + digest_module._encode_extra(extras)
+        assert (
+            compute_extras_digest(extras) == hashlib.sha256(digest_module._EXTRAS_DIGEST_DOMAIN + payload).hexdigest()
+        )
+
+
+@pytest.mark.parametrize(
+    "bad", [(1, 2), b"bytes", float("nan"), float("inf"), 2**63, -(2**63) - 1, {1: "bad"}, object()]
+)
+def test_streamed_extras_reject_invalid_values_like_frozen_encoder(bad) -> None:
+    with pytest.raises((TypeError, ValueError)) as original:
+        digest_module._encode_extra({"nested": [bad]})
+    with pytest.raises(type(original.value), match="^" + re.escape(str(original.value)) + "$"):
+        compute_extras_digest({"nested": [bad]})
+
+
+def test_streamed_large_string_is_not_copied_into_joined_payload(monkeypatch) -> None:
+    original = digest_module._encode_extra
+
+    def scalar_only(value):
+        assert type(value) not in (str, dict, list), "Streaming must not join a nested payload"
+        return original(value)
+
+    monkeypatch.setattr(digest_module, "_encode_extra", scalar_only)
+    assert compute_extras_digest({"routes": ["a" * (4 * 1024 * 1024), 3]})

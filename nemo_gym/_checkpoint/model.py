@@ -261,6 +261,7 @@ class _Ticket:
 
 
 _CURRENT_TICKET: ContextVar[Optional[_Ticket]] = ContextVar("nemo_gym_policy_ticket", default=None)
+_CURRENT_CUT_DEADLINE: ContextVar[Optional[float]] = ContextVar("nemo_gym_cut_deadline", default=None)
 
 
 @dataclass(eq=False)
@@ -554,9 +555,12 @@ class PolicyGate:
         )
         with checkpoint_span("gym.checkpoint.generation_cut") as span:
             span.set(calls=len(prefixes))
+            # Keep the same absolute bound through HTTP queueing and retries.
+            cut_timeout = max(0.0, request.deadline_ts - time.time()) / 2
+            deadline_token = _CURRENT_CUT_DEADLINE.set(time.time() + cut_timeout)
             try:
                 # Half of what remains: a cut is optional, and the stages after this one need time too.
-                async with asyncio.timeout(max(0.0, request.deadline_ts - time.time()) / 2):
+                async with asyncio.timeout(cut_timeout):
                     receipt = await self.cut_requester(backend, inventory)
                 receipt.validate_for(inventory)
                 acks = {ack.ticket_id: ack for ack in receipt.prefixes}
@@ -566,6 +570,8 @@ class PolicyGate:
                     "generation cut failed on %s; those calls regenerate after restore", backend, exc_info=True
                 )
                 acks = {ticket_id: GenerationCutPrefixAck.failure(prefix) for ticket_id, prefix in prefixes.items()}
+            finally:
+                _CURRENT_CUT_DEADLINE.reset(deadline_token)
             dispositions = Counter(ack.disposition for ack in acks.values())
             span.set(**{f"cut_{disposition}": count for disposition, count in dispositions.items()})
         for disposition, count in dispositions.items():
@@ -1012,11 +1018,15 @@ def generation_cut_requester(
     async def request_cut(backend: str, inventory: GenerationCutInventory) -> GenerationCutReceipt:
         from nemo_gym.server_utils import get_response_json, raise_for_status, request
 
+        headers = {"authorization": f"Bearer {auth_token}"}
+        deadline_ts = _CURRENT_CUT_DEADLINE.get()
+        if deadline_ts is not None:
+            headers["x-nemo-gym-cut-deadline"] = str(deadline_ts)
         response = await request(
             method="POST",
             url=f"{control_root(backend)}{GENERATION_CUT_ROUTE}",
             json=inventory.model_dump(mode="json"),
-            headers={"authorization": f"Bearer {auth_token}"},
+            headers=headers,
             _internal=True,
             # The worker's data connections are busy with the very generations being cut.
             _control=True,

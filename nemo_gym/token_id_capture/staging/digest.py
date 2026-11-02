@@ -31,7 +31,7 @@ from __future__ import annotations
 import hashlib
 import math
 import struct
-from collections.abc import Mapping, Sequence
+from collections.abc import Iterator, Mapping, Sequence
 from typing import Any
 
 from nemo_gym.token_id_capture import capture_metrics
@@ -183,6 +183,33 @@ def _encode_extra(value: Any) -> bytes:
     raise TypeError(f"extras contain unsupported value type {type(value).__name__}")
 
 
+def _iter_encoded_extra(value: Any) -> Iterator[bytes]:
+    """Yield the frozen extras encoding without joining nested payloads."""
+    if type(value) is str:
+        encoded = value.encode("utf-8")
+        yield b"S"
+        yield struct.pack(">Q", len(encoded))
+        yield encoded
+    elif type(value) is list:
+        yield b"L"
+        yield _encode_uint(len(value), field="extras list length")
+        for item in value:
+            yield from _iter_encoded_extra(item)
+    elif type(value) is dict:
+        if any(type(key) is not str for key in value):
+            raise TypeError("extras mappings must have string keys")
+        keys = sorted(value, key=lambda key: key.encode("utf-8"))
+        yield b"D"
+        yield _encode_uint(len(keys), field="extras mapping length")
+        for key in keys:
+            encoded_key = key.encode("utf-8")
+            yield struct.pack(">Q", len(encoded_key))
+            yield encoded_key
+            yield from _iter_encoded_extra(value[key])
+    else:
+        yield _encode_extra(value)
+
+
 def compute_extras_digest(extras: Mapping[str, Any] | None) -> str:
     """Digest a normalized JSON-like extras envelope.
 
@@ -198,9 +225,15 @@ def compute_extras_digest(extras: Mapping[str, Any] | None) -> str:
         normalized = dict(extras)
     else:
         raise TypeError(f"extras must be a mapping or None, got {type(extras).__name__}")
-    payload = struct.pack(">B", EXTRAS_DIGEST_VERSION) + _encode_extra(normalized)
-    capture_metrics.digest("extras", len(payload))
-    return hashlib.sha256(_EXTRAS_DIGEST_DOMAIN + payload).hexdigest()
+    hasher = hashlib.sha256(_EXTRAS_DIGEST_DOMAIN)
+    version = struct.pack(">B", EXTRAS_DIGEST_VERSION)
+    hasher.update(version)
+    payload_length = len(version)
+    for chunk in _iter_encoded_extra(normalized):
+        hasher.update(chunk)
+        payload_length += len(chunk)
+    capture_metrics.digest("extras", payload_length)
+    return hasher.hexdigest()
 
 
 EMPTY_EXTRAS_DIGEST = compute_extras_digest(None)
