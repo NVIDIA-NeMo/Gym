@@ -3,19 +3,15 @@ from asyncio.subprocess import PIPE, STDOUT
 from os import killpg
 from pathlib import Path
 from signal import SIGKILL
-from typing import List, Optional
+from typing import Any, Dict, List, Optional
 
 import aiofiles
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
 
 
-class SlurmConfig(BaseNeMoGymCLIConfig):
-    pass
-
-
-class MooncakeConfig(BaseNeMoGymCLIConfig):
+class FlashInferConfig(BaseNeMoGymCLIConfig):
     pass
 
 
@@ -24,8 +20,8 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     output_container_fpath: str
     log_file: Path
 
-    slurm: Optional[SlurmConfig] = None
-    mooncake: Optional[MooncakeConfig] = None
+    slurm: Dict[str, Any] = Field(default_factory=dict)
+    flashinfer: Optional[FlashInferConfig] = None
 
 
 class CommandOutput(BaseModel):
@@ -91,8 +87,8 @@ class BaseBuilder(BaseModel):
         return last_output_split[0]
 
 
-class MooncakeBuilder(BaseBuilder):
-    config: MooncakeConfig
+class FlashInferBuilder(BaseBuilder):
+    config: FlashInferConfig
 
 
 class BuildContainerHelper:
