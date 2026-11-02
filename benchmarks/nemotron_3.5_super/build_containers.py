@@ -252,6 +252,7 @@ class FlashInferBuilder(BaseBuilder):
                 if remaining != manifest["modules"]:
                     manifest["modules"] = remaining
                     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+            PY
 
             # These derived caches/plans describe the previous installation. Recreate
             # them during warmup instead of validating stale manifests or reusing graphs.
@@ -260,17 +261,8 @@ class FlashInferBuilder(BaseBuilder):
             exit 0
             """
         ).lstrip()
-        return join(
-            [
-                "bash",
-                "-c",
-                script,
-                "flashinfer-build",
-                self.config.repo,
-                self._head_sha,
-                ",".join(self.config.invalidate_modules),
-            ]
-        )
+
+        return join(["bash", "-c", script, "flashinfer-build"])
 
     def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
         return {
@@ -289,7 +281,7 @@ class FlashInferBuilder(BaseBuilder):
             "time": "01:00:00",
             "container-image": str(container_config.output_container_fpath),
             "no-container-mount-home": True,
-            "container-save=": str(container_config.output_container_fpath),
+            "container-save": str(container_config.output_container_fpath),
             "export": "ALL",
         }
 
@@ -313,8 +305,8 @@ class BuildContainerHelper:
         srun_slurm_vars_strs = []
         for k, v in srun_slurm_vars.items():
             if isinstance(v, str):
-                srun_slurm_vars_strs.append(f'--{k}="{quote(v)}"')
-            elif v == True:
+                srun_slurm_vars_strs.append(f"--{k}={quote(v)}")
+            elif isinstance(v, bool) and v:
                 srun_slurm_vars_strs.append(f"--{k}")
             else:
                 raise NotImplementedError(f"Unknown srun slurm variable type: {k=} {v=} {type(v)=}")
@@ -323,7 +315,7 @@ class BuildContainerHelper:
         srun_command_str = f"""{env_vars_str} \\
 srun \\
     {srun_slurm_vars_str} \\
-    bash {builder_command_str}"""
+    {builder_command_str}"""
 
         command_output = await _run_command(srun_command_str, self.config.log_file)
 
