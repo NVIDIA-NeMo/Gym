@@ -5930,6 +5930,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         dispatched = examples
         run_id = None
         if record_output_dir is not None:
+            # Recording needs the indices every reader keys on. Refuse before any existing shard is replaced.
+            for index, row in enumerate(examples):
+                missing = [key for key in (TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME) if key not in row]
+                if missing:
+                    raise ValueError(f"Recording row {index} is missing required fields: {', '.join(missing)}")
             # Recorded as collection dispatches: typed failure records under route_failures_to_sidecar and validated
             # results, on rows that name the shard's run. The caller's rows are not modified.
             run_id = uuid4().hex

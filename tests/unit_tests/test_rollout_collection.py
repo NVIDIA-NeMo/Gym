@@ -14677,3 +14677,30 @@ class TestRunRecordWriter:
         # Another label is another shard, written independently.
         RunRecordWriter(tmp_path, "step_2").write(scored)
         assert self._lines(tmp_path / "rollouts-step_2.jsonl") == [scored]
+
+    @pytest.mark.parametrize(
+        "missing",
+        [[TASK_INDEX_KEY_NAME], [ROLLOUT_INDEX_KEY_NAME], [TASK_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME]],
+        ids=["task index", "rollout index", "both"],
+    )
+    def test_recording_rows_without_indices_are_refused_before_the_shard_is_replaced(
+        self, tmp_path: Path, missing: list[str]
+    ) -> None:
+        run_dir = tmp_path / "run"
+        run_dir.mkdir()
+        main, sidecar = run_dir / "rollouts-step_1.jsonl", run_dir / "rollouts-step_1_failures.jsonl"
+        main.write_bytes(b'{"reward": 1.0}\n')
+        sidecar.write_bytes(b'{"_ng_failure_class": "agent_run_error"}\n')
+        row = {key: value for key, value in TestEnrichRunResult._row().items() if key not in missing}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                raise AssertionError("a refused recording call must not dispatch")
+
+        with pytest.raises(ValueError, match="missing required fields"):
+            Helper().run_examples([row], record_output_dir=run_dir, record_shard="step_1")
+        assert main.read_bytes() == b'{"reward": 1.0}\n'
+        assert sidecar.read_bytes() == b'{"_ng_failure_class": "agent_run_error"}\n'
