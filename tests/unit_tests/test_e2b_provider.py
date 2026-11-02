@@ -17,6 +17,7 @@
 
 import asyncio
 import inspect
+import json
 import re
 import sys
 import tomllib
@@ -466,6 +467,56 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
         cpu_count=2,
         memory_mb=1024,
     )
+
+
+async def test_real_sdk_pause_resume_and_status_use_only_the_control_plane(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The real SDK parses states into ``SandboxState`` enums and maps 409 to False; pin both."""
+    e2b = pytest.importorskip("e2b", reason="e2b optional sandbox dependency is not installed")
+    import httpx
+    from e2b.api import client_async
+
+    state = {"value": "running"}
+    requests: list[tuple[str, str, bytes]] = []
+    record = {"sandboxID": "sbx-1", "templateID": "base", "clientID": "c", "envdVersion": "0.4.0"}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        requests.append((request.method, request.url.path, request.content))
+        if request.url.path == "/sandboxes/sbx-1/pause":
+            if state["value"] == "paused":
+                return httpx.Response(409, json={"code": 409, "message": "already paused"})
+            state["value"] = "paused"
+            return httpx.Response(204)
+        if request.url.path == "/sandboxes/sbx-1/connect":
+            state["value"] = "running"
+            return httpx.Response(200, json=record)
+        detail = {"cpuCount": 1, "memoryMB": 512, "diskSizeMB": 1024, "state": state["value"]}
+        times = {"startedAt": "2026-01-01T00:00:00Z", "endAt": "2026-01-01T01:00:00Z"}
+        return httpx.Response(200, json={**record, **detail, **times})
+
+    monkeypatch.setattr(client_async, "get_transport", lambda *args, **kwargs: httpx.MockTransport(handler))
+    monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: e2b)
+    provider = E2BProvider(connection={"api_key": "k", "api_url": "http://api.test"}, create={"template": "base"})
+
+    handle = await provider.connect({"sandbox_id": "sbx-1"})
+    requests.clear()
+    assert await provider.status(handle) is SandboxStatus.RUNNING
+    await provider.pause(handle)
+    await provider.pause(handle)  # A 409 on an already-paused sandbox is a no-op.
+    assert await provider.status(handle) is SandboxStatus.PAUSED
+    await provider.resume(handle)
+    assert await provider.status(handle) is SandboxStatus.RUNNING
+
+    # No envd request: status and pause must not wake a paused guest.
+    assert [(method, path) for method, path, _ in requests] == [
+        ("GET", "/sandboxes/sbx-1"),
+        ("POST", "/sandboxes/sbx-1/pause"),
+        ("POST", "/sandboxes/sbx-1/pause"),
+        ("GET", "/sandboxes/sbx-1"),
+        ("GET", "/sandboxes/sbx-1"),
+        ("POST", "/sandboxes/sbx-1/connect"),
+        ("GET", "/sandboxes/sbx-1"),
+    ]
+    assert json.loads(requests[5][2]) == {"timeout": 3600}
 
 
 # --------------------------------------------------------------------------
