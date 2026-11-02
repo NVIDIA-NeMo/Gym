@@ -749,6 +749,64 @@ def test_render_driver_entrypoint_puts_uv_on_path_without_env_file():
     assert out.index('export PATH="$HOME/.local/bin:$PATH"') < out.index("uv venv --seed .venv")
 
 
+def _run_private_uv_entrypoint(
+    tmp_path: Path, *, shared_uv: str, tmpdir: Path | None = None
+) -> tuple[str, Path, Path]:
+    """Run a private-uv reader entrypoint with stub git, uv and curl; return its report, the shared uv and curl log."""
+    home, tools = tmp_path / "home", tmp_path / "tools"
+    (home / ".local/bin").mkdir(parents=True)
+    tools.mkdir()
+    fake_uv = '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; : > .venv/bin/activate;; esac\n'
+    shared = home / ".local/bin/uv"
+    if shared_uv != "missing":
+        shared.write_text(fake_uv if shared_uv == "working" else "#!/bin/bash\nexit 1\n")
+        shared.chmod(0o755)
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    curl_log = tmp_path / "curl.log"
+    installer = (
+        'mkdir -p "$UV_INSTALL_DIR"; printf %s '
+        + shlex.quote(fake_uv)
+        + ' > "$UV_INSTALL_DIR/uv"; chmod +x "$UV_INSTALL_DIR/uv"'
+    )
+    (tools / "curl").write_text(
+        f"#!/bin/bash\necho called >> {shlex.quote(str(curl_log))}\necho {shlex.quote(installer)}\n"
+    )
+    for tool in ("git", "curl"):
+        (tools / tool).chmod(0o755)
+    report = 'echo "UV=$(command -v uv) CACHE=$UV_CACHE_DIR PYTHONS=$UV_PYTHON_INSTALL_DIR SRC=$GYM_SRC"'
+    out = render_driver_entrypoint(
+        "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
+    )
+    env = {"HOME": str(home), "PATH": f"{tools}:/usr/bin:/bin"} | ({"TMPDIR": str(tmpdir)} if tmpdir else {})
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, check=True)
+    return result.stdout, shared, curl_log
+
+
+@pytest.mark.parametrize("shared_uv", ["working", "broken", "missing"])
+def test_a_private_uv_entrypoint_runs_its_own_uv_and_cache(tmp_path: Path, shared_uv: str) -> None:
+    # Concurrent readers on other hosts replace the shared uv binary and cache on a network home; a uv
+    # running from those files dies with SIGBUS, so each reader runs a private copy with a host-local cache.
+    stdout, shared, curl_log = _run_private_uv_entrypoint(tmp_path, shared_uv=shared_uv)
+
+    fields = dict(part.split("=", 1) for part in stdout.split())
+    assert fields["UV"] == f"{fields['SRC']}/uv-bin/uv"
+    assert fields["CACHE"] == f"/tmp/gym-uv-cache-{os.getuid()}"
+    # Managed Pythons are never shared: each read installs its own under its temporary directory.
+    assert fields["PYTHONS"] == f"{fields['SRC']}/uv-python"
+    assert fields["SRC"].startswith("/tmp/gym-install-")
+    # A working uv is copied, not reinstalled over the shared one; a broken or missing one is replaced by an
+    # install into the private dir, and the shared file is left as it was.
+    assert curl_log.exists() is (shared_uv != "working")
+    assert shared.exists() is (shared_uv != "missing")
+    if shared_uv == "broken":
+        assert shared.read_text() == "#!/bin/bash\nexit 1\n"
+
+
+def test_the_driver_entrypoint_keeps_the_shared_uv_install() -> None:
+    out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
+    assert "UV_CACHE_DIR" not in out and "uv-bin" not in out
+
+
 def test_render_driver_entrypoint_installs_git_if_missing():
     # The driver container (e.g. a minimal python image) may not bundle git.
     out = render_driver_entrypoint("https://github.com/NVIDIA-NeMo/gym", "main", None)
@@ -2987,3 +3045,37 @@ def test_one_task_exiting_ends_its_service_step_and_the_driver_step_is_unchanged
     assert service_steps and driver_steps
     assert all(" --kill-on-bad-exit=1 --wait=1 " in line for line in service_steps)
     assert not any("--kill-on-bad-exit" in line or " --wait=" in line for line in driver_steps + collector_steps)
+
+
+@pytest.mark.parametrize("planted", ["symlink", "group-writable"])
+def test_a_private_uv_entrypoint_never_uses_a_shared_cache_dir_it_does_not_own_privately(
+    tmp_path: Path, planted: str
+) -> None:
+    # A predictable shared name could be created first by another user; then the reader would run a planted
+    # Python or install from a planted cache entry. It keeps its cache in its own temporary directory instead.
+    shared_tmp, elsewhere = tmp_path / "shared-tmp", tmp_path / "elsewhere"
+    shared_tmp.mkdir()
+    elsewhere.mkdir()
+    cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
+    if planted == "symlink":
+        cache.symlink_to(elsewhere, target_is_directory=True)
+    else:
+        cache.mkdir()
+        cache.chmod(0o775)
+
+    stdout, _, _ = _run_private_uv_entrypoint(tmp_path, shared_uv="working", tmpdir=shared_tmp)
+
+    fields = dict(part.split("=", 1) for part in stdout.split())
+    assert fields["CACHE"] == f"{fields['SRC']}/uv-cache"
+    assert not any(elsewhere.iterdir())
+
+
+def test_a_private_uv_entrypoint_creates_its_shared_cache_dir_private(tmp_path: Path) -> None:
+    shared_tmp = tmp_path / "shared-tmp"
+    shared_tmp.mkdir()
+
+    stdout, _, _ = _run_private_uv_entrypoint(tmp_path, shared_uv="working", tmpdir=shared_tmp)
+
+    cache = shared_tmp / f"gym-uv-cache-{os.getuid()}"
+    assert dict(part.split("=", 1) for part in stdout.split())["CACHE"] == str(cache)
+    assert cache.stat().st_mode & 0o777 == 0o700

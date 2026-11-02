@@ -209,6 +209,7 @@ def render_driver_entrypoint(
     extras: tuple[str, ...] = (),
     cleanup: bool = False,
     record_install_failure: bool = False,
+    private_uv: bool = False,
 ) -> str:
     """Render the srun entrypoint for the driver step.
 
@@ -228,6 +229,12 @@ def render_driver_entrypoint(
     `record_install_failure` writes `driver_install_failed` to the file named by `$GYM_DRIVER_FAILURE_FILE` when
     the install exits with a failure status (1 to 128; a signal is not an install failure), for the guard of the
     next segment. It replaces the EXIT trap, so it cannot be combined with `cleanup`.
+
+    `private_uv` gives the install its own uv binary inside its temporary directory (a copy of a working `uv`, else
+    a fresh install there) keeps uv's cache on the host's local disk, in this user's own directory only, and gives the install its own
+    managed Pythons. Concurrent installs on
+    other hosts replace the shared `~/.local/bin/uv` and cache entries on a network home, and a uv running from those
+    files then dies with SIGBUS.
     """
     if record_install_failure and cleanup:
         raise ValueError("record_install_failure and cleanup both need the EXIT trap")
@@ -246,14 +253,43 @@ def render_driver_entrypoint(
         # the artifacts. `cd` into it because a benchmark's prepare_script and
         # jsonl_fpath resolve against cwd; the driver's output path is absolute,
         # so nothing depends on the clone being reachable afterwards.
+        if private_uv:
+            uv_setup = [
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+                *(["trap " + shlex.quote('rm -rf -- "$GYM_SRC"') + " EXIT"] if cleanup else []),
+                'mkdir -p "$GYM_SRC/uv-bin"',
+                'export PATH="$HOME/.local/bin:$PATH"',
+                # Run a private copy, never the shared binary another host's installer may replace; a copy that
+                # does not run is replaced by a private install.
+                'if _gym_uv="$(command -v uv)" && "$_gym_uv" --version >/dev/null 2>&1 '
+                '&& cp "$_gym_uv" "$GYM_SRC/uv-bin/uv" && "$GYM_SRC/uv-bin/uv" --version >/dev/null 2>&1; then :; '
+                "else curl -LsSf https://astral.sh/uv/install.sh | "
+                'env UV_INSTALL_DIR="$GYM_SRC/uv-bin" UV_NO_MODIFY_PATH=1 sh; fi',
+                # The cache and managed Pythons stay on this host's local disk, reused by its later readers: a
+                # rename there leaves a running uv's open files intact, where a network home does not. A shared
+                # temporary-directory name is used only when it is this user's own directory, not a link and not
+                # writable by others; otherwise another user could plant a Python or a cache entry there, so the
+                # install keeps them in its own temporary directory instead.
+                '_gym_own_dir() { mkdir -p -m 700 "$1" 2>/dev/null; if [ -d "$1" ] && [ ! -L "$1" ] && [ -O "$1" ] '
+                '&& [ -z "$(find "$1" -maxdepth 0 -perm /022)" ]; then printf %s "$1"; else printf %s "$2"; fi; }',
+                'export PATH="$GYM_SRC/uv-bin:$PATH" '
+                'UV_CACHE_DIR="$(_gym_own_dir "${TMPDIR:-/tmp}/gym-uv-cache-$(id -u)" "$GYM_SRC/uv-cache")" '
+                # Managed Pythons are per read: an interpreter file another process rewrites or a killed install
+                # leaves half-written breaks every venv built on it, so no reader shares one.
+                'UV_PYTHON_INSTALL_DIR="$GYM_SRC/uv-python"',
+            ]
+        else:
+            uv_setup = [
+                "curl -LsSf https://astral.sh/uv/install.sh | sh",
+                # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
+                # the directory is already on PATH, and the file only does this export anyway.
+                'export PATH="$HOME/.local/bin:$PATH"',
+                'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
+                *(["trap " + shlex.quote('rm -rf -- "$GYM_SRC"') + " EXIT"] if cleanup else []),
+            ]
         preamble += [
             *record_failure,
-            "curl -LsSf https://astral.sh/uv/install.sh | sh",
-            # Not `source "$HOME/.local/bin/env"`: the installer skips writing that file when
-            # the directory is already on PATH, and the file only does this export anyway.
-            'export PATH="$HOME/.local/bin:$PATH"',
-            'GYM_SRC="$(mktemp -d /tmp/gym-install-XXXXXX)"',
-            *(["trap " + shlex.quote('rm -rf -- "$GYM_SRC"') + " EXIT"] if cleanup else []),
+            *uv_setup,
             render_repo_checkout(repo, ref, dest='"$GYM_SRC/gym"'),
             # A real venv, not --system: --system targets whatever interpreter happens to be on
             # the container's PATH, sidestepping uv's own project-aware Python selection - `uv
