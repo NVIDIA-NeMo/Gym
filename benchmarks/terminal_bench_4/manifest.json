@@ -1,6 +1,6 @@
 {
   "dataset": "terminal-bench/terminal-bench",
-  "ref": "sha256:17f8d25131ad47c286f682e0159ae78fd1698b2437eb0e5baa996753a412ae18",
+  "ref": "sha256:70bf6a87566301eb1f2c2c60db72ba2c0158c287b72f71a1e83113b7213b4962",
   "source_commit": "06a92e790027045921482f2acd23f3fa598ffe38",
   "tasks": [
     {
@@ -290,7 +290,7 @@
     },
     {
       "name": "takens-embedding-lean",
-      "ref": "sha256:9fdf09246b714d389cdc35514bbb60154a35ca34bbbd064ad9ad19d4045a0c3a",
+      "ref": "sha256:37c98cd2d83037b2a62958c37cd1e4e7c6205a071c8527f3cecc4e322de4f60a",
       "category": "cpu"
     },
     {
