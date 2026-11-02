@@ -1149,7 +1149,15 @@ def decide_recovery(
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.EXHAUSTED]} identity(ies) used every attempt since the last resubmit, so a "
-                "resume would run nothing; the run is not complete",
+                "resume would run nothing; the run is not complete; "
+                + _EXTEND_RETRIES_SCOPE.format(
+                    cap="/".join(
+                        str(cap)
+                        for cap in sorted(
+                            {item.max_attempts for item in evidence if item.state == IdentityState.EXHAUSTED} - {None}
+                        )
+                    )
+                ),
             )
         if counts.get(IdentityState.MASKED):
             return decision(
@@ -1173,7 +1181,7 @@ def decide_recovery(
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         return decision(
             RecoveryAction.STOP,
-            f"the stored infra-retry budget is used ({budget.infra_retries_used} of {budget.max_infra_retries})",
+            f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})",
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
@@ -1194,6 +1202,13 @@ def decide_recovery(
         + (f"; {populations}" if counts.get(IdentityState.UNKNOWN) or counts.get(IdentityState.MASKED) else ""),
         reverify_first=reverify_first,
     )
+
+
+_INFRA_BUDGET_USED_PREFIX = "the stored infra-retry budget is used"
+_EXTEND_RETRIES_SCOPE = (
+    "--extend-retries raises infra retries only; it does not raise the per-identity attempt cap "
+    "(max_rollout_attempts={cap})"
+)
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
@@ -2592,7 +2607,12 @@ def _decide_from_collected(
                 configured_retries=configured,
                 max_walltime_s=max_walltime_s,
             )
-    if max_infra_retries is not None and max_infra_retries != configured:
+    # The cap note explains an infra-cap decision (a resubmit, or the stored budget is used); a stop for the
+    # identities' own states (exhausted, terminal, masked) does not depend on it.
+    infra_cap_decision = decision.action == RecoveryAction.RESUBMIT or decision.reason.startswith(
+        _INFRA_BUDGET_USED_PREFIX
+    )
+    if infra_cap_decision and max_infra_retries is not None and max_infra_retries != configured:
         extension = (
             f"infra-retry cap {max_infra_retries}: {configured} configured + {int(recorded or 0)} recorded extension"
             + (f" + {extend_retries} requested now" if extend_retries else "")
