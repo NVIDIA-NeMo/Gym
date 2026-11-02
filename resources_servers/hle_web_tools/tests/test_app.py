@@ -666,15 +666,16 @@ async def test_every_key_rejected_ends_the_call_without_backoff(monkeypatch, key
 
 
 async def test_rejected_keys_do_not_spend_the_retry_budget(monkeypatch, key_pool_deadline):
-    def answer(*_, headers, **__):
-        return http_response(200 if headers["authorization"] == "Bearer good" else 401, {"results": []})
-
-    post = AsyncMock(side_effect=answer)
+    """With two attempts, a rejected key and then a transient failure on the only accepted key still leave one
+    retry, on that same key: the rejection spends no attempt and key selection wraps round to the current key."""
+    post = AsyncMock(side_effect=[http_response(401), http_response(429), http_response(200, {"results": []})])
     monkeypatch.setattr(module, "request", post)
     monkeypatch.setattr(module, "sleep", AsyncMock())
-    server = make_server(tavily_api_key="bad-1, bad-2, bad-3, good", max_http_attempts=3)
+    server = make_server(tavily_api_key="key-one, key-two", max_http_attempts=2)
     assert (await search(server, "spin structures")).text == "No results."
-    assert post.await_count == 4
+    tried = [c.kwargs["headers"]["authorization"] for c in post.await_args_list]
+    assert tried == ["Bearer key-one", "Bearer key-two", "Bearer key-two"]
+    module.sleep.assert_awaited_once()
 
 
 def test_shipped_blocklist_is_the_pinned_upstream_snapshot(tmp_path):
