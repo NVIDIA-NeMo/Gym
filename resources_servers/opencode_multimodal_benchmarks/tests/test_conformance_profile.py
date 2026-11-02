@@ -22,7 +22,12 @@ def test_conformance_uses_eval_profile_and_explicit_sandbox(tmp_path, monkeypatc
         )
     )
     monkeypatch.setenv("GYM_MULTIMODAL_SANDBOX_CONFIG", str(runtime))
-    config = _config("opencode_multimodal", tmp_path, [10001, 10002, 10003, 10004], 60)
+    config = _config(
+        "opencode_multimodal",
+        tmp_path,
+        {"policy_model": 10001, "probe_resources": 10002, "probe_agent": 10003, "probe_environment": 10004},
+        60,
+    )
     agent = OpenCodeMultimodalEvalConfig.model_validate(
         config["probe_agent"]["responses_api_agents"]["opencode_multimodal_agent"]
     )

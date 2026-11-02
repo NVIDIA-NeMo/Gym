@@ -26,11 +26,10 @@ def select_harnesses(paths: list[str]) -> list[str]:
             selected.add(adapter)
         elif path.startswith(("nemo_gym/cli/", "nemo_gym/tasks/")) and path not in (
             "nemo_gym/cli/__init__.py",
-            "nemo_gym/cli/_compat.py",
             "nemo_gym/cli/utils.py",
         ):
             # Probes construct their own rows and call the collector directly.
-            # Core modules still import the shared CLI compatibility helpers.
+            # A change to either of these two still runs every harness.
             continue
         elif path.startswith(
             (
@@ -103,8 +102,9 @@ def install_runtime(harness: str) -> None:
     if harness == "opencode_multimodal":
         # The separate sandbox setup installs the native executable, not npm's Node launcher.
         return
-    if harness in ("hermes", "stirrup"):
-        return  # Hermes' pinned runtime is in its requirements; Stirrup installs its runtime in the task sandbox.
+    if harness in ("hermes", "stirrup", "simple"):
+        # Simple Agent is built in; Hermes ships via requirements; Stirrup installs in its task sandbox.
+        return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":

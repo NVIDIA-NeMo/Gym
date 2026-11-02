@@ -28,7 +28,7 @@ import yaml
 from pydantic import BaseModel, Field, ValidationError
 
 from nemo_gym import _resolve_under_cwd_or_install
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigPathNotFoundError, PromptConfigMalformedError
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigPathNotFoundError, PromptConfigMalformedError
 
 
 class PromptConfig(BaseModel):
@@ -183,7 +183,7 @@ class MaterializePromptsConfig(BaseNeMoGymCLIConfig):
 
 # Backward-compatibility shim (CLI refactor): this CLI entry point moved to `nemo_gym.cli.dataset`.
 # Re-exported lazily to avoid a circular import; accessing it emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

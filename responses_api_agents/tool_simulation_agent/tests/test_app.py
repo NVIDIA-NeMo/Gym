@@ -20,9 +20,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 from pytest import fixture, raises
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.tool_simulation_agent.app import ToolSimulationAgent, ToolSimulationAgentConfig
 
 

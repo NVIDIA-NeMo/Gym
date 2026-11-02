@@ -17,10 +17,10 @@
 
 from __future__ import annotations
 
+import warnings
 from typing import Annotated, Any, Literal, Self
 
 from pydantic import (
-    AliasChoices,
     BaseModel,
     ConfigDict,
     Field,
@@ -133,19 +133,45 @@ class _DigestWireModel(_WireModel):
     extras_digest_version: Literal[EXTRAS_DIGEST_VERSION] = EXTRAS_DIGEST_VERSION
 
 
-class _CaptureIdentityCompat:
-    """Read-only identity spelling used by older training-framework clients.
+# Renamed fields already warned about in this process; bounded by the fixed set of renames.
+_WARNED_RENAMES: set[tuple[str, str]] = set()
 
-    ``capture_key`` remains the canonical field and serialized wire name. The
-    input alias on identity records also accepts legacy ``rollout_id`` payloads;
-    supplying both names is rejected by the records' extra-field validation.
-    """
 
-    capture_key: str
+def warn_renamed(old: str, new: str, *, stacklevel: int = 2) -> None:
+    """Warn the first time this process uses a capture field under its name from before the rename."""
+    if (old, new) in _WARNED_RENAMES:
+        return
+    _WARNED_RENAMES.add((old, new))
+    warnings.warn(
+        f"`{old}` is deprecated and will be removed in a future release; use `{new}` instead.",
+        FutureWarning,
+        stacklevel=stacklevel + 1,
+    )
+
+
+def _accept_renamed(data: Any, *, old: str, new: str, owner: str = "") -> Any:
+    if not isinstance(data, dict) or old not in data:
+        return data
+    warn_renamed(f"{owner}{old}", f"{owner}{new}")
+    if new in data:
+        raise ValueError(f"pass `{new}` or its deprecated name `{old}`, not both")
+    data = dict(data)
+    data[new] = data.pop(old)
+    return data
+
+
+class _RolloutIdAlias(BaseModel):
+    """Accepts and reads ``capture_key`` under the name it replaced."""
+
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_rollout_id(cls, data: Any) -> Any:
+        return _accept_renamed(data, old="rollout_id", new="capture_key")
 
     @property
     def rollout_id(self) -> str:
-        return self.capture_key
+        warn_renamed("rollout_id", "capture_key", stacklevel=2)
+        return self.capture_key  # type: ignore[attr-defined]
 
 
 class ReplayItem(_WireModel):
@@ -207,7 +233,7 @@ class GenerationCutContinuation(_WireModel):
         return self
 
 
-class CaptureAdmission(_CaptureIdentityCompat, _WireModel):
+class CaptureAdmission(_RolloutIdAlias, _WireModel):
     """Gate-to-worker identity and exact-prefix contract for one model call.
 
     A ``token_in`` admission carries its prefix in one of two encodings.
@@ -217,7 +243,7 @@ class CaptureAdmission(_CaptureIdentityCompat, _WireModel):
     It passes that list to ``CaptureAdapter.enter_prefix`` and to ``RolloutTokenCapture.begin_call``.
     """
 
-    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+    capture_key: Identifier
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt = 0
@@ -263,7 +289,7 @@ class CaptureAdmission(_CaptureIdentityCompat, _WireModel):
         return self
 
 
-class StagedCallBaseSnapshot(_CaptureIdentityCompat, _DigestWireModel):
+class StagedCallBaseSnapshot(_RolloutIdAlias, _DigestWireModel):
     """Token columns and metadata for one staged call.
 
     This model excludes the optional ``extras`` payload.
@@ -272,7 +298,7 @@ class StagedCallBaseSnapshot(_CaptureIdentityCompat, _DigestWireModel):
     A consumer that loads extras must verify them separately with ``compute_extras_digest``.
     """
 
-    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+    capture_key: Identifier
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     mode: CaptureMode
@@ -433,10 +459,10 @@ class StageResult(_WireModel):
         return self
 
 
-class CommitCoords(_CaptureIdentityCompat, _DigestWireModel):
+class CommitCoords(_RolloutIdAlias, _DigestWireModel):
     """Metadata returned after an inference worker stages one call."""
 
-    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+    capture_key: Identifier
     model_call_id: Identifier
     parent_call_id: Identifier | None = None
     prev_len: NonNegativeInt
@@ -529,6 +555,17 @@ class CallRecord(_DigestWireModel):
     # column rejects each row (``extra="forbid"``) as ``invalid_manifest_row``, as with ``source_capture_key``.
     finish_reason: StrictStr | None = None
 
+    # Rows written before the rename carry ``source_capture_key`` as ``capture_key``.
+    @model_validator(mode="before")
+    @classmethod
+    def _accept_capture_key(cls, data: Any) -> Any:
+        return _accept_renamed(data, old="capture_key", new="source_capture_key", owner="CallRecord.")
+
+    @property
+    def capture_key(self) -> str | None:
+        warn_renamed("CallRecord.capture_key", "CallRecord.source_capture_key", stacklevel=2)
+        return self.source_capture_key
+
     @model_validator(mode="after")
     def _validate_lengths(self) -> Self:
         if self.delta_len == 0 or self.cum_len != self.prev_len + self.delta_len:
@@ -544,14 +581,14 @@ class CallRecord(_DigestWireModel):
         return self
 
 
-class CaptureLedgerCommit(_CaptureIdentityCompat, _WireModel):
+class CaptureLedgerCommit(_RolloutIdAlias, _WireModel):
     """One successfully staged call, as handed to ``CaptureLedger.record``.
 
     ``record`` is the manifest row. The remaining fields feed parent resolution
     and are not part of the manifest.
     """
 
-    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+    capture_key: Identifier
     record: CallRecord
     staging_chain: tuple[Identifier, ...] = ()
     request_items: list[dict]
@@ -565,10 +602,10 @@ class ManifestFailure(_WireModel):
     reason: Identifier
 
 
-class RolloutManifest(_CaptureIdentityCompat, _WireModel):
+class RolloutManifest(_RolloutIdAlias, _WireModel):
     """The token-free ledger read returned by the manifest control route."""
 
-    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+    capture_key: Identifier
     records: list[CallRecord] = Field(default_factory=list)
     failures: list[ManifestFailure] = Field(default_factory=list)
     attempted_call_ids: list[Identifier] = Field(default_factory=list)
@@ -587,10 +624,10 @@ class RolloutRemoval(_WireModel):
     absent: list[Identifier] = Field(default_factory=list)
 
 
-class RolloutReceipt(_CaptureIdentityCompat, _DigestWireModel):
+class RolloutReceipt(_RolloutIdAlias, _DigestWireModel):
     """Token-free immutable manifest the framework assembles at rollout end."""
 
-    capture_key: Identifier = Field(validation_alias=AliasChoices("capture_key", "rollout_id"))
+    capture_key: Identifier
     reward: float | None = None
     terminal_model_call_id: Identifier | None = None
     manifest: list[CallRecord] = Field(default_factory=list)

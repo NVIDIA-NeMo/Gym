@@ -4,6 +4,7 @@
 """Local probe adapters, importable by CI before Gym dependencies are installed."""
 
 HARNESSES = {
+    "simple": "SimpleAgent",
     "opencode": "OpenCodeAgent",
     "opencode_multimodal": "OpenCodeMultimodalEvalAgent",
     "pi": "PiAgent",
