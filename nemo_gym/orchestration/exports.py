@@ -83,6 +83,8 @@ def export_run_settings(
         full.setdefault("session_id", f"gym-submit-{benchmark_name}-{submission}")
         full.setdefault("output_dirpath", str(bench_dir / "exports" / "atif"))
     elif name == "evalrdl":
+        full.setdefault("label", run_name)
+        full.setdefault("run_dir", str(bench_dir))
         meta = full.setdefault("meta", {})
         # Anything but a mapping is left for the settings model to reject with its own message.
         if isinstance(meta, dict):

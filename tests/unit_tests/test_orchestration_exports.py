@@ -140,6 +140,13 @@ class TestRunSettings:
         assert settings["output_dirpath"] == f"/jobs/{JOB_ID}/gpqa/exports/atif"
         assert settings["agent_version"] == "1.0.0"
 
+    def test_evalrdl_uploads_the_benchmark_directory_under_the_run_name(self) -> None:
+        settings = self._settings("evalrdl", {})
+        assert settings["label"] == f"gpqa-{JOB_ID}"
+        assert settings["run_dir"] == str(BENCH_DIR)
+        own = self._settings("evalrdl", {"label": "mine", "run_dir": "/elsewhere"})
+        assert (own["label"], own["run_dir"]) == ("mine", "/elsewhere")
+
     def test_evalrdl_metadata_names_the_benchmark(self) -> None:
         assert self._settings("evalrdl", {})["meta"] == {"benchmark": "gpqa"}
         assert self._settings("evalrdl", {"meta": {"benchmark": "mine", "k": "v"}})["meta"] == {
@@ -596,6 +603,7 @@ def test_the_rendered_entrypoint_passes_awkward_settings_to_gym_eval_export_unch
         "tags": ["a b", "1"],
         "meta": {"owner": "o'brien", "version": "2", "benchmark": "gpqa"},
         "url": "${oc.env:EVALRDL_URL}",
+        "run_dir": str(tail_env["bench"]),
         "rollouts_jsonl_fpath": f"{tail_env['bench']}/artifacts/rollouts.jsonl",
         "result_json_fpath": f"{tail_env['bench']}/exports/evalrdl.result.json",
     }
