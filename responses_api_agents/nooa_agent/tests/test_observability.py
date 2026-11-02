@@ -1074,7 +1074,7 @@ async def test_a_tool_call_nooa_rejects_without_running_is_a_failed_tool_call_wi
 
 
 @pytest.mark.asyncio
-async def test_a_tool_call_skipped_after_a_failed_cell_is_reported_as_a_gap_not_invented() -> None:
+async def test_a_tool_call_skipped_after_a_failed_cell_is_reported_with_nooas_answer_not_invented() -> None:
     trace = GymTraceHooks()
     state = RolloutLLMState(max_policy_calls=2)
     responses = [
@@ -1123,15 +1123,14 @@ async def test_a_tool_call_skipped_after_a_failed_cell_is_reported_as_a_gap_not_
 
     tools = {tool.tool_call_id: tool for tool in trajectory.tool_calls}
     assert tools["call-1"].status == "failed"
-    assert "call-2" not in tools
-    assert not any(
-        isinstance(item, NeMoGymFunctionCallOutput) and item.call_id == "call-2"
-        for item in trajectory.invocations[0].conversation
-    )
-    skipped = [gap for gap in trajectory.gaps if gap.code == "tool_call_not_executed"]
-    assert [(gap.invocation_id, "call-2" in (gap.detail or "")) for gap in skipped] == [
-        (trajectory.invocations[0].invocation_id, True)
-    ]
+    # NOOA answers the call it did not run with its own error result (labs-OO-Agents ed22fffed), which the model
+    # reads next turn; the record reports that answer as a rejected call and invents no execution.
+    assert tools["call-2"].status == "failed"
+    assert tools["call-2"].error_type == "ToolCallRejected"
+    assert "Not executed" in (tools["call-2"].output or "")
+    assert "python_cell call 1" in (tools["call-2"].output or "")
+    assert tools["call-2"].sandbox_id is None
+    assert not [gap for gap in trajectory.gaps if gap.code == "tool_call_not_executed"]
     # A partial snapshot cannot tell a skipped call from one that has not started.
     _, partial = trace.project(
         create_params=NeMoGymResponseCreateParamsNonStreaming(input="fail then skip"),
