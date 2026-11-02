@@ -85,9 +85,11 @@ class BaseBuilder(BaseModel):
         command_output = await self._run_command(
             command=f'git ls-remote --exit-code "{repo}" "refs/heads/{branch}" | cut -f1'
         )
-        assert command_output.returncode == 0, (
+        assert command_output.returncode == 0 and len(command_output.output_lines[-1].split("\n")) == 1, (
             f"Preflight git repo check failed for {repo} @ {branch}. See {self.log_file}"
         )
+
+        return command_output.output_lines[-1]
 
 
 class MooncakeBuilder(BaseBuilder):
