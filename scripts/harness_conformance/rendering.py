@@ -43,7 +43,14 @@ def render_table(report: dict) -> str:
     rows = report["harnesses"]
     for row in rows.values():
         validate_row(row)
-    lines = [BEGIN, "", "| Harness | P0 | Passing scenarios (all priorities) | P1 |", "| --- | --- | --- | --- |"]
+    lines = [
+        BEGIN,
+        "",
+        "Priority results are cumulative: P1 requires both P0 and P1 scenarios, so a P1 failure can originate at either priority.",
+        "",
+        "| Harness | P0 | Passing scenarios (all priorities) | P0 + P1 |",
+        "| --- | --- | --- | --- |",
+    ]
     for harness in HARNESSES:
         row = rows.get(harness)
         status = statuses.get(harness)
