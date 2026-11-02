@@ -397,15 +397,24 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         '        _gym_srun_said=$(tail -n 1 "$_gym_err" | cut -c 1-300)',
         f'        scancel --name {name} --user "$USER" 2>/dev/null',
         "        _gym_waited=0",
-        f'        while [[ -n $(squeue -h -u "$USER" -n {name} -o %i 2>/dev/null) ]] '
-        f"&& (( _gym_waited < {_READER_CANCEL_WAIT_S} )); do",
+        "        _gym_gone=0",
+        # Only a squeue that answers and no longer lists the step confirms the cancellation.
+        f'        while _gym_queued=$(squeue -h -u "$USER" -n {name} -o %i 2>/dev/null); do',
+        "            [[ -n $_gym_queued ]] || { _gym_gone=1; break; }",
+        f"            (( _gym_waited < {_READER_CANCEL_WAIT_S} )) || break",
         "            sleep 2",
         "            _gym_waited=$(( _gym_waited + 2 ))",
         "        done",
         f'        _gym_fallback="the reader step did not start within {step.wait_s} s and was cancelled"',
         '        [[ -z $_gym_srun_said ]] || _gym_fallback="$_gym_fallback ($_gym_srun_said)"',
-        f"        (( _gym_waited < {_READER_CANCEL_WAIT_S} )) || "
-        f'_gym_fallback="$_gym_fallback; it was still queued after {_READER_CANCEL_WAIT_S} s"',
+        # A step that may still start must not race a second reader on the login host: stop instead.
+        "        if (( ! _gym_gone )); then",
+        "            _gym_host=unconfirmed",
+        "            _gym_rc=1",
+        '            _gym_fallback=""',
+        f'            echo "gym: the cancelled reader step {name} was not confirmed gone (still queued after '
+        f'{_READER_CANCEL_WAIT_S} s, or squeue failed); no second reader was started on the login host" >>"$_gym_err"',
+        "        fi",
         "    fi",
         "fi",
     ]

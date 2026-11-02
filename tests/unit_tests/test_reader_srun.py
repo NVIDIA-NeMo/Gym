@@ -44,6 +44,8 @@ exit 1
 # Lists the configured reader jobs; a lookup by name (the wait after a cancel) finds nothing.
 _SQUEUE = """#!/bin/bash
 [[ -n $FAKE_SQUEUE_FAILS ]] && exit 1
+[[ " $* " == *" -n "* && -n $FAKE_SQUEUE_STEP_FAILS ]] && exit 1
+[[ " $* " == *" -n "* && -n $FAKE_SQUEUE_STEP_QUEUED ]] && { echo 99; exit 0; }
 [[ " $* " == *" -n "* ]] && exit 0
 cat "$FAKE_LOG/queue" 2>/dev/null
 exit 0
@@ -354,3 +356,18 @@ def test_the_wait_and_the_cap_take_their_defaults_for_unset_or_invalid_values(
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_MAX", raw)
     step = slurm.reader_step()
     assert step.wait_s == expected and step.max_readers == (8 if expected == 120 else expected)
+
+
+@pytest.mark.parametrize("env", ["FAKE_SQUEUE_STEP_QUEUED", "FAKE_SQUEUE_STEP_FAILS"])
+def test_an_unconfirmed_cancellation_starts_no_second_reader(fake_slurm, tmp_path: Path, monkeypatch, env) -> None:
+    fake_slurm(_REFUSED_SRUN)
+    monkeypatch.setattr(slurm, "_READER_CANCEL_WAIT_S", 2)
+    monkeypatch.setenv(env, "1")
+
+    output = LocalConnection().run(_reader(tmp_path))
+
+    # The step may still start, so the login host does not read too: the reader fails and says why.
+    assert "PAYLOAD-LINE" not in output.splitlines()
+    assert "__GYM_READER_RC:1" in output
+    assert "was not confirmed gone" in output
+    assert slurm.reader_placement(output)[0] == "unconfirmed"
