@@ -14820,6 +14820,23 @@ class TestRunRecordWriter:
         assert [failed[NG_FAILURE_CLASS_KEY] for failed in store.failures()] == ["agent_request_failed"]
         assert row[RUN_ID_KEY] == "an-earlier-run"  # the caller's row is untouched
 
+    def test_a_superseded_writer_leaves_the_newer_shard_status_alone(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import _RunRecordWriter
+
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0}
+            for index in range(2)
+        ]
+        first = _RunRecordWriter(tmp_path, "step_1", rows=rows, status_rows=[dict(row) for row in rows])
+        first.write({**rows[0], "reward": 1.0})
+        second = _RunRecordWriter(tmp_path, "step_1", rows=rows, status_rows=[dict(row) for row in rows])
+        before = second.status_fpath.read_bytes()
+        first.flush_status()
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            first.write({**rows[1], "reward": 1.0})
+        assert second.status_fpath.read_bytes() == before
+        assert orjson.loads(before)["members"]["a"]["completed_rollout_count"] == 0
+
 
 @pytest.mark.parametrize("retain_results", [False, True])
 async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(

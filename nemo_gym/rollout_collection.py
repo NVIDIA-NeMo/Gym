@@ -1801,16 +1801,23 @@ class _RunRecordWriter:
                 raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
             with fpath.open("ab") as f:
                 f.write(line + b"\n")
-        if self._status is not None and self._status.enabled:
-            status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
-            (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
-            last = self._status_expected is not None and self._status_written >= self._status_expected
-            self._status.write_status(self._status_completed, self._status_failures, force=last)
+            # The status follows under the same lock, so a writer superseded meanwhile cannot overwrite the newer
+            # writer's counts.
+            if self._status is not None and self._status.enabled:
+                status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
+                (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
+                last = self._status_expected is not None and self._status_written >= self._status_expected
+                self._status.write_status(self._status_completed, self._status_failures, force=last)
         return fpath
 
     def flush_status(self) -> None:
         """Write the shard's status as it stands, for a caller that stops consuming before every row is in."""
-        if self._status is not None and self._status.enabled:
+        if self._status is None or not self._status.enabled:
+            return
+        with self._locked() as lock:
+            lock.seek(0)
+            if lock.read() != self._writer_token:
+                return  # another writer owns the shard now; its status stands
             self._status.write_status(self._status_completed, self._status_failures, force=True)
 
 
