@@ -6,6 +6,7 @@ import hashlib
 import json
 import logging
 import re
+import signal
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -33,13 +34,13 @@ QUESTION = (
 )
 
 
-def make_server(**overrides) -> HLEWebToolsResourcesServer:
+def make_server(tavily_api_key: str = "key-one, key-two", **overrides) -> HLEWebToolsResourcesServer:
     config = HLEWebToolsResourcesServerConfig(
         host="127.0.0.1",
         port=8000,
         entrypoint="app.py",
         name="hle_tools",
-        tavily_api_key="key-one, key-two",
+        tavily_api_key=tavily_api_key,
         **overrides,
     )
     return HLEWebToolsResourcesServer(config=config, server_client=MagicMock(spec=ServerClient))
@@ -393,6 +394,56 @@ async def test_rejected_key_fails_over_and_provider_bodies_stay_private(server, 
     with pytest.raises(RuntimeError, match="Tavily HTTP 400") as error:
         await search(server, "spin structures")
     assert "secret" not in str(error.value)
+
+
+class KeyPoolSpin(BaseException):
+    """Raised by the alarm; a BaseException so the transport's ``except TimeoutError`` cannot swallow it."""
+
+
+@pytest.fixture
+def key_pool_deadline():
+    # An asyncio timeout cannot interrupt a synchronous spin in key selection; SIGALRM can, so the test fails.
+    def expire(*_):
+        raise KeyPoolSpin("key selection did not terminate")
+
+    previous = signal.signal(signal.SIGALRM, expire)
+    signal.alarm(5)
+    yield
+    signal.alarm(0)
+    signal.signal(signal.SIGALRM, previous)
+
+
+@pytest.mark.parametrize(
+    "keys, status, tried",
+    [
+        ("key-one", 401, ["key-one"]),
+        ("key-one", 432, ["key-one"]),
+        ("key-one", 433, ["key-one"]),
+        ("key-one, key-one", 401, ["key-one"]),
+        ("key-one, key-two", 401, ["key-one", "key-two"]),
+    ],
+)
+async def test_every_key_rejected_ends_the_call_without_backoff(monkeypatch, key_pool_deadline, keys, status, tried):
+    post = AsyncMock(side_effect=lambda *a, **kw: http_response(status, {"detail": "secret-key-details"}))
+    monkeypatch.setattr(module, "request", post)
+    monkeypatch.setattr(module, "sleep", AsyncMock())
+    with pytest.raises(RuntimeError, match=f"Tavily HTTP {status} on /search: every configured key") as error:
+        await search(make_server(tavily_api_key=keys), "spin structures")
+    assert "secret" not in str(error.value)
+    assert [c.kwargs["headers"]["authorization"] for c in post.await_args_list] == [f"Bearer {k}" for k in tried]
+    module.sleep.assert_not_awaited()
+
+
+async def test_rejected_keys_do_not_spend_the_retry_budget(monkeypatch, key_pool_deadline):
+    def answer(*_, headers, **__):
+        return http_response(200 if headers["authorization"] == "Bearer good" else 401, {"results": []})
+
+    post = AsyncMock(side_effect=answer)
+    monkeypatch.setattr(module, "request", post)
+    monkeypatch.setattr(module, "sleep", AsyncMock())
+    server = make_server(tavily_api_key="bad-1, bad-2, bad-3, good", max_http_attempts=3)
+    assert (await search(server, "spin structures")).text == "No results."
+    assert post.await_count == 4
 
 
 def test_shipped_blocklist_is_the_pinned_upstream_snapshot(tmp_path):

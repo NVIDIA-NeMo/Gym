@@ -115,7 +115,7 @@ hle_tools:
 
 | Key | Default | Meaning |
 | --- | --- | --- |
-| `tavily_api_key` | required | one key, a list, or a comma-separated string; a key Tavily rejects (401, 432, 433) is skipped for the rest of the call |
+| `tavily_api_key` | required | one key, a list, or a comma-separated string (a repeated key counts once); a key Tavily rejects (401, 432, 433) is skipped for the rest of the call without spending the retry budget, and the call fails once every key is rejected |
 | `blocklist_file_path` | `resources_servers/hle_web_tools/blocklist.json` | the policy file; resolved under the cwd or the install root |
 | `blocklist_sha256` | upstream digest | the digest the file must have; `null` accepts any file |
 | `verbatim_span_words` | 8 | consecutive question words that refuse a query |

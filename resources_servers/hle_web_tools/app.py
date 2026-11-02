@@ -36,12 +36,12 @@ from asyncio import sleep
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, List, Literal, Optional, Tuple
+from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, ConfigDict, Field, PrivateAttr
+from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.client import SESSION_ID_KEY, request
@@ -433,8 +433,9 @@ def extract_question(seed_body: Dict[str, Any], field: str) -> Optional[str]:
 class TavilyBackend(BaseModel):
     """Tavily's ``/search`` and ``/extract`` over Gym's shared aiohttp client, with a key pool.
 
-    A key Tavily rejects (401, 432, 433) is skipped for the rest of the call; transient failures retry with
-    backoff on the next key. Provider bodies are never surfaced: they may describe credentials.
+    A key Tavily rejects (401, 432, 433) is skipped for the rest of the call without spending the retry budget,
+    and the call fails once every key is rejected; transient failures retry with backoff on the next key that
+    is still accepted. Provider bodies are never surfaced: they may describe credentials.
     """
 
     api_keys: List[str] = Field(repr=False, min_length=1)
@@ -442,6 +443,12 @@ class TavilyBackend(BaseModel):
     max_attempts: int = Field(default=3, ge=1)
     timeout_s: float = Field(default=60, gt=0)
     _next_key: int = PrivateAttr(default=0)
+
+    @field_validator("api_keys")
+    @classmethod
+    def _distinct_keys(cls, keys: List[str]) -> List[str]:
+        # A key listed twice is one key: Tavily rejecting it rejects every copy.
+        return list(dict.fromkeys(keys))
 
     async def search(self, query: str, *, max_results: int, search_depth: str) -> Dict[str, Any]:
         return await self._post(
@@ -466,11 +473,10 @@ class TavilyBackend(BaseModel):
     async def _post(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
         keys = self.api_keys[self._next_key :] + self.api_keys[: self._next_key]
         self._next_key = (self._next_key + 1) % len(self.api_keys)
-        rejected: set = set()
+        rejected: Set[int] = set()
         key_index = 0
-        for attempt in range(self.max_attempts):
-            while keys[key_index] in rejected:
-                key_index = (key_index + 1) % len(keys)
+        attempt = 0  # spent by transient failures only; a rejected key moves on without spending it
+        while True:
             key = keys[key_index]
             response = None
             try:
@@ -485,11 +491,15 @@ class TavilyBackend(BaseModel):
                 if response.status == 200:
                     return await response.json()
                 if response.status in TAVILY_KEY_REJECTED_CODES:
-                    rejected.add(key)
-                    if len(rejected) < len(keys):
-                        key_index = (key_index + 1) % len(keys)
-                        continue  # another key may work: no backoff, same attempt budget
-                elif response.status not in TAVILY_RETRY_CODES:
+                    rejected.add(key_index)
+                    next_index = _next_accepted_key(len(keys), key_index, rejected)
+                    if next_index is None:
+                        raise RuntimeError(
+                            f"Tavily HTTP {response.status} on {endpoint}: every configured key was rejected"
+                        )
+                    key_index = next_index
+                    continue  # another key may work: no backoff, same attempt budget
+                if response.status not in TAVILY_RETRY_CODES:
                     raise RuntimeError(f"Tavily HTTP {response.status} on {endpoint}")
                 if attempt + 1 == self.max_attempts:
                     raise RuntimeError(f"Tavily HTTP {response.status} on {endpoint} after {attempt + 1} attempts")
@@ -501,9 +511,19 @@ class TavilyBackend(BaseModel):
             finally:
                 if response is not None:
                     response.release()
-            key_index = (key_index + 1) % len(keys)
+            # The current key was not rejected, so there is always one to retry on.
+            key_index = _next_accepted_key(len(keys), key_index, rejected)
             await sleep(min(2**attempt, 8))
-        raise RuntimeError(f"Tavily retry budget exhausted on {endpoint}")
+            attempt += 1
+
+
+def _next_accepted_key(count: int, index: int, rejected: Set[int]) -> Optional[int]:
+    """The first key index after ``index`` (wrapping round to ``index`` itself) not in ``rejected``, or None."""
+    for step in range(1, count + 1):
+        candidate = (index + step) % count
+        if candidate not in rejected:
+            return candidate
+    return None
 
 
 class HLEWebToolsResourcesServerConfig(BaseResourcesServerConfig):
