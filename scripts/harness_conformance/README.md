@@ -48,8 +48,9 @@ installation in `ci.install_runtime` as well as its episode configuration.
 
 Scheduled CI runs every four hours. A separate job with read-only credentials
 renders the measured checks with the shared table renderer and uploads one `harness-conformance-docs-<run>-<attempt>`
-artifact. Fern inserts that block into the main capability matrix; the page and
-table are the published output. No generation report is retained for this job.
+artifact. Fern inserts that block at the top of the
+[Harness Conformance page](../../fern/versions/latest/pages/observability/harness-conformance.mdx#results);
+the page and table are the published output. No generation report is retained for this job.
 
 Periodic publication uses the triggering run and attempt, independently of its P0
 conclusion. An unavailable artifact stops that update. Ordinary docs pushes, tags,

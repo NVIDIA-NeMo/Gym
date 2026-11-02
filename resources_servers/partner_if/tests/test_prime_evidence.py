@@ -7,10 +7,10 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.base_resources_server import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId
 from nemo_gym.sandbox.providers.base import SandboxExecResult
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime import ResourcesCloseSessionRequest, ResourcesSeedSessionRequest
 from resources_servers.partner_if.evidence import EvidenceUnavailable
 from resources_servers.partner_if.prime_app import PrimeIFConfig, PrimeIFResourcesServer, delivered_report_evidence
 

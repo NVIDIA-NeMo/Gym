@@ -26,6 +26,6 @@ assaybench_assaybench_simple_agent:
 assaybench_assaybench_environment_server:
   _inherit_from: assaybench_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: assaybench_assaybench_simple_agent

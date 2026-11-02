@@ -28,9 +28,8 @@ from pydantic import ValidationError
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT
 from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
 from responses_api_agents.pi_agent.app import PiAgent, PiAgentConfig, PiAgentRunRequest, _parse_recorded_events
@@ -1347,10 +1346,9 @@ async def test_default_config_collects_through_environment_run(setup, monkeypatc
         SingleAgentTurnEnvironmentServer,
         SingleAgentTurnEnvironmentServerConfig,
     )
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.config import BaseServerConfig, GlobalConfigDictParser
     from nemo_gym.rollout_collection import RolloutCollectionConfig, RolloutCollectionHelper
-    from nemo_gym.server_utils import BaseServerConfig
-    from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest
+    from nemo_gym.server_runtime import SingleAgentTurnRequest
 
     agent, sandbox = setup
     root = Path(__file__).parents[3]
@@ -2180,7 +2178,7 @@ async def test_session_retry_ownership_uses_provider_correlation(setup, interrup
     assert "model_call_ownership_unavailable" not in gaps
     if interrupted:
         from nemo_gym.observability.model_calls import ModelCallRecord
-        from nemo_gym.rollout_observability import join_agent_model_calls
+        from nemo_gym.trajectory import join_agent_model_calls
 
         assert "agent_activation_interrupted" in gaps
         assert root.status == "incomplete"
@@ -2613,7 +2611,7 @@ def test_native_model_error_is_reported_with_classification(setup, message, stat
 )
 def test_terminal_provider_failure_uses_default_episode_policy(setup, message, failure_kind):
     from nemo_gym.agent_outcome import OutcomeAction, agent_outcome_policy
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     agent, sandbox = setup
     native = {"role": "assistant", "stopReason": "error", "errorMessage": message, "content": []}

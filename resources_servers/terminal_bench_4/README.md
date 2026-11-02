@@ -41,6 +41,12 @@ infrastructure-failure marker. Recognition requires an explicit provider death
 report. Setup failures, node-pressure evictions, unrelated sandbox losses, and a
 verifier that fails to start retain their existing infrastructure-error handling.
 
+An agent whose process was killed before it finished (`termination.reason:
+killed`) also records a completed `reward: 0.0` without starting a verifier, with
+`verifier_result.source` set to `agent_killed`. Once the process is gone, a kill by
+the agent's own command and one by the per-process OOM killer look the same, and
+either ends the attempt.
+
 A verifier that runs but times out, or that leaves no reward file, an empty one
 or one that cannot be parsed, scores `reward: 0.0` and counts in the pass-rate
 denominator. This is how Terminal-Bench scores it: Harbor never retries these
@@ -68,7 +74,7 @@ command is submitted and so expires first.
 
 The wire models in `models.py` are resources-owned. Agent implementations use
 their own HTTP models and need not import this server. `termination.reason` accepts
-`completed`, `timeout`, `nonzero_exit`, `cancelled`, and `infrastructure_error`;
+`completed`, `timeout`, `nonzero_exit`, `killed`, `cancelled`, and `infrastructure_error`;
 `agent_started` indicates whether execution began. `harness_metadata` is opaque
 result metadata, independent of the selected harness.
 

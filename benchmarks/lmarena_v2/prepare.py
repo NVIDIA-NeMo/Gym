@@ -21,7 +21,7 @@ import json
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
-from nemo_gym.config_types import DownloadJsonlDatasetGitlabConfig
+from nemo_gym.config import DownloadJsonlDatasetGitlabConfig
 from nemo_gym.gitlab_utils import download_jsonl_dataset
 
 

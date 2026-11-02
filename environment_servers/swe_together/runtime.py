@@ -15,8 +15,7 @@ from pathlib import Path
 from shlex import quote
 from uuid import uuid4
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, create_provider
-from nemo_gym.sandbox.providers.base import SupportsSandboxSharedStorage
+from nemo_gym.sandbox import AsyncSandbox, SandboxResources, SandboxSpec, SupportsSandboxSharedStorage, create_provider
 
 
 RUNTIME_ROOT = "/opt/gym-runtime"

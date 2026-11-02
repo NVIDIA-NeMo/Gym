@@ -44,8 +44,8 @@ import pytest
 import requests
 import yaml
 
-from nemo_gym.runtime_dir import RUNTIME_ROOT
-from nemo_gym.session_routing import SESSION_CLAIMS_DIR
+from nemo_gym.server_runtime.request_handling.session_routing import SESSION_CLAIMS_DIR
+from nemo_gym.server_runtime.runtime_dir import RUNTIME_ROOT
 
 
 pytestmark = pytest.mark.skipif(

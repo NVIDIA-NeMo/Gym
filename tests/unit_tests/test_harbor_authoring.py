@@ -48,7 +48,7 @@ from nemo_gym.verifiers import exact_match, final_text, numeric_match
 from nemo_gym.verifiers.files import file_exists, read_text, text_file_equals
 from nemo_gym.verifiers.runner import main as run_verifier
 from nemo_gym.verifiers.runner import place_on_path
-from tests.unit_tests.test_harbor_tasks import HELLO_TOML, no_real_registry, write_task  # noqa: F401 (autouse fixture)
+from tests.unit_tests.test_harbor_tasks import HELLO_TOML, write_task
 
 
 REPO = Path(__file__).resolve().parents[2]

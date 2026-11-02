@@ -196,6 +196,11 @@ async def finalize_session(session, *, grade):
             session, session.termination.detail
         ):
             return
+        if session.termination.reason == "killed":
+            # A self-kill and a per-process OOM kill look the same afterwards, and either ends the attempt.
+            exception(session, session.termination.detail or "Agent was killed", "NonZeroAgentExitCodeError")
+            session.result["verifier_result"] = {"rewards": {"reward": 0.0}, "source": "agent_killed"}
+            return
         session.subphase = "quiesce"
         session.persist()
         await session.environment.quiesce_agent(session.session_id)

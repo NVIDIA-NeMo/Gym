@@ -14,9 +14,9 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.config_types import AggregateMetricsRequest
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.core import NeMoGymResponse
 from nemo_gym.task_data import load_task_data_schema, validate_jsonl_rows
 from resources_servers.chemcotbench.app import (
     ChemCoTBenchResourcesServer,
@@ -313,7 +313,7 @@ async def test_real_upstream_task_specific_predictions(subtask, reference, text,
 
 
 async def test_workload_verifier_fixture():
-    from nemo_gym.verifier_fixture import exercise_verifier_fixture
+    from nemo_gym.verification import exercise_verifier_fixture
     from resources_servers.chemcotbench.app import VERIFIER_FIXTURE
 
     results = await exercise_verifier_fixture(

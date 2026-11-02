@@ -22,7 +22,7 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.tests.test_review_regressions import during_turn
 from environment_servers.harbor.verifier import verifier_command
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 
 

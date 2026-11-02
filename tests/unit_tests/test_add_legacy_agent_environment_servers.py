@@ -19,16 +19,15 @@ from pathlib import Path
 
 import pytest
 import yaml
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     environment_server_agent_refs,
     legacy_environment_server_name,
 )
 from nemo_gym.rollout_collection import _environment_servers_by_agent
-from nemo_gym.server_utils import DictConfig
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "add_legacy_agent_environment_servers.py"
@@ -98,7 +97,12 @@ def test_migration_respects_agent_session_templates(
         yaml.safe_dump(
             {
                 "my_agent": {
-                    "responses_api_agents": {agent_type: {"entrypoint": "app.py", "resources_server": resources}}
+                    "responses_api_agents": {
+                        agent_type: {
+                            "entrypoint": "child_app.py" if agent_type == "prime_agent" else "app.py",
+                            "resources_server": resources,
+                        }
+                    }
                 }
             }
         )
@@ -109,6 +113,12 @@ def test_migration_respects_agent_session_templates(
         assert config.read_text() == before
     else:
         assert _environment_servers(yaml.safe_load(config.read_text())) == {"my_agent": ["my_environment_server"]}
+
+
+def test_prime_host_entrypoint_still_requires_a_legacy_relay() -> None:
+    assert migration.needs_environment_server(
+        {"responses_api_agents": {"prime_agent": {"entrypoint": "app.py", "resources_server": None}}}
+    )
 
 
 @pytest.mark.parametrize(
@@ -597,7 +607,7 @@ def _switched_server(document: dict, name: str) -> dict:
 
 
 def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 
     config = tmp_path / "my_run.yaml"
     config.write_text(AGENT_CONFIG + RELAY + FOLLOWING)
@@ -612,9 +622,13 @@ def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.Cap
     assert server["agent_server"] == {"type": "responses_api_agents", "name": "my_simple_agent"}
     # The agent's /run called the Resources Server's tool routes; the grant gives the session the same routes.
     assert server["resources_tool_transports"] == ["direct_http"]
-    SingleAgentTurnEnvironmentServerConfig.model_validate(
+    assert "default_episode_timeout_seconds" not in server
+    assert "cleanup_timeout_seconds" not in server
+    server_config = SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(
         {**server, "name": "my_environment_server", "host": "h", "port": 1}
     )
+    assert server_config.default_episode_timeout_seconds == 21600
+    assert server_config.cleanup_timeout_seconds == 180
     resolved = _parse(config, strict=True)
     assert _environment_servers_by_agent(resolved) == {"my_simple_agent": ["my_environment_server"]}
     assert "relays switched: 1, staying on the relay: 0" in capsys.readouterr().out

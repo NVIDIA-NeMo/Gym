@@ -3,8 +3,7 @@
 
 from pathlib import Path
 
-from nemo_gym.episode_types import MaterializedTask
-from nemo_gym.single_agent_turn_types import SingleAgentTurnTaskInput
+from nemo_gym.server_runtime import MaterializedTask, SingleAgentTurnTaskInput
 
 
 ROOT = Path(__file__).resolve().parents[3]
@@ -23,7 +22,7 @@ def test_counter_session_recipe_uses_shared_environment() -> None:
     from omegaconf import OmegaConf
 
     from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
-    from nemo_gym.global_config import GlobalConfigDictParser
+    from nemo_gym.config import GlobalConfigDictParser
 
     parser = GlobalConfigDictParser()
     _, configs = parser.load_extra_config_paths(

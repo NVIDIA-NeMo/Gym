@@ -9,9 +9,8 @@ from fastapi import HTTPException
 from starlette.requests import Request
 
 from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from responses_api_agents.prime_agent.child_app import ChildSession, PrimeChildAgent, PrimeChildConfig
 
@@ -39,7 +38,7 @@ def seed(**overrides):
 
 
 def response():
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
     return NeMoGymResponse(
         id="response",

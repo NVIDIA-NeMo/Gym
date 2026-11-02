@@ -25,20 +25,20 @@ from nemo_gym.base_responses_api_agent import (
     AgentSessionSetupError,
     AgentSessionState,
 )
-from nemo_gym.global_config import get_global_config_dict
-from nemo_gym.openai_utils import (
+from nemo_gym.client import request as http_request
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
 from nemo_gym.sandbox import AsyncSandbox, create_provider
 from nemo_gym.sandbox.config import resolve_provider_config
 from nemo_gym.sandbox.utils import read_text, upload_text
-from nemo_gym.server_utils import is_nemo_gym_fastapi_entrypoint
-from nemo_gym.server_utils import request as http_request
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 from responses_api_agents.prime_agent.app import (
     PrimeAgent,
     PrimeAgentConfig,

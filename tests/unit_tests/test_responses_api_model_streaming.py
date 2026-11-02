@@ -40,7 +40,8 @@ from nemo_gym.base_responses_api_model import (
     CaptureStore,
     SimpleResponsesAPIModel,
 )
-from nemo_gym.openai_utils import (
+from nemo_gym.client.server_client import ServerClient
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymResponse,
@@ -59,7 +60,6 @@ from nemo_gym.responses_streaming import (
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 def _build_response(output: list) -> NeMoGymResponse:

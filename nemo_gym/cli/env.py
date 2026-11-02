@@ -50,20 +50,13 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
-from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
-from nemo_gym.environment.onboarding import (
-    EnvironmentOnboardingError,
-    VerifierReport,
-    prepare_verifier_run,
-)
-from nemo_gym.environment.publication import finalize_publication
-from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
-from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.global_config import (
+from nemo_gym.client.server_client import ServerClient, ServerStatus
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
+from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
     DRY_RUN_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    HEAD_SERVER_KEY_NAME,
     JSON_OUTPUT_KEY_NAME,
     MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
@@ -76,6 +69,15 @@ from nemo_gym.global_config import (
     GlobalConfigDictParserConfig,
     get_global_config_dict,
 )
+from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
+from nemo_gym.environment.onboarding import (
+    EnvironmentOnboardingError,
+    VerifierReport,
+    prepare_verifier_run,
+)
+from nemo_gym.environment.publication import finalize_publication
+from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
+from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
 from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
@@ -84,18 +86,10 @@ from nemo_gym.registry import (
     read_environment_details,
     resolve_catalog_entry,
 )
-from nemo_gym.server_status import StatusCommand
-from nemo_gym.server_utils import (
-    HEAD_SERVER_KEY_NAME,
-    HeadServer,
-    ServerClient,
-    ServerInstanceDisplayConfig,
-    ServerStatus,
-    entrypoint_ray_enabled,
-    entrypoint_server_class_names,
-    initialize_ray,
-    ray_is_installed,
-)
+from nemo_gym.server_runtime.entrypoint_flags import entrypoint_server_class_names
+from nemo_gym.server_runtime.ray_support import entrypoint_ray_enabled, initialize_ray, ray_is_installed
+from nemo_gym.server_runtime.registry_server import HeadServer, ServerInstanceDisplayConfig
+from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.telemetry.config import MemoryProfilingConfig
 from nemo_gym.telemetry.memory import MemoryProfiler, ServerMemoryTarget, process_tree_memory_supported
 from nemo_gym.telemetry.metrics import record_active_servers
@@ -379,7 +373,7 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
     """Yield each server instance in the config that has an entrypoint to launch."""
     top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-    # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
+    # TODO there is a better way to resolve this that uses nemo_gym/config/global_config.py::ServerInstanceConfig
     for top_level_path in top_level_paths:
         server_config_dict = global_config_dict[top_level_path]
         if not isinstance(server_config_dict, DictConfig):
