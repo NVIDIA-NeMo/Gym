@@ -310,10 +310,16 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - Whether a trial counts as observed depends on the benchmark: its server recorded the grading
   operation, or saved a grading artifact bound to the answer (`judge_record`, `rubric_verdict`,
   `symbolic_match`, `metric_record`, `test_execution`, `environment_reward`, `repository_test_run`,
-  `substep_tests`), or the model's own failed answer settles it. A benchmark whose server records
-  neither reads `UNVERIFIED` with `trial_counts.unobserved_reason` naming the server, and so does a
-  run whose saved config does not name its resources server. Report it with the reason; do not
-  re-run, and change no flag: none changes it. The fix is that server's grading record, in Gym.
+  `substep_tests`), or the model's own failed answer settles it. Most servers grade through the
+  shared verify wrapper, which records the grading for them. A verifier that calls a judge without
+  recording it and saves no recognised artifact is unobserved by construction, and its runs read
+  `UNVERIFIED` with `trial_counts.unobserved_reason` naming the server; so does a run whose saved
+  config does not name its resources server. At this head that is the case for `aegis_v4_safety`,
+  `agentif`, `beam`, `deepsearchqa`, `finance_agent_v2`, `finance_sec_search`, `gdp_pdf`,
+  `imo_proofbench`, `longmemeval`, `simpleqa`, `widesearch`, `litmus-bench`, the `abstention`,
+  `inverse_if` and `multichallenge` parts of `nemotron_3.5_super`, `frontierscience_olympiad` and
+  `automationbench`. Report it with the reason; do not re-run, and change no flag: none changes it.
+  The fix is that server's grading record, in Gym.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
   `applied: false`; `--max-unhealthy-fraction` (per-rollout health) is judged in `warnings`. None
