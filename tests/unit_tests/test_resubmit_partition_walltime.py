@@ -28,6 +28,10 @@ from nemo_gym.orchestration.recovery import RecoveryAction
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
+from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
+from tests.unit_tests.test_resubmit_walltime import (
+    _launcher_at_the_pinned_revision as _launcher_at_the_pinned_revision,
+)
 from tests.unit_tests.test_resubmit_walltime import _timed_run
 
 

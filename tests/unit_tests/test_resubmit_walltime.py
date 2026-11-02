@@ -33,6 +33,12 @@ from tests.unit_tests.test_resubmit_repin import NEW, OLD, _digests
 from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
 
 
+@pytest.fixture(autouse=True)
+def _launcher_at_the_pinned_revision(launcher_at):
+    """The launcher is Gym OLD, the revision ``_timed_run`` pins, so a raise may render its job.sh again."""
+    launcher_at(OLD)
+
+
 def _timed_run(tmp_path: Path) -> Path:
     """One benchmark with a 4 h Slurm walltime and a 16 h chain cap, one saved row, one missing, spent budgets."""
     config = SubmitConfig.model_validate(
@@ -214,3 +220,41 @@ def test_the_resubmit_help_lists_the_walltime_flags_and_refuses_them_out_of_plac
     with pytest.raises(SystemExit):
         _eval_resubmit(args, [])
     assert error in capsys.readouterr().err
+
+
+@pytest.mark.parametrize(
+    "change",
+    [
+        {"max_walltime": "12:00:00", "walltime_reason": "slow but healthy policy"},
+        {"server_spinup_timeout_seconds": 1800, "spinup_timeout_reason": "cold server installs"},
+        {"unsafe_resume_reason": "identity check reviewed"},
+    ],
+    ids=["walltime", "spinup-timeout", "unsafe-resume"],
+)
+def test_a_limit_raise_from_a_launcher_of_another_revision_is_refused_before_anything_changes(
+    tmp_path, slurm_bin, launcher_at, change
+):
+    # The run is pinned to Gym OLD. This launcher is NEW: its job.sh templates may need modules OLD does not have.
+    from nemo_gym.orchestration.executors.slurm import IncompatibleRerenderError
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(NEW)
+    job_dir = _timed_run(tmp_path)
+    files = {path: path.read_bytes() for path in [job_dir / "job.sh", job_dir.parent / "resolved-config.yaml"]}
+    with pytest.raises(IncompatibleRerenderError, match=f"pinned to Gym {OLD}.*this launcher is Gym {NEW}") as raised:
+        recover(*_handle(job_dir), **change)
+    assert (raised.value.pinned, raised.value.launcher) == (OLD, NEW)
+    assert {path: path.read_bytes() for path in files} == files
+    assert not (slurm_bin / "env").exists()
+    assert not list(job_dir.parent.glob("*-journal.jsonl")) and not list(job_dir.glob("*-journal.jsonl"))
+
+
+def test_a_limit_raise_from_the_pinned_revision_renders_the_run_again(tmp_path, slurm_bin, launcher_at):
+    from nemo_gym.orchestration.submit import recover
+
+    launcher_at(OLD)
+    job_dir = _timed_run(tmp_path)
+    out = recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="slow but healthy policy")
+
+    assert out.dispatched == "resubmit", out.decision.reason
+    assert "#SBATCH --time=12:00:00" in (job_dir / "job.sh").read_text()

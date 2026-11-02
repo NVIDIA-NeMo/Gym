@@ -215,6 +215,23 @@ UNSAFE_RESUME_JOURNAL_NAME = "unsafe-resume-journal.jsonl"
 SPINUP_TIMEOUT_JOURNAL_NAME = "spinup-timeout-journal.jsonl"
 
 
+class IncompatibleRerenderError(RuntimeError):
+    """A job script would be rendered again by a launcher of another Gym revision than the one the job runs.
+
+    The launcher's job.sh templates may need modules the pinned revision does not have, and the capability checks
+    run later inspect only the newly rendered script, so the mismatch is refused before anything changes.
+    """
+
+    def __init__(self, pinned: str, launcher: str | None) -> None:
+        super().__init__(
+            f"the run is pinned to Gym {pinned}, but this launcher is Gym {launcher}: rendering job.sh again here "
+            "would install this launcher's job templates into a job that runs the pinned revision; recover from a "
+            "launcher installed at the pinned revision, or move the run here with --repin"
+        )
+        self.pinned = pinned
+        self.launcher = launcher
+
+
 def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitConfig:
     """``config`` with the driver's Gym install at ``ref``, and the benchmark's MLflow pin tags that named the old one."""
     install = config.driver.gym_install
@@ -2499,6 +2516,11 @@ class SlurmExecutor(BaseExecutor):
                 },
                 sort_keys=True,
             )
+        # This full render writes this launcher's job templates, so the launcher must be the revision the job runs,
+        # whatever setting is raised. A repin has already made its target that revision.
+        pinned = target.driver.gym_install.ref if target.driver.gym_install is not None else None
+        if pinned is not None and installed_gym_commit() != pinned:
+            raise IncompatibleRerenderError(pinned, installed_gym_commit())
         run_dir = Path(record.run_dir)
         script = build_sbatch_script(
             target, benchmark, target.driver.benchmarks[benchmark], target.compute[record.cluster], job_dir

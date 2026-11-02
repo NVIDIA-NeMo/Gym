@@ -12,6 +12,10 @@ from nemo_gym.orchestration.executors.slurm import UNSAFE_RESUME_JOURNAL_NAME, W
 from tests.unit_tests.test_eval_resubmit import _handle
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_resubmit_repin import _digests
+from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
+from tests.unit_tests.test_resubmit_walltime import (
+    _launcher_at_the_pinned_revision as _launcher_at_the_pinned_revision,
+)
 from tests.unit_tests.test_resubmit_walltime import _timed_run
 
 
