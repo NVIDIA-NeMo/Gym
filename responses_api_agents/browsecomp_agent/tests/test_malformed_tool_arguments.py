@@ -34,8 +34,9 @@ BOTH branches: the resources-server tool path and the `update_progress` board pa
 import json as jsonlib
 from unittest.mock import AsyncMock, MagicMock
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
@@ -45,7 +46,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.browsecomp_agent.app import BrowsecompAgent, BrowsecompAgentConfig
 
 

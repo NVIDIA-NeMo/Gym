@@ -195,8 +195,8 @@ class TestAggregation:
     @staticmethod
     def _make_config() -> InverseIFConfig:
         """Create a minimal InverseIFConfig for testing."""
-        from nemo_gym.config_types import ModelServerRef
-        from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+        from nemo_gym.config import ModelServerRef
+        from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
         return InverseIFConfig(
             host="",
@@ -228,7 +228,7 @@ class TestAggregation:
         """Test various aggregation modes."""
         from unittest.mock import MagicMock
 
-        from nemo_gym.server_utils import ServerClient
+        from nemo_gym.client import ServerClient
         from resources_servers.inverse_if.app import InverseIFServer
 
         config = self._make_config()
@@ -260,7 +260,7 @@ class TestAggregation:
         """Empty list should return 0.0."""
         from unittest.mock import MagicMock
 
-        from nemo_gym.server_utils import ServerClient
+        from nemo_gym.client import ServerClient
         from resources_servers.inverse_if.app import InverseIFServer
 
         config = self._make_config()
@@ -272,7 +272,7 @@ class TestAggregation:
         """All criteria passing should give 1.0 for all aggregation modes."""
         from unittest.mock import MagicMock
 
-        from nemo_gym.server_utils import ServerClient
+        from nemo_gym.client import ServerClient
         from resources_servers.inverse_if.app import InverseIFServer
 
         config = self._make_config()

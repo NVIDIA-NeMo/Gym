@@ -22,8 +22,8 @@ from huggingface_hub import CommitOperationAdd, DatasetCard, HfApi, hf_hub_downl
 from huggingface_hub.errors import RemoteEntryNotFoundError
 from huggingface_hub.utils import HfHubHTTPError
 
-from nemo_gym.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
-from nemo_gym.server_metadata import visit_resources_server
+from nemo_gym.config.config_types import DownloadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceConfig
+from nemo_gym.config.server_metadata import visit_resources_server
 
 
 def create_huggingface_client(token: str) -> HfApi:  # pragma: no cover

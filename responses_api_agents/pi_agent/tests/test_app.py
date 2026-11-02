@@ -25,16 +25,16 @@ import pytest
 import yaml
 from fastapi import Request
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, ToolCallObservation
 from responses_api_agents.pi_agent.app import (
     PiAgent,
     PiAgentConfig,
