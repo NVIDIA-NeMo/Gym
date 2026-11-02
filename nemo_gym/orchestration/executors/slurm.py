@@ -33,7 +33,7 @@ from typing import Any
 import yaml
 
 from nemo_gym import __version__
-from nemo_gym.config.global_config import SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
+from nemo_gym.config.global_config import DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS, SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
@@ -235,10 +235,8 @@ def _unsafe_resume_config(config: SubmitConfig, benchmark: str) -> SubmitConfig:
 
 def _recorded_spinup_timeout_seconds(config: SubmitConfig, benchmark: str) -> float:
     """The benchmark's server spin-up limit in seconds as the run starts its servers; 0 or less is no limit."""
-    from nemo_gym.cli.env import _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC
-
     value = config.driver.benchmarks[benchmark].run.get(SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME)
-    return _DEFAULT_SERVER_SPINUP_TIMEOUT_SEC if value is None else float(value)
+    return float(DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS if value is None else value)
 
 
 def _spinup_timeout_raise_refusal(recorded: float, seconds: int) -> str | None:

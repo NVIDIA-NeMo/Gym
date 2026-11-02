@@ -60,6 +60,7 @@ from nemo_gym.client.server_client import ServerClient, ServerStatus
 from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
 from nemo_gym.config.global_config import (
     COMPONENT_NAME_KEY_NAME,
+    DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
     DRY_RUN_KEY_NAME,
     ENVIRONMENT_SERVER_TYPE_KEY_NAME,
     HEAD_SERVER_KEY_NAME,
@@ -336,7 +337,7 @@ def _model_endpoint_timeout_seconds(global_config_dict: DictConfig) -> float:
         ) from None
 
 
-_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = 600.0
+_DEFAULT_SERVER_SPINUP_TIMEOUT_SEC: float = float(DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS)
 
 # Longest single readiness probe of a Gym server. A probe is capped further by the time left before the deadline.
 _SERVER_PROBE_TIMEOUT_SEC: float = 5.0
