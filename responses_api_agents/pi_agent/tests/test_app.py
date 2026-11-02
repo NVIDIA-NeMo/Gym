@@ -48,7 +48,10 @@ from responses_api_agents.pi_agent.app import (
 
 
 @pytest.mark.skipif(shutil.which("node") is None, reason="Node is required for the Pi extension")
-@pytest.mark.parametrize("filename", ["test_gym_mcp.mjs", "test_remaining_context.mjs", "test_bash_timeout.mjs"])
+@pytest.mark.parametrize(
+    "filename",
+    ["test_gym_mcp.mjs", "test_remaining_context.mjs", "test_bash_timeout.mjs", "test_compaction_observer.mjs"],
+)
 def test_gym_extensions(filename):
     result = subprocess.run(
         ["node", "--test", str(Path(__file__).with_name(filename))],
@@ -461,6 +464,77 @@ class TestModelServer:
 
 
 class TestRolloutObservability:
+    @pytest.mark.parametrize("outcome", ["completed", "failed", "interrupted"])
+    def test_helper_identity_and_usage_survive_compaction_outcome(self, outcome):
+        helper = {
+            "type": "ng_pi_compaction_call",
+            "compaction_id": "compaction-1",
+            "message": {
+                "role": "assistant",
+                "responseId": "summary-response",
+                "content": [{"type": "text", "text": "Must never become the task answer"}],
+                "usage": {"input": 497, "cacheRead": 3, "output": 11},
+            },
+        }
+        events = [
+            (1.0, {"type": "compaction_start", "reason": "overflow", "ng_compaction_id": "compaction-1"}),
+            (2.0, helper),
+        ]
+        if outcome != "interrupted":
+            events.append(
+                (
+                    3.0,
+                    {
+                        "type": "compaction_end",
+                        "reason": "overflow",
+                        "ng_compaction_id": "compaction-1",
+                        **(
+                            {"result": {"summary": "Summary"}}
+                            if outcome == "completed"
+                            else {"errorMessage": "Summary rejected"}
+                        ),
+                    },
+                )
+            )
+        output, usage = parse_pi_events("\n".join(json.dumps(e) for _, e in events))
+        assert not output and usage == {"input_tokens": 500, "output_tokens": 11}
+        bundle = _build_pi_observations(
+            events, "invocation", ModelServerRef(type="responses_api_models", name="policy"), []
+        )
+        [invocation] = _records(bundle, AgentInvocation)
+        [compaction] = _records(bundle, ContextCompactionObservation)
+        assert compaction.outcome == ("unknown" if outcome == "interrupted" else outcome)
+        assert compaction.model_calls == invocation.model_calls
+        assert [ref.response_id for ref in compaction.model_calls] == ["summary-response"]
+
+    def test_helper_operations_do_not_claim_other_calls(self):
+        events = [
+            (1.0, {"type": "compaction_start", "ng_compaction_id": "one"}),
+            (2.0, {"type": "ng_pi_compaction_call", "compaction_id": "one", "message": {"responseId": "helper-one"}}),
+            (3.0, {"type": "compaction_end", "ng_compaction_id": "one", "result": {"summary": "First"}}),
+            (4.0, {"type": "message_end", "message": {"role": "assistant", "responseId": "policy"}}),
+            (5.0, {"type": "compaction_start", "ng_compaction_id": "two"}),
+            (6.0, {"type": "ng_pi_compaction_call", "compaction_id": "two", "message": {"responseId": "helper-two"}}),
+        ]
+        bundle = _build_pi_observations(
+            events, "invocation", ModelServerRef(type="responses_api_models", name="policy"), []
+        )
+        compactions = _records(bundle, ContextCompactionObservation)
+        assert [[ref.response_id for ref in c.model_calls] for c in compactions] == [["helper-one"], ["helper-two"]]
+        assert compactions[0].after_model_call.response_id == "policy"
+        assert compactions[1].before_model_call.response_id == "policy"
+
+    @pytest.mark.parametrize("identity", [None, "", [], 1])
+    def test_unjoinable_helper_reports_gap_without_guessing(self, identity):
+        events = [
+            (1.0, {"type": "ng_pi_compaction_call", "compaction_id": "one", "message": {"responseId": identity}})
+        ]
+        bundle = _build_pi_observations(
+            events, "invocation", ModelServerRef(type="responses_api_models", name="policy"), []
+        )
+        assert not _records(bundle, AgentInvocation)[0].model_calls
+        assert "compaction_model_call_reference_unavailable" in {gap.code for gap in bundle.gaps}
+
     def test_incomplete_tool_and_compaction_events_preserve_unknowns(self) -> None:
         events = [
             (1.0, {"type": "compaction_end", "result": {"tokensBefore": -1}}),

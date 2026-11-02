@@ -257,7 +257,7 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             continue
         if not isinstance(event, dict):
             continue
-        if event.get("type") != "message_end":
+        if event.get("type") not in ("message_end", "ng_pi_compaction_call"):
             continue
         message = event.get("message") or {}
         if not isinstance(message, dict):
@@ -276,6 +276,8 @@ def parse_pi_events(stdout: str | bytes) -> tuple[list[Any], dict[str, int]]:
             if type(cache_read) is int and cache_read >= 0:
                 input_tokens += cache_read
             output_tokens += int(usage.get("output") or 0)
+            if event.get("type") == "ng_pi_compaction_call":
+                continue  # Auxiliary usage belongs to the invocation, never its answer.
             texts = [b["text"] for b in content if isinstance(b, dict) and (b.get("text") or "").strip()]
             if texts:
                 # Match the other adapters: reasoning belongs in reasoning items,
@@ -387,11 +389,31 @@ def _build_pi_observations(
     model_call_join_missing = False
     starts: dict[str, tuple[float, Optional[str]]] = {}
     tools: dict[str, ToolCallObservation] = {}
-    compaction_start: Optional[tuple[float, Optional[str], Optional[ModelCallRef]]] = None
+    compaction_start: Optional[tuple[float, Optional[str], Optional[ModelCallRef], Optional[str]]] = None
     compactions: list[ContextCompactionObservation] = []
     compactions_waiting_for_call: list[ContextCompactionObservation] = []
     last_model_call: Optional[ModelCallRef] = None
     invocation_status = "unknown"
+
+    helper_calls: dict[str, list[ModelCallRef]] = {}
+    for _, event in events:
+        if event.get("type") != "ng_pi_compaction_call":
+            continue
+        operation = event.get("compaction_id")
+        message = event.get("message")
+        response_id = message.get("responseId") if isinstance(message, dict) else None
+        if (
+            isinstance(operation, str)
+            and operation
+            and model_ref is not None
+            and isinstance(response_id, str)
+            and response_id
+        ):
+            ref = ModelCallRef(model_ref=model_ref, response_id=response_id)
+            helper_calls.setdefault(operation, []).append(ref)
+            model_calls.append(ref)
+        else:
+            gaps.append(gap("compaction_model_call_reference_unavailable"))
 
     for observed_at, event in events:
         event_type = event.get("type")
@@ -399,6 +421,8 @@ def _build_pi_observations(
         call_id = event.get("toolCallId")
         tool_name = event.get("toolName")
         tool_name = tool_name if isinstance(tool_name, str) and tool_name else None
+        operation_id = event.get("ng_compaction_id")
+        operation_id = operation_id if isinstance(operation_id, str) else None
 
         if event_type == "message_end" and isinstance(message, dict) and message.get("role") == "assistant":
             response_id = message.get("responseId")
@@ -468,10 +492,20 @@ def _build_pi_observations(
                 gaps.append(gap("tool_outcome_unavailable", call_id))
         elif event_type == "compaction_start":
             reason = event.get("reason")
-            compaction_start = (observed_at, reason if isinstance(reason, str) else None, last_model_call)
+            compaction_start = (
+                observed_at,
+                reason if isinstance(reason, str) else None,
+                last_model_call,
+                operation_id,
+            )
         elif event_type == "compaction_end":
             reason = event.get("reason")
-            started_at, started_reason, before_model_call = compaction_start or (observed_at, None, None)
+            started_at, started_reason, before_model_call, operation = compaction_start or (
+                observed_at,
+                None,
+                None,
+                None,
+            )
             raw_result = event.get("result")
             result: dict[str, Any] = raw_result if isinstance(raw_result, dict) else {}
             before = result.get("tokensBefore")
@@ -497,6 +531,7 @@ def _build_pi_observations(
                 summary=summary if isinstance(summary, str) else None,
                 first_kept_item_id=first_kept_item_id if isinstance(first_kept_item_id, str) else None,
                 before_model_call=before_model_call,
+                model_calls=helper_calls.get(operation_id or operation, []),
             )
             compactions.append(compaction)
             compactions_waiting_for_call.append(compaction)
@@ -532,13 +567,14 @@ def _build_pi_observations(
         )
         gaps.append(gap("tool_timing_unavailable", call_id))
     if compaction_start is not None:
-        started_at, reason, before_model_call = compaction_start
+        started_at, reason, before_model_call, operation = compaction_start
         compactions.append(
             ContextCompactionObservation(
                 invocation_id=invocation_id,
                 observed_at=started_at,
                 trigger=reason,
                 before_model_call=before_model_call,
+                model_calls=helper_calls.get(operation, []),
             )
         )
         gaps.append(gap("compaction_result_unavailable"))
@@ -991,6 +1027,9 @@ class PiAgent(SimpleResponsesAPIAgent):
         await state.session.sandbox.upload(
             Path(__file__).with_name("outcome.mjs"), f"{state.session.session_dir}/outcome.mjs"
         )
+        await state.session.sandbox.upload(
+            Path(__file__).with_name("compaction-observer.mjs"), f"{state.session.session_dir}/compaction-observer.mjs"
+        )
         mcp_servers, unusable_grant_gaps = self._session_mcp_servers(state.request)
         mcp_extension = []
         mcp_env = {}
@@ -1005,6 +1044,8 @@ class PiAgent(SimpleResponsesAPIAgent):
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.timeout)
         command = [
             f"{state.runtime}/node/bin/node",
+            "--import",
+            f"{state.session.session_dir}/compaction-observer.mjs",
             f"{state.runtime}/pi/node_modules/@earendil-works/pi-coding-agent/dist/cli.js",
             "--print",
             "--mode",
@@ -1126,6 +1167,13 @@ class PiAgent(SimpleResponsesAPIAgent):
             message = event.get("message") or {}
             if event.get("type") == "message_end":
                 messages.append(message)
+            if event.get("type") in ("message_end", "ng_pi_compaction_call") and message.get("role") == "assistant":
+                cache_read = (message.get("usage") or {}).get("cacheRead")
+                # Zero is also Pi's default when the provider omitted cache details.
+                if type(cache_read) is not int or cache_read <= 0:
+                    cached_tokens = None
+                elif cached_tokens is not None:
+                    cached_tokens += cache_read
             if event.get("type") == "message_end" and message.get("role") == "assistant":
                 for part in message.get("content") or []:
                     if part.get("type") == "thinking" and part.get("thinking"):
@@ -1135,12 +1183,6 @@ class PiAgent(SimpleResponsesAPIAgent):
                                 summary=[{"type": "summary_text", "text": part["thinking"]}],
                             )
                         )
-                cache_read = (message.get("usage") or {}).get("cacheRead")
-                # Pi also emits zero when backend cache details are absent; zero has no measured provenance.
-                if type(cache_read) is not int or cache_read <= 0:
-                    cached_tokens = None
-                elif cached_tokens is not None:
-                    cached_tokens += cache_read
                 stop_reasons.append(message.get("stopReason"))
                 # Pi emits failed attempts before retrying; only the terminal assistant decides the outcome.
                 terminal_error = (
