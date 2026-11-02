@@ -15,13 +15,14 @@
 """Unit tests for the shared Responses API <-> Chat Completions converter."""
 
 import json
+import logging
+from copy import deepcopy
 from types import SimpleNamespace
 
 import pytest
 from openai.types.completion_usage import CompletionTokensDetails, CompletionUsage, PromptTokensDetails
 
-from nemo_gym.observability.model_calls import _cache_signal
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionMessage,
@@ -46,6 +47,7 @@ from nemo_gym.openai_utils import (
     NeMoGymSummary,
     training_variant_of,
 )
+from nemo_gym.observability.model_calls import _cache_signal
 from nemo_gym.responses_converter import (
     ResponsesConverter,
     ResponsesConverterState,
@@ -206,7 +208,7 @@ def test_flush_assistant_emits_plain_message():
 def test_flush_assistant_emits_training_message_when_token_info_present():
     state = ResponsesConverterState(return_token_id_information=True)
     state.content_buffer = "hello"
-    from nemo_gym.openai_utils import TokenIDLogProbMixin
+    from nemo_gym.core.responses_api_types import TokenIDLogProbMixin
 
     state.token_information = TokenIDLogProbMixin(
         prompt_token_ids=[1, 2],
@@ -472,22 +474,11 @@ def test_chat_schema_accepts_only_canonical_video_url():
     ],
     ids=["file_id", "original_detail"],
 )
-@pytest.mark.parametrize("role", ["user", "tool"])
-@pytest.mark.parametrize("drop_unrepresentable", [False, True])
-def test_responses_to_chat_completion_rejects_unrepresentable_input_images(
-    converter: ResponsesConverter, part: dict, role: str, drop_unrepresentable: bool
-):
-    item = (
-        {"role": "user", "type": "message", "content": [part]}
-        if role == "user"
-        else {"type": "function_call_output", "call_id": "call_1", "output": [part]}
-    )
-    params = NeMoGymResponseCreateParamsNonStreaming(input=[item])
+def test_responses_to_chat_completion_rejects_unrepresentable_input_images(converter: ResponsesConverter, part: dict):
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "type": "message", "content": [part]}])
 
     with pytest.raises(NotImplementedError):
-        converter.responses_to_chat_completion_create_params(
-            params, drop_unrepresentable_request_fields=drop_unrepresentable
-        )
+        converter.responses_to_chat_completion_create_params(params)
 
 
 def test_responses_to_chat_completion_unsupported_part_raises(converter: ResponsesConverter):
@@ -587,6 +578,7 @@ def test_responses_to_chat_completion_preserves_structured_function_output_text(
 @pytest.mark.parametrize(
     ("output", "unsupported_type"),
     [
+        ([{"type": "input_image", "file_id": "file_123"}], "input_image"),
         ([{"type": "input_file", "file_id": "file_123"}], "input_file"),
     ],
 )
@@ -604,10 +596,13 @@ def test_responses_to_chat_completion_rejects_unrepresentable_function_output(
         converter.responses_to_chat_completion_create_params(responses_params)
 
 
-@pytest.mark.parametrize("drop_unrepresentable", [False, True])
-def test_responses_to_chat_completion_preserves_function_output_images(
-    converter: ResponsesConverter, drop_unrepresentable: bool
+def test_responses_to_chat_completion_renders_a_function_output_image_as_a_placeholder(
+    converter: ResponsesConverter, caplog
 ):
+    # With the switch on, an image a tool returned becomes a neutral text placeholder in the tool
+    # message, so the conversion succeeds and the text parts around it keep their positions. The
+    # drop is logged at debug like the other drops: the whole transcript is re-converted on every
+    # later turn, so a warning would repeat for the rest of the rollout.
     responses_params = NeMoGymResponseCreateParamsNonStreaming(
         input=[
             {
@@ -615,36 +610,34 @@ def test_responses_to_chat_completion_preserves_function_output_images(
                 "call_id": "call_1",
                 "output": [
                     {"type": "input_text", "text": "Rendered the plot."},
-                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "high"},
+                    {"type": "input_image", "image_url": "data:image/png;base64,AAAA", "detail": "auto"},
                     {"type": "input_text", "text": "The axes are labeled."},
-                    {"type": "input_image", "image_url": "https://example.com/page.png", "detail": "auto"},
                 ],
             }
         ]
     )
 
-    params = converter.responses_to_chat_completion_create_params(
-        responses_params, drop_unrepresentable_request_fields=drop_unrepresentable
-    )
+    with caplog.at_level(logging.DEBUG, logger="nemo_gym.responses_converter"):
+        params = converter.responses_to_chat_completion_create_params(
+            responses_params, drop_unrepresentable_request_fields=True
+        )
 
     (tool_message,) = params.messages
     assert tool_message["role"] == "tool"
     assert tool_message["tool_call_id"] == "call_1"
     assert tool_message["content"] == [
         {"type": "text", "text": "Rendered the plot."},
-        {"type": "image_url", "image_url": {"url": "data:image/png;base64,AAAA", "detail": "high"}},
+        {"type": "text", "text": "[image omitted from tool output]"},
         {"type": "text", "text": "The axes are labeled."},
-        {"type": "image_url", "image_url": {"url": "https://example.com/page.png", "detail": "auto"}},
     ]
-    (roundtrip,) = converter.chat_completions_messages_to_responses_items(params.messages)
-    assert roundtrip.call_id == "call_1"
-    assert roundtrip.output == responses_params.input[0].output
+    image_records = [r for r in caplog.records if "text placeholder" in r.getMessage()]
+    assert [r.levelno for r in image_records] == [logging.DEBUG]
 
 
 def test_responses_to_chat_completion_still_rejects_other_function_output_parts_when_dropping(
     converter: ResponsesConverter,
 ):
-    """Dropping reporting-only fields must not silently discard unsupported tool content."""
+    """The switch covers image parts only; every other part type still fails the conversion."""
     responses_params = NeMoGymResponseCreateParamsNonStreaming(
         input=[
             {
@@ -661,6 +654,77 @@ def test_responses_to_chat_completion_still_rejects_other_function_output_parts_
     ):
         converter.responses_to_chat_completion_create_params(
             responses_params, drop_unrepresentable_request_fields=True
+        )
+
+
+PNG_URL = "data:image/png;base64,iVBORw0KGgo="
+
+
+def _tool_output_params(*parts: dict) -> NeMoGymResponseCreateParamsNonStreaming:
+    return NeMoGymResponseCreateParamsNonStreaming(
+        input=[{"type": "function_call_output", "call_id": "call_1", "output": list(parts)}]
+    )
+
+
+@pytest.fixture
+def inlining_converter() -> ResponsesConverter:
+    return ResponsesConverter(return_token_id_information=False, inline_tool_output_images=True)
+
+
+def test_inline_tool_output_images_keeps_each_image_in_the_tool_message(inlining_converter: ResponsesConverter):
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params(
+            {"type": "input_text", "text": "plot:"},
+            {"type": "input_image", "image_url": PNG_URL, "detail": "high"},
+            {"type": "input_image", "image_url": PNG_URL},
+        )
+    )
+
+    assert params.messages == [
+        {
+            "role": "tool",
+            "tool_call_id": "call_1",
+            "content": [
+                {"type": "text", "text": "plot:"},
+                {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}},
+                {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "auto"}},
+            ],
+        }
+    ]
+
+
+def test_inline_tool_output_images_takes_precedence_over_the_placeholder(inlining_converter: ResponsesConverter):
+    # The Codex CLI needs drop_unrepresentable_request_fields for its other fields; its images still reach the model.
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params({"type": "input_image", "image_url": PNG_URL, "detail": "high"}),
+        drop_unrepresentable_request_fields=True,
+    )
+
+    assert params.messages[0]["content"] == [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}]
+
+
+def test_inline_tool_output_images_sends_original_detail_as_high(inlining_converter: ResponsesConverter):
+    # The Codex CLI's view_image with detail "original" (full resolution), which Chat Completions lacks.
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        _tool_output_params({"type": "input_image", "image_url": PNG_URL, "detail": "original"})
+    )
+
+    assert params.messages[0]["content"] == [{"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}}]
+
+
+def test_inline_tool_output_images_rejects_an_image_without_a_url(inlining_converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match="file_id"):
+        inlining_converter.responses_to_chat_completion_create_params(
+            _tool_output_params({"type": "input_image", "file_id": "file_123"})
+        )
+
+
+def test_inline_tool_output_images_leaves_other_parts_unrepresentable(inlining_converter: ResponsesConverter):
+    with pytest.raises(NotImplementedError, match=r"content part type\(s\) 'input_file'$"):
+        inlining_converter.responses_to_chat_completion_create_params(
+            _tool_output_params(
+                {"type": "input_image", "image_url": PNG_URL}, {"type": "input_file", "file_id": "file_123"}
+            )
         )
 
 
@@ -1551,6 +1615,30 @@ def test_chat_tool_image_to_responses_becomes_input_image(converter: ResponsesCo
     ]
 
 
+def test_chat_tool_image_parts_round_trip_through_responses_items(inlining_converter: ResponsesConverter):
+    tool_message = {
+        "role": "tool",
+        "tool_call_id": "call_1",
+        "content": [
+            {"type": "text", "text": "plot:"},
+            {"type": "image_url", "image_url": {"url": PNG_URL, "detail": "high"}},
+        ],
+    }
+
+    items = inlining_converter.chat_completions_messages_to_responses_items([deepcopy(tool_message)])
+    output = items[0].model_dump(exclude_none=True)["output"]
+    assert output == [
+        {"type": "input_text", "text": "plot:"},
+        {"type": "input_image", "image_url": PNG_URL, "detail": "high"},
+    ]
+    params = inlining_converter.responses_to_chat_completion_create_params(
+        NeMoGymResponseCreateParamsNonStreaming(
+            input=[{"type": "function_call_output", "call_id": "call_1", "output": output}]
+        )
+    )
+    assert params.messages == [tool_message]
+
+
 def test_chat_messages_to_responses_items_unrecognized_role_raises(converter: ResponsesConverter):
     with pytest.raises(NotImplementedError):
         converter.chat_completions_messages_to_responses_items([{"role": "alien", "content": "x"}])
@@ -2028,11 +2116,49 @@ def test_downconverting_drops_reporting_only_reasoning_fields_when_configured(
 
 
 @pytest.mark.parametrize("context", ["auto", "current_turn", "all_turns"])
-def test_downconverting_still_rejects_a_reasoning_context_when_configured(converter: ResponsesConverter, context: str):
-    """`reasoning.context` tells the provider which earlier reasoning items to render back to the
-    model. The conversion renders every item and leaves the rest to the chat template, so it honors
-    no value of the field and refuses it even with the switch on."""
+def test_downconverting_rejects_a_reasoning_context_by_default(converter: ResponsesConverter, context: str):
     params = NeMoGymResponseCreateParamsNonStreaming(input="hi", reasoning={"effort": "high", "context": context})
+
+    with pytest.raises(NotImplementedError, match="context"):
+        converter.responses_to_chat_completion_create_params(params)
+
+
+@pytest.mark.parametrize("context", ["auto", "all_turns"])
+def test_downconverting_drops_a_reasoning_context_the_conversion_behaves_as_when_configured(
+    converter: ResponsesConverter, context: str, caplog: pytest.LogCaptureFixture
+):
+    """The conversion passes every replayed reasoning item to the backend and leaves what is rendered
+    to its chat template: what `all_turns` and `auto` ask for. The Codex CLI sends `all_turns` with
+    a model catalog that enables reasoning context."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input=[
+            {"role": "user", "content": "fix the test"},
+            {"type": "reasoning", "id": "rs_1", "summary": [{"type": "summary_text", "text": "Look first."}]},
+            {"type": "function_call", "call_id": "call_1", "name": "shell", "arguments": '{"command":"ls"}'},
+            {"type": "function_call_output", "call_id": "call_1", "output": "a.py"},
+        ],
+        reasoning={"effort": "high", "summary": "auto", "context": context},
+    )
+
+    with caplog.at_level("DEBUG", logger="nemo_gym.responses_converter"):
+        converted = converter.responses_to_chat_completion_create_params(
+            params, drop_unrepresentable_request_fields=True
+        )
+
+    assert converted.reasoning_effort == "high"
+    # The earlier turn's reasoning still reaches the backend with the call it led to.
+    assert converted.messages[1]["content"] == "<think>Look first.</think>"
+    assert "['summary', 'context']" in caplog.text
+
+
+def test_downconverting_still_rejects_a_current_turn_reasoning_context_when_configured(
+    converter: ResponsesConverter,
+):
+    """`current_turn` asks the provider to leave the earlier turns' reasoning out of the prompt. The
+    conversion passes every reasoning item on, so it refuses the value even with the switch on."""
+    params = NeMoGymResponseCreateParamsNonStreaming(
+        input="hi", reasoning={"effort": "high", "context": "current_turn"}
+    )
 
     with pytest.raises(NotImplementedError, match="context"):
         converter.responses_to_chat_completion_create_params(params, drop_unrepresentable_request_fields=True)

@@ -84,7 +84,7 @@ The provider recognises this, polls the sandbox status for up to 5 seconds to le
 raises a typed error with the reason attached:
 
 ```python
-from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
+from nemo_gym.sandbox import SandboxBackendUnreachableError
 
 try:
     result = await sandbox.exec(cmd, timeout_s=120)

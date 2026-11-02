@@ -27,13 +27,14 @@ import pytest
 from aiohttp import ClientResponseError
 from PIL import Image
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.responses_converter import ResponsesConverter
 from responses_api_agents.gdp_pdf_agent import app as gdp_pdf_agent_app
 from responses_api_agents.gdp_pdf_agent.app import (
     DocumentDelivery,
@@ -95,6 +96,13 @@ def test_python_observations_reach_the_model_without_an_image_cap():
     assert messages[0].call_id == "cell"
     assert messages[0].model_dump(exclude_unset=True)["type"] == "function_call_output"
     assert messages[0].output == content
+    converter = ResponsesConverter(return_token_id_information=False, inline_tool_output_images=True)
+    params = NeMoGymResponseCreateParamsNonStreaming(input=[call, *messages])
+    chat = converter.responses_to_chat_completion_create_params(params)
+    observation = chat.messages[-1]
+    assert observation["role"] == "tool"
+    images = [part["image_url"]["url"] for part in observation["content"] if part["type"] == "image_url"]
+    assert images == ["data:image/png;base64,aA=="] * 6
 
 
 @pytest.mark.parametrize(

@@ -45,7 +45,7 @@ from cvdp_lib.model_helpers import ModelHelpers
 from cvdp_lib.subjective import calculate_BLEU, calculate_ROUGE
 from pydantic import BaseModel, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

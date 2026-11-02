@@ -56,14 +56,14 @@ from PIL import Image, ImageDraw
 from pydantic import Field, model_validator
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
 from responses_api_agents.simple_agent.app import (
     SimpleAgent,
     SimpleAgentConfig,

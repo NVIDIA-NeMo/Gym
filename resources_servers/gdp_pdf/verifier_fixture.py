@@ -9,8 +9,8 @@ from unittest.mock import AsyncMock, MagicMock
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.openai_utils import NeMoGymChatCompletion
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import NeMoGymChatCompletion
 
 
 if TYPE_CHECKING:

@@ -45,6 +45,8 @@ fire first. Final cleanup runs after the episode deadline under its own `cleanup
 `session_close_timeout_seconds` budgets each cleanup/capture phase and the remaining activation join
 (default: 30 seconds per phase). Both settings must be positive and finite.
 
+See [NOOA sessions and SWE-bench Pro](../../fern/versions/latest/pages/evaluation-tutorials/nooa-swe-bench-pro.mdx)
+for setup, recipes, service lifecycle and observation limits.
 
 Sandboxed mode requires the Resources server to provide `sandbox_access`; otherwise seeding returns HTTP 422.
 Its provider must support `AsyncSandbox.connect`. The Gym model server address must be reachable from inside

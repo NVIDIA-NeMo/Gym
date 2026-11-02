@@ -18,7 +18,7 @@ from typing import Optional
 from fastapi import HTTPException
 from pydantic import PositiveInt
 
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxExecResult, SandboxProvider
 from nemo_gym.sandbox.config import SandboxConfig
 from nemo_gym.sandbox.utils import cpu_cap_env, upload_text

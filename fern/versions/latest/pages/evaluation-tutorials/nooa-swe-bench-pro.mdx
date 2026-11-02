@@ -1,0 +1,104 @@
+---
+title: "NOOA sessions and SWE-bench Pro"
+description: "Run NOOA through single_agent_turn and a Resources-owned sandbox."
+position: 5
+---
+
+# NOOA sessions and SWE-bench Pro
+
+NOOA uses Gym's agent sessions and existing `single_agent_turn` Environment Server. It seeds Resources,
+opens and invokes NOOA, closes the agent to collect evidence and final Resources cookies, asks Resources to
+verify, and closes Resources. Call the Environment Server's `/run`; NOOA
+no longer implements `/run` or assigns rewards. Sessions support one activation, with identical retries sharing it.
+Use one agent-server worker; independent sessions can still execute concurrently.
+
+The default harness is `nooa_bench.bench_agent:BenchAgent`, invoked through
+`responses_api_agents.nooa_agent.bench_agent_adapter:invoke_bench_agent`. The standard NOOA requirements
+install `nooa`, `nooa-cli`, and `nooa-bench` at the same revision. Normal `gym env prefetch` prepares
+these dependencies for the agent server; sandbox runtime preparation installs the same pinned packages.
+
+## Execution modes
+
+`nooa.execution_mode: embedded` runs NOOA in the agent server. Its Python execution can access files, processes,
+and network on that host; embedded mode provides no sandbox protection. Custom embedded invocation adapters
+must close their own processes and resources before returning; agent session close cannot track arbitrary
+host-side effects.
+
+`nooa.execution_mode: sandboxed` runs the complete NOOA agent in the Resources-provided sandbox. Resources must
+return direct `SandboxAccess`; NOOA never provisions or destroys the sandbox. NOOA prepares its runtime under
+`/opt/nemo-gym-nooa`, keeps session files under `/tmp/nemo-gym-nooa`, and executes in the supplied task workdir.
+NOOA closes its worker and session before Resources verifies; the Resources-owned sandbox remains available.
+Verification can inspect persisted artifacts after agent cleanup. Tasks whose verifier requires a
+NOOA-started service to remain live are not supported by this lifecycle.
+
+Cold runtime setup requires Linux x86_64 or aarch64 with glibc, `bash`, `tar`, `gzip`, `sha256sum`, `flock`,
+`tee`, `mv` with `-T` support, and writable `/opt/nemo-gym-nooa` and `/tmp`. The controller supplies Python;
+the sandbox needs outbound package and build-dependency access. Alpine/musl images are not supported.
+Model and Resources URLs must be reachable from the sandbox. A host-loopback URL is not automatically
+rewritten; configure `use_absolute_ip` / `default_host` for the deployment. No host virtual environment
+or provider credentials are copied into the runner.
+
+## Resource tools and observations
+
+Direct HTTP tool grants arrive through the agent session's `tool_accesses`. Generated `self.*` resource methods, `GymResponsesLLM`,
+and `GymTraceHooks` execute alongside NOOA. Model and resource cookies remain separate; final resource cookies
+return on close for verification. Model/resource infrastructure failures fail the episode instead of becoming a
+reward-zero response. Policy-budget exhaustion remains a gradable partial response.
+
+Hooks capture Python execution and nested resource calls. Sandbox results are exported on completion or handled
+errors; a hard kill can lose in-memory events. Sandbox-written results are agent-reported evidence, not trusted
+training records. Resources remains responsible for rewards.
+
+## Stateful resource example
+
+Use `resources_servers/example_session_state_mgmt/configs/example_session_state_mgmt_nooa.yaml` for an embedded
+real-model smoke of the instance-method resource bindings. Its materialized task rows are in
+`resources_servers/example_session_state_mgmt/data/example_nooa_tasks.jsonl`; other agents retain the original rows.
+The smoke requires `POLICY_BASE_URL`, `POLICY_API_KEY`, and `POLICY_MODEL_NAME`:
+
+```bash
+bash responses_api_agents/nooa_agent/smoke/run_stateful_e2e.sh
+```
+
+The script routes `nooa-counter` tasks to `example_session_state_mgmt_environment_server` and checks the server-side
+counter reward, model usage, resource calls, and trajectory. This example does not exercise sandbox provisioning.
+
+## SWE-bench Pro
+
+The recipe reuses the existing Resources-owned task sandbox, patch extraction, and separate grading sandbox:
+
+```bash
+python benchmarks/swebench/pro/prepare.py
+gym env start --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml
+
+gym eval run --no-serve \
+  --config benchmarks/swebench/pro/nooa.yaml --config model-provider.yaml \
+  --input benchmarks/swebench/data/swebench_pro_benchmark.jsonl \
+  --output /tmp/nooa-swebench-pro.jsonl --limit 1 --concurrency 1 \
+  +agent_name=swebench_pro_nooa_agent
+```
+
+Use `model-provider.yaml` to supply the policy model and sandbox provider settings and credentials. Pass the
+same recipe and overlay to both commands: `--no-serve` does not inherit routing from the running head server.
+For Docker, configure Gym's published model
+and Resources addresses to be reachable from the container before running. Preparation preserves upstream grading
+metadata in the shared flat dataset. The existing `single_agent_turn_legacy` adapter separates that metadata
+from the Responses request before invoking NOOA. Swap the provider configuration for
+remote infrastructure without changing the agent recipe.
+
+The overall deadline belongs to the Environment Server (`default_episode_timeout_seconds`). The standard
+task contract has no separate NOOA agent deadline. This recipe sets the task sandbox TTL to **25,200 seconds
+(seven hours)** through
+`swebench_pro_nooa_resources_server.resources_servers.swebench_pro.sandbox_config.ttl_s`.
+Override that Resources key when changing the budget; provider overlays do not set this TTL.
+Keep the worker ceiling plus patch extraction and cleanup below `ttl_s`, and also keep the episode deadline
+plus final cleanup below it. The defaults are a 21,420-second worker ceiling and a 21,600-second episode timeout.
+Patch generation and patch-file removal each use the sandbox command timeout (180 seconds); stopping the task
+sandbox has a 120-second budget. Patch download has no separate timeout; the episode deadline bounds the caller's wait.
+Final cleanup allows 180 seconds per callback, with at most three registered callbacks including the Resources retry.
+The episode budget includes setup, so it can expire before the worker reaches its ceiling. Protected grading uses a
+separate sandbox after patch extraction; a model-call limit alone is not a wall-clock guarantee.
+NOOA has no model-call limit by default (`max_policy_calls: null`). Set a positive `max_policy_calls` to opt into a
+shared model-call budget for the rollout. The optional `resources_server` agent reference identifies the Resources
+server that owns the dataset and its schema. Runtime tool and sandbox access comes from the standard environment's
+agent session grants. The old `run_timeout_secs` agent configuration field is removed.

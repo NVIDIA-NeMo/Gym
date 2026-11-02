@@ -254,6 +254,11 @@ export GDP_PDF_SANDBOX_IMAGE=gdp-pdf-sandbox
 gym eval run --benchmark gdp_pdf/python --config nemo_gym/sandbox/providers/docker/configs/docker.yaml ...
 ```
 
+For vLLM, set `policy_model.responses_api_models.vllm_model.inline_tool_output_images=true`
+on the selected policy model. This uses Gym’s image-aware converter; without it, the backend
+refuses image tool outputs or replaces them with placeholders. Responses-native backends
+receive the image content directly.
+
 ## Throttling
 
 `judge_endpoint_max_concurrency` bounds judge fan-out. A full 5-repeat run issues ~6,375 judge

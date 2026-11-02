@@ -20,7 +20,7 @@ from responses_api_agents.codex_agent import sandbox_runner
 pytestmark = pytest.mark.skipif(sys.platform != "linux", reason="Linux process supervision is required")
 
 
-def launch(tmp_path, code, timeout=3, python=sys.executable):
+def launch(tmp_path, code, timeout=3, python=sys.executable, **request_fields):
     request = {
         "directory": str(tmp_path),
         "command": [python, "-c", code],
@@ -29,6 +29,7 @@ def launch(tmp_path, code, timeout=3, python=sys.executable):
         "timeout": timeout,
         "cleanup_timeout": 2,
         "prompt": "task input",
+        **request_fields,
     }
     path = tmp_path / "input.json"
     path.write_text(json.dumps(request))
@@ -112,6 +113,29 @@ def test_task_descendants_survive_until_owner_teardown(tmp_path, ending):
                 pass
 
 
+@pytest.mark.parametrize(("start", "expected"), [("0", "1000"), ("500", "1000"), ("-997", "0"), ("-1000", "0")])
+def test_prefer_for_oom_kill_raises_the_score_and_never_lowers_it(tmp_path, start, expected):
+    path = tmp_path / "oom_score_adj"
+    path.write_text(start + "\n")
+    assert sandbox_runner.prefer_for_oom_kill(str(path)) == f"{start} -> {expected}"
+    assert path.read_text() == expected
+    assert sandbox_runner.prefer_for_oom_kill(str(tmp_path / "missing")).startswith("unchanged")
+
+
+@pytest.mark.parametrize("raise_score", [False, True])
+def test_codex_and_its_tools_inherit_the_raised_oom_score(tmp_path, raise_score):
+    start = int(open("/proc/self/oom_score_adj").read())
+    # Stands in for Codex: a tool it starts reports the score it inherited.
+    code = (
+        "import subprocess,sys; subprocess.run([sys.executable,'-c',"
+        "\"import pathlib; pathlib.Path('score').write_text(open('/proc/self/oom_score_adj').read())\"],check=True)"
+    )
+    process = launch(tmp_path, code, raise_oom_score_adj=raise_score)
+    summary = result(tmp_path, process)
+    assert summary["return_code"] == 0
+    assert int((tmp_path / "score").read_text()) == ((0 if start < 0 else 1000) if raise_score else start)
+
+
 def test_spawn_error_is_not_success(tmp_path):
     process = launch(tmp_path, "raise RuntimeError('failed')")
     summary = result(tmp_path, process)
@@ -141,6 +165,24 @@ def test_runtime_environment_does_not_inherit_provider_credentials(tmp_path, mon
     assert result(tmp_path, process)["cleanup_confirmed"]
     _, event = json.loads((tmp_path / "events.jsonl").read_text())
     assert event == {"SANDBOX_PROVIDER_API_KEY": None, **task_environment}
+
+
+def test_inherited_environment_is_opt_in_and_keeps_explicit_values(tmp_path, monkeypatch):
+    monkeypatch.setenv("TASK_VARIABLE", "from-task-image")
+    monkeypatch.setenv("HOME", "/root")
+    code = (
+        "import os,json; print(json.dumps({key: os.environ.get(key) "
+        "for key in ('TASK_VARIABLE', 'HOME', 'CODEX_HOME', 'PATH')}))"
+    )
+    process = launch(tmp_path, code, inherit_env=True, env={"CODEX_HOME": "/tmp/session/.codex"})
+    assert result(tmp_path, process)["cleanup_confirmed"]
+    _, event = json.loads((tmp_path / "events.jsonl").read_text())
+    assert event == {
+        "TASK_VARIABLE": "from-task-image",
+        "HOME": "/root",
+        "CODEX_HOME": "/tmp/session/.codex",
+        "PATH": os.environ["PATH"],
+    }
 
 
 @pytest.mark.skipif(shutil.which("python3.8") is None, reason="Python 3.8 is not installed")

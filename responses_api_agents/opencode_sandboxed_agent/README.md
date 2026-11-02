@@ -1,4 +1,18 @@
 # OpenCode Sandboxed Agent
+
+> [!WARNING]
+> **Deprecated.** `opencode_sandboxed_agent` runs each episode through its own legacy `/run` path, behind a
+> `legacy_agent` environment server, and will be removed after the environment-server migration.
+> Do not build new benchmarks, agents or configs on this harness. Where the resources server returns
+> `sandbox_access`, switch to a session harness that its `allowed_agents` lists, under an environment server:
+> [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) where it is listed (Terminal Bench 2.1),
+> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro).
+>
+> Some setups have no session path yet and stay on this agent until they do: the SWE resources servers that
+> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`), the HLE search presets
+> (`tool_servers`), and `vibench_agent`, which extends this agent. Existing configs keep working; the agent logs a
+> deprecation warning when it starts.
+
 ```bash
 # In terminal 1
 gym env start \
@@ -157,6 +171,16 @@ Lean/Mathlib 4.34.0. Tool use instructions and dependency provenance are include
 for dependency updates and offline validation.
 The Dockerfile pins downloads and image digests, and package locks pin transitive
 dependencies. Builds need network access; sandbox startup performs no package installs.
+
+For `benchmarks/hle_diamond/opencode_reference.yaml` build the reference image instead
+(`OPENCODE_REFERENCE_SANDBOX_IMAGE`): upstream's Python 3.11.16 with its twelve pinned packages, a
+shell and the same OpenCode 1.17.11 install, nothing else. See the
+[reference image README](hle_reference_image/README.md) for the protocol source and verification.
+
+```bash
+docker build --platform linux/amd64 -t gym-opencode-hle-reference:local \
+  responses_api_agents/opencode_sandboxed_agent/hle_reference_image
+```
 
 Pi adds Node 22.23.2 and Pi 0.85.1 in a small layer:
 
