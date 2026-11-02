@@ -20,6 +20,7 @@ from nemo_gym.models.history_delta import (
     _encoded,
     reconstruct_request,
 )
+from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
 from responses_api_agents.hermes_agent.history_delta import HistoryDeltaClient
 
 
@@ -62,7 +63,7 @@ def make_client(read_events, received_headers):
     """Echo requests through the real middleware; record when the body is consumed."""
     with ExitStack() as stack:
 
-        def make(*, enabled=True, protocol=None):
+        def make(*, enabled=True, protocol=None, rollout_claims=None):
             app = FastAPI()
 
             @app.post("/v1/chat/completions")
@@ -78,6 +79,7 @@ def make_client(read_events, received_headers):
                 model_server_name="model",
                 history_delta_enabled=enabled,
                 history_transport_protocol=protocol,
+                rollout_claims=rollout_claims,
             )
 
             async def record_reads(scope, receive, send):
@@ -90,6 +92,59 @@ def make_client(read_events, received_headers):
             return stack.enter_context(TestClient(record_reads))
 
         yield make
+
+
+def test_first_model_request_claims_rollout_and_later_requests_keep_its_owner(tmp_path, make_client, read_events):
+    worker_a = SessionClaims(str(tmp_path), "a" * 32, holds=lambda _: True)
+    worker_b = SessionClaims(str(tmp_path), "b" * 32, holds=lambda _: True)
+    client_a = make_client(rollout_claims=worker_a)
+    client_b = make_client(rollout_claims=worker_b)
+    first_request = {"messages": [{"role": "user", "content": "task"}]}
+    next_request = {
+        "messages": [
+            {"role": "user", "content": "task"},
+            {"role": "assistant", "content": "answer"},
+        ]
+    }
+
+    # The first request assigns worker A; worker B sees the same owner.
+    assert worker_a.claimant("rollout-1") is None
+    first_response = client_a.post("/ng-rollout/rollout-1/v1/chat/completions", json=first_request)
+    assert first_response.status_code == 200
+    assert first_response.json() == first_request
+    assert worker_b.claimant("rollout-1") == worker_a.routing_id
+
+    # The owner accepts later requests, including paths requesting token capture.
+    next_response = client_a.post(
+        "/ng-rollout/rollout-1/training-token-capture/v1/chat/completions", json=next_request
+    )
+    assert next_response.status_code == 200
+    assert next_response.json() == next_request
+
+    # Worker B rejects this rollout before reading the body or dispatching inference.
+    read_events.clear()
+    wrong_worker_response = client_b.post("/ng-rollout/rollout-1/v1/chat/completions", json=next_request)
+    assert wrong_worker_response.status_code == 409
+    assert wrong_worker_response.json() == {"error": {"code": "gym_rollout_wrong_worker"}}
+    assert read_events == []
+    assert worker_b.claimant("rollout-1") == worker_a.routing_id
+
+    # A different rollout can independently belong to worker B.
+    other_response = client_b.post("/ng-rollout/rollout-2/v1/responses", json={"input": "other task"})
+    assert other_response.status_code == 200
+    assert worker_a.claimant("rollout-2") == worker_b.routing_id
+
+
+def test_unprefixed_model_request_does_not_claim_a_rollout(tmp_path, make_client):
+    claims = SessionClaims(str(tmp_path), "a" * 32, holds=lambda _: True)
+    client = make_client(rollout_claims=claims)
+
+    response = client.post("/v1/responses", json={"input": "ordinary request"})
+
+    # Requests without a rollout prefix pass through without creating an ownership claim.
+    assert response.status_code == 200
+    assert response.json() == {"input": "ordinary request"}
+    assert list((tmp_path / "session-claims").iterdir()) == []
 
 
 @pytest.fixture

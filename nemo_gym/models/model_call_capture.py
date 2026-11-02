@@ -47,6 +47,7 @@ from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
 )
+from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
 from nemo_gym.models.history_delta import HistoryBuffer, HistoryTransportProtocol
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
@@ -760,6 +761,7 @@ class _CaptureMiddleware:
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
         history_delta_enabled: bool = False,
         history_transport_protocol: HistoryTransportProtocol | None = None,
+        rollout_claims: SessionClaims | None = None,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -779,6 +781,7 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._history_buffer = HistoryBuffer() if history_delta_enabled else None
+        self._rollout_claims = rollout_claims
         self._history_transport_protocol = (
             history_transport_protocol if history_transport_protocol is not None else HistoryTransportProtocol()
         )
@@ -813,6 +816,16 @@ class _CaptureMiddleware:
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
         known_non_generating = (method, path) in self._non_generating_requests
+
+        if rollout_from_path and method == "POST" and dialect is not None and not known_non_generating:
+            claims = self._rollout_claims
+            if claims is not None and claims.claim(rollout_from_path) != claims.routing_id:
+                # Until owner forwarding is installed, never reconstruct or dispatch
+                # a rollout on a worker that does not own it.
+                await JSONResponse({"error": {"code": "gym_rollout_wrong_worker"}}, status_code=409)(
+                    scope, receive, send
+                )
+                return
 
         if (
             rollout_from_path
