@@ -210,3 +210,46 @@ def test_a_policy_call_refused_for_an_unsupported_parameter_value_is_an_evaluati
     assert report["model"]["count"] == 0
     assert report["evaluation"]["kinds"] == {"invalid_request_parameter": refused}
     assert report["evaluation"]["server"] == 0
+
+
+def _tau3_style_saved_row(a, rows, invocations):
+    """A saved tool-transcript trial whose only policy call was rejected at the context limit (HTTP 400, no later
+    call) and scored zero; the call kept its error category and a failure event of a model request error."""
+    trajectory = rows[0]["ng_trajectory"]
+    meta = trajectory["model_calls"][0]["response_metadata"]
+    [operation] = meta["model_operations"]
+    operation["outcome"], operation["failure_id"] = "failed", "rejected-1"
+    event = {
+        "event_id": "rejected-1",
+        "boundary": "model",
+        "operation": "model_request",
+        "operation_id": operation["operation_id"],
+        "attempt_id": operation["final_attempt_id"],
+        "cause_id": None,
+        "failure_kind": "model_request_error",
+        "http_status": 400,
+    }
+    meta["failure_report"]["events"] = {"rejected-1": event}
+    meta |= {"status_code": 400, "response_status": None, "error_category": "context_length_exceeded"}
+    trajectory["invocations"], trajectory["turns"] = invocations, []
+    rows[0]["ng_policy_model_server"] = "policy"
+    rows[0]["_ng_failure_events"] = {"rejected-1": dict(event)}
+    save_rows(a, rows)
+    return collect(a)
+
+
+@pytest.mark.parametrize(
+    "invocations",
+    [
+        [],
+        [{"invocation_id": "agent", "status": "unknown", "in_session": None, "model_calls": []}],
+    ],
+    ids=["no-invocation", "unreferenced-invocation"],
+)
+def test_a_saved_tool_transcript_trial_that_ended_on_the_context_limit_is_typed_when_read(tmp_path, invocations):
+    """The agent recorded a tool exchange for none of its calls, or for some: the policy's last captured call ended
+    the rollout either way."""
+    a, rows = setup(tmp_path)
+    collected = _tau3_style_saved_row(a, rows, invocations)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}

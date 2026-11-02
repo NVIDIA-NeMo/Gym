@@ -4198,7 +4198,7 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
     has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
-    (its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
+    (it has no invocation, or its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
     failed that way; an earlier failed call is no end and stays unaccounted. The kind is keyed on the failure's HTTP
     status (``status_fault_kind``): a 5xx reply is the server's fault, and another model's 4xx rejection is
     evaluation-side. A policy whose own last call was rejected on length (``_length_refusal_kind``) ended there,
@@ -4217,10 +4217,9 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
         if _identity(row) in infrastructure:
             continue  # Counted once, as its agent timeout's server-side fault.
         invocations = observed.get("invocations") if isinstance(observed, dict) else None
-        unreferenced = (
-            isinstance(invocations, list)
-            and bool(invocations)
-            and all(isinstance(item, dict) and item.get("model_calls") == [] for item in invocations)
+        # No invocation names a call: an agent that recorded no tool exchange has none at all.
+        unreferenced = isinstance(invocations, list) and all(
+            isinstance(item, dict) and item.get("model_calls") == [] for item in invocations
         )
         if unreferenced and isinstance(observed.get("model_calls"), list):
             own = _last_captured_call([call for call in observed["model_calls"] if _policy_call(row, call)])
