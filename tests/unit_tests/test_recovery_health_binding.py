@@ -407,8 +407,8 @@ def test_inputs_changed_while_producing_report_are_not_bound(tmp_path, monkeypat
     a, _ = setup(tmp_path)
     original = producer._index_jsonl
 
-    def changing(paths):
-        result = original(paths)
+    def changing(paths, **kwargs):
+        result = original(paths, **kwargs)
         path = a / name
         path.write_bytes(path.read_bytes() + b"\n")
         return result

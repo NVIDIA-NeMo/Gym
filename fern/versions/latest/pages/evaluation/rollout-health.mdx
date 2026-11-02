@@ -22,11 +22,12 @@ metrics, model servers, or agent behavior. It writes two additional report files
 ## When Health Checks Run
 
 <Note>
-Fresh runs, including those with a recovery manifest, support the checks below when every saved row still represents
-its task's selected attempt. Histories with superseded rows require a merged selected-result projection from
-`gym eval aggregate`; automatic checks print a skip message for those histories, and standalone checks explain
-how to export them. Reading and reporting those histories directly remains a follow-up to
-[evaluation resume](/main/evaluation/resume). These protections also apply through file symlinks.
+For runs with a recovery manifest, health checks inspect only the selected completed attempts. Older successes
+superseded by another attempt do not count as additional samples, even if the newer attempt failed or has no saved
+outcome. Checks read the selected records from their original files without requiring an exported projection.
+Run-level failure and timeout accounting still includes the source history. This applies to standalone checks,
+automatic checks, multi-shard aggregation and file symlinks. Loose files and explicitly supplied failure sidecars
+remain available for line-by-line diagnostics.
 </Note>
 
 `gym eval run` runs health checks after rollout collection and aggregate-metrics computation. `gym eval aggregate` runs health checks
