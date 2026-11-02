@@ -6,7 +6,7 @@ from pathlib import Path
 from responses_api_agents.nooa_agent import provenance
 
 
-SHA = "94c6b1db495df2cc9d3ddaae542520f6e12fb619"
+SHA = "94c6b1db495df2cc9d3ddaae542520f6e12fb619"  # pragma: allowlist secret
 
 
 def test_nooa_pin_reads_the_commit_of_the_nooa_requirement(tmp_path: Path) -> None:
