@@ -1044,6 +1044,26 @@ def substep_tests(r):
     return {"steps": len(steps), "passed": sum(steps), "num_steps_total": count(r.get("num_steps_total")),
             "num_steps_passed": count(r.get("num_steps_passed")), "problem_accuracy": boolean(r.get("problem_accuracy")),
             "environment_results": len(environments) if isinstance(environments, list) else None}
+import re
+JUDGE_VERDICT = re.compile(r"^(?:\[\[(A=B|A!=B)\]\]|judgement:\s*(yes|no))$", re.IGNORECASE)
+def judge_verdicts(value):
+    # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
+    # not parse; the label text stays local.
+    out = []
+    for item in value:
+        label = item.get("verdict_label") if isinstance(item, dict) else None
+        match = JUDGE_VERDICT.match(label.strip()) if isinstance(label, str) else None
+        out.append(None if match is None else (match.group(1) or match.group(2)).lower() in ("a=b", "yes"))
+    return out
+def rubric(r):
+    # A rubric judge's verdict and scores as scalars only; the judge's text stays local.
+    if "rubric_score" not in r and "scoring_threshold" not in r:
+        return None
+    verdict = r.get("verdict")
+    return {"verdict": (verdict == "YES") if verdict in ("YES", "NO") else None,
+            "rubric_score": finite(r.get("rubric_score")), "scoring_threshold": finite(r.get("scoring_threshold")),
+            "scoring_max_points": finite(r.get("scoring_max_points")),
+            "invalid_judge_response": r.get("invalid_judge_response") if type(r.get("invalid_judge_response")) is bool else None}
 def grading_facts(r):
     # Scalar facts of the grading artifacts a verifier or environment saved on the row; their contents stay local.
     judgments, result = r.get("judgments"), r.get("result")
@@ -1053,7 +1073,11 @@ def grading_facts(r):
         "judgments": isinstance(judgments, list) and bool(judgments),
         "judge_score": finite(r.get("judge_score")) is not None or (isinstance(judgments, list) and any(
             isinstance(item, dict) and finite(item.get("judge_score")) is not None for item in judgments)),
-        "judge_evaluations": r.get("judge_evaluations") is not None,
+        "judge_evaluations": isinstance(r.get("judge_evaluations"), list) and bool(r["judge_evaluations"]),
+        "judge_verdicts": judge_verdicts(r["judge_evaluations"]) if isinstance(r.get("judge_evaluations"), list) and r["judge_evaluations"] else None,
+        "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
+            isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
+        "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
         "sentence_metrics": sorted(k for k, v in r.items() if k.startswith("sentence_") and finite(v) is not None),
         "verifier_exit_code": r.get("verifier_exit_code") if type(r.get("verifier_exit_code")) is int else None,
@@ -3438,12 +3462,41 @@ def _reward(row: Mapping[str, Any]) -> float | None:
     return reward if type(reward) in (int, float) and math.isfinite(reward) else None
 
 
+def _judge_evaluations(facts: Mapping[str, Any], reward: float | None) -> bool:
+    """A non-empty ``judge_evaluations`` list without a judge error; when every evaluation's verdict label parses
+    (``[[A=B]]``/``[[A!=B]]`` or ``Judgement: yes/no``), the reward is 1.0 exactly when every verdict is equal/yes."""
+    verdicts = facts.get("judge_verdicts")
+    if facts.get("judge_evaluations") is not True or facts.get("judge_error") is True:
+        return False
+    if isinstance(verdicts, list) and verdicts and all(type(verdict) is bool for verdict in verdicts):
+        return reward == (1.0 if all(verdicts) else 0.0)
+    return True
+
+
 def _judge_record(row: Mapping[str, Any]) -> bool:
     """A saved judge verdict: a ``judge_response``, a non-empty ``judgments`` list with a ``judge_score``, or
-    ``judge_evaluations``."""
+    non-empty ``judge_evaluations`` whose parsed verdicts agree with the reward (``_judge_evaluations``)."""
     facts = _grading_facts(row)
-    return bool(facts.get("judge_response") or (facts.get("judgments") and facts.get("judge_score"))) or bool(
-        facts.get("judge_evaluations")
+    return bool(facts.get("judge_response") or (facts.get("judgments") and facts.get("judge_score"))) or (
+        _judge_evaluations(facts, _reward(row))
+    )
+
+
+def _rubric_verdict(row: Mapping[str, Any]) -> bool:
+    """A saved rubric judge's verdict: ``verdict`` YES or NO, a finite ``rubric_score`` and ``scoring_threshold``, no
+    ``invalid_judge_response``, and the reward 1.0 exactly when the verdict is YES and the score reaches the threshold
+    (0.0 otherwise). The saved answer and score are bound."""
+    record = _grading_facts(row).get("rubric")
+    if not isinstance(record, dict):
+        return False
+    score, threshold, verdict = record.get("rubric_score"), record.get("scoring_threshold"), record.get("verdict")
+    return (
+        type(score) in (int, float)
+        and type(threshold) in (int, float)
+        and type(verdict) is bool
+        and record.get("invalid_judge_response") is False
+        and _reward(row) == (1.0 if verdict and score >= threshold else 0.0)
+        and _bound_answer(row)
     )
 
 
@@ -3525,6 +3578,7 @@ def _environment_reward(row: Mapping[str, Any]) -> bool:
 # a bare reward is never one.
 GRADING_ARTIFACTS = (
     ("judge_record", _judge_record),
+    ("rubric_verdict", _rubric_verdict),
     ("symbolic_match", _symbolic_match),
     ("metric_record", _metric_record),
     ("test_execution", _test_execution),
