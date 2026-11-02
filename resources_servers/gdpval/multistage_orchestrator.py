@@ -510,6 +510,64 @@ def compute_fingerprint(
     ``retry_inprocess``, ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``, and the contents
     of the reference deliverable directories.
     """
+    return _fingerprint_digest(
+        _fingerprint_payload(
+            multistage_config,
+            reference_elos,
+            distribution,
+            materialized_rows=materialized_rows,
+            rollout_collection_config=rollout_collection_config,
+            resolved_global_config=resolved_global_config,
+        )
+    )
+
+
+def compute_fingerprint_with_components(
+    multistage_config: MultiStageRunConfig,
+    reference_elos: Mapping[str, float],
+    distribution: Mapping[str, Mapping[str, object]],
+    *,
+    materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    rollout_collection_config: Optional[Any] = None,
+    resolved_global_config: Optional[Mapping[str, Any]] = None,
+) -> Tuple[str, Dict[str, str]]:
+    """Return ``compute_fingerprint``'s value and a digest of each component it hashes.
+
+    Both come from one payload, with the same serialization and hash. Each
+    top-level payload entry is a component, except ``runtime_components``, which
+    has one per server block (``runtime_components.<name>``). The digests only
+    name what changed when a journal is stale; a resume still compares the full
+    fingerprint alone.
+    """
+    payload = _fingerprint_payload(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows=materialized_rows,
+        rollout_collection_config=rollout_collection_config,
+        resolved_global_config=resolved_global_config,
+    )
+    components = {name: _fingerprint_digest(value) for name, value in payload.items() if name != "runtime_components"}
+    for name, block in payload.get("runtime_components", {}).items():
+        components[f"runtime_components.{name}"] = _fingerprint_digest(block)
+    return _fingerprint_digest(payload), components
+
+
+def _fingerprint_digest(value: Any) -> str:
+    """SHA-256 of ``value`` in the fingerprint's canonical form (orjson with sorted keys)."""
+    return hashlib.sha256(orjson.dumps(value, option=orjson.OPT_SORT_KEYS)).hexdigest()
+
+
+def _fingerprint_payload(
+    multistage_config: MultiStageRunConfig,
+    reference_elos: Mapping[str, float],
+    distribution: Mapping[str, Mapping[str, object]],
+    *,
+    materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
+    rollout_collection_config: Optional[Any] = None,
+    resolved_global_config: Optional[Mapping[str, Any]] = None,
+) -> Dict[str, Any]:
+    """The inputs ``compute_fingerprint`` hashes, as one JSON-ready mapping."""
 
     def jsonable(value: Any) -> Any:
         if hasattr(value, "model_dump"):
@@ -635,8 +693,7 @@ def compute_fingerprint(
         transport_repair = (resolved_global_config.get("multistage") or {}).get("transport_assignment_repair")
         if transport_repair is not None:
             payload["transport_assignment_repair"] = jsonable(transport_repair)
-    encoded = orjson.dumps(payload, option=orjson.OPT_SORT_KEYS)
-    return hashlib.sha256(encoded).hexdigest()
+    return payload
 
 
 # ---------------------------------------------------------------------------
@@ -2021,6 +2078,56 @@ def read_journal(journal_fpath: str | Path) -> Tuple[Dict[int, dict], Dict[int, 
     return plans, outcomes, fingerprint
 
 
+# Optional journal key: the run's per-component fingerprint digests, stored with
+# the fingerprint so a stale verdict can name what changed. The resume decision
+# never reads it, and readers that predate it ignore it.
+FINGERPRINT_COMPONENTS_KEY = "fingerprint_components"
+
+
+def read_journal_fingerprint_components(journal_fpath: str | Path) -> Optional[Dict[str, str]]:
+    """Component digests of the fingerprint ``read_journal`` returns.
+
+    They are read from the same record, the last one carrying a fingerprint,
+    so they describe that fingerprint. None when that record has none.
+    """
+    components: Optional[Dict[str, str]] = None
+    path = Path(journal_fpath)
+    if not path.exists():
+        return components
+    with path.open("rb") as handle:
+        for line in handle:
+            line = line.strip()
+            if not line:
+                continue
+            record = orjson.loads(line)
+            if "fingerprint" in record:
+                value = record.get(FINGERPRINT_COMPONENTS_KEY)
+                components = dict(value) if isinstance(value, Mapping) else None
+    return components
+
+
+def describe_fingerprint_component_changes(
+    journal_components: Optional[Mapping[str, str]],
+    run_components: Optional[Mapping[str, str]],
+) -> str:
+    """Name the fingerprint components whose digests differ, in sorted order.
+
+    A component present on only one side differs too.
+    """
+    if journal_components is None:
+        return "components unknown (the journal predates component digests)"
+    if run_components is None:
+        return "components unknown (this run has no component digests)"
+    differing = sorted(
+        name
+        for name in set(journal_components) | set(run_components)
+        if journal_components.get(name) != run_components.get(name)
+    )
+    if not differing:
+        return "no component digest differs"
+    return "components differ: " + ", ".join(differing)
+
+
 def load_latest_attempt_dispositions(
     journal_fpath: str | Path,
 ) -> Dict[int, Dict[Tuple[Any, Any], Dict[str, Any]]]:
@@ -2329,12 +2436,22 @@ def load_reuse_cached_keys(output_fpath: str | Path) -> Dict[int, set[Tuple[Any,
     return reuse_cached_keys
 
 
-def append_journal_record(journal_fpath: str | Path, record: Mapping[str, Any], fingerprint: str) -> None:
-    """Append a single journal record stamped with the run fingerprint."""
+def append_journal_record(
+    journal_fpath: str | Path,
+    record: Mapping[str, Any],
+    fingerprint: str,
+    *,
+    fingerprint_components: Optional[Mapping[str, str]] = None,
+) -> None:
+    """Append a single journal record stamped with the run fingerprint and, when given, its component digests."""
     path = Path(journal_fpath)
     path.parent.mkdir(parents=True, exist_ok=True)
     out = dict(record)
     out["fingerprint"] = fingerprint
+    # Digests describe only the fingerprint stamped here; a replayed record may carry others.
+    out.pop(FINGERPRINT_COMPONENTS_KEY, None)
+    if fingerprint_components is not None:
+        out[FINGERPRINT_COMPONENTS_KEY] = dict(fingerprint_components)
     with path.open("ab") as handle:
         handle.write(orjson.dumps(out) + b"\n")
         handle.flush()
@@ -2391,7 +2508,13 @@ def _gate_partial_outcome_omissions(
             gated_keys.setdefault(stage_index, set()).update(_recorded_key_set(outcome, "omitted_keys"))
 
 
-def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, fingerprint: str) -> StageResume:
+def build_file_resume(
+    output_fpath: str | Path,
+    journal_fpath: str | Path,
+    fingerprint: str,
+    *,
+    fingerprint_components: Optional[Mapping[str, str]] = None,
+) -> StageResume:
     """Build a file-backed :class:`StageResume` from the journal + rollout files."""
     output_fpath = Path(output_fpath)
     journal_fpath = Path(journal_fpath)
@@ -2404,6 +2527,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": recovered_restart, "status": "restart_cleanup_complete"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
 
     plans, outcomes, _ = read_journal(journal_fpath)
@@ -2429,6 +2553,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": restart_stage, "status": "restart_from_stage"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
         aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
         _prune_downstream_files(output_fpath, restart_stage)
@@ -2436,6 +2561,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": restart_stage, "status": "restart_cleanup_complete"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
         plans, outcomes, _ = read_journal(journal_fpath)
         rows_by_stage = load_persisted_rows(output_fpath)
@@ -2449,10 +2575,10 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
         latest_attempt_dispositions_by_stage = load_latest_attempt_dispositions(journal_fpath)
 
     def on_plan(index: int, plan: dict) -> None:
-        append_journal_record(journal_fpath, plan, fingerprint)
+        append_journal_record(journal_fpath, plan, fingerprint, fingerprint_components=fingerprint_components)
 
     def on_outcome(index: int, outcome: dict) -> None:
-        append_journal_record(journal_fpath, outcome, fingerprint)
+        append_journal_record(journal_fpath, outcome, fingerprint, fingerprint_components=fingerprint_components)
 
     def on_rows(index: int, rows: List[Dict[str, Any]]) -> None:
         dispositions = [
@@ -2479,6 +2605,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
                     "attempts": no_persist_dispositions,
                 },
                 fingerprint,
+                fingerprint_components=fingerprint_components,
             )
         route_stage_rows(output_fpath, rows)
         if persisted_dispositions:
@@ -2490,6 +2617,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
                     "attempts": persisted_dispositions,
                 },
                 fingerprint,
+                fingerprint_components=fingerprint_components,
             )
 
     def on_restart(index: int) -> None:
@@ -2497,6 +2625,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": index, "status": "restart_from_stage"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
         aggregate_metrics_path_for(output_fpath).unlink(missing_ok=True)
         _prune_downstream_files(output_fpath, index)
@@ -2504,6 +2633,7 @@ def build_file_resume(output_fpath: str | Path, journal_fpath: str | Path, finge
             journal_fpath,
             {"stage_index": index, "status": "restart_cleanup_complete"},
             fingerprint,
+            fingerprint_components=fingerprint_components,
         )
 
     return StageResume(
@@ -2753,7 +2883,7 @@ async def run_e2e_multistage(
 
     output_fpath = Path(rollout_collection_config.output_jsonl_fpath)
     journal_fpath = journal_path_for(output_fpath)
-    fingerprint = compute_fingerprint(
+    fingerprint, fingerprint_components = compute_fingerprint_with_components(
         multistage_config,
         reference_elos,
         distribution,
@@ -2770,7 +2900,13 @@ async def run_e2e_multistage(
 
         assignment_repair = make_assignment_repair(global_config_dict, transport_config)
 
-    resume = _prepare_resume(rollout_collection_config, output_fpath, journal_fpath, fingerprint)
+    resume = _prepare_resume(
+        rollout_collection_config,
+        output_fpath,
+        journal_fpath,
+        fingerprint,
+        fingerprint_components=fingerprint_components,
+    )
 
     # Rewrite the materialized inputs from the journal on every plan and outcome: a stage's
     # references come from the previous stage's ELO, and its accepted row count from its outcome.
@@ -2836,7 +2972,12 @@ Stages: {orjson.dumps(stage_summaries, option=orjson.OPT_INDENT_2).decode()}"""
 
 
 def _prepare_resume(
-    rollout_collection_config, output_fpath: Path, journal_fpath: Path, fingerprint: str
+    rollout_collection_config,
+    output_fpath: Path,
+    journal_fpath: Path,
+    fingerprint: str,
+    *,
+    fingerprint_components: Optional[Mapping[str, str]] = None,
 ) -> StageResume:
     """Build the file-backed :class:`StageResume` for the run.
 
@@ -2845,7 +2986,9 @@ def _prepare_resume(
     reused only when ``resume_from_cache`` is set and both the rollouts file and a
     fingerprint-matching journal exist; every other case renames the prior
     rollouts, failure sidecar, journals, manifest, materialized inputs, coverage and aggregate metrics to
-    ``<name>.stale.<ns>`` and starts fresh (with the reason logged).
+    ``<name>.stale.<ns>`` and starts fresh (with the reason logged). The reason
+    for a stale journal names the fingerprint components that differ; the
+    digests never change the decision.
     """
     import sys
 
@@ -2859,8 +3002,11 @@ def _prepare_resume(
         reason = "resume_from_cache not set"
     elif not output_fpath.exists() or not journal_fpath.exists():
         reason = f"no prior cache (rollouts exist={output_fpath.exists()}, journal exists={journal_fpath.exists()})"
-    elif read_journal(journal_fpath)[2] != fingerprint:
-        reason = f"journal STALE (fingerprint {read_journal(journal_fpath)[2]} != {fingerprint})"
+    elif (journal_fingerprint := read_journal(journal_fpath)[2]) != fingerprint:
+        changes = describe_fingerprint_component_changes(
+            read_journal_fingerprint_components(journal_fpath), fingerprint_components
+        )
+        reason = f"journal STALE (fingerprint {journal_fingerprint} != {fingerprint}): {changes}"
     else:
         reason = None
 
@@ -2891,7 +3037,7 @@ def _prepare_resume(
         print("[multistage-elo] resuming multi-stage run from cache (fingerprint match)", file=sys.stderr, flush=True)
         if getattr(rollout_collection_config, "resubmit", False):
             record_resubmit_offset(output_fpath)
-    return build_file_resume(output_fpath, journal_fpath, fingerprint)
+    return build_file_resume(output_fpath, journal_fpath, fingerprint, fingerprint_components=fingerprint_components)
 
 
 def _log_event(name: str, data: dict) -> None:  # pragma: no cover
