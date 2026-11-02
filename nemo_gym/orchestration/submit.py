@@ -86,6 +86,7 @@ def recover(
     max_unhealthy_fraction: float | None = None,
     max_response_failure_fraction: float | None = None,
     max_trial_failure_fraction: float | None = None,
+    policy_timeout_counts_as_model: bool | None = None,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
@@ -121,6 +122,7 @@ def recover(
         max_unhealthy_fraction=max_unhealthy_fraction,
         max_response_failure_fraction=max_response_failure_fraction,
         max_trial_failure_fraction=max_trial_failure_fraction,
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
         outcome_policy=outcome_policy,
         mlflow_status=mlflow_status,
         mlflow_run_id=mlflow_run_id,
@@ -147,6 +149,7 @@ def inspect_recovery(
     max_unhealthy_fraction: float | None = None,
     max_response_failure_fraction: float | None = None,
     max_trial_failure_fraction: float | None = None,
+    policy_timeout_counts_as_model: bool | None = None,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
@@ -165,6 +168,7 @@ def inspect_recovery(
         max_unhealthy_fraction=max_unhealthy_fraction,
         max_response_failure_fraction=max_response_failure_fraction,
         max_trial_failure_fraction=max_trial_failure_fraction,
+        policy_timeout_counts_as_model=policy_timeout_counts_as_model,
         outcome_policy=outcome_policy,
         mlflow_status=mlflow_status,
         mlflow_run_id=mlflow_run_id,
@@ -191,6 +195,7 @@ def _recover(
     max_unhealthy_fraction: float | None = None,
     max_response_failure_fraction: float | None = None,
     max_trial_failure_fraction: float | None = None,
+    policy_timeout_counts_as_model: bool | None = None,
     outcome_policy: RecoveryOutcomePolicyConfig | None = None,
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
@@ -231,6 +236,9 @@ def _recover(
         raise ValueError("invalid response-health criterion: expected a finite number in (0, 1]")
     limits = {"max_response_failure_fraction": max_response_failure_fraction}
     limits["max_trial_failure_fraction"] = max_trial_failure_fraction
+    if policy_timeout_counts_as_model is not None and not isinstance(policy_timeout_counts_as_model, bool):
+        raise ValueError("invalid gate criteria: policy_timeout_counts_as_model expected true or false")
+    limits["policy_timeout_counts_as_model"] = policy_timeout_counts_as_model
     try:
         criteria = GateCriteria(**{name: value for name, value in limits.items() if value is not None})
     except ValidationError as error:

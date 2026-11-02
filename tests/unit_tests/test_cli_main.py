@@ -2257,3 +2257,18 @@ def test_eval_status_prints_disabled_tracking_and_update_time(tmp_path, monkeypa
     assert "tracking: disabled" in output
     assert "ConfigError" in output
     assert "2026-10-16T12:34:56Z" in output
+
+
+class TestEvalResubmitFractionFlagsHelp:
+    def test_the_fraction_flags_are_described_as_reported_not_as_gates(
+        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        # Only evaluation health decides the gate; the help must not promise that these flags change the verdict.
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "resubmit", "--help"])
+        help_text = " ".join(capsys.readouterr().out.split())
+
+        assert "response gate passes" not in help_text
+        assert "trial gate fails" not in help_text
+        assert help_text.count("reported under criteria with applied: false") == 2
+        assert "reported in warnings; it does not change the verdict" in help_text

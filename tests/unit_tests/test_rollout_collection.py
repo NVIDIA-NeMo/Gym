@@ -14393,6 +14393,33 @@ class TestEnrichRunResult:
 
         assert reply[ATTEMPT_INDEX_KEY_NAME] == 2
 
+    async def test_enrichment_returns_the_typed_failure_record_for_a_failed_run(self, monkeypatch) -> None:
+        """Through the real dispatcher: with enrichment a judge failure is the typed record, not the legacy dict."""
+        from nemo_gym.rollout_outcomes import RolloutFailureRecord
+
+        judge_failed = {
+            NG_FAILURE_CLASS_KEY: "judge_failed",
+            "failure_kind": "judge_failed",
+            "failure_reason": "judge unavailable",
+            "reward": 0.0,
+            "response": {"output": []},
+        }
+
+        async def post(*args, **kwargs):
+            return FakeResponse(200, dict(judge_failed))
+
+        install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        _, typed = await next(
+            RolloutCollectionHelper().run_examples(
+                [failing_row()], route_failures_to_sidecar=True, enrich_results=True
+            )
+        )
+        assert isinstance(typed, RolloutFailureRecord)
+        assert typed.failure.failure_kind == "judge_failed"
+        # Without enrichment the dispatcher's legacy row is returned, as before.
+        _, legacy = await next(RolloutCollectionHelper().run_examples([failing_row()], route_failures_to_sidecar=True))
+        assert isinstance(legacy, dict) and legacy[NG_FAILURE_CLASS_KEY] == "judge_failed"
+
 
 class TestRunRecordWriter:
     """``_RunRecordWriter`` lays out a shard the way ``ng_collect_rollouts`` lays out a run."""
@@ -14438,7 +14465,9 @@ class TestRunRecordWriter:
 
         assert [row["reward"] for row in self._lines(replayed.rollouts_fpath)] == [1.0]
 
-    @pytest.mark.parametrize("label", ["", "../escape", "step 1", "-step", "one_failures", "x_materialized_inputs"])
+    @pytest.mark.parametrize(
+        "label", ["", "../escape", "step 1", "-step", "one_failures", "x_materialized_inputs", "step_1_attempts"]
+    )
     def test_a_shard_label_that_is_not_a_plain_name_is_refused(self, tmp_path: Path, label: str) -> None:
         from nemo_gym.rollout_collection import _RunRecordWriter
 
@@ -14609,9 +14638,12 @@ class TestRunRecordWriter:
         assert written_failure[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
         assert written_failure[NG_FAILURE_MAX_ATTEMPTS_KEY] == 3
         assert (written_failure[TASK_INDEX_KEY_NAME], written_failure[ROLLOUT_INDEX_KEY_NAME]) == (4, 0)
-        assert RUN_ID_KEY not in written_failure
+        # Records and inputs name the shard's run, as collection stamps its own.
+        run_id = written_failure["_ng_failure_record"]["run_id"]
+        assert written_failure[RUN_ID_KEY] == run_id
         materialized = self._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
-        assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4] and RUN_ID_KEY not in materialized[0]
+        assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4]
+        assert {row[RUN_ID_KEY] for row in materialized} == {run_id}
         assert (run_dir / "rollouts-step_1_manifest.json").is_file()
         # The shard's saved progress, as gym eval status and aggregation read it for any run.
         status = orjson.loads((run_dir / "rollouts-step_1_batch_status.json").read_bytes())
@@ -14625,7 +14657,17 @@ class TestRunRecordWriter:
         # and the rollouts it would run again.
         store = RolloutStore.read(run_dir / "rollouts-step_1.jsonl")
         assert store is not None
-        assert store.manifest.run_id == written_failure["_ng_failure_record"]["run_id"]
+        assert store.manifest.run_id == run_id
+        # A verified manifest with every attempt reserved, so resume and recovery accept the shard like a run.
+        assert store.manifest.legacy_import is False
+        assert store.manifest.next_attempt == {"g1_g0_a0": 1, "g2_g0_a0": 1}
+        from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
+
+        shard = run_dir / "rollouts-step_1.jsonl"
+        saved = RunManifest.model_validate_json(manifest_path_for(shard).read_bytes())
+        assert validate_resume(manifest_path_for(shard), saved, run_dir / "rollouts-step_1_materialized_inputs.jsonl")
+        resumed = RolloutStore.start_or_resume(shard, lambda: (materialized, saved), resume=True)
+        assert [row[TASK_INDEX_KEY_NAME] for row in resumed.pending()] == [4]
         assert [record.read()["reward"] for record in store.selected_records("success").values()] == [1.0]
         [failed] = store.failures()
         assert failed[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
@@ -14703,6 +14745,62 @@ class TestRunRecordWriter:
         writer.write({**rows[2], "reward": 1.0})
         assert completed() == 3  # the last expected record is always written
 
+    async def test_a_reused_row_is_recorded_under_the_shard_run(self, tmp_path: Path, monkeypatch) -> None:
+        """A row that carries an earlier run's id is dispatched and saved under the shard's run, so the Store reads it."""
+        from nemo_gym.rollout_collection import RUN_ID_KEY, RolloutStore, _failure_diagnostics
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        row = {**TestEnrichRunResult._row("g7_g0_a0"), RUN_ID_KEY: "an-earlier-run"}
+        failure = {NG_FAILURE_CLASS_KEY: "agent_request_failed", "_ng_failure_message": "connection refused"}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(
+                        row=examples[0],
+                        result=dict(failure),
+                        rollout_latency_ms=None,
+                        diagnostics=_failure_diagnostics(failure),
+                    )
+                )
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples(
+                [row], record_output_dir=run_dir, record_shard="step_2", route_failures_to_sidecar=True
+            )
+        )
+        await completion
+        [written] = self._lines(run_dir / "rollouts-step_2_failures.jsonl")
+        store = RolloutStore.read(run_dir / "rollouts-step_2.jsonl")
+        assert (
+            written[RUN_ID_KEY] == written["_ng_failure_record"]["run_id"] == store.manifest.run_id != "an-earlier-run"
+        )
+        assert [failed[NG_FAILURE_CLASS_KEY] for failed in store.failures()] == ["agent_request_failed"]
+        assert row[RUN_ID_KEY] == "an-earlier-run"  # the caller's row is untouched
+
+    def test_a_superseded_writer_leaves_the_newer_shard_status_alone(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import _RunRecordWriter
+
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0}
+            for index in range(2)
+        ]
+        first = _RunRecordWriter(tmp_path, "step_1", rows=rows, status_rows=[dict(row) for row in rows])
+        first.write({**rows[0], "reward": 1.0})
+        second = _RunRecordWriter(tmp_path, "step_1", rows=rows, status_rows=[dict(row) for row in rows])
+        before = second.status_fpath.read_bytes()
+        first.flush_status()
+        with pytest.raises(RuntimeError, match="replaced by another writer"):
+            first.write({**rows[1], "reward": 1.0})
+        assert second.status_fpath.read_bytes() == before
+        assert orjson.loads(before)["members"]["a"]["completed_rollout_count"] == 0
+
 
 @pytest.mark.parametrize("retain_results", [False, True])
 async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
@@ -14750,6 +14848,43 @@ async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
     assert member["expected_rollout_count"] == member["completed_rollout_count"] == 2
     assert member["remaining_rollout_count"] == 0
     assert member["failures_by_class"] == {}
+
+
+async def test_run_status_ends_current_when_a_step_after_collection_fails(tmp_path, empty_global_config, monkeypatch):
+    """Results persisted inside the write throttle reach the status file even when aggregation fails afterwards."""
+    import nemo_gym.batch_status as batch_status
+
+    monkeypatch.setattr(batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 3600.0)
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(
+        b"".join(b'{"agent_ref":{"name":"a"},"responses_create_params":{"input":[]}}\n' for _ in range(2))
+    )
+    output = tmp_path / "rollouts.jsonl"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        upload_rollouts=False,
+        retain_results_in_memory=False,
+    )
+
+    async def aggregation_fails(self, *args, **kwargs):
+        raise RuntimeError("aggregation failed after collection")
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", aggregation_fails)
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            futures = []
+            for row in examples:
+                future = Future()
+                future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=None))
+                futures.append(future)
+            return futures
+
+    with pytest.raises(RuntimeError, match="aggregation failed"):
+        await Helper().run_from_config(config)
+    member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
+    assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 0)
 
 
 async def test_run_status_errors_do_not_abort_collection(tmp_path, empty_global_config, monkeypatch, caplog):

@@ -26,12 +26,17 @@ NO_FACTS = {
     "judgments": False,
     "judge_score": False,
     "judge_evaluations": False,
+    "judge_verdicts": None,
+    "judge_error": False,
+    "rubric": None,
     "library_reward": None,
     "sentence_metrics": [],
     "verifier_exit_code": None,
     "verifier_error": False,
     "environment_reward": None,
     "invalid_model_response": False,
+    "test_run": None,
+    "substep_tests": None,
 }
 
 
