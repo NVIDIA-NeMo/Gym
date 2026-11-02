@@ -10,12 +10,19 @@ from omegaconf import OmegaConf
 from nemo_gym.benchmarks import BenchmarkConfig
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from responses_api_agents.codex_agent.app import CodexAgentConfig
+from responses_api_agents.openclaw_agent.app import OpenClawAgentConfig
+from responses_api_agents.opencode_agent.app import OpenCodeAgentConfig
 from responses_api_agents.pi_agent.app import PiAgentConfig
 
 
 _BENCHMARK_DIR = Path(__file__).resolve().parents[3] / "benchmarks" / "gdpval"
 # Each harness config here (<harness>.yaml), with its agent's config class.
-_HARNESS_CONFIGS = {"pi": PiAgentConfig, "codex": CodexAgentConfig}
+_HARNESS_CONFIGS = {
+    "pi": PiAgentConfig,
+    "codex": CodexAgentConfig,
+    "opencode": OpenCodeAgentConfig,
+    "openclaw": OpenClawAgentConfig,
+}
 
 
 @pytest.fixture(autouse=True)
@@ -47,6 +54,11 @@ def test_harness_replaces_stirrup_and_reaches_the_task_tools_over_mcp(harness):
     # gym env start and gym env prefetch read the first key of every top-level mapping.
     assert all(value for value in config.values() if isinstance(value, dict))
     assert agent["timeout"] < environment["default_episode_timeout_seconds"]
+    # Every session is rejected when one model call may use more tokens than the window holds.
+    if "max_output_tokens" in agent and "context_window" in agent:
+        assert agent["max_output_tokens"] <= agent["context_window"]
+    # An episode beyond the agent's concurrency waits with its sandbox started and its deadline running.
+    assert agent["concurrency"] >= environment["max_concurrent_episodes"]
     # The agent ignores keys its config class does not define, so a misspelled setting would be dropped silently.
     # Gym reads datasets and description itself.
     assert agent.keys() - {"datasets", "description"} - _HARNESS_CONFIGS[harness].model_fields.keys() == set()

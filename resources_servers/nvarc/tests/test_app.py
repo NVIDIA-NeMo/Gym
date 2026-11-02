@@ -40,7 +40,7 @@ from app import (
     _parse_grid,
 )
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 # ============================================================================

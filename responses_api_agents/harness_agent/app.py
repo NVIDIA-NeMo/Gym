@@ -40,9 +40,12 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_first_server
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    failure_kinds,
 )
 from nemo_gym.sandbox import (
     ConnectableProvider,
+    SandboxBackendUnreachableError,
+    SandboxCreateError,
     SandboxSpec,
     create_provider,
     resolve_provider_config,
@@ -90,6 +93,61 @@ _WORKDIR_KEYS = {
     "opencode": "repo_dir",
     "terminus_2": "workspace_root",
 }
+
+
+# Markers in a provider failure's own message that name an OOM kill (OpenSandbox's 410 status and its typed backend loss).
+_OOM_MARKERS = ("exited with code 137", "OOMKilled", "Sandbox was OOM-killed")
+
+
+def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
+    """The failure_kind when ``exc`` is the sandbox runtime failing rather than the harness or model, else None.
+
+    Only a failure the provider reports counts: the OpenSandbox SDK's exceptions (e.g. ``SANDBOX::ENDED`` when the
+    container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
+    timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
+    never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
+    Messages naming an OOM kill are reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    """
+    names = {cls.__name__ for cls in type(exc).__mro__}
+    infra = (
+        "SandboxApiException" in names
+        or type(exc).__module__.startswith("opensandbox.")
+        or isinstance(exc, (SandboxCreateError, SandboxBackendUnreachableError, TimeoutError, ConnectionError))
+    )
+    if not infra:
+        return None
+    if any(marker in str(exc) for marker in _OOM_MARKERS):
+        return failure_kinds.PROVIDER_OOM_KILLED
+    return failure_kinds.PROVIDER_UNAVAILABLE
+
+
+def _empty_response(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+    return NeMoGymResponse(
+        id="harness-agent-sandbox-failure",
+        created_at=0,
+        model=params.model or "unknown",
+        object="response",
+        output=[],
+        parallel_tool_calls=params.parallel_tool_calls,
+        tool_choice=params.tool_choice,
+        tools=[],
+    )
+
+
+def _masked_result(
+    body: "HarnessAgentRunRequest", failure_kind: str | None, reason: str | None
+) -> "HarnessAgentVerifyResponse":
+    return HarnessAgentVerifyResponse.model_validate(
+        body.model_dump()
+        | {
+            "response": _empty_response(body.responses_create_params).model_dump(mode="json"),
+            "reward": 0.0,
+            "mask_sample": True,
+            "evaluation_completed": False,
+            "failure_kind": failure_kind,
+            "failure_reason": (reason or "")[:4000],
+        }
+    )
 
 
 def resolve_agent(name: str) -> tuple[str, str, str]:
@@ -311,6 +369,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                     ):
                         verify_json["reward"] = 0.0
                 return HarnessAgentVerifyResponse.model_validate(verify_json)
+            except Exception as exc:
+                await self._close_run_sandbox(run_context)
+                failure_kind = sandbox_infra_failure_kind(exc)
+                if failure_kind is None:
+                    raise
+                # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
+                LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
+                return _masked_result(body, failure_kind, f"{type(exc).__name__}: {exc}")
             except BaseException:
                 await self._close_run_sandbox(run_context)
                 raise
