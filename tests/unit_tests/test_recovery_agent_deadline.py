@@ -132,6 +132,42 @@ def test_metric_coverage_counts_a_producer_marked_zero_and_leaves_out_an_answere
     assert failure_facts(d, stale)["metric_coverage"]["source"] == "saved_rows"
 
 
+def test_a_benchmark_declared_metric_coverage_is_preferred_and_named(tmp_path) -> None:
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text("".join(json.dumps(r) + "\n" for r in inventory(3)))
+    (artifacts / "rollouts.jsonl").write_text(json.dumps(scored(0)) + "\n")
+    (artifacts / "rollouts_failures.jsonl").write_text(json.dumps(deadline(1)) + "\n")
+    (artifacts / "rollouts_coverage.json").write_text(json.dumps({"scored": 1, "expected": 3}))
+
+    def gate(metrics):
+        aggregate = [{"agent_ref": {"name": "a"}, "agent_metrics": {"mean/reward": 1.0, **metrics}, "key_metrics": {}}]
+        (artifacts / "rollouts_aggregate_metrics.json").write_text(json.dumps(aggregate))
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)],
+            capture_output=True,
+            text=True,
+            check=True,
+        )
+        collected = CollectedEvidence.model_validate_json(raw.stdout)
+        d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+        return gate_summary_from_collected(d, collected, max_unhealthy_fraction=None)
+
+    task = gate({"metric_coverage/trials": 212, "metric_coverage/expected": 220})
+    assert task["failures"]["metric_coverage"] == {
+        "trials": 212,
+        "expected": 220,
+        "source": "benchmark",
+        "name": "metric",
+    }
+    assert task["health_verdict"].endswith("; metric over 212 of 220 trials")
+    named = gate({"metric_coverage/trials": 212, "metric_coverage/expected": 220, "metric_coverage/name": "ELO"})
+    assert named["health_verdict"].endswith("; ELO over 212 of 220 trials")
+    # A malformed declaration is not one: collection's report is the source.
+    for bad in ({"metric_coverage/trials": 221, "metric_coverage/expected": 220}, {"metric_coverage/trials": 1.5}):
+        assert gate(bad)["failures"]["metric_coverage"] == {"trials": 1, "expected": 3, "source": "coverage_report"}
+
+
 async def test_collection_keeps_an_answered_agent_deadline_and_a_resume_does_not_dispatch_it(
     tmp_path, monkeypatch
 ) -> None:

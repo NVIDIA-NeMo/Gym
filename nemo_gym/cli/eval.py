@@ -791,6 +791,11 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
                 metrics[f"health/{family}/rate"] = facts[family]["rate"]
                 for cause, fact in facts[family]["by_cause"].items():
                     metrics[f"health/{family}/{cause}"] = fact["count"]
+            # Health metrics are numbers only: the source is the one key of its name set to 1.
+            coverage = facts["metric_coverage"]
+            metrics["health/metric_coverage/trials"] = coverage["trials"]
+            metrics["health/metric_coverage/expected"] = coverage["expected"]
+            metrics[f"health/metric_coverage/source/{coverage['source']}"] = 1
         upstream = (quality or {}).get("observed_upstream_recovery")
         upstream_keys = (
             "observed_attempt_errors",

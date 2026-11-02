@@ -751,6 +751,24 @@ def test_postrun_exports_the_same_bound_health_metric_snapshot(live, monkeypatch
     assert payload == summary["run"]["stats"]["acceptance_health"]
     assert payload["metrics"] == values
     assert _collected_mlflow(artifacts)["receipt"]["current"] is True
+    # The metric coverage fact is exported with the other health fields; its source is a key, as metrics are numbers.
+    assert values["health/metric_coverage/expected"] == 2
+    assert client.metrics["health/metric_coverage/trials"] == values["health/metric_coverage/trials"]
+    assert [key for key in values if key.startswith("health/metric_coverage/source/")] == [
+        "health/metric_coverage/source/saved_rows"
+    ]
+
+
+def test_postrun_exports_a_benchmark_declared_metric_coverage(live):
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+
+    artifacts, _, _ = live
+    entries = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
+    entries[0]["agent_metrics"] |= {"metric_coverage/trials": 1, "metric_coverage/expected": 2}
+    artifacts.aggregate_metrics_json_fpath.write_bytes(orjson.dumps(entries))
+    values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert (values["health/metric_coverage/trials"], values["health/metric_coverage/expected"]) == (1, 2)
+    assert values["health/metric_coverage/source/benchmark"] == 1
 
 
 @pytest.mark.parametrize("fault", ["duplicate", "stale", "nan", "non_health_key"])

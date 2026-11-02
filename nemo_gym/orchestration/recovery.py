@@ -1436,6 +1436,24 @@ try:
 except (OSError, ValueError, KeyError, TypeError, AttributeError):
     # Optional diagnostics cannot make the authoritative saved inventory unreadable.
     pass
+benchmark_metric_coverage = None
+try:
+    # A benchmark may declare how many trials its headline metric covered, beside its metrics; one declaration only.
+    declared = set()
+    value = json.load(open(os.path.join(a, "rollouts_aggregate_metrics.json")))
+    for entry in value if isinstance(value, list) else []:
+        metrics = entry.get("agent_metrics") if isinstance(entry, dict) else None
+        if not isinstance(metrics, dict) or "metric_coverage/trials" not in metrics:
+            continue
+        trials, expected = metrics.get("metric_coverage/trials"), metrics.get("metric_coverage/expected")
+        name = metrics.get("metric_coverage/name")
+        valid = (all(type(n) is int and n >= 0 for n in (trials, expected)) and trials <= expected
+                 and (name is None or isinstance(name, str) and 0 < len(name) <= 40 and name.isprintable()))
+        declared.add((trials, expected, name) if valid else None)
+    if len(declared) == 1 and None not in declared:
+        benchmark_metric_coverage = list(next(iter(declared)))
+except (OSError, ValueError, AttributeError, TypeError):
+    pass
 score = None
 if len(sys.argv) > 2:
     try:
@@ -1484,7 +1502,8 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
-                  "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored}
+                  "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored,
+                  "benchmark_metric_coverage": benchmark_metric_coverage}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):
@@ -1582,6 +1601,9 @@ class CollectedEvidence(BaseModel):
     coverage_allocation_id: str | None = None
     # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
     coverage_scored: tuple[int, int] | None = None
+    # The aggregate's own (metric_coverage/trials, metric_coverage/expected, metric_coverage/name or None): the trials
+    # the benchmark's headline metric covered, as the benchmark declares them.
+    benchmark_metric_coverage: tuple[int, int, str | None] | None = None
     # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
     # states (absent, ok, malformed) when the sources were stable.
     accounting_unknown_reason: str | None = None
@@ -4566,7 +4588,10 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
 def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any]:
     """How many expected trials the benchmark's metric covered: ``{"trials": N, "expected": M, "source": ...}``.
 
-    The source is collection's own count when its coverage report has one for this inventory (``coverage_report``):
+    A benchmark that declares the coverage of its headline metric in its aggregate (``metric_coverage/trials``,
+    ``metric_coverage/expected`` and an optional ``metric_coverage/name``) is the source (``benchmark``), with its
+    own denominator and the metric's name. Otherwise the source is collection's own count when its coverage report
+    has one for this inventory (``coverage_report``):
     the rollouts whose score entered the metrics, a failure counted as zero by configuration included. Otherwise it is
     read from the saved rows (``saved_rows``): the scored results and the failures their producer marked as counted
     zeros, which is what collection hands the metrics unless it counts more by configuration. A failure the benchmark
@@ -4575,6 +4600,9 @@ def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | N
     """
     from nemo_gym.rollout_collection import is_non_superseding_rollout_row
 
+    declared = collected.benchmark_metric_coverage if collected is not None else None
+    if declared is not None:
+        return {"trials": declared[0], "expected": declared[1], "source": "benchmark", "name": declared[2] or "metric"}
     expected = trial_population(decision)
     report = collected.coverage_scored if collected is not None else None
     if report is not None and report[1] == decision.expected:
@@ -4605,7 +4633,7 @@ def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | No
         text += f"; {facts['omitted']} accepted stage omission(s) are not counted"
     coverage = facts.get("metric_coverage")
     if coverage is not None:
-        text += f"; metric over {coverage['trials']} of {coverage['expected']} trials"
+        text += f"; {coverage.get('name') or 'metric'} over {coverage['trials']} of {coverage['expected']} trials"
     return text
 
 
