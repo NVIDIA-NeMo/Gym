@@ -82,6 +82,7 @@ from nemo_gym.server_runtime import (
     ResourcesSeedRejectedError,
     ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
+    ResourcesSessionFence,
     ResourcesSessionLostError,
     ReverifyMode,
     SimpleResourcesServer,
@@ -291,6 +292,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
             self._judge_prompt = f.read().strip()
 
         self._python_sandboxes: dict[str, AsyncSandbox] = {}
+        self._python_starting: set[str] = set()
+        self._python_sessions = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._python_closing = False
         self._python_failures: dict[str, str] = {}
         self._sandbox_provider = (
             create_provider(
@@ -319,7 +323,9 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
                 async with parent_lifespan(app) as maybe_state:
                     yield maybe_state
             finally:
-                await asyncio.gather(*(self._stop_python_sandbox(s) for s in list(self._python_sandboxes)))
+                self._python_closing = True
+                sessions = self._python_sandboxes.keys() | self._python_starting
+                await asyncio.gather(*(self._stop_python_sandbox(s) for s in sessions))
                 await self._sandbox_provider.aclose()
 
         app.router.lifespan_context = lifespan
@@ -331,20 +337,30 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         if not self.config.sandbox_provider or isinstance(body, ResourcesSeedSessionRequest):
             return await super().seed_session(body)
         session_id = request.session[SESSION_ID_KEY]
-        if session_id in self._python_failures:
-            raise ResourcesSessionLostError(self._python_failures[session_id])
-        if session_id not in self._python_sandboxes:  # a repeated seed keeps the rollout's sandbox
-            meta = body.verifier_metadata or {}
-            pdf = Path(self.config.documents_base_dir) / str(meta.get("source_pdf") or "")
-            if not pdf.is_file():
-                raise ResourcesSeedRejectedError(f"The python tool needs the task's source PDF, but {pdf} is missing")
-            self._python_sandboxes[session_id] = await start_python_sandbox(
-                self.config.sandbox_provider,
-                self.config.sandbox_config,
-                pdf,
-                task_id=str(meta.get("task_id")),
-                provider=self._sandbox_provider,
-            )
+        async with self._python_sessions.locked(session_id):
+            if self._python_closing:
+                raise ResourcesSessionLostError("Python resources server is shutting down")
+            if session_id in self._python_failures:
+                raise ResourcesSessionLostError(self._python_failures[session_id])
+            if session_id not in self._python_sandboxes:
+                meta = body.verifier_metadata or {}
+                pdf = Path(self.config.documents_base_dir) / str(meta.get("source_pdf") or "")
+                if not pdf.is_file():
+                    raise ResourcesSeedRejectedError(
+                        f"The python tool needs the task's source PDF, but {pdf} is missing"
+                    )
+                # Register before awaiting startup so shutdown also drains kernels still starting.
+                self._python_starting.add(session_id)
+                try:
+                    self._python_sandboxes[session_id] = await start_python_sandbox(
+                        self.config.sandbox_provider,
+                        self.config.sandbox_config,
+                        pdf,
+                        task_id=str(meta.get("task_id")),
+                        provider=self._sandbox_provider,
+                    )
+                finally:
+                    self._python_starting.discard(session_id)
         return BaseSeedSessionResponse()
 
     async def python(self, request: Request, body: PythonToolRequest) -> JSONResponse:
@@ -384,16 +400,19 @@ class GdpPdfResourcesServer(SimpleResourcesServer):
         return {"released": request.session.get(SESSION_ID_KEY) not in self._python_sandboxes}
 
     async def _stop_python_sandbox(self, session_id: Optional[str]) -> None:
-        sandbox = self._python_sandboxes.get(session_id)
-        if sandbox is None:
+        if session_id is None:
             return
-        try:
-            await stop_python_sandbox(sandbox, self.config.sandbox_config)
-        except Exception as e:  # noqa: BLE001
-            # Kept so the shutdown sweep tries again; grading never depends on the sandbox.
-            LOG.warning("Could not stop GDP.pdf Python sandbox: %r", e)
-            return
-        del self._python_sandboxes[session_id]
+        async with self._python_sessions.locked(session_id):
+            sandbox = self._python_sandboxes.get(session_id)
+            if sandbox is None:
+                return
+            try:
+                await stop_python_sandbox(sandbox, self.config.sandbox_config)
+            except Exception as e:  # noqa: BLE001
+                # Kept so the shutdown sweep tries again; grading never depends on the sandbox.
+                LOG.warning("Could not stop GDP.pdf Python sandbox: %r", e)
+                return
+            del self._python_sandboxes[session_id]
 
     # -------------------------------------------------------------------------
     # Verification

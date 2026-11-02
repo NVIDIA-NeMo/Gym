@@ -14,6 +14,7 @@
 # limitations under the License.
 """Tests for the gdp_pdf resources server and its data preparation helpers."""
 
+import asyncio
 import base64
 import io
 import json
@@ -625,6 +626,45 @@ def _process_ended(pid: int) -> bool:
 
 
 class TestPythonTool:
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("race", ["seed", "close", "shutdown"])
+    async def test_startup_is_tracked_until_release(self, python_server, monkeypatch, race) -> None:
+        started, finish_start = asyncio.Event(), asyncio.Event()
+        sandbox = MagicMock()
+
+        async def start(*args, **kwargs):
+            started.set()
+            await finish_start.wait()
+            return sandbox
+
+        launch, stop = AsyncMock(side_effect=start), AsyncMock()
+        monkeypatch.setattr(gdp_pdf_app, "start_python_sandbox", launch)
+        monkeypatch.setattr(gdp_pdf_app, "stop_python_sandbox", stop)
+        request = SimpleNamespace(session={gdp_pdf_app.SESSION_ID_KEY: "same-session"})
+        body = gdp_pdf_app.GdpPdfSeedSessionRequest(verifier_metadata={"source_pdf": "source.pdf"})
+        app = python_server.setup_webserver()
+        lifespan = app.router.lifespan_context(app)
+        await lifespan.__aenter__()
+        seed = asyncio.create_task(python_server.seed_session(request, body))
+        await started.wait()
+        action = {
+            "seed": lambda: python_server.seed_session(request, body),
+            "close": lambda: python_server.release_python_session(request),
+            "shutdown": lambda: lifespan.__aexit__(None, None, None),
+        }[race]
+        competing = asyncio.create_task(action())
+        await asyncio.sleep(0)
+        finish_start.set()
+        await asyncio.gather(seed, competing)
+        if race != "shutdown":
+            await lifespan.__aexit__(None, None, None)
+        launch.assert_awaited_once()
+        stop.assert_awaited_once_with(sandbox, python_server.config.sandbox_config)
+        assert not python_server._python_sandboxes
+        assert not python_server._python_starting
+        with raises(gdp_pdf_app.ResourcesSessionLostError, match="shutting down"):
+            await python_server.seed_session(request, body)
+
     @pytest.mark.skipif(sys.platform != "linux", reason="Kernel address-space limits use Linux prlimit")
     def test_memory_limit_preserves_state_and_survives_restart(self, python_server: GdpPdfResourcesServer) -> None:
         python_server.config.sandbox_config.kernel_address_space_mib = 4096
