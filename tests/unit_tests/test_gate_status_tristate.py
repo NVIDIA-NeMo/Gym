@@ -63,11 +63,20 @@ def test_an_evaluation_side_failure_is_failed():
 
 def test_a_real_error_beside_unverified_health_is_failed():
     collected = _uncovered(_run(100))
-    collected.score = 0.9
-    # Tracking is required and there is no MLflow evidence: a delivery error, which outranks the unknown health.
+    collected.score = None
     _, _, task = _gate(collected)
     assert task["status"] == "FAILED"
-    assert any(e.startswith("no MLflow run evidence") for e in task["errors"])
+    assert "score unavailable: no requested metric was read" in task["errors"]
+    assert any(w.startswith("response/trial health unknown") for w in task["warnings"])
+
+
+def test_missing_mlflow_delivery_beside_unverified_health_is_a_fact_not_a_failure():
+    collected = _uncovered(_run(100))
+    collected.score = 0.9
+    # Tracking is required and there is no MLflow evidence: a pending delivery fact, not an error.
+    _, _, task = _gate(collected)
+    assert task["status"] == "UNVERIFIED" and not any("MLflow" in e for e in task["errors"])
+    assert task["mlflow_delivery"]["state"] == "pending"
     assert any(w.startswith("response/trial health unknown") for w in task["warnings"])
 
 

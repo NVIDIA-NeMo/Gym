@@ -49,6 +49,7 @@ from nemo_gym.rollout_recovery import (
     is_infrastructure_agent_timeout,
     is_terminal_failure,
     keeps_partial_response,
+    load_attempt_extension,
     load_resubmit_offset,
     manifest_path_for,
     masked_infrastructure_kind,
@@ -558,6 +559,13 @@ class RolloutRecords:
         self.replay_blocked: set[str] = set()
         self.unresolved_dispatches: set[str] = set()
         self.retry_terminal_timeouts = manifest.retry_terminal_timeouts
+        # Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`).
+        self.attempt_extension = 0
+
+    @property
+    def attempt_cap(self) -> int:
+        """Every rollout's attempt cap: the run's saved cap plus the extension an explicit recovery recorded."""
+        return (self.manifest.max_rollout_attempts or _get_max_rollout_attempts()) + self.attempt_extension
 
     def _key(self, row: dict) -> tuple[str, int]:
         identity = logical_rollout_id(row)
@@ -712,6 +720,7 @@ class RolloutRecords:
         # Legacy files lacked an attempt id on some rows. Import once in their
         # recorded order, preserving the old failure-count-based numbering.
         legacy_counts: Counter = Counter()
+        state.attempt_extension = load_attempt_extension(output)
         resubmit_offset = load_resubmit_offset(output)
         resubmitted = resubmit_offset_path_for(output).exists()
         for path in (failures_path_for(output), output):
@@ -910,7 +919,7 @@ class RolloutRecords:
     def coverage(self) -> dict:
         counts = Counter(self.disposition(identity) for identity in self.expected)
         expected = len(self.expected)
-        max_attempts = self.manifest.max_rollout_attempts or _get_max_rollout_attempts()
+        max_attempts = self.attempt_cap
         not_started = expected - len(self.latest)
         missing = counts["unknown"] - not_started
         # A producer-masked result completed execution, so recovery reuses it unless infrastructure masked it
@@ -968,6 +977,7 @@ class RolloutRecords:
                 self._retryable(identity) and self.failure_count(identity) < max_attempts for identity in self.expected
             ),
             "max_rollout_attempts": max_attempts,
+            "attempt_extension": self.attempt_extension,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
             "completion_fraction": settled / expected if expected else 1.0,
             "complete": settled == expected,

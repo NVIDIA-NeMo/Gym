@@ -146,6 +146,16 @@ _CONTEXT_WINDOW_MARKERS = (
 # at least 1", "max_completion_tokens=N cannot be greater than max_model_len"). Lowering the
 # parameter fixes these; shortening the prompt does not.
 _MAX_TOKENS_PARAMETER_MARKERS = ("max_tokens", "max_completion_tokens")
+# How a 400 body says a request parameter carries a value the serving deployment does not support: "Unexpected
+# reasoning effort high. Supported types are xhigh (default), medium, and low." and OpenAI's "Unsupported value:
+# 'reasoning_effort' does not support 'high' with this model." A body whose error code is "unsupported_value" says the
+# same. Such a request is a setup the deployment cannot serve, not the model's outcome.
+_UNSUPPORTED_VALUE_PATTERNS = (
+    re.compile(r"Unexpected [^.\n]{1,80}\. Supported (?:types|values) (?:are|is)\b"),
+    re.compile(r"Unsupported value: '[^']{1,80}' does not support\b"),
+)
+# The error category recorded for such a refusal; the acceptance gate types it as ``invalid_request_parameter``.
+INVALID_REQUEST_PARAMETER_CATEGORY = "invalid_request_parameter"
 
 
 def _names_context_window(message: str) -> bool:
@@ -173,6 +183,28 @@ def _is_context_length_error(error: ClientResponseError) -> bool:
         return False
     message = error.response_content.decode(errors="replace")
     return _names_context_window(message) or any(marker in message for marker in _MAX_TOKENS_PARAMETER_MARKERS)
+
+
+def _is_unsupported_parameter_value(error: ClientResponseError) -> bool:
+    """Whether a 400 says a request parameter carries a value the deployment does not support.
+
+    A length refusal (``_is_context_length_error``) is never one: the output-budget and context-window detectors decide
+    those first. Only the phrases in ``_UNSUPPORTED_VALUE_PATTERNS`` and an error code ``unsupported_value`` count, so a
+    generic invalid request, or a parameter the deployment does not support at all, keeps its ordinary handling.
+    """
+    if error.status != 400 or _is_context_length_error(error):
+        return False
+    message = error.response_content.decode(errors="replace")
+    if any(pattern.search(message) for pattern in _UNSUPPORTED_VALUE_PATTERNS):
+        return True
+    try:
+        payload = json.loads(message)
+    except json.JSONDecodeError:
+        return False
+    if not isinstance(payload, dict):
+        return False
+    inner = payload.get("error")
+    return "unsupported_value" in (payload.get("code"), inner.get("code") if isinstance(inner, dict) else None)
 
 
 # How an engine names its context window: "maximum context length is 32768", "max_model_len=32768", and vLLM 0.27's
@@ -1677,6 +1709,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 execution.update(response_source="local", local_response_reason=category)
                 return res
             else:
+                if _is_unsupported_parameter_value(e):
+                    execution["error_category"] = INVALID_REQUEST_PARAMETER_CATEGORY
                 _log_unhandled_engine_error(request, e.status, result_content_str, "chat completion")
                 raise e
         except Exception as e:
@@ -2055,6 +2089,8 @@ class VLLMModel(SimpleResponsesAPIModel):
                 res.choices[0].finish_reason = "length"
                 execution.update(response_source="local", local_response_reason=category)
                 return res
+            if _is_unsupported_parameter_value(e):
+                execution["error_category"] = INVALID_REQUEST_PARAMETER_CATEGORY
             _log_unhandled_engine_error(request, e.status, result_content_str, "completion")
             raise
 

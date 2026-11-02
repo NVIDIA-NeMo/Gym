@@ -58,7 +58,7 @@ from nemo_gym.core.failure_kinds import (
     is_evaluation_side,
     is_server_status,
 )
-from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
+from nemo_gym.utils.path_utils import attempt_extension_path_for, failures_path_for, resubmit_offset_path_for
 
 
 def has_saved_generation(row: Mapping[str, Any]) -> bool:
@@ -466,6 +466,9 @@ _COLLECTION_OPTIONS = frozenset(
         "count_failure_classes_as_zero",
         "count_missing_rollouts_as_zero",
         "route_failures_to_sidecar",
+        # How long a refused /run is resent: dispatch tuning, not a task setting. It is in ``_ADDED_COLLECTION_DEFAULTS``
+        # too, so a run saved with it in its digest still resumes.
+        "dispatch_connect_grace_s",
         # Timing/queue reports observe the run; they do not change task execution.
         "dispatch_start_report_within_s",
         "dispatch_start_report_min_fraction",
@@ -547,6 +550,24 @@ def load_resubmit_offset(output_fpath: str | Path) -> int:
     except (ValueError, OSError) as error:
         raise ConfigError(f"Cannot read resubmit budget offset {path}: {error}") from error
     return offset
+
+
+def load_attempt_extension(output_fpath: str | Path) -> int:
+    """Attempts an explicit recovery added to every rollout's saved attempt cap (`--extend-attempts`); 0 when none.
+
+    A rollout's cap is the run's saved ``max_rollout_attempts`` plus this. An unreadable record stops the run rather
+    than guess its cap.
+    """
+    path = attempt_extension_path_for(Path(output_fpath))
+    if not path.exists():
+        return 0
+    try:
+        text = path.read_text().strip()
+        if not (text.isascii() and text.isdecimal()):
+            raise ValueError(f"not a whole number: {text[:40]!r}")
+        return int(text)
+    except (ValueError, OSError) as error:
+        raise ConfigError(f"Cannot read the recorded attempt extension {path}: {error}") from error
 
 
 def record_resubmit_offset(output_fpath: str | Path) -> int:
@@ -832,12 +853,45 @@ _LEGACY_CONFIG_DIGESTS: dict[str, dict[str, tuple[str, ...]]] = {}
 _LEGACY_SUBSET_LIMIT = 10
 
 
-def _legacy_config_digests(identity: dict) -> dict[str, tuple[str, ...]]:
+# Collection settings added after a run could have been saved, with the default each had on release. They are left out
+# of the digest (``_COLLECTION_OPTIONS``), but a Gym that had them recorded them, so a run saved by it carries them in
+# its digest. A setting with a default must not change the resume fingerprint of a run saved before it existed.
+_ADDED_COLLECTION_DEFAULTS: dict[str, float] = {"dispatch_connect_grace_s": 60.0}
+
+
+def _earlier_collection_forms(identity: dict, config: Mapping[str, Any]) -> Iterator[dict]:
+    """The identity as the Gyms before and after each added collection setting recorded it.
+
+    First the identity as it is (a Gym before the setting existed), then with the setting restored at its default and at
+    the value this configuration sets. A run saved with another value is still compared on its saved identity, if any.
+    """
+    yield identity
+    for key, default in _ADDED_COLLECTION_DEFAULTS.items():
+        values = [default]
+        configured = config.get(key)
+        if isinstance(configured, (int, float)) and not isinstance(configured, bool) and configured != default:
+            values.append(configured)
+        for value in values:
+            variant = json.loads(json.dumps(identity))
+            variant.setdefault("collection", {})[key] = value
+            yield variant
+
+
+def _legacy_config_digests(identity: dict, config: Mapping[str, Any] | None = None) -> dict[str, tuple[str, ...]]:
     """Digests an earlier Gym recorded for this configuration, with the settings each restored as null defaults.
 
     Restoration is per concrete server path: a removed default is added only to a server that lacks it, never over a
-    value another server of the same implementation sets.
+    value another server of the same implementation sets. Each form is also tried with the collection settings added
+    since restored (``_earlier_collection_forms``).
     """
+    digests: dict[str, tuple[str, ...]] = {}
+    for base in _earlier_collection_forms(identity, config or {}):
+        for digest, restored in _null_default_digests(base).items():
+            digests.setdefault(digest, restored)
+    return digests
+
+
+def _null_default_digests(identity: dict) -> dict[str, tuple[str, ...]]:
     digests: dict[str, tuple[str, ...]] = {_digest(identity): ()}
     absent = sorted(
         {
@@ -1091,14 +1145,14 @@ class RunManifest(BaseModel):
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
         identity = _configuration_identity(config, global_config, rows)
         config_digest = _digest(_without_null_defaults(identity))
-        legacy = _legacy_config_digests(identity)
+        legacy = _legacy_config_digests(identity, config)
         try:
             # The digest an earlier Gym took over resolved credentials, compared in memory only, so its runs resume.
             earlier = _configuration_identity(config, global_config, rows, credential_safe=False)
         except (ConfigError, OmegaConfBaseException):
             earlier = None
         if earlier is not None:
-            legacy = {_digest(_without_null_defaults(earlier)): ()} | _legacy_config_digests(earlier) | legacy
+            legacy = {_digest(_without_null_defaults(earlier)): ()} | _legacy_config_digests(earlier, config) | legacy
         _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(config_digest, {}) | legacy
         manifest = cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
