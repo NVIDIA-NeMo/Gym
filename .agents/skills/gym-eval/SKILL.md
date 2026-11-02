@@ -52,9 +52,11 @@ and for reading health while you build a benchmark or a harness, follow
    list them: `++key=value` sets or replaces a key, `+key=value` only adds a new one. For example
    `gym eval submit --config submit.yaml --dry-run ++compute.cluster.walltime=00:40:00
    ++driver.benchmarks.<name>.run.limit=2`. Check the result with `--resolve-only` or `--dry-run`.
-6. Without an MLflow server, set `mlflow_tracking_required: false` in each benchmark's `run`.
-   Otherwise the acceptance gate of a complete, healthy run stays `FAILED` on "no MLflow run
-   evidence" (step 9). A Gym pinned before this skill does not know the key.
+6. An evaluation you do not track in MLflow on purpose: set `mlflow_tracking_required: false` in
+   each benchmark's `run`. It waives only the delivery requirement of the acceptance gate (step
+   9); health checks still run, and a configured MLflow export still happens. Without it, the
+   gate of a complete, healthy run stays `FAILED` on "no MLflow run evidence". A Gym pinned
+   before this skill does not know the key.
 
 ## 2. Submit and let the chain run
 
@@ -128,7 +130,7 @@ The agent name is the rows' `agent_ref.name`, the agent entry in
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
-| NOOP, `FAILED`, and the only error is `no MLflow run evidence` | The results are complete and tracking was not configured. Read `trial_counts`, coverage and the score yourself. Next time, set `mlflow_tracking_required: false` (step 1). |
+| NOOP, `FAILED`, and the only error starts with `no MLflow run evidence` | The results are complete, but no delivery is on record: no live MLflow run id and no post-run export receipt. The rest of the error says which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, and export the run again so that the receipt `rollouts_mlflow_export_done` exists (`gym eval export` with the `mlflow` exporter writes it once every upload returned); then inspect again. "does not name all of the tracking URI, experiment and run name": the run was never tracked; read `trial_counts`, coverage and the score yourself, and set `mlflow_tracking_required: false` next time (step 1). |
 | `SUCCESS` | Done. Keep the run directory as the record. |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
@@ -149,10 +151,30 @@ in the same directory; the saved files are kept, and the plan is journaled.
 
 ## 7. Who decides what
 
-The product owns the evaluation retry; you own the model retry. A resubmit picks up only rollouts
-that are not terminal: successes and model failures are never run again. Infrastructure failures
-are retried within a bounded budget, so when that budget is spent, or the cluster was down, you run
-`gym eval resubmit <id> <benchmark> --recover` again (after `--inspect`), and nothing else.
+Which saved failures run again is decided by the run's recovery outcome policy, not by a fixed
+model-versus-infrastructure split. A resubmit never reopens a settled result or a failure marked
+final. For every other saved failure the policy picks one action from the failure's HTTP status,
+else its failure kind, else the default: `retry` (another attempt, within the identity's attempt
+cap and the run's infra-retry cap), `verify` (re-judge the saved answer, never the policy) or
+`fail` (leave it ungraded). The default recovery policy retries, re-judges `judge_failed`, and
+keeps what producers settled as the model's final result (an answered agent deadline, a scored
+zero). `--inspect` lists the identities in each state. When the budget is spent, or the cluster
+was down, run `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the
+same command does not extend an exhausted budget, `--extend-retries` and `--max-walltime` do.
+
+The CLI extends budgets; it does not change the policy. The Python API takes a partial override
+(the defaults stay for everything it does not name, kinds must be registered, and `count_as_zero`
+is refused here):
+
+```python
+from nemo_gym.agent_outcome import OutcomeAction
+from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
+from nemo_gym.orchestration.submit import recover
+
+recover(gym_job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_code={401: OutcomeAction.FAIL}))
+```
+
+A CLI or config path for the override does not exist yet.
 
 Resubmit by hand after a cluster outage, a crashed server, an expired credential, or a budget stop.
 The chain's own stop text (in the driver log and `.gym_chain_incomplete`) and the inspection's
@@ -160,10 +182,10 @@ reason say which one it was.
 
 | The product decides | The operator decides |
 | --- | --- |
-| Retrying infrastructure failures (transport, server start, sandbox start) within the retry budget. | Raising the walltime cap or the retry budget, with a reason. |
+| Retrying the failures the outcome policy marks `retry` (by default every infrastructure failure: transport, server start, sandbox start) within the retry budget. | Raising the walltime cap or the retry budget, with a reason. |
 | That model failures and final zeros are final: they are scored under the benchmark's protocol, not retried. | Moving a run to another Gym commit (`--repin`). |
 | Re-judging saved answers whose judge failed, at the end of a run, without calling the policy again. | Accepting a semantic configuration difference (`--allow-unsafe-resume`), or starting a fresh run instead. |
-| Health verdicts and the gate results. | The gate thresholds for this evaluation, and whether a result is accepted. |
+| Health verdicts, the gate's fixed 2% limit and the gate results. | Whether a result is accepted, on the gate's facts. |
 | Resuming across operational configuration drift, and saying so. | When to stop a chain, and when to start over in a new location. |
 
 ## 8. Overriding evaluation parameters
@@ -188,10 +210,20 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `gym eval health-check <run dir>/<benchmark>/artifacts` re-runs the checks on a local path; it
   reports, it does not fail the run for you. It rewrites `quality_summary.json` in that directory,
   so run it on a copy, never on the run's own `artifacts/` (step 3).
-- Gates are flags on `--recover`: `--score-key` (a JSON path) with `--score-agent` and, when an
-  agent has several entries, `--score-environment`; `--max-unhealthy-fraction` (per-rollout
-  health); `--max-response-failure-fraction` and `--max-trial-failure-fraction` (default 0.02;
-  response passes strictly below, trial fails at or above).
+- What decides acceptance: complete results, the score gate (`--score-key`, a JSON path, with
+  `--score-agent` and, when an agent has several entries, `--score-environment`), a readable
+  health summary, the MLflow delivery when it is required (step 1), and evaluation health.
+  Evaluation health is `gate_task.evaluation_health`: `PASS` when evaluation-side trial failures
+  (judge, verifier, sandbox and harness faults) are strictly below 2% of the expected trials and
+  every trial's grading is traceable; `FAIL` at or above 2%; `UNVERIFIED` below 2% when some
+  grading is not traceable, so the known count is a lower bound. The 2% is fixed in Gym; no flag
+  changes it.
+- What is reported and not applied: `--max-response-failure-fraction` and
+  `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
+  `applied: false`; `--max-unhealthy-fraction` (per-rollout health) is judged in `warnings`. None
+  of them changes the verdict. `gate_task.failures` lists the response failures (truncated, empty,
+  malformed) and the trial failures by cause, with their rates: facts for you to judge, not
+  verdicts. Model failures count in the score and never fail health.
 - Pass `--mlflow-run-id <id> --mlflow-status FINISHED` only after you observed that run and status
   yourself. They do not export anything; acceptance also needs a current export receipt.
 - `SUCCESS` needs complete results and every gate. A NOOP, a finished job, or a full score alone is

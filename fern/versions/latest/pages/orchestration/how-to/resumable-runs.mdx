@@ -116,7 +116,7 @@ each user one core, so both readers can run in a Slurm step instead:
 The gate task reports `reader_host` and `collector_host` (`login` or `cpu:<job id>`), and `reader_fallback_reason`
 and `collector_fallback_reason` when a reader stayed on the login host.
 
-The optional unhealthy fraction is a **per-rollout** criterion for the existing quality report. It is not a response or trial denominator. Response health separately requires unique, verified raw-response observations and a failure fraction strictly below 2%. Trial health can reject at 2% from its known-failure lower bound. Below that threshold, it can pass when source-bound agent, model-attempt, supported client-executed function-tool, and verifier observations join across every expected identity and repeat. The verifier must record an actually executed programmatic grading calculation bound to the saved response and reward. Unjoined recovered failures, unsupported hosted or custom tools, unobserved judge dependencies, sandbox lifecycle gaps, and historical records without grading observations remain unknown; a low failure count alone does not certify them. Missing report-source identity, unsupported multi-source summaries, malformed counters or missing runtime facts remain unknown.
+The optional unhealthy fraction is a **per-rollout** criterion for the existing quality report. It is not a response or trial denominator. Response failures are reported by cause and rate under `failures` and never fail the gate. Evaluation health, the trial gate, rejects at 2% from its known-failure lower bound. Below that threshold, it can pass when source-bound agent, model-attempt, supported client-executed function-tool, and verifier observations join across every expected identity and repeat. The verifier must record an actually executed programmatic grading calculation bound to the saved response and reward. Unjoined recovered failures, unsupported hosted or custom tools, unobserved judge dependencies, sandbox lifecycle gaps, and historical records without grading observations remain unknown; a low failure count alone does not certify them. Missing report-source identity, unsupported multi-source summaries, malformed counters or missing runtime facts remain unknown.
 
 ### Unobserved trials
 
@@ -154,14 +154,15 @@ judge answer, and `fail` leaves it ungraded. Settled results and terminal failur
 Mixed decisions stop when the executor cannot honor them separately. Saved-answer re-verification still
 requires an executor that supports it.
 
-The independent response and trial criteria are configurable with `--max-response-failure-fraction` and
-`--max-trial-failure-fraction`. Both default to a strict fraction below `0.02`, before rounding; reports include
-the effective values under `criteria`. These criteria do not change rewards or retry policy. A positive trial
+`--max-response-failure-fraction` and `--max-trial-failure-fraction` are validated and reported under `criteria`
+with `applied: false`; they do not change the verdict. The gate's only health verdict is evaluation health, at the
+fixed limit of a strict fraction below `0.02`, before rounding, which `criteria.evaluation` reports; response and
+trial failures are reported by cause under `failures`. None of this changes rewards or retry policy. A positive trial
 result requires observed coverage of every expected identity. Supported paths join invocation, selected response, model operations, client-executed function-tool results,
 and observed programmatic grading bound to the saved result. Unsupported paths, missing grading or runtime
 observations, and unjoined recovered failures remain unknown. Recovery NOOP is separate from acceptance and tracking delivery.
 
 
-The live and post-run tracking paths export the same saved-evidence health snapshot under `health/response`, `health/trial`, and separate model/grading recovery namespaces. Always check the current `known` metric before interpreting a `passed` value or rate: `known=0` means unknown and resets `passed=0` (not passed, not a classified failure); older count and rate values remain historical. Trial `counts_known=0` labels a known failure from a lower bound; its `failed_lower_bound` and `failure_rate_lower_bound` are not exact counts. These facts do not certify tracking delivery or replace the independent response and trial gates.
+The live and post-run tracking paths export the same saved-evidence health snapshot under `health/response`, `health/trial`, and separate model/grading recovery namespaces. Always check the current `known` metric before interpreting a `passed` value or rate: `known=0` means unknown and resets `passed=0` (not passed, not a classified failure); older count and rate values remain historical. Trial `counts_known=0` labels a known failure from a lower bound; its `failed_lower_bound` and `failure_rate_lower_bound` are not exact counts. These facts do not certify tracking delivery or replace the gate's evaluation health verdict.
 
-These exported health flags use the default strict 2% response and trial thresholds. They are not a later recovery command’s custom-threshold result. Upstream recovery includes observed model HTTP operations, including judge calls; grading recovery is a separate joined projection. These counters overlap and must not be summed.
+These exported health flags use the fixed strict 2% limit; no recovery command applies a custom threshold. Upstream recovery includes observed model HTTP operations, including judge calls; grading recovery is a separate joined projection. These counters overlap and must not be summed.
