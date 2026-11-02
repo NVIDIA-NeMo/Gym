@@ -1161,11 +1161,13 @@ def test_known_operational_settings_do_not_change_resume_identity(saved_manifest
     before = RunManifest.create(source, rows, config, servers).config_digest
     settings[field] = "after"
     assert RunManifest.create(source, rows, config, servers).config_digest == before
-    # The same spelling inside task data must not be silently erased.
+    # The same spelling inside task data must not be silently erased, unless it names a credential: a credential is
+    # never part of the persisted identity, at any depth.
     settings["task_parameters"] = {field: "before"}
     before = RunManifest.create(source, rows, config, servers).config_digest
     settings["task_parameters"][field] = "after"
-    assert RunManifest.create(source, rows, config, servers).config_digest != before
+    changed = RunManifest.create(source, rows, config, servers).config_digest != before
+    assert changed is not field.endswith("api_key")
 
 
 @pytest.mark.parametrize(
