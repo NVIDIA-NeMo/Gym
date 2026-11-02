@@ -970,3 +970,152 @@ def test_codex_profile_passes_codex_provider_retries_through():
     }
     tuned = OmegaConf.merge(config, overrides)
     assert [OmegaConf.select(tuned, f"{path}.{key}") for key in keys] == [8, 10, 90000000]
+
+
+def test_pi_profile_runs_pi_in_the_task_sandbox_on_a_direct_endpoint(monkeypatch):
+    config = OmegaConf.load(BENCHMARK_DIR / "pi.yaml")
+    assert list(config.config_paths) == [
+        "benchmarks/terminal_bench_science/resources.yaml",
+        "responses_api_agents/pi_agent/configs/pi_agent.yaml",
+        "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
+    ]
+    resources = config.terminal_bench_science_pi_resources_server.resources_servers.terminal_bench_4
+    environment = config.terminal_bench_science_pi.environment_servers.single_agent_turn_legacy
+    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
+    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
+    assert config.terminal_bench_science_sandbox.opensandbox.operations.background_exec is True
+    assert resources.datasets[0].num_repeats == 1
+    assert resources.datasets[0].jsonl_fpath == "benchmarks/terminal_bench_science/data/benchmark_codex.jsonl"
+    assert environment.resources_server.name == "terminal_bench_science_pi_resources_server"
+    assert environment.agent_server.name == "terminal_bench_science_pi_agent"
+
+    monkeypatch.delenv("POLICY_API_KEY", raising=False)
+    resolved = OmegaConf.to_container(
+        OmegaConf.merge(config, {"tbsci_pi_base_url": "http://gateway.example:16100/v1"}), resolve=True
+    )
+    agent = resolved["terminal_bench_science_pi_agent"]["responses_api_agents"]["pi_agent"]
+    assert agent["resources_server"]["name"] == "terminal_bench_science_pi_resources_server"
+    # Pi calls the endpoint's chat completions itself: DeepSeek V4.1 Flash at effort max by default.
+    assert (agent["model_server"], agent["model_base_url"]) == (None, "http://gateway.example:16100/v1")
+    assert (agent["model"], agent["pi_version"], agent["model_api_key"]) == ("deepseek-flash", "0.80.10", "EMPTY")
+    assert (agent["thinking"], agent["thinking_level_map"]) == ("max", {"max": "max"})
+    assert agent["provider_compat"]["supportsReasoningEffort"] is True
+    assert agent["provider_compat"]["maxTokensField"] == "max_tokens"
+    assert (agent["context_window"], agent["max_output_tokens"], agent["timeout"]) == (1048576, 393216, 28800)
+    # As a plain launch in the task container runs Pi: its own tools and prompt, no startup network checks.
+    assert agent["sandbox_runtime_guards"] is False
+    assert agent["sandbox_env"]["PI_OFFLINE"] == "1"
+    assert (agent["sandbox_logs_dir"], agent["log_requests"]) == ("/logs/agent", True)
+    assert agent["session_prompt_cache_key"] is True
+    assert (agent["verify_after_agent_error"], agent["raise_oom_score_adj"]) == (True, True)
+    assert agent["settings"] == {"retry": {"maxRetries": 10}}
+    assert agent["concurrency"] >= 210
+
+    # The key comes from the variable the run names, POLICY_API_KEY by default.
+    monkeypatch.setenv("PI_ENDPOINT_KEY", "named-variable")
+    named = OmegaConf.merge(config, {"tbsci_model_api_key_env": "PI_ENDPOINT_KEY"})
+    assert named.terminal_bench_science_pi_agent.responses_api_agents.pi_agent.model_api_key == "named-variable"
+    manifest = yaml.safe_load((BENCHMARK_DIR / "pi" / "manifest.yaml").read_text())
+    assert (manifest["config_path"], manifest["agent_server"]) == ("../pi.yaml", "pi_agent")
+    assert manifest["dataset_owner"] == "terminal_bench_science_pi_resources_server"
+
+
+def test_opencode_profile_runs_opencode_in_the_task_sandbox_on_a_direct_endpoint(monkeypatch):
+    config = OmegaConf.load(BENCHMARK_DIR / "opencode.yaml")
+    # Not opencode_agent.yaml: its command restrictions and tool settings are Gym policy.
+    assert list(config.config_paths) == [
+        "benchmarks/terminal_bench_science/resources.yaml",
+        "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
+    ]
+    resources = config.terminal_bench_science_opencode_resources_server.resources_servers.terminal_bench_4
+    environment = config.terminal_bench_science_opencode.environment_servers.single_agent_turn_legacy
+    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
+    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
+    assert config.terminal_bench_science_sandbox.opensandbox.operations.background_exec is True
+    assert resources.datasets[0].num_repeats == 1
+    assert resources.datasets[0].jsonl_fpath == "benchmarks/terminal_bench_science/data/benchmark_codex.jsonl"
+    assert environment.resources_server.name == "terminal_bench_science_opencode_resources_server"
+    assert environment.agent_server.name == "terminal_bench_science_opencode_agent"
+
+    monkeypatch.delenv("POLICY_API_KEY", raising=False)
+    resolved = OmegaConf.to_container(
+        OmegaConf.merge(config, {"tbsci_opencode_base_url": "http://gateway.example:16100/v1"}), resolve=True
+    )
+    agent = resolved["terminal_bench_science_opencode_agent"]["responses_api_agents"]["opencode_agent"]
+    assert (agent["entrypoint"], agent["num_workers"]) == ("app.py", 1)
+    assert agent["resources_server"]["name"] == "terminal_bench_science_opencode_resources_server"
+    # OpenCode calls the endpoint's chat completions itself: DeepSeek V4.1 Flash at effort max by default.
+    assert (agent["model_server"], agent["model_base_url"]) == (None, "http://gateway.example:16100/v1")
+    assert (agent["model"], agent["opencode_version"], agent["model_api_key"]) == ("deepseek-flash", "1.17.8", "EMPTY")
+    assert (agent["reasoning_effort"], agent["interleaved_reasoning_field"]) == ("max", "reasoning")
+    assert (agent["output_token_policy"], agent["declare_model_limits"]) == ("remaining_context", False)
+    # As a plain `opencode run` in the task container: everything allowed, default tools, the root workdir.
+    assert agent["opencode_config"] == {"permission": "allow"}
+    assert (agent["allow_root_workdir"], agent["argv_prompt_quoting"], agent["thinking"]) == (True, True, True)
+    assert (agent["verify_after_agent_error"], agent["raise_oom_score_adj"]) == (True, True)
+    assert (agent["timeout"], agent["concurrency"]) == (28800, 1024)
+
+    monkeypatch.setenv("OPENCODE_ENDPOINT_KEY", "named-variable")
+    named = OmegaConf.merge(config, {"tbsci_model_api_key_env": "OPENCODE_ENDPOINT_KEY"})
+    assert named.terminal_bench_science_opencode_agent.responses_api_agents.opencode_agent.model_api_key == (
+        "named-variable"
+    )
+    manifest = yaml.safe_load((BENCHMARK_DIR / "opencode" / "manifest.yaml").read_text())
+    assert (manifest["config_path"], manifest["agent_server"]) == ("../opencode.yaml", "opencode_agent")
+    assert manifest["dataset_owner"] == "terminal_bench_science_opencode_resources_server"
+
+
+def test_claude_code_profile_runs_claude_code_as_harbor_does_in_the_task_sandbox(monkeypatch):
+    config = OmegaConf.load(BENCHMARK_DIR / "claude_code.yaml")
+    assert list(config.config_paths) == [
+        "benchmarks/terminal_bench_science/resources.yaml",
+        "responses_api_agents/claude_code_agent/configs/claude_code_agent.yaml",
+        "environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml",
+    ]
+    resources = config.terminal_bench_science_claude_code_resources_server.resources_servers.terminal_bench_4
+    environment = config.terminal_bench_science_claude_code.environment_servers.single_agent_turn_legacy
+    assert resources.sandbox_provider_ref == "terminal_bench_science_sandbox"
+    assert list(config.terminal_bench_science_sandbox) == ["opensandbox"]
+    assert config.terminal_bench_science_sandbox.opensandbox.operations.background_exec is True
+    assert resources.datasets[0].num_repeats == 1
+    assert resources.datasets[0].jsonl_fpath == "benchmarks/terminal_bench_science/data/benchmark_codex.jsonl"
+    assert environment.resources_server.name == "terminal_bench_science_claude_code_resources_server"
+    assert environment.agent_server.name == "terminal_bench_science_claude_code_agent"
+
+    # The model and its client settings come from the run config (DeepSeek V4.1 Flash here).
+    monkeypatch.delenv("POLICY_API_KEY", raising=False)
+    overrides = {
+        "policy_model_name": "deepseek-flash",
+        "tbsci_anthropic_base_url": "http://messages.example:26600",
+        "tbsci_claude_model": "deepseek-flash[1m]",
+        "tbsci_reasoning_effort": "max",
+        "tbsci_claude_max_output_tokens": 128000,
+        "tbsci_claude_env": {"API_TIMEOUT_MS": "3600000", "CLAUDE_CODE_AUTO_COMPACT_WINDOW": "786432"},
+    }
+    resolved = OmegaConf.to_container(OmegaConf.merge(config, overrides), resolve=True)
+    agent = resolved["terminal_bench_science_claude_code_agent"]["responses_api_agents"]["claude_code_agent"]
+    assert agent["resources_server"]["name"] == "terminal_bench_science_claude_code_resources_server"
+    assert (agent["model_server"], agent["anthropic_base_url"]) == (None, "http://messages.example:26600")
+    assert (agent["model"], agent["claude_code_version"], agent["anthropic_api_key"]) == (
+        "deepseek-flash[1m]",
+        "2.1.207",
+        "EMPTY",
+    )
+    assert (agent["reasoning_effort"], agent["max_output_tokens"]) == ("max", 128000)
+    assert agent["extra_env"]["CLAUDE_CODE_AUTO_COMPACT_WINDOW"] == "786432"
+    # Harbor's launch: no turn limit, no --bare, its dependency step, the instruction on stdin, the root workdir.
+    assert (agent["max_turns"], agent["bare"]) == (None, False)
+    assert (agent["harbor_system_dependencies"], agent["instruction_on_stdin"], agent["allow_root_workdir"]) == (
+        True,
+        True,
+        True,
+    )
+    assert (agent["timeout"], agent["concurrency"]) == (28800, 1024)
+
+    defaults = OmegaConf.to_container(
+        OmegaConf.merge(config, {"policy_model_name": "served"}).terminal_bench_science_claude_code_agent, resolve=True
+    )["responses_api_agents"]["claude_code_agent"]
+    assert (defaults["model"], defaults["reasoning_effort"], defaults["extra_env"]) == ("served", None, {})
+    manifest = yaml.safe_load((BENCHMARK_DIR / "claude_code" / "manifest.yaml").read_text())
+    assert (manifest["config_path"], manifest["agent_server"]) == ("../claude_code.yaml", "claude_code_agent")
+    assert manifest["dataset_owner"] == "terminal_bench_science_claude_code_resources_server"

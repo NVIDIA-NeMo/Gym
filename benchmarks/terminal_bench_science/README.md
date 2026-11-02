@@ -396,6 +396,149 @@ settings, as Harbor 0.24 starts it: the agent leaves Codex's feature defaults al
 sessions run Codex without `--ephemeral`, which keeps its goal tools. Gym's own `config.toml`
 keys (provider name, update checks, analytics, history) do not change the requests.
 
+### Pi in the task sandbox
+
+`terminal_bench_science/pi` (`pi.yaml`) runs [Pi](https://github.com/earendil-works/pi) inside each task
+sandbox through [`pi_agent`](../../responses_api_agents/pi_agent/README.md#lifecycle-and-ownership)'s
+sandbox sessions, composed like the Codex profile and using the same prompt-bearing rows
+(`prepare_codex.py`). It runs Pi as a plain launch inside the task container would:
+
+- The pinned Pi (`++tbsci_pi_version`, default `0.80.10`) with a private Node 22, installed in the sandbox
+  outside the task's `PATH`.
+- `pi --print --mode json --no-session --provider nemo --model M --thinking T`, with the instruction on
+  stdin, Pi's own tools and system prompt (no Gym runtime guards: no per-call bash cap), and Pi's default
+  compaction.
+- An `openai-completions` provider with compat flags for a plain OpenAI-compatible chat server
+  (`supportsStore`, `supportsDeveloperRole`, `supportsStrictMode` and `supportsLongCacheRetention` off,
+  `maxTokensField: max_tokens`), plus `supportsReasoningEffort`.
+- `PI_OFFLINE=1` (no startup network checks), pagers and git prompts off, and the task image's environment
+  and `HOME`.
+- The task's working directory, including `/` for images without a `WORKDIR`, and its 8-hour budget.
+- `/logs/agent`, which the resources server copies into the trial directory: `pi.txt` (Pi's JSON events
+  without the streaming deltas), `pi_stderr.txt`, and `pi-requests.jsonl` (every model request without its
+  conversation; the first one in full in `pi-requests.first.json`).
+
+Pi calls an OpenAI-compatible chat-completions endpoint directly, which the task sandbox must reach: set
+`tbsci_pi_base_url` to its `/v1` base URL. The key comes from `POLICY_API_KEY` (or the variable named by
+`++tbsci_model_api_key_env`; any string for an endpoint without auth). The calls do not pass through Gym, so
+Gym does not capture them; `pi-requests.jsonl` records what was sent. To route them through a Gym model
+server instead, set the agent's `model_server` and a null `model_base_url`.
+
+The defaults serve DeepSeek V4.1 Flash as `deepseek-flash` at DeepSeek's `max` effort: `--thinking max` with
+the model's `thinkingLevelMap: {max: max}` makes Pi send chat `reasoning_effort: "max"`, which is what Codex's
+effort `max` becomes on chat completions. `max_tokens` is the endpoint's 393216-token cap (Pi sends it on every
+call, clamped to the context left) and the context window is the served 1048576 tokens, so Pi compacts near
+it. Other settings for TB-Science runs:
+
+- One `prompt_cache_key` per trial, so a gateway that routes on it keeps the trial on one replica and its
+  prefix cache.
+- Pi retries a failed model call up to 10 times (`++tbsci_pi_max_retries`; Pi's default is 3, within about
+  14 seconds), riding out a gateway or replica restart.
+- As for Codex, a Pi run that dies while its sandbox still runs (an OOM kill, an agent's `pkill node`) is graded
+  as a nonzero agent exit (`++tbsci_verify_after_agent_error=false` retries it instead), and Pi and its tools
+  get `oom_score_adj` 1000. A run that loses its sandbox is retried. A model error Pi reports after its own
+  retries goes to the environment's outcome policy (#4834), which by default retries a transient one and grades
+  a rejected request (400, 413, 422).
+
+The instruction reaches Pi on stdin, which Pi trims; a launcher that passes it as an argument keeps its
+trailing newline.
+
+```yaml
+# run config: DeepSeek V4.1 Flash on an OpenAI-compatible endpoint
+config_paths: [benchmarks/terminal_bench_science/pi.yaml]
+policy_api_key: ${oc.env:POLICY_API_KEY,EMPTY}  # Gym's own model server is unused
+tbsci_pi_base_url: http://ENDPOINT_HOST:PORT/v1
+tbsci_concurrency: 8
+```
+
+### OpenCode in the task sandbox
+
+`terminal_bench_science/opencode` (`opencode.yaml`) runs [OpenCode](https://opencode.ai) inside each task
+sandbox through [`opencode_agent`](../../responses_api_agents/opencode_agent/README.md#task-container-settings)'s
+sandbox sessions, composed like the Codex profile and using the same prompt-bearing rows
+(`prepare_codex.py`). It runs OpenCode as a plain `opencode run` in the task container would:
+
+- The pinned OpenCode (`++tbsci_opencode_version`, default `1.17.8`), installed in the sandbox outside the
+  task's `PATH`.
+- `opencode run --format json --thinking` in the task's working directory, including `/` for images without
+  a `WORKDIR`, with its 8-hour budget. Its tools see the task image's environment and `HOME`.
+- `permission: allow` and OpenCode's default tools, without `opencode_agent.yaml`'s command restrictions.
+- No `OPENCODE_FAKE_VCS`. Harbor 0.24 sets it to `git`, which makes OpenCode snapshot its working directory
+  with git before the first model call; for the tasks whose image sets no `WORKDIR` that is the whole root
+  filesystem, and OpenCode stalls.
+- The instruction as OpenCode builds it from one argv word, which is how Harbor 0.24 passes it: wrapped in
+  double quotes, inner quotes escaped (`++tbsci_opencode_argv_prompt_quoting=false` sends it as written).
+
+OpenCode calls an OpenAI-compatible chat-completions endpoint directly, which the task sandbox must reach:
+set `tbsci_opencode_base_url` to its `/v1` base URL. The key comes from `POLICY_API_KEY` (or the variable
+named by `++tbsci_model_api_key_env`; any string for an endpoint without auth). The calls do not pass
+through Gym, so Gym does not capture them; usage comes from OpenCode's session database. To route them
+through a Gym model server instead, set the agent's `model_server` and a null `model_base_url`.
+
+The defaults serve DeepSeek V4.1 Flash as `deepseek-flash` at effort max: chat `reasoning_effort: "max"` on
+every request, each turn's reasoning replayed in the assistant message's `reasoning` field, no `max_tokens`
+(the endpoint's own output cap applies, as for Codex) and no model size, so OpenCode compacts only when the
+endpoint reports a context overflow. OpenCode sends no `prompt_cache_key`. As for Codex, an OpenCode run that
+dies while its sandbox still runs is graded as a nonzero agent exit (`++tbsci_verify_after_agent_error=false`
+retries it instead), and OpenCode and its tools get `oom_score_adj` 1000. A run that loses its sandbox is
+retried, and a model error OpenCode reports after its own retries goes to the outcome policy, as for Pi.
+
+```yaml
+# run config: DeepSeek V4.1 Flash on an OpenAI-compatible endpoint
+config_paths: [benchmarks/terminal_bench_science/opencode.yaml]
+policy_api_key: ${oc.env:POLICY_API_KEY,EMPTY}  # Gym's own model server is unused
+tbsci_opencode_base_url: http://ENDPOINT_HOST:PORT/v1
+tbsci_concurrency: 8
+```
+
+### Claude Code in the task sandbox
+
+`terminal_bench_science/claude_code` (`claude_code.yaml`) runs Claude Code inside each task sandbox
+through [`claude_code_agent`](../../responses_api_agents/claude_code_agent/README.md#sandbox-execution)'s
+sandbox sessions, composed like the Codex profile and using the same prompt-bearing rows (`prepare_codex.py`).
+It starts Claude Code the way Harbor 0.24's claude-code agent does, the harness behind the leaderboard's
+Claude Code rows:
+
+- Harbor's system-dependency step first: curl, bash, nodejs, npm and procps, installed when missing.
+- The pinned Claude Code (`++tbsci_claude_code_version`, default `2.1.207`), the native release checked
+  against its SHA-256, installed outside the task's `PATH`.
+- `claude -p --output-format stream-json --verbose --dangerously-skip-permissions [--effort E]` with the
+  instruction on stdin, no turn limit and no `--bare`.
+- The model in `ANTHROPIC_MODEL` and its tier aliases, `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC=1`,
+  `IS_SANDBOX=1`, and no background-task variables.
+- The task image's environment and `HOME`, the task's working directory (including `/` for images without a
+  `WORKDIR`), and its 8-hour budget.
+
+Claude Code calls an Anthropic Messages endpoint directly (vLLM serves `/v1/messages`), which the task sandbox
+must reach: set `tbsci_anthropic_base_url` to its URL without `/v1`. The key comes from `POLICY_API_KEY` (or the
+variable named by `++tbsci_model_api_key_env`). Those calls do not pass through Gym, so they are not captured.
+To route them through a Gym model server instead (Messages mapped onto its Responses backend), set the agent's
+`model_server` and a null `anthropic_base_url`. The Gym host downloads the Claude Code release, so it needs
+HTTPS access to `downloads.claude.ai`.
+
+The model and its client settings go in the run config. For DeepSeek V4.1 Flash served as `deepseek-flash`,
+following DeepSeek's Claude Code guide (`deepseek-flash[1m]`, effort `max`, auto-compact window 786432) with an
+output cap of 128000, the most Claude Code sends for a model it does not know, and hour-long API and stream
+timeouts, since a max-effort turn can think longer than the CLI's 10-minute request timeout:
+
+```yaml
+config_paths: [benchmarks/terminal_bench_science/claude_code.yaml]
+policy_model_name: deepseek-flash
+policy_api_key: ${oc.env:POLICY_API_KEY,EMPTY}  # Gym's own model server is unused
+tbsci_anthropic_base_url: http://MESSAGES_HOST:PORT
+tbsci_claude_model: deepseek-flash[1m]
+tbsci_reasoning_effort: max
+tbsci_claude_max_output_tokens: 128000
+tbsci_claude_env:
+  API_TIMEOUT_MS: "3600000"
+  CLAUDE_STREAM_IDLE_TIMEOUT_MS: "3600000"
+  CLAUDE_ENABLE_STREAM_WATCHDOG: "0"
+  API_FORCE_IDLE_TIMEOUT: "0"
+  CLAUDE_CODE_EAGER_FLUSH: "1"
+  CLAUDE_CODE_AUTO_COMPACT_WINDOW: "786432"
+tbsci_concurrency: 8
+```
+
 ## Run
 
 The `gym` CLI does not read an env file, and `resources.yaml` falls back to `localhost` when

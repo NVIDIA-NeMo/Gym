@@ -1,0 +1,114 @@
+# Terminal-Bench-Science v0.1 with OpenCode running inside each task sandbox.
+#
+# The same composition as the Codex profile: the TB4 resources server owns the task and verifier
+# sandboxes and lends the task sandbox through SandboxAccess, opencode_agent installs its pinned CLI
+# there (outside the task's PATH) and runs it, and single_agent_turn_legacy seeds both, closes
+# OpenCode before grading, then closes Resources. OpenCode runs as a plain `opencode run` in the task
+# container would: every permission allowed, OpenCode's default tools, no OPENCODE_FAKE_VCS, the task's
+# working directory (also /), environment and HOME for its tools, and the instruction as OpenCode builds
+# it from one argv word. It calls an OpenAI-compatible chat-completions endpoint directly
+# (tbsci_opencode_base_url, with /v1), which the task sandbox must reach. The defaults serve DeepSeek
+# V4.1 Flash as `deepseek-flash` at effort max. Rows carry the official instruction as their prompt
+# (prepare_codex.py). See README.md, "OpenCode in the task sandbox".
+config_paths:
+  - benchmarks/terminal_bench_science/resources.yaml
+  - environment_servers/single_agent_turn_legacy/configs/single_agent_turn_legacy.yaml
+
+# The provider block OpenCode reconnects through to borrow the task sandbox. It must reach the same
+# OpenSandbox deployment as the resources server's environment.sandbox_provider.
+terminal_bench_science_sandbox:
+  opensandbox:
+    connection:
+      domain: ${oc.env:OPENSANDBOX_DOMAIN,localhost}
+      api_key: ${oc.env:OPENSANDBOX_API_KEY,null}
+      protocol: http
+      use_server_proxy: true
+      transport_backend: aiohttp
+      tls_verify: false
+    operations:
+      # OpenCode's supervisor runs for the whole 8-hour budget: poll it instead of holding one stream.
+      background_exec: true
+      retries: 5
+      retry_delay_s: 5
+      retry_max_delay_s: 60
+      status_poll_timeout_s: 20
+
+terminal_bench_science_opencode_resources_server:
+  _inherit_from: terminal_bench_science
+  resources_servers:
+    terminal_bench_4:
+      description: Pinned Terminal-Bench-Science v0.1 tasks lent to OpenCode in the task sandbox, with separate offline verification.
+      sandbox_provider_ref: terminal_bench_science_sandbox
+      datasets:
+        - name: terminal_bench_science
+          type: benchmark
+          jsonl_fpath: benchmarks/terminal_bench_science/data/benchmark_codex.jsonl
+          prepare_script: benchmarks/terminal_bench_science/prepare_codex.py
+          # One trial per task, as the mini-SWE profile. The leaderboard's protocol is three trials
+          # per task (210 in all): ++num_repeats=3.
+          num_repeats: 1
+          license: Apache 2.0
+
+# Not opencode_agent.yaml: its command restrictions and tool settings are Gym policy, which a plain
+# OpenCode launch does not have.
+terminal_bench_science_opencode_agent:
+  responses_api_agents:
+    opencode_agent:
+      entrypoint: app.py
+      # Agent sessions run in one worker.
+      num_workers: 1
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_opencode_resources_server
+      # OpenCode calls the endpoint's own /v1/chat/completions, which the task sandbox must reach. Set
+      # model_server to a Gym model server instead (and model_base_url to null) to route the calls
+      # through Gym.
+      model_server: null
+      model_base_url: ${oc.select:tbsci_opencode_base_url,null}
+      # The endpoint's key, from the variable the run names (POLICY_API_KEY by default); any
+      # non-empty string for an endpoint without auth.
+      model_api_key: ${oc.env:${oc.select:tbsci_model_api_key_env,POLICY_API_KEY},EMPTY}
+      model: ${oc.select:tbsci_opencode_model,deepseek-flash}
+      opencode_version: ${oc.select:tbsci_opencode_version,1.17.8}
+      thinking: true
+      # DeepSeek's "max" effort, sent as chat `reasoning_effort` on every request.
+      reasoning_effort: ${oc.select:tbsci_opencode_reasoning_effort,max}
+      # Replay each turn's reasoning to the model in the assistant message's `reasoning` field.
+      interleaved_reasoning_field: ${oc.select:tbsci_opencode_interleaved_field,reasoning}
+      # No max_tokens in the requests: the endpoint's own output cap applies, as for Codex. No model
+      # size either, so OpenCode compacts only when the endpoint reports a context overflow.
+      output_token_policy: remaining_context
+      declare_model_limits: false
+      opencode_config:
+        permission: allow
+      # Images without a WORKDIR start in /.
+      allow_root_workdir: true
+      # What a model sees when the instruction is passed as one argv word: OpenCode quotes it.
+      argv_prompt_quoting: ${oc.select:tbsci_opencode_argv_prompt_quoting,true}
+      # Every v0.1 task has an 8-hour agent budget (prepare_codex.py checks it).
+      timeout: ${oc.select:tbsci_agent_timeout_sec,28800}
+      # Trials in flight at once; keep it at least the run's --concurrency.
+      concurrency: ${oc.select:tbsci_agent_concurrency,1024}
+      # As Harbor does: grade an OpenCode run that died (for example the kernel's OOM kill picked
+      # OpenCode) while its sandbox still runs, instead of retrying it, and make OpenCode and its
+      # tools, not the exec daemon, the OOM killer's preferred victims.
+      verify_after_agent_error: ${oc.select:tbsci_verify_after_agent_error,true}
+      raise_oom_score_adj: ${oc.select:tbsci_raise_oom_score_adj,true}
+      sandbox_install_timeout_seconds: 1200
+      # Closing an 8-hour session stops its process tree and copies its session database.
+      session_close_timeout_seconds: 300
+
+terminal_bench_science_opencode:
+  _inherit_from: single_agent_turn_legacy
+  environment_servers:
+    single_agent_turn_legacy:
+      resources_server:
+        type: resources_servers
+        name: terminal_bench_science_opencode_resources_server
+      agent_server:
+        type: responses_api_agents
+        name: terminal_bench_science_opencode_agent
+      # Provisioning, OpenCode installation, the 8-hour agent budget, and verification (up to 12000
+      # seconds for the slowest verifier, plus its startup).
+      default_episode_timeout_seconds: ${oc.select:tbsci_episode_timeout_sec,46800}
+      cleanup_timeout_seconds: 600
