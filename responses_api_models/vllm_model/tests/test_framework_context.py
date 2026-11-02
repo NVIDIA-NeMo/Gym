@@ -16,23 +16,24 @@ from fastapi.testclient import TestClient
 
 import nemo_gym.base_responses_api_model
 import nemo_gym.client.server_client
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym.base_responses_api_model import _CaptureMiddleware, _reconstruct_streamed_response
-from nemo_gym.chat_streaming import SSE_KEEPALIVE
 from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming, current_rollout_id
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.responses_streaming import is_responses_lifecycle_chunk
-from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
-from nemo_gym.token_id_capture.protocols import CAPTURE_REFUSAL_HEADER
-from nemo_gym.token_id_capture.sink import NG_CAPTURE_FIELD, NG_COMMIT_COORDS_FIELD
-from nemo_gym.token_id_capture.staging.capture import RolloutTokenCapture
-from nemo_gym.token_id_capture.staging.records import (
+from nemo_gym.models import (
+    CAPTURE_REFUSAL_HEADER,
     INVALID_COMMIT_COORDS_REASON,
+    NG_CAPTURE_FIELD,
+    NG_COMMIT_COORDS_FIELD,
+    SSE_KEEPALIVE,
     CaptureAdmission,
+    NeMoGymAsyncOpenAI,
     RolloutManifest,
+    RolloutTokenCapture,
     StageResult,
+    is_responses_lifecycle_chunk,
 )
+from nemo_gym.server_runtime import CheckpointRequest
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.tests.test_external_capture_streaming import _request
 
@@ -101,7 +102,7 @@ def make_capture_harness(
             "external_staging": True,
             "parent_resolution": parent_resolution_mode,
             "rebuild_response": False,
-            "lineage_store": "nemo_gym.token_id_capture.lineage:FileLineageStore",
+            "lineage_store": "nemo_gym.models.token_capture.lineage:FileLineageStore",
             "lineage_store_kwargs": {"root": str(tmp_path / "lineage")},
         }
     }
@@ -1229,7 +1230,7 @@ def test_capture_transport_retries_only_before_connection(monkeypatch, tmp_path,
 
     monkeypatch.setattr(NeMoGymAsyncOpenAI, "create_chat_completion", real_generate)
     monkeypatch.setattr("nemo_gym.client.http_client.get_global_aiohttp_client", lambda: MagicMock(request=send))
-    monkeypatch.setattr(nemo_gym.server_utils.asyncio, "sleep", AsyncMock())
+    monkeypatch.setattr(nemo_gym.server_runtime.base_server.asyncio, "sleep", AsyncMock())
     response = harness.post("attempt", HISTORY)
     if failure == "connect":
         assert_clean(response)

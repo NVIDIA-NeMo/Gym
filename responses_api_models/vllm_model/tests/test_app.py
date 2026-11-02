@@ -31,63 +31,63 @@ from multidict import CIMultiDict, CIMultiDictProxy
 from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.core import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymChatCompletionMessage,
-    NeMoGymChatCompletionMessageForTraining,
-    NeMoGymChoice,
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
-    NeMoGymMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInput,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseReasoningItem,
-    NeMoGymSummary,
-    rollout_context,
-)
-from nemo_gym.core.responses_api_types import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionContentPartTextParam,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionUserMessageParam,
+    NeMoGymChoice,
+    NeMoGymEasyInputMessage,
     NeMoGymFunction,
+    NeMoGymFunctionCallOutput,
     NeMoGymFunctionToolParam,
+    NeMoGymMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInput,
     NeMoGymResponseInputText,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
+    rollout_context,
 )
-from nemo_gym.models._checkpoint import PolicyModelParticipant, generation_cut_requester
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
-from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
-from nemo_gym.server_runtime._checkpoint.generation_cut import (
-    GenerationCutInventory,
-    GenerationCutPrefixAck,
-    GenerationCutReceipt,
-)
-from nemo_gym.token_id_capture import (
+from nemo_gym.models import (
+    CaptureAdmission,
     CaptureContext,
     InMemoryLineageStore,
+    NeMoGymAsyncOpenAI,
     ParentResolutionStatus,
+    PermanentEndpointError,
+    PolicyModelParticipant,
     TokenCaptureStore,
+    VLLMWorkerCaptureHandler,
+    generation_cut_requester,
     reset_token_sink,
     resolve_parent,
     set_token_sink,
 )
-from nemo_gym.token_id_capture.external_capture import VLLMWorkerCaptureHandler
-from nemo_gym.token_id_capture.staging.records import CaptureAdmission
+from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
+from nemo_gym.server_runtime import (
+    CheckpointRequest,
+    GenerationCutInventory,
+    GenerationCutPrefixAck,
+    GenerationCutReceipt,
+)
 from responses_api_agents.simple_agent.app import (
     ModelServerRef,
     ResourcesServerRef,
@@ -2003,7 +2003,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2162,7 +2162,7 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2417,7 +2417,7 @@ class TestApp:
             mock_method,
         )
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -2561,7 +2561,7 @@ class TestApp:
         app = server.setup_webserver()
         client = TestClient(app)
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         responses_create_params = NeMoGymResponseCreateParamsNonStreaming(input=single_input)
@@ -2942,7 +2942,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -3393,7 +3393,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         request_body = NeMoGymResponseCreateParamsNonStreaming(
             input=input_messages,
@@ -3720,7 +3720,7 @@ class TestApp:
         )
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         response = client.post(
             "/v1/responses",
@@ -3858,7 +3858,7 @@ class TestVLLMConverter:
         ChatCompletion output -> Response output
         """
 
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
@@ -3888,7 +3888,7 @@ class TestVLLMConverter:
         assert main_content_none == "Just plain content here."
 
     def test_postprocess_chat_response_multiple_reasoning_items(self, monkeypatch: MonkeyPatch):
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         raw_model_response = (
@@ -4181,7 +4181,7 @@ class TestVLLMConverter:
         assert expected_output == chat_completion_create_params.model_dump(exclude=OPENAI_2_44_OPTIONAL_CHAT_FIELDS)
 
     def test_whitespace_round_trip_chat_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
 
         message = NeMoGymChatCompletionMessage(
             content="<think> \n \n I'm thinking \n \n </think> \n \n I'm chatting! \n \n ",
@@ -5755,7 +5755,9 @@ class TestCompletionsBackendEndToEnd:
         return fake_client, captured
 
     def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
 
         model = _make_completions_backend_model()
         _, captured = self._install_fake_client(
@@ -5791,7 +5793,9 @@ class TestCompletionsBackendEndToEnd:
 
     def test_request_chat_template_kwargs_dropped_with_warning(self, monkeypatch: MonkeyPatch, caplog) -> None:
         """The completions path never forwards a request's top-level chat_template_kwargs."""
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
         model = _make_completions_backend_model()
         _, captured = self._install_fake_client(
             model,
@@ -5815,8 +5819,10 @@ class TestCompletionsBackendEndToEnd:
         assert "use_completions_api is true" in caplog.text
 
     def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
-        monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
+        monkeypatch.setattr("nemo_gym.models.chat_completions_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 
         model = _make_completions_backend_model()

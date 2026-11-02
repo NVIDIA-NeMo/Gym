@@ -11,7 +11,7 @@ from pytest import mark, raises
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.models import NeMoGymAsyncOpenAI
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model.tests.test_app import _engine_bad_request_error
 

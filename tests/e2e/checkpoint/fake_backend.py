@@ -33,13 +33,13 @@ from typing import Any
 import uvicorn
 from fastapi import FastAPI, Request
 
+from nemo_gym.models.token_capture.staging import CaptureAdmission, StagedCallRecord, StageResult
+from nemo_gym.models.token_capture.staging.capture import ActiveCall, RolloutTokenCapture
 from nemo_gym.server_runtime._checkpoint.generation_cut import (
     GenerationCutInventory,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
 )
-from nemo_gym.token_id_capture.staging import CaptureAdmission, StagedCallRecord, StageResult
-from nemo_gym.token_id_capture.staging.capture import ActiveCall, RolloutTokenCapture
 
 
 DEFAULT_SCRIPT = [{"name": "get_weather", "arguments": {"city": "SF"}}]

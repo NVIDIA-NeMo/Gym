@@ -28,7 +28,6 @@ import pytest
 from fastapi import Body, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.anthropic_converter import AnthropicConverter
 from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, SimpleResponsesAPIModel
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.responses_api_types import (
@@ -37,8 +36,9 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.token_id_capture.records import TokenEntry
-from nemo_gym.token_id_capture.store import TokenCaptureStore
+from nemo_gym.models.anthropic_converter import AnthropicConverter
+from nemo_gym.models.token_capture.records import TokenEntry
+from nemo_gym.models.token_capture.store import TokenCaptureStore
 
 
 PTOKS = [1, 2, 3]

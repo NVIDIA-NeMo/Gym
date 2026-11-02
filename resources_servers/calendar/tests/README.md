@@ -48,6 +48,8 @@ Main test suite containing unit tests for the `CalendarResourcesServer` verifica
 |------|-------------|-----------------|
 | `test_wrong_number_of_events_too_few` | Fewer events than expected | 0 |
 | `test_wrong_number_of_events_too_many` | More events than expected | 0 |
+| `test_duplicate_event_ids` | Repeated IDs, including integer/string aliases, in a nonempty expected calendar | 0 |
+| `test_single_event_id_representation` | Unique ID supplied as an integer or string | 1 |
 
 ### Conflict Detection
 

@@ -30,7 +30,7 @@ from nemo_gym.core.responses_api_types import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.responses_converter import ResponsesConverter
+from nemo_gym.models.chat_completions_converter import ResponsesConverter
 from nemo_gym.server_runtime.base_resources_server import ReverifyMode
 from nemo_gym.trajectory.atif_reverification import (
     AtifProjectionError,

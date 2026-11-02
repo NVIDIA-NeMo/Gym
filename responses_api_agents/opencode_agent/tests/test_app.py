@@ -652,27 +652,38 @@ class TestRolloutObservability:
         assert env["OPENAI_API_KEY"] == "EMPTY"  # pragma: allowlist secret
         assert agent.config.opencode_config == opencode_config
 
-    def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path) -> None:
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    def test_padding_is_not_reported_as_artifact_evidence(self, tmp_path: Path, mode) -> None:
         _, usage = parse_opencode_session(tmp_path / "missing.db")
         observations = _parse_opencode_session(tmp_path / "missing.db", "1-2")
-        agent = _make_agent(system_prompt="configured system")
+        agent = _make_agent(system_prompt="configured system", system_prompt_mode=mode)
         agent._run_opencode = AsyncMock(return_value=([], usage, "model", observations))
         body = NeMoGymResponseCreateParamsNonStreaming(
+            instructions="request instructions",
             input=[
                 NeMoGymEasyInputMessage(role="system", content="request system"),
                 NeMoGymEasyInputMessage(role="user", content="old question"),
                 NeMoGymEasyInputMessage(role="assistant", content="old answer"),
                 NeMoGymEasyInputMessage(role="user", content="solve"),
-            ]
+            ],
         )
 
         episode = asyncio.run(agent._create_episode(body, rollout_id="1-2"))
 
         assert episode.response.output
-        assert agent._run_opencode.await_args.args == ("solve", "configured system\n\nrequest system")
-        assert _invocations(episode.observations)[0].conversation == [
-            NeMoGymEasyInputMessage(role="user", content="configured system\n\nrequest system\n\nsolve")
-        ]
+        system = "configured system\n\nrequest system"
+        if mode == "replace":
+            system = "configured system\n\nrequest instructions\n\nrequest system"
+        assert agent._run_opencode.await_args.args == ("solve", system)
+        conversation = (
+            [
+                NeMoGymEasyInputMessage(role="system", content=system),
+                NeMoGymEasyInputMessage(role="user", content="solve"),
+            ]
+            if mode == "replace"
+            else [NeMoGymEasyInputMessage(role="user", content=system + "\n\nsolve")]
+        )
+        assert _invocations(episode.observations)[0].conversation == conversation
         assert "agent_transcript_unavailable" in {gap.code for gap in episode.observations.gaps}
         assert "model_call_ownership_unavailable" in {gap.code for gap in episode.observations.gaps}
 
@@ -778,6 +789,81 @@ class TestRepoDir:
         assert "turns_unavailable" in {gap.code for gap in trajectory.gaps}
         assert repo_dir.is_dir()
         assert not workspace.exists()
+
+    @pytest.mark.parametrize("system", ["replacement instruction", ""])
+    async def test_replacement_is_an_invocation_override_and_does_not_persist(self, tmp_path: Path, system) -> None:
+        repo = tmp_path / "repo"
+        configured = {"default_agent": "plan", "agent": {"build": {"temperature": 0.25}}, "tools": {"bash": False}}
+        inherited = {"agent": {"build": {"top_p": 0.8}}, "permission": {"edit": "deny"}}
+        agent = _make_agent(
+            repo_dir=str(repo),
+            workspace_root=str(tmp_path / "work"),
+            system_prompt_mode="replace",
+            opencode_config=configured,
+            env={"OPENCODE_CONFIG_CONTENT": json.dumps(inherited)},
+        )
+        process = MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+        with (
+            patch.object(agent, "_ensure_local_runtime", AsyncMock()),
+            patch(
+                "responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process
+            ) as run,
+            patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+        ):
+            await agent._run_opencode("user task", system, collect_observations=False)
+            first = run.call_args
+            assert first.args[-1] == "user task"
+            assert first.args[first.args.index("--agent") + 1] == "build"
+            override = json.loads(first.kwargs["env"]["OPENCODE_CONFIG_CONTENT"])
+            expected = {**inherited, "agent": {"build": {"top_p": 0.8, "prompt": system}}} if system else inherited
+            assert override == expected
+            assert json.loads((repo / "opencode.json").read_text()) == configured
+            agent.config.system_prompt_mode = "append"
+            await agent._run_opencode("next task", "next instruction", collect_observations=False)
+            assert run.call_args.args[-1] == "next instruction\n\nnext task"
+            assert json.loads(run.call_args.kwargs["env"]["OPENCODE_CONFIG_CONTENT"]) == inherited
+            assert json.loads((repo / "opencode.json").read_text()) == configured
+        assert agent.config.opencode_config == configured
+
+
+@pytest.mark.parametrize("extra_args", [["--agent", "plan"], ["--agent=plan"], ["--agent", "build"]])
+def test_replacement_rejects_explicit_agent_selectors(extra_args) -> None:
+    with pytest.raises(ValueError, match="replacement selects the build agent"):
+        _config(system_prompt_mode="replace", extra_args=extra_args)
+    assert _config(extra_args=extra_args).extra_args == extra_args
+
+
+@pytest.mark.parametrize("extra_args", [["--agent", "plan"], ["--agent=plan"]])
+def test_mutated_replacement_selector_is_rejected_by_the_http_route(extra_args) -> None:
+    from fastapi.testclient import TestClient
+
+    agent = _make_agent(extra_args=extra_args)
+    agent.config.system_prompt_mode = "replace"
+    with patch.object(agent, "_ensure_local_runtime", AsyncMock()) as install:
+        with TestClient(agent.setup_webserver()) as client:
+            response = client.post("/v1/responses", json={"input": "task"})
+    assert response.status_code == 422
+    assert "remove --agent from extra_args" in response.json()["detail"]
+    install.assert_not_awaited()
+
+
+async def test_append_keeps_the_explicit_local_agent_selector(tmp_path) -> None:
+    agent = _make_agent(workspace_root=str(tmp_path), extra_args=["--agent", "plan"])
+    process = MagicMock(returncode=0, communicate=AsyncMock(return_value=(b"", b"")))
+    with (
+        patch.object(agent, "_ensure_local_runtime", AsyncMock()),
+        patch("responses_api_agents.opencode_agent.app.asyncio.create_subprocess_exec", return_value=process) as run,
+        patch("responses_api_agents.opencode_agent.app.parse_opencode_session", return_value=([], {})),
+    ):
+        await agent._run_opencode("user task", None, collect_observations=False)
+    assert run.call_args.args[-3:] == ("--agent", "plan", "user task")
+
+
+@pytest.mark.parametrize("mode", ["append", "replace"])
+def test_system_prompt_mode_is_validated(mode) -> None:
+    assert _config(system_prompt_mode=mode).system_prompt_mode == mode
+    with pytest.raises(ValueError, match="system_prompt_mode"):
+        _config(system_prompt_mode="invalid")
 
 
 class TestConfigYaml:

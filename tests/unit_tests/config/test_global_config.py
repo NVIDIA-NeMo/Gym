@@ -25,7 +25,7 @@ from pydantic import ValidationError
 from pytest import CaptureFixture, LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym import CACHE_DIR, NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, RESULTS_DIR, WORKING_DIR
 from nemo_gym.config.config_types import (
     AgentCompositionError,
@@ -90,6 +90,7 @@ class TestGlobalConfig:
             "skip_venv_if_present": False,
             "dry_run": False,
             "server_spinup_timeout_seconds": 600,
+            "server_shutdown_timeout_seconds": 1,
             "model_endpoint_readiness_timeout_seconds": 600,
             "allow_openai_version_skew": False,
             "uv_cache_dir": str(CACHE_DIR.expanduser().resolve() / "uv"),
@@ -370,7 +371,7 @@ class TestGlobalConfig:
         omegaconf_load_mock.side_effect = lambda path: (
             DictConfig({}) if "env" not in str(path) else DictConfig({"extra_dot_env_key": 2})
         )
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -419,7 +420,7 @@ b: 2
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
         omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -466,7 +467,7 @@ config_paths:
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
         omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         get_global_config_dict()
 
@@ -512,7 +513,7 @@ config_paths:
                 return DictConfig({})
 
         omegaconf_load_mock.side_effect = omegaconf_load_mock_side_effect
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
         global_config_dict = get_global_config_dict()
         assert (
@@ -556,7 +557,7 @@ config_paths:
         omegaconf_load_mock = MagicMock()
         original_load = OmegaConf.load
         omegaconf_load_mock.side_effect = lambda path: (DictConfig({}) if "env" in str(path) else original_load(path))
-        monkeypatch.setattr(nemo_gym.server_utils.OmegaConf, "load", omegaconf_load_mock)
+        monkeypatch.setattr(nemo_gym.server_runtime.base_server.OmegaConf, "load", omegaconf_load_mock)
 
     def test_get_global_config_dict_config_paths_later_sibling_wins(
         self, monkeypatch: MonkeyPatch, tmp_path: Path
@@ -3473,7 +3474,7 @@ class TestComposeUnboundAgent:
             "agent_server": {"type": "responses_api_agents", "name": f"gpqa_mcqa_{harness_type}"},
         }
 
-    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent"])
+    @mark.parametrize("harness_type", ["hermes_agent", "opencode_agent", "pool_agent"])
     def test_swap_to_agent_with_sessions_keeps_single_agent_turn_legacy(self, harness_type: str) -> None:
         config = self._session_environment_config(harness_type)
         server_before = OmegaConf.to_container(
