@@ -52,7 +52,7 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 
 | Family | Rules | Applied to | Semantics |
 | --- | --- | --- | --- |
-| `domains` | 220 | every URL (requested, returned, redirected, wrapped) and `site:` operands | exact hostname or any subdomain, after IDNA and lower-casing |
+| `domains` | 220 | every URL (requested, returned, redirected, wrapped) and `site:` operands | exact hostname or any subdomain, after UTS #46 mapping (as browsers and `yarl` map a host), IDNA and lower-casing |
 | `url_prefixes` | 66 | every URL | prefix of the URL with the scheme and a leading `www.` removed, ignoring case; tried on the URL as written and on its canonical form |
 | `serp_url_patterns` | 12 | every URL | regexes anchored at the start of the scheme-less URL; `www.` is kept, the patterns allow subdomains themselves; tried on the URL as written and on its canonical form |
 | `url_patterns` | 22 | queries, URLs, result titles and snippets, fetched titles and Markdown | case-insensitive regexes |
@@ -60,7 +60,7 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 | `answer_title_patterns` | 5 | result titles | case-insensitive; also tried on the title with each trailing ` \| Site`, ` - Site`, ` – Site`, ` · Site`, ` » Site`, ` :: Site` segment removed |
 | `answer_title_allow_hosts` | 7 | result titles | hosts (and subdomains) exempt from `answer_title_patterns` only; every other family still applies |
 
-The canonical form is the URL as a fetcher resolves it: the host IDNA-encoded, lower-cased and without a
+The canonical form is the URL as a fetcher resolves it: the host UTS #46-mapped and IDNA-encoded, lower-cased and without a
 trailing dot, userinfo and a default port (`:443`, `:80`) dropped, `.` and `..` path segments resolved, the
 fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./abs/...` and `arxiv.org/x/../abs/...` all match the
 prefix `arxiv.org/abs/...`.

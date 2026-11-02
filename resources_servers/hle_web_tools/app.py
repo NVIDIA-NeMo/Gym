@@ -41,6 +41,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import parse_qsl, unquote, urlsplit
 
+import idna
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
@@ -170,7 +171,14 @@ MAX_SESSION_QUESTIONS = 10_000
 
 
 def normalize_hostname(value: str) -> str:
-    """IDNA-encode, lower-case and strip the trailing dot: the one form every hostname comparison uses."""
+    """The one form every hostname comparison uses: mapped as UTS #46 fetchers map it, IDNA-encoded, lower-cased,
+    trailing dot stripped.
+
+    Browsers (WHATWG URL) and ``yarl`` map a host with UTS #46 before IDNA, so ``sc\U0001f130le.com`` and
+    ``sc\u1d43le.com`` reach ``scale.com``; Python's IDNA 2003 codec alone leaves such letters unmapped.
+    """
+    if not value.isascii():
+        value = idna.uts46_remap(value, std3_rules=False, transitional=False)
     return value.encode("idna").decode().lower().rstrip(".")
 
 

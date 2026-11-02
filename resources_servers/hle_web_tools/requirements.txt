@@ -1,1 +1,2 @@
 -e nemo-gym[dev] @ ../../
+idna>=3.7
