@@ -184,3 +184,29 @@ def test_a_saved_upstream_context_rejection_is_typed_when_the_run_is_read_again(
     collected = collect(a)
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}
+
+
+def _parameter_value_refusals(count: int):
+    """The policy's only call refused with HTTP 400 because a request parameter carries a value the deployment does not
+    support (vllm_model records ``invalid_request_parameter``), its event typed ``model_request_error``, the row scored
+    zero: the shape of a baseline whose every policy call was refused for its reasoning effort."""
+    collected = _run(100)
+    for task, row in enumerate(collected.results[:count]):
+        row["reward"] = 0.0
+        [call] = row["ng_trial_observations"]["model_calls"]
+        event = _reject(call, status=400, event_id=f"param-{task}")
+        call["response_metadata"]["error_category"] = "invalid_request_parameter"
+        row["_ng_failure_events"] = {event["event_id"]: dict(event)}
+    return collected
+
+
+@pytest.mark.parametrize(("refused", "status"), [(1, "PASS"), (2, "FAIL")])
+def test_a_policy_call_refused_for_an_unsupported_parameter_value_is_an_evaluation_side_setup_failure(refused, status):
+    """Not the model's request error: the trial counts toward evaluation health, which fails at the 2% limit."""
+    _, (passed, reason, report), _ = _gate(_parameter_value_refusals(refused))
+    assert report["status"] == status and passed is (status == "PASS"), reason
+    # A failure at the limit is decided on the known faults before coverage is proven, so only a pass is exact.
+    assert report["exact"] is (status == "PASS"), reason
+    assert report["model"]["count"] == 0
+    assert report["evaluation"]["kinds"] == {"invalid_request_parameter": refused}
+    assert report["evaluation"]["server"] == 0

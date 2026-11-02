@@ -70,6 +70,7 @@ from nemo_gym.core.failure_kinds import (
     HARNESS_TERMINATION_UNCONFIRMED,
     INFRASTRUCTURE_ERROR,
     INVALID_OUTPUT_BUDGET,
+    INVALID_REQUEST_PARAMETER,
     JUDGE_FAILED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
@@ -4089,12 +4090,13 @@ def _failed_request(call: Any) -> tuple[str, Any] | None:
     return None
 
 
-# The kind of a request the model server rejected on length, by the reason it recorded: the conversation outgrew the
-# context window (the model's own limit), or the request's output budget alone exceeds it (a setup the deployment
-# cannot serve, evaluation-side).
+# The kind of a request the model server rejected, by the reason it recorded: the conversation outgrew the context
+# window (the model's own limit), the request's output budget alone exceeds it, or a request parameter carries a value
+# the deployment does not support (both setups the deployment cannot serve, evaluation-side).
 LENGTH_REFUSAL_KINDS = {
     "context_length_exceeded": MODEL_CONTEXT_LIMIT,
     "invalid_output_token_parameter": INVALID_OUTPUT_BUDGET,
+    "invalid_request_parameter": INVALID_REQUEST_PARAMETER,
 }
 
 
