@@ -35,7 +35,7 @@ from pydantic import Field
 
 from environment_servers.harbor.session import SOLUTION_DIR
 from environment_servers.harbor.verifier import TIMEOUT_WRAPPER_GUARD
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionState,

@@ -24,7 +24,7 @@ import anyio
 from fastapi import Body, Request, Response
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (

@@ -36,24 +36,24 @@ import psutil
 from fastapi import HTTPException, Request
 from pydantic import ConfigDict, Field, PrivateAttr
 
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.agent_utils.sandbox_session import (
+from nemo_gym.agents import (
+    AGENT_OUTCOME_METADATA_KEY,
+    AGENT_TIMEOUT_METADATA_KEY,
     HARNESS_RUNNER_FILE,
     HARNESS_RUNNER_SCRIPT,
-    SandboxCommand,
-    SandboxSession,
-    shell_assignments,
-)
-from nemo_gym.agent_utils.supervisor_client import OUTPUT_LOG_FILE
-from nemo_gym.agent_utils.task_timeout import AGENT_TIMEOUT_METADATA_KEY, resolve_agent_timeout
-from nemo_gym.base_responses_api_agent import (
+    OUTPUT_LOG_FILE,
     AgentCloseSessionResponse,
+    AgentOutcome,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    SandboxCommand,
+    SandboxSession,
     SimpleResponsesAPIAgent,
+    resolve_agent_timeout,
+    shell_assignments,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
@@ -523,7 +523,6 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 

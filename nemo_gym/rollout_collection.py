@@ -189,6 +189,7 @@ if TYPE_CHECKING:
 
 
 _failures_path_for = failures_path_for  # Backwards-compatible alias
+from nemo_gym.agents.skills import SkillsConfig, load_skill_directory
 from nemo_gym.client.http_client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -200,23 +201,22 @@ from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
 from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
-from nemo_gym.skills import SkillsConfig, load_skill_directory
-from nemo_gym.task_materialization import TASK_ID_FIELDS
-from nemo_gym.token_id_capture import (
+from nemo_gym.models.token_capture import (
+    TokenCaptureConfig,
     TokenCaptureStore,
-    TokenIdCaptureConfig,
     clear_token_captures_for_rollouts,
     installed_token_source,
     mask_incomplete_when_attributed_from_config,
-    token_id_capture_dirs_from_config,
+    token_capture_dirs_from_config,
 )
-from nemo_gym.token_id_capture.config import token_id_capture_enabled_for_agent
-from nemo_gym.token_id_capture.delivery import (
+from nemo_gym.models.token_capture.config import token_capture_enabled_for_agent
+from nemo_gym.models.token_capture.delivery import (
     MASK_SAMPLE_KEY,
     capture_build_can_retire,
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
+from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 
 logger = logging.getLogger(__name__)
@@ -3794,7 +3794,7 @@ class RolloutCollectionHelper(BaseModel):
         # Resolve the training-token store directory once.
         # Training capture is independent of evaluation capture.
         # An empty result disables training-token capture.
-        token_capture_dirs = token_id_capture_dirs_from_config(global_config)
+        token_capture_dirs = token_capture_dirs_from_config(global_config)
         # The finalizer reads and freezes records through this source.
         # The source is absent when capture or response rebuilding is disabled.
         # A framework-owned transport may rebuild through its own source.
@@ -3802,7 +3802,7 @@ class RolloutCollectionHelper(BaseModel):
         # Reruns still clear deterministic rollout ids before dispatch.
         token_source = None
         owned_token_source = None
-        token_capture_config = TokenIdCaptureConfig.model_validate(global_config)
+        token_capture_config = TokenCaptureConfig.model_validate(global_config)
         if token_capture_config.enabled and token_capture_config.token_id_capture.rebuild_response:
             token_source = installed_token_source()
 
@@ -3818,7 +3818,7 @@ class RolloutCollectionHelper(BaseModel):
         def token_capture_enabled_for_row(row: dict[str, Any]) -> bool:
             agent_name = self._agent_name_for_row(row, global_config)
             if agent_name not in token_capture_enabled_by_agent:
-                token_capture_enabled_by_agent[agent_name] = token_id_capture_enabled_for_agent(
+                token_capture_enabled_by_agent[agent_name] = token_capture_enabled_for_agent(
                     global_config, agent_name, config=token_capture_config
                 )
             return token_capture_enabled_by_agent[agent_name]
