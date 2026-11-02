@@ -197,6 +197,32 @@ def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, execu
     assert set(_EXECUTORS_BY_NAME) == {"slurm", "kubernetes"}
 
 
+def test_recover_on_an_executor_without_a_collector_stops_with_every_recovery_control(
+    tmp_path: Path, slurm_bin: Path
+) -> None:
+    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _staged_run(tmp_path, executor=KubernetesExecutor.name)
+    sbatch_env = slurm_bin / "env"
+
+    # An operator budget (walltime with a reason), retries and a spin-up raise all reach the executor's evidence
+    # read; one without a collector reports that it cannot decide instead of failing on the new keywords.
+    out = recover(
+        *_handle(job_dir),
+        extend_retries=2,
+        max_walltime="08:00:00",
+        walltime_reason="longer segments",
+        server_spinup_timeout_seconds=1800,
+        spinup_timeout_reason="cold server installs",
+    )
+
+    assert out.decision.action == RecoveryAction.STOP
+    assert out.decision.reason.startswith("KubernetesExecutor cannot collect the run's evidence")
+    assert out.ok is False and out.dispatched is None
+    assert not sbatch_env.exists()
+
+
 def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_bin: Path) -> None:
     job_dir = _staged_run(tmp_path)
     (slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")

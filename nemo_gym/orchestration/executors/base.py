@@ -32,6 +32,7 @@ from nemo_gym.orchestration.jobs import (
 )
 from nemo_gym.orchestration.recovery import (
     CollectedEvidence,
+    OperatorBudget,
     RecoveryAction,
     RecoveryDecision,
     RecoveryOutcome,
@@ -80,8 +81,14 @@ class BaseExecutor(ABC):
         reader_ref: str | None = None,
         extend_retries: int = 0,
         max_walltime: str | None = None,
+        operator_budget: OperatorBudget | None = None,
+        server_spinup_timeout_seconds: int | None = None,
+        spinup_timeout_reason: str | None = None,
     ) -> tuple[RecoveryDecision, CollectedEvidence | None]:
-        """Decide from the run's persisted evidence, and return what was collected; without a collector, stop."""
+        """Decide from the run's persisted evidence, and return what was collected; without a collector, stop.
+
+        Takes every control a recovery passes, so an executor without a collector reports that it cannot decide.
+        """
         return self.recovery_decision(record, benchmark), None
 
     def recovery_decision(self, record: SubmissionRecord, benchmark: str) -> RecoveryDecision:
