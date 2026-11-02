@@ -32,6 +32,8 @@ NO_FACTS = {
     "verifier_error": False,
     "environment_reward": None,
     "invalid_model_response": False,
+    "test_run": None,
+    "substep_tests": None,
 }
 
 

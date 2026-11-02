@@ -1021,6 +1021,26 @@ def trial_metadata(value):
 import hashlib
 def finite(value):
     return value if type(value) in (int, float) and math.isfinite(value) else None
+def boolean(value):
+    return value if type(value) is bool else None
+def count(value):
+    return value if type(value) is int else None
+def test_run(r):
+    # A saved repository test run: its outcome flags only; the patch, test names and output stay local.
+    if type(r.get("resolved")) is not bool:
+        return None
+    return {"resolved": r["resolved"], "patch_applied": boolean(r.get("patch_applied")),
+            "timed_out": boolean(r.get("eval_timed_out")), "error": r.get("error") is not None,
+            "test_results": isinstance(r.get("test_results"), dict), "model_patch": isinstance(r.get("model_patch"), str)}
+def substep_tests(r):
+    # Saved per-sub-step test results: counts and the problem verdict only; code and test output stay local.
+    steps = r.get("step_results")
+    if not isinstance(steps, list) or not all(type(step) is bool for step in steps):
+        return None
+    environments = r.get("step_environment_results")
+    return {"steps": len(steps), "passed": sum(steps), "num_steps_total": count(r.get("num_steps_total")),
+            "num_steps_passed": count(r.get("num_steps_passed")), "problem_accuracy": boolean(r.get("problem_accuracy")),
+            "environment_results": len(environments) if isinstance(environments, list) else None}
 def grading_facts(r):
     # Scalar facts of the grading artifacts a verifier or environment saved on the row; their contents stay local.
     judgments, result = r.get("judgments"), r.get("result")
@@ -1037,6 +1057,8 @@ def grading_facts(r):
         "verifier_error": r.get("verifier_error") is not None,
         "environment_reward": finite(info.get("reward")) if isinstance(info, dict) else None,
         "invalid_model_response": r.get("invalid_model_response") is True,
+        "test_run": test_run(r),
+        "substep_tests": substep_tests(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -3331,6 +3353,50 @@ def _test_execution(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _bound_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the collector bound the saved answer and score together (``_ng_collected_grading_binding``)."""
+    binding = row.get("_ng_collected_grading_binding")
+    return isinstance(binding, str) and len(binding) == 64
+
+
+def _repository_test_run(row: Mapping[str, Any]) -> bool:
+    """A saved repository test run of the answer's patch: ``evaluation_completed`` true, the run's ``resolved``
+    verdict with the row's reward equal to it (1.0 resolved, 0.0 not), saved ``test_results``, no ``error``, no
+    evaluation timeout, and a resolved verdict only for a patch that applied. The saved answer and score are bound."""
+    run = _grading_facts(row).get("test_run")
+    return (
+        isinstance(run, dict)
+        and row.get("evaluation_completed") is True
+        and type(run.get("resolved")) is bool
+        and _reward(row) == float(run["resolved"])
+        and run.get("test_results") is True
+        and run.get("error") is False
+        and run.get("timed_out") is False
+        and (not run["resolved"] or run.get("patch_applied") is True)
+        and _bound_answer(row)
+    )
+
+
+def _substep_tests(row: Mapping[str, Any]) -> bool:
+    """Saved per-sub-step test results: a non-empty ``step_results`` list of booleans, one environment result per
+    step, ``num_steps_total`` and ``num_steps_passed`` equal to its length and its passes, ``problem_accuracy`` true
+    exactly when every step passed, and the row's reward equal to it (1.0 or 0.0). The saved answer and score are
+    bound."""
+    steps = _grading_facts(row).get("substep_tests")
+    return (
+        isinstance(steps, dict)
+        and type(steps.get("steps")) is int
+        and steps["steps"] >= 1
+        and steps.get("num_steps_total") == steps["steps"]
+        and steps.get("num_steps_passed") == steps.get("passed")
+        and steps.get("environment_results") == steps["steps"]
+        and type(steps.get("problem_accuracy")) is bool
+        and steps["problem_accuracy"] is (steps.get("passed") == steps["steps"])
+        and _reward(row) == float(steps["problem_accuracy"])
+        and _bound_answer(row)
+    )
+
+
 def _environment_reward(row: Mapping[str, Any]) -> bool:
     """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
     recorded = _grading_facts(row).get("environment_reward")
@@ -3346,6 +3412,8 @@ GRADING_ARTIFACTS = (
     ("metric_record", _metric_record),
     ("test_execution", _test_execution),
     ("environment_reward", _environment_reward),
+    ("repository_test_run", _repository_test_run),
+    ("substep_tests", _substep_tests),
 )
 
 
