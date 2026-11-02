@@ -10,13 +10,13 @@ import pytest
 from fastapi import Body
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.failure_transport import FailureHeader, observe_failure
+from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.typed_exceptions import NgFailureEvent
-from tests.unit_tests.test_chat_completions_streaming import _EchoChatModel
-from tests.unit_tests.test_responses_api_model_streaming import _EchoModel
+from tests.unit_tests.models.test_chat_completions_streaming import _EchoChatModel
+from tests.unit_tests.models.test_responses_api_model_streaming import _EchoModel
 
 
 _BACKEND_S = 0.04
@@ -104,7 +104,7 @@ def test_a_keepalive_responses_stream_reports_late_failures_on_its_terminal_even
 
 @pytest.mark.parametrize("fail", [False, True])
 def test_a_keepalive_chat_stream_reports_late_failures_on_its_last_event(monkeypatch, fail: bool) -> None:
-    monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", _KEEPALIVE_S)
+    monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", _KEEPALIVE_S)
     client = _client(_LateChat, fail=fail)
     reply = client.post("/v1/chat/completions", json={"stream": True, "messages": [{"role": "user", "content": "hi"}]})
     assert reply.status_code == 200

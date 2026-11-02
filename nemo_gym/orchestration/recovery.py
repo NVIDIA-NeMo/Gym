@@ -52,7 +52,7 @@ from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator, model_validator
 
-from nemo_gym.agent_outcome import (
+from nemo_gym.agents.agent_outcome import (
     AGENT_OUTCOME_METADATA_KEY,
     AgentOutcome,
     OutcomeAction,

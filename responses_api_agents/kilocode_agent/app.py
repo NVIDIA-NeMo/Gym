@@ -32,15 +32,17 @@ from fastapi import HTTPException, Request
 from openai.types.responses import ResponseError
 from pydantic import ConfigDict, Field, JsonValue, PrivateAttr
 
-from nemo_gym.agent_utils.sandbox_session import HARNESS_COMMAND_NOT_STARTED, HARNESS_RUNNER_FAILED, SandboxSession
-from nemo_gym.agent_utils.supervisor_client import CleanupReceipt
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
+    HARNESS_COMMAND_NOT_STARTED,
+    HARNESS_RUNNER_FAILED,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
+    CleanupReceipt,
+    SandboxSession,
     SimpleResponsesAPIAgent,
 )
 from nemo_gym.client import get_response_json, raise_for_status

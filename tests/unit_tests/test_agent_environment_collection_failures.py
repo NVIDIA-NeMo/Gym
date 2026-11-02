@@ -12,16 +12,16 @@ from fastapi import Body
 from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client
-import nemo_gym.openai_utils as openai_utils_module
+import nemo_gym.client.openai_client as openai_utils_module
 import nemo_gym.server_runtime.base_server
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
+from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig
 from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.rollout_collection import RolloutCollectionHelper
 
 

@@ -1795,7 +1795,7 @@ def test_build_sbatch_script_vllm_service_backend_omits_ray_prelude(submit_confi
 # Fixtures
 # ---------------------------------------------------------------------------
 
-from nemo_gym.orchestration.api import NodePool, SlurmComputeConfig, VllmServiceConfig
+from nemo_gym.orchestration.api import SlurmComputeConfig, VllmServiceConfig
 
 
 @pytest.fixture

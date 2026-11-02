@@ -67,6 +67,20 @@ class MovedPath:
 # Old module path -> new module path.
 # A key also covers every submodule under it.
 MOVED_MODULES: dict[str, MovedPath] = {
+    "nemo_gym.base_responses_api_agent": MovedPath(new="nemo_gym.agents.base_responses_api_agent", since="0.8.0"),
+    "nemo_gym.agent_utils": MovedPath(new="nemo_gym.agents.utils", since="0.8.0"),
+    "nemo_gym.agent_outcome": MovedPath(new="nemo_gym.agents.agent_outcome", since="0.8.0"),
+    "nemo_gym.agent_activation_types": MovedPath(new="nemo_gym.agents.agent_activation_types", since="0.8.0"),
+    "nemo_gym.sandbox.agent_tools": MovedPath(new="nemo_gym.agents.agent_tools", since="0.8.0"),
+    "nemo_gym.skills": MovedPath(new="nemo_gym.agents.skills", since="0.8.0"),
+    "nemo_gym.base_responses_api_model": MovedPath(new="nemo_gym.models.base_responses_api_model", since="0.8.0"),
+    "nemo_gym.openai_utils": MovedPath(new="nemo_gym.client.openai_client", since="0.8.0"),
+    "nemo_gym.anthropic_utils": MovedPath(new="nemo_gym.models.anthropic_utils", since="0.8.0"),
+    "nemo_gym.anthropic_converter": MovedPath(new="nemo_gym.models.anthropic_converter", since="0.8.0"),
+    "nemo_gym.responses_converter": MovedPath(new="nemo_gym.models.chat_completions_converter", since="0.8.0"),
+    "nemo_gym.chat_streaming": MovedPath(new="nemo_gym.models.chat_streaming", since="0.8.0"),
+    "nemo_gym.responses_streaming": MovedPath(new="nemo_gym.models.responses_streaming", since="0.8.0"),
+    "nemo_gym.token_id_capture": MovedPath(new="nemo_gym.models.token_capture", since="0.8.0"),
     "nemo_gym.server_utils": MovedPath(new="nemo_gym.server_runtime.base_server", since="0.8.0"),
     "nemo_gym._checkpoint.model": MovedPath(new="nemo_gym.models._checkpoint", since="0.8.0"),
     "nemo_gym._checkpoint.model_workers": MovedPath(new="nemo_gym.models._checkpoint_workers", since="0.8.0"),
@@ -472,7 +486,103 @@ MOVED_NAMES: dict[str, dict[str, MovedPath]] = {
         # Imported by the exporter base before it masked a plain container copy instead.
         **_names("nemo_gym.config.secret_utils", "0.8.0", "recursively_hide_secrets"),
     },
+    "nemo_gym.base_responses_api_model": {
+        # Split out of base_responses_api_model.
+        **_names(
+            "nemo_gym.models.model_call_capture",
+            "0.8.0",
+            """
+            CaptureStore ModelExecutionOutcome _CLIENT_SESSION_HEADER _CaptureMiddleware _OBSERVED_PATHS
+            _PENDING_SUFFIX _ROLLOUT_PATH_RE _TERMINAL_SSE_LINES _classify_exception _classify_status
+            _consume_terminal_sse_event _exception_http_details _fail_uncommitted_external_call
+            _headers_content_type _parse_sse_events _pending_token _preserve_capture_prefix_on_redirect
+            _reconstruct_anthropic_sse _reconstruct_chat_sse _reconstruct_responses_sse
+            _reconstruct_streamed_response _record _unique_request_header _validate_rollout_id
+            make_capture_store start_model_execution
+            """,
+        ),
+        # Moved, and still imported by base_responses_api_model for its own use.
+        **_names(
+            "nemo_gym.models.model_call_capture",
+            "0.8.0",
+            """
+            ModelCallCaptureConfig _SSE_KEEPALIVE install_model_call_capture
+            """,
+        ),
+        # base_responses_api_model imported these for code that moved out of it.
+        **_names("nemo_gym.config.config_types", "0.8.0", "ROLLOUT_PATH_PREFIX TOKEN_CAPTURE_PATH_SEGMENT"),
+        **_names("nemo_gym.core.episode", "0.8.0", "VERIFIER_INVOCATION_HEADER rollout_context"),
+        **_names("nemo_gym.models._checkpoint", "0.8.0", "attach_capture_context ledger_removal_refusal"),
+        **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
+        **_names("pydantic", "0.8.0", "model_validator"),
+        **_names("nemo_gym.models.responses_streaming", "0.8.0", "is_responses_lifecycle_chunk"),
+        **_names("nemo_gym.models.token_capture.protocols", "0.8.0", "installed_lineage_store installed_token_sink"),
+        **_names("nemo_gym.models.token_capture.sink", "0.8.0", "CaptureContext reset_token_sink set_token_sink"),
+        **_names("nemo_gym.models.token_capture.control_routes", "0.8.0", "install_rollout_control_routes"),
+        **_names("nemo_gym.models.token_capture.lineage", "0.8.0", "FileLineageStore InMemoryLineageStore"),
+        **_names("nemo_gym.models.token_capture.protocols", "0.8.0", "ParentResolutionMode"),
+        **_names("nemo_gym.models.token_capture.records", "0.8.0", "UNCOMMITTED_CALL_REASON"),
+        **_names("nemo_gym.models.token_capture.store", "0.8.0", "make_token_store"),
+        **_names("nemo_gym.server_runtime.request_handling.rollout_context", "0.8.0", "scope_with_routed_path"),
+    },
+    "nemo_gym.chat_streaming": {
+        # Split out of chat_streaming.
+        **_names("nemo_gym.core.responses_api_types", "0.8.0", "SSE_KEEPALIVE"),
+    },
 }
+
+# Names renamed with the token capture package (token_id_capture -> token_capture), at each old module path that
+# defined or imported them. Kept apart so a module path that MOVED_NAMES already lists keeps its other entries.
+_TOKEN_CAPTURE = "nemo_gym.models.token_capture"
+_RENAMED_TOKEN_CAPTURE_NAMES: dict[str, dict[str, MovedPath]] = {
+    "nemo_gym.token_id_capture": {
+        "TokenIdCaptureConfig": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureConfig", since="0.8.0"),
+        "token_id_capture_dirs_from_config": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.consumer:token_capture_dirs_from_config", since="0.8.0"
+        ),
+    },
+    "nemo_gym.token_id_capture.config": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+        "TokenIdCaptureConfig": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureConfig", since="0.8.0"),
+        "TokenIdCaptureSettings": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureSettings", since="0.8.0"),
+        "token_id_capture_config": MovedPath(new=f"{_TOKEN_CAPTURE}.config:token_capture_config", since="0.8.0"),
+        "token_id_capture_enabled_for_agent": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.config:token_capture_enabled_for_agent", since="0.8.0"
+        ),
+    },
+    "nemo_gym.token_id_capture.consumer": {
+        "token_id_capture_dirs_from_config": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.consumer:token_capture_dirs_from_config", since="0.8.0"
+        ),
+    },
+    "nemo_gym.config": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new="nemo_gym.config.global_config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+    },
+    "nemo_gym.global_config": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new="nemo_gym.config.global_config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+    },
+    "nemo_gym.base_responses_api_agent": {
+        "TOKEN_ID_CAPTURE_BLOCK": MovedPath(new="nemo_gym.config.global_config:TOKEN_CAPTURE_BLOCK", since="0.8.0"),
+    },
+    "nemo_gym._checkpoint.model": {
+        "token_id_capture_enabled_for_agent": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.config:token_capture_enabled_for_agent", since="0.8.0"
+        ),
+    },
+    "nemo_gym.rollout_collection": {
+        "TokenIdCaptureConfig": MovedPath(new=f"{_TOKEN_CAPTURE}.config:TokenCaptureConfig", since="0.8.0"),
+        "token_id_capture_dirs_from_config": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.consumer:token_capture_dirs_from_config", since="0.8.0"
+        ),
+        "token_id_capture_enabled_for_agent": MovedPath(
+            new=f"{_TOKEN_CAPTURE}.config:token_capture_enabled_for_agent", since="0.8.0"
+        ),
+    },
+}
+for _module, _renamed in _RENAMED_TOKEN_CAPTURE_NAMES.items():
+    _listed = MOVED_NAMES.setdefault(_module, {})
+    assert not set(_listed) & set(_renamed), f"{_module} lists a renamed token capture name twice"
+    _listed.update(_renamed)
 
 
 def _running_version() -> str:

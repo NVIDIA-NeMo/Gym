@@ -142,8 +142,8 @@ QUERY_KEY_NAME = "query"
 OBSERVABILITY_ENABLED_KEY_NAME = "observability_enabled"
 MODEL_CALL_CAPTURE_DIR_KEY_NAME = "model_call_capture_dir"
 # Run-wide training-token capture settings.
-# See ``nemo_gym/token_id_capture/config.py``.
-TOKEN_ID_CAPTURE_BLOCK = "token_id_capture"
+# See ``nemo_gym/models/token_capture/config.py``.
+TOKEN_CAPTURE_BLOCK = "token_id_capture"
 COMPONENT_NAME_KEY_NAME = "component_name"
 SKIP_VERIFICATION_KEY_NAME = "skip_verification"
 SKIP_VERIFICATION_REWARD_KEY_NAME = "skip_verification_reward"
@@ -191,7 +191,7 @@ NEMO_GYM_RESERVED_TOP_LEVEL_KEYS = [
     QUERY_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     MODEL_CALL_CAPTURE_DIR_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
+    TOKEN_CAPTURE_BLOCK,
     COMPONENT_NAME_KEY_NAME,
     SKIP_VERIFICATION_KEY_NAME,
     SKIP_VERIFICATION_REWARD_KEY_NAME,
@@ -2379,3 +2379,10 @@ def format_almost_server_warning(server_name: str, error: ValidationError) -> st
 
     This server will NOT be started.
     """
+
+
+# Serves the names this module had before token_id_capture was renamed token_capture, with a warning.
+from nemo_gym._moved_paths import moved_names_getattr  # noqa: E402
+
+
+__getattr__ = moved_names_getattr(__name__)

@@ -54,7 +54,7 @@ from PIL import Image, ImageDraw
 from pydantic import Field
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.agent_utils.verify_call import verify_with_transport_retry
+from nemo_gym.agents.utils.verify_call import verify_with_transport_retry
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.typed_exceptions import NgFailureEvent

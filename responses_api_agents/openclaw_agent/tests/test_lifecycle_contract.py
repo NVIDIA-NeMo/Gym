@@ -7,7 +7,7 @@ import json
 import pytest
 from fastapi import Request
 
-from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
+from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.openclaw_agent.tests.test_sandbox import seed, setup  # noqa: F401
 
