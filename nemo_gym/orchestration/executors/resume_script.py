@@ -79,6 +79,13 @@ RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 --
 PROVISIONAL_MARKER_PREFIX = "Continuation "
 # Why the chain ends after a segment that timed out before Gym wrote the task inventory.
 PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
+# Where a resumed segment records how many progress rows the Store held when it started (one file per job id).
+ROWS_AT_START_NAME = ".gym_rows_at_start"
+# Why the chain ends after a resumed segment that timed out without saving a rollout: its walltime went to setup.
+NO_PROGRESS_SEGMENT_REASON = (
+    "the segment saved no rollout: its walltime is shorter than this run's setup (Gym install and server start-up)"
+    " plus a rollout, so the next segment would repeat it; the chain does not retry it; raise the walltime"
+)
 # Where the driver step's DRIVER_FAILURE_ENV points: the next segment's guard ends the chain with the kind in it.
 DRIVER_FAILURE_NAME = ".gym_driver_failure"
 SPINUP_TIMEOUT_REASON = (
@@ -362,6 +369,46 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
         _gym_stop_incomplete "$_gym_stop_reason"
     fi
 fi
+# The rows the Store counts as progress (RolloutStore.record_outcome): every saved result, and every recorded failure
+# but an interruption (kill_shaped, not sent, refused at admission) that is neither terminal nor an omission. Only
+# newline-terminated lines count: the Store drops a cut tail and terminates a whole one, so the count never shrinks.
+_gym_progress_rows() {{
+    local _results="$OUTPUT_DIR/artifacts/rollouts.jsonl" _failures="$OUTPUT_DIR/artifacts/rollouts_failures.jsonl"
+    local _rows=0 _lines
+    if [[ -e "$_results" ]]; then
+        _lines=$(wc -l < "$_results") || return 1
+        _rows=$((_rows + _lines))
+    fi
+    if [[ -e "$_failures" ]]; then
+        _lines=$(wc -l < "$_failures") || return 1
+        _lines=$(head -n "$_lines" "$_failures" | awk -v q='"' '
+            index($0, q "_ng_failure_terminal" q ":true") || index($0, q "_ng_omitted" q ":") {{ n++; next }}
+            index($0, q "_ng_failure_class" q ":" q "kill_shaped" q) {{ next }}
+            index($0, q "delivery" q ":" q "not_sent" q) || index($0, q "stage" q ":" q "admission" q) {{ next }}
+            {{ n++ }}
+            END {{ print n + 0 }}') || return 1
+        _rows=$((_rows + _lines))
+    fi
+    echo "$_rows"
+}}
+# A resumed segment that timed out without saving a rollout spent its walltime on setup (or on one rollout longer
+# than what was left): the next segment would do the same. The previous segment recorded the Store's progress rows
+# when it started; only an unchanged count stops, and a missing or unreadable record continues. Nothing here depends
+# on the Store's coverage report, which a segment killed at its walltime may not have flushed. It runs after
+# admission, so a stop the saved evidence explains (unknown reservations, no retries) keeps its own reason.
+if [[ "$_prev_state" == TIMEOUT && -n "$_prev_slurm_job_id" ]]; then
+    _gym_rows_then=$(head -n 1 "$OUTPUT_DIR/{rows_at_start_name}.$_prev_slurm_job_id" 2>/dev/null) || _gym_rows_then=""
+    if [[ "$_gym_rows_then" =~ ^[0-9]+$ ]] && _gym_rows_now=$(_gym_progress_rows) && \
+        (( _gym_rows_now == 10#$_gym_rows_then )); then
+        _gym_run_dir="${{OUTPUT_DIR%/*}}"
+        _gym_stop_incomplete "Previous job $_prev_slurm_job_id ended TIMEOUT after $((10#$_prev_elapsed))s: {no_progress_segment_reason}: {fresh_restart_command}"
+    fi
+fi
+# A resumed segment (a continuation or a recovery) records its own start for the next one. The first segment does not:
+# its successor reuses the prepared data and the installed toolchain, so it is not the same segment again.
+if [[ -n "$_prev_slurm_job_id" || "$_gym_resubmit" == 1 ]] && _gym_rows_now=$(_gym_progress_rows); then
+    echo "$_gym_rows_now" > "$OUTPUT_DIR/{rows_at_start_name}.$SLURM_JOB_ID" || true
+fi
 # The infrastructure ended the follow-up this sentinel replaces, so the takeover is an infra retry: dying
 # follow-ups spend the chain's retry budget and stop at its cap instead of continuing without end.
 [[ -z "$_gym_sentinel_takeover" ]] || _gym_needs_retry=1
@@ -550,6 +597,8 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         retry_extension_name=RETRY_EXTENSION_NAME,
         requeue_unknown_reason=REQUEUE_UNKNOWN_REASON,
         pre_inventory_reason=PRE_INVENTORY_REASON,
+        rows_at_start_name=ROWS_AT_START_NAME,
+        no_progress_segment_reason=NO_PROGRESS_SEGMENT_REASON,
         # The job dir is <output_path>/<gym_job_id>/<benchmark>: the command names both from the directory it runs in.
         fresh_restart_command=fresh_restart_command("${_gym_run_dir##*/}", "${OUTPUT_DIR##*/}"),
         driver_failure_name=DRIVER_FAILURE_NAME,

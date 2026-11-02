@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
+import json
 import os
 import shlex
 import shutil
@@ -26,6 +27,7 @@ from nemo_gym.orchestration.api import ResumeConfig
 from nemo_gym.orchestration.executors.resume_script import (
     INCOMPLETE_MARKER_NAME,
     PROVISIONAL_MARKER_PREFIX,
+    ROWS_AT_START_NAME,
     _walltime_to_seconds,
     render_resume_prologue,
 )
@@ -909,6 +911,8 @@ def test_a_dead_follow_up_is_debited_once_and_stays_in_the_chain_for_the_next_ho
     assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "1074"
 
     # The sentinel's own follow-up 999 debits only its predecessor 200 (30 s); 777 is not counted again.
+    # 200 saved a rollout, so its timeout is not a segment that would repeat itself.
+    _store(tmp_path, [_RESULT])
     next_hop = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", job_id="999", prev_job_id="200", elapsed="30")
     assert next_hop.returncode == 0 and "REACHED_WORK" in next_hop.stdout, next_hop.stdout + next_hop.stderr
     assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "1104"
@@ -1043,3 +1047,107 @@ def test_inspection_names_a_continuation_that_died_before_its_guard(tmp_path):
         "the chain recorded"
         not in decide_from_collected(collect(job), max_infra_retries=3, max_walltime_s=None, live_job=False).reason
     )
+
+
+_RESULT = '{"_ng_task_index":0,"_ng_rollout_index":0,"reward":1.0}'
+_KILLED = '{"_ng_task_index":1,"_ng_rollout_index":0,"_ng_failure_class":"kill_shaped"}'
+_NOT_SENT = '{"_ng_task_index":2,"_ng_rollout_index":0,"_ng_failure_class":"transient","_ng_failure_record":{"delivery":"not_sent"}}'
+_FAILED = '{"_ng_task_index":3,"_ng_rollout_index":0,"_ng_failure_class":"transient"}'
+_KILLED_TERMINAL = (
+    '{"_ng_task_index":4,"_ng_rollout_index":0,"_ng_failure_class":"kill_shaped","_ng_failure_terminal":true}'
+)
+
+
+def _store(tmp_path, results=(), failures=(), tail="") -> None:
+    """The Store's two append-only files; ``tail`` is an unterminated last line of the results file."""
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir(exist_ok=True)
+    (artifacts / "rollouts.jsonl").write_text("".join(f"{row}\n" for row in results) + tail)
+    (artifacts / "rollouts_failures.jsonl").write_text("".join(f"{row}\n" for row in failures))
+
+
+def _rows_at_start(tmp_path, job_id, value) -> None:
+    (tmp_path / f"{ROWS_AT_START_NAME}.{job_id}").write_text(f"{value}\n")
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    ("results", "failures", "tail"),
+    [
+        ([_RESULT, _FAILED], [], ""),
+        ([_RESULT, _FAILED], [_KILLED, _NOT_SENT], ""),
+        ([_RESULT, _FAILED], [], '{"_ng_task_index":5,"rew'),
+    ],
+    ids=["nothing-written", "only-interruptions-written", "only-a-cut-row-written"],
+)
+def test_a_resumed_segment_that_timed_out_without_saving_a_rollout_ends_the_chain(tmp_path, results, failures, tail):
+    _write_inventory(tmp_path)
+    _store(tmp_path, results, failures, tail)
+    _rows_at_start(tmp_path, "100", 2)
+    (tmp_path / ".gym_job_chain").write_text("50\n100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", elapsed="14400")
+
+    assert result.returncode == 1 and "REACHED_WORK" not in result.stdout
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert marker.startswith("Previous job 100 ended TIMEOUT after 14400s: the segment saved no rollout")
+    assert "--recover --max-walltime HH:MM:SS --walltime-reason TEXT" in marker
+    assert _sbatch_calls(tmp_path) == []
+    # The segment's time is still accounted.
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "14400"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    ("failures", "start"),
+    [([], "2"), ([_FAILED], "3"), ([_KILLED_TERMINAL], "3"), ([], None), ([], "unreadable")],
+    ids=["saved-a-result", "saved-a-failure", "a-killed-row-reached-its-cap", "no-record", "unreadable-record"],
+)
+def test_a_resumed_segment_that_saved_a_row_or_left_no_record_continues(tmp_path, failures, start):
+    _write_inventory(tmp_path)
+    _store(tmp_path, [_RESULT, _FAILED, _RESULT], failures)
+    if start is not None:
+        _rows_at_start(tmp_path, "100", start)
+    # A segment killed at its walltime never flushed coverage: the report still says it saved nothing.
+    report = {"outcomes_recorded": 0, "progress_outcomes_recorded": 0, "allocation_id": "100"}
+    (tmp_path / "artifacts" / "rollouts_coverage.json").write_text(json.dumps(report))
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "saved no rollout" not in result.stdout
+    # This segment records its own start for the next one.
+    assert (tmp_path / f"{ROWS_AT_START_NAME}.200").read_text().strip() == str(3 + len(failures))
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_the_first_segment_records_no_start_so_its_successor_is_never_stopped_for_it(tmp_path):
+    _write_inventory(tmp_path)
+    _store(tmp_path, [_RESULT])
+    result = _run_prologue(tmp_path, ResumeConfig(), None)
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert not (tmp_path / f"{ROWS_AT_START_NAME}.200").exists()
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_the_recovery_the_no_progress_stop_names_runs_and_records_its_start(tmp_path):
+    _write_inventory(tmp_path)
+    _store(tmp_path, [_RESULT, _FAILED])
+    _rows_at_start(tmp_path, "100", 2)
+    (tmp_path / ".gym_job_chain").write_text("50\n100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(max_walltime="08:00:00"), None, keep_budget=True)
+
+    assert result.returncode == 0 and "REACHED_WORK" in result.stdout, result.stdout + result.stderr
+    assert "saved no rollout" not in result.stdout
+    assert (tmp_path / f"{ROWS_AT_START_NAME}.200").read_text().strip() == "2"
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_cut_before_the_inventory_still_takes_the_fresh_restart_path(tmp_path):
+    _rows_at_start(tmp_path, "100", 0)
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT")
+
+    assert result.returncode == 1
+    marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert "before the task inventory was written" in marker and "saved no rollout" not in marker
