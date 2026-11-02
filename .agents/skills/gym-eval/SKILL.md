@@ -184,7 +184,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
 | The chain's walltime cap is spent | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. Never below the recorded walltime; journaled. |
-| The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. |
+| The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. It raises infra retries only: it does not raise the per-identity attempt cap, so a STOP that says identities used every attempt is not a lost extension (see "When a run stops"). |
 | The run's chain accounting is unknown (a segment the scheduler requeued ends this way: the requeued allocation's elapsed time is unknown) | An explicit budget continues it: `--max-walltime` with `--walltime-reason`, optionally `--extend-retries`. Without it, the STOP names these options. |
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
@@ -194,6 +194,44 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
 per-rollout attempt allowance. It is not a substitute for a recovery STOP.
+
+## When a run stops: budgets and resubmit
+
+- The chain runs one Slurm segment after another until the work is done, the chain cap
+  (`max_walltime`, the walltime summed over segments) is spent, or the infra-retry budget
+  (`max_retries`) is spent. A typed stop ends it with its kind in `.gym_chain_incomplete`. At a
+  stop nothing is lost: every finished row is saved.
+- Look first, then act. `gym eval resubmit <id> <benchmark> --recover --inspect` says what a
+  recovery would do and why, and dispatches nothing. The same command without `--inspect` does it.
+- Three limits, each counting something different. The chain cap is raised with
+  `--max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime. The
+  job's infra-retry budget (preemptions, node failures) is widened with `--extend-retries N`; the
+  spent count is kept. Each carries a reason that lands in a journal. The third limit belongs to
+  each task row, not to the job: the attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3),
+  and `--extend-retries` does not raise it.
+- A cut that ends an allocation while a row is in flight charges that row an attempt, except the
+  first cut, so a long task that spans several segments can reach the cap without any model
+  failure. A row at the cap is masked: the stop reads "N identity(ies) used every attempt since the
+  last resubmit" and says that `--extend-retries` raises infra retries only, not the per-identity
+  attempt cap (`max_rollout_attempts=N`). It is never scored as the model's result, and a resubmit
+  does not revive it. Until Gym has an option that extends the
+  attempts, such rows need a fresh run (step 6).
+- A resume keeps every finished row and runs only the missing and retriable ones. A rollout in
+  flight when an allocation ends starts again from its beginning: the first such cut is free, and
+  each later one charges one attempt of that row.
+- None of this retries a model failure. A scored zero, a clean agent timeout and a typed model
+  failure are final (step 7).
+- When the launcher's Gym revision differs from the run's pin, the recovery needs
+  `--repin <full sha> --repin-reason "<why>"` (step 5).
+- If a resume is refused because the saved configuration fingerprint no longer matches, do not set
+  `allow_unsafe_resume` yourself: continue the run at its own pinned version and report it.
+- Never use plain `gym eval resubmit` without `--recover` to continue: it resets the budgets.
+
+Cases that went this way: a Terminal-Bench 4.0 run whose chain cap of 16 hours was spent with
+rows missing was continued with the cap at 24 hours; another had its cap raised from 12 to 16 and
+then to 19 hours 15 minutes, with one retry extension after preemptions; a third ran as a chain of six
+segments, with preemptions and requeues handled by the chain itself and one operator
+continuation, and was reconciled to the second against the scheduler's own accounting.
 
 ## 6. When nothing can be recovered
 
