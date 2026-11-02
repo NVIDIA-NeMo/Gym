@@ -37,8 +37,8 @@ from langchain_core.runnables import RunnableConfig
 from pydantic import Field, model_validator
 
 from nemo_gym.base_responses_api_agent import AgentSeedRejectedError, AgentSeedSessionRequest
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle, ObservationGap
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.trajectory import AgentObservationBundle, ObservationGap
 from responses_api_agents.langchain_deepagents_agent.responses_langchain_bridge import (
     GymResponsesChatModel,
     to_langchain,

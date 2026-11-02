@@ -13,7 +13,7 @@ from pathlib import Path
 import pytest
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.codex_agent import sandbox_runner
 from responses_api_agents.codex_agent.sandbox import CodexSandboxSession
 from responses_api_agents.codex_agent.tests.test_sandbox_sessions import seed
@@ -40,7 +40,7 @@ class ExecOnlySandbox:
         self.disconnected = True
 
     async def exec(self, command, *, cwd=None, timeout_s=30):
-        launch = "--receipt" in command and "process_supervisor" in command
+        launch = "--receipt" in command and "process_supervisor.sh" in command
         if launch:
             self.deadline = timeout_s
             self.delayed_command = command

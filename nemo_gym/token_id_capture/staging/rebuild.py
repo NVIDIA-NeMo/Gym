@@ -14,7 +14,7 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 from typing import Sequence
 
-from nemo_gym.episode_types import EpisodeId
+from nemo_gym.core.episode import EpisodeId
 from nemo_gym.token_id_capture.records import FINISH_REASON_DISAGREEMENT_REASON, incomplete_reason_for_finish_reason
 from nemo_gym.token_id_capture.staging.digest import (
     EXTRAS_DIGEST_VERSION,

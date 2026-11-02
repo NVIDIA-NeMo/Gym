@@ -90,7 +90,7 @@ Each JSONL row contains:
 | `response_tokens/*`, `reasoning_tokens/*` | Response and reasoning length statistics. |
 | `arena/*`, `taxonomy-language/*`, `taxonomy-task-type/*` | Prompt count and ON/OFF scores for slices with at least 50 prompts. |
 
-Each benchmark config also sets `health_check_max_not_final_failure_fraction` to the same limit. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
+Each benchmark config also sets `health_check_max_not_final_failure_fraction` and `health_check_max_final_failure_fraction` to the same limit; an outage counts as final once its retries are used up. When judge outages exceed that share of expected rollouts, the run health check reports the run as unhealthy, but the score is still published. Withholding the score of an unhealthy run is a separate shared-health follow-up; these limits do not yet replace Arena's aggregation-time protection.
 
 `lmarena_v3` keeps the judge score when `0.5 < response length / reference length < 1.75`; otherwise it assigns zero. The reference length is the median length from reference models. For short references (at most 100 tokens), responses from 0 to 175 tokens are accepted.
 

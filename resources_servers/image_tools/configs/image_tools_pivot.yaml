@@ -30,7 +30,6 @@ image_tools_pivot_agent:
       entrypoint: app.py
       # One model call; its tool calls go to the verifier unexecuted.
       execute_tools: false
-      # A pivot is a single decision: one model call, no tool execution.
       max_steps: 1
       resources_server:
         type: resources_servers
@@ -63,5 +62,3 @@ image_tools_pivot_environment_server:
       agent_server:
         type: responses_api_agents
         name: image_tools_pivot_agent
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

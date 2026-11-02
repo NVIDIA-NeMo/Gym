@@ -8,8 +8,8 @@ import pytest
 from starlette.requests import Request
 
 from benchmarks.indic.milu_1_5.prepare import DIRECTORY
+from nemo_gym.client import ServerClient
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.simple_agent.app import SimpleAgentRunRequest
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 

@@ -24,15 +24,15 @@ from app import (
     _parse_wildguard_verdict,
 )
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError
 
 
 _PROMPT_TEMPLATES_DIR = Path(__file__).resolve().parents[1] / "prompt_templates"

@@ -21,7 +21,7 @@ source "${ci_dir}/setup_dev.sh"
 # actually run in CI instead of silently skipping, which would leave that code permanently
 # uncovered by the coverage gate below. mlflow and wandb are optional extras (SDKs now opt-in
 # to keep a core install lean); this suite covers both their installed- and missing-dependency
-# paths (tests/unit_tests/test_exporters.py, tests/unit_tests/test_gitlab_utils.py), so both
+# paths (tests/unit_tests/artifacts/test_exporters.py, tests/unit_tests/test_gitlab_utils.py), so both
 # extras must be present here.
 uv sync --extra dev --extra ray --extra telemetry --extra mlflow --extra wandb
 pytest_addopts='-m "not sandbox" --cov-report= --cov-fail-under=0 --color=yes'

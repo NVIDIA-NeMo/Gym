@@ -41,7 +41,7 @@ import logging
 from copy import deepcopy
 from typing import Any, Iterator
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
     NeMoGymChatCompletionCreateParamsNonStreaming,
 )

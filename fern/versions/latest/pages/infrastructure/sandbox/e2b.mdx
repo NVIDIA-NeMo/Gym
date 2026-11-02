@@ -40,6 +40,9 @@ requirements, template permissions, and quota from its operator. Gateway access
 uses the operator's authentication settings. Set `E2B_API_URL` and
 `E2B_SANDBOX_URL` to the supplied endpoints; the operator may also require
 `connection.api_headers`. Keep secret values out of checked-in YAML.
+Gateway-specific create parameters go in `create.custom_extension_params` and are sent as the
+API's `customExtensionParams`. The E2B SDK cannot send that field, so setting it makes the
+provider create each sandbox with one `POST {api_url}/sandboxes` and then attach with `connect`.
 
 ## Provider Config
 
@@ -62,6 +65,8 @@ sandbox:
       timeout_s: 3600.0
       secure: true
       allow_internet_access: true
+      network: null
+      custom_extension_params: null
       strict_resources: false
     exec:
       default_timeout_s: 180.0
@@ -177,7 +182,18 @@ responsible for the deployment's security posture. The shipped config uses `secu
 the sandbox envd service requires an access token.
 
 Outbound internet access is enabled by default for workloads that install dependencies. Set
-`create.allow_internet_access: false` for offline or untrusted workloads. Values in
+`create.allow_internet_access: false` for offline or untrusted workloads. To allow only some
+destinations, set `create.network` with `allow_out`/`deny_out` lists of CIDRs, IPs or hostnames.
+For example, this permits only the listed package registries:
+
+```yaml
+create:
+  network:
+    deny_out: ["0.0.0.0/0"]
+    allow_out: [pypi.org, files.pythonhosted.org, deb.debian.org, security.debian.org]
+```
+
+Values in
 `SandboxSpec.env` are injected into the remote sandbox, so pass only secrets required by the
 workload and keep E2B credentials in the provider connection config or host environment.
 

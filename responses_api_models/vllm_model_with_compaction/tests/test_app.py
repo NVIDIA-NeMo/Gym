@@ -7,8 +7,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
-from nemo_gym.server_utils import ServerClient
 from responses_api_models.vllm_model.app import VLLMModel, VLLMModelConfig
 from responses_api_models.vllm_model_with_compaction.app import (
     VLLMContextCompactionResponseCreateParams,
@@ -35,6 +35,11 @@ def _make_model(**config_overrides: Any) -> VLLMModelWithCompaction:
         config=config,
         server_client=MagicMock(spec=ServerClient, global_config_dict={}),
     )
+
+
+def test_rejects_forward_unvalidated_reasoning_effort() -> None:
+    with pytest.raises(ValueError, match="does not support forward_unvalidated_reasoning_effort"):
+        _make_model(forward_unvalidated_reasoning_effort=True)
 
 
 def test_tokenize_route_is_non_generating() -> None:

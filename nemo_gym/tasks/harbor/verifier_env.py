@@ -16,7 +16,7 @@ from typing import Any
 import yaml
 
 from nemo_gym.tasks.harbor.errors import HarborTaskError
-from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborTaskConfig
+from nemo_gym.tasks.harbor.models import HarborEnvironment, HarborTaskConfig, HarborTaskStep
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, MAIN_SERVICE
 
 
@@ -42,6 +42,60 @@ def effective_verifier_environment(config: HarborTaskConfig) -> HarborEnvironmen
     return config.environment.model_copy(deep=True)
 
 
+def step_verifier_mode(config: HarborTaskConfig, step: HarborTaskStep) -> str:
+    """``"separate"`` or ``"shared"`` for one step, as Harbor's ``resolve_step_verifier_mode`` (verifier_mode.py at
+    v0.22.0) resolves it: the step's explicit ``[steps.verifier].environment_mode``, else ``separate`` when the step
+    declares a ``[steps.verifier.environment]``, else the task's own mode (:attr:`HarborTaskConfig.is_shared_verifier`).
+    Steps of one task may resolve differently."""
+    if step.verifier.environment_mode is not None:
+        return step.verifier.environment_mode
+    if step.verifier.environment is not None:
+        return "separate"
+    return "shared" if config.is_shared_verifier else "separate"
+
+
+def step_verifier_environment(config: HarborTaskConfig, step: HarborTaskStep) -> HarborEnvironment | None:
+    """The environment a step's separate verifier runs in, as Harbor's ``resolve_effective_verifier_env_config``
+    resolves it with a step: ``[steps.verifier.environment]``, else ``[verifier.environment]``, else a copy of
+    ``[environment]``; ``None`` when the step verifies in shared mode."""
+    if step_verifier_mode(config, step) != "separate":
+        return None
+    if step.verifier.environment is not None:
+        return step.verifier.environment
+    if config.verifier.environment is not None:
+        return config.verifier.environment
+    return config.environment.model_copy(deep=True)
+
+
+def step_verifier_build_context(task_folder: Path, step: HarborTaskStep) -> Path:
+    """The folder Harbor starts a step's separate verifier environment from (``_verifier_env_build_context`` with a
+    step in trial.py at v0.22.0): ``steps/<name>/tests/`` when that folder exists, else the task's ``tests/``."""
+    step_tests = Path(task_folder) / "steps" / step.name / "tests"
+    return step_tests if step_tests.is_dir() else Path(task_folder) / TESTS_DOCKERFILE.parent
+
+
+def verifier_build_environment(task_folder: Path, config: HarborTaskConfig) -> HarborEnvironment | None:
+    """The effective verifier environment whose settings Harbor's build of ``tests/Dockerfile`` sees, or ``None``
+    when nothing builds from ``tests/``: the task's own (:func:`effective_verifier_environment`) when it declares no
+    ``docker_image``, else the first step's whose separate verifier declares none and starts from ``tests/``
+    (:func:`step_verifier_build_context`; a step with a ``tests/`` folder of its own starts from that folder, which
+    this server does not build, and the loader refuses such a step). Steps that would build ``tests/`` under
+    different environments share the first one's settings here, where Harbor builds once per step."""
+    environment = effective_verifier_environment(config)
+    if environment is not None and not environment.docker_image:
+        return environment
+    tests = Path(task_folder) / TESTS_DOCKERFILE.parent
+    for step in config.steps:
+        step_environment = step_verifier_environment(config, step)
+        if (
+            step_environment is not None
+            and not step_environment.docker_image
+            and step_verifier_build_context(task_folder, step) == tests
+        ):
+            return step_environment
+    return None
+
+
 def verifier_build_context(task_folder: Path, config: HarborTaskConfig) -> Path | None:
     """The folder Harbor builds the separate verifier's image from, ``tests/``, when it builds one; else ``None``.
 
@@ -54,10 +108,10 @@ def verifier_build_context(task_folder: Path, config: HarborTaskConfig) -> Path 
     and without an image Harbor refuses the task (``require_agent_environment_definition`` on ``tests/``, which is
     always its verifier environment dir: there is no fallback to ``environment/``), and so does :func:`load_task`.
     Prepare plans one build entry per returned context (``nemo_gym.tasks.harbor.image_build.plan_builds``) and the
-    loader reads its record.
+    loader reads its record. A multi-step task whose steps verify separately builds ``tests/`` for the steps that
+    declare no image and start from it (:func:`verifier_build_environment`), whatever the task's own mode.
     """
-    environment = effective_verifier_environment(config)
-    if environment is None or environment.docker_image:
+    if verifier_build_environment(task_folder, config) is None:
         return None
     dockerfile = Path(task_folder) / TESTS_DOCKERFILE
     return dockerfile.parent if dockerfile.is_file() else None

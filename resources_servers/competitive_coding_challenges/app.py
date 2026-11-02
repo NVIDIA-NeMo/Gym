@@ -12,25 +12,30 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
+import asyncio
 import json
 import logging
 import os
 from datetime import datetime, timezone
-from typing import Any, Dict, List, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional, Tuple, Union
 
 from fastapi import FastAPI
-from pydantic import ConfigDict, Field, PrivateAttr
+from pydantic import ConfigDict, Field, PrivateAttr, model_validator
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
+from nemo_gym.metrics import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.sandbox import get_provider_class, resolve_provider_config, resolve_provider_metadata
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.failure_kinds import PROVIDER_UNAVAILABLE, VERIFIER_ERROR
-from nemo_gym.reward_profile import compute_pass_majority_metrics, highest_k_metrics
+from nemo_gym.verification import SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator
+from resources_servers.competitive_coding_challenges.sandbox_evaluator import CCCSandboxConfig, evaluate_in_sandbox
 
 
 LOG = logging.getLogger(__name__)
@@ -100,6 +105,34 @@ class CompetitiveCodingChallengesResourcesServerConfig(BaseResourcesServerConfig
     shared_dir: str = "/tmp"
     local_compile_dir: Optional[str] = "/tmp/nemo-gym-compile"
     reward_mode: Literal["binary", "fraction"] = "binary"
+    # Grade every subtask of a row's problem, not only its own, as NeMo Skills does. Benchmarks turn it
+    # on so their totals cover every subtask; the reward still uses only the row's own subtask.
+    grade_all_subtasks: bool = False
+    # Score a `min` subtask as its lowest test score times its points, as IOI does, instead of
+    # all-or-nothing. Grading of a subtask stops at the first test that settles its score either way.
+    partial_credit: bool = False
+    # Compile and run each submission in a fresh provider sandbox instead of the NeMo Skills
+    # sandbox. Names a top-level sandbox block, such as `sandbox` from
+    # nemo_gym/sandbox/providers/<provider>/configs/<provider>.yaml, or is an inline provider mapping.
+    # num_parallel_requests then caps concurrent sandboxes.
+    sandbox_provider: Optional[Union[str, Dict[str, Any]]] = None
+    sandbox_config: CCCSandboxConfig = Field(default_factory=CCCSandboxConfig)
+
+    @model_validator(mode="after")
+    def _check_sandbox_config(self) -> "CompetitiveCodingChallengesResourcesServerConfig":
+        if self.sandbox_provider is None:
+            return self
+        if not self.sandbox_config.image:
+            raise ValueError("sandbox_config.image is required when sandbox_provider is set")
+        cpu = self.sandbox_config.resources.cpu
+        if cpu is None:
+            raise ValueError("sandbox_config.resources.cpu is required when sandbox_provider is set")
+        if self.test_batch_size > cpu:
+            # Time limits are wall-clock, so oversubscribed tests turn into spurious time-limit failures.
+            raise ValueError(
+                f"test_batch_size ({self.test_batch_size}) must not exceed sandbox_config.resources.cpu ({cpu})"
+            )
+        return self
 
 
 class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
@@ -111,6 +144,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
     _evaluator: Optional[CCCEvaluator] = PrivateAttr(default=None)
     _log_lock: Optional[Any] = PrivateAttr(default=None)
+    _sandbox_target: Optional[Tuple[Dict[str, Any], Dict[str, str]]] = PrivateAttr(default=None)
+    _sandbox_semaphore: Optional[asyncio.Semaphore] = PrivateAttr(default=None)
 
     def _subtask_max_score(self, body: CompetitiveCodingChallengesVerifyRequest) -> Optional[float]:
         if body.subtask_score is not None:
@@ -237,8 +272,14 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         headline ``total_score``. ``per_problem_subtask_scores`` carries the
         per-problem breakdown with per-subtask ``{score, max_score}`` and a
         ``total`` summary.
+
+        ``pass@1[avg-of-k]/total_score`` is NeMo Skills' pass@1 total: average each
+        row's rollouts per subtask, keep the best row per subtask, and sum. With
+        ``grade_all_subtasks`` and ``partial_credit`` both totals are computed the way Skills reports them.
+        Without ``grade_all_subtasks`` a row runs only its own subtask's tests, and a subtask that shares some of
+        them is scored from those alone, so both totals overcount problems whose subtasks share tests.
         """
-        metrics, _, _, _ = compute_pass_majority_metrics(
+        metrics, _, _, max_k = compute_pass_majority_metrics(
             tasks,
             score_fn=self._score_fn,
             answer_key="extracted_code",
@@ -279,13 +320,34 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             }
             total_score += problem_total
 
-        metrics["total_score"] = int(total_score)
+        # Partial credit makes fractional totals; keep them rather than truncating.
+        metrics["total_score"] = int(total_score) if total_score.is_integer() else total_score
         metrics["per_problem_subtask_scores"] = per_problem
+        if max_k:
+            metrics[f"pass@1[avg-of-{max_k}]/total_score"] = self._avg_rollout_total_score(tasks)
         return metrics
+
+    @staticmethod
+    def _avg_rollout_total_score(tasks: List[List[Dict[str, Any]]]) -> float:
+        """Sum over problem subtasks of the best row's mean score across that row's rollouts."""
+        best_row_mean: Dict[Tuple[str, str], float] = {}
+        for rollouts in tasks:
+            subtask_sums: Dict[Tuple[str, str], float] = {}
+            for r in rollouts:
+                problem_id = r.get("problem_id") or r.get("ioi_id")
+                if not problem_id:
+                    continue
+                tcr = (r.get("details") or {}).get("test_case_results") or {}
+                for st, sub in tcr.items():
+                    key = (problem_id, st)
+                    subtask_sums[key] = subtask_sums.get(key, 0.0) + float((sub or {}).get("score", 0) or 0)
+            for key, total in subtask_sums.items():
+                best_row_mean[key] = max(best_row_mean.get(key, 0.0), total / len(rollouts))
+        return sum(best_row_mean.values())
 
     def get_key_metrics(self, agent_metrics: Dict[str, Any]) -> Dict[str, Any]:
         key: Dict[str, Any] = {}
-        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy"]))
+        key.update(highest_k_metrics(agent_metrics, "pass@1[avg-of-{k}]", score_names=["accuracy", "total_score"]))
         key.update(highest_k_metrics(agent_metrics, "pass@{k}", score_names=["accuracy"]))
         if "total_score" in agent_metrics:
             key["total_score"] = agent_metrics["total_score"]
@@ -293,8 +355,14 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
+        use_sandbox = self.config.sandbox_provider is not None
+        if use_sandbox:
+            # Fail at startup: verify() scores any error other than SandboxVerificationError as 0.0, so a
+            # missing or unknown provider would otherwise zero every sample without masking it.
+            provider, _ = self._resolve_sandbox_target()
+            get_provider_class(next(iter(provider)))
 
-        if os.path.abspath(self.config.shared_dir) == "/tmp":
+        if not use_sandbox and os.path.abspath(self.config.shared_dir) == "/tmp":
             LOG.warning(
                 "CCC shared_dir is /tmp. If the resources server and sandbox run in separate containers, "
                 "/tmp may not be visible to both. Set CCC_SHARED_TEMP_DIR to a path mounted into both containers."
@@ -314,6 +382,8 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
                 "shared_dir": self.config.shared_dir,
                 "local_compile_dir": self.config.local_compile_dir,
                 "run_all_tests": self.config.reward_mode == "fraction",
+                "grade_all_subtasks": self.config.grade_all_subtasks,
+                "partial_credit": self.config.partial_credit,
             },
             num_parallel_requests=self.config.num_parallel_requests,
         )
@@ -323,7 +393,9 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         @app.on_event("startup")
         async def _eager_init():
             print("CCC: pre-loading metadata (~27 GB, ~46s) before first request...")
-            await evaluator._initialize_runtime()
+            # With sandbox_provider, execution happens in per-verification sandboxes and the
+            # server only needs metadata for scoring.
+            await (evaluator.load_metadata() if use_sandbox else evaluator._initialize_runtime())
             print("CCC: metadata loaded, server ready.")
 
         return app
@@ -351,13 +423,25 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             }
             if payload.get("total_time") is not None:
                 evaluation_entry["total_time"] = payload["total_time"]
-            details = await self._evaluator.eval_single(evaluation_entry)
+            if self.config.sandbox_provider is None:
+                details = await self._evaluator.eval_single(evaluation_entry)
+            else:
+                details = await self._evaluate_in_sandbox(evaluation_entry)
             reward = self._compute_reward(body, details)
             if details.get("infra_error"):
                 failure_kind, failure_reason = PROVIDER_UNAVAILABLE, details["infra_error"]
+        except SandboxVerificationError as e:
+            # The environment failed, not the policy: exclude the sample rather than score it.
+            LOG.warning("competitive_coding_challenges sandbox verification failed (%s): %s", e.failure_kind, e)
+            failure_kind, failure_reason = e.failure_kind, str(e)
+            details = {"error": str(e)}
         except UnicodeEncodeError as e:
             # The generated code cannot be written as UTF-8 (a lone surrogate): the model's output, so it stays scored.
             details = {"error": str(e)}
+        except ImportError:
+            # A provider SDK missing from the server venv is a deployment error; masking it as a verifier error
+            # would silently drop every CCC sample.
+            raise
         except Exception as e:
             details = {"error": str(e)}
             failure_kind, failure_reason = VERIFIER_ERROR, str(e)
@@ -384,6 +468,43 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
             total_test_execution_time_s=details.get("total_test_execution_time_s", 0.0),
             mean_test_execution_time_s=details.get("mean_test_execution_time_s", 0.0),
         )
+
+    def _resolve_sandbox_target(self) -> Tuple[Dict[str, Any], Dict[str, str]]:
+        """Provider config and sandbox metadata, resolved once from the global config."""
+        if self._sandbox_target is None:
+            global_config_dict = get_global_config_dict()
+            provider = resolve_provider_config(self.config.sandbox_provider, global_config_dict)
+            metadata = {
+                **resolve_provider_metadata(self.config.sandbox_provider, global_config_dict),
+                "nemo_gym_server": self.config.name,
+            }
+            self._sandbox_target = (provider, metadata)
+        return self._sandbox_target
+
+    async def _evaluate_in_sandbox(self, entry: dict[str, Any]) -> dict[str, Any]:
+        await self._evaluator.load_metadata()
+        # An unknown problem fails here, before a sandbox exists, as it does on the default path.
+        self._evaluator.get_problem_metadata(entry["problem_id"], entry["competition_id"])
+        if not entry["competition_id"]:
+            # The row may omit its competition when the problem id is unique, but the problem's file in
+            # problem_data_dir sits under the competition it belongs to.
+            (competition_id,) = self._evaluator.problem_index[entry["problem_id"]]
+            entry = {**entry, "competition_id": competition_id or None}
+        provider, metadata = self._resolve_sandbox_target()
+        if self._sandbox_semaphore is None:
+            self._sandbox_semaphore = asyncio.Semaphore(self.config.num_parallel_requests)
+        evaluator_config = {
+            key: self._evaluator.config[key]
+            for key in ("test_batch_size", "time_scale", "run_all_tests", "grade_all_subtasks", "partial_credit")
+        }
+        async with self._sandbox_semaphore:
+            return await evaluate_in_sandbox(
+                entry,
+                evaluator_config=evaluator_config,
+                provider=provider,
+                config=self.config.sandbox_config,
+                metadata=metadata,
+            )
 
     async def _append_log_jsonl(
         self,

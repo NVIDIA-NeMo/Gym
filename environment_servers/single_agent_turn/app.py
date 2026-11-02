@@ -10,20 +10,7 @@ from warnings import warn
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
 
-from nemo_gym._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType, seed_restarts, seed_verify_step_type
 from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.base_environment_server import (
-    BaseEnvironmentServer,
-    BaseEnvironmentServerConfig,
-    CleanupContext,
-    HandledEpisodeError,
-    dependency_failure,
-)
-from nemo_gym.base_resources_server import (
-    ResourcesCloseSessionRequest,
-    ResourcesSeedSessionRequest,
-    ResourcesSeedSessionResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
@@ -31,44 +18,50 @@ from nemo_gym.base_responses_api_agent import (
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
 )
-from nemo_gym.config_types import (
+from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
+from nemo_gym.config import (
+    SKIP_VERIFICATION_KEY_NAME,
+    SKIP_VERIFICATION_REWARD_KEY_NAME,
     TOKEN_CAPTURE_PATH_SEGMENT,
+    TOKEN_ID_CAPTURE_BLOCK,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
     ResourcesServerRef,
-)
-from nemo_gym.global_config import (
-    SKIP_VERIFICATION_KEY_NAME,
-    SKIP_VERIFICATION_REWARD_KEY_NAME,
-    TOKEN_ID_CAPTURE_BLOCK,
     get_first_server_config_dict,
 )
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.rollout_observability import (
-    NG_AGENT_OBSERVATIONS_KEY,
-    NG_TRAJECTORY_KEY,
-    AgentObservationBundle,
-    TrajectoryRecord,
-)
-from nemo_gym.server_utils import (
-    get_response_json,
-    is_nemo_gym_fastapi_entrypoint,
-    raise_for_status,
-    rollout_path_prefix,
-)
-from nemo_gym.single_agent_turn_types import (
+from nemo_gym.core import NeMoGymResponse
+from nemo_gym.server_runtime import (
+    CHECKPOINT_CLOSE_FOLLOWS_HEADER,
+    BaseEnvironmentServer,
+    BaseEnvironmentServerConfig,
+    CleanupContext,
+    DirectHTTPToolAccess,
+    HandledEpisodeError,
+    MCPStreamableHTTPConnection,
+    MCPToolAccess,
+    ResourcesCloseSessionRequest,
+    ResourcesSeedSessionRequest,
+    ResourcesSeedSessionResponse,
     SingleAgentTurnFailure,
     SingleAgentTurnRequest,
     SingleAgentTurnResponse,
     SingleAgentTurnResult,
-)
-from nemo_gym.tool_access import (
-    DirectHTTPToolAccess,
-    MCPStreamableHTTPConnection,
-    MCPToolAccess,
+    StepType,
     ToolAccess,
+    dependency_failure,
+    seed_restarts,
+    seed_verify_step_type,
 )
+from nemo_gym.trajectory import (
+    NG_AGENT_OBSERVATIONS_KEY,
+    NG_TRAJECTORY_KEY,
+    NG_VERIFIER_INVOCATIONS_KEY,
+    AgentObservationBundle,
+    TrajectoryRecord,
+    VerifierInvocation,
+)
+from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
 class SessionHandles(BaseModel):
@@ -478,6 +471,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         observations: AgentObservationBundle | None,
         trajectory: TrajectoryRecord | None = None,
     ) -> SingleAgentTurnResult:
+        verifier_invocations = None
         try:
             verify_http_response = await self.server_client.post(
                 server_name=self.config.resources_server.name,
@@ -488,8 +482,19 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 # Final cleanup closes the session, so the Resources Server keeps tracking it until then.
                 headers={CHECKPOINT_CLOSE_FOLLOWS_HEADER: "1"},
             )
-            await raise_for_status(verify_http_response)
-            return SingleAgentTurnResult.model_validate(await get_response_json(verify_http_response))
+            # Read returned evidence before raising on an HTTP failure. A non-JSON
+            # error body still follows the original HTTP-error handling path.
+            try:
+                payload = await get_response_json(verify_http_response)
+                if isinstance(payload, dict) and payload.get(NG_VERIFIER_INVOCATIONS_KEY):
+                    verifier_invocations = [
+                        VerifierInvocation.model_validate(value) for value in payload[NG_VERIFIER_INVOCATIONS_KEY]
+                    ]
+            except (ValueError, TypeError):
+                await raise_for_status(verify_http_response, content=await verify_http_response.read())
+                raise
+            await raise_for_status(verify_http_response, content=await verify_http_response.read())
+            return SingleAgentTurnResult.model_validate(payload)
         except Exception as error:
             raise dependency_failure(
                 error,
@@ -498,6 +503,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=agent_response,
                 agent_observations=observations,
                 trajectory=trajectory,
+                verifier_invocations=verifier_invocations,
             ) from error
 
     @staticmethod
@@ -550,6 +556,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         partial_response: Any = None,
         agent_observations: Any = None,
         trajectory: Any = None,
+        verifier_invocations: list[VerifierInvocation] | None = None,
     ) -> HandledEpisodeError:
         # The harness's evidence of a failed turn (its observations and the decisions it took before the failure)
         # travels with the failure row, as it travels with a result.
@@ -561,6 +568,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
                 partial_response=partial_response,
                 agent_observations=agent_observations,
                 trajectory=trajectory,
+                verifier_invocations=verifier_invocations,
             )
         )
 

@@ -8,8 +8,8 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from fastapi import Request
 
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
 from nemo_gym.rollout_collection import NG_TERMINAL_KEY, is_terminal_failure
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
 from resources_servers.terminal_bench_4 import lifecycle
 from resources_servers.terminal_bench_4.models import SandboxedVerifyRequest, TerminalBench4RunRequest
 from resources_servers.terminal_bench_4.task import TaskSettings

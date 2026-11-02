@@ -81,7 +81,7 @@ def clear_token_captures_for_rollouts(records: list, token_capture_dirs: list[Pa
     """
     if not token_capture_dirs:
         return
-    from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
+    from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     rollout_ids = [rollout_id for record in records if (rollout_id := maybe_rollout_id_from_run_body(record))]
     for directory in token_capture_dirs:

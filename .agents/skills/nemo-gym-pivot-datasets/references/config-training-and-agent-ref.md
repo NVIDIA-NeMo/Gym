@@ -32,8 +32,6 @@ example_single_step_tool_use_with_argument_comparison_environment_server:
       agent_server:
         type: responses_api_agents
         name: example_single_step_tool_use_with_argument_comparison_agent
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180
 ```
 
 `simple_agent` with `execute_tools: false` runs only in agent sessions, so the config declares a

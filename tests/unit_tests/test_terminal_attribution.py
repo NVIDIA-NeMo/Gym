@@ -26,14 +26,6 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.token_id_capture import (
-    EngineRefusalRecord,
-    ParentResolutionStatus,
-    TokenCaptureStore,
-    TokenEntry,
-    apply_capture_incomplete_verdict,
-    stamp_lineage,
-)
 from nemo_gym.token_id_capture.builder import run_builder
 from nemo_gym.token_id_capture.consumer import _assemble
 from nemo_gym.token_id_capture.delivery import (
@@ -45,8 +37,16 @@ from nemo_gym.token_id_capture.delivery import (
     finalize_rollout_token_capture,
 )
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, assistant_fingerprint
+from nemo_gym.token_id_capture.records import (
+    EngineRefusalRecord,
+    ParentResolutionStatus,
+    TokenEntry,
+    apply_capture_incomplete_verdict,
+    stamp_lineage,
+)
 from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST
 from nemo_gym.token_id_capture.staging.records import CallRecord
+from nemo_gym.token_id_capture.store import TokenCaptureStore
 from nemo_gym.token_id_capture.terminal import resolve_terminal
 
 

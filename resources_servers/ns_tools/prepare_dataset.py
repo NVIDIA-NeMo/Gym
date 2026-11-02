@@ -17,7 +17,8 @@
 Prepare a dataset for use with the ns_tools NeMo Gym resources server.
 
 This script transforms a source dataset (e.g., comp-math-24-25/test.txt) into the
-JSONL format required by nemo-gym, using nemo_skills prompt configs and tool schemas.
+JSONL format required by nemo-gym, using NeMo Skills prompt configs (copied to prompts/)
+and NeMo Skills tool schemas.
 
 Usage:
     python prepare_dataset.py \
@@ -30,7 +31,7 @@ Usage:
 Example:
     python prepare_dataset.py \
         --input ~/nemo_skills/dataset/comp-math-24-25/test.txt \
-        --output data/compmath_prepared.jsonl \
+        --output data/compmath_test.jsonl \
         --prompt_config generic/math \
         --tools nemo_skills.mcp.servers.python_tool::DirectPythonTool
 """
@@ -44,11 +45,16 @@ from pathlib import Path
 from typing import Any
 
 from nemo_skills.mcp.tool_manager import ToolManager
-from nemo_skills.prompt.utils import load_config
+
+from nemo_gym.prompt import PromptConfig, load_prompt_config
 
 
 logging.basicConfig(level=logging.INFO, format="%(asctime)s - %(levelname)s - %(message)s")
 logger = logging.getLogger(__name__)
+
+# Prompt config names such as generic/math resolve to copies of the NeMo Skills YAMLs here, because the pinned
+# nemo-skills-tools package ships none.
+PROMPT_CONFIG_DIR = Path(__file__).parent / "prompts"
 
 
 def parse_args():
@@ -72,7 +78,7 @@ def parse_args():
     parser.add_argument(
         "--prompt_config",
         default="generic/math",
-        help="Prompt config path (e.g., generic/math, llama3-instruct/math)",
+        help="Prompt config name under prompts/ (e.g., generic/math), or a path to a prompt YAML file",
     )
     parser.add_argument(
         "--tools",
@@ -181,45 +187,33 @@ async def get_tool_schemas(
     return formatted_tools
 
 
-def format_user_message(problem: str, prompt_config: str) -> str:
+def load_prompt(prompt_config: str) -> PromptConfig:
     """
-    Format the user message using nemo_skills prompt config.
+    Load a prompt config by name from prompts/ (e.g., generic/math), or from a path ending in .yaml.
     """
-    try:
-        config = load_config(prompt_config)
-        user_template = config.get("user", "{problem}")
-
-        # Handle few-shot examples if present
-        examples = ""
-        if "few_shot_examples" in config:
-            # For now, we don't include few-shot examples by default
-            pass
-
-        # Format the user message
-        user_message = user_template.format(problem=problem, examples=examples)
-        return user_message
-    except Exception as e:
-        logger.warning(f"Could not load prompt config '{prompt_config}': {e}. Using raw problem.")
-        return problem
+    if not prompt_config.endswith(".yaml"):
+        prompt_config = str(PROMPT_CONFIG_DIR / f"{prompt_config}.yaml")
+    return load_prompt_config(prompt_config)
 
 
-def get_system_prompt(prompt_config: str) -> str | None:
+def build_input_messages(problem: str, prompt: PromptConfig) -> list[dict[str, str]]:
     """
-    Get system prompt from prompt config, if present.
+    Fill the prompt config's system and user templates for one problem.
     """
-    try:
-        config = load_config(prompt_config)
-        return config.get("system", None)
-    except Exception:
-        return None
+    # Few-shot examples are not included, so {examples} is empty.
+    values = {"problem": problem, "examples": ""}
+    input_messages = []
+    if prompt.system:
+        input_messages.append({"role": "system", "content": prompt.system.format(**values)})
+    input_messages.append({"role": "user", "content": prompt.user.format(**values)})
+    return input_messages
 
 
 def process_sample(
     sample: dict[str, Any],
     idx: int,
     tool_schemas: list[dict[str, Any]],
-    prompt_config: str,
-    system_prompt: str | None,
+    prompt: PromptConfig,
     problem_field: str,
     answer_field: str,
     id_field: str,
@@ -237,14 +231,8 @@ def process_sample(
     if not problem:
         logger.warning(f"Sample {sample_id} has no problem text")
 
-    # Format user message using prompt config
-    user_message = format_user_message(problem, prompt_config)
-
-    # Build the input messages
-    input_messages = []
-    if system_prompt:
-        input_messages.append({"role": "system", "content": system_prompt})
-    input_messages.append({"role": "user", "content": user_message})
+    # Build the input messages from the prompt config
+    input_messages = build_input_messages(problem, prompt)
 
     # Build the output entry
     output = {
@@ -283,6 +271,11 @@ async def main():
         logger.error(f"Input file not found: {input_path}")
         sys.exit(1)
 
+    # Loaded before any output is written, so a missing prompt config fails the run instead of leaving raw problems.
+    prompt = load_prompt(args.prompt_config)
+    # Fill it once too, so a template error (unknown placeholder, stray brace) fails before the output is truncated.
+    build_input_messages("", prompt)
+
     # Create output directory if needed
     output_path = Path(args.output).expanduser()
     output_path.parent.mkdir(parents=True, exist_ok=True)
@@ -303,10 +296,8 @@ async def main():
     )
     logger.info(f"Loaded {len(tool_schemas)} tools: {[t.get('name') for t in tool_schemas]}")
 
-    # Get system prompt from config
-    system_prompt = get_system_prompt(args.prompt_config)
-    if system_prompt:
-        logger.info(f"System prompt: {system_prompt[:100]}...")
+    if prompt.system:
+        logger.info(f"System prompt: {prompt.system[:100]}...")
     else:
         logger.info("No system prompt in config")
 
@@ -333,8 +324,7 @@ async def main():
                 sample=sample,
                 idx=idx,
                 tool_schemas=tool_schemas,
-                prompt_config=args.prompt_config,
-                system_prompt=system_prompt,
+                prompt=prompt,
                 problem_field=args.problem_field,
                 answer_field=args.answer_field,
                 id_field=args.id_field,

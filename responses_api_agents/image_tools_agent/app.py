@@ -11,26 +11,20 @@ from fastapi import Request, Response
 from PIL import Image
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    AggregateMetrics,
-    AggregateMetricsRequest,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-)
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import AggregateMetrics, AggregateMetricsRequest, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     accumulate_response_usage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyRequest, BaseVerifyResponse
 from resources_servers.image_tools import (
     ImageToolsGymToolConfig,
     ImageToolsGymToolLogic,
@@ -372,7 +366,10 @@ class ImageToolsAgent(SimpleResponsesAPIAgent):
         aux_reward = float(rollout_info["image_tools_aux_reward"])
         verify_response_json["base_reward"] = base_reward
         verify_response_json["image_tools_aux_reward"] = aux_reward
-        verify_response_json["reward"] = base_reward + aux_reward
+        # Add auxiliary rewards to the base score, capped above at 1.0.
+        # Positive bonuses can raise any score below the cap; negative penalties
+        # still apply at every base score, including a correct answer's 1.0.
+        verify_response_json["reward"] = min(1.0, base_reward + aux_reward)
         verify_response_json["image_tools_base_agent_ref"] = body.image_tools_base_agent_ref
         verify_response_json.update(rollout_info)
         verify_response_json["response"] = model_response.model_dump()

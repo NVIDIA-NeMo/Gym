@@ -19,16 +19,15 @@ from pathlib import Path
 
 import pytest
 import yaml
-from omegaconf import OmegaConf
+from omegaconf import DictConfig, OmegaConf
 
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
     environment_server_agent_refs,
     legacy_environment_server_name,
 )
 from nemo_gym.rollout_collection import _environment_servers_by_agent
-from nemo_gym.server_utils import DictConfig
 
 
 SCRIPT = Path(__file__).resolve().parents[2] / "scripts" / "add_legacy_agent_environment_servers.py"
@@ -78,6 +77,7 @@ def test_migrates_a_config_outside_the_repository(tmp_path: Path) -> None:
     [
         "hermes_agent",
         "pi_agent",
+        "pool_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
@@ -115,6 +115,7 @@ def test_migration_respects_agent_session_templates(
     [
         "hermes_agent",
         "pi_agent",
+        "pool_agent",
         "codex_agent",
         "openclaw_agent",
         "opencode_agent",
@@ -142,21 +143,22 @@ def test_agent_session_capable_overlay_keeps_inherited_resources(tmp_path: Path,
     assert resolved.renamed_agent.responses_api_agents[agent_type].resources_server.name == "my_resources"
 
 
-def test_default_pi_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
+@pytest.mark.parametrize("agent_type", ["pi_agent", "pool_agent"])
+def test_default_agent_composes_with_exactly_one_session_environment(tmp_path: Path, agent_type: str) -> None:
     config = tmp_path / "agent.yaml"
-    default = SCRIPT.parents[1] / "responses_api_agents/pi_agent/configs/pi_agent.yaml"
+    default = SCRIPT.parents[1] / f"responses_api_agents/{agent_type}/configs/{agent_type}.yaml"
     config.write_text(default.read_text())
     composition = tmp_path / "run.yaml"
     composition.write_text(
         "policy_model_name: test-model\n"
-        + _server_fronting("pi_agent", name="session_environment", server_type="single_agent_turn_legacy")
+        + _server_fronting(agent_type, name="session_environment", server_type="single_agent_turn_legacy")
     )
     before = config.read_text()
     assert migration.main([str(config)]) == 0
     assert config.read_text() == before
     resolved = _parse(config, composition, strict=True)
-    assert _environment_servers_by_agent(resolved) == {"pi_agent": ["session_environment"]}
-    assert resolved.pi_agent.responses_api_agents.pi_agent.resources_server is None
+    assert _environment_servers_by_agent(resolved) == {agent_type: ["session_environment"]}
+    assert resolved[agent_type].responses_api_agents[agent_type].resources_server is None
 
 
 def test_default_codex_composes_with_exactly_one_session_environment(tmp_path: Path) -> None:
@@ -595,7 +597,7 @@ def _switched_server(document: dict, name: str) -> dict:
 
 
 def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 
     config = tmp_path / "my_run.yaml"
     config.write_text(AGENT_CONFIG + RELAY + FOLLOWING)
@@ -609,9 +611,13 @@ def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.Cap
     assert server["agent_server"] == {"type": "responses_api_agents", "name": "my_simple_agent"}
     # The agent's /run called the Resources Server's tool routes; the grant gives the session the same routes.
     assert server["resources_tool_transports"] == ["direct_http"]
-    SingleAgentTurnEnvironmentServerConfig.model_validate(
+    assert "default_episode_timeout_seconds" not in server
+    assert "cleanup_timeout_seconds" not in server
+    server_config = SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(
         {**server, "name": "my_environment_server", "host": "h", "port": 1}
     )
+    assert server_config.default_episode_timeout_seconds == 21600
+    assert server_config.cleanup_timeout_seconds == 180
     resolved = _parse(config, strict=True)
     assert _environment_servers_by_agent(resolved) == {"my_simple_agent": ["my_environment_server"]}
     assert "relays switched: 1, staying on the relay: 0" in capsys.readouterr().out
@@ -1153,18 +1159,22 @@ def test_resolved_instances_deletes_after_all_overlays_merge() -> None:
 
 
 @pytest.mark.parametrize(
-    ("benchmark", "recipe", "resources"),
+    ("benchmark", "recipe", "resources", "dataset"),
     [
-        ("hle", "pi", "equivalence_llm_judge"),
-        ("hle", "opencode", "equivalence_llm_judge"),
-        ("hle", "pi_search", "equivalence_llm_judge"),
-        ("hle", "opencode_search", "equivalence_llm_judge"),
-        ("apex_shortlist", "pi", "math_with_judge"),
-        ("apex_shortlist", "opencode", "math_with_judge"),
+        ("hle", "pi", "equivalence_llm_judge", "hle"),
+        ("hle", "opencode", "equivalence_llm_judge", "hle"),
+        ("hle", "pi_search", "equivalence_llm_judge", "hle"),
+        ("hle", "opencode_search", "equivalence_llm_judge", "hle"),
+        ("hle_diamond", "pi", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "opencode", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "pi_search", "equivalence_llm_judge", "hle_diamond_text"),
+        ("hle_diamond", "opencode_search", "equivalence_llm_judge", "hle_diamond_text"),
+        ("apex_shortlist", "pi", "math_with_judge", "apex_shortlist"),
+        ("apex_shortlist", "opencode", "math_with_judge", "apex_shortlist"),
     ],
 )
 def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
-    benchmark: str, recipe: str, resources: str, monkeypatch: pytest.MonkeyPatch
+    benchmark: str, recipe: str, resources: str, dataset: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     for variable in ("PI_SANDBOX_IMAGE", "OPENCODE_SANDBOX_IMAGE", "OPENSANDBOX_API_KEY", "TAVILY_API_KEY"):
         monkeypatch.setenv(variable, "test-only")
@@ -1207,7 +1217,7 @@ def test_harness_recipes_preserve_routing_and_bindings_across_the_switch(
         assert list(parsed[server_name].environment_servers) == ["legacy_agent"]
         agent = next(iter(parsed[agent_name].responses_api_agents.values()))
         assert agent.resources_server.name == resources_name
-        assert agent.datasets[0].name == benchmark
+        assert agent.datasets[0].name == dataset
         if recipe.endswith("_search"):
             assert agent.tool_servers == [{"type": "resources_servers", "name": "tavily"}]
         participants = {}

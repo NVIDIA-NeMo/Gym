@@ -20,7 +20,7 @@ from unittest.mock import AsyncMock
 from aiohttp import ClientConnectionError
 from pytest import mark
 
-from nemo_gym.base_resources_server import judge_failsafe
+from nemo_gym.verification import judge_failsafe
 from resources_servers.arena.app import ArenaResourcesServer
 from resources_servers.arena.scripts.remove_failed_rollouts import is_failed_rollout
 from resources_servers.arena.tests import test_app as _server_tests

@@ -31,8 +31,7 @@ from environment_servers.harbor.tests.conftest import (
     write_image_config,
 )
 from environment_servers.harbor.verifier import _verifier_image
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxSpec
-from nemo_gym.sandbox.utils import cpu_cap_env
+from nemo_gym.sandbox import SandboxExecResult, SandboxSpec, cpu_cap_env
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.dockerfile import OverlayRun
 from nemo_gym.tasks.harbor.errors import HarborTaskError

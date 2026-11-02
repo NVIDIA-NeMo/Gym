@@ -52,5 +52,3 @@ swe_pivot_environment_server:
       agent_server:
         type: responses_api_agents
         name: swe_pivot_tool_simulation_agent
-      default_episode_timeout_seconds: 21600
-      cleanup_timeout_seconds: 180

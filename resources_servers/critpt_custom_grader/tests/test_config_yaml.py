@@ -15,7 +15,7 @@ from pathlib import Path
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from resources_servers.critpt_custom_grader import app as adapter
 from resources_servers.critpt_custom_grader.execution import ExecutionPolicy
 
@@ -108,7 +108,7 @@ def shipped_block():
 
 
 def loaded(block):
-    """What server_utils.load_config_from_global_config validates: the populated YAML block plus the instance name."""
+    """What BaseServer.load_config_from_global_config validates: the populated YAML block plus the instance name."""
     return adapter.CritPtCustomGraderConfig.model_validate(
         {**block, "host": "127.0.0.1", "port": 8000, "name": "critpt_custom_grader"}
     )

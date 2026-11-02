@@ -19,28 +19,28 @@ import threading
 
 import pytest
 
-from nemo_gym.token_id_capture import (
-    CaptureContext,
-    FileLineageStore,
-    InMemoryLineageStore,
-    ParentResolutionStatus,
-    TokenCaptureSnapshot,
+from nemo_gym.token_id_capture.builder import (
     assert_prefix_contiguity,
-    compute_digest,
-    mask_incomplete_when_attributed_from_config,
     prefix_merging,
     project_chain_to_output_items,
     project_main_chain_response,
-    reset_token_sink,
-    set_token_sink,
-    stamp_continuation,
-    stamp_lineage,
+)
+from nemo_gym.token_id_capture.consumer import (
+    mask_incomplete_when_attributed_from_config,
     token_id_capture_dirs_from_config,
     trajectories_for_rollout,
     trajectories_from_source,
 )
-from nemo_gym.token_id_capture.records import TokenEntry
-from nemo_gym.token_id_capture.sink import commit_entry, resolve_parent
+from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, stamp_continuation
+from nemo_gym.token_id_capture.protocols import TokenCaptureSnapshot
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, compute_digest, stamp_lineage
+from nemo_gym.token_id_capture.sink import (
+    CaptureContext,
+    commit_entry,
+    reset_token_sink,
+    resolve_parent,
+    set_token_sink,
+)
 from nemo_gym.token_id_capture.store import TokenCaptureStore
 
 

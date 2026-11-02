@@ -22,6 +22,12 @@ from typing import Callable, List, Optional, Union
 
 logger = logging.getLogger(__name__)
 
+# Old import paths of code moved by the package reorganization keep working; see nemo_gym/_moved_paths.py.
+from nemo_gym._moved_paths import install_moved_module_finder, moved_names_getattr  # noqa: E402
+
+
+install_moved_module_finder()
+
 # /path/to/dir/Gym (PARENT_DIR)
 # |- cache (CACHE_DIR)
 # |- results (RESULTS_DIR)
@@ -181,38 +187,38 @@ from nemo_gym.package_info import (
 # Maps each public name to its defining submodule. Existing deep import paths continue to work.
 _LAZY_EXPORTS: dict[str, str] = {
     # Resources server extension points and contracts
-    "BaseResourcesServerConfig": "base_resources_server",
-    "SimpleResourcesServer": "base_resources_server",
-    "BaseRunRequest": "base_resources_server",
-    "BaseVerifyRequest": "base_resources_server",
-    "BaseVerifyResponse": "base_resources_server",
-    "BaseMultiRewardVerifyResponse": "base_resources_server",
-    "BaseSeedSessionRequest": "base_resources_server",
-    "BaseSeedSessionResponse": "base_resources_server",
-    "ReverifyMode": "base_resources_server",
+    "BaseResourcesServerConfig": "server_runtime.base_resources_server",
+    "SimpleResourcesServer": "server_runtime.base_resources_server",
+    "BaseRunRequest": "server_runtime.base_resources_server",
+    "BaseVerifyRequest": "server_runtime.base_resources_server",
+    "BaseVerifyResponse": "server_runtime.base_resources_server",
+    "BaseMultiRewardVerifyResponse": "server_runtime.base_resources_server",
+    "BaseSeedSessionRequest": "server_runtime.base_resources_server",
+    "BaseSeedSessionResponse": "server_runtime.base_resources_server",
+    "ReverifyMode": "server_runtime.base_resources_server",
     # Agent and model extension points
     "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
     "SimpleResponsesAPIAgent": "base_responses_api_agent",
     "BaseResponsesAPIModelConfig": "base_responses_api_model",
     "SimpleResponsesAPIModel": "base_responses_api_model",
     # Common server-client utilities
-    "ServerClient": "server_utils",
-    "raise_for_status": "server_utils",
-    "get_response_json": "server_utils",
-    "SESSION_ID_KEY": "server_utils",
+    "ServerClient": "client.server_client",
+    "raise_for_status": "client.http_client",
+    "get_response_json": "client.http_client",
+    "SESSION_ID_KEY": "client.server_client",
     # Author-facing config and metrics types
-    "BaseServerConfig": "config_types",
-    "BaseRunServerInstanceConfig": "config_types",
-    "Domain": "config_types",
-    "AggregateMetrics": "config_types",
-    "AggregateMetricsRequest": "config_types",
-    "ModelServerRef": "config_types",
+    "BaseServerConfig": "config.config_types",
+    "BaseRunServerInstanceConfig": "config.config_types",
+    "Domain": "config.config_types",
+    "AggregateMetrics": "config.config_types",
+    "AggregateMetricsRequest": "config.config_types",
+    "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
     "NeMoGymAsyncOpenAI": "openai_utils",
-    "NeMoGymResponse": "openai_utils",
-    "NeMoGymResponseCreateParamsNonStreaming": "openai_utils",
-    "NeMoGymChatCompletion": "openai_utils",
-    "NeMoGymChatCompletionCreateParamsNonStreaming": "openai_utils",
+    "NeMoGymResponse": "core.responses_api_types",
+    "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
+    "NeMoGymChatCompletion": "core.responses_api_types",
+    "NeMoGymChatCompletionCreateParamsNonStreaming": "core.responses_api_types",
 }
 
 # Eagerly-defined names (path constants + package metadata) that live directly in this module.
@@ -229,12 +235,16 @@ _EAGER_PUBLIC: tuple[str, ...] = (
 __all__ = sorted({*_EAGER_PUBLIC, *_LAZY_EXPORTS})
 
 
+_moved_names = moved_names_getattr(__name__)
+
+
 def __getattr__(name: str):
     # PEP 562 calls module-level __getattr__ only for names that are absent from the module globals.
     # Eager symbols and resolved lazy symbols never reach this function.
     module_name = _LAZY_EXPORTS.get(name)
     if module_name is None:
-        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+        # A module that moved out of the package, such as `nemo_gym.config.global_config`, resolves with a warning.
+        return _moved_names(name)
 
     import importlib
 
