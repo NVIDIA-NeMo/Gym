@@ -128,6 +128,10 @@ hle_tools:
 | `max_cached_pages`, `max_cached_page_chars` | 128, 500,000 | the fetched-page cache |
 | `max_http_attempts`, `http_timeout_s` | 3, 60 | the retry budget per call and the timeout per attempt |
 
+Run the server single-worker (leave `num_workers` unset): seeded questions and the page cache live in the
+process, so with `num_workers > 1` a rollout's seed and its searches could reach different workers, and the
+module defines no worker `app`, so such a launch fails to start.
+
 `verify` is a stub: this is a tool server. A preset pairs it through the agent's `tool_servers` and
 grades the rollout with its own `resources_server` (for HLE-Diamond, the equivalence judge). Should
 `verify` be called anyway it returns reward 0 with `mask_sample: true` and a `failure_reason` saying so.
