@@ -215,12 +215,13 @@ def test_a_legacy_harbor_graded_zero_is_kept_and_its_server_faults_are_counted_e
         materialized=inventory(2), results=[harbor_zero(0, LAST_503), harbor_zero(1, CLEAN)], failures=[]
     )
     kinds = trial_faults(d, collected)
-    assert kinds == {AGENT_TIMEOUT_INFRASTRUCTURE: 1}
+    # The clean graded zero still counts its own agent_timeout once, as the model's (``_scored_fault``).
+    assert kinds == {AGENT_TIMEOUT_INFRASTRUCTURE: 1, "agent_timeout": 1}
     report = fault_report(kinds, 2)
     assert report["evaluation"]["count"] == 1 and report["evaluation"]["server"] == 1
-    assert report["model"]["count"] == 0
+    assert report["model"]["count"] == 1 and report["model"]["kinds"] == {"agent_timeout": 1}
     facts = failure_facts(d, collected)
-    assert facts["trial_failures"]["by_cause"]["timeout"] == {"count": 1, "rate": 0.5}
+    assert facts["trial_failures"]["by_cause"]["timeout"] == {"count": 2, "rate": 1.0}
 
 
 def test_the_collector_projects_the_failure_rows_calls_and_recovery_reclassifies_a_saved_run(tmp_path) -> None:
