@@ -1,0 +1,19 @@
+# OpenCode sandboxed preset on all 1000 HLE-Diamond questions, the 272 image questions included: the
+# same agent as opencode.yaml (reasoning high, the environment note, the permissions) over the full set
+# materialized by prepare_opencode.py with prompts/opencode.yaml. Each row's single user turn carries the
+# question plus the verbatim HLE instruction and, on image rows, an input_image data URI that the adapter
+# uploads into the sandbox and attaches with `opencode run -f` (README > Sandboxed agents (with tools)).
+# The default set's file (prepare.py) is not reusable here: it bakes the instruction as a system message,
+# which the adapter does not forward. Needs a vision-capable policy model.
+config_paths:
+- benchmarks/hle_diamond/opencode.yaml
+hle_diamond_opencode_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      datasets:
+      - name: hle_diamond_opencode_full
+        type: benchmark
+        jsonl_fpath: benchmarks/hle_diamond/data/hle_diamond_benchmark_opencode_full.jsonl
+        prompt_config: null
+        prepare_script: benchmarks/hle_diamond/prepare_opencode.py
+        num_repeats: 1
