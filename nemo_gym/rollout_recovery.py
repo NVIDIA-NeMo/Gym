@@ -920,6 +920,9 @@ _SEMANTIC_PARTS = (
     "answer",
     "reference",
 )
+# A path to a prompt, template or rubric names what the model or verifier reads, not where something is kept: two
+# shipped grading templates are different rubrics. The generic path rule does not make such a path operational.
+_SEMANTIC_ASSET_PATH = re.compile(r"(^|_)(prompt|prompts|template|templates|rubric|rubrics)_(.+_)?(dir|path|fpath)$")
 
 
 def _is_semantic(key: str) -> bool:
@@ -929,6 +932,8 @@ def _is_semantic(key: str) -> bool:
         return False
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
+        return True
+    if _SEMANTIC_ASSET_PATH.search(segments[-1]):
         return True
     if any(part in segment for segment in segments[:-1] for part in _SEMANTIC_PARTS):
         # Under a grading or model segment only operational-named leaves (a judge's timeout) stay operational.

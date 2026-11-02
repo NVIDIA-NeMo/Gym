@@ -282,3 +282,45 @@ def test_an_operational_setting_stays_operational(key):
     from nemo_gym.rollout_recovery import _is_semantic
 
     assert not _is_semantic(key)
+
+
+def judge_with_template(template: str) -> dict:
+    return {
+        "policy_model": BASE["policy_model"],
+        "equivalence_llm_judge": {
+            "resources_servers": {
+                "equivalence_llm_judge": {
+                    "judge_model_server": {"type": "responses_api_models", "name": "policy_model"},
+                    "judge_prompt_template_fpath": template,
+                    "judge_endpoint_max_concurrency": 32,
+                }
+            }
+        },
+    }
+
+
+def test_a_different_grading_prompt_template_refuses_the_resume(tmp_path: Path) -> None:
+    # Both are shipped templates: the verifier reads different grading instructions, not a moved copy.
+    path, materialized = saved_run(tmp_path, judge_with_template("prompt_templates/equivalence_llm_judge.txt"))
+    current = current_manifest(tmp_path, judge_with_template("prompt_templates/lc_judge.txt"))
+
+    with pytest.raises(ConfigError, match=r"semantic settings differ: .*judge_prompt_template_fpath"):
+        validate_resume(path, current, materialized)
+    assert not resume_drift_path_for(path).exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "semantic"),
+    [
+        ("servers.j.resources_servers.g.judge_prompt_template_fpath", True),
+        ("servers.j.resources_servers.g.rubric_judge_prompt_template_fpath", True),
+        ("servers.a.responses_api_agents.r.retrieval_system_prompt_fpath", True),
+        ("servers.j.resources_servers.g.policy_verifier_templates_path", True),
+        ("servers.j.resources_servers.g.prompt_dir", True),
+        ("servers.j.resources_servers.g.judge_prompt_timeout_s", False),
+        ("servers.j.resources_servers.g.judge_telemetry_output_dir", False),
+        ("servers.j.resources_servers.g.cache_dir", False),
+    ],
+)
+def test_a_prompt_or_template_path_is_semantic_and_other_paths_stay_operational(key: str, semantic: bool) -> None:
+    assert _is_semantic(key) is semantic
