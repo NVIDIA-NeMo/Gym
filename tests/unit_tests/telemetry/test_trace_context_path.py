@@ -236,7 +236,7 @@ class TestServerSpanParent:
         """FastAPI redirects the trailing-slash form; the client only has the URL, so the segment must come back.
 
         This app has the plain rollout middleware, which does not restore the rollout prefix on a redirect
-        (the model server's capture middleware does; see test_token_id_capture), so here the segment goes
+        (the model server's capture middleware does; see test_token_capture), so here the segment goes
         back at the root. With the prefix restored it goes right after it: see TestRedirectLocation.
         """
         client = TestClient(app, follow_redirects=False)
@@ -285,7 +285,7 @@ def test_agent_hand_off_urls_carry_the_current_span(traces):  # noqa: F811
 
     from opentelemetry import trace
 
-    from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+    from nemo_gym.agents.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
     from nemo_gym.client.server_client import ServerClient
 
     class _Agent(SimpleResponsesAPIAgent):

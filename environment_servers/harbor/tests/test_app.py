@@ -69,7 +69,7 @@ from environment_servers.harbor.verifier import (
     summing_components,
     verifier_command,
 )
-from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
+from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcomePolicyConfig, OutcomeAction
 from nemo_gym.client import ServerClient
 from nemo_gym.config import AggregateMetricsRequest
 from nemo_gym.core import failure_kinds
