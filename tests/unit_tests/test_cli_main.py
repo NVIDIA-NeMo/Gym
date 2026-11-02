@@ -2194,8 +2194,11 @@ def test_eval_status_reports_each_exporter_receipt_and_live_run_id(tmp_path, mon
     (artifacts / "rollouts_mlflow_export_done").write_text("")
     (artifacts / "rollouts_mlflow_run_id").write_text("run-123\n")
     (artifacts / "rollouts_wandb_run_id").write_text("w-7")
-    # Another output's markers in the same directory belong to that output, not to this status.
+    # Another output's markers in the same directory belong to that output, not to this status, including an
+    # output whose stem starts with this one.
     (artifacts / "other_mlflow_export_done").write_text("")
+    (artifacts / "rollouts_x_mlflow_export_done").write_text("")
+    (artifacts / "rollouts_x_wandb_run_id").write_text("x-9")
     monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(artifacts), *(["--json"] if json_output else [])])
     cli_main.main()
     output = capsys.readouterr().out

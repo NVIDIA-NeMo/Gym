@@ -19,6 +19,7 @@ import inspect
 import json
 import logging
 import os
+import re
 import signal
 import site
 import subprocess
@@ -2210,13 +2211,22 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
         """Each exporter's receipt (``<stem>_<exporter>_export_done``) and live run id (``<stem>_<exporter>_run_id``)
         beside the output this status file belongs to. The legacy ``batch_status.json`` names no stem, so every
         marker in its directory counts."""
-        stem = file.name.removesuffix("_batch_status.json") if file.name.endswith("_batch_status.json") else ""
+        stem = file.name.removesuffix("_batch_status.json") if file.name.endswith("_batch_status.json") else None
         facts: dict[str, dict[str, Any]] = {}
+        names = sorted(entry.name for entry in file.parent.iterdir() if entry.is_file())
         for suffix, key in (("_export_done", "receipt"), ("_run_id", "run_id")):
-            for marker in sorted(file.parent.glob(f"{stem}_*{suffix}" if stem else f"*{suffix}")):
-                exporter = marker.name.removesuffix(suffix).rsplit("_", 1)[-1]
-                fact = facts.setdefault(exporter, {"receipt": False})
-                fact[key] = True if key == "receipt" else marker.read_text().strip()
+            # Anchored on the stem with a single-token exporter name, so a shard label that is a prefix of another
+            # shard's label never takes that shard's markers.
+            exporter_pattern = rf"([A-Za-z0-9-]+){re.escape(suffix)}$"
+            pattern = re.compile(
+                rf"^{re.escape(stem)}_{exporter_pattern}" if stem is not None else rf"^(?:.*_)?{exporter_pattern}"
+            )
+            for name in names:
+                match = pattern.match(name)
+                if match is None:
+                    continue
+                fact = facts.setdefault(match.group(1), {"receipt": False})
+                fact[key] = True if key == "receipt" else (file.parent / name).read_text().strip()
         return facts
 
     path = Path(target)
