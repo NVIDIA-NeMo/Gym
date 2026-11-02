@@ -91,18 +91,41 @@ relay_watchdog() {
     kill -TERM "$relay" 2>/dev/null
 }
 
-# Start the relay and wait until it listens; fails, leaving no relay, when it does not within 10 seconds.
+# Centiseconds since boot in clock, from /proc/uptime, else whole seconds from SECONDS; without forking.
+read_clock() {
+    local uptime=
+    read -r uptime _ 2>/dev/null </proc/uptime
+    if [[ $uptime =~ ^([0-9]+)\.([0-9]{2}) ]]; then
+        clock=$((10#${BASH_REMATCH[1]} * 100 + 10#${BASH_REMATCH[2]}))
+    else
+        clock=$((SECONDS * 100))
+    fi
+}
+
+# Start the relay and wait until it listens; fails, leaving no relay, when it does not within 10 seconds of the
+# runner's own running time. A checkpoint can freeze the runner (SIGSTOP) or stop the whole sandbox between two
+# polls: a gap counts as at most a second, so the time it spent stopped does not use up the wait, and a relay that
+# came up meanwhile is seen before the wait is checked.
 start_relay() {
-    local status= deadline=$((SECONDS + 10))
+    local status= waited=0 last step clock
     relay_log=$(dirname "$MODEL_RELAY_STATUS")/relay.log
     relay_link=$(dirname "$MODEL_RELAY_STATUS")/gym-model-relay
+    read_clock
+    last=$clock
     find_relay_python && ln -sfn "$relay_python" "$relay_link" || return 1
     rm -f "$MODEL_RELAY_STATUS"
     relay_watchdog 2>>"$relay_log" &
     watchdog=$!
-    while ((SECONDS <= deadline)) && running "$watchdog"; do
+    while running "$watchdog"; do
         IFS= read -r -d '' status 2>/dev/null <"$MODEL_RELAY_STATUS"
         [[ $status =~ \"port\":\ [1-9] ]] && return 0
+        read_clock
+        step=$((clock - last))
+        last=$clock
+        ((step < 0)) && step=5
+        ((step > 100)) && step=100
+        waited=$((waited + step))
+        ((waited <= 1000)) || break
         sleep 0.05
     done
     kill -TERM "$watchdog" 2>/dev/null
