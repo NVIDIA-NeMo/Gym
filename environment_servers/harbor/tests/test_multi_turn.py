@@ -43,7 +43,7 @@ from environment_servers.harbor.tests.conftest import (
 )
 from environment_servers.harbor.verifier import COLLECT_HOOK_GRACE_S
 from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from nemo_gym.tasks.harbor import load_task
 from nemo_gym.tasks.harbor.digest import context_digest
 from nemo_gym.tasks.harbor.materialize import STEP_METADATA_KEY, materialize_task

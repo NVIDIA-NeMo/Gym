@@ -26,7 +26,7 @@ import pytest
 from jsonschema import Draft202012Validator
 from nooa import Agent
 
-from nemo_gym.tool_access import DirectHTTPToolAccess
+from nemo_gym.server_runtime import DirectHTTPToolAccess
 from responses_api_agents.nooa_agent import resource_tools
 from responses_api_agents.nooa_agent.observability import GymTraceHooks
 from responses_api_agents.nooa_agent.resource_tools import (

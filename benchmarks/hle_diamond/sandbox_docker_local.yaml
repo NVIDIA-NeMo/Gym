@@ -33,6 +33,17 @@
 # - The Docker provider ignores sandbox_config.ttl_s when an entrypoint is set (the presets set
 #   `entrypoint: [sleep, infinity]`), so container lifetime relies on the agent's cleanup; check
 #   `docker ps -a --filter label=nemo-gym.sandbox` after every run.
+# - The reference preset (opencode_reference.yaml, agent hle_diamond_opencode_reference_agent) is the
+#   one whose egress policy IS the measurement, so this file refuses to compose with it: its agent's
+#   network_access resolves to a refusal string that the agent config rejects at server start, unless
+#   HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted is exported, the label every such pilot
+#   must carry. With it the reference agent runs on local Docker with network_access: inherit and a
+#   note that tells the model the truth, like the other presets:
+#
+#   export HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted
+#   export OPENCODE_REFERENCE_SANDBOX_IMAGE=gym-opencode-hle-reference:local   # the default
+#   gym eval run --benchmark hle_diamond/opencode_reference --split benchmark \
+#       '+config_paths=[benchmarks/hle_diamond/judge_openai.yaml,benchmarks/hle_diamond/sandbox_docker_local.yaml]' ...
 sandbox_docker:
   default_metadata:
     sandbox-api: docker-cli
@@ -77,6 +88,24 @@ hle_diamond_opencode_agent:
           /tmp/nemo-gym-environment.txt: |
             Direct internet access from this machine is NOT restricted (local Docker sandbox). If Tavily search and browsing tools are offered, they are available if useful for the task.
             Scientific Python packages (including NumPy, SciPy, and SymPy), SageMath, and Lean/Mathlib are preinstalled. See /opt/science/README.md for available tools and usage.
+
+# Reference preset: refused without the acknowledgement. The only accepted value of
+# HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS is the key below; any other value, or none, selects the refusal
+# default, which is not a valid network_access and stops the agent server with that message.
+hle_diamond_docker_egress_acknowledgement:
+  egress-not-restricted: inherit
+
+hle_diamond_opencode_reference_agent:
+  responses_api_agents:
+    opencode_sandboxed_agent:
+      sandbox_provider: sandbox_docker
+      network_access: "${oc.select:hle_diamond_docker_egress_acknowledgement.${oc.env:HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS,unset},'refused - the reference preset enforces egress; export HLE_DIAMOND_ACK_UNRESTRICTED_EGRESS=egress-not-restricted to run it on local Docker and label the result'}"
+      sandbox_config:
+        files:
+          # The reference image's note with the truth about the network; nothing the image lacks.
+          /tmp/nemo-gym-environment.txt: |
+            Direct internet access from this machine is NOT restricted (local Docker sandbox). The web search and page-reading tools offered to you are available if useful for the task.
+            Python 3.11 is installed with a shell and these packages: numpy, scipy, sympy, mpmath, networkx, pandas, matplotlib, pillow, scikit-learn, statsmodels, requests, pyyaml. Nothing else is installed.
 
 hle_diamond_pi_agent:
   responses_api_agents:
