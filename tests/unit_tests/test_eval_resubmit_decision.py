@@ -1835,7 +1835,11 @@ STRICT_DEFAULT = {
 def test_review_gate_reports_its_effective_named_criteria(tmp_path):
     _, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0))
     assert task["criteria"] == {
-        "evaluation": {"max_failure_fraction": 0.02, "passes": "strictly below, before rounding"},
+        "evaluation": {
+            "max_failure_fraction": 0.02,
+            "passes": "strictly below, before rounding",
+            "policy_timeout_counts_as_model": True,
+        },
         "response": {"max_failure_fraction": 0.02, "applied": False},
         "trial": {"max_failure_fraction": 0.02, "applied": False},
     }
