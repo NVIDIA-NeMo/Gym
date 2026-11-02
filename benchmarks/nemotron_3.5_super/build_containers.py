@@ -22,19 +22,65 @@ class FlashInferConfig(BaseNeMoGymCLIConfig):
     branch: str
     invalidate_modules: List[str]
 
+    cpus_per_task: int
+
 
 class BuildContainerConfig(BaseNeMoGymCLIConfig):
-    input_container_fpath: str
-    output_container_fpath: str
+    input_container_fpath: Path
+    output_container_fpath: Path
     log_file: Path
 
     slurm: Dict[str, Any] = Field(default_factory=dict)
     flashinfer: Optional[FlashInferConfig] = None
 
+    def model_post_init(self, context: Any, /) -> None:
+        super().model_post_init(context)
+
+        self.input_container_fpath = self.input_container_fpath.resolve()
+        self.output_container_fpath = self.output_container_fpath.resolve()
+        self.log_file = self.log_file.resolve()
+
+        print(f"""Resolved fpaths:
+- Input container: {self.input_container_fpath}
+- Output container: {self.output_container_fpath}
+- Log file: {self.log_file}
+""")
+
 
 class CommandOutput(BaseModel):
     returncode: int
     output_lines: List[str]
+
+
+async def _run_command(command: str, log_fpath: Path) -> CommandOutput:
+    async with aiofiles.open(log_fpath, "a") as log_file:
+        process = await create_subprocess_shell(command, stdout=PIPE, stderr=STDOUT, start_new_session=True)
+        output_lines = []
+
+        try:
+            assert process.stdout is not None
+
+            async for line in process.stdout:
+                line = line.decode(errors="replace").rstrip()
+
+                print(line, flush=True)
+                output_lines.append(line)
+                await log_file.write(line + "\n")
+
+            returncode = await process.wait()
+        except:
+            try:
+                killpg(process.pid, SIGKILL)
+            except ProcessLookupError:
+                pass  # Already exited.
+
+            await process.communicate()
+            raise
+
+    return CommandOutput(
+        returncode=returncode,
+        output_lines=output_lines,
+    )
 
 
 class BaseBuilder(BaseModel):
@@ -46,38 +92,14 @@ class BaseBuilder(BaseModel):
     async def perform_preflight_checks(self) -> None:
         raise NotImplementedError
 
-    def get_command_str(self) -> str:
+    def get_srun_command_str(self) -> str:
         raise NotImplementedError
 
-    async def _run_command(self, command: str) -> CommandOutput:
-        async with aiofiles.open(self.log_file, "a") as log_file:
-            process = await create_subprocess_shell(command, stdout=PIPE, stderr=STDOUT, start_new_session=True)
-            output_lines = []
+    def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        raise NotImplementedError
 
-            try:
-                assert process.stdout is not None
-
-                async for line in process.stdout:
-                    line = line.decode(errors="replace").rstrip()
-
-                    print(line, flush=True)
-                    output_lines.append(line)
-                    await log_file.write(line + "\n")
-
-                returncode = await process.wait()
-            except:
-                try:
-                    killpg(process.pid, SIGKILL)
-                except ProcessLookupError:
-                    pass  # Already exited.
-
-                await process.communicate()
-                raise
-
-        return CommandOutput(
-            returncode=returncode,
-            output_lines=output_lines,
-        )
+    def get_srun_slurm_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        raise NotImplementedError
 
     async def _preflight_check_git_repo(self, repo: str, branch: str) -> str:
         """
@@ -85,7 +107,7 @@ class BaseBuilder(BaseModel):
         """
 
         ref = f"refs/heads/{branch}"
-        command_output = await self._run_command(command=f"git ls-remote --exit-code {quote(repo)} {quote(ref)}")
+        command_output = await _run_command(f"git ls-remote --exit-code {quote(repo)} {quote(ref)}", self.log_file)
 
         error_message = f"Preflight git repo check failed for {repo} @ {branch}. See {self.log_file}"
         if command_output.returncode != 0 or not command_output.output_lines:
@@ -110,30 +132,18 @@ class FlashInferBuilder(BaseBuilder):
         self._head_sha = None
         self._head_sha = await self._preflight_check_git_repo(self.config.repo, self.config.branch)
 
-    def get_command_str(self) -> str:
-        """Return a Bash command to run inside the target container.
-
-        Call perform_preflight_checks first. The container must supply BASE_IMAGE
-        for provenance; FLASHINFER_CUDA_ARCH_LIST defaults to 10.0a. Installation
-        preserves binary packages and invalidates selected modules without JIT.
-        Slurm submission and saving the container belong to the caller.
-        """
+    def get_srun_command_str(self) -> str:
+        """Installation preserves binary packages and invalidates selected modules without JIT."""
         if self._head_sha is None:
             raise RuntimeError("Run FlashInfer preflight checks before generating the build command")
+
         for pattern in self.config.invalidate_modules:
             if not re.fullmatch(r"[A-Za-z0-9_*?-]+", pattern):
                 raise ValueError(f"Invalid FlashInfer module name/glob: {pattern!r}")
-        # Pass configuration as positional arguments so shell metacharacters in
-        # repo URLs and module patterns are never evaluated as command text.
+
         script = dedent(
             r"""
             set -Eeuo pipefail
-            export FLASHINFER_REPO="$1"
-            export FLASHINFER_HEAD_SHA="$2"
-            export FLASHINFER_INVALIDATE_MODULES="$3"
-            export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.0a}"
-            export BASE_IMAGE
-            : "${FLASHINFER_HEAD_SHA:?}" "${BASE_IMAGE:?}"
             command -v git >/dev/null || { echo "Missing build tool: git" >&2; exit 1; }
             BUILD_DIR=$(mktemp -d /tmp/flashinfer-slim.XXXXXX)
             export BUILD_DIR
@@ -242,24 +252,11 @@ class FlashInferBuilder(BaseBuilder):
                 if remaining != manifest["modules"]:
                     manifest["modules"] = remaining
                     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
-            record = {key: os.environ[key] for key in
-                      ("BASE_IMAGE", "FLASHINFER_HEAD_SHA", "FLASHINFER_CUDA_ARCH_LIST", "FLASHINFER_INVALIDATE_MODULES")}
-            record["invalidated_paths"] = removed
-            record["retained_packages"] = packages
-            (root / "flashinfer-slim.json").write_text(json.dumps(record, indent=2) + "\n")
-            print(f"Invalidated {len(removed)} native cache entries; selected modules will JIT on first use", flush=True)
-            PY
-            mkdir -p /opt
-            cp "$BUILD_DIR/flashinfer-slim.json" /opt/flashinfer-slim.json
+
             # These derived caches/plans describe the previous installation. Recreate
             # them during warmup instead of validating stale manifests or reusing graphs.
-            rm -rf /opt/flashinfer-autotune-cache \
-                /opt/vllm-cache /opt/prims-cute-cache
-            # A previous full-build verifier describes the old Python sources/modules.
-            # Keep it for reference, but don't let the launcher apply it to this build.
-            if [[ -f /opt/flashinfer-build.env ]]; then
-                mv /opt/flashinfer-build.env /opt/flashinfer-build.before-slim.env
-            fi
+            rm -rf /opt/flashinfer-autotune-cache /opt/vllm-cache /opt/prims-cute-cache
+
             exit 0
             """
         ).lstrip()
@@ -275,9 +272,62 @@ class FlashInferBuilder(BaseBuilder):
             ]
         )
 
+    def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        return {
+            "FLASHINFER_REPO": self.config.repo,
+            "FLASHINFER_HEAD_SHA": self._head_sha,
+            "FLASHINFER_INVALIDATE_MODULES": ",".join(self.config.invalidate_modules),
+        }
+
+    def get_srun_slurm_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        return {
+            "job-name": "build-flashinfer",
+            "nodes": "1",
+            "ntasks": "1",
+            "segment": "1",
+            "cpus-per-task": f"{self.config.cpus_per_task}",
+            "time": "01:00:00",
+            "container-image": str(container_config.output_container_fpath),
+            "no-container-mount-home": True,
+            "container-save=": str(container_config.output_container_fpath),
+            "export": "ALL",
+        }
+
 
 class BuildContainerHelper:
     config: BuildContainerConfig
 
     def run(self) -> None:
         pass
+
+    async def _run_single_srun(
+        self,
+        builder_command_str: str,
+        builder_env_vars: Dict[str, Any],
+        builder_srun_slurm_vars: Dict[str, Any],
+    ) -> None:
+        env_vars = builder_env_vars.copy()
+        srun_slurm_vars = self.config.slurm | builder_srun_slurm_vars
+
+        env_vars_str = " \\\n".join(f"{k}={quote(v)}" for k, v in env_vars.items())
+        srun_slurm_vars_strs = []
+        for k, v in srun_slurm_vars.items():
+            if isinstance(v, str):
+                srun_slurm_vars_strs.append(f'--{k}="{quote(v)}"')
+            elif v == True:
+                srun_slurm_vars_strs.append(f"--{k}")
+            else:
+                raise NotImplementedError(f"Unknown srun slurm variable type: {k=} {v=} {type(v)=}")
+        srun_slurm_vars_str = " \\\n    ".join(srun_slurm_vars_strs)
+
+        srun_command_str = f"""{env_vars_str} \\
+srun \\
+    {srun_slurm_vars_str} \\
+    bash {builder_command_str}"""
+
+        command_output = await _run_command(srun_command_str, self.config.log_file)
+
+        if command_output.returncode != 0:
+            raise RuntimeError(
+                f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
+            )
