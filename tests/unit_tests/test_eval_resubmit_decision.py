@@ -24,6 +24,7 @@ import json
 import subprocess
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -741,11 +742,15 @@ def test_a_live_mlflow_run_is_unverified_delivery_not_an_unfinished_export(tmp_p
         "gym-job-o", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status="FINISHED"
     )
     assert out.decision.action == RecoveryAction.NOOP and out.dispatched is None
-    mlflow = [e for e in out.gate_task["errors"] if "MLflow" in e]
-    assert out.gate_task["status"] == "FAILED" and mlflow == [
-        "MLflow live run live-run: configured payload delivery is not verified (live uploads log failures and "
-        "continue), so live acceptance is unsupported"
-    ]
+    # Delivery is a fact beside the verdict: it never turns the gate's status into FAILED.
+    assert not [e for e in out.gate_task["errors"] if "MLflow" in e] and out.gate_task["status"] != "FAILED"
+    assert out.gate_task["mlflow_delivery"] == {
+        "state": "unverified",
+        "reasons": [
+            "MLflow live run live-run: configured payload delivery is not verified (live uploads log failures and "
+            "continue), so live acceptance is unsupported"
+        ],
+    }
 
 
 def test_omitted_rollout_rows_are_unsupported_not_scored_or_retried(tmp_path, fake_executor) -> None:
@@ -801,7 +806,7 @@ def mlflow_job(tmp_path: Path, *, mode: str) -> Path:
     [
         ("postrun", "FINISHED", []),
         ("postrun", "FAILED", ["MLflow run status FAILED"]),
-        ("postrun", None, ["MLflow terminal status not observed"]),
+        ("postrun", None, ["status not queried"]),
         ("postrun", "RUNNING", ["MLflow run status RUNNING"]),
         (
             "stale",
@@ -842,8 +847,15 @@ def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_exe
             'summary validity unknown: ["quality summary is not bound to this run\'s sole rollouts.jsonl source"]',
             HEALTH_UNKNOWN,
         ]
-    # Unknown health alone is UNVERIFIED; any MLflow delivery error is a failure.
-    assert out.gate_task["status"] == ("FAILED" if mlflow else "UNVERIFIED") and out.gate_task["errors"] == mlflow
+    # Unknown health alone is UNVERIFIED; MLflow delivery is a separate fact and never changes the status.
+    assert out.gate_task["status"] == "UNVERIFIED" and out.gate_task["errors"] == []
+    state = (
+        "verified" if not mlflow else "pending" if mode == "none" or mlflow == ["status not queried"] else "unverified"
+    )
+    assert out.gate_task["mlflow_delivery"] == {"state": state, "reasons": mlflow}
+    assert (state in ("verified", "pending", "unverified")) and (
+        any(w.startswith("MLflow delivery ") for w in out.gate_task["warnings"]) == (state != "verified")
+    )
     assert out.gate_task["warnings"][: len(health_unknown)] == health_unknown
 
 
@@ -852,7 +864,9 @@ def test_mlflow_status_for_a_run_without_an_mlflow_id_is_contradictory(tmp_path,
     out = submit.recover(
         "gym-job-s", "bench", score_key=["agent", "mean/reward"], max_unhealthy_fraction=0.02, mlflow_status="FINISHED"
     )
-    assert out.gate_task["status"] == "FAILED" and any("no MLflow run id" in e for e in out.gate_task["errors"])
+    delivery = out.gate_task["mlflow_delivery"]
+    assert out.gate_task["status"] != "FAILED" and not [e for e in out.gate_task["errors"] if "MLflow" in e]
+    assert delivery["state"] == "unverified" and any("no MLflow run id" in r for r in delivery["reasons"])
 
 
 def test_cli_passes_the_observed_mlflow_status(tmp_path, fake_executor, capsys) -> None:
@@ -873,7 +887,10 @@ def test_cli_passes_the_observed_mlflow_status(tmp_path, fake_executor, capsys) 
         ],
         capsys,
     )
-    assert code == 1 and out["mlflow"]["observed_status"] == "FAILED" and out["gate_task"]["status"] == "FAILED"
+    # The observed status is a delivery fact; the gate is still not accepted (health is unknown), but not FAILED.
+    assert code == 1 and out["mlflow"]["observed_status"] == "FAILED" and out["gate_task"]["status"] == "UNVERIFIED"
+    delivery = out["gate_task"]["mlflow_delivery"]
+    assert delivery["state"] == "unverified" and "MLflow run status FAILED" in delivery["reasons"]
 
 
 @pytest.mark.parametrize(
@@ -1071,7 +1088,7 @@ def test_health_criterion_and_counts_are_strict(tmp_path, verdicts, criterion, h
     assert quality_inputs(d, collected, max_unhealthy_fraction=criterion)[2] is health
 
 
-def test_absent_mlflow_evidence_never_passes(tmp_path) -> None:
+def test_absent_mlflow_evidence_is_a_pending_delivery_fact_not_a_failure(tmp_path) -> None:
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
 
     job = complete_job(tmp_path)
@@ -1080,10 +1097,11 @@ def test_absent_mlflow_evidence_never_passes(tmp_path) -> None:
     collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02)
-    assert (
-        task["status"] == "FAILED"
-        and "no MLflow run evidence: no live run id and no post-run export receipt" in (task["errors"])
-    )
+    assert task["status"] != "FAILED" and not [e for e in task["errors"] if "MLflow" in e]
+    assert task["mlflow_delivery"] == {
+        "state": "pending",
+        "reasons": ["no MLflow run evidence: no live run id and no post-run export receipt"],
+    }
 
 
 def test_an_omitted_agent_error_without_interruption_class_stops(tmp_path, fake_executor) -> None:
@@ -1367,7 +1385,7 @@ def test_a_context_window_signal_is_reported_and_stays_unknown_without_changing_
         ("yes", "no MLflow run evidence: no live run id and no post-run export receipt"),
     ],
 )
-def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_path, configured, message) -> None:
+def test_missing_mlflow_evidence_names_the_configuration_as_a_pending_fact(tmp_path, configured, message) -> None:
     job = gate_job(tmp_path, expected=100, final_zeros=0)
     (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
     from nemo_gym.orchestration.recovery import gate_summary_from_collected
@@ -1378,9 +1396,10 @@ def test_missing_mlflow_evidence_names_the_configuration_and_never_passes(tmp_pa
     )
     d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status=None)
-    mlflow = [e for e in task["errors"] if "MLflow" in e]
-    assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED" and len(mlflow) == 1
-    assert message in mlflow[0]
+    delivery = task["mlflow_delivery"]
+    assert d.action == RecoveryAction.NOOP and not [e for e in task["errors"] if "MLflow" in e]
+    assert delivery["state"] == "pending" and len(delivery["reasons"]) == 1
+    assert message in delivery["reasons"][0]
 
 
 @pytest.mark.parametrize(
@@ -2720,19 +2739,55 @@ def test_mlflow_not_required_by_design_passes_the_mlflow_part_with_a_note(tmp_pa
     task = _mlflow_gate(tmp_path, tracking_required=False)
     assert task["mlflow_tracking_required"] is False
     assert not any("MLflow" in error for error in task["errors"])
+    assert task["mlflow_delivery"] == {"state": "not_required", "reasons": []}
     assert "no MLflow export by design (mlflow_tracking_required is false in the saved config)" in task["warnings"]
 
 
 @pytest.mark.parametrize("tracking_required", [True, None])
-def test_mlflow_required_or_unstated_fails_without_evidence_as_before(tmp_path, tracking_required) -> None:
+def test_mlflow_required_or_unstated_is_a_pending_delivery_without_evidence(tmp_path, tracking_required) -> None:
     task = _mlflow_gate(tmp_path, tracking_required=tracking_required)
     assert task["mlflow_tracking_required"] is True
-    assert (
-        "no MLflow run evidence: no live run id and no post-run export receipt, and the saved config snapshot does "
-        "not name all of the tracking URI, experiment and run name; exporter activation and whether tracking was "
-        "required or disabled are not recorded"
-    ) in task["errors"]
-    assert task["status"] == "FAILED"
+    assert task["mlflow_delivery"] == {
+        "state": "pending",
+        "reasons": [
+            "no MLflow run evidence: no live run id and no post-run export receipt, and the saved config snapshot "
+            "does not name all of the tracking URI, experiment and run name; exporter activation and whether "
+            "tracking was required or disabled are not recorded"
+        ],
+    }
+    assert not [e for e in task["errors"] if "MLflow" in e] and task["status"] != "FAILED"
+    assert any(w.startswith("MLflow delivery pending: ") for w in task["warnings"])
+
+
+@pytest.mark.parametrize(
+    ("config_line", "state"),
+    [
+        ("mlflow_tracking_required: false", "not_required"),
+        ("mlflow_tracking_required: 'False'  # by design", "not_required"),
+        ("mlflow_tracking_required: true", "pending"),
+        ("other_key: 1", "pending"),
+    ],
+)
+def test_an_old_quality_summary_without_the_provenance_key_falls_back_to_the_saved_config(
+    tmp_path, config_line, state
+) -> None:
+    """A run born on a pin that did not report `tracking_required` in provenance still honours its saved config."""
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    job = gate_job(tmp_path, expected=4, final_zeros=0)
+    (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text(
+        f"mlflow_tracking_uri: http://x{chr(10)}{config_line}{chr(10)}"
+    )
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    collected.quality = unit_quality(
+        expected=d.expected, provenance={"resolved_config": "read", "servers": {}, "mlflow": {"configured": True}}
+    )
+    task = gate_summary_from_collected(d, collected, max_unhealthy_fraction=0.02, mlflow_status=None)
+    assert task["mlflow_delivery"]["state"] == state
+    assert task["mlflow_tracking_required"] is (state == "pending")
+    assert not [e for e in task["errors"] if "MLflow" in e]
 
 
 def _row_with_a_model_call(task: int, *, operations_field: bool) -> dict:
@@ -2923,3 +2978,85 @@ def _cli_refuses(argv: list[str], capsys) -> int:
         sys.argv = saved
         capsys.readouterr()
     return refused.value.code
+
+
+class _FakeRun:
+    def __init__(self, status: str) -> None:
+        self.info = SimpleNamespace(status=status)
+
+
+class _FakeClient:
+    """An MlflowClient stand-in: `get_run` answers for the runs it knows or raises what it was told to."""
+
+    def __init__(self, runs: dict | None = None, error: Exception | None = None) -> None:
+        self.runs, self.error, self.asked = runs or {}, error, []
+
+    def get_run(self, run_id: str) -> _FakeRun:
+        self.asked.append(run_id)
+        if self.error is not None:
+            raise self.error
+        return _FakeRun(self.runs[run_id])
+
+
+def _delivery_with_a_queried_status(tmp_path, *, uri, client, receipt=True, mlflow_status=None) -> dict:
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected
+
+    job = gate_job(tmp_path, expected=4, final_zeros=0)
+    if not receipt:
+        (job / "artifacts" / "rollouts_mlflow_export_done").unlink()
+    config = "mlflow_experiment_name: e" + chr(10) + (f"mlflow_tracking_uri: {uri}" + chr(10) if uri else "")
+    (job / "artifacts" / "rollouts_resolved_config.yaml").write_text(config)
+    write_postrun_receipt(job)
+    collected = collect_with_score(job, json.dumps(["agent", "mean/reward"]))
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    collected.quality = unit_quality(expected=d.expected)
+    return gate_summary_from_collected(
+        d,
+        collected,
+        max_unhealthy_fraction=0.02,
+        mlflow_status=mlflow_status,
+        mlflow_run_id="postrun-run" if mlflow_status else None,
+        status_client_factory=lambda _uri: client,
+    )
+
+
+def test_the_receipt_s_run_status_is_read_from_the_tracking_server_when_the_caller_gave_none(tmp_path) -> None:
+    client = _FakeClient(runs={"postrun-run": "FINISHED"})
+    task = _delivery_with_a_queried_status(tmp_path, uri="http://tracking.example", client=client)
+    assert client.asked == ["postrun-run"]
+    assert task["mlflow_delivery"] == {"state": "verified", "reasons": []}
+    assert not any("MLflow delivery" in w for w in task["warnings"])
+
+
+def test_a_queried_status_that_is_not_finished_is_unverified(tmp_path) -> None:
+    task = _delivery_with_a_queried_status(
+        tmp_path, uri="http://tracking.example", client=_FakeClient(runs={"postrun-run": "RUNNING"})
+    )
+    assert task["mlflow_delivery"] == {"state": "unverified", "reasons": ["MLflow run status RUNNING"]}
+
+
+def test_a_failed_status_query_is_unverified_with_its_reason_never_a_silent_not_observed(tmp_path) -> None:
+    task = _delivery_with_a_queried_status(
+        tmp_path, uri="http://tracking.example", client=_FakeClient(error=ConnectionError("server unreachable"))
+    )
+    assert task["mlflow_delivery"] == {
+        "state": "unverified",
+        "reasons": ["status query failed: ConnectionError: server unreachable"],
+    }
+    assert not any("not observed" in w for w in task["warnings"])
+    assert any(w.startswith("MLflow delivery unverified: status query failed") for w in task["warnings"])
+
+
+def test_without_a_tracking_uri_the_status_is_not_queried_and_delivery_is_pending(tmp_path) -> None:
+    client = _FakeClient(runs={"postrun-run": "FINISHED"})
+    task = _delivery_with_a_queried_status(tmp_path, uri=None, client=client)
+    assert client.asked == []
+    assert task["mlflow_delivery"] == {"state": "pending", "reasons": ["status not queried"]}
+
+
+def test_a_status_the_caller_passes_is_never_queried(tmp_path) -> None:
+    client = _FakeClient(error=ConnectionError("must not be asked"))
+    task = _delivery_with_a_queried_status(
+        tmp_path, uri="http://tracking.example", client=client, mlflow_status="FINISHED"
+    )
+    assert client.asked == [] and task["mlflow_delivery"]["state"] == "verified"

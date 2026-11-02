@@ -45,7 +45,7 @@ import hashlib
 import math
 import os
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -1883,6 +1883,22 @@ if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
         mlflow["receipt"] = {"run_id": text.strip(), "current": None}
     else:
         mlflow["receipt"] = "malformed"
+# A run whose health report predates `provenance.mlflow.tracking_required` still states it in its saved config.
+try:
+    config_match = re.search(r"^mlflow_tracking_required:[ 	]*['\"]?(true|false)['\"]?[ 	]*(?:#.*)?$",
+                             open(os.path.join(a, "rollouts_resolved_config.yaml")).read(), re.MULTILINE | re.IGNORECASE)
+    mlflow["config_tracking_required"] = None if config_match is None else config_match.group(1).lower() == "true"
+except OSError:
+    pass
+# The tracking server named by the saved config, for the reader to ask the receipt's run for its status; an absent,
+# null or interpolated value names none.
+try:
+    uri_match = re.search(r"^mlflow_tracking_uri:[ \t]*['\"]?([^\s'\"#]+)",
+                          open(os.path.join(a, "rollouts_resolved_config.yaml")).read(), re.MULTILINE)
+    uri = uri_match.group(1) if uri_match is not None else None
+    mlflow["config_tracking_uri"] = uri if uri and "${" not in uri and uri.lower() not in ("null", "~") else None
+except OSError:
+    pass
 quality = None
 try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
@@ -3311,6 +3327,45 @@ def mlflow_notes(local: Mapping[str, Any] | None) -> list[str]:
     return []
 
 
+MLFLOW_STATUS_NOT_OBSERVED = "MLflow terminal status not observed"
+# The longest a status query of the tracking server may take per HTTP request, and its retries.
+MLFLOW_STATUS_QUERY_TIMEOUT_S = "10"
+MLFLOW_STATUS_QUERY_RETRIES = "1"
+
+
+def query_mlflow_status(
+    tracking_uri: str, run_id: str, client_factory: Callable[[str], Any] | None = None
+) -> tuple[str | None, str | None]:
+    """The status of ``run_id`` on the tracking server, as ``(status, None)``, or ``(None, error)`` when it could not
+    be read: a missing client, an unreachable or refusing server, a missing run. Short timeout and one retry;
+    ``client_factory`` builds the client from the URI (default ``mlflow.MlflowClient``)."""
+    knobs = {
+        "MLFLOW_HTTP_REQUEST_TIMEOUT": MLFLOW_STATUS_QUERY_TIMEOUT_S,
+        "MLFLOW_HTTP_REQUEST_MAX_RETRIES": MLFLOW_STATUS_QUERY_RETRIES,
+    }
+    saved = {key: os.environ.get(key) for key in knobs}
+    os.environ.update(knobs)
+    try:
+        if client_factory is None:
+            from mlflow import MlflowClient
+
+            def client_factory(uri: str) -> Any:
+                return MlflowClient(tracking_uri=uri)
+
+        status = client_factory(tracking_uri).get_run(run_id).info.status
+    except Exception as error:  # a status that cannot be read is reported, whatever the reason
+        return None, f"{type(error).__name__}: {str(error)[:200]}"
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    if not isinstance(status, str) or not status.strip():
+        return None, f"the server reported no status for run {run_id}"
+    return status, None
+
+
 def mlflow_errors(
     local: Mapping[str, Any] | None,
     observed_status: str | None,
@@ -3432,7 +3487,7 @@ def mlflow_errors(
         elif observed_run_id != bound:
             errors.append(f"MLflow observed status is for run {observed_run_id}, not the receipt's run {bound}")
     if observed_status is None:
-        errors.append("MLflow terminal status not observed")
+        errors.append(MLFLOW_STATUS_NOT_OBSERVED)
     elif observed_status != "FINISHED":
         errors.append(f"MLflow run status {observed_status}")
     return errors
@@ -5761,10 +5816,37 @@ MLFLOW_NOT_REQUIRED_NOTE = "no MLflow export by design (mlflow_tracking_required
 
 def mlflow_tracking_required(collected: CollectedEvidence | None) -> bool:
     """False only when the run's saved config snapshot sets ``mlflow_tracking_required`` to false; absent, unread or
-    any other value means tracking is required."""
+    any other value means tracking is required. The health report's provenance states it when its pin did; for a run
+    whose report does not, the collector's read of the saved ``rollouts_resolved_config.yaml`` does."""
     provenance = ((collected.quality or {}) if collected is not None else {}).get("provenance")
     facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
-    return not (isinstance(facts, dict) and facts.get("tracking_required") is False)
+    stated = facts.get("tracking_required") if isinstance(facts, dict) else None
+    if not isinstance(stated, bool):
+        local = collected.mlflow if collected is not None else None
+        stated = local.get("config_tracking_required") if isinstance(local, dict) else None
+    return stated is not False
+
+
+def mlflow_delivery(
+    problems: Sequence[str], *, tracking_required: bool, status_error: str | None = None
+) -> dict[str, Any]:
+    """The MLflow delivery fact of a run: ``not_required`` by design, ``verified`` when ``mlflow_errors`` found nothing,
+    ``pending`` while there is no receipt and no live run to judge or only the run's status was not queried, else
+    ``unverified`` with its reasons. A fact for consumers to read, never a verdict: it does not touch evaluation
+    health or the gate's status. A status that was neither given nor queried reads "status not queried"; a query that
+    failed reads "status query failed: ...": never a silent "not observed"."""
+    if not tracking_required:
+        return {"state": "not_required", "reasons": []}
+    others = [problem for problem in problems if problem != MLFLOW_STATUS_NOT_OBSERVED]
+    status_unknown = len(others) != len(problems)
+    reasons = list(others)
+    if status_unknown:
+        reasons.append(f"status query failed: {status_error}" if status_error else "status not queried")
+    if not reasons:
+        return {"state": "verified", "reasons": []}
+    # Pending: nothing to judge yet (no run evidence) or only the run's status unread. Anything else is unverified.
+    pending = not status_error and all(problem.startswith("no MLflow run evidence") for problem in others)
+    return {"state": "pending" if pending else "unverified", "reasons": reasons}
 
 
 def gate_summary_from_collected(
@@ -5775,14 +5857,18 @@ def gate_summary_from_collected(
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
     criteria: GateCriteria | None = None,
+    status_client_factory: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """The acceptance gate task entry from the collected run: decision counts, the named score and the quality summary.
 
     ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
+    Without a status, the receipt's run is asked of the tracking server the saved config names (``query_mlflow_status``;
+    ``status_client_factory`` replaces its client).
     ``criteria`` are accepted and reported under ``criteria`` but not applied (``GateCriteria``). The only health
     verdict is ``evaluation_health``; ``failures`` reports response and trial failures by cause, never a verdict.
     ``status`` follows ``gate_task_summary``: an UNVERIFIED evaluation health with nothing failed is UNVERIFIED, and
-    a chain or MLflow error turns SUCCESS or UNVERIFIED into FAILED.
+    a chain error turns SUCCESS or UNVERIFIED into FAILED. MLflow delivery is reported as
+    ``mlflow_delivery``, a fact that never changes the status.
     """
     criteria = criteria or GateCriteria()
     summary_valid, summary_reasons, rollout_health, rollout_reasons = quality_inputs(
@@ -5809,7 +5895,7 @@ def gate_summary_from_collected(
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
-        if task["status"] == "SUCCESS":
+        if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     task["trial_counts"] = trial_counts(decision, collected)
     task["evaluation_health"] = evaluation
@@ -5840,6 +5926,20 @@ def gate_summary_from_collected(
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
     task["mlflow_tracking_required"] = mlflow_tracking_required(collected)
+    mlflow_problems: list[str] = []
+    status_error = None
+    receipt = (collected.mlflow or {}).get("receipt")
+    uri = (collected.mlflow or {}).get("config_tracking_uri")
+    if (
+        task["mlflow_tracking_required"]
+        and mlflow_status is None
+        and isinstance(receipt, dict)
+        and isinstance(receipt.get("run_id"), str)
+        and isinstance(uri, str)
+    ):
+        # No caller-read status: ask the tracking server for the receipt's own run.
+        mlflow_status, status_error = query_mlflow_status(uri, receipt["run_id"], status_client_factory)
+        mlflow_run_id = receipt["run_id"] if mlflow_status is not None else mlflow_run_id
     if task["mlflow_tracking_required"] is False:
         task["warnings"] = task["warnings"] + [MLFLOW_NOT_REQUIRED_NOTE]
     else:
@@ -5849,9 +5949,18 @@ def gate_summary_from_collected(
             configured=configured if isinstance(configured, bool) else None,
             observed_run_id=mlflow_run_id,
         )
-        extra.extend(mlflow_problems)
         if not mlflow_problems:
             task["warnings"] = task["warnings"] + mlflow_notes(collected.mlflow)
+    # MLflow delivery is a fact, never a verdict: it neither fails evaluation health nor turns the status to FAILED.
+    task["mlflow_delivery"] = mlflow_delivery(
+        mlflow_problems,
+        tracking_required=task["mlflow_tracking_required"],
+        status_error=status_error,
+    )
+    if task["mlflow_delivery"]["state"] in ("pending", "unverified"):
+        task["warnings"] = task["warnings"] + [
+            f"MLflow delivery {task['mlflow_delivery']['state']}: {'; '.join(task['mlflow_delivery']['reasons'])}"
+        ]
     if extra:
         task["errors"] = task["errors"] + extra
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
