@@ -1015,7 +1015,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     runner_config.resume_from_cache = True
     calls.clear()
     await helper.run_from_config(runner_config)
-    assert [(row["task"], row["_ng_attempt_index"]) for row in calls] == [(1, 1)]
+    # The failed rollout runs again, and so does the result its verifier_error masked: infrastructure left it unmeasured.
+    assert sorted((row["task"], row["_ng_attempt_index"]) for row in calls) == [(0, 1), (1, 1)]
     assert collection.failures_path_for(output).read_bytes() == original_failures
     assert not journal_path_for(output).exists()
     report = json.loads(coverage_path_for(output).read_text())

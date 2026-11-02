@@ -4736,7 +4736,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"] + completion["final_zeros"],
+            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,

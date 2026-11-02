@@ -252,6 +252,15 @@ def is_server_status(status: object) -> bool:
     return type(status) is int and 500 <= status <= 599
 
 
+def is_evaluation_side(name: str) -> bool:
+    """Whether ``name`` is a registered kind whose class is evaluation-side by its kind alone: not a model fault.
+
+    A recorded HTTP status can still refine an occurrence of it (see the fault classes above); this is the kind's own
+    class, for a saved row that carries a kind and nothing else.
+    """
+    return is_registered(name) and name not in MODEL_FAULT_KINDS
+
+
 def is_gate_derived(name: str) -> bool:
     """Whether ``name`` is a class the acceptance gate derives from saved rows (``GATE_DERIVED_KINDS``)."""
     return name in GATE_DERIVED_KINDS

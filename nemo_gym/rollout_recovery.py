@@ -44,14 +44,18 @@ from nemo_gym.artifacts.rollout_rows import is_no_generation_placeholder
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
+    AGENT_ROUTE_FAILED,
     AGENT_TIMEOUT,
     COLLECTION_RESUME_REFUSED,
+    JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
     MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
     PROVIDER_OOM_KILLED,
     SESSION_RELEASE_FAILED,
     TRANSPORT_PEER_DROP,
     TRANSPORT_UNREACHABLE,
+    is_evaluation_side,
     is_server_status,
 )
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
@@ -291,6 +295,39 @@ def is_infrastructure_agent_timeout(row: Mapping[str, Any]) -> bool:
     return _row_failure_kind(row) == AGENT_TIMEOUT and (
         _sandbox_or_tool_fault(row) or _material_model_call_faults(row)
     )
+
+
+# Masked kinds whose saved answer is graded again (judge) or whose verify call may have been lost in transport: their
+# recovery reads the saved answer and never reruns the rollout, so they are not rerun here either.
+_MASKED_REGRADE_KINDS = frozenset({JUDGE_FAILED, JUDGE_UNPARSEABLE, AGENT_ROUTE_FAILED})
+
+
+def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
+    """The kind of a masked result that infrastructure, not the evaluated model, left unmeasured; else None.
+
+    A result row is masked (``mask_sample``) by the Environment Server that graded it, so its ``failure_kind`` was
+    reported at that boundary: a lost session, a failed provider, an infrastructure error, a verifier that could not
+    run. When the kind is evaluation-side (``is_evaluation_side``) the rollout is retried like an infrastructure
+    failure, within its attempt cap: the masked row counts one failed attempt and a later attempt supersedes it. A
+    model-class kind, no kind, an unregistered or namespaced kind, and the kinds whose saved answer is graded again
+    (``_MASKED_REGRADE_KINDS``, including a ``transport_*`` verify call) keep the masked row as the result.
+    """
+    if (
+        row.get("mask_sample") is not True
+        or row.get("_ng_failure_class") is not None
+        or row.get("_ng_omitted_rollout") is True
+        or row.get("_ng_rejudge_operation_id") is not None
+    ):
+        return None
+    kind = row.get("failure_kind")
+    if (
+        not isinstance(kind, str)
+        or not is_evaluation_side(kind)
+        or kind in _MASKED_REGRADE_KINDS
+        or kind.startswith("transport_")
+    ):
+        return None
+    return kind
 
 
 def holds_response(row: Mapping[str, Any]) -> bool:

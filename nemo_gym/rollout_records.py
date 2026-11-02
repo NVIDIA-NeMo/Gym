@@ -51,6 +51,7 @@ from nemo_gym.rollout_recovery import (
     keeps_partial_response,
     load_resubmit_offset,
     manifest_path_for,
+    masked_infrastructure_kind,
     matches_failure_class,
     observed_elapsed,
 )
@@ -202,6 +203,8 @@ class _Outcome:
     interruption_cause_unknown: bool = False
     saved_answer: bool = False
     unclassified_execution_failure: bool = False
+    # A result masked by an infrastructure failure (``masked_infrastructure_kind``): a failed attempt that is retried.
+    masked_infrastructure: bool = False
 
 
 # A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
@@ -644,6 +647,11 @@ class RolloutRecords:
             and not is_terminal_failure(row, retry_terminal_timeouts=True)
         ):
             self.overridden_terminal_counts[key[0]] += 1
+        masked_infrastructure = masked_infrastructure_kind(row) is not None
+        if masked_infrastructure and key not in self.payloads:
+            # The results file keeps no resubmit offset, so a masked attempt counts whenever it was saved: a resubmit
+            # still gives the process it starts a fresh budget, as for every failure.
+            self.attempt_counts[key[0]] += 1
         if row.get("_ng_omitted"):
             self.omitted.add(key)
         self.payloads[key] = _Outcome(
@@ -665,6 +673,7 @@ class RolloutRecords:
             saved_answer=failure_class is not None
             and not infrastructure
             and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
+            masked_infrastructure=masked_infrastructure,
         )
         outcome = self.payloads[key]
         if (
@@ -820,6 +829,9 @@ class RolloutRecords:
                 },
                 retry_terminal_timeouts=True,
             )
+        if payload and payload.masked_infrastructure and self.disposition(identity) == "success":
+            # Infrastructure masked this result, so it is retried and a later attempt supersedes it.
+            return True
         return self.disposition(identity) not in {"success", "omitted"} and not terminal
 
     def failure_count(self, identity: str) -> int:
@@ -863,8 +875,8 @@ class RolloutRecords:
         max_attempts = self.manifest.max_rollout_attempts or _get_max_rollout_attempts()
         not_started = expected - len(self.latest)
         missing = counts["unknown"] - not_started
-        # A producer-masked result completed execution, so recovery still reuses
-        # it. Report its measurement status separately, after selecting attempts.
+        # A producer-masked result completed execution, so recovery reuses it unless infrastructure masked it
+        # (``masked_infrastructure``). Report its measurement status separately, after selecting attempts.
         masked = sum(
             self.payloads[(identity, self.latest[identity])].masked
             and self.payloads[(identity, self.latest[identity])].has_reward
@@ -882,6 +894,15 @@ class RolloutRecords:
         failed_final = sum(
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
+        # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
+        masked_retryable = sum(
+            self.payloads[(identity, self.latest[identity])].masked_infrastructure
+            and self._retryable(identity)
+            and self.failure_count(identity) < max_attempts
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+        )
+        settled = counts["success"] - masked_retryable + final_zeros
         return {
             "schema_version": 2,
             "selection_policy": self.manifest.selection_policy,
@@ -890,6 +911,7 @@ class RolloutRecords:
             "successful": counts["success"],
             "measured": counts["success"] - masked - unscored,
             "masked": masked,
+            "masked_retryable": masked_retryable,
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
@@ -909,8 +931,8 @@ class RolloutRecords:
             ),
             "max_rollout_attempts": max_attempts,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
-            "completion_fraction": (counts["success"] + final_zeros) / expected if expected else 1.0,
-            "complete": counts["success"] + final_zeros == expected,
+            "completion_fraction": settled / expected if expected else 1.0,
+            "complete": settled == expected,
             "reconciled": missing == 0,
             "identity_verified": not (self.manifest.legacy_import or self.manifest.identity_overridden),
         }

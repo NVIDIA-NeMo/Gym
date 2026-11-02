@@ -654,7 +654,11 @@ def decide_recovery(
         is_omitted_rollout_row,
         is_terminal_failure,
     )
-    from nemo_gym.rollout_recovery import is_answered_agent_deadline, is_infrastructure_agent_timeout
+    from nemo_gym.rollout_recovery import (
+        is_answered_agent_deadline,
+        is_infrastructure_agent_timeout,
+        masked_infrastructure_kind,
+    )
 
     policy = outcome_policy or RecoveryOutcomePolicyConfig()
     managed = {fact.identity: fact for fact in managed_selection or []}
@@ -739,6 +743,37 @@ def decide_recovery(
                             state=IdentityState.JUDGE_RECOVERABLE,
                             failure_kind=row.get("failure_kind"),
                             events=_events(row),
+                        )
+                    )
+                    continue
+                infrastructure = masked_infrastructure_kind(row)
+                fact = managed.get(identity)
+                if infrastructure is not None and fact is not None:
+                    # Infrastructure masked it: the Store counts it as a failed attempt and runs it again, and the new
+                    # attempt supersedes it. The policy decides it as it decides a failure of that kind.
+                    action = choose_action(failure_kind=infrastructure, http_status=None, config=policy)
+                    if action == OutcomeAction.FAIL:
+                        # The Store would still run it again, so a policy that fails it stops the run.
+                        policy_stopped = True
+                        state = IdentityState.TERMINAL
+                    elif action == OutcomeAction.RETRY:
+                        state = (
+                            IdentityState.RETRYABLE if fact.attempts < fact.max_attempts else IdentityState.EXHAUSTED
+                        )
+                    else:
+                        state = IdentityState.UNKNOWN
+                    evidence.append(
+                        IdentityEvidence(
+                            identity=identity,
+                            state=state,
+                            failure_kind=infrastructure,
+                            attempts=fact.attempts,
+                            max_attempts=fact.max_attempts,
+                            reason=(
+                                "the policy verifies a masked result that has no saved judge answer"
+                                if state == IdentityState.UNKNOWN
+                                else None
+                            ),
                         )
                     )
                     continue
@@ -5258,8 +5293,8 @@ def gate_summary_from_collected(
 # --- Saved-answer re-verification --------------------------------------------------------------------------------- #
 # A saved result whose grading failed for a judge or transport cause, or whose grading was never recorded, is graded
 # again from its saved answer: never by running the policy again. Collection settles it into the run at completion
-# (``rollout_reverification.bind_judge_failures``) and ``--recover`` decides REVERIFY for it. A masked result whose
-# verifier deterministically could not measure it (any other cause) is a model fact and is never re-verified.
+# (``rollout_reverification.bind_judge_failures``) and ``--recover`` decides REVERIFY for it. No other masked
+# result is re-verified: one that infrastructure left unmeasured runs again (``masked_infrastructure_kind``).
 REVERIFY_JUDGE = "judge"
 REVERIFY_VERIFY_TRANSPORT = "verify_transport"
 REVERIFY_UNGRADED = "ungraded"
