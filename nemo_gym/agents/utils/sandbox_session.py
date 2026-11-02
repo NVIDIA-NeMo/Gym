@@ -133,7 +133,8 @@ class HarnessPauseResult:
     receipt answers instead. ``unconfirmed``: the supervisor did not confirm in time or reported ``error``.
     ``pids`` are the processes a pause stopped. ``identity`` is the answering supervisor's ``PID.START`` and
     ``mode`` its pause mode, when it reported them. ``wall`` and ``uptime`` are the sandbox's wall clock (epoch
-    seconds) and uptime (seconds since boot) when it answered.
+    seconds) and uptime (seconds since boot) when it answered. ``frozen``: a hold pause also stopped every process
+    of the harness (``hold_freeze_s``).
     """
 
     status: Literal["confirmed", "finished", "unconfirmed"]
@@ -143,6 +144,7 @@ class HarnessPauseResult:
     mode: PauseMode | None = None
     wall: float | None = None
     uptime: float | None = None
+    frozen: bool | None = None
 
     @property
     def confirmed(self) -> bool:
@@ -165,6 +167,9 @@ class SandboxSessionCheckpoint(TypedDict):
     # to where the snapshot left it.
     pause_wall: NotRequired[float]
     pause_uptime: NotRequired[float]
+    # Whether that pause also stopped every process of the harness: nothing of it can run in a restored sandbox
+    # until the continue, so a restore may set the wall clock back before it does.
+    pause_frozen: NotRequired[bool]
 
 
 _CHECKPOINT_STATE = TypeAdapter(SandboxSessionCheckpoint)
@@ -187,6 +192,7 @@ def _pause_result(
         mode=acknowledgement.get("mode"),
         wall=acknowledgement.get("wall"),
         uptime=acknowledgement.get("uptime"),
+        frozen=acknowledgement.get("frozen"),
     )
 
 
@@ -239,6 +245,9 @@ class SandboxSession[Artifacts]:
     owns_sandbox: bool = False
     pausable: bool = False
     pause_mode: PauseMode = "stop"
+    # In hold mode, also stop the harness's processes for the snapshot, waiting this long (seconds) for them to stop;
+    # a pause that cannot stays a plain hold. See ``process_supervisor.sh --hold-freeze``.
+    hold_freeze_s: float | None = None
     launch_started: bool = field(default=False, init=False)
     cleanup: CleanupReceipt | None = field(default=None, init=False)
     artifacts: Artifacts | None = field(default=None, init=False)
@@ -272,6 +281,7 @@ class SandboxSession[Artifacts]:
     _held_seq: int = field(default=0, init=False)
     # The sandbox's wall clock and uptime when that supervisor confirmed pause ``_held_seq``.
     _held_clocks: tuple[float, float] | None = field(default=None, init=False)
+    _held_frozen: bool = field(default=False, init=False)
     # Holds the provider's polls of the launch's command while the harness is paused, so a sandbox being snapshotted
     # is not asked about it; released before anything else runs a command in the sandbox.
     _parked_polls: ExitStack | None = field(default=None, init=False, repr=False)
@@ -293,6 +303,8 @@ class SandboxSession[Artifacts]:
             state["supervisor_identity"] = self._held_identity
             if self._held_clocks is not None:
                 state["pause_wall"], state["pause_uptime"] = self._held_clocks
+            if self._held_frozen:
+                state["pause_frozen"] = True
         return state
 
     @classmethod
@@ -306,6 +318,7 @@ class SandboxSession[Artifacts]:
         owns_sandbox: bool = False,
         pausable: bool = False,
         pause_mode: PauseMode = "stop",
+        hold_freeze_s: float | None = None,
     ) -> "SandboxSession[Artifacts]":
         """Rebind a session from ``checkpoint_state`` to ``sandbox``, restored from a snapshot of the original.
 
@@ -326,6 +339,7 @@ class SandboxSession[Artifacts]:
             owns_sandbox=owns_sandbox,
             pausable=pausable,
             pause_mode=pause_mode,
+            hold_freeze_s=hold_freeze_s,
         )
         if state["session_root"] != state["session_dir"]:
             session._session_root = state["session_root"]
@@ -431,6 +445,7 @@ class SandboxSession[Artifacts]:
                 stdlib_runner=command.stdlib_runner,
                 pausable=self.pausable,
                 pause_mode=self.pause_mode,
+                hold_freeze=self.hold_freeze_s,
             )
             self.launch_started = True
             return asyncio.create_task(self.sandbox.exec(command_line, cwd=self.workdir, timeout_s=provider_timeout))
@@ -581,6 +596,7 @@ class SandboxSession[Artifacts]:
         self._pause_seq = self._continue_seq = self._continued_seq = self._held_seq = 0
         self._held_identity = None
         self._held_clocks = None
+        self._held_frozen = False
         self._release_parked_polls()
 
     async def pause_harness(self, *, timeout: float = DEFAULT_PAUSE_TIMEOUT) -> HarnessPauseResult:
@@ -606,6 +622,7 @@ class SandboxSession[Artifacts]:
         if result.confirmed and result.identity is not None:
             self._held_seq, self._held_identity = self._pause_seq, result.identity
             self._held_clocks = None
+            self._held_frozen = result.frozen is True
             if result.wall is not None and result.uptime is not None:
                 self._held_clocks = (result.wall, result.uptime)
         if result.confirmed and self.launch_started and self._parked_polls is None:

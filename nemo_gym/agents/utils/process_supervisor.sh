@@ -42,6 +42,11 @@
 # With --pause-mode hold, for a sandbox whose snapshot keeps its processes, a pause sends no signal: the
 # harness keeps running, the supervisor acknowledges at once and stops counting the deadline until the
 # continue, which sends nothing either. The checkpoint holds the harness's model calls instead.
+# --hold-freeze SECONDS also stops, for the snapshot, every process a stop-mode pause would: a hold pause then
+# sends STOP as a stop-mode pause does and waits up to SECONDS for every process to stop. When one does not (a
+# process in uninterruptible sleep), it continues them all and the pause stays a plain hold. The acknowledgement's
+# "frozen" says which: true when nothing of the harness can run until the continue, which sends CONT. A restore
+# that sets the wall clock can then set it back before anything of the harness reads it.
 #
 # --abandon IDENTITY ends a launch for good after a restore of such a snapshot, when nothing of it may run
 # again: it sends KILL, never CONT, to the supervisor IDENTITY names, the shell that started it, every
@@ -50,7 +55,7 @@
 #
 # usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
 #        [--expire-file PATH] [--pause-file PATH --paused PATH --continue-file PATH --continued PATH
-#         [--pause-mode stop|hold]]
+#         [--pause-mode stop|hold] [--hold-freeze SECONDS]]
 #        -- COMMAND...
 #        process_supervisor.sh --abandon IDENTITY --receipt PATH [--cleanup-timeout SECONDS]
 
@@ -234,7 +239,8 @@ request_seq() {
 
 # Write acknowledgement $1 for request $2 atomically.
 acknowledge() {
-    local named=null wall uptime=null
+    local named=null wall uptime=null frozen=
+    [[ $pause_mode == hold ]] && frozen=", \"frozen\": ${ack_frozen:-false}"
     [[ -n ${identity-} ]] && named="\"$identity\""
     # The wall clock (epoch seconds) and uptime (seconds since boot) when the acknowledgement is written. A restore
     # that keeps the processes but sets the wall clock to the host's can set it back to wall + (uptime now - uptime),
@@ -243,8 +249,8 @@ acknowledge() {
     wall=${wall/,/.}
     [[ -n $wall ]] || printf -v wall '%(%s)T' -1
     read -r uptime _ </proc/uptime 2>/dev/null || uptime=null
-    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s, "wall": %s, "uptime": %s}' \
-        "$2" "$3" "$4" "$5" "$pause_mode" "$named" "$wall" "${uptime:-null}" >"$1.tmp" && mv -f "$1.tmp" "$1"
+    printf '{"seq": %s, "confirmed": %s, "pids": [%s], "error": %s, "mode": "%s", "identity": %s, "wall": %s, "uptime": %s%s}' \
+        "$2" "$3" "$4" "$5" "$pause_mode" "$named" "$wall" "${uptime:-null}" "$frozen" >"$1.tmp" && mv -f "$1.tmp" "$1"
 }
 
 # Record in paused[PID]=START every process a pause reaches: what a stop would reach now, and
@@ -287,23 +293,49 @@ paused_settled() {
     ((!others && !waiting))
 }
 
+# Send STOP to every process a pause reaches, recording them in paused.
+stop_reached() {
+    pause_scan
+    [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
+    signal_paused STOP
+    # A process forked between the scan and its group's stop is found again.
+    pause_scan
+    signal_paused STOP
+}
+
+# Freeze a held harness (--hold-freeze): stop every reached process within hold_freeze centiseconds, or continue
+# them all and fail. A harness not launched yet cannot run until the continue: frozen.
+freeze_held() {
+    local limit
+    [[ -n ${harness-} ]] || return 0
+    stop_reached
+    now
+    limit=$((NOW + hold_freeze))
+    while ! paused_settled '[Tt]'; do
+        now
+        if ((NOW >= limit)); then
+            signal_paused CONT
+            paused=()
+            return 1
+        fi
+        signal_paused STOP
+        sleep 0.02
+    done
+}
+
 # Pause request $1: stop every reached process and acknowledge. A harness not launched yet has
 # nothing to stop; the launch waits instead.
 pause() {
     local limit error=null pid list=
     paused=()
     if [[ $pause_mode == hold ]]; then
-        acknowledge "$paused_ack" "$1" true "" null
+        ack_frozen=false
+        ((hold_freeze)) && freeze_held && ack_frozen=true
+        for pid in "${!paused[@]}"; do list+="${list:+, }$pid"; done
+        acknowledge "$paused_ack" "$1" true "$list" null
         return
     fi
-    if [[ -n ${harness-} ]]; then
-        pause_scan
-        [[ -n ${groups[harness]} ]] && owned_group "$harness" "${groups[harness]}" && kill -STOP -- "-$harness" 2>/dev/null
-        signal_paused STOP
-        # A process forked between the scan and its group's stop is found again.
-        pause_scan
-        signal_paused STOP
-    fi
+    [[ -n ${harness-} ]] && stop_reached
     now
     limit=$((NOW + pause_wait))
     while ! paused_settled '[Tt]'; do
@@ -322,7 +354,8 @@ pause() {
 # Continue request $1: continue every process the pause stopped and acknowledge.
 resume_paused() {
     local limit error=null
-    if [[ $pause_mode == hold ]]; then
+    if [[ $pause_mode == hold && ${#paused[@]} == 0 ]]; then
+        ack_frozen=false
         acknowledge "$continued_ack" "$1" true "" null
         return
     fi
@@ -339,6 +372,7 @@ resume_paused() {
         sleep 0.02
     done
     paused=()
+    ack_frozen=false
     acknowledge "$continued_ack" "$1" "$([[ $error == null ]] && echo true || echo false)" "" "$error"
 }
 
@@ -441,6 +475,7 @@ if [[ ${1-} == --abandon ]]; then
 fi
 
 arguments=("$@")
+hold_freeze=0
 while (($#)) && [[ $1 != -- ]]; do
     (($# >= 2)) || usage
     case $1 in
@@ -457,6 +492,7 @@ while (($#)) && [[ $1 != -- ]]; do
         [[ $2 == stop || $2 == hold ]] || { echo "--pause-mode must be stop or hold" >&2; exit 2; }
         pause_mode=$2
         ;;
+    --hold-freeze) hold_freeze=$(centiseconds "$2") || { echo "--hold-freeze must be finite and positive" >&2; exit 2; } ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2

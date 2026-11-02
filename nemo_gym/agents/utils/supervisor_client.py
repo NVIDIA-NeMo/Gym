@@ -115,7 +115,8 @@ class PauseAcknowledgement(TypedDict):
     ``mode`` is the supervisor's pause mode and ``identity`` its ``PID.START``, ``None`` before it launched;
     acknowledgements written before either existed have neither. ``wall`` (epoch seconds) and ``uptime`` (seconds
     since boot) are the sandbox's clocks when the acknowledgement was written; ``uptime`` is ``None`` without a
-    readable ``/proc/uptime``.
+    readable ``/proc/uptime``. ``frozen`` (hold mode only): the pause also stopped every process of the harness
+    (``hold_freeze``), so nothing of it runs until the continue.
     """
 
     seq: int
@@ -126,6 +127,7 @@ class PauseAcknowledgement(TypedDict):
     identity: NotRequired[str | None]
     wall: NotRequired[float]
     uptime: NotRequired[float | None]
+    frozen: NotRequired[bool]
 
 
 # How a supervisor pauses: ``stop`` sends SIGSTOP and SIGCONT to every process it reaches; ``hold`` sends nothing,
@@ -236,6 +238,7 @@ def supervised_launch_command(
     stdlib_runner: bool = False,
     pausable: bool = False,
     pause_mode: PauseMode = "stop",
+    hold_freeze: float | None = None,
 ) -> str:
     """Fence delayed launches and run a harness command under the shared supervisor.
 
@@ -254,7 +257,9 @@ def supervised_launch_command(
     When the link cannot be made, the argv runs unchanged.
 
     With ``pausable``, the supervisor also serves pause and continue requests in
-    ``session_dir`` (see ``request_pause`` and ``request_continue``), in ``pause_mode``.
+    ``session_dir`` (see ``request_pause`` and ``request_continue``), in ``pause_mode``. With ``hold_freeze``
+    (seconds; hold mode), a hold pause also stops the harness's processes, waiting that long for them to stop, and
+    reports in its acknowledgement whether it did (``frozen``).
     """
     check_stdlib_runner(command, stdlib_runner=stdlib_runner)
     supervisor = quote(f"{session_dir}/{SUPERVISOR_FILE}")
@@ -264,6 +269,7 @@ def supervised_launch_command(
         f"--continue-file {quote(f'{session_dir}/{CONTINUE_REQUEST_FILE}')} "
         f"--continued {quote(f'{session_dir}/{CONTINUED_FILE}')} "
         + (f"--pause-mode {pause_mode} " if pause_mode != "stop" else "")
+        + (f"--hold-freeze {_seconds(hold_freeze)} " if pause_mode == "hold" and hold_freeze else "")
         if pausable
         else ""
     )

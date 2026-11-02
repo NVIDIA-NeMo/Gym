@@ -40,13 +40,17 @@ linux_only = pytest.mark.skipif(sys.platform != "linux", reason="Linux /proc is 
 # -- the bash supervisor -------------------------------------------------------------------------------------------
 
 
-def _start(tmp_path: Path, *command: str, timeout: str = "30", pause_mode: str = "stop") -> subprocess.Popen:
+def _start(
+    tmp_path: Path, *command: str, timeout: str = "30", pause_mode: str = "stop", hold_freeze: str | None = None
+) -> subprocess.Popen:
     return subprocess.Popen(
         ["bash", str(SUPERVISOR_SCRIPT), "--timeout", timeout, "--cleanup-timeout", "1"]
         + ["--receipt", str(tmp_path / CLEANUP_RECEIPT_FILE), "--stop-file", str(tmp_path / "stop.request")]
         + ["--pause-file", str(tmp_path / PAUSE_REQUEST_FILE), "--paused", str(tmp_path / PAUSED_FILE)]
         + ["--continue-file", str(tmp_path / CONTINUE_REQUEST_FILE), "--continued", str(tmp_path / CONTINUED_FILE)]
-        + ["--pause-mode", pause_mode, "--", *command],
+        + ["--pause-mode", pause_mode]
+        + (["--hold-freeze", hold_freeze] if hold_freeze else [])
+        + ["--", *command],
         cwd=tmp_path,
         # Not pipes: a service the harness left running would hold them open.
         stdout=subprocess.DEVNULL,
@@ -264,6 +268,7 @@ def test_a_hold_pause_signals_nothing_names_the_supervisor_and_credits_the_deadl
         _request(tmp_path / PAUSE_REQUEST_FILE, 1)
         paused = _acknowledgement(tmp_path / PAUSED_FILE, 1)
         assert paused["confirmed"] is True and paused["pids"] == [] and paused["mode"] == "hold", paused
+        assert paused["frozen"] is False
         assert _is_identity_of_a_live_process(paused["identity"])
         # Nothing is stopped: the harness keeps running while the pause holds.
         before = _ticks(tmp_path)["worker"]
@@ -300,6 +305,61 @@ def test_every_acknowledgement_records_the_sandboxs_wall_clock_and_uptime(tmp_pa
         assert continued["wall"] >= paused["wall"] and continued["uptime"] >= paused["uptime"], continued
     finally:
         _finish(process)
+
+
+@linux_only
+def test_a_freezing_hold_pause_stops_the_harness_and_its_service_until_the_continue(tmp_path: Path) -> None:
+    (tmp_path / "service.py").write_text(_SERVICE)
+    process = _start(tmp_path, "bash", "-c", _WORKER, pause_mode="hold", hold_freeze="2")
+    service = None
+    try:
+        _wait_for(lambda: (tmp_path / "ready").exists())
+        service = int((tmp_path / "service.pid").read_text())
+        _wait_for(lambda: all(_ticks(tmp_path).values()))
+        for seq in (1, 2):
+            _request(tmp_path / PAUSE_REQUEST_FILE, seq)
+            paused = _acknowledgement(tmp_path / PAUSED_FILE, seq)
+            # Still a hold (a restore can adopt it), and nothing of the harness runs until the continue.
+            assert paused["confirmed"] is True and paused["mode"] == "hold" and paused["frozen"] is True, paused
+            assert service in paused["pids"] and _state(service) in ("T", "t")
+            frozen = _ticks(tmp_path)
+            time.sleep(0.3)
+            assert _ticks(tmp_path) == frozen
+            _request(tmp_path / CONTINUE_REQUEST_FILE, seq)
+            continued = _acknowledgement(tmp_path / CONTINUED_FILE, seq)
+            assert continued["confirmed"] is True and continued["frozen"] is False, continued
+            _wait_for(lambda: all(after > before for after, before in zip(_ticks(tmp_path).values(), frozen.values())))
+    finally:
+        _finish(process)
+        if service is not None:
+            try:
+                os.kill(service, signal.SIGKILL)
+            except ProcessLookupError:
+                pass
+
+
+@linux_only
+def test_a_freeze_that_cannot_stop_every_process_continues_them_and_stays_a_plain_hold(tmp_path: Path) -> None:
+    # A process in uninterruptible sleep never reports stopped: stand in for it by a check that never settles.
+    harness = subprocess.Popen(["sleep", "30"])
+    script = (
+        'source "$1"; harness=$2; hold_freeze=20; '
+        'stop_reached() { stat_fields "$harness"; paused[harness]=${fields[19]}; kill -STOP "$harness"; }; '
+        "paused_settled() { return 1; }; "
+        'freeze_held && echo frozen || echo "not frozen, ${#paused[@]} recorded"'
+    )
+    try:
+        result = subprocess.run(
+            ["bash", "-c", script, "_", str(SUPERVISOR_SCRIPT), str(harness.pid)],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        assert result.stdout == "not frozen, 0 recorded\n", result.stderr
+        _wait_for(lambda: _state(harness.pid) not in ("T", "t"))
+    finally:
+        harness.kill()
+        harness.wait()
 
 
 def test_the_pause_mode_must_be_stop_or_hold(tmp_path: Path) -> None:
@@ -493,8 +553,37 @@ async def test_a_hold_session_keeps_its_harness_running_and_records_the_pause_it
     assert state["pause_seq"] == 1 and state["supervisor_identity"] == paused.identity
     assert paused.wall is not None and paused.uptime is not None
     assert (state["pause_wall"], state["pause_uptime"]) == (paused.wall, paused.uptime)
+    assert "pause_frozen" not in state
     assert (await session.continue_harness(timeout=10)).confirmed
     assert not {"pause_seq", "pause_wall", "pause_uptime"} & set(session.checkpoint_state())
+    assert await asyncio.wait_for(running, 30) == "artifacts"
+
+
+@linux_only
+async def test_a_freezing_hold_session_stops_its_harness_and_records_that_the_pause_froze_it(tmp_path: Path) -> None:
+    session = _session(tmp_path, pause_mode="hold", hold_freeze_s=2.0)
+    launch_dir = tmp_path / "launch-1"
+    running = asyncio.create_task(
+        session.execute(
+            stage_activation=_ticking_stage(launch_dir),
+            collect=AsyncMock(return_value="artifacts"),
+            timeout=30,
+            close_timeout=3,
+        )
+    )
+    async with asyncio.timeout(15):
+        while not (launch_dir / "ticks").exists():
+            await asyncio.sleep(0.02)
+    paused = await session.pause_harness(timeout=10)
+    assert paused.confirmed and paused.mode == "hold" and paused.frozen is True and paused.pids, paused
+    before = len((launch_dir / "ticks").read_text())
+    await asyncio.sleep(0.3)
+    assert len((launch_dir / "ticks").read_text()) == before
+    state = session.checkpoint_state()
+    assert state["pause_frozen"] is True and state["pause_seq"] == 1
+    continued = await session.continue_harness(timeout=10)
+    assert continued.confirmed and continued.frozen is False
+    assert "pause_frozen" not in session.checkpoint_state()
     assert await asyncio.wait_for(running, 30) == "artifacts"
 
 
