@@ -282,8 +282,14 @@ def flatten_scores(scores: Dict[str, Any]) -> Dict[str, Any]:
     for area in scores.get("areas") or []:
         if isinstance(area.get("skill"), (int, float)):
             out[f"decision_index_area/{area['label']}"] = 100 * area["skill"]
+    load_kit()
+    from decision_index.scoring import index02
+
+    spec = index02.spec(EDITION)
+    names = {n: c.get("name", n) for n, c in spec["chance"].items()}
+    names.update({str(item["id"]): item.get("name", str(item["id"])) for item in spec["not_in_index"]})
     for n, b in (scores.get("index_benchmarks") or {}).items():
         if isinstance(b, dict) and isinstance(b.get("skill"), (int, float)) and math.isfinite(b["skill"]):
-            name = (scores.get("benchmarks") or {}).get(n, {}).get("dataset", n)
-            out[f"decision_index_skill/{n}:{name}"] = 100 * b["skill"]
+            group = "decision_index_skill" if b.get("in_index") else "decision_index_not_counted"
+            out[f"{group}/{n}:{names.get(n, n)}"] = 100 * b["skill"]
     return out

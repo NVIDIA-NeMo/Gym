@@ -110,11 +110,14 @@ class TestRequestMapping:
 class TestEngineCalls:
     def test_systemone_ok_strips_the_trace_and_wraps_the_answers(self) -> None:
         model = _model(extra_body={"packing": "shared"})
-        calls = _scripted(model, [(200, json.dumps({"model": "decider", "answers": ANSWERS, "evaluation_trace": [1]}))])
+        raw = {"model": "decider", "answers": ANSWERS, "usage": {"input_tokens": 42}, "evaluation_trace": [1]}
+        calls = _scripted(model, [(200, json.dumps(raw))])
         body = _body({"role": "user", "content": json.dumps({"state": STATE, "questions": QUESTIONS})})
         response = asyncio.run(model.responses(body))
         envelope = _envelope(response)
-        assert envelope["status"] == "ok" and envelope["response"] == {"model": "decider", "answers": ANSWERS}
+        assert envelope["status"] == "ok" and envelope["response"] == {"model": "decider", "answers": ANSWERS, "usage": {"input_tokens": 42}}
+        # One answer position per question; the engine's own input-token count.
+        assert (response.usage.input_tokens, response.usage.output_tokens) == (42, 2)
         assert calls == [("/v1/systemone", {"model": "decider", "state": STATE, "questions": QUESTIONS, "packing": "shared"})]
 
     def test_decisions_endpoint(self) -> None:
@@ -122,6 +125,7 @@ class TestEngineCalls:
         raw = {"model": "decider", "answers": [{"type": "predicate", "name": "refund", "probability": 0.3}]}
         calls = _scripted(model, [(200, json.dumps(raw))])
         envelope = asyncio.run(model.call_engine(STATE, {"refund": QUESTIONS["refund"]}))
+        assert engine_app.usage_of(None, envelope) is None
         assert calls[0][0] == "/v1/decisions" and envelope["response"]["answers"]["refund"] == {"type": "noul", "noul": 0.3}
 
     def test_capacity_rejection_is_unsupported(self) -> None:
