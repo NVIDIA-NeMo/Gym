@@ -97,6 +97,7 @@ def format_entry(row: dict, prompt_config: Any = None) -> dict:
         # Metadata for analysis; not used for grading.
         "answer_type": row.get("answer_type"),
         "uuid": row["id"],
+        "task_id": row["id"],
         "category": row.get("category"),
         "raw_subject": row.get("raw_subject"),
         "verified_class": VERIFIED_CLASSES_MAP.get(row.get("Verified_Classes"), row.get("Verified_Classes")),
@@ -132,7 +133,7 @@ def prepare(
 
     from datasets import load_dataset
 
-    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+    from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
     print(f"Downloading {REPO_ID} from HuggingFace...")
     hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)

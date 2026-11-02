@@ -17,7 +17,7 @@ from unittest.mock import MagicMock
 
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.example_session_state_mgmt.app import (
     StatefulCounterResourcesServer,
     StatefulCounterResourcesServerConfig,

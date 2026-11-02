@@ -19,19 +19,21 @@ and the Chat Completions API format. It is used by model servers that need to
 convert between the two formats (e.g. vllm_model, inference_provider).
 """
 
+import json
 import logging
 import re
-from typing import Any, ClassVar, Dict, List, Optional, Tuple
+from typing import Any, ClassVar, Collection, Dict, List, Literal, Optional, Tuple
 from uuid import uuid4
 
 from openai.types.completion_usage import CompletionUsage
 from openai.types.responses.response_create_params import ToolParam
 from pydantic import BaseModel, Field
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core.responses_api_types import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
+    NeMoGymChatCompletionContentPartImageParam,
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymChatCompletionDeveloperMessageParam,
     NeMoGymChatCompletionMessageParam,
@@ -48,6 +50,7 @@ from nemo_gym.openai_utils import (
     NeMoGymFunctionDefinition,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseCustomToolCall,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputItem,
@@ -75,10 +78,17 @@ _IMAGE_OUTPUT_PLACEHOLDER = "[image omitted from tool output]"
 # Responses reasoning fields that only select what the provider reports back (a reasoning
 # summary, under its current and its deprecated name), so a Chat Completions backend answers the
 # request faithfully without them. With `drop_unrepresentable_request_fields` these are removed
-# from the request rather than refused. `reasoning.context` is not among them: it tells the
-# provider which earlier reasoning items to render back to the model, which the conversion cannot
-# honor (it renders every item and leaves the rest to the chat template), so it stays refused.
+# from the request rather than refused.
 _REPORTING_ONLY_REASONING_FIELDS = ("summary", "generate_summary")
+
+# The `reasoning.context` values the conversion already behaves as. The field tells the provider
+# which earlier reasoning items to render back to the model. The conversion passes every reasoning
+# item the request carries to the backend and leaves what is rendered to its chat template, which
+# is what `all_turns` (render them all) and `auto` (the provider's choice) ask for, so with
+# `drop_unrepresentable_request_fields` these values are dropped. `current_turn` asks for the
+# earlier turns' reasoning to be left out, which the conversion does not do, so it stays refused.
+# The Codex CLI sends `all_turns` when its model catalog enables reasoning context.
+_DROPPABLE_REASONING_CONTEXTS = ("auto", "all_turns")
 
 
 def message_content_to_text(content: Any) -> str:
@@ -234,11 +244,48 @@ def _align_logprobs_to_text(
     return kept or None
 
 
+# The single parameter of a function-bridged custom tool. It is declared
+# exactly `"type": "string"`: schema coercion returns a string-typed value
+# byte-verbatim. How the payload crosses the engine depends on the backend's
+# tool parser: an XML-style parser (`qwen3_coder`, `nemotron_v3`) carries the
+# string value as raw text in its markup, while a JSON-format parser
+# (`hermes`, `llama3_json`, `mistral`) makes the model emit the whole
+# arguments object as JSON, so the model must JSON-escape the payload and an
+# escaping mistake surfaces as plain text with no tool call.
+_CUSTOM_TOOL_BRIDGE_PARAMETER = "input"
+
+# One strategy type shared by this converter and the model-server config
+# (`BaseResponsesAPIModelConfig.custom_tool_strategy`), so a value added to one
+# cannot be rejected by the other.
+CustomToolStrategy = Literal["passthrough", "function_bridge"]
+
+# Custom tools whose grammar `format` was already reported dropped at the
+# function-bridge lowering. The transcript is reconverted on every model call,
+# so an unguarded warning would repeat each turn.
+_BRIDGE_GRAMMAR_DROP_WARNED: set = set()
+
+
 class ResponsesConverter(BaseModel):
     """Converts between OpenAI Responses API and Chat Completions API formats."""
 
     return_token_id_information: bool
     uses_reasoning_parser: bool = True
+    # How a Responses `custom` (free-form) tool crosses a Chat Completions
+    # backend that admits function tools only (vLLM's chat schema).
+    # "passthrough" keeps the historical behavior: the definition converts to a
+    # Chat custom tool and the backend's own validation decides, while replayed
+    # `custom_tool_call` history items refuse the conversion. "function_bridge"
+    # lowers each custom tool to a function tool with one required plain-string
+    # parameter (_CUSTOM_TOOL_BRIDGE_PARAMETER), replays custom-tool history in
+    # that lowered form, and the response lift turns a returned call whose name
+    # the request declared as custom back into a `custom_tool_call` item.
+    custom_tool_strategy: CustomToolStrategy = "passthrough"
+    # Keep each ``input_image`` part of a tool call output (e.g. the Codex CLI's view_image) as an
+    # ``image_url`` part of the chat tool message, which engines such as vLLM accept and a vision model
+    # then sees inside the tool result. Detail "original", which chat lacks, is sent as "high". Off by
+    # default: OpenAI's chat tool messages carry text only, so such an output fails the conversion, or
+    # becomes a text placeholder with ``drop_unrepresentable_request_fields``.
+    inline_tool_output_images: bool = False
 
     THINK_TAG_PATTERN: ClassVar = re.compile(r"<think>(.*?)</think>", re.DOTALL)
 
@@ -269,10 +316,11 @@ class ResponsesConverter(BaseModel):
         ``drop_unrepresentable_request_fields`` the reporting-only fields are removed from the
         request instead and the conversion proceeds: a non-empty ``include`` (every value; an
         empty one is already treated as absent), ``reasoning.summary`` and
-        ``reasoning.generate_summary``, and a message ``phase``. An image part in a tool's output
+        ``reasoning.generate_summary``, a ``reasoning.context`` of ``auto`` or ``all_turns`` (see
+        ``_DROPPABLE_REASONING_CONTEXTS``), and a message ``phase``. An image part in a tool's output
         becomes the text placeholder ``_IMAGE_OUTPUT_PLACEHOLDER``, which does replace that part
-        of the prompt. Every other unrepresentable field, ``reasoning.context`` included, is still
-        refused.
+        of the prompt, unless ``inline_tool_output_images`` keeps it as an image. Every other
+        unrepresentable field, a ``current_turn`` reasoning context included, is still refused.
         """
         responses_create_params = responses_create_params.model_dump(exclude_none=True, exclude_unset=True)
         if responses_create_params.get("include") == []:
@@ -347,6 +395,14 @@ class ResponsesConverter(BaseModel):
                     self._format_function_call_output(
                         m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
                     )
+                case "custom_tool_call" if self.custom_tool_strategy == "function_bridge":
+                    self._format_custom_tool_call(m, state)
+                case "custom_tool_call_output" if self.custom_tool_strategy == "function_bridge":
+                    # The wire shape matches a function result: a call_id plus a
+                    # string or structured-content output.
+                    self._format_function_call_output(
+                        m, state, drop_unrepresentable_request_fields=drop_unrepresentable_request_fields
+                    )
                 case _:
                     # This fires mid-rollout, on whichever model server downconverts.
                     # Most types that reach it are Responses-only by design.
@@ -394,13 +450,17 @@ class ResponsesConverter(BaseModel):
         reasoning = responses_create_params.pop("reasoning", None)
         if reasoning is not None:
             # A chat completion carries only the effort. The summary fields select what the provider
-            # reports back and are dropped when configured; `context` is an instruction about the
-            # prompt and is refused like every other unrepresentable field.
+            # reports back and are dropped when configured. `context` is an instruction about the
+            # prompt, dropped when configured only for the values the conversion already behaves as.
             representable_fields = {"effort"}
             if drop_unrepresentable_request_fields:
                 representable_fields.update(_REPORTING_ONLY_REASONING_FIELDS)
+                if reasoning.get("context") in _DROPPABLE_REASONING_CONTEXTS:
+                    representable_fields.add("context")
                 dropped_reasoning_fields = [
-                    field for field in _REPORTING_ONLY_REASONING_FIELDS if reasoning.get(field) is not None
+                    field
+                    for field in (*_REPORTING_ONLY_REASONING_FIELDS, "context")
+                    if field in representable_fields and reasoning.get(field) is not None
                 ]
                 if dropped_reasoning_fields:
                     logger.debug(
@@ -441,6 +501,18 @@ class ResponsesConverter(BaseModel):
 
         tool_choice = self._responses_to_chat_tool_choice(responses_create_params.pop("tool_choice", None))
         tools = responses_create_params.pop("tools", None)
+        if tools and self.custom_tool_strategy == "function_bridge":
+            declared_kinds: Dict[str, set] = {}
+            for tool_dict in tools:
+                if tool_dict.get("type") in {"function", "custom"} and tool_dict.get("name"):
+                    declared_kinds.setdefault(str(tool_dict["name"]), set()).add(tool_dict["type"])
+            collisions = sorted(name for name, kinds in declared_kinds.items() if len(kinds) == 2)
+            if collisions:
+                raise ValueError(
+                    f"Tools {collisions} are declared both as a function tool and as a custom tool. The "
+                    "function bridge lowers each custom tool to a function tool with the same name, so a "
+                    "returned call could not be attributed to one of the two. Rename one of them."
+                )
         if tools:
             responses_create_params["tools"] = []
             for tool_dict in tools:
@@ -462,6 +534,11 @@ class ResponsesConverter(BaseModel):
                     converted_tool = NeMoGymChatCompletionToolParam(
                         type="function",
                         function=NeMoGymFunctionDefinition(**tool_dict),
+                    )
+                elif self.custom_tool_strategy == "function_bridge":
+                    converted_tool = NeMoGymChatCompletionToolParam(
+                        type="function",
+                        function=self._custom_tool_to_bridged_function(tool_dict),
                     )
                 else:
                     converted_tool = {
@@ -498,23 +575,25 @@ class ResponsesConverter(BaseModel):
         if isinstance(output, str):
             content = output
         elif isinstance(output, list):
-            # Chat tool messages carry text only, so every other part type fails the conversion.
-            # An image part is the one exception `drop_unrepresentable_request_fields` covers: the
-            # text placeholder keeps the position of the image in the tool's output.
+            # Chat tool messages carry text only in OpenAI's API, so every other part type fails the
+            # conversion. Image parts are the exception: `inline_tool_output_images` keeps each one as an
+            # image part, which engines such as vLLM accept, and otherwise
+            # `drop_unrepresentable_request_fields` replaces it with a text placeholder that keeps its
+            # position in the tool's output.
             representable_types = {"input_text"}
-            if drop_unrepresentable_request_fields:
+            if self.inline_tool_output_images or drop_unrepresentable_request_fields:
                 representable_types.add("input_image")
             unsupported_types = sorted(
                 {part.get("type", "<missing>") for part in output if part.get("type") not in representable_types}
             )
             if unsupported_types:
                 raise NotImplementedError(
-                    "Cannot convert Responses function_call_output "
+                    f"Cannot convert Responses {m['type']} "
                     f"for call {m['call_id']!r} to a Chat Completions tool message: "
                     "Chat tool messages cannot represent content part type(s) "
                     f"{', '.join(repr(part_type) for part_type in unsupported_types)}"
                 )
-            if any(part["type"] == "input_image" for part in output):
+            if not self.inline_tool_output_images and any(part["type"] == "input_image" for part in output):
                 # Debug, like the other drops: the conversion re-converts the whole transcript on
                 # every later turn, so one returned image would otherwise warn on every turn after it.
                 logger.debug(
@@ -524,7 +603,7 @@ class ResponsesConverter(BaseModel):
             content = [
                 {"type": "text", "text": part["text"]}
                 if part["type"] == "input_text"
-                else {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+                else self._tool_output_image_to_chat(part)
                 for part in output
             ]
         else:  # pragma: no cover - guarded by NeMoGymFunctionCallOutput validation
@@ -539,6 +618,34 @@ class ResponsesConverter(BaseModel):
             tool_call_id=m["call_id"],
         )
         state.messages.append(converted)
+
+    def _tool_output_image_to_chat(self, part: dict) -> dict:
+        """What the chat tool message carries for an ``input_image`` part of a tool call output."""
+        if not self.inline_tool_output_images:
+            return {"type": "text", "text": _IMAGE_OUTPUT_PLACEHOLDER}
+        if part.get("detail") == "original":
+            # Chat has no "original" detail (full resolution). The Codex CLI sends it when the model
+            # asks view_image for it; "high" is the closest chat level.
+            part = {**part, "detail": "high"}
+        return self._input_image_to_chat(part)
+
+    @staticmethod
+    def _input_image_to_chat(part_param: dict) -> NeMoGymChatCompletionContentPartImageParam:
+        image_url = part_param.get("image_url")
+        if image_url is None:
+            raise NotImplementedError(
+                "Responses input images referenced by file_id have no Chat Completions representation."
+            )
+        if isinstance(image_url, dict):
+            image_url = image_url.get("url", "")
+        if not image_url:
+            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
+        detail = part_param.get("detail", "auto")
+        if detail == "original":
+            raise NotImplementedError(
+                "Responses input image detail 'original' has no Chat Completions representation."
+            )
+        return {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
 
     def _format_message(
         self,
@@ -563,23 +670,7 @@ class ResponsesConverter(BaseModel):
                     case "input_text":
                         converted_parts.append({"type": "text", "text": part_param["text"]})
                     case "input_image":
-                        image_url = part_param.get("image_url")
-                        if image_url is None:
-                            raise NotImplementedError(
-                                "Responses input images referenced by file_id have no Chat Completions representation."
-                            )
-                        if isinstance(image_url, dict):
-                            image_url = image_url.get("url", "")
-                        if not image_url:
-                            raise ValueError(f"{part_param['type']} requires a non-empty image_url")
-                        detail = part_param.get("detail", "auto")
-                        if detail == "original":
-                            raise NotImplementedError(
-                                "Responses input image detail 'original' has no Chat Completions representation."
-                            )
-                        converted_parts.append(
-                            {"type": "image_url", "image_url": {"url": image_url, "detail": detail}}
-                        )
+                        converted_parts.append(self._input_image_to_chat(part_param))
                     case "input_video":
                         source_key = "video_url" if "video_url" in part_param else "video"
                         video_url = part_param[source_key]
@@ -625,6 +716,25 @@ class ResponsesConverter(BaseModel):
                 state.content_buffer += final_content
                 # Chat-shaped turns carry tool calls inline, not as separate `function_call` items.
                 for tool_call in m.get("tool_calls") or []:
+                    if tool_call.get("type") == "custom":
+                        if self.custom_tool_strategy != "function_bridge":
+                            raise NotImplementedError(
+                                "A chat-shaped custom tool call has no function-only Chat Completions "
+                                "representation. Route it to a backend with free-form tool support, or "
+                                "serve it with custom_tool_strategy=function_bridge."
+                            )
+                        custom_call = tool_call["custom"]
+                        state.tool_calls_buffer.append(
+                            NeMoGymChatCompletionMessageToolCallParam(
+                                id=tool_call["id"],
+                                function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                                    arguments=self._encode_bridged_input(custom_call.get("input") or ""),
+                                    name=custom_call["name"],
+                                ),
+                                type="function",
+                            )
+                        )
+                        continue
                     state.tool_calls_buffer.append(
                         NeMoGymChatCompletionMessageToolCallParam(
                             id=tool_call["id"],
@@ -716,6 +826,38 @@ class ResponsesConverter(BaseModel):
         )
         state.tool_calls_buffer.append(tool_call)
 
+    def _format_custom_tool_call(
+        self,
+        m: dict,
+        state: ResponsesConverterState,
+    ) -> None:
+        """Replay a custom tool call in its function-bridged form.
+
+        The bridged arguments re-encode the item's free-form input as the
+        one-parameter object rather than echoing the byte string the engine
+        produced. vLLM parses a replayed call's arguments into an object before
+        rendering the chat template, so a well-formed call re-renders to the
+        same parsed object even when the byte encodings differ. A malformed
+        call is the limit: its raw-text lift re-encodes here as
+        ``{"input": "<raw text>"}``, a different object from the one the model
+        generated.
+        """
+        state.assistant_item_buffered = True
+        assert "call_id" in m
+        if m.get("namespace") is not None:
+            # The streaming sanitizer folds a namespaced call into its flattened
+            # name before the conversion, exactly like a function call's.
+            raise NotImplementedError("Responses custom tool call namespace has no Chat Completions representation.")
+        tool_call = NeMoGymChatCompletionMessageToolCallParam(
+            id=m["call_id"],
+            function=NeMoGymChatCompletionMessageToolCallFunctionParam(
+                arguments=self._encode_bridged_input(m.get("input") or ""),
+                name=m["name"],
+            ),
+            type="function",
+        )
+        state.tool_calls_buffer.append(tool_call)
+
     # =======================================================
     # Chat Completion create params to Response create params
     # =======================================================
@@ -753,6 +895,88 @@ class ResponsesConverter(BaseModel):
             }
         return converted
 
+    @staticmethod
+    def _custom_tool_to_bridged_function(tool_dict: dict) -> NeMoGymFunctionDefinition:
+        """The function-tool lowering of a Responses custom tool definition.
+
+        The free-form payload becomes the one required string parameter.
+        ``description`` is optional on a custom tool and is carried only when
+        present. A grammar ``format`` is dropped, with a warning once per tool
+        name: no vLLM tool parser enforces a grammar through function calling,
+        so the constraint falls back to the model's own behavior, the same as a
+        hosted model that ignores the grammar.
+        """
+        name = tool_dict["name"]
+        if tool_dict.get("format") is not None and name not in _BRIDGE_GRAMMAR_DROP_WARNED:
+            _BRIDGE_GRAMMAR_DROP_WARNED.add(name)
+            logger.warning(
+                "Custom tool %r carries a grammar format; the function-bridge lowering drops it, so the "
+                "grammar no longer constrains the model's payload.",
+                name,
+            )
+        description = tool_dict.get("description")
+        return NeMoGymFunctionDefinition(
+            name=name,
+            **({"description": description} if description else {}),
+            parameters={
+                "type": "object",
+                "properties": {
+                    _CUSTOM_TOOL_BRIDGE_PARAMETER: {
+                        "type": "string",
+                        "description": "The raw text payload of this free-form tool.",
+                    }
+                },
+                "required": [_CUSTOM_TOOL_BRIDGE_PARAMETER],
+            },
+        )
+
+    @staticmethod
+    def _encode_bridged_input(input_value: str) -> str:
+        """Encode a custom tool call's free-form input as bridged function arguments."""
+        return json.dumps({_CUSTOM_TOOL_BRIDGE_PARAMETER: input_value or ""}, ensure_ascii=False)
+
+    @staticmethod
+    def _decode_bridged_input(arguments: Optional[str], *, tool_name: str = "", call_id: str = "") -> str:
+        """Recover the free-form input from bridged function arguments.
+
+        Malformed arguments, not JSON or not the expected one-parameter object,
+        return the raw string: the model's payload is better delivered unwrapped
+        than lost, and the harness then sees exactly what was generated. Every
+        malformed shape, and any dropped extra key, is logged with the tool name
+        and call id, because the harness then runs something other than a clean
+        bridged payload while the rollout record looks like a normal call.
+        """
+        if not arguments:
+            return ""
+        try:
+            parsed = json.loads(arguments)
+        except (TypeError, ValueError):
+            logger.warning(
+                "Bridged custom tool call %s (tool %r): arguments are not JSON; delivering the raw string.",
+                call_id,
+                tool_name,
+            )
+            return arguments
+        if isinstance(parsed, dict) and isinstance(parsed.get(_CUSTOM_TOOL_BRIDGE_PARAMETER), str):
+            extra_keys = sorted(set(parsed) - {_CUSTOM_TOOL_BRIDGE_PARAMETER})
+            if extra_keys:
+                logger.warning(
+                    "Bridged custom tool call %s (tool %r): extra argument keys %s are dropped; only the "
+                    "%r payload is delivered.",
+                    call_id,
+                    tool_name,
+                    extra_keys,
+                    _CUSTOM_TOOL_BRIDGE_PARAMETER,
+                )
+            return parsed[_CUSTOM_TOOL_BRIDGE_PARAMETER]
+        logger.warning(
+            "Bridged custom tool call %s (tool %r): arguments are not the expected one-parameter object; "
+            "delivering the raw string.",
+            call_id,
+            tool_name,
+        )
+        return arguments
+
     def _chat_to_responses_tool_choice(self, tool_choice: Any) -> Any:
         if tool_choice is None or isinstance(tool_choice, str):
             return tool_choice
@@ -769,19 +993,30 @@ class ResponsesConverter(BaseModel):
             }
         raise NotImplementedError(f"Chat tool choice type {tool_type!r} has no Responses representation.")
 
+    def _tool_reference_to_chat_lowered(self, tool: dict) -> dict:
+        """A Responses tool reference in Chat form, following the bridge's lowering.
+
+        Under ``function_bridge`` the request declares a referenced custom tool
+        as a function tool, and vLLM's named tool choice admits ``type:
+        "function"`` only, so the reference is rewritten to the function form.
+        """
+        if self.custom_tool_strategy == "function_bridge" and tool.get("type") == "custom":
+            return {"type": "function", "function": {"name": tool["name"]}}
+        return self._tool_reference_to_chat(tool)
+
     def _responses_to_chat_tool_choice(self, tool_choice: Any) -> Any:
         if tool_choice is None or isinstance(tool_choice, str):
             return tool_choice
 
         tool_type = tool_choice.get("type")
         if tool_type in {"function", "custom"}:
-            return self._tool_reference_to_chat(tool_choice)
+            return self._tool_reference_to_chat_lowered(tool_choice)
         if tool_type == "allowed_tools":
             return {
                 "type": "allowed_tools",
                 "allowed_tools": {
                     "mode": tool_choice["mode"],
-                    "tools": [self._tool_reference_to_chat(tool) for tool in tool_choice["tools"]],
+                    "tools": [self._tool_reference_to_chat_lowered(tool) for tool in tool_choice["tools"]],
                 },
             }
         raise NotImplementedError(f"Responses tool choice type {tool_type!r} has no Chat representation.")
@@ -841,14 +1076,17 @@ class ResponsesConverter(BaseModel):
     # Chat Completion to Response
     # =======================================================
 
-    def postprocess_chat_response(self, choice: NeMoGymChoice) -> List[NeMoGymResponseOutputItem]:
+    def postprocess_chat_response(
+        self, choice: NeMoGymChoice, *, custom_tool_names: Collection[str] = ()
+    ) -> List[NeMoGymResponseOutputItem]:
         return self.postprocess_assistant_message_dict(
             choice.message.model_dump(exclude_none=True),
             logprobs=_chat_logprobs_to_responses(choice.logprobs),
+            custom_tool_names=custom_tool_names,
         )
 
     def postprocess_assistant_message_dict(
-        self, message_dict: Dict[str, Any], *, logprobs: Any = None
+        self, message_dict: Dict[str, Any], *, logprobs: Any = None, custom_tool_names: Collection[str] = ()
     ) -> List[NeMoGymResponseOutputItem]:
         response_output = []
 
@@ -906,16 +1144,48 @@ class ResponsesConverter(BaseModel):
 
         for tc in tool_calls_raw:
             assert "id" in tc
-            response_output.append(
-                NeMoGymResponseFunctionToolCall(
-                    name=tc["function"]["name"],
-                    arguments=tc["function"]["arguments"],
-                    call_id=tc["id"],
-                    type="function_call",
-                    status="completed",
-                    id=tc["id"],
+            if tc.get("type") == "custom":
+                # A backend with free-form tool support returns the chat custom
+                # tool call shape; lift it regardless of the bridge.
+                custom_call = tc.get("custom") or {}
+                response_output.append(
+                    NeMoGymResponseCustomToolCall(
+                        name=custom_call.get("name") or "",
+                        input=custom_call.get("input") or "",
+                        call_id=tc["id"],
+                        type="custom_tool_call",
+                        status="completed",
+                        id=tc["id"],
+                    )
                 )
-            )
+            elif tc["function"]["name"] in custom_tool_names:
+                # The request declared this name as a custom tool, so the call
+                # is the function bridge's lowering; lift it back.
+                response_output.append(
+                    NeMoGymResponseCustomToolCall(
+                        name=tc["function"]["name"],
+                        input=self._decode_bridged_input(
+                            tc["function"].get("arguments"),
+                            tool_name=tc["function"]["name"],
+                            call_id=tc["id"],
+                        ),
+                        call_id=tc["id"],
+                        type="custom_tool_call",
+                        status="completed",
+                        id=tc["id"],
+                    )
+                )
+            else:
+                response_output.append(
+                    NeMoGymResponseFunctionToolCall(
+                        name=tc["function"]["name"],
+                        arguments=tc["function"]["arguments"],
+                        call_id=tc["id"],
+                        type="function_call",
+                        status="completed",
+                        id=tc["id"],
+                    )
+                )
 
         token_information = _token_information_from_mapping(message_dict) if self.return_token_id_information else None
         if token_information is not None:
@@ -977,7 +1247,14 @@ class ResponsesConverter(BaseModel):
     ) -> NeMoGymResponse:
         choice = chat_completion.choices[0]
 
-        response_output = self.postprocess_chat_response(choice)
+        custom_tool_names: frozenset[str] = frozenset()
+        if self.custom_tool_strategy == "function_bridge":
+            custom_tool_names = frozenset(
+                str(tool.get("name"))
+                for tool in (responses_create_params.tools or [])
+                if isinstance(tool, dict) and tool.get("type") == "custom" and tool.get("name")
+            )
+        response_output = self.postprocess_chat_response(choice, custom_tool_names=custom_tool_names)
         response_output_dicts = [item.model_dump() for item in response_output]
 
         usage = chat_completion_usage_to_response_usage(chat_completion.usage)

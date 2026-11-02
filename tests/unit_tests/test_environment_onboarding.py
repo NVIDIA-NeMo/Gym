@@ -66,6 +66,14 @@ async def test_custom_verifier_does_not_require_a_lock(
     assert [case.kind for case in report.cases] == ["full_reward", "zero_reward", "malformed"]
 
 
+async def test_onboarding_rejects_competing_dependency_manifests(tmp_path, monkeypatch):
+    """Reject an ambiguous component before importing its verifier."""
+    entry = _scaffold_entry(tmp_path, monkeypatch)
+    (tmp_path / "resources_servers/sample/requirements.txt").write_text("nemo-gym\n")
+    with pytest.raises(EnvironmentOnboardingError, match="only one of pyproject.toml and requirements.txt"):
+        await verify_environment(entry)
+
+
 async def test_expected_reward_updates_are_explicit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     entry = _scaffold_entry(tmp_path, monkeypatch)
     cases_path = tmp_path / "resources_servers/sample/tests/verifier_cases.jsonl"

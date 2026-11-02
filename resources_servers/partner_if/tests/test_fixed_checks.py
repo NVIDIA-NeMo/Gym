@@ -30,11 +30,44 @@ def run(identifier, answer="", artifacts=None):
     return checker.run(params, CheckContext(EvidenceBundle(answer=answer, artifacts=artifacts or {})))
 
 
+def run_file_blocks(answer, paths=("src/a.py", "src/b.py")):
+    checker, params = resolve(VerifierSpec(id="file_blocks_v1", params={"expected_paths": list(paths)}))
+    return checker.run(params, CheckContext(EvidenceBundle(answer=answer)))
+
+
 @pytest.mark.parametrize("identifier", FIXED_CHECKS)
 def test_fixed_checks_are_built_in_and_take_no_dataset_parameters(identifier):
     assert REGISTRY[identifier].params is EmptyParams and REGISTRY[identifier].run is not None
     with pytest.raises(ValueError, match="Extra inputs"):
         resolve(VerifierSpec(id=identifier, params={"limit": 100000}))
+
+
+# File blocks.
+
+FILE_A = "<!-- file_start: src/a.py -->\nReview A.\n<!-- file_end -->"
+FILE_B = "<!-- file_start: src/b.py -->\nReview B.\n<!-- file_end -->"
+
+
+@pytest.mark.parametrize(
+    "answer,expected",
+    [
+        (FILE_A + "\n" + FILE_B, True),
+        (FILE_A + "\n" + FILE_B.removesuffix("\n<!-- file_end -->"), False),
+        (FILE_A + "\n<!-- file_end -->\n" + FILE_B, False),
+        (FILE_A + "\n" + FILE_A + "\n" + FILE_B, False),
+        (FILE_A.replace("src/a.py", "src/other.py") + "\n" + FILE_B, False),
+        (FILE_A + "\n<!-- file_start: src/b.py -->\n<!-- file_start: src/a.py -->\n<!-- file_end -->", False),
+        (FILE_A + "\n<!-- file_start: src/b.py -->\n```text\n<!-- file_end -->\n```", False),
+        (FILE_A + "\n```text\n" + FILE_B + "\n```", False),
+    ],
+)
+def test_file_blocks_require_exact_paths_and_paired_markers(answer, expected):
+    assert run_file_blocks(answer)[0] is expected
+
+
+def test_file_blocks_reject_duplicate_expected_paths():
+    with pytest.raises(ValueError, match="Expected file paths must be unique"):
+        resolve(VerifierSpec(id="file_blocks_v1", params={"expected_paths": ["src/a.py", "src/a.py"]}))
 
 
 # Scratchpad comments.
@@ -302,4 +335,39 @@ async def test_fixed_checks_share_the_engine_and_do_not_send_their_items_to_the_
     assert result.dimensions["if"].points_earned == 1
     assert result.dimensions["if"].points_possible == 2
     assert result.dimensions["if"].partial_score == 0.5
+    assert result.reward == 0
+
+
+@pytest.mark.asyncio
+async def test_file_blocks_fail_independently_of_other_llm_rubrics(monkeypatch):
+    async def run_inline(check, params, context):
+        return check(params, context)
+
+    monkeypatch.setattr("resources_servers.partner_if.engine.asyncio.to_thread", run_inline)
+    contract = GradingContract(
+        task_id="synthetic",
+        origin="test",
+        source="test",
+        rubric_version="test",
+        audit_signoff=False,
+        data_kind="synthetic_smoke",
+        rubrics=[
+            {
+                "id": "R01",
+                "constraint": "Every file has a block",
+                "verifier": {"id": "file_blocks_v1", "params": {"expected_paths": ["src/a.py", "src/b.py"]}},
+            },
+            {"id": "meaning", "constraint": "Meaning", "verifier": {"id": "llm_judge_v1"}},
+        ],
+    )
+
+    async def judge(items, evidence):
+        assert [item.id for item in items] == ["meaning"]
+        return [RawJudgment(id="meaning", passed=True, reason="Good", evidence="Good")]
+
+    answer = FILE_A + "\n" + FILE_B.removesuffix("\n<!-- file_end -->")
+    result = await evaluate(contract, EvidenceBundle(answer=answer), judge=judge)
+    assert result.items[0].verifier == "file_blocks_v1"
+    assert result.items[0].passed is False
+    assert result.items[1].passed is True
     assert result.reward == 0

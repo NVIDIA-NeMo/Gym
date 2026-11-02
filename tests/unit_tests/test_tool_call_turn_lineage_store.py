@@ -18,10 +18,9 @@ from copy import deepcopy
 
 import pytest
 
-from nemo_gym.token_id_capture import stamp_lineage
 from nemo_gym.token_id_capture.fingerprint import FINGERPRINT_VERSION, tool_call_turn_fingerprint
 from nemo_gym.token_id_capture.lineage import FileLineageStore, InMemoryLineageStore, stamp_continuation
-from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry
+from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
 from nemo_gym.token_id_capture.staging.digest import EMPTY_EXTRAS_DIGEST, compute_chain_hash, hash_token_ids
 from nemo_gym.token_id_capture.staging.records import CallRecord, CaptureLedgerCommit
 from nemo_gym.token_id_capture.store import TokenCaptureStore
@@ -69,7 +68,7 @@ def _commit(call_id: str, output: list[dict], tokens: list[int], version: int) -
         fingerprint_version=version,
     )
     return CaptureLedgerCommit(
-        rollout_id="r", record=record, request_items=CONTEXT, response_items=output, staging_chain=(f"r/{call_id}",)
+        capture_key="r", record=record, request_items=CONTEXT, response_items=output, staging_chain=(f"r/{call_id}",)
     )
 
 
@@ -250,7 +249,7 @@ async def test_custody_column_survives_restart_and_checkpoint_import(tmp_path) -
     rows = writer.export_rows("r")
     assert rows[0]["tool_call_turn_fingerprint"] == tool_call_turn_fingerprint(_turn())
     assert "cumulative_token_ids" not in rows[0]
-    assert "output_items" not in rows[0]
+    assert rows[0].get("output_items") is None
     for reader in (FileLineageStore(tmp_path / "source"), FileLineageStore(tmp_path / "restored")):
         reader.import_rows("r", rows)
         result = await reader.resolve("r", _request())

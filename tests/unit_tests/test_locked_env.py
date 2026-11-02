@@ -4,9 +4,15 @@
 import importlib.metadata
 import json
 import shutil
+import subprocess
+import sys
 import tomllib
+import zipfile
 from email.message import Message
+from functools import partial
+from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from threading import Thread
 from unittest.mock import Mock
 
 import pytest
@@ -26,6 +32,50 @@ def _distribution(
         requires=requires,
         read_text=lambda _: json.dumps(source) if source else None,
     )
+
+
+@pytest.mark.parametrize("mirror", [False, True])
+def test_real_component_parent_resolution_preserves_lock_and_manual_packages(tmp_path, monkeypatch, capsys, mirror):
+    """Exercise actual compatibility installs and mirror URLs against Simple Agent."""
+    project = Path(__file__).resolve().parents[2] / "responses_api_agents/simple_agent"
+    original = (project / "uv.lock").read_bytes()
+    wheel = tmp_path / "nemo_gym_lock_provider-1.0-py3-none-any.whl"
+    with zipfile.ZipFile(wheel, "w") as archive:
+        archive.writestr("lock_provider.py", "value = 42\n")
+        metadata = "nemo_gym_lock_provider-1.0.dist-info/"
+        archive.writestr(metadata + "METADATA", "Metadata-Version: 2.1\nName: nemo-gym-lock-provider\nVersion: 1.0\n")
+        archive.writestr(metadata + "WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
+        archive.writestr(metadata + "RECORD", "")
+    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=str(tmp_path)))
+    thread = Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    if mirror:
+        monkeypatch.setenv("UV_INDEX_URL", f"http://127.0.0.1:{server.server_port}/")
+        monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
+    venv = tmp_path / "component-venv"
+    requirements = [f"nemo-gym-lock-provider @ {wheel.as_uri()}"]
+    try:
+        _locked_env.sync_environment(project, venv, sys.executable, requirements, [])
+        manual = next((venv / "lib").glob("python*/site-packages")) / "manual_helper.py"
+        manual.write_text("value = 7\n")
+        _locked_env.sync_environment(project, venv, sys.executable, requirements, [])
+        output = subprocess.check_output(
+            [
+                str(venv / "bin/python"),
+                "-c",
+                "import lock_provider, manual_helper; print(lock_provider.value, manual_helper.value)",
+            ],
+            text=True,
+        )
+        assert output.strip() == "42 7"
+        assert (project / "uv.lock").read_bytes() == original
+        assert (
+            capsys.readouterr().err.count("Resolving component dependencies with inherited parent requirements.") == 1
+        )
+    finally:
+        server.shutdown()
+        server.server_close()
+        thread.join(timeout=5)
 
 
 def test_parent_requirement_and_constraint_semantics(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,7 +115,9 @@ def test_parent_source_and_extras_are_verified(monkeypatch: pytest.MonkeyPatch) 
 def test_sync_uses_locked_project_and_exact_venv(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     project = tmp_path / "resources_servers/sample"
     project.mkdir(parents=True)
-    (project / "pyproject.toml").write_text('[project]\nname="sample"\nversion="0"\n')
+    (project / "pyproject.toml").write_text(
+        '[project]\nname="sample"\nversion="0"\n[project.optional-dependencies]\ntelemetry=[]\n'
+    )
     (project / "uv.lock").touch()
     venv = tmp_path / "external venv"
     run = Mock()
@@ -81,6 +133,7 @@ def test_sync_uses_locked_project_and_exact_venv(tmp_path: Path, monkeypatch: py
         "--python",
         "3.13",
         "--no-dev",
+        "--inexact",
         "--extra",
         "telemetry",
         "--verbose",
@@ -99,7 +152,7 @@ def test_sync_forwards_selected_component_extras(tmp_path: Path, monkeypatch: py
     monkeypatch.setattr(_locked_env.subprocess, "run", run)
     _locked_env.sync_environment(tmp_path, tmp_path / ".venv", "3.13", [], [], extras=("lexmount",))
     assert run.call_args_list[0].args[0][-2:] == ["--extra", "lexmount"]
-    assert "--inexact" not in run.call_args_list[0].args[0]
+    assert "--inexact" in run.call_args_list[0].args[0]
 
 
 def test_sync_failure_never_runs_parent_check_or_unlocked_fallback(tmp_path: Path, monkeypatch) -> None:
@@ -231,7 +284,7 @@ def test_main_preserves_command_failure_without_prescribing_a_lock_update(tmp_pa
     diagnostic = capsys.readouterr().err
     assert "Locked environment command failed:" in diagnostic
     assert "dependency access, cache, build, or lock errors" in diagnostic
-    assert "will not fall back to an unlocked install" in diagnostic
+    assert "only an inherited parent mismatch permits compatibility resolution" in diagnostic
     assert "Update and commit" not in diagnostic
     assert run.call_count == (1 if failed_stage == "sync" else 2)
     assert (project / "uv.lock").read_text() == "unchanged lock"
@@ -247,7 +300,7 @@ def test_main_parent_contract_failure_signals_compatibility_resolution(monkeypat
     assert result.value.code == 2
     diagnostic = capsys.readouterr().err
     assert "Parent requires openai==0, but the component installed openai==1" in diagnostic
-    assert "Parent mismatches use compatibility resolution" in diagnostic
+    assert "Component requires parent compatibility resolution" in diagnostic
     assert "Update and commit" not in diagnostic
 
 
@@ -294,8 +347,8 @@ def test_osworld_ray_lock_matches_parent_process_constraint() -> None:
     constraint = f"ray=={next(iter(versions))}"
     manifest = tomllib.loads((project / "pyproject.toml").read_text())
     config = tomllib.loads((project / "uv.toml").read_text())
-    assert constraint in manifest["tool"]["uv"]["constraint-dependencies"]
-    assert constraint in config["constraint-dependencies"]
+    assert constraint not in manifest["tool"]["uv"]["constraint-dependencies"]
+    assert constraint not in config["constraint-dependencies"]
 
 
 @pytest.mark.parametrize("version", ["1.1.dev1", "1.1rc1"])

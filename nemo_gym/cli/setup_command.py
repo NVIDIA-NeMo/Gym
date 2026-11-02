@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import importlib.metadata
+import importlib.util
 import os
 import platform
 import re
@@ -29,7 +30,7 @@ from packaging.specifiers import InvalidSpecifier, SpecifierSet
 from packaging.version import InvalidVersion, Version
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, PARENT_DIR
-from nemo_gym.global_config import (
+from nemo_gym.config.global_config import (
     COMPONENT_EXTRAS_KEY_NAME,
     HEAD_SERVER_CONSTRAINTS_KEY_NAME,
     HEAD_SERVER_DEPS_KEY_NAME,
@@ -291,8 +292,16 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
                 f"Found both pyproject.toml and requirements.txt for uv venv setup in server dir: {dir_path}. Please only use one or the other!"
             )
         elif has_pyproject_toml:
+            import tomllib
+
+            metadata = tomllib.loads((dir_path / "pyproject.toml").read_text())
+            target = (
+                "--requirements pyproject.toml"
+                if metadata.get("tool", {}).get("uv", {}).get("package") is False
+                else "'-e .'"
+            )
             if is_editable_install:
-                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}'-e .' {head_server_dep_args}"""
+                install_cmd = f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}{target} {head_server_dep_args}"""
             else:
                 # install nemo-gym from pypi instead of relative path in pyproject.toml
                 # with support for pre-releases, custom indexes, and version pinning
@@ -300,7 +309,7 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
                 version_spec = _get_nemo_gym_version_spec(is_editable_install)
                 install_cmd = (
                     f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{install_flags}{constraint_flag}nemo-gym{version_spec} && """
-                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources '-e .' {head_server_dep_args}"""
+                    f"""uv pip install {server_uv_flags}{verbose_flag}{uv_pip_python_flag}{constraint_flag}--no-sources {target} {head_server_dep_args}"""
                 )
         elif has_requirements_txt:
             has_overrides_txt = (dir_path / "overrides.txt").exists()
@@ -336,7 +345,9 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
     # the lock in case another server completes installation before this one.
     setup_command = [
         sys.executable,
-        str(Path(__file__).with_name("_venv_setup.py")),
+        # Found by module name rather than next to this file, because the script may live in another package.
+        # The script itself runs without importing Gym.
+        importlib.util.find_spec("nemo_gym.utils.venv_setup").origin,
         "--venv",
         str(venv_path),
         "--command",
@@ -349,6 +360,7 @@ def _legacy_setup_env_command(dir_path: Path, global_config_dict: DictConfig, pr
 
 
 def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: str) -> str:
+    """Prepare a component from its lock, or retain custom component setup."""
     # External components keep the pre-lock requirements/project contracts.
     # Managed component locks are enforced by repository CI, not user migration.
     if not all((dir_path / name).is_file() for name in ("pyproject.toml", "uv.lock")):
@@ -361,15 +373,10 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     activate_cmd = f"source {shlex.quote(str(venv_activate_fpath))}"
     if skip_venv_if_present and venv_python_fpath.exists() and venv_activate_fpath.exists():
         return f"cd {shlex.quote(str(dir_path))} && {activate_cmd}"
+    if (dir_path / "requirements.txt").is_file():
+        raise RuntimeError(f"Found both pyproject.toml and requirements.txt in {dir_path}; use only one.")
 
     try:
-        for filename in ("pyproject.toml", "uv.lock"):
-            if not (dir_path / filename).is_file():
-                raise RuntimeError(
-                    f"Missing {filename} for locked setup in {dir_path}. "
-                    "Declare dependencies in pyproject.toml, run `uv lock` in the component directory, "
-                    "and commit both files. Setup never resolves unlocked requirements."
-                )
         sync_command = [
             sys.executable,
             str(Path(__file__).with_name("_locked_env.py")),
@@ -408,7 +415,7 @@ def setup_env_command(dir_path: Path, global_config_dict: DictConfig, prefix: st
     # the lock in case another server completes installation before this one.
     setup_command = [
         sys.executable,
-        str(Path(__file__).with_name("_venv_setup.py")),
+        importlib.util.find_spec("nemo_gym.utils.venv_setup").origin,
         "--venv",
         str(venv_path),
         "--command",

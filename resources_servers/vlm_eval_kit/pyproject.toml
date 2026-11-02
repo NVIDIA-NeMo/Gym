@@ -104,14 +104,16 @@ include = ["local_vllm_model"]
 
 [tool.uv]
 constraint-dependencies = [
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 exclude-dependencies = [
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -134,19 +136,22 @@ override-dependencies = [
     "opencv-python-headless; sys_platform == 'never'",
     "pynvvideocodec; sys_platform == 'never'",
     "torchcodec; sys_platform == 'never'",
+    "torchvision",
     "torchaudio; sys_platform == 'never'",
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
-    "pathspec; sys_platform == 'never'",
+    "pathspec",
     "opencv-python>=4.7.0.72",
     "decord2>=3.0.0",
-    "torchvision",
 ]
+required-version = ">=0.13.4"
 
 [tool.uv.sources]
-nemo-lens = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
 nemo-gym = { path = "../..", editable = true }
 
+[tool.uv.sources.nemo-lens]
+git = "https://github.com/NVIDIA-NeMo/Lens.git"
+rev = "4d045c03186b90afdc815db46b671f6a21bc7e98"
 [project.optional-dependencies]
 telemetry = ["nemo-gym[telemetry]"]
 

@@ -130,7 +130,7 @@ def test_ambiguous_plain_pdf_is_ignored_while_each_office_source_is_rendered(mon
     (tmp_path / "Plan.pptx").write_bytes(b"pptx source")
     (tmp_path / "Plan.pdf").write_bytes(b"STALE COLLIDED RENDER")
 
-    def _render(source: Path, out_dir: Path | None = None) -> Path:
+    def _render(source: Path, out_dir: Path | None = None, **_kwargs) -> Path:
         assert out_dir is not None
         rendered = out_dir / f"{source.stem}.pdf"
         rendered.write_bytes(source.suffix.upper().encode())

@@ -19,7 +19,7 @@ from uuid import uuid4
 
 from openai.types.responses.response_input_text_param import ResponseInputTextParam
 
-from nemo_gym.openai_utils import NeMoGymMessage, NeMoGymResponseOutputMessageForTraining, NeMoGymResponseOutputText
+from nemo_gym.core import NeMoGymMessage, NeMoGymResponseOutputMessageForTraining, NeMoGymResponseOutputText
 
 
 @dataclass

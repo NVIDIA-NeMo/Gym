@@ -35,7 +35,7 @@ _JOB_SCRIPT_NAME = "job.sh"
 PROLOGUE_MARKER = "# --- Auto-resume chain ---"
 JOB_CHAIN_NAME = ".gym_job_chain"
 RETRY_FILE_NAME = ".gym_infra_retries"
-# Written when the chain stops before the run finished (the walltime cap, or a cancel), so a reader of the
+# Written when the chain stops before the run finished (no eligible retries, walltime cap, or cancel), so a reader of the
 # job dir, not only of sacct, sees that rollouts are missing. A chain that continues removes it.
 INCOMPLETE_MARKER_NAME = ".gym_chain_incomplete"
 # Set to 1 in the environment of a job queued by `gym eval resubmit`.
@@ -73,6 +73,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         [[ -n "$_prev_state" ]] && break
         sleep 10
     done
+    _prev_exit=$(sacct -j $_prev_slurm_job_id -P -n -o ExitCode | head -n 1)
     _prev_elapsed=$(sacct -j $_prev_slurm_job_id -P -n -o ElapsedRaw | head -n 1)
     _prev_elapsed=${{_prev_elapsed:-0}}
     _gym_accumulated=$(cat "$_walltime_file" 2>/dev/null || echo 0)
@@ -87,6 +88,13 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         exit 0
     elif [[ $_prev_state == CANCELLED* ]]; then
         _gym_stop_incomplete "Previous job $_prev_slurm_job_id was cancelled. Chain stopped with rollouts missing; resubmit to continue."
+    elif [[ $_prev_state == 'FAILED' && $_prev_exit == '76:0' ]]; then
+        _gym_stop_incomplete "Previous evaluation is incomplete with no eligible retries. Stopping chain; inspect its artifacts."
+    elif [[ $_prev_state == 'FAILED' && $_prev_exit == '75:0' ]]; then
+        # The collector uses exit 1 if no new outcome was saved, so repeated
+        # empty invocations take the bounded infrastructure-retry branch below.
+        echo "Previous evaluation made progress and has retryable unfinished work. Resuming..."
+{max_walltime_check}
     elif [[ $_prev_state == 'TIMEOUT' || $_prev_state == 'PREEMPTED' || $_prev_state == 'NODE_FAIL' ]]; then
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Resuming..."
 {max_walltime_check}
@@ -95,8 +103,7 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
         _retries=$((_retries + 1))
         echo $_retries > "$_retry_file"
         if [[ $_retries -gt {max_retries} ]]; then
-            echo "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
-            exit 1
+            _gym_stop_incomplete "Infra retry limit ({max_retries}) reached after $_prev_state. Stopping."
         fi
         echo "Previous job $_prev_slurm_job_id: $_prev_state. Infra retry $_retries/{max_retries}..."
     fi
@@ -105,21 +112,52 @@ fi
 # This job continues the run, so an earlier stop no longer describes it.
 rm -f "$_incomplete_file"
 echo "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{job_chain_name}"
-# A requeued job keeps its job id and runs this script again. One follow-up per job id, so a requeue
-# does not queue a second one on the same dependency. mkdir is atomic on shared filesystems.
+# A requeued job keeps its job id and runs this script again. One follow-up per job id: the marker is a
+# claim on it, taken with an O_EXCL create (bash noclobber, not mkdir: uutils coreutils 0.10.0's mkdir tells
+# concurrent callers that both succeeded). A claim with no follow-up pending on this job was left by a shell
+# that died before sbatch answered, or by an sbatch that failed; replace it.
 _guard_marker="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
-if ! mkdir "$_guard_marker" 2>/dev/null; then
-    echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued (requeued job). Not queueing another."
-# kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
-elif _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
-    _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
-    if [[ -n "$_next_id" ]]; then
-        echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
+_gym_claim_followup() {{ (set -C; : > "$_guard_marker") 2>/dev/null; }}
+_gym_queue_followup=1
+if ! _gym_claim_followup; then
+    _gym_queue_followup=0
+    # squeue's %E lists the dependencies, e.g. "afternotok:123(unfulfilled)", and %Z the job's working directory.
+    # The follow-up runs in this job dir (--chdir), so a dependent job of another run does not count. %Z is the
+    # --chdir path as given, while $PWD in the job can be the resolved one, so the two are compared with -ef
+    # (same file), never as strings.
+    # --all: without it squeue does not list jobs, ours included, in a hidden partition.
+    if ! _pending=$(squeue --me --all --noheader --states=PENDING --format='%i|%E|%Z' 2>&1); then
+        # Unknown is not none: a second follow-up would run the job dir twice, so keep the claim.
+        echo "WARNING: squeue failed ($_pending); cannot tell whether job $SLURM_JOB_ID has a follow-up, so none is queued."
+    elif _followup=$(
+            while IFS='|' read -r _id _deps _cwd; do
+                [[ -n "$_cwd" && "$_cwd" -ef "$OUTPUT_DIR" ]] || continue
+                if grep -qE "(^|[ ,])afternotok:$SLURM_JOB_ID([(,]|$)" <<< "$_deps"; then
+                    echo "$_id"
+                    break
+                fi
+            done <<< "$_pending"
+        ) && [[ -n "$_followup" ]]; then
+        echo "Auto-resume follow-up for job $SLURM_JOB_ID is already queued: $_followup (requeued job). Not queueing another."
+    else
+        echo "Follow-up claim of job $SLURM_JOB_ID has no pending follow-up (submission interrupted or failed). Queueing one."
+        rm -rf -- "$_guard_marker"
+        _gym_claim_followup && _gym_queue_followup=1
     fi
-else
-    # Release the marker so a requeue of this job can try again.
-    rmdir "$_guard_marker" 2>/dev/null
-    echo "WARNING: Failed to submit auto-resume follow-up. Chain will NOT continue on failure."
+fi
+if [[ $_gym_queue_followup == 1 ]]; then
+    # kill-on-invalid-dep: without it, clusters lacking kill_invalid_depend keep the successor pending forever.
+    if _next_output=$(sbatch --dependency=afternotok:$SLURM_JOB_ID --kill-on-invalid-dep=yes "$_this_script" $SLURM_JOB_ID 2>&1); then
+        _next_id=$(echo "$_next_output" | grep -oE '[0-9]+')
+        if [[ -n "$_next_id" ]]; then
+            echo "$_next_id" > "$_guard_marker"
+            echo "Auto-resume follow-up queued: $_next_id (afternotok:$SLURM_JOB_ID)"
+        fi
+    else
+        # Keep the claim: sbatch can fail after the job was created (a lost reply). A requeue of this job asks
+        # squeue, and queues the follow-up only if none is pending.
+        echo "WARNING: Failed to submit auto-resume follow-up. The chain may not continue on failure; a requeue of this job queues one if squeue shows none pending."
+    fi
 fi
 """
 

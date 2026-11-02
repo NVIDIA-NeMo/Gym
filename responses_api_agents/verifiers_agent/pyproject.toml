@@ -7,7 +7,7 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "verifiers @ git+https://github.com/PrimeIntellect-ai/verifiers.git@v0.3.1",
+    "verifiers@ git+https://github.com/PrimeIntellect-ai/verifiers.git@b2e4e8157783b2c0dffc7821044c87f29f1c3ccf",
     "acereason-math",
     "automationbench-env",
 ]
@@ -15,8 +15,11 @@ dependencies = [
 [tool.uv]
 package = false
 constraint-dependencies = [
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 override-dependencies = [
     "spacy>=3.8.13",
@@ -34,7 +37,6 @@ exclude-dependencies = [
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -49,14 +51,22 @@ exclude-dependencies = [
     "waitress",
     "diskcache",
 ]
+required-version = ">=0.13.4"
 
 [tool.uv.sources]
-"nemo-lens" = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
 "nemo-gym" = { path = "../..", editable = true }
 "automationbench-env" = { path = "../../benchmarks/automationbench", editable = true }
 
+[tool.uv.sources.nemo-lens]
+git = "https://github.com/NVIDIA-NeMo/Lens.git"
+rev = "4d045c03186b90afdc815db46b671f6a21bc7e98"
+
+[tool.uv.sources.acereason-math]
+index = "primeintellect"
 [[tool.uv.index]]
 url = "https://hub.primeintellect.ai/primeintellect/simple/"
+name = "primeintellect"
+explicit = true
 
 [project.optional-dependencies]
 telemetry = ["nemo-gym[telemetry]"]

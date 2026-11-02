@@ -88,7 +88,7 @@ async def test_tool_only_response_reaches_shared_judge_with_typed_arguments():
     assert result.reward == 1 and not result.mask_sample
     assert result.grading_result.dimensions["if"].partial_score == 1
     assert result.grading_result.dimensions["if"].binary_score == 1
-    assert result.judge_protocol == "partner-if-evidence-v5.2"
+    assert result.judge_protocol == "partner-if-evidence-v5.3"
     sources = json.loads(result.judge_request["input"][1]["content"])["evidence_sources"]
     assert sources["event:0/tool_name"]["lines"][0]["text"] == "search"
     assert sources["event:0/arguments/query"]["lines"][0]["text"] == "hello"

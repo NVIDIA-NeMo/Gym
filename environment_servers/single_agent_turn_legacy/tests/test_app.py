@@ -14,17 +14,18 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ConfigDict
 
-import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
 from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServer
-from nemo_gym.config_types import AgentServerRef, ResourcesServerRef
-from nemo_gym.episode_types import EpisodeId, MaterializedTask, TaskId
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import BaseServerConfig, ServerClient, SimpleServer
-from nemo_gym.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
+from nemo_gym.client import ServerClient
+from nemo_gym.config import AgentServerRef, ResourcesServerRef
+from nemo_gym.core import EpisodeId, NeMoGymResponse, TaskId
+from nemo_gym.server_runtime import SingleAgentTurnRequest
+from nemo_gym.server_runtime.episode_types import MaterializedTask
+from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnTaskInput
+from nemo_gym.server_utils import BaseServerConfig, SimpleServer
 
 
 class _Cookie:
@@ -33,7 +34,7 @@ class _Cookie:
 
 def test_legacy_module_exports_app_for_multi_worker_import(monkeypatch: pytest.MonkeyPatch) -> None:
     worker_app = object()
-    monkeypatch.setattr(nemo_gym.server_utils, "is_nemo_gym_fastapi_entrypoint", lambda _: True)
+    monkeypatch.setattr("nemo_gym.utils.server_process.is_nemo_gym_fastapi_entrypoint", lambda _: True)
     monkeypatch.setattr(SimpleServer, "run_webserver", classmethod(lambda _: worker_app))
 
     namespace = runpy.run_path(
@@ -327,6 +328,52 @@ def test_task_source_naming_another_instance_is_rejected() -> None:
         )
 
 
+def _unbound_adapter() -> tuple[SingleAgentTurnLegacyEnvironmentServer, _Client]:
+    # A server that replaced a legacy_agent relay names no resources server and binds its agent's.
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"resources_server": {"type": "resources_servers", "name": "agents_resources"}}
+    )
+    config = SingleAgentTurnEnvironmentServerConfig.model_validate(
+        {**environment_server.config.model_dump(), "resources_server": None}
+    )
+    return SingleAgentTurnLegacyEnvironmentServer(config=config, server_client=client), client
+
+
+@pytest.mark.parametrize("task_source", [None, "agents_resources"])
+def test_an_unbound_adapter_takes_its_agents_resources_server_as_the_taskset(task_source: str | None) -> None:
+    adapter, _ = _unbound_adapter()
+    row = {"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "task"}}
+
+    request = adapter._episode_request_from_row(row if task_source is None else {**row, "task_source": task_source})
+
+    assert request.task.task_id.taskset == "agents_resources"
+
+
+def test_an_unbound_adapter_rejects_a_row_naming_another_resources_server() -> None:
+    adapter, _ = _unbound_adapter()
+
+    with pytest.raises(ValueError, match="names none of this Environment Server's instances"):
+        adapter._episode_request_from_row(
+            {
+                "task_source": "resources",
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": "task"},
+            }
+        )
+
+
+def test_an_unbound_adapter_forwards_aggregate_metrics_to_its_agents_resources_server() -> None:
+    adapter, client = _unbound_adapter()
+    client.responses = [_Response({"agent_metrics": {"mean/reward": 0.5}})]
+
+    response = TestClient(adapter.setup_webserver()).post("/aggregate_metrics", json={"verify_responses": []})
+
+    assert response.status_code == 200
+    assert [(server, path) for server, path, _ in client.calls] == [("agents_resources", "/aggregate_metrics")]
+
+
 async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     legacy_environment, legacy_client = _environment_server()
     episode_environment, episode_client = _environment_server()
@@ -361,6 +408,149 @@ async def test_flat_rows_and_episode_requests_project_the_same_result() -> None:
     episode_result = await episode_adapter.run_legacy(episode_request.model_dump(mode="json"))
 
     assert episode_result == legacy_result
+
+
+@pytest.mark.parametrize("legacy", [False, True])
+@pytest.mark.parametrize("failure_kind", [None, "judge_failed"])
+@pytest.mark.parametrize("partial", [False, True])
+@pytest.mark.parametrize("terminal", [False, True])
+async def test_protocol_failure_metadata_survives_collection(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    legacy: bool,
+    failure_kind: str | None,
+    partial: bool,
+    terminal: bool,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    import nemo_gym.rollout_collection as collection
+    from nemo_gym.rollout_outcomes import RolloutFailureRecord
+    from nemo_gym.rollout_records import logical_rollout_id
+    from nemo_gym.rollout_store import RolloutStore
+    from nemo_gym.server_runtime import EpisodeFailure, SingleAgentTurnFailure, SingleAgentTurnResponse
+    from tests.unit_tests.test_rollout_collection import FakeResponse, install_fake_server_client
+
+    environment, client = _environment_server()
+    if legacy:
+        environment = SingleAgentTurnLegacyEnvironmentServer(config=environment.config, server_client=client)
+    answer = _agent_response() if partial else None
+
+    async def failed_episode(
+        self: SingleAgentTurnEnvironmentServer, request: SingleAgentTurnRequest
+    ) -> SingleAgentTurnResponse:
+        return SingleAgentTurnResponse(
+            episode_id=request.episode_id,
+            task_id=request.task.task_id,
+            failure=SingleAgentTurnFailure(
+                failure_reason="Judge unavailable",
+                failure_kind=failure_kind,
+                stage="verification",
+                terminal=terminal,
+                partial_response=answer,
+            ),
+        )
+
+    monkeypatch.setattr(SingleAgentTurnEnvironmentServer, "run_request", failed_episode)
+    with TestClient(environment.setup_webserver()) as http:
+
+        async def post(**kwargs):
+            response = http.post("/run", json=kwargs["json"])
+            assert response.status_code == 200
+            return FakeResponse(response.status_code, response.json())
+
+        collector = install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+        collector.global_config_dict = OmegaConf.create(
+            {
+                "agent": {"responses_api_agents": {"test": {}}},
+                "environment": {
+                    "environment_servers": {
+                        "single_agent_turn_legacy" if legacy else "single_agent_turn": {
+                            "agent_server": {"name": "agent"},
+                            "resources_server": {"name": "resources"},
+                        }
+                    }
+                },
+            }
+        )
+        collector.global_config_dict["resources"] = {"resources_servers": {"example": {}}}
+        monkeypatch.setattr(collection, "get_global_config_dict", lambda: {})
+        source = tmp_path / "input.jsonl"
+        row = (
+            {
+                "agent_ref": {"name": "agent"},
+                "_ng_task_index": 0,
+                "_ng_rollout_index": 0,
+                "responses_create_params": {"input": "task"},
+            }
+            if legacy
+            else {
+                "task_id": {"taskset": "resources", "task_id": "task"},
+                "task_input": {"responses_create_params": {"input": "task"}, "task_data": {}},
+            }
+        )
+        source.write_bytes(orjson.dumps(row) + b"\n")
+        output = tmp_path / "rollouts.jsonl"
+        with pytest.raises(RuntimeError, match="has no score to report"):
+            await collection.RolloutCollectionHelper().run_from_config(
+                collection.RolloutCollectionConfig(
+                    input_jsonl_fpath=str(source),
+                    output_jsonl_fpath=str(output),
+                    environment_server_routes={"resources": "environment"} if not legacy else {},
+                    route_failures_to_sidecar=True,
+                    disable_aggregation=True,
+                    disable_health_check=True,
+                    require_complete=False,
+                )
+            )
+
+    store = RolloutStore.read(output)
+    [saved] = store.failures()
+    expected_kind = failure_kind or "environment_server_failed"
+    assert saved["_ng_failure_class"] == expected_kind
+    assert saved.get("_ng_failure_terminal", False) is terminal
+    assert "reward" not in saved and "response" not in saved
+    record = RolloutFailureRecord.model_validate(saved["_ng_failure_record"])
+    assert record.run_id == store.manifest.run_id
+    assert record.episode_id.rollout_id == logical_rollout_id(saved)
+    assert (record.source, record.delivery) == ("environment", "delivered")
+    assert type(record.failure) is EpisodeFailure
+    assert record.failure.failure_kind == failure_kind
+    assert record.failure.failure_reason == "Judge unavailable"
+    assert record.failure.stage == "verification" and record.failure.terminal is terminal
+    assert "partial_response" not in record.model_dump()["failure"]
+    assert RolloutFailureRecord.model_validate_json(record.model_dump_json()) == record
+    if answer is None:
+        assert "_ng_failure_partial_response" not in saved
+    else:
+        assert saved["_ng_failure_partial_response"] == answer.model_dump(mode="json")
+    assert store.coverage()["failed"] == 1 and store.coverage()["measured"] == 0
+    assert store.selected("success") == []
+
+
+async def test_a_flat_row_keeps_the_agents_skip_verification_after_leaving_the_relay() -> None:
+    # Under the legacy_agent relay, the agent's /run honored the setting Gym copies into agent configs.
+    environment_server, client = _environment_server()
+    client.global_config_dict.agent.responses_api_agents.test.update(
+        {"skip_verification": True, "skip_verification_reward": 0.25}
+    )
+    del client.responses[4]
+    adapter = SingleAgentTurnLegacyEnvironmentServer(config=environment_server.config, server_client=client)
+
+    result = await adapter.run_legacy(
+        {
+            "_ng_task_index": 0,
+            "_ng_rollout_index": 0,
+            "instance_id": "task",
+            "responses_create_params": {"input": "task"},
+        }
+    )
+
+    assert result["reward"] == 0.25
+    assert result["verification_skipped"] is True
+    assert result["agent_ref"] == {"name": "agent"}
+    assert "/verify" not in [path for _, path, _ in client.calls]
+    assert [path for _, path, _ in client.calls][-1] == "/close_session"
 
 
 class _BlockingAgentClient(_Client):

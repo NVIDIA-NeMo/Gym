@@ -32,9 +32,11 @@ dependencies = [
 [tool.uv]
 package = false
 constraint-dependencies = [
-    "ray==2.58.0",
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 override-dependencies = [
     "spacy>=3.8.13",
@@ -47,18 +49,19 @@ override-dependencies = [
     "pycountry; sys_platform == 'never'",
     "gprof2dot; sys_platform == 'never'",
     "pathspec; sys_platform == 'never'",
+    "grpcio-status==1.71.2",
+    "protobuf==5.29.6",
     "torch==2.11.0",
     "matplotlib==3.10.6",
     "pillow==12.3.0",
     "opencv-python; sys_platform == 'never'",
     "opencv-contrib-python; sys_platform == 'never'",
+    "transformers>=5.17.0,<6",
 ]
 exclude-dependencies = [
-    "agp-client",
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -72,12 +75,31 @@ exclude-dependencies = [
     "werkzeug",
     "waitress",
     "diskcache",
+    "agp-client",
+    "azure-identity",
+    "azure-mgmt-compute",
+    "azure-mgmt-network",
+    "alibabacloud-ecs20140526",
+    "alibabacloud-tea-openapi",
+    "alibabacloud-tea-util",
+    "volcengine-python-sdk",
 ]
+required-version = ">=0.13.4"
 
 [tool.uv.sources]
-"nemo-lens" = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
 "nemo-gym" = { path = "../..", editable = true }
 
+[tool.uv.sources.nemo-lens]
+git = "https://github.com/NVIDIA-NeMo/Lens.git"
+rev = "4d045c03186b90afdc815db46b671f6a21bc7e98"
+
+[tool.uv.sources.torch]
+index = "pytorch-cpu"
+
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
 [project.optional-dependencies]
 telemetry = ["nemo-gym[telemetry]"]
 

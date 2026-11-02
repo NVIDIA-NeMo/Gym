@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -28,10 +29,11 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -45,15 +47,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
+from nemo_gym.trajectory import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
@@ -89,6 +91,28 @@ class TestOpenCodeSandboxedAgent:
             opencode_max_context_window=0,
             token_id_capture=True,
         )
+
+    @mark.parametrize("worker", [False, True])
+    def test_only_the_main_process_logs_the_deprecation_once(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch, worker: bool
+    ) -> None:
+        """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+        app_module._warn_deprecated_once.cache_clear()
+        monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+        with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+            for _ in range(2):
+                OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+
+        warnings = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
+        assert warnings == ([] if worker else [app_module.DEPRECATION_WARNING])
+        for phrase in (
+            "legacy /run",
+            "allowed_agents",
+            "sandbox_handle",
+            "vibench_agent",
+            "opencode_agent/README.md",
+        ):
+            assert phrase in app_module.DEPRECATION_WARNING
 
     async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
@@ -1260,7 +1284,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
 ):
     from fastapi import Request
 
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
@@ -1346,3 +1370,94 @@ def test_assistant_message_plugin_hooks() -> None:
         check=True,
         timeout=30,
     )
+
+
+def test_an_unreadable_part_leaves_tool_timing_unknown(tmp_path: Path) -> None:
+    """The part may have been a tool call, so the tool history read is not complete."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute(
+        "insert into message values (?, ?, ?, ?)",
+        ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1, "completed": 3}}), 1),
+    )
+    connection.execute("insert into part values ('p1', 'm1', 'root', 'not json', 1)")
+    connection.commit()
+    connection.close()
+
+    bundle = parse_opencode_observations(db_path, "fallback")
+
+    gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+    assert ("agent_artifact_record_unparseable", None) in gaps
+    assert ("tool_timing_unavailable", "p1") in gaps
+
+
+@mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
+def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(tmp_path: Path, call_id) -> None:
+    """The tool ran but has no observation to time, so the tool history read is not complete."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    part = {"type": "tool", "tool": "bash", "state": {"status": "completed", "time": {"start": 1000, "end": 2000}}}
+    if call_id != "absent":
+        part["callID"] = call_id
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute(
+        "insert into message values (?, ?, ?, ?)",
+        ("m1", "root", json.dumps({"role": "assistant", "time": {"created": 1, "completed": 3}}), 1),
+    )
+    connection.execute("insert into part values ('p1', 'm1', 'root', ?, 1)", (json.dumps(part),))
+    connection.commit()
+    connection.close()
+
+    bundle = parse_opencode_observations(db_path, "fallback")
+
+    gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+    assert ("tool_call_identity_unavailable", "p1") in gaps
+    assert ("tool_timing_unavailable", "p1") in gaps
+
+
+@mark.parametrize(
+    "message_data",
+    ["not json", json.dumps({"time": {"created": 1, "completed": 3}})],
+    ids=["unreadable-message", "message-without-role"],
+)
+def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(tmp_path: Path, message_data: str) -> None:
+    """Its tool is known but cannot be placed, so the tool history read is not complete."""
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    part = {
+        "type": "tool",
+        "callID": "c1",
+        "tool": "bash",
+        "state": {"status": "completed", "time": {"start": 1000, "end": 2000}},
+    }
+    db_path = tmp_path / "opencode.db"
+    connection = sqlite3.connect(db_path)
+    connection.execute("create table session (id text, parent_id text, time_created integer)")
+    connection.execute("create table message (id text, session_id text, data text, time_created integer)")
+    connection.execute(
+        "create table part (id text, message_id text, session_id text, data text, time_created integer)"
+    )
+    connection.execute("insert into session values ('root', null, 0)")
+    connection.execute("insert into message values ('m1', 'root', ?, 1)", (message_data,))
+    connection.execute("insert into part values ('p1', 'm1', 'root', ?, 1)", (json.dumps(part),))
+    connection.commit()
+    connection.close()
+
+    bundle = parse_opencode_observations(db_path, "fallback")
+
+    assert ("tool_timing_unavailable", "p1") in [(gap.code, gap.detail) for gap in bundle.gaps]

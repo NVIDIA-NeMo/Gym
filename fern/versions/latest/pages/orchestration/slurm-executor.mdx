@@ -9,7 +9,7 @@ The Slurm executor is the only executor today. It targets clusters with [Pyxis](
 ## What the executor needs
 
 - **On the machine you submit from**, when `compute.<name>.hostname` is set to a different machine: `ssh` and `rsync`. Authentication must work without prompts (the connection runs with `BatchMode=yes`, so use keys or an agent) and unknown host keys are accepted on first contact (`StrictHostKeyChecking=accept-new`). Gym opens one SSH master connection and reuses it for the whole submit.
-- **On the cluster login node**: `sbatch`, plus `sacct` if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
+- **On the cluster login node**: `sbatch`, plus `sacct` and `squeue` (with `--me`, Slurm 20.11 or later) if a benchmark is [resumable](/orchestration/how-to/resumable-runs).
 - **On the compute nodes**: Pyxis, and network access to pull container images and, when `gym_install` is used, to clone the repository and install `uv`.
 - **When `hostname` is unset, or equals the current machine's hostname**: nothing is copied over SSH. Commands run locally and files are copied locally. Use this when you submit from the login node.
 
