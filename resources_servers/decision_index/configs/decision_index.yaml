@@ -1,0 +1,36 @@
+# Decision Index (DI 0.3) verifier. answer_mode: decision (option probabilities from decision_engine_model), llm
+# (JSON answer parsed from a chat reply) or auto (decision when the reply is a decision_engine_model envelope).
+# The benchmark configs in benchmarks/decision_index/ set decision or llm, so each mode is its own run and score.
+decision_index_resources_server:
+  resources_servers:
+    decision_index:
+      entrypoint: app.py
+      domain: other
+      verified: false
+      description: Decision Index 0.3 public suite, typed decisions with option probabilities
+      value: Measure decision engines and LLMs on 43 decision benchmarks with the official chance-corrected index
+      answer_mode: auto
+
+decision_index_simple_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      max_steps: 1
+      resources_server:
+        type: resources_servers
+        name: decision_index_resources_server
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      datasets:
+      - name: example
+        type: example
+        jsonl_fpath: resources_servers/decision_index/data/example.jsonl
+
+decision_index_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: decision_index_simple_agent

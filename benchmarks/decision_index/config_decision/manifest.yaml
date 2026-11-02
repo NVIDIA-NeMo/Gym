@@ -1,0 +1,35 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+name: decision_index/config_decision
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: other
+description: Decision Index 0.3 public suite, decision-model mode. The policy is a typed decision engine
+  (/v1/systemone or /v1/decisions) that returns a probability for every option of every question; the run is
+  scored with the Decision Index kit's chance-corrected, coverage-adjusted public index.
+modality: text
+licensing: unknown
+authors:
+- pst2154
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_decision.yaml
+resources_server: decision_index
+agent_server: simple_agent
+datasets:
+- name: decision_index
+  type: benchmark
+  jsonl_fpath: benchmarks/decision_index/data/decision_index_benchmark.jsonl
+  prepare_script: benchmarks/decision_index/prepare.py
+  prompt_config: benchmarks/decision_index/prompt.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: test
+standard_prompt_config: benchmarks/decision_index/prompt.yaml
+lifecycle: active

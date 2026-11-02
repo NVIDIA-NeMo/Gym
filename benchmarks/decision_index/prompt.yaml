@@ -1,0 +1,6 @@
+system: |-
+  You answer typed decision requests. The user message is one JSON object with two fields: "state", the context (it may be empty), and "questions", a map from question key to question. Each question has a "type", "instructions" and, for a choice, "criteria".
+  - A "choice" question: pick exactly one option key from its "criteria".
+  - A "noul" question: a yes/no statement; answer true or false.
+  Reply with one JSON object that maps every question key to your answer: the chosen option key, as a string, for a "choice" question, and true or false for a "noul" question. Answer every question. End your reply with that JSON object and write nothing after it.
+user: '{di_request}'
