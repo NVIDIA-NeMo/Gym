@@ -21,7 +21,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseOutputText,
 )
 from nemo_gym.rollout_correlation import current_rollout_id
-from nemo_gym.rollout_observability import AgentEpisode, AgentObservationBundle, TrajectoryRecord
+from nemo_gym.rollout_observability import AgentEpisode, AgentInvocation, AgentObservationBundle, TrajectoryRecord
 from nemo_gym.server_utils import ServerClient
 from responses_api_agents.nooa_agent import app as app_module
 from responses_api_agents.nooa_agent.app import NOOAAgent
@@ -66,7 +66,9 @@ def result(*, reason: NOOATerminationReason | None = None) -> NOOARunResult:
         model_cookies={"session": "model-cookie"},
         resource_cookies={"session": "resource-cookie"},
         termination_reason=reason,
-        trajectory=TrajectoryRecord(task_id="task", rollout_id="rollout-a2"),
+        trajectory=TrajectoryRecord(
+            task_id="task", rollout_id="rollout-a2", invocations=[AgentInvocation(invocation_id="inv-a2")]
+        ),
     )
 
 
@@ -161,7 +163,10 @@ async def test_agent_session_activation_and_close_preserve_identity_cookies_and_
     assert receipt.agent_observations.source == "nooa"
     assert receipt.resources_cookies == {"session": "resource-cookie"}
     # Rollout collection takes the run's turns from the receipt; evaluation runs capture no model calls to rebuild them.
-    assert receipt.trajectory == result().trajectory
+    # Invocations come from the observations instead, where Gym joins every captured attempt (retries included); a
+    # producer invocation with the same id would shadow that join, so the receipt leaves them out.
+    assert result().trajectory.invocations
+    assert receipt.trajectory == result().trajectory.model_copy(update={"invocations": []})
     assert "trajectory" in receipt.model_dump(mode="json")
     assert await close(instance) == receipt
     instance.server_client.post.assert_not_called()
@@ -245,7 +250,7 @@ async def test_failed_activation_replays_error_and_returns_evidence_on_close(
     receipt = await close(instance)
     assert NOOATerminationReason.INFRASTRUCTURE_ERROR in {gap.code for gap in receipt.agent_observations.gaps}
     # A failed activation keeps the turns it took before failing, like its observations.
-    assert receipt.trajectory == failure.result.trajectory
+    assert receipt.trajectory == failure.result.trajectory.model_copy(update={"invocations": []})
 
 
 @pytest.mark.parametrize(

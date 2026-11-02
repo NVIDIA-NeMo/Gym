@@ -296,7 +296,12 @@ class NOOAAgent(SimpleResponsesAPIAgent):
             agent_observations=observations,
             # The run's own turns and model-call references. Without them collection has no producer turns:
             # evaluation runs capture no model calls, so every row would report its turns as unavailable.
-            trajectory=state.result.trajectory if state.result is not None else None,
+            # Invocations stay out: collection takes them from the observations above, where Gym has joined
+            # every captured attempt (including the 429/500 retries this client never saw a response for);
+            # a producer invocation with the same id would shadow that join and leave those calls unowned.
+            trajectory=state.result.trajectory.model_copy(update={"invocations": []})
+            if state.result is not None and state.result.trajectory is not None
+            else None,
             resources_cookies=dict(
                 state.result.resource_cookies if state.result is not None else state.resources_cookies
             )
