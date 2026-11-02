@@ -164,15 +164,36 @@ The provider constructor accepts these optional config sections:
 | `connection` | OpenSandbox SDK connection settings: domain, API key, protocol, request timeout, server proxy mode, and `tls_verify`. |
 | `create` | Sandbox create timeout, retry, image pull policy, and health-check behavior. |
 | `probe` | Post-create command probe used to verify command execution before the sandbox is returned. |
-| `operations` | Retry and timeout behavior for SDK operations after create, including command retries, close timeout, background command polling, and the dedicated `status_poll_timeout_s` budget for background status polls. |
-| `diagnostics` | `inspect_oom` enables a two-second authenticated control-plane inspect after ambiguous backend loss (default `true`). Set it to `false` if the deployment does not support the OpenSandbox 1.1.0 plain-text diagnostics route. |
+| `operations` | Runtime `outcome_policy`, retry bounds, command headroom, status-recovery window, close timeout and background polling. `status_poll_timeout_s` bounds each status read. |
+| `diagnostics` | Shared `timeout_s`, per-request `request_timeout_s` and `poll_interval_s`. `inspect_oom` is an opt-in OpenSandbox 1.1.0 text fallback, disabled by default. |
 
-For every OpenSandbox caller, HTTP 410/502 command backend failures outside background status recovery now raise
-`SandboxBackendUnreachableError` when an OOM cannot be confirmed. Background commands keep polling the same
-execution ID for up to five minutes after status reads fail, then raise `SandboxCommandStatusTimeoutError` if the
-outcome remains unknown. Exhausted command submission, log read, and file transfer request timeouts raise
-`SandboxIOTimeoutError` because their outcomes are unknown. Ambiguous failures may make an additional authenticated inspect request when
-`diagnostics.inspect_oom` is enabled. These changes apply independently of any agent or benchmark OOM scoring option.
+Runtime failures use `NgFailureEvent(boundary="sandbox")`; see [Error Handling](./index#error-handling).
+Status and log reads retry through `operations.outcome_policy`, whose HTTP rules take precedence over kind rules.
+Partial overrides merge with defaults. Supported actions are `retry` and `fail`; budgets and replay safety remain
+execution constraints. A failed submission is never replayed without a non-delivery receipt, even with
+`command_retries` or a retry policy enabled. Transport-level 429 retries are disabled for OpenSandbox so they
+cannot bypass this policy. Create and lifecycle retries retain their existing behavior.
+
+```yaml
+operations:
+  command_timeout_headroom_s: 60
+  status_recovery_timeout_s: 300
+  exec_hard_cap_slack_s: 30
+  status_poll_timeout_s: 10
+  outcome_policy:
+    by_status_code: {503: fail}  # Other defaults, including 429: retry, remain.
+    by_failure_kind: {provider_io_timeout: retry}
+diagnostics:
+  timeout_s: 5
+  request_timeout_s: 2
+  poll_interval_s: 0.5
+  inspect_oom: false
+```
+
+The status-recovery window covers reads of the **same execution ID** and is capped by the existing command
+budget; diagnostic calls cannot restart it. Failed attempts enter the request's failure report before retry,
+including when a later read succeeds. Collection persists that report through the shared failure-reporting path.
+An ambiguous outcome is not proof of OOM or model fault, and this provider does not assign benchmark scores.
 
 ### Closing a sandbox
 
@@ -395,7 +416,7 @@ The neutral `user` argument to `exec()` maps onto OpenSandbox command options:
 | Integer uid | Pass the uid through the OpenSandbox command options. |
 | Other string | Wrap the command with `su -s /bin/sh -c ... <user>`. |
 
-Command failures return `SandboxExecResult` with the command's exit code. If OpenSandbox reports an execution error without an exit code, the provider returns code `125` with `error_type="sandbox"`. execd kills a command that reaches its `timeout_s` and reports it only as a signal death (exit code `-1`, `signal: killed`), so the provider returns code `124` with `error_type="timeout"` when a command killed by a signal ran for its whole timeout. A command killed earlier, for example by the OOM killer, keeps exit code `-1`.
+Commands with a reported exit status return `SandboxExecResult`. A missing or contradictory final outcome raises `NgFailureEvent` with `provider_command_outcome_unknown`. A signal death near the configured deadline does not establish that the command timer fired, so its reported exit code is preserved. For session commands, Gym observes its own deadline directly: it records `provider_command_timeout`, performs cleanup and returns the existing timeout result. A client request timeout instead reports `provider_io_timeout`; it does not establish that the remote command stopped.
 
 The provider's `create.image_pull_policy` defaults to `IfNotPresent`. Valid values are `Always`, `IfNotPresent`, and `Never`. The resolved policy is written into OpenSandbox create extensions as both `imagePullPolicy` and `opensandbox.extensions.image-pull-policy` unless those keys are already present in `provider_options.extensions`.
 

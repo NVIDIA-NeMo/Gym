@@ -75,12 +75,21 @@ class _AiohttpResponseStream(httpx.AsyncByteStream):
 class GymAiohttpTransport(httpx.AsyncBaseTransport):
     """Use Gym's connection pool without transferring session ownership to an SDK."""
 
-    def __init__(self, *, verify: bool = True, proxy: httpx.Proxy | None = None) -> None:
+    def __init__(
+        self,
+        *,
+        verify: bool = True,
+        proxy: httpx.Proxy | None = None,
+        rate_limit_retries: int = _MAX_RATE_LIMIT_RETRIES,
+    ) -> None:
+        if rate_limit_retries < 0:
+            raise ValueError("rate_limit_retries must be nonnegative")
+        self.rate_limit_retries = rate_limit_retries
         self.verify = verify
         self.proxy = proxy
 
     async def handle_async_request(self, request: httpx.Request) -> httpx.Response:
-        """Retry buffered requests on 429 using Retry-After or exponential backoff (three retries)."""
+        """Retry buffered 429s within the configured budget; providers can own retries instead."""
         replayable = True
         try:
             data = request.content or None
@@ -92,7 +101,7 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
             request.headers.pop("transfer-encoding", None)
 
         timeout = request.extensions.get("timeout", {})
-        for attempt in range(_MAX_RATE_LIMIT_RETRIES + 1):
+        for attempt in range(self.rate_limit_retries + 1):
             with _map_aiohttp_exceptions():
                 response = await http_client.request(
                     method=request.method,
@@ -119,7 +128,7 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
                         sock_read=timeout.get("read"),
                     ),
                 )
-            if response.status != 429 or not replayable or attempt == _MAX_RATE_LIMIT_RETRIES:
+            if response.status != 429 or not replayable or attempt == self.rate_limit_retries:
                 break
 
             try:
@@ -132,7 +141,7 @@ class GymAiohttpTransport(httpx.AsyncBaseTransport):
                 request.method,
                 request.url.host,
                 attempt + 1,
-                _MAX_RATE_LIMIT_RETRIES,
+                self.rate_limit_retries,
                 delay,
             )
             await asyncio.sleep(delay)
