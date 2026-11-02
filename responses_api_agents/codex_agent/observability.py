@@ -30,6 +30,13 @@ from nemo_gym.trajectory import (
 )
 
 
+# Compaction format compatibility: tested with Codex 0.144.4.
+# This covers native compacted records and summary wrappers here, plus request
+# metadata and completed SSE responses in sandbox_transport.py; revalidate them together.
+# Source: https://github.com/openai/codex/tree/rust-v0.144.4/codex-rs/core/src
+# (compact.rs and responses_metadata.rs).
+# The prefix below wraps the persisted summary. Strip it only after a structured
+# compacted event; helper requests are identified separately by native metadata.
 _COMPACTION_PREFIX = (
     "Another language model started to solve this problem and produced a summary of its thinking process. "
     "You also have access to the state of the tools that were used by that language model. "

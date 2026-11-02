@@ -20,6 +20,8 @@ from urllib.request import Request, urlopen
 
 
 MAX_RATE_LIMIT_RETRIES = 2
+# Adapter-chosen memory cap for helper evidence, not a Codex protocol limit.
+# Larger responses still forward in full; only the buffered evidence is dropped.
 _MAX_COMPACTION_RESPONSE_BYTES = 8 * 1024 * 1024
 
 
@@ -41,8 +43,7 @@ def _compaction_request(body: bytes) -> bool:
     client_metadata = payload.get("client_metadata") if isinstance(payload, dict) else None
     if not isinstance(client_metadata, dict):
         return False
-    # Codex 0.144.4 declares the request purpose independently of its compaction prompt.
-    # https://github.com/openai/codex/blob/rust-v0.144.4/codex-rs/core/src/responses_metadata.rs
+    # Tested compaction formats and upstream sources are documented in observability.py.
     metadata = client_metadata.get("x-codex-turn-metadata")
     if not isinstance(metadata, str):
         return False
