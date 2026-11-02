@@ -169,6 +169,121 @@ def _text_only_agent(tmp_path: Path, **overrides) -> tuple[GdpPdfAgent, str]:
     return agent, _write_text_manifest(tmp_path)
 
 
+def _image_agent(tmp_path: Path, **overrides) -> tuple[GdpPdfAgent, str, list[dict]]:
+    """An agent over a two-page manifest with page screenshots, built under ``tmp_path``; also returns the
+    list that collects every request body sent to /verify."""
+    document_dir = tmp_path / "documents" / "img"
+    document_dir.mkdir(parents=True)
+    pages = []
+    for number in (1, 2):
+        Image.new("RGB", (60, 80), "white").save(document_dir / f"page_{number}.png")
+        pages.append({"page_number": number, "text": f"Page {number} text.", "image": f"page_{number}.png"})
+    (document_dir / "manifest.json").write_text(json.dumps({"source_dpi": 150, "pages": pages}), encoding="utf-8")
+    agent = _agent(documents_base_dir=str(tmp_path), strip_images_from_output=False, **overrides)
+    verified: list[dict] = []
+
+    def post(**kw):
+        if kw["url_path"] == "/verify":
+            verified.append(kw["json"])
+            return SimpleNamespace(cookies={}, data=kw["json"] | {"reward": 0.25})
+        return SimpleNamespace(cookies={}, data={})
+
+    agent.server_client.post = AsyncMock(side_effect=post)
+    return agent, "documents/img/manifest.json", verified
+
+
+async def _run_with_episodes(agent: GdpPdfAgent, manifest: str, episode) -> SimpleAgentVerifyResponse:
+    with (
+        patch.object(GdpPdfAgent, "_create_episode", side_effect=episode),
+        patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+        patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+        patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+    ):
+        return await agent.run(SimpleNamespace(cookies={}), _run_request(manifest))
+
+
+class TestIncompleteOutputIsTheResult:
+    """An incomplete answer means the model spent its output budget: that is the row's result, not a
+    delivery problem to negotiate away. Regenerating it is opt-in (``regenerate_on_incomplete_output``)."""
+
+    async def test_incomplete_answer_with_images_is_kept_and_verified(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            return _incomplete_response("cut off mid-"), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 1
+        assert len(verified) == 1
+        assert verified[0]["response"]["status"] == "incomplete"
+        assert verified[0]["response"]["output"][0]["content"][0]["text"] == "cut off mid-"
+        assert result.response.status == "incomplete"
+        assert result.reward == 0.25
+        assert result.document_delivery["image_dpi"] == 150
+        assert result.document_delivery["rejected_attempts"] == []
+        assert result.document_delivery["input_limit_rejections"] == 0
+        assert result.document_delivery["output_truncation_regenerations"] == 0
+        assert result.agent_adaptations == {"input_limit_rejections": 0, "output_truncation_regenerations": 0}
+
+    async def test_flag_restores_regeneration_and_counts_it(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path, regenerate_on_incomplete_output=True)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            return (_incomplete_response() if len(calls) == 1 else _response("full answer")), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 2
+        assert len(verified) == 1
+        assert verified[0]["response"]["status"] != "incomplete"
+        assert result.document_delivery["image_dpi"] == 120
+        assert [a["limit"] for a in result.document_delivery["rejected_attempts"]] == ["output_truncated"]
+        assert result.document_delivery["output_truncation_regenerations"] == 1
+        assert result.document_delivery["input_limit_rejections"] == 0
+        assert result.agent_adaptations == {"input_limit_rejections": 0, "output_truncation_regenerations": 1}
+
+    async def test_an_image_count_rejection_still_adapts_and_is_counted(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            if len(calls) == 1:
+                raise _error("At most 1 image(s) may be provided in one prompt.", status=400)
+            return _response("full answer"), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 2
+        images = [b for b in calls[1].input[0].content if _block_type(b) == "input_image"]
+        assert len(images) == 1  # two pages composited into the one image the endpoint allows
+        assert result.document_delivery["pages_per_image"] == 2
+        assert [a["limit"] for a in result.document_delivery["rejected_attempts"]] == ["image_count"]
+        assert result.document_delivery["input_limit_rejections"] == 1
+        assert result.document_delivery["output_truncation_regenerations"] == 0
+        assert result.agent_adaptations == {"input_limit_rejections": 1, "output_truncation_regenerations": 0}
+        assert len(verified) == 1 and result.reward == 0.25
+
+    async def test_a_complete_answer_is_unchanged(self, tmp_path: Path) -> None:
+        agent, manifest, verified = _image_agent(tmp_path)
+        calls = []
+
+        async def episode(params, **kwargs):
+            calls.append(params)
+            return _response("full answer"), None, {}, {}
+
+        result = await _run_with_episodes(agent, manifest, episode)
+        assert len(calls) == 1
+        assert len(verified) == 1
+        assert result.response.output[0].content[0].text == "full answer"
+        assert result.document_delivery["image_dpi"] == 150
+        assert result.document_delivery["rejected_attempts"] == []
+        assert result.document_delivery["input_limit_rejections"] == 0
+        assert result.document_delivery["output_truncation_regenerations"] == 0
+
+
 class TestConfig:
     def test_defaults_are_conservative(self) -> None:
         config = _agent_config()
@@ -179,6 +294,7 @@ class TestConfig:
         assert config.include_text is True
         assert config.include_images is True
         assert config.strip_images_from_output is True
+        assert config.regenerate_on_incomplete_output is False
 
     def test_overrides_apply(self) -> None:
         config = _agent_config(dpi=200, max_images=8, max_pages=10, include_images=False)
@@ -543,11 +659,10 @@ class TestRun:
         assert len(result.document_delivery["rejected_attempts"]) == 2
 
     @requires_example_manifest
-    async def test_incomplete_status_triggers_dpi_backoff_without_an_error(self) -> None:
-        # vLLM can accept an oversized request and just run out of output room instead of
-        # rejecting it outright -- no exception is raised, so this must be detected separately
-        # from the ClientResponseError path above.
-        agent = _agent(strip_images_from_output=False, include_images=True)
+    async def test_incomplete_status_triggers_dpi_backoff_when_regeneration_is_enabled(self) -> None:
+        # Opt-in only (regenerate_on_incomplete_output): an incomplete answer is regenerated with a
+        # smaller image footprint, detected separately from the ClientResponseError path above.
+        agent = _agent(strip_images_from_output=False, include_images=True, regenerate_on_incomplete_output=True)
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},
@@ -575,7 +690,9 @@ class TestRun:
 
     @requires_example_manifest
     async def test_incomplete_status_is_accepted_once_dpi_floor_reached(self) -> None:
-        agent = _agent(strip_images_from_output=False, include_images=True, min_dpi=140)
+        agent = _agent(
+            strip_images_from_output=False, include_images=True, min_dpi=140, regenerate_on_incomplete_output=True
+        )
         agent.server_client.post = AsyncMock(
             side_effect=lambda **kw: SimpleNamespace(
                 cookies={},

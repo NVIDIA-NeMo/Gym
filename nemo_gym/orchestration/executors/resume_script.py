@@ -19,10 +19,12 @@ Rendered at the top of a benchmark's sbatch script, ahead of every
 service/driver command, when `BenchmarkRunConfig.resumable` is set. Each job
 in the chain inspects the PREVIOUS job (passed as `$1`) via `sacct`, decides
 whether to continue, and unconditionally queues its own successor with an
-`afternotok` dependency before doing any real work. A job that COMPLETEs
-leaves its queued successor with a dependency that can never be satisfied, so
-Slurm cancels it on its own -- the chain needs no explicit "we're done" step
-on the success path.
+`afternotok` dependency before doing any real work, and a sentinel that
+continues the chain if that successor dies before its prologue. A job that
+COMPLETEs leaves its queued successor with a dependency that can never be
+satisfied, so Slurm would cancel it on its own, but the sentinel would then
+start on a full allocation only to exit. So the epilogue, rendered after the
+driver step, cancels both when the job finished the run.
 """
 
 import logging
@@ -129,6 +131,9 @@ EXPORT_RECEIPT_MISSING_REASON = (
     "(artifacts/rollouts_mlflow_export_done) for the saved artifacts is missing; the chain does not export the run; "
     "continue with gym eval resubmit --recover"
 )
+# Appended in the job dir by a job whose driver step finished the run: how the chain ended there and the sentinel and
+# follow-up it had queued and then cancelled, each with its job id and whether scancel took it.
+CHAIN_END_JOURNAL_NAME = "chain-end-journal.jsonl"
 # The files an export receipt binds (`_artifact_version` in the exporters), by receipt key, in the job's artifacts.
 _RECEIPT_ARTIFACTS = (
     ("rollouts_jsonl_fpath", "rollouts.jsonl"),
@@ -761,6 +766,52 @@ fi
 
 """
 
+# Rendered right after the driver step; it uses the prologue's functions and files. Its first line keeps the driver
+# step's status (a function definition resets `$?`), and the function returns it: the job's state, and what a later
+# step reads, is the driver's.
+_EPILOGUE_TEMPLATE = """\
+# --- A job that finishes the run ends its own chain ---
+_gym_driver_rc=$?
+_gym_end_own_chain() {{
+    local _rc=$1 _ended=run_complete _role _file _id _result _cancelled=""
+    # A job whose driver failed has its follow-up start, and that prologue decides; an incomplete run continues.
+    [[ $_rc == 0 ]] && _gym_run_complete || return $_rc
+    # This job COMPLETEs: Slurm would cancel its afternotok follow-up, and the follow-up's sentinel would then start on
+    # a full allocation only to write the record below and exit. A deliberate stop already in the marker stays.
+    if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+        if _gym_export_required && ! _gym_receipt_current; then
+            _ended={export_receipt_missing}
+            echo "{export_receipt_missing_reason}" > "$_incomplete_file"
+            echo "{export_receipt_missing_reason}"
+        else
+            rm -f "$_incomplete_file"
+            echo "Run complete: the Store covers all $_gym_complete_rollouts expected rollouts and $_gym_export_note; job $SLURM_JOB_ID ends the chain with nothing to recover."
+        fi
+    else
+        _ended=run_complete_stop_kept
+    fi
+    # The sentinel first: once its follow-up is gone, its afterany dependency is met and it could start.
+    for _role in sentinel follow_up; do
+        _file="$OUTPUT_DIR/.gym_followup_queued.$SLURM_JOB_ID"
+        [[ $_role == follow_up ]] || _file="$OUTPUT_DIR/.gym_followup_sentinel.$SLURM_JOB_ID"
+        _id=$(head -n 1 "$_file" 2>/dev/null) || _id=""
+        [[ "$_id" =~ ^[0-9]{{1,15}}$ ]] || continue
+        if scancel "$_id"; then
+            _result=cancelled
+            echo "Cancelled this chain's queued ${{_role/_/-}} $_id: the run is complete."
+        else
+            _result=scancel_failed
+            echo "WARNING: could not cancel this chain's queued ${{_role/_/-}} $_id; if it starts, its prologue ends it."
+        fi
+        _cancelled+="${{_cancelled:+,}}\\"$_role\\":{{\\"job_id\\":\\"$_id\\",\\"result\\":\\"$_result\\"}}"
+    done
+    printf '{{"at":"%s","cancelled":{{%s}},"ended":"%s","job_id":"%s"}}\\n' "$(date -u +%Y-%m-%dT%H:%M:%SZ)" \\
+        "$_cancelled" "$_ended" "$SLURM_JOB_ID" >> "$OUTPUT_DIR/{chain_end_journal_name}" || \\
+        echo "WARNING: cannot journal the end of the chain in {chain_end_journal_name}."
+    return $_rc
+}}
+_gym_end_own_chain "$_gym_driver_rc\""""
+
 
 def _walltime_to_seconds(duration: str) -> int:
     """Convert a Slurm-style duration string to seconds.
@@ -864,6 +915,21 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         credentials_rejected_reason=CREDENTIALS_REJECTED_REASON,
         export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
         receipt_artifacts=" ".join(f"{key}:{name}" for key, name in _RECEIPT_ARTIFACTS),
+    )
+
+
+def render_resume_epilogue() -> str:
+    """Render the step after the driver of a resumable job: a job that finished the run ends its own chain.
+
+    When the driver step succeeded and the run is complete, it writes the record the follow-up or its sentinel would
+    have written, cancels the sentinel and then the follow-up it queued, and journals both in
+    ``CHAIN_END_JOURNAL_NAME``, so no allocation starts for a finished run. The job keeps the driver step's status.
+    """
+    return _EPILOGUE_TEMPLATE.format(
+        provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
+        export_receipt_missing=EXPORT_RECEIPT_MISSING,
+        export_receipt_missing_reason=EXPORT_RECEIPT_MISSING_REASON,
+        chain_end_journal_name=CHAIN_END_JOURNAL_NAME,
     )
 
 

@@ -100,6 +100,7 @@ from nemo_gym.orchestration.recovery import (
     JUDGE_JOB_FAILURE_BOUND,
     JUDGE_JOB_JOURNAL_NAME,
     LIVE_JOB_STATES,
+    MAX_EXTEND_ATTEMPTS,
     NO_INVENTORY,
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
@@ -123,6 +124,7 @@ from nemo_gym.orchestration.recovery import (
     select_managed_evidence,
     stopped_followup,
 )
+from nemo_gym.utils.path_utils import attempt_extension_path_for
 
 
 # Executed only inside the saved pinned install. The projection contains no saved answer text.
@@ -1036,6 +1038,8 @@ def _remote_managed_evidence(
             "managed_reader_unavailable",
             "source_job_identity",
             "checkpoint_enabled",
+            # The attempt extension the Store applied (--extend-attempts); an older reader leaves it unset.
+            "attempt_extension_applied",
         }
         # A pinned reader older than a host-collected field drops it on its own model (the reader's projection then
         # lacks the key); the host collection owns such fields, and these named ones, either way.
@@ -1288,6 +1292,7 @@ class SlurmExecutor(BaseExecutor):
         outcome_policy: RecoveryOutcomePolicyConfig | None = None,
         reader_ref: str | None = None,
         extend_retries: int = 0,
+        extend_attempts: int = 0,
         max_walltime: str | None = None,
         operator_budget: OperatorBudget | None = None,
         server_spinup_timeout_seconds: int | None = None,
@@ -1385,6 +1390,7 @@ class SlurmExecutor(BaseExecutor):
                             outcome_policy=outcome_policy,
                             outcome_policy_source=policy_source,
                             extend_retries=extend_retries,
+                            extend_attempts=extend_attempts,
                         ), collected
             try:
                 workdirs = conn.run(["squeue --me --all --noheader --format=%Z"]).split()
@@ -1446,6 +1452,7 @@ class SlurmExecutor(BaseExecutor):
                         )
                     except (RuntimeError, OSError):
                         stopped = None
+        collected = collected.model_copy(update={"infra_retries_configured": resume.max_retries})
         if collected.accounting_snapshot is not None:
             collected.accounting_snapshot = {
                 **collected.accounting_snapshot,
@@ -1460,6 +1467,7 @@ class SlurmExecutor(BaseExecutor):
             outcome_policy_source=policy_source,
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
+            extend_attempts=extend_attempts,
             live_job_name=live_job_name,
             operator_budget=operator_budget,
         )
@@ -2001,6 +2009,7 @@ class SlurmExecutor(BaseExecutor):
         repin: str | None = None,
         repin_reason: str | None = None,
         extend_retries: int = 0,
+        extend_attempts: int = 0,
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         operator_continuation: Mapping[str, Any] | None = None,
@@ -2172,8 +2181,9 @@ class SlurmExecutor(BaseExecutor):
                         f"printf '%s\\n' {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' Resubmit acknowledgement was not confirmed.')} "
                         "> .gym_chain_incomplete || return; fi; "
                         f"rm -f {_RESUBMIT_LOCK}; }}",
-                        "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }; _gym_restore_operator() { :; }",
-                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_repin; "
+                        "_gym_restore_repin() { :; }; _gym_restore_extension() { :; }; _gym_restore_operator() { :; }; "
+                        "_gym_restore_attempts() { :; }",
+                        "trap '_gym_restore_operator; _gym_restore_extension; _gym_restore_attempts; _gym_restore_repin; "
                         "_gym_release_resubmit_lock' EXIT",
                         # --all: without it squeue does not list jobs, ours included, in a hidden partition.
                         "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
@@ -2258,6 +2268,11 @@ class SlurmExecutor(BaseExecutor):
                         ),
                         *operator_commands,
                         *(self._extension_commands(extend_retries, keep_budget=keep_budget) if extend_retries else []),
+                        *(
+                            self._attempt_extension_commands(extend_attempts, keep_budget=keep_budget)
+                            if extend_attempts
+                            else []
+                        ),
                         *restart_note,
                         f"export {RESUBMIT_ENV}=1",
                         "_gym_submit_started=1",
@@ -2314,6 +2329,7 @@ class SlurmExecutor(BaseExecutor):
                         "restored": [
                             *(["job.sh", RESOLVED_CONFIG_NAME] if repin_commands else []),
                             *(["infra-retry extension"] if extend_retries else []),
+                            *(["attempt extension"] if extend_attempts else []),
                             *(["operator continuation counters"] if operator_continuation is not None else []),
                             "resubmit lock released",
                         ],
@@ -2325,10 +2341,15 @@ class SlurmExecutor(BaseExecutor):
                 | ({"gym_commit": repin} if repin is not None else {})
                 | ({"walltime": segment_walltime or max_walltime} if max_walltime is not None else {})
             )
-            if extend_retries:
-                entry = shlex.quote(json.dumps({"by": extend_retries, "at": utc_timestamp(utc_now())}))
-                journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
-                conn.run([f"printf '%s\\n' {entry} >> {journal}"])
+            # One journal for both extensions, one line per kind: the run's infra-retry cap and every rollout's
+            # attempt cap.
+            journal = shlex.quote(str(job_dir / RETRY_EXTENSION_JOURNAL_NAME))
+            for kind, by in (("infra", extend_retries), ("attempts", extend_attempts)):
+                if by:
+                    entry = shlex.quote(
+                        json.dumps({"kind": kind, "by": by, "at": utc_timestamp(utc_now()), "user": getpass.getuser()})
+                    )
+                    conn.run([f"printf '%s\\n' {entry} >> {journal}"])
             for name, entry in journals.items():
                 # A name is in the run dir; a job-dir journal is keyed by its absolute path.
                 journal = Path(record.run_dir) / name
@@ -2398,6 +2419,31 @@ class SlurmExecutor(BaseExecutor):
             f"else rm -f {name}; fi; }}",
             f"printf '%s\\n' $((10#$_gym_old_extension + {extend_retries})) > {name}.tmp && mv -f {name}.tmp {name} "
             "|| fail 'cannot record the retry extension'",
+        ]
+
+    @staticmethod
+    def _attempt_extension_commands(extend_attempts: int, *, keep_budget: bool) -> list[str]:
+        """The locked steps that record ``extend_attempts`` more attempts for every rollout, restored unless queued.
+
+        The Store reads the record (artifacts/rollouts_attempt_extension) as an addition to the run's saved
+        ``max_rollout_attempts``; a rollout that ended with a model failure is never run again.
+        """
+        if not keep_budget:
+            raise RuntimeError("--extend-attempts needs --recover: it extends the spent attempts, never resets them")
+        if type(extend_attempts) is not int or not 0 < extend_attempts <= MAX_EXTEND_ATTEMPTS:
+            raise ValueError(
+                f"--extend-attempts needs a whole number from 1 to {MAX_EXTEND_ATTEMPTS}, not {extend_attempts!r}"
+            )
+        name = "artifacts/" + attempt_extension_path_for(Path("rollouts.jsonl")).name
+        return [
+            f"_gym_old_attempts=$(cat {name} 2>/dev/null || echo 0)",
+            '[[ "$_gym_old_attempts" =~ ^[0-9]{1,6}$ ]] || fail "the recorded attempt extension is malformed"',
+            f"[[ -e {name} ]] && _gym_had_attempts=1 || _gym_had_attempts=0",
+            '_gym_restore_attempts() { [[ "$_gym_submit_confirmed" == 1 ]] && return; '
+            f'if [[ "$_gym_had_attempts" == 1 ]]; then printf "%s\\n" "$_gym_old_attempts" > {name}; '
+            f"else rm -f {name}; fi; }}",
+            f"printf '%s\\n' $((10#$_gym_old_attempts + {extend_attempts})) > {name}.tmp && mv -f {name}.tmp {name} "
+            "|| fail 'cannot record the attempt extension'",
         ]
 
     def _rerender_commands(

@@ -523,7 +523,6 @@ class OpenClawAgentConfig(BaseResponsesAPIAgentConfig):
     sandbox_provider: str | None = None
     sandbox_config: dict[str, Any] = Field(default_factory=dict)
     sandbox_install_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
     # Per-request timeout of a sandbox session's MCP tool grants (OpenClaw's mcp.servers.<name>.timeout).
     mcp_tool_timeout_seconds: float | None = Field(default=None, gt=0, allow_inf_nan=False)
 

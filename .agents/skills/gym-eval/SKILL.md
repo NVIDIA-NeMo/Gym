@@ -55,11 +55,10 @@ and for reading health while you build a benchmark or a harness, follow
    `gym eval submit --config submit.yaml --dry-run ++compute.cluster.walltime=00:40:00
    ++driver.benchmarks.<name>.run.limit=2`. Check the result with `--resolve-only` or `--dry-run`.
 7. An evaluation you do not track in MLflow on purpose: set `mlflow_tracking_required: false` in
-   each benchmark's `run`. It waives only the delivery requirement of the acceptance gate (step
-   9); health checks still run, and a configured MLflow export still happens. Without it, the
-   gate of a complete, healthy run stays `FAILED` on "no MLflow run evidence". A Gym pinned
-   before this skill does not know the key; a pin that does makes the inspection say `no MLflow
-   export by design`.
+   each benchmark's `run`. Delivery to MLflow is reported beside the acceptance gate as
+   `gate_task.mlflow_delivery` (step 4), and this key makes its state `not_required`: no delivery
+   evidence is expected. Health checks still run, and a configured MLflow export still happens.
+   A Gym pinned before this skill does not know the key.
 
 ## 2. Submit and let the chain run
 
@@ -83,6 +82,11 @@ over only if the successor dies before its own prologue, then reads its predeces
 | `COMPLETED` | Ends. |
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. |
 | `TIMEOUT` before the task inventory was written | Stops and names the fresh-restart command (step 6). |
+
+A job whose driver finishes the run ends the chain itself. After the driver step, it writes the
+record the next job would have written (the run complete, or its missing export receipt), cancels
+the sentinel and the successor it queued, and journals both, with their ids and the `scancel`
+result, in `chain-end-journal.jsonl`. No allocation starts for a finished run.
 
 A run that hangs instead of failing is not left to hold its allocation. A driver that stops on a
 typed condition exits at once (76 when another attempt cannot help), and the next segment's guard
@@ -114,7 +118,7 @@ Do not resubmit while a job of the run is live; recovery answers NOOP then anywa
 | Location | What |
 | --- | --- |
 | Run directory | `gym-job.json` (the submission record), `resolved-config.yaml` (the config as submitted), and the journals `walltime-extension-journal.jsonl`, `repin-journal.jsonl`, `unsafe-resume-journal.jsonl`. |
-| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl`, `spinup-timeout-journal.jsonl` and `operator-continuation-journal.jsonl`. |
+| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl` (one line per `--extend-retries` or `--extend-attempts`, with its `kind`), `spinup-timeout-journal.jsonl`, `operator-continuation-journal.jsonl` and `chain-end-journal.jsonl`. |
 | `artifacts/` | `rollouts.jsonl` (results), `rollouts_failures.jsonl` (failed attempts), `rollouts_materialized_inputs.jsonl` (the task inventory), `rollouts_manifest.json` with its identity and resume-drift journal, `rollouts_coverage.json`, `rollouts_aggregate_metrics.json`, `quality_summary.json` (health), and `rollouts_mlflow_export_done` (the post-run export receipt). |
 | Your machine | A copy of each submission record under the Gym jobs cache (see Job Records). |
 
@@ -157,8 +161,8 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 - `gate_task.status`: `RUNNING` (a job is live), `PLANNED` (eligible work, nothing dispatched; a
   dispatching call reports `RESUMING`), `FAILED` (stopped, unsupported, or something failed: read
   `errors`), `UNVERIFIED` (complete, nothing failed, acceptance not proven: read `warnings`),
-  `SUCCESS` (complete and every gate passed). A chain or MLflow error turns `SUCCESS` or
-  `UNVERIFIED` into `FAILED`.
+  `SUCCESS` (complete and every gate passed). A chain error turns `SUCCESS` or
+  `UNVERIFIED` into `FAILED`; MLflow delivery never does.
 - `gate_task.evaluation_health` (null until the run is complete): `status` (`PASS`, `FAIL`,
   `UNVERIFIED`), `evaluation_failure_rate`, `exact`, `trials`, `evaluation` (`count`, `fraction`,
   `kinds`, `server`), `model` (`count`, `fraction`, `kinds`), `policy_timeout_counts_as_model`
@@ -171,6 +175,12 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
   `verifier_recorded` (the observed-healthy trials known only through the verifier's own grading
   record) and `unobserved_reason` when `unobserved` is not 0. Unobserved trials are unverified,
   not healthy.
+- `gate_task.mlflow_delivery`: `state` and `reasons`. `not_required` (`mlflow_tracking_required` is
+  false), `verified` (no delivery problem), `pending` (no run evidence yet, or only the run's
+  status unread) or `unverified` (with its reasons). It is a fact, not a verdict: it changes
+  neither the status nor evaluation health, and `pending` and `unverified` add the warning
+  `MLflow delivery <state>: <reasons>`. A run that stated no `tracking_required` is read from its
+  saved config.
 - `gate_task.health_verdict` (one line), `criteria`, `mlflow_tracking_required`,
   `expected_samples`, `scored_samples`, `omitted_samples`, `score`, `errors`, `warnings`, and where
   the read ran (`reader_host`, `collector_host`, each with a `*_fallback_reason` when a reader
@@ -185,16 +195,59 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
 | The chain's walltime cap is spent | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. Never below the recorded walltime; journaled. |
-| The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. |
+| The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. It raises infra retries only: it does not raise the per-identity attempt cap, so a STOP that says identities used every attempt is not a lost extension (see "When a run stops"). |
+| Identities used every attempt (`exhausted`, `max_rollout_attempts`) | `--recover --extend-attempts N` gives each of them N more attempts. Only rollouts the Store would run again are reopened (infrastructure failures, allocation cuts); a model failure or a saved result never is. The spent attempts are kept; recorded in `artifacts/rollouts_attempt_extension` and journaled with the infra extension. A run pinned to a Gym without it needs `--repin` in the same resubmit. |
 | The run's chain accounting is unknown (a segment the scheduler requeued ends this way: the requeued allocation's elapsed time is unknown) | An explicit budget continues it: `--max-walltime` with `--walltime-reason`, optionally `--extend-retries`. Without it, the STOP names these options. |
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
-| NOOP, `FAILED`, and the only error starts with `no MLflow run evidence` | The results are complete, but no delivery is on record: no live MLflow run id and no post-run export receipt. The rest of the error says which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then run the same command without `--inspect`: on a complete run that requires tracking and has no receipt, `--recover` runs the post-run export itself and reads the run again. Then inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status. "does not name all of the tracking URI, experiment and run name": the run was never tracked; read `trial_counts`, coverage and the score yourself, and set `mlflow_tracking_required: false` next time (step 1). |
+| NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (the warning reads `MLflow delivery <state>: <reasons>`) | The results are complete and the status is whatever they decide: delivery is reported beside the gate, never inside it. Close the delivery: run `gym eval export mlflow` on the run with the current Gym (a repeat on an exported run verifies without touching the run lock); `--recover` on a complete run that requires tracking and has no receipt runs the export too. The reasons say which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then export. "does not name all of the tracking URI, experiment and run name": the run was never tracked; set `mlflow_tracking_required: false` next time (step 1). The inspection asks the tracking server the saved config names for the status of the receipt's run (up to about 10 seconds, one retry); from a host without access it reports `unverified` with `status query failed: ...`, so inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status yourself; passing the two flags avoids the call. |
 | `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`): once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
 per-rollout attempt allowance. It is not a substitute for a recovery STOP.
+
+## When a run stops: budgets and resubmit
+
+- The chain runs one Slurm segment after another until the work is done, the chain cap
+  (`max_walltime`, the walltime summed over segments) is spent, or the infra-retry budget
+  (`max_retries`) is spent. A typed stop ends it with its kind in `.gym_chain_incomplete`. At a
+  stop nothing is lost: every finished row is saved.
+- Look first, then act. `gym eval resubmit <id> <benchmark> --recover --inspect` says what a
+  recovery would do and why, and dispatches nothing. The same command without `--inspect` does it.
+- Three limits, each counting something different. The chain cap is raised with
+  `--max-walltime HH:MM:SS --walltime-reason "<why>"`, never below the recorded walltime. The
+  job's infra-retry budget (preemptions, node failures) is widened with `--extend-retries N`; the
+  spent count is kept. Each carries a reason that lands in a journal. The third limit belongs to
+  each task row, not to the job: the attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3),
+  and `--extend-retries` does not raise it.
+- A cut that ends an allocation while a row is in flight charges that row an attempt, except the
+  first cut, so a long task that spans several segments can reach the cap without any model
+  failure. A row at the cap is masked: the stop reads "N identity(ies) used every attempt since the
+  last resubmit" and says that `--extend-retries` raises infra retries only, not the per-identity
+  attempt cap (`max_rollout_attempts=N`). It is never scored as the model's result, and a resubmit
+  does not revive it. Until Gym has an option that extends the
+  attempts, such rows need a fresh run (step 6).
+- A resume keeps every finished row and runs only the missing and retriable ones. A rollout in
+  flight when an allocation ends starts again from its beginning: the first such cut is free, and
+  each later one charges one attempt of that row.
+- `--recover --extend-attempts N` raises the per-identity attempt cap for the rows
+  that spent their attempts on infrastructure or on allocation cuts, never for rows that ended on
+  a model failure. Like `--extend-retries`, it is journaled with its reason and keeps the spent
+  counts. Inspect first: it names the rows it would reopen.
+- None of this retries a model failure. A scored zero, a clean agent timeout and a typed model
+  failure are final (step 7).
+- When the launcher's Gym revision differs from the run's pin, the recovery needs
+  `--repin <full sha> --repin-reason "<why>"` (step 5).
+- If a resume is refused because the saved configuration fingerprint no longer matches, do not set
+  `allow_unsafe_resume` yourself: continue the run at its own pinned version and report it.
+- Never use plain `gym eval resubmit` without `--recover` to continue: it resets the budgets.
+
+Cases that went this way: a Terminal-Bench 4.0 run whose chain cap of 16 hours was spent with
+rows missing was continued with the cap at 24 hours; another had its cap raised from 12 to 16 and
+then to 19 hours 15 minutes, with one retry extension after preemptions; a third ran as a chain of six
+segments, with preemptions and requeues handled by the chain itself and one operator
+continuation, and was reconciled to the second against the scheduler's own accounting.
 
 ## 6. When nothing can be recovered
 
@@ -223,11 +276,17 @@ result under the benchmark's time limit (a harness that records its agent deadli
 zero has settled it). That limit is the benchmark's own: for Terminal-Bench 4.0, 8 h per task is
 the official agent budget (TB 4.0 release notes, "Calibrating resources"), and Gym's default
 `agent_timeout_sec` of 28800 matches it. An `agent_timeout` that kept no answer is a saved failure
-the policy decides, retried by default. Successes and final failures are never run again.
+the policy decides, retried by default. Successes and final failures are never run again. For
+GDP-PDF, a policy answer that comes back incomplete because its output budget was spent is the
+row's result, graded as a truncated answer and not regenerated; the HTTP 4xx input-limit
+negotiation (the DPI step-down to 72, the image cap, the text-only fallback) is the benchmark's
+delivery protocol, counted per row (`document_delivery.input_limit_rejections`,
+`output_truncation_regenerations`) and in the run facts; `regenerate_on_incomplete_output=true`
+reproduces the old main behaviour, for comparison only, so its cells differ from main by design.
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
-does not extend an exhausted budget, `--extend-retries` and `--max-walltime` do.
+does not extend an exhausted budget, `--extend-retries`, `--extend-attempts` and `--max-walltime` do.
 
 Retries happen in three layers before a failure reaches you. In a call: the policy client retries
 HTTP 429, 502, 503, 504, 520, 404, 408 and 500, the judge client 408 and 429, and the sandbox
@@ -238,6 +297,9 @@ zero: masked, out of the score, counted on the evaluation side. In the chain: on
 `NODE_FAIL` and `BOOT_FAIL` spend an infra retry, `TIMEOUT` continues, and `FAILED`,
 `OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop the chain; `--recover` is the way on, and it
 dispatches only the missing and retriable identities.
+
+A request the provider rejects for an unsupported parameter value is an evaluation-side fault: it
+invalidates the run and is never the model's zero. Fix the parameter and run again.
 
 What is retriable is one question; whether the score can be trusted is another. The split between
 model faults and evaluation-side faults belongs to the second only: `gate_task.evaluation_health`
@@ -306,7 +368,7 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   its checks and rewrites it, so run it on a copy, never on the run's own `artifacts/` (step 3).
 - What decides acceptance: complete results, the score gate (`--score-key`, a JSON path, with
   `--score-agent` and, when an agent has several entries, `--score-environment`), a readable
-  health summary, the MLflow delivery when it is required (step 1), and evaluation health.
+  health summary, and evaluation health.
   Evaluation health is `gate_task.evaluation_health`: `PASS` when evaluation-side trial failures
   (judge, verifier, sandbox and harness faults, a server that did not start, transport faults and
   model-server 5xx replies) are strictly below 2% of the expected trials and every trial's
@@ -331,7 +393,15 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `agentif`, `beam`, `deepsearchqa`, `finance_agent_v2`, `finance_sec_search`, `gdp_pdf`,
   `imo_proofbench`, `longmemeval`, `simpleqa`, `widesearch`, `litmus-bench`, the `abstention`,
   `inverse_if` and `multichallenge` parts of `nemotron_3.5_super`, `frontierscience_olympiad` and
-  `automationbench`. Report it with the reason; do not re-run, and change no flag: none changes it.
+  `automationbench` (the benchmarks graded by the verifiers agent, AutomationBench among them).
+  `UNVERIFIED` means the answers were scored, but the grading evidence was not recorded on this
+  stack version. A resubmit cannot change it, and no flag does: it needs a run on a stack version
+  that records grading. Report it with the reason and do not present the run as verified.
+- Evaluation health is the gate on the collected results. Delivery to MLflow is reported separately
+  as `mlflow_delivery` (pending until the export receipt exists, then verified or unverified with
+  reasons) and does not fail the gate. A run with `mlflow_tracking_required: false` needs no
+  delivery evidence. To close a pending delivery on a finished run, run `gym eval export mlflow` on
+  the run with the current Gym.
   The fix is that server's grading record, in Gym.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
@@ -343,10 +413,11 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - `warnings` also carries facts that fail nothing: `no response-health criterion configured` when
   `--max-unhealthy-fraction` was not given, and `health checks not fully evaluated` with the checks
   a small run gave too little to judge.
-- The MLflow part passes only with a current export receipt (`mlflow.receipt.current`, with
-  `uploaded_rollouts` true and `rollout_projection_version` 1) and `--mlflow-status FINISHED`
-  observed by you for `--mlflow-run-id` equal to the receipt's `run_id`. A live run id alone is
-  never accepted, and the two flags export nothing. The receipt, `artifacts/rollouts_mlflow_export_done`,
+- MLflow delivery is `verified` only with a current export receipt (`mlflow.receipt.current`, with
+  `uploaded_rollouts` true and `rollout_projection_version` 1) and a `FINISHED` status of the
+  receipt's run, read from the tracking server the saved config names, or given by you with
+  `--mlflow-status FINISHED` for `--mlflow-run-id` equal to the receipt's `run_id`. A live run id
+  alone is never accepted, and the two flags export nothing. The receipt, `artifacts/rollouts_mlflow_export_done`,
   binds the sha256 of five run files; a file that changes after the export makes it stale.
 - With MLflow configured, the post-run export logs the same facts as metrics: `health/response/*`,
   `health/trial/*` (`known`, `passed`, `counts_known`, `expected`, `failed` or
@@ -363,8 +434,10 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 1. Cancel the running job of the chain and the jobs it queued (`scancel <ids>`): its successor
    (in `.gym_followup_queued.<job id>`) and the successor's sentinel (in
    `.gym_followup_sentinel.<job id>`). A successor that is left to start sees `CANCELLED` and stops
-   without doing work, but only after it got an allocation. Cancel a pending sentinel after a
-   completed run too: once Slurm cancels the successor, the sentinel's dependency is met. If you
+   without doing work, but only after it got an allocation. A job that finished the run cancels
+   both itself (see `chain-end-journal.jsonl`); a `job.sh` rendered before that did not, so after
+   such a run cancel a pending sentinel too: once Slurm cancels the successor, the sentinel's
+   dependency is met. If you
    cancel only the running job, its follow-up starts when it gets an allocation, sees `CANCELLED`,
    writes the stop to `.gym_chain_incomplete` and exits; cancelling the successor and the sentinel
    too saves that allocation and leaves no stop record (the inspection reads the state from the
@@ -381,5 +454,6 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   explained.
 - [ ] Any `resumed across operational drift` settings are listed with the result.
 - [ ] The run is final on its receipts: `rollouts_coverage.json` says complete, the export
-  receipt `rollouts_mlflow_export_done` is current (or `mlflow_tracking_required: false` was set
-  on purpose), and `.gym_chain_incomplete` is absent or explained.
+  receipt `rollouts_mlflow_export_done` is current and `gate_task.mlflow_delivery.state` is
+  `verified` (or `not_required`, with `mlflow_tracking_required: false` set on purpose), and
+  `.gym_chain_incomplete` is absent or explained.
