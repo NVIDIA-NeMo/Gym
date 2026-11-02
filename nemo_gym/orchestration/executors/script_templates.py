@@ -275,8 +275,10 @@ def render_driver_entrypoint(
                 'export PATH="$GYM_SRC/uv-bin:$PATH" '
                 'UV_CACHE_DIR="$(_gym_own_dir "${TMPDIR:-/tmp}/gym-uv-cache-$(id -u)" "$GYM_SRC/uv-cache")" '
                 # Managed Pythons are per read: an interpreter file another process rewrites or a killed install
-                # leaves half-written breaks every venv built on it, so no reader shares one.
-                'UV_PYTHON_INSTALL_DIR="$GYM_SRC/uv-python"',
+                # leaves half-written breaks every venv built on it, so no reader shares one. uv otherwise prefers
+                # a compatible Python already on PATH, such as a link in the shared `~/.local/bin`, so only the
+                # managed Pythons of this read are allowed.
+                'UV_PYTHON_INSTALL_DIR="$GYM_SRC/uv-python" UV_PYTHON_PREFERENCE=only-managed',
             ]
         else:
             uv_setup = [

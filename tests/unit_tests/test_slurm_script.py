@@ -18,9 +18,11 @@ import contextlib
 import os
 import re
 import shlex
+import shutil
 import signal
 import socket
 import subprocess
+import sys
 import time
 import warnings
 from pathlib import Path
@@ -756,7 +758,11 @@ def _run_private_uv_entrypoint(
     home, tools = tmp_path / "home", tmp_path / "tools"
     (home / ".local/bin").mkdir(parents=True)
     tools.mkdir()
-    fake_uv = '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; : > .venv/bin/activate;; esac\n'
+    # `uv venv` records the interpreter preference it ran with, which decides whether a Python on PATH may be used.
+    fake_uv = (
+        '#!/bin/bash\ncase "$1" in --version) echo "uv 0.0.0";; venv) mkdir -p .venv/bin; : > .venv/bin/activate; '
+        'printf %s "${UV_PYTHON_PREFERENCE:-unset}" > .venv/python-preference;; esac\n'
+    )
     shared = home / ".local/bin/uv"
     if shared_uv != "missing":
         shared.write_text(fake_uv if shared_uv == "working" else "#!/bin/bash\nexit 1\n")
@@ -773,7 +779,10 @@ def _run_private_uv_entrypoint(
     )
     for tool in ("git", "curl"):
         (tools / tool).chmod(0o755)
-    report = 'echo "UV=$(command -v uv) CACHE=$UV_CACHE_DIR PYTHONS=$UV_PYTHON_INSTALL_DIR SRC=$GYM_SRC"'
+    report = (
+        'echo "UV=$(command -v uv) CACHE=$UV_CACHE_DIR PYTHONS=$UV_PYTHON_INSTALL_DIR SRC=$GYM_SRC '
+        'VENV_PREFERENCE=$(cat .venv/python-preference)"'
+    )
     out = render_driver_entrypoint(
         "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
     )
@@ -793,6 +802,9 @@ def test_a_private_uv_entrypoint_runs_its_own_uv_and_cache(tmp_path: Path, share
     assert fields["CACHE"] == f"/tmp/gym-uv-cache-{os.getuid()}"
     # Managed Pythons are never shared: each read installs its own under its temporary directory.
     assert fields["PYTHONS"] == f"{fields['SRC']}/uv-python"
+    # ... and its venv is built on one of them only: a compatible Python on PATH (`~/.local/bin` stays on it) is
+    # never selected in its place.
+    assert fields["VENV_PREFERENCE"] == "only-managed"
     assert fields["SRC"].startswith("/tmp/gym-install-")
     # A working uv is copied, not reinstalled over the shared one; a broken or missing one is replaced by an
     # install into the private dir, and the shared file is left as it was.
@@ -800,6 +812,37 @@ def test_a_private_uv_entrypoint_runs_its_own_uv_and_cache(tmp_path: Path, share
     assert shared.exists() is (shared_uv != "missing")
     if shared_uv == "broken":
         assert shared.read_text() == "#!/bin/bash\nexit 1\n"
+
+
+@pytest.mark.skipif(shutil.which("uv") is None, reason="needs a real uv to select the interpreter")
+def test_a_private_uv_reader_never_bases_its_venv_on_a_shared_python_on_path(tmp_path: Path) -> None:
+    # A compatible interpreter linked in the shared `~/.local/bin` is what a real uv selects first unless only
+    # managed Pythons are allowed. Downloads are disabled here, so the read must fail rather than build its venv
+    # on that shared interpreter.
+    home, tools = tmp_path / "home", tmp_path / "tools"
+    (home / ".local/bin").mkdir(parents=True)
+    tools.mkdir()
+    shutil.copy(shutil.which("uv"), home / ".local/bin/uv")
+    shared_python = home / ".local/bin" / f"python{sys.version_info[0]}.{sys.version_info[1]}"
+    shared_python.symlink_to(Path(sys.executable).resolve())
+    (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
+    (tools / "git").chmod(0o755)
+    report = "python -c 'import sys; print(\"BASE=\" + sys.base_prefix)'"
+    out = render_driver_entrypoint(
+        "https://github.com/NVIDIA-NeMo/gym", "main", None, command=report, cleanup=True, private_uv=True
+    )
+    env = {
+        "HOME": str(home),
+        "PATH": f"{tools}:/usr/bin:/bin",
+        "TMPDIR": str(tmp_path),
+        "UV_PYTHON_DOWNLOADS": "never",
+    }
+    result = subprocess.run(["bash", "-c", out], env=env, capture_output=True, text=True, timeout=120)
+
+    assert "BASE=" not in result.stdout, result.stdout
+    assert f"interpreter at: {home}" not in result.stderr, result.stderr
+    assert result.returncode != 0
+    assert "managed installations" in result.stderr, result.stderr
 
 
 def test_the_driver_entrypoint_keeps_the_shared_uv_install() -> None:
