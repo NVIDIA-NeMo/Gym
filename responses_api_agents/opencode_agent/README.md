@@ -259,9 +259,14 @@ relaunched when it need not be:
   same way. Otherwise the launch is killed, nothing of it continuing, and relaunched as above.
 - **Without Python 3.6 or later in the task image** there is no relay: OpenCode calls the model server directly, and a
   restore relaunches it.
-- **The wall clock** stays continuous: the provider sets a resumed sandbox's clock to the host's, so the re-bind first
-  sets it back to the checkpoint's plus the time the sandbox ran since (`restore_sandbox_clock`), and gives files
-  written in between that time. Session setup stops the image's time daemons (systemd-timesyncd, chrony, ntpd), which
+- **The wall clock** stays continuous: the provider sets a resumed sandbox's clock to the host's, the moment the VM
+  resumes, so the re-bind first sets it back to the checkpoint's plus the time the sandbox ran since
+  (`restore_sandbox_clock`). Nothing of OpenCode may run on the provider's clock before that: OpenCode orders a
+  conversation by message IDs it makes from the clock, and a message written then would sort after every later one.
+  So the checkpoint's pause also freezes OpenCode's processes (SIGSTOP, `checkpoint_freeze_wait_seconds`) until the
+  continue; a pause that cannot freeze them all (a process in uninterruptible sleep) holds them running instead, and
+  a restore of that checkpoint leaves the clock as the provider set it. The re-bind gives files written between the
+  resume and the rewind (by services that left OpenCode) the rewound time. Session setup stops the image's time daemons (systemd-timesyncd, chrony, ntpd), which
   would pull it forward again. `date`, new files and OpenCode's date then read as if the sandbox had never stopped;
   the sandbox's clock lags real time by the time it spent stopped, which requests it signs with the time (cloud APIs,
   short-lived tokens) or a freshly rotated TLS certificate could notice.
@@ -279,7 +284,8 @@ Settings:
 | `sandbox_session_root` | `/tmp/nemo-gym-opencode-sessions` | Must be on the sandbox's snapshotted disk; the saved conversation lives here. |
 | `checkpoint_pause_allowance_seconds` | `3600` | Time a launch may spend paused in all. It extends the provider's command deadline; a longer pause fails the launch. Cover the longest commit. |
 | `sandbox_model_relay_port` | `18431` | Sandbox port of the model relay, on providers whose snapshots keep processes. |
-| `restore_sandbox_clock` | `true` | Keep the wall clock of a sandbox whose snapshots keep processes continuous across a restore. |
+| `restore_sandbox_clock` | `true` | Keep the wall clock of a sandbox whose snapshots keep processes continuous across a restore; freezes OpenCode during a checkpoint's pause. |
+| `checkpoint_freeze_wait_seconds` | `2.0` | How long a checkpoint's pause waits for OpenCode's processes to stop before holding them running instead. |
 
 The controller's `control_timeout` must cover the pause: a prepare waits until every running OpenCode is paused (up to
 about 45 s for the supervisor to confirm).

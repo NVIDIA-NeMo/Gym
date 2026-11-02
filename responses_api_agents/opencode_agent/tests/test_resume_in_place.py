@@ -171,8 +171,9 @@ async def _crash_after_a_checkpoint(fixture: InPlaceFixture, state_dir: Path, he
     for operation, extra in (("prepare", {}), ("commit", {"checkpoint_dir": str(state_dir / "ckpt")})):
         reply = await http.post(f"/ng-control/v1/checkpoint/{operation}", json=_control("c1", **extra), headers=_AUTH)
         assert reply.status_code == 200, f"{operation}: {reply.text}"
-    # Holding, not stopping: no harness process was signalled.
-    assert all(_state(pid) not in ("T", "t") for pid in fixture.harness_pids())
+    # Held and frozen: the relay holds the model call and every harness process is stopped until the continue, so a
+    # restore can set the clock back before anything of the launch reads it.
+    assert fixture.harness_pids() and all(_state(pid) in ("T", "t") for pid in fixture.harness_pids())
     # The agent server dies here; the sandbox's processes do not. Its tasks are left as a dead process leaves them.
     return config, (agent, http, activation)
 
@@ -388,7 +389,13 @@ async def test_a_restore_sets_the_clock_back_from_the_pause_it_held(
     monkeypatch.setattr(opencode_app, "rewind_clock", record_rewind)
     caplog.set_level(logging.WARNING)
 
-    saved = {"pause_seq": 3, "supervisor_identity": "10.20", "pause_wall": 1000.5, "pause_uptime": 50.25}
+    saved = {
+        "pause_seq": 3,
+        "supervisor_identity": "10.20",
+        "pause_wall": 1000.5,
+        "pause_uptime": 50.25,
+        "pause_frozen": True,
+    }
     await agent._rewind_restored_clock(state, MagicMock(), saved, ["/work", None, "/sessions/s", "/tmp"])
 
     assert calls[0]["pause_wall"] == 1000.5 and calls[0]["pause_uptime"] == 50.25
@@ -409,7 +416,24 @@ async def test_a_restore_without_recorded_clocks_or_with_a_failing_rewind_goes_o
         raise RuntimeError("sandbox unreachable")
 
     monkeypatch.setattr(opencode_app, "rewind_clock", failing_rewind)
-    await agent._rewind_restored_clock(state, MagicMock(), {"pause_wall": 1.0, "pause_uptime": 2.0}, ["/work"])
+    saved = {"pause_wall": 1.0, "pause_uptime": 2.0, "pause_frozen": True}
+    await agent._rewind_restored_clock(state, MagicMock(), saved, ["/work"])
+
+
+async def test_a_restore_whose_pause_did_not_freeze_the_launch_leaves_the_clock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Something of the launch may have run on the resumed clock before the re-bind: OpenCode orders a conversation
+    # by IDs it makes from the clock, so setting the clock back now would sort what it wrote after everything later.
+    agent = OpenCodeFixture(tmp_path, monkeypatch).make_agent({})
+    state = _restored_state(agent)
+    monkeypatch.setattr(opencode_app, "rewind_clock", MagicMock(side_effect=AssertionError("not frozen: not rewound")))
+    caplog.set_level(logging.WARNING)
+
+    saved = {"pause_seq": 3, "supervisor_identity": "10.20", "pause_wall": 1.0, "pause_uptime": 2.0}
+    await agent._rewind_restored_clock(state, MagicMock(), saved, ["/work"])
+
+    assert "OpenCode left the sandbox clock: session s, reason not_frozen" in caplog.text
 
 
 async def test_stopping_the_time_daemons_never_fails_a_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

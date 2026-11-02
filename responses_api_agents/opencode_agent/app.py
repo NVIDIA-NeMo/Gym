@@ -299,10 +299,14 @@ class OpenCodeAgentConfig(BaseResponsesAPIAgentConfig):
     # processes: a restore re-points the relay at the replacement attempt while OpenCode keeps running.
     sandbox_model_relay_port: int = Field(default=18431, gt=0, lt=65536)
     # On a sandbox whose snapshots keep processes, keep its wall clock continuous across a restore: stop its time
-    # daemons at setup, and after a restore set the clock back to where it would be had the sandbox never stopped
-    # (the provider sets it to the host's when it resumes). The sandbox's clock then lags real time by the time it
-    # spent stopped.
+    # daemons at setup, freeze OpenCode's processes while a checkpoint holds them (so nothing of it runs in a restored
+    # sandbox before the clock is set back), and after a restore set the clock back to where it would be had the
+    # sandbox never stopped (the provider sets it to the host's when it resumes). The sandbox's clock then lags real
+    # time by the time it spent stopped. A checkpoint that could not freeze every process leaves the clock as the
+    # provider set it.
     restore_sandbox_clock: bool = True
+    # How long a checkpoint's pause waits for OpenCode's processes to stop before it holds them running instead.
+    checkpoint_freeze_wait_seconds: float = Field(default=2.0, gt=0)
 
     @model_validator(mode="after")
     def _validate_prompt_agent(self) -> Self:
@@ -918,6 +922,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
             harness="OpenCode",
             pausable=True,
             pause_mode="hold" if state.keeps_processes else "stop",
+            hold_freeze_s=self._hold_freeze_s(state.keeps_processes),
         )
         root = session.session_root
         if state.keeps_processes and self.config.restore_sandbox_clock:
@@ -960,10 +965,18 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
     ) -> None:
         """Set a restored sandbox's wall clock back to the checkpoint's plus the time the sandbox ran since.
 
-        Needs the clocks the held pause recorded; a failure is logged and never fails the seed.
+        Needs the clocks the held pause recorded, and a pause that froze every process of the launch: a process
+        that ran in the restored sandbox before the rewind read the provider's clock, and OpenCode orders a
+        conversation by IDs it makes from the clock, so a message written then would sort after every later one.
+        A failure is logged and never fails the seed.
         """
         pause_wall, pause_uptime = saved.get("pause_wall"), saved.get("pause_uptime")
         if pause_wall is None or pause_uptime is None:
+            return
+        if not saved.get("pause_frozen"):
+            LOG.warning(
+                "OpenCode left the sandbox clock: session %s, reason not_frozen", state.request.agent_session_id
+            )
             return
         try:
             rewind = await rewind_clock(
@@ -989,6 +1002,12 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 state.request.agent_session_id,
                 rewind.reason,
             )
+
+    def _hold_freeze_s(self, keeps_processes: bool) -> float | None:
+        """How long a hold pause waits to freeze OpenCode's processes; ``None`` when it does not freeze them."""
+        if keeps_processes and self.config.restore_sandbox_clock:
+            return self.config.checkpoint_freeze_wait_seconds
+        return None
 
     async def _check_restored_launch(self, state: OpenCodeSandboxSession, saved: Mapping[str, Any]) -> None:
         """Decide what becomes of the launch a process-keeping restore brought back: take it over, or end it.
@@ -1139,6 +1158,7 @@ class OpenCodeAgent(SimpleResponsesAPIAgent):
                 owns_sandbox=owns_sandbox,
                 pausable=checkpointed,
                 pause_mode="hold" if keeps_processes else "stop",
+                hold_freeze_s=self._hold_freeze_s(keeps_processes),
             ),
             runtime=runtime,
             model_ref=self.config.model_server,

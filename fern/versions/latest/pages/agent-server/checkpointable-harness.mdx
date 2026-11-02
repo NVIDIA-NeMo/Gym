@@ -76,6 +76,9 @@ Per-harness policy stays in the adapter:
   Such a provider sets the resumed sandbox's wall clock to the host's, while uptime runs on from the snapshot: the
   re-bind first sets the clock back to the held pause's `wall` plus the uptime since its `uptime`
   (`nemo_gym/agents/utils/sandbox_clock.py`), so the harness and its tools never see the time the sandbox spent stopped.
+  Only when the pause also froze the harness (`process_supervisor.sh --hold-freeze`, `"frozen": true`): a harness
+  that runs in the fork before the rewind reads the host's clock, and what it stamps then (OpenCode's message IDs)
+  would sort after everything it stamps later.
   The clock then lags real time by that much, which only requests signed with the time can notice.
 - **Resume decision.** On the first launch after a stop or a restore, read the saved conversation. Resume it when it is
   the task's own and the model answered at least once; otherwise start afresh from the original prompt. OpenCode
