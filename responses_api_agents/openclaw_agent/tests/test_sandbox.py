@@ -125,6 +125,7 @@ class Sandbox:
         self.runtime_info = {"hostname": "task-container", "pid": 123}
         self.events = events()
         self.stderr = "model error"
+        self.stdout = ""
         self.blocked = False
         self.started = asyncio.Event()
         self.exited = asyncio.Event()
@@ -175,7 +176,7 @@ class Sandbox:
         await self.exited.wait()
         self.files[f"{self.directory}/cleanup.json"] = json.dumps(self.result)
         self.files[f"{self.directory}/runtime.json"] = json.dumps(self.runtime_info)
-        self.files[f"{self.directory}/stdout.log"] = ""
+        self.files[f"{self.directory}/stdout.log"] = self.stdout
         self.files[f"{self.directory}/stderr.log"] = self.stderr
         session_id = self.directory.rsplit("/", 1)[-1]
         self.files[f"{self.directory}/home/.openclaw/agents/main/sessions/{session_id}.jsonl"] = self.events
@@ -2137,6 +2138,106 @@ def test_terminal_model_error_retains_response_and_cause(setup, partial, message
         closed = client.post("/v1/agent_sessions/close", json=close_body(session_id)).json()
         assert closed["agent_observations"]["records"][0]["status"] == "failed"
     sandbox.launch.assert_awaited_once()
+
+
+@pytest.mark.parametrize(
+    "stop_reason,message,envelope_error,expected",
+    [
+        ("error", "Connection error.", None, {"failure_kind": "model_transport_error"}),
+        ("error", "terminated", None, {"failure_kind": "model_transport_error"}),
+        (
+            "aborted",
+            "LLM idle timeout (2s): no response from model",
+            None,
+            {"failure_kind": "model_transport_error"},
+        ),
+        (
+            None,
+            "Context overflow: prompt too large for the model (precheck).",
+            "context_overflow",
+            {"failure_kind": "model_context_limit"},
+        ),
+        (
+            "error",
+            "400 maximum context length exceeded",
+            "context_overflow",
+            {"failure_kind": "model_context_limit"},
+        ),
+    ],
+)
+@pytest.mark.parametrize("partial", [False, True])
+def test_model_transport_and_context_errors_reach_environment(
+    setup, stop_reason, message, envelope_error, expected, partial
+):
+    from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, agent_outcome_policy
+    from nemo_gym.core import NeMoGymResponse
+
+    agent, sandbox = setup
+    transcript = [json.loads(line) for line in events(stop_reason=stop_reason).splitlines()]
+    transcript[2]["message"].update(errorMessage=message, content=[], usage={"input": 0, "output": 0})
+    if stop_reason is None:
+        transcript = transcript[:2] if partial else []
+    elif not partial:
+        transcript = [transcript[2]]
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    if envelope_error:
+        sandbox.stdout = json.dumps({"meta": {"error": {"kind": envelope_error, "message": message}}})
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        body = response.json()
+        assert body["status"] == "failed"
+        assert body["error"]["message"] == message
+        assert json.loads(body["metadata"]["ng_agent_outcome"]) == expected
+        assert any(item["type"] == "function_call_output" for item in body["output"]) == partial
+        # Context prechecks have no HTTP status: the environment can explicitly
+        # choose verification, rather than inheriting a fabricated HTTP 400.
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(body)).value == (
+            "fail" if envelope_error else "retry"
+        )
+        policy = AgentOutcomePolicyConfig(by_failure_kind={"model_context_limit": "verify"})
+        assert agent_outcome_policy(NeMoGymResponse.model_validate(body), config=policy).value == (
+            "verify" if envelope_error else "retry"
+        )
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
+
+
+@pytest.mark.parametrize("failure", ["abort", "worker_exit", "cleanup", "untyped_envelope"])
+def test_runtime_failures_do_not_become_model_outcomes(setup, failure):
+    agent, sandbox = setup
+    message = "Request was aborted." if failure == "abort" else "LLM idle timeout (2s): no response from model"
+    transcript = [json.loads(line) for line in events(stop_reason="aborted").splitlines()]
+    transcript[2]["message"]["errorMessage"] = message
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    if failure == "worker_exit":
+        sandbox.result["return_code"] = 1
+        sandbox.stderr = "unexpected worker exception"
+    elif failure == "cleanup":
+        sandbox.result["error"] = "cleanup failed"
+    elif failure == "untyped_envelope":
+        sandbox.events = ""
+        sandbox.stdout = json.dumps({"meta": {"error": {"kind": "runtime_error", "message": "failed"}}})
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 502, response.text
+        client.post("/v1/agent_sessions/close", json=close_body(session_id))
+
+
+def test_supervisor_timeout_is_not_a_model_transport_error(setup):
+    agent, sandbox = setup
+    sandbox.result.update(timed_out=True, return_code=143)
+    transcript = [json.loads(line) for line in events(stop_reason="aborted").splitlines()]
+    transcript[2]["message"]["errorMessage"] = "LLM idle timeout (2s): no response from model"
+    sandbox.events = "\n".join(json.dumps(event) for event in transcript)
+    with TestClient(agent.setup_webserver()) as client:
+        session_id = client.post("/v1/agent_sessions", json=seed().model_dump(mode="json")).json()["agent_session_id"]
+        response = client.post("/ng-rollout/openclaw-smoke-a2/v1/responses", json={"input": "task"})
+        assert response.status_code == 200, response.text
+        assert response.json()["status"] == "incomplete"
+        assert "ng_agent_outcome" not in response.json()["metadata"]
+        assert client.post("/v1/agent_sessions/close", json=close_body(session_id)).status_code == 200
 
 
 @pytest.mark.parametrize("transcript_available", [False, True])

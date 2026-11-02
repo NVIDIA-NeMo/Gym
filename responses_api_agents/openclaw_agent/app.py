@@ -58,7 +58,9 @@ from nemo_gym.base_responses_api_agent import (
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
+    MODEL_CONTEXT_LIMIT,
     MODEL_REQUEST_ERROR,
+    MODEL_TRANSPORT_ERROR,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -549,10 +551,18 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
     """Runs the OpenClaw CLI (openclaw agent --local --json)"""
 
     def classify_outcome(self, native_result: Mapping[str, Any]) -> AgentOutcome:
-        """Read the pinned OpenClaw 2026.6.11 assistant's terminal model error."""
+        """Read pinned assistant errors or the CLI's typed context-overflow envelope."""
+        context_overflow = native_result.get("kind") == "context_overflow"
+        message = str(native_result.get("message" if context_overflow else "errorMessage") or "")
+        match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
+        if context_overflow:
+            return AgentOutcome(failure_kind=MODEL_CONTEXT_LIMIT)
+        if native_result.get("stopReason") in {"error", "aborted"}:
+            if message in {"Connection error.", "terminated"} or re.fullmatch(
+                r"LLM idle timeout \(\d+(?:\.\d+)?s\): no response from model", message
+            ):
+                return AgentOutcome(failure_kind=MODEL_TRANSPORT_ERROR)
         if native_result.get("stopReason") == "error":
-            message = str(native_result.get("errorMessage") or "")
-            match = re.match(r"^(?:HTTP )?([45]\d{2})(?::|\s|$)", message)
             if match:
                 return AgentOutcome(failure_kind=MODEL_REQUEST_ERROR, status_code=int(match[1]))
         return AgentOutcome(failure_kind="unknown")
@@ -1125,6 +1135,15 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             gaps.append(ObservationGap(code="worker_exit_code_unavailable"))
         error = result["error"] if result else "OpenClaw activation ended without a cleanup receipt"
         last = assistants[-1] if assistants else {}
+        envelope_error = meta.get("error") if isinstance(meta, dict) else None
+        context_error = (
+            envelope_error
+            if isinstance(envelope_error, dict) and envelope_error.get("kind") == "context_overflow"
+            else None
+        )
+        terminal_result = context_error if context_error is not None else last
+        if context_error is not None:
+            error = error or str(context_error.get("message") or "OpenClaw context overflow")
         if last.get("stopReason") == "error" or (
             last.get("stopReason") == "aborted" and not (result and result["timed_out"])
         ):
@@ -1195,13 +1214,22 @@ class OpenClawAgent(SimpleResponsesAPIAgent):
             )
             and not result["timed_out"]
             and not result["error"]
-            and last.get("stopReason") == "error"
+            and (
+                context_error is not None
+                or last.get("stopReason") == "error"
+                or (
+                    last.get("stopReason") == "aborted"
+                    and self.classify_outcome(last).failure_kind == MODEL_TRANSPORT_ERROR
+                )
+            )
         ):
             # 2026.6.11 can surface model errors by throwing FailoverError and
             # exiting 1. Require its terminal diagnostic as well as the assistant
             # error; an unrelated worker exit must still raise. The environment
             # owns verify/retry/fail policy for the preserved model response.
-            return self.report_outcome(response, last)
+            # An idle watchdog abort is a model failure; the supervisor's whole-run
+            # deadline and unrelated aborts must not be classified as transport errors.
+            return self.report_outcome(response, terminal_result)
         return response
 
     def model_post_init(self, __context: Any) -> None:
