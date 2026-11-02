@@ -493,7 +493,9 @@ async def test_real_sdk_pause_resume_and_status_use_only_the_control_plane(monke
         times = {"startedAt": "2026-01-01T00:00:00Z", "endAt": "2026-01-01T01:00:00Z"}
         return httpx.Response(200, json={**record, **detail, **times})
 
-    monkeypatch.setattr(client_async, "get_transport", lambda *args, **kwargs: httpx.MockTransport(handler))
+    # envd HTTP clients also take get_transport; get_envd_transport is its deprecated alias.
+    for factory in ("get_transport", "get_envd_transport"):
+        monkeypatch.setattr(client_async, factory, lambda *args, **kwargs: httpx.MockTransport(handler))
     monkeypatch.setattr(e2b_provider, "_require_e2b_sdk", lambda: e2b)
     provider = E2BProvider(connection={"api_key": "k", "api_url": "http://api.test"}, create={"template": "base"})
 
@@ -506,7 +508,7 @@ async def test_real_sdk_pause_resume_and_status_use_only_the_control_plane(monke
     await provider.resume(handle)
     assert await provider.status(handle) is SandboxStatus.RUNNING
 
-    # No envd request: status and pause must not wake a paused guest.
+    # No envd request (an is_running health check would add GET /health): don't wake a paused guest.
     assert [(method, path) for method, path, _ in requests] == [
         ("GET", "/sandboxes/sbx-1"),
         ("POST", "/sandboxes/sbx-1/pause"),
