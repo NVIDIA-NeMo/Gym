@@ -937,3 +937,47 @@ def test_noncolliding_sanitized_scientific_metric_still_exports(live, monkeypatc
     changed = orjson.loads(artifacts.aggregate_metrics_json_fpath.read_bytes())
     changed[0].pop("_ng_run_health_metrics")
     assert changed == entries
+
+
+@pytest.mark.parametrize("case", ["settled_zero", "missing"])
+def test_the_exported_trial_rate_uses_the_gates_denominator_and_reports_omissions(live, monkeypatch, case):
+    """49 scored trials, then one settled zero (or one missing row), and 50 rows an accepted stage omitted."""
+    import nemo_gym.orchestration.recovery as recovery
+    from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
+    from nemo_gym.cli.eval import _prepare_run_health_metrics
+    from tests.unit_tests.test_evaluation_health import _run
+
+    artifacts, _, _ = live
+    collected = _run(49, settled={"model_transport_error": 1} if case == "settled_zero" else None)
+    if case == "missing":
+        collected.materialized.append({"_ng_task_index": 49, "_ng_rollout_index": 0, "_ng_collected_task_id": "49"})
+    for task in range(50, 100):
+        collected.materialized.append(
+            {
+                "_ng_task_index": task,
+                "_ng_rollout_index": 0,
+                "_ng_collected_task_id": str(task),
+                ACCEPTED_STAGE_OMISSION: {"stage_index": 1, "tolerate_unresolved": True},
+            }
+        )
+    monkeypatch.setattr(recovery, "select_managed_evidence", lambda *_: collected)
+    decision = recovery.decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert decision.counts.get("omitted") == 50
+    passed, reason = recovery.trial_health(decision, collected)
+    values = _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+    assert values["health/trial/expected"] == 50 and values["health/trial/omitted"] == 50
+    assert values["health/trial/counts_known"] == 0
+    if case == "settled_zero":
+        # The gate rejects 1 of 50 (2%); the export reports the same population, not 1 of 100.
+        assert passed is False and "evaluation-side faults: 1 of 50 (2.00%) is not below 2%" in reason
+        assert (values["health/trial/known"], values["health/trial/passed"]) == (1, 0)
+        assert values["health/trial/failed_lower_bound"] == 1
+        assert values["health/trial/failure_rate_lower_bound"] == 0.02
+        assert values["health/trial_failures/request"] == 1 and values["health/trial_failures/rate"] == 0.02
+    else:
+        # Not evaluated: the known count is a lower bound over the same denominator.
+        assert passed is None and reason.startswith("trial: not evaluated")
+        assert (values["health/trial/known"], values["health/trial/passed"]) == (0, 0)
+        assert values["health/trial/failed_lower_bound"] == 0
+        assert values["health/trial/failure_rate_lower_bound"] == 0
+        assert values["health/trial_failures/rate"] == 0 and values["health/response_failures/rate"] == 0

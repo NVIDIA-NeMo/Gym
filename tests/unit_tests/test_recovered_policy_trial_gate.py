@@ -95,12 +95,13 @@ def test_a_policy_attempt_retried_and_completed_in_the_same_operation_is_no_tria
     decision = _decide(collected)
     passed, reason = trial_health(decision, collected)
     assert passed is True, reason
-    assert reason.startswith("trial: 0 failed of 1 expected trials (0.00%)")
+    assert reason.startswith("trial: evaluation-side faults: 0 of 1 (0.00%) is below 2%; model faults: 0 of 1")
     assert "1 failed policy attempt(s) were retried and completed in the same operation" in reason
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
     assert not [e for e in task["errors"] if "health" in e], task["errors"]
     assert any(
-        w.startswith("health gate within the bounded failure policy: trial: 0 failed") for w in task["warnings"]
+        w.startswith("health gate within the bounded failure policy: trial: evaluation-side faults: 0 of 1")
+        for w in task["warnings"]
     )
 
 
@@ -187,14 +188,19 @@ def test_a_rollout_that_ended_on_a_failed_policy_request_and_scored_zero_is_a_se
     assert decision.counts == {"scored": 1}  # the decision and the score are unchanged
     assert final_zero_trials(decision, collected) == {(0, 0): "model_request_error"}
     passed, reason = trial_health(decision, collected)
-    assert passed is False
-    assert reason == (
-        "trial: 1 settled zero-scored failure(s) of 1 expected trials (100.00%) is not below 2%, "
-        "kinds {'model_request_error': 1}"
+    # A rejected policy request is the model's fault: counted and named, never a health failure.
+    assert passed is True
+    assert reason.startswith(
+        "trial: evaluation-side faults: 0 of 1 (0.00%) is below 2%; model faults: 1 of 1 (100.00%) "
+        "(model_request_error 1); exact count:"
     )
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
-    assert task["status"] == "FAILED"
-    assert any(e.startswith("response/trial health failed:") for e in task["errors"]), task["errors"]
+    assert not any(e.startswith("response/trial health") for e in task["errors"]), task["errors"]
+    assert task["failures"]["trial_failures"]["by_cause"]["request"] == {"count": 1, "rate": 1.0}
+    events = _policy_call(collected)["response_metadata"]["failure_report"]["events"]
+    events["request-failure-1"]["failure_kind"] = "model_transport_error"
+    passed, reason = trial_health(_decide(collected), collected)
+    assert passed is False and "(server 1: model_transport_error 1)" in reason
 
 
 @pytest.mark.parametrize("change", [{"reward": 1.0}, {"recorded": False}])
@@ -205,4 +211,4 @@ def test_a_failed_last_request_without_a_zero_score_or_its_event_is_not_counted(
     assert final_zero_trials(decision, collected) == {}
     passed, reason = trial_health(decision, collected)
     assert passed is None
-    assert "0 settled zero-scored failure(s) of 1" in reason
+    assert "known failures are a lower bound: evaluation-side faults: 0 of 1" in reason

@@ -358,7 +358,7 @@ def test_recovered_event_id_cannot_be_reused_by_another_judge_dependency():
     ],
 )
 def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish):
-    from nemo_gym.orchestration.recovery import trial_health
+    from nemo_gym.orchestration.recovery import gate_summary_from_collected, trial_counts, trial_health
 
     c, meta, grade = _recovered_fixture()
     grade["outcome"] = "unknown"
@@ -377,6 +377,13 @@ def test_bound_returned_invalid_grading_is_a_trial_fault(dialect, status, finish
     c.quality["observed_upstream_recovery"] = {"recovered_attempt_errors": 1, "recovered_operations": 1}
     before = copy.deepcopy(c.model_dump())
     assert trial_health(d, c)[0] is False
+    # The detailed counts follow the gate: the grading without a valid verdict is unhealthy, never healthy.
+    expected_counts = {"observed_healthy": 0, "unhealthy": 1, "unobserved": 0, "verifier_recorded": 0}
+    assert trial_counts(d, c) == expected_counts
+    task = gate_summary_from_collected(d, c, max_unhealthy_fraction=None)
+    assert task["trial_counts"] == expected_counts
+    assert task["evaluation_health"]["evaluation"]["kinds"] == {"grading_without_verdict": 1}
+    assert task["failures"]["trial_failures"]["by_cause"]["judge"] == {"count": 1, "rate": 1.0}
     assert d.expected == 1 and d.action.value == "noop"
     assert c.model_dump() == before
     grade["dependencies"] = []

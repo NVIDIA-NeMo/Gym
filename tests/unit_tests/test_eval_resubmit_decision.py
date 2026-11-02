@@ -55,9 +55,7 @@ class _StartsWith:
 
 
 # A report without run.stats.responses leaves the response gate unknown, and the trial count is a lower bound.
-HEALTH_UNKNOWN = _StartsWith(
-    "response/trial health unknown: ['response: population not verified for every scored rollout"
-)
+HEALTH_UNKNOWN = _StartsWith('response/trial health unknown: ["trial: UNOBSERVED')
 
 
 # The saved answer a judge failure keeps beside its row; re-verification re-judges it.
@@ -820,7 +818,7 @@ def test_mlflow_delivery_follows_the_producer_of_its_evidence(tmp_path, fake_exe
     if mode == "stale":
         health_errors = [
             'summary validity unknown: ["quality summary is not bound to this run\'s sole rollouts.jsonl source"]',
-            _StartsWith("response/trial health unknown: ['response: the health report has no verified response"),
+            HEALTH_UNKNOWN,
         ]
     assert out.gate_task["status"] == "FAILED" and out.gate_task["errors"] == health_errors + mlflow
 
@@ -1099,11 +1097,12 @@ def test_named_health_facts_below_the_criterion_reach_the_gate_warnings(tmp_path
         d, collected, max_unhealthy_fraction=0.5, mlflow_status="FINISHED", mlflow_run_id="postrun-run"
     )
     assert task["status"] == "FAILED"
-    assert task["warnings"][-3].startswith("per-rollout health within the configured criterion")
-    assert task["warnings"][-2:] == [
+    assert task["warnings"][-4].startswith("per-rollout health within the configured criterion")
+    assert task["warnings"][-3:-1] == [
         "health-check issues (nonzero): model_call_runaway_generation 1, task_consistently_unhealthy 1",
         "health checks not fully evaluated: run_excessive_failures (evaluated 0, unobserved 1, ignored 0)",
     ]
+    assert task["warnings"][-1] == task["health_verdict"]
 
 
 @pytest.mark.parametrize(
@@ -1217,9 +1216,10 @@ def test_known_trial_failures_fail_at_two_percent_and_are_only_a_lower_bound_bel
     assert d.action == RecoveryAction.NOOP and (job / "artifacts" / "rollouts.jsonl").read_bytes() == rollouts
     assert task["status"] == "FAILED" and task["scored_samples"] == 100 and task["score"] == 0.5
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
-    rate = f"{final_zeros} settled zero-scored failure(s) of 100 expected trials ({final_zeros / 100:.2%})"
+    rate = f"evaluation-side faults: {final_zeros} of 100 ({final_zeros / 100:.2%}) is not below 2%"
     if failed:
-        assert health.startswith("response/trial health failed") and f"trial: {rate} is not below 2%" in health
+        assert health.startswith("response/trial health failed") and f"trial: {rate}" in health
+        assert f"(server {final_zeros}: model_transport_error {final_zeros})" in health
     else:
         # These rows carry no grading observation: the trial gate stays unknown and says why, with the count.
         assert health.startswith("response/trial health unknown")
@@ -1250,14 +1250,9 @@ def test_the_response_gate_reads_the_reported_population_strictly_below_two_perc
     )
     assert d.action == RecoveryAction.NOOP and task["status"] == "FAILED"
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
-    within = [w for w in task["warnings"] if w.startswith("health gate within the bounded failure policy: response:")]
-    if state == "within":
-        assert within and "4 faulted of 250 selected raw responses (1.60%)" in within[0]
-        assert health.startswith("response/trial health unknown") and "response:" not in health
-    elif state == "failed":
-        assert health.startswith("response/trial health failed") and "5 faulted of 250" in health and not within
-    else:
-        assert health.startswith("response/trial health unknown") and "response:" in health and not within
+    # Whatever the reported response population, it never decides health: only the unobserved trials do.
+    assert health.startswith("response/trial health unknown") and "response:" not in health, state
+    assert not any("response:" in w for w in task["warnings"])
 
 
 def test_the_trial_gate_is_not_evaluated_on_an_incomplete_run(tmp_path) -> None:
@@ -1839,7 +1834,11 @@ STRICT_DEFAULT = {
 
 def test_review_gate_reports_its_effective_named_criteria(tmp_path):
     _, task = gate_of(gate_job(tmp_path, expected=100, final_zeros=0))
-    assert task["criteria"] == STRICT_DEFAULT
+    assert task["criteria"] == {
+        "evaluation": {"max_failure_fraction": 0.02, "passes": "strictly below, before rounding"},
+        "response": {"max_failure_fraction": 0.02, "applied": False},
+        "trial": {"max_failure_fraction": 0.02, "applied": False},
+    }
 
 
 def test_review_trial_criterion_is_configurable_without_changing_decision_or_rows(tmp_path):
@@ -1863,10 +1862,9 @@ def test_review_trial_criterion_is_configurable_without_changing_decision_or_row
     health = {
         limit: [e for e in t["errors"] if e.startswith("response/trial health")][0] for limit, t in tasks.items()
     }
-    # 1 of 100 is a lower bound under the strict default, and fails a stricter configured limit.
-    assert health[0.02].startswith("response/trial health unknown")
-    assert health[0.01].startswith("response/trial health failed") and "is not below 1%" in health[0.01]
-    assert tasks[0.01]["criteria"]["trial"]["max_failure_fraction"] == 0.01
+    # The configured fraction is accepted and reported, never applied: 1 of 100 stays unverified under both.
+    assert health[0.02] == health[0.01] and health[0.01].startswith("response/trial health unknown")
+    assert tasks[0.01]["criteria"]["trial"] == {"max_failure_fraction": 0.01, "applied": False}
     assert d.action == RecoveryAction.NOOP and (job / "artifacts" / "rollouts.jsonl").read_bytes() == rollouts
     assert tasks[0.02]["score"] == tasks[0.01]["score"] == 0.5
 
@@ -2611,13 +2609,14 @@ def test_a_run_whose_verifier_records_no_grading_is_unobserved_with_a_count_and_
         "unhealthy": 0,
         "unobserved": 6,
         "verifier_recorded": 0,
-        "unobserved_reason": "no grading operation or grading record was recorded by the verifier (demo_verifier)",
+        "unobserved_reason": "no completed grading operation or grading record was recorded by the verifier (demo_verifier)",
     }
     [health] = [e for e in task["errors"] if e.startswith("response/trial health")]
     assert health.startswith("response/trial health unknown")
     assert (
-        "trial: UNOBSERVED 6 of 6 expected trials: no grading operation or grading record was recorded by the "
-        "verifier (demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0" in health
+        "trial: UNOBSERVED 6 of 6 expected trials: no completed grading operation or grading record was recorded "
+        "by the verifier (demo_verifier), so the run is unverified, not healthy; observed healthy 0, unhealthy 0"
+        in health
     )
     assert task["status"] == "FAILED"
 
@@ -2741,8 +2740,9 @@ def test_a_complete_earlier_pin_run_is_certified_on_coverage_with_the_note(tmp_p
     d, (passed, reason) = _trial_gate_of(tmp_path, expected=50, final_zeros=0, operations_field=False)
     assert d.complete and passed is True
     assert reason == (
-        "trial: 0 settled zero-scored failure(s) of 50 expected trials (0.00%); exact failure count unavailable "
-        "(earlier pin): the run's rows predate operation observations, so the complete run is certified on coverage"
+        "trial: evaluation-side faults: 0 of 50 (0.00%) is below 2%; model faults: 0 of 50 (0.00%); exact failure "
+        "count unavailable (earlier pin): the run's rows predate operation observations, so the complete run is "
+        "certified on coverage"
     )
 
 

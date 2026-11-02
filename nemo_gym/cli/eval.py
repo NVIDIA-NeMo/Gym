@@ -705,10 +705,13 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         IdentityState,
         _observed_trial_operations,
         decide_from_collected,
-        final_zero_trials,
+        failure_facts,
+        fault_report,
         response_health,
         select_managed_evidence,
-        trial_health,
+        trial_faults,
+        trial_population,
+        trial_verdict,
     )
 
     artifacts = RunArtifacts(output)
@@ -734,7 +737,6 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         summary = None
     metrics: dict[str, int | float] = {
         "health/response/known": 0,
-        "health/response/passed": 0,
         "health/trial/known": 0,
         "health/trial/passed": 0,
         "health/grading_recovery/known": 0,
@@ -751,44 +753,44 @@ def _prepare_run_health_metrics(output: Path) -> dict[str, int | float]:
         decision = decide_from_collected(collected, max_infra_retries=None, max_walltime_s=None, live_job=None)
         quality = collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
         response, _ = response_health(decision, quality)
-        trial, _ = trial_health(decision, collected)
         if response is not None:
             counts = quality["responses"]
             metrics.update(
                 {
                     "health/response/known": 1,
-                    "health/response/passed": int(response),
                     "health/response/faulted": counts["faulted"],
                     "health/response/selected": counts["selected"],
                     "health/response/failure_rate": counts["faulted"] / counts["selected"],
                 }
             )
-        settled = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero_trials(decision, collected))
-        if trial is not None:
-            failures = []
-            exact = _observed_trial_operations(decision, collected, grading_failures=failures)
-            failed = settled + len(failures)
+        # The trial family is evaluation health: the evaluation-side count and denominator (expected trials less
+        # accepted omissions, which are reported separately) the gate judges.
+        trials = trial_population(decision)
+        trial, _, evaluation = trial_verdict(decision, collected)
+        if evaluation is None and trials > 0:
+            # Not evaluated (the run is not complete): its known faults are a lower bound.
+            evaluation = fault_report(trial_faults(decision, collected), trials) | {"exact": False}
+        if evaluation is not None:
+            exact = evaluation["exact"]
+            failed = evaluation["evaluation"]["count"]
             metrics.update(
                 {
-                    "health/trial/known": 1,
-                    "health/trial/passed": int(trial),
                     "health/trial/counts_known": int(exact),
                     "health/trial/failed" if exact else "health/trial/failed_lower_bound": failed,
-                    "health/trial/expected": decision.expected,
-                    "health/trial/failure_rate" if exact else "health/trial/failure_rate_lower_bound": failed
-                    / decision.expected,
+                    "health/trial/expected": trials,
+                    "health/trial/omitted": decision.counts.get(IdentityState.OMITTED, 0),
+                    "health/trial/failure_rate" if exact else "health/trial/failure_rate_lower_bound": failed / trials,
                 }
             )
-        if trial is None and decision.expected > 0:
-            # A known terminal model failure remains a lower bound when other trial facts are unobserved.
-            lower_bound = settled
-            metrics.update(
-                {
-                    "health/trial/expected": decision.expected,
-                    "health/trial/failed_lower_bound": lower_bound,
-                    "health/trial/failure_rate_lower_bound": lower_bound / decision.expected,
-                }
-            )
+        if trial is not None:
+            metrics.update({"health/trial/known": 1, "health/trial/passed": int(trial)})
+        # Response and trial failures by cause: reported facts with no limit applied, for consumers to judge.
+        facts = failure_facts(decision, collected)
+        if facts is not None:
+            for family in ("response_failures", "trial_failures"):
+                metrics[f"health/{family}/rate"] = facts[family]["rate"]
+                for cause, fact in facts[family]["by_cause"].items():
+                    metrics[f"health/{family}/{cause}"] = fact["count"]
         upstream = (quality or {}).get("observed_upstream_recovery")
         upstream_keys = (
             "observed_attempt_errors",

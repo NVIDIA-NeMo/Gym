@@ -61,13 +61,21 @@ from nemo_gym.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
+    AGENT_INVALID_OUTPUT,
+    AGENT_LIMIT,
+    AGENT_TIMEOUT,
     COLLECTION_DISPATCH_FAILED,
+    HARBOR_FAILED,
     HARNESS_TERMINATION_UNCONFIRMED,
+    INFRASTRUCTURE_ERROR,
     JUDGE_FAILED,
+    JUDGE_UNPARSEABLE,
     MODEL_CONTEXT_LIMIT,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
     MODEL_TRANSPORT_ERROR,
+    SERVER_START_FAILED,
+    VERIFIER_ERROR,
     is_namespaced,
     is_registered,
 )
@@ -2508,9 +2516,10 @@ GATE_FAILURE_LIMIT = 0.02
 
 
 class GateCriteria(BaseModel):
-    """The named response and trial acceptance criteria. Each gate passes only strictly below its limit, measured
-    before rounding. They are separate from retry policy, budgets and benchmark rewards, and default to the bounded
-    failure policy's limit; an invalid value is refused, never clamped."""
+    """The response and trial failure fractions a caller may still pass. They are validated (an invalid value is
+    refused, never clamped) and reported, but no longer applied: the gate's only health verdict is evaluation health
+    on the bounded failure policy's limit (``trial_verdict``), and response and trial failures are reported as facts
+    (``failure_facts``) for consumers to judge."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
 
@@ -2530,11 +2539,12 @@ class GateCriteria(BaseModel):
         return float(value)
 
     def report(self) -> dict[str, Any]:
-        """The effective criteria as reported beside the gate results."""
+        """The effective criterion and the accepted, unapplied fractions, as reported beside the gate results."""
         rule = "strictly below, before rounding"
         return {
-            "response": {"max_failure_fraction": self.max_response_failure_fraction, "passes": rule},
-            "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "passes": rule},
+            "evaluation": {"max_failure_fraction": GATE_FAILURE_LIMIT, "passes": rule},
+            "response": {"max_failure_fraction": self.max_response_failure_fraction, "applied": False},
+            "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "applied": False},
         }
 
 
@@ -2661,17 +2671,21 @@ def _observed_trial_operations(
     """
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
+    # A settled model failure (MODEL_FINAL) or a rollout that ended on a failed policy request is a counted trial
+    # failure with its recorded kind; only the other trials need their operations and grading observed.
     if (
         collected is None
         or not collected.quality
         or collected.quality.get("source_matches") is not True
-        or decision.counts.get(IdentityState.SCORED, 0) != decision.expected
+        or decision.counts.get(IdentityState.SCORED, 0) + decision.counts.get(IdentityState.MODEL_FINAL, 0)
+        != decision.expected
     ):
         return False
     rows = collected.results
     expected = set(decision.identities.get(IdentityState.SCORED.value, []))
-    if rows is None or len(rows) != decision.expected or {_identity(row) for row in rows} != expected:
+    if rows is None or len(rows) != len(expected) or {_identity(row) for row in rows} != expected:
         return False
+    final_zero = final_zero_trials(decision, collected)
     provenance = collected.quality.get("provenance")
     if not isinstance(provenance, dict) or provenance.get("resolved_config") != "read":
         return False
@@ -2708,16 +2722,30 @@ def _observed_trial_operations(
             and (ref.get("response_id") is None or ref["response_id"] == meta["response_id"])
         )
 
-    def completed_once(call, *, judge=False, valid_grade=True):
-        """One successful HTTP response with one completed physical attempt, ids unique in the run."""
+    def completed_once(call, *, judge=False, valid_grade=True, truncated=False):
+        """One successful HTTP response with one completed physical attempt, ids unique in the run.
+
+        ``truncated``: the policy's final answer that ran into its output cap (a length finish on an incomplete or
+        chat response); the model answered, so it is a model fault the trial gate counts, not missing evidence.
+        """
         meta = call["response_metadata"]
         operations, report = meta["model_operations"], meta["failure_report"]
+        if truncated and not (
+            meta.get("finish_reason") == "length"
+            and meta.get("error_category") in (None, "incomplete")
+            and (
+                meta.get("response_status") == "incomplete"
+                or (meta.get("dialect") == "chat" and meta.get("response_status") is None)
+            )
+        ):
+            return False
         if (
             type(meta["status_code"]) is not int
             or not 200 <= meta["status_code"] < 300
-            or meta.get("error_category") is not None
+            or (meta.get("error_category") is not None and not truncated)
             or not (
-                meta.get("response_status") == "completed"
+                truncated
+                or meta.get("response_status") == "completed"
                 or (
                     meta.get("dialect") == "chat"
                     and meta.get("response_status") is None
@@ -2905,6 +2933,9 @@ def _observed_trial_operations(
 
     try:
         for row in rows:
+            if _identity(row) in final_zero:
+                continue
+            truncated = _truncated_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
             resource = servers[agent["resources_server"]]
@@ -3036,7 +3067,7 @@ def _observed_trial_operations(
             if len(tool_by_id) != len(tools):
                 return False
             for number, (call, turn) in enumerate(zip(ordered, turns), 1):
-                if not completed_once(call):
+                if not completed_once(call, truncated=truncated and number == len(ordered)):
                     return False
                 inputs, outputs = call["input_items"], call["output_items"]
                 if not isinstance(inputs, list) or not isinstance(outputs, list) or not outputs:
@@ -3071,11 +3102,16 @@ def _observed_trial_operations(
                 if type(turn["step_count"]) is not int or turn["step_count"] < 0:
                     return False
                 if number == len(ordered):
-                    if emitted or not any(
-                        item.get("type") == "message"
-                        and item.get("role") == "assistant"
-                        and item.get("status") == "completed"
-                        for item in outputs
+                    # A truncated final answer may hold only reasoning or a cut-off message.
+                    if (
+                        emitted
+                        or not truncated
+                        and not any(
+                            item.get("type") == "message"
+                            and item.get("role") == "assistant"
+                            and item.get("status") == "completed"
+                            for item in outputs
+                        )
                     ):
                         return False
                 elif not emitted:
@@ -3096,7 +3132,7 @@ def _observed_trial_operations(
                 set(requested) != set(tool_by_id)
                 or not isinstance(saved_response, dict)
                 or saved_response.get("id") != ordered[-1]["response_metadata"]["response_id"]
-                or saved_response.get("status") != "completed"
+                or saved_response.get("status") != ("incomplete" if truncated else "completed")
                 or saved_response.get("error") is not None
             ):
                 return False
@@ -3168,12 +3204,19 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
 
 
 def _graded(row: Mapping[str, Any]) -> bool:
-    """Whether the row's verifier recorded at least one programmatic grading operation for it."""
+    """Whether the row's one verifier recorded grading operations for it that all completed with a valid verdict.
+
+    An operation without a valid verdict does not resolve the trial; the gate's join decides whether it is a fault.
+    """
     observed = row.get("ng_trial_observations")
     verifiers = observed.get("verifier_invocations") if isinstance(observed, dict) else None
-    return isinstance(verifiers, list) and any(
-        isinstance(item, dict) and isinstance(item.get("grading_operations"), list) and item["grading_operations"]
-        for item in verifiers
+    operations = (
+        verifiers[0].get("grading_operations") if isinstance(verifiers, list) and len(verifiers) == 1 else None
+    )
+    return (
+        isinstance(operations, list)
+        and bool(operations)
+        and all(isinstance(item, dict) and item.get("outcome") == "completed" for item in operations)
     )
 
 
@@ -3235,21 +3278,43 @@ def _verifying_servers(collected: CollectedEvidence) -> str:
     return ", ".join(names) if names else "a resources server the run provenance does not name"
 
 
+def trial_population(decision: RecoveryDecision) -> int:
+    """The trial denominator: every expected trial, including repeats, failed and missing ones, less the rows an
+    accepted partial stage omitted (no trial: reported separately, never in a numerator or denominator)."""
+    return decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
+
+
 def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any] | None:
     """Acceptance's trial counts: observed healthy, unhealthy and unobserved, over the expected trials.
 
-    ``unhealthy`` are the known failures the trial gate counts. ``unobserved`` are the other scored trials whose
-    verifier recorded neither a grading operation nor its own grading record: nothing observed their grading, so
-    they are unverified, never healthy. ``observed_healthy`` are the rest; ``verifier_recorded`` of them are
-    observed only through the verifier's grading record. None until the run is complete.
+    ``unhealthy`` are the failures the trial gate counts (``trial_faults``, model and evaluation-side). When the
+    gate's observation join covers every other trial, its observed gradings without a valid verdict are unhealthy
+    too and nothing is unobserved. Otherwise ``unobserved`` are the other scored trials whose verifier recorded
+    neither completed grading operations bound to the saved row nor its own grading record: nothing resolved their
+    grading, so they are unverified, never healthy. ``observed_healthy`` are the rest; ``verifier_recorded`` of them
+    are observed only through the verifier's grading record. None until the run is complete.
     """
-    trials = decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
+    trials = trial_population(decision)
     if not decision.complete or trials <= 0 or collected is None:
         return None
+    unhealthy = sum(trial_faults(decision, collected).values())
+    invalid_grades: list[Identity] = []
+    covered: list[Identity] = []
+    if _observed_trial_operations(decision, collected, grading_failures=invalid_grades, verifier_recorded=covered):
+        unhealthy += len(invalid_grades)
+        return {
+            "observed_healthy": trials - unhealthy,
+            "unhealthy": unhealthy,
+            "unobserved": 0,
+            "verifier_recorded": len(covered),
+        }
     final_zero = final_zero_trials(decision, collected)
-    unhealthy = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    rows = [row for row in collected.results or [] if _identity(row) in scored and _identity(row) not in final_zero]
+    rows = [
+        row
+        for row in collected.results or []
+        if _identity(row) in scored and _identity(row) not in final_zero and not _truncated_zero(row)
+    ]
     recorded = sum(1 for row in rows if not _graded(row) and _recorded_by_verifier(row, collected))
     unobserved = sum(1 for row in rows if not _graded(row)) - recorded
     counts: dict[str, Any] = {
@@ -3260,7 +3325,8 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     }
     if unobserved:
         counts["unobserved_reason"] = (
-            f"no grading operation or grading record was recorded by the verifier ({_verifying_servers(collected)})"
+            f"no completed grading operation or grading record was recorded by the verifier "
+            f"({_verifying_servers(collected)})"
         )
     return counts
 
@@ -3289,46 +3355,147 @@ def _predates_operation_observations(decision: RecoveryDecision, collected: Coll
     return True
 
 
+# The trial gate's fault classes. A model fault is the evaluated model's own outcome under the benchmark protocol (a
+# rejected or timed-out request, its context limit, an agent limit, timeout or invalid output, or an answer cut off at
+# its output cap) and never fails evaluation health. Every other counted failure is evaluation-side and counts
+# against the trial limit: server faults (a server that did not start, a model transport error, any provider failure)
+# are named as such, and any other kind is named by its kind alone.
+TRUNCATED_ANSWER = "truncated_answer"
+GRADING_WITHOUT_VERDICT = "grading_without_verdict"
+MODEL_FAULT_KINDS = frozenset(
+    {
+        MODEL_REQUEST_ERROR,
+        MODEL_POLICY_RESPONSE_TIMEOUT,
+        MODEL_CONTEXT_LIMIT,
+        AGENT_TIMEOUT,
+        AGENT_LIMIT,
+        AGENT_INVALID_OUTPUT,
+        TRUNCATED_ANSWER,
+    }
+)
+SERVER_FAULT_KINDS = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR})
+UNVERIFIED_NOTE = "unverified: this withholds a pass and is no health failure"
+
+
+def fault_class(kind: Any) -> str | None:
+    """A counted trial failure's class: ``model``, ``server``, or None for another evaluation-side kind."""
+    if kind in MODEL_FAULT_KINDS:
+        return "model"
+    if kind in SERVER_FAULT_KINDS or (isinstance(kind, str) and kind.startswith("provider_")):
+        return "server"
+    return None
+
+
+def _truncated_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the row's saved answer is a response the model left incomplete, without an error."""
+    response = row.get("response")
+    return isinstance(response, dict) and response.get("status") == "incomplete" and response.get("error") is None
+
+
+def _truncated_zero(row: Mapping[str, Any]) -> bool:
+    """Whether the row scored zero on an answer the model left incomplete (``TRUNCATED_ANSWER``)."""
+    return type(row.get("reward")) in (int, float) and row["reward"] == 0 and _truncated_answer(row)
+
+
+def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None) -> Counter:
+    """The trial gate's counted failures by kind.
+
+    Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
+    (``final_zero_trials``), and scored-zero rows whose saved answer the model left incomplete (``TRUNCATED_ANSWER``).
+    """
+    final_zero = final_zero_trials(decision, collected)
+    kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
+    kinds.update(final_zero.values())
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    kinds[TRUNCATED_ANSWER] += sum(
+        1
+        for row in (collected.results or [] if collected is not None else [])
+        if _identity(row) in scored and _identity(row) not in final_zero and _truncated_zero(row)
+    )
+    return +kinds
+
+
+def fault_report(kinds: Counter, trials: int) -> dict[str, Any]:
+    """Model and evaluation-side fault counts, fractions and kinds over the trials; ``server`` counts server faults."""
+
+    def side(found: dict) -> dict[str, Any]:
+        count = sum(found.values())
+        return {"count": count, "fraction": count / trials, "kinds": dict(sorted(found.items(), key=str))}
+
+    model = {kind: n for kind, n in kinds.items() if fault_class(kind) == "model"}
+    evaluation = {kind: n for kind, n in kinds.items() if fault_class(kind) != "model"}
+    server = sum(n for kind, n in evaluation.items() if fault_class(kind) == "server")
+    return {"trials": trials, "evaluation": side(evaluation) | {"server": server}, "model": side(model)}
+
+
+def _fault_text(report: dict[str, Any], limit: float) -> str:
+    """``evaluation-side faults: N of M (x%) is [not] below L (server S: kind n; kind n); model faults: ...``."""
+    trials, evaluation, model = report["trials"], report["evaluation"], report["model"]
+    server = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if fault_class(kind) == "server"]
+    other = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if fault_class(kind) != "server"]
+    named = ([f"server {evaluation['server']}: {', '.join(server)}"] if server else []) + other
+    below = "is below" if evaluation["fraction"] < limit else "is not below"
+    return (
+        f"evaluation-side faults: {evaluation['count']} of {trials} ({evaluation['fraction']:.2%}) {below} "
+        f"{_percent(limit)}" + (f" ({'; '.join(named)})" if named else "") + f"; model faults: {model['count']} of "
+        f"{trials} ({model['fraction']:.2%})"
+        + (f" ({', '.join(f'{kind} {n}' for kind, n in model['kinds'].items())})" if model["kinds"] else "")
+    )
+
+
 def trial_health(
     decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
 ) -> tuple[bool | None, str]:
-    """The trial gate's known failures: settled zero-scored failures over the expected trials, including repeats.
+    """Evaluation health from the trial gate (``trial_verdict``): passed, failed or None, with its reason."""
+    passed, reason, _ = trial_verdict(decision, collected, limit=limit)
+    return passed, reason
 
-    A failure counts when rollout collection settled it as a scored zero (MODEL_FINAL: marked counts-as-zero by its
-    producer and terminal), or when a scored row's rollout ended on a failed policy request and was scored zero
-    (``final_zero_trials``), so it is recorded as incorrect under the benchmark protocol. The denominator is the full
-    materialized inventory. A run that is not complete has unaccounted trials, so the gate is not evaluated. Other
-    terminal trial failures (a judge, verifier or harness error scored as a zero in the main output) carry no failure
-    record and cannot be ruled out, so their count is a lower bound. At or above the limit it fails; below it the
-    gate remains unknown unless actual per-identity operation outcomes cover the observed model/tool and programmatic grading path.
+
+def trial_verdict(
+    decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
+) -> tuple[bool | None, str, dict[str, Any] | None]:
+    """Evaluation health: evaluation-side trial faults over the expected trials, including repeats.
+
+    The counted failures are ``trial_faults``; a model fault (``fault_class``) is reported with its kind and never
+    fails. Only the evaluation-side share is judged against the limit: at or above it the gate fails. Below it, it
+    passes only with an exact count, when actual per-identity operation outcomes cover the observed model/tool and
+    grading path of every trial that is not a recorded failure (``_observed_trial_operations``); an observed grading
+    without a valid verdict is an evaluation-side fault. Otherwise the run is UNVERIFIED: a judge, verifier or harness
+    error scored as a zero in the main output carries no failure record and cannot be ruled out, so the known count is
+    a lower bound. That withholds a pass, never fails health. The denominator is the full materialized inventory less
+    accepted omissions. A run that is not complete has unaccounted trials, so the gate is not evaluated.
+
+    The report is ``status`` (PASS, FAIL or UNVERIFIED), the evaluation-side rate, ``exact`` and the fault counts.
     """
     # A row an accepted partial stage omitted is no trial: it is neither in the numerator nor the denominator.
-    trials = decision.expected - decision.counts.get(IdentityState.OMITTED, 0)
+    trials = trial_population(decision)
     if not decision.complete or trials <= 0:
-        return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})"
-    final_zero = final_zero_trials(decision, collected)
-    failed = decision.counts.get(IdentityState.MODEL_FINAL, 0) + len(final_zero)
-    kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
-    kinds.update(final_zero.values())
-    rate = failed / trials
-    counts = f"{failed} settled zero-scored failure(s) of {trials} expected trials ({rate:.2%})"
-    detail = f", kinds {dict(sorted(kinds.items(), key=lambda kv: str(kv[0])))}" if kinds else ""
-    if rate >= limit:
-        return False, f"trial: {counts} is not below {_percent(limit)}{detail}"
+        return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})", None
+    kinds = trial_faults(decision, collected)
+    report = fault_report(kinds, trials)
+
+    def verdict(passed: bool | None, reason: str, *, exact: bool = False):
+        state = {True: "PASS", False: "FAIL", None: "UNVERIFIED"}[passed]
+        rate = report["evaluation"]["fraction"]
+        return passed, reason, {"status": state, "evaluation_failure_rate": rate, "exact": exact} | report
+
+    if report["evaluation"]["fraction"] >= limit:
+        return verdict(False, f"trial: {_fault_text(report, limit)}")
     recovery = (collected.quality or {}).get("observed_upstream_recovery") if collected else None
     if recovery is not None and (
         not isinstance(recovery, dict)
         or any(_count(recovery.get(key)) is None for key in ("recovered_attempt_errors", "recovered_operations"))
     ):
-        return None, "trial: recovered attempt/operation counters are malformed or incomplete"
+        return verdict(None, "trial: recovered attempt/operation counters are malformed or incomplete")
     if _predates_operation_observations(decision, collected):
         # Those pins never recorded the operations the strict rule joins, so neither a trial nor a recovered attempt
         # can be joined to one; the known-failure limit above still holds.
         unjoined = recovery["recovered_attempt_errors"] if isinstance(recovery, dict) else 0
-        return True, (
-            f"trial: {counts}{detail}; exact failure count unavailable (earlier pin): the run's rows predate "
-            "operation observations, so the complete run is certified on coverage"
-            + (f"; {unjoined} recovered attempt error(s) cannot be joined to an operation" if unjoined else "")
+        return verdict(
+            True,
+            f"trial: {_fault_text(report, limit)}; exact failure count unavailable (earlier pin): the run's rows "
+            "predate operation observations, so the complete run is certified on coverage"
+            + (f"; {unjoined} recovered attempt error(s) cannot be joined to an operation" if unjoined else ""),
         )
     judge_recovery: dict[str, int] = {}
     policy_recovery: dict[str, int] = {}
@@ -3351,45 +3518,153 @@ def trial_health(
         > judge_recovery.get("observed_grading_failed_operations", 0)
         + policy_recovery.get("policy_recovered_operations", 0)
     ):
-        return (
+        return verdict(
             None,
             "trial: recovered failures are not fully joined to a completed policy or grading operation; "
             "treatment is not defined",
         )
     if covered:
-        failed += len(invalid_grades)
-        rate = failed / decision.expected
+        if invalid_grades:
+            report = fault_report(kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}), trials)
         retried = (
             f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "
             "(recovered, no trial failure); "
             if recovered_policy
             else ""
         )
+        scored = decision.counts.get(IdentityState.SCORED, 0) - len(final_zero_trials(decision, collected))
         grading = (
-            f"grading ({len(recorded)} verifier-recorded, {decision.expected - len(recorded)} observed through a "
-            "recorded grading operation)"
+            f"grading ({len(recorded)} verifier-recorded, {scored - len(recorded)} observed through a recorded grading "
+            "operation)"
             if recorded
             else "bound grading operations"
         )
-        return (
-            rate < limit,
-            f"trial: {failed} failed of {decision.expected} expected trials ({rate:.2%}); "
-            f"{len(invalid_grades)} observed returned grading result(s) lack a valid verdict; {retried}"
-            f"actual model/tool and {grading} cover every identity and repeat",
+        return verdict(
+            report["evaluation"]["fraction"] < limit,
+            f"trial: {_fault_text(report, limit)}; exact count: {len(invalid_grades)} observed returned grading "
+            f"result(s) lack a valid verdict; {retried}actual model/tool and {grading} cover every identity and "
+            "repeat that is not a recorded failure",
+            exact=True,
         )
     observed = trial_counts(decision, collected)
     if observed is not None and observed["unobserved"]:
-        return None, (
+        return verdict(
+            None,
             f"trial: UNOBSERVED {observed['unobserved']} of {trials} expected trials: "
             f"{observed['unobserved_reason']}, so the run is unverified, not healthy; observed healthy "
             f"{observed['observed_healthy']}"
             + (f" ({observed['verifier_recorded']} verifier-recorded)" if observed["verifier_recorded"] else "")
-            + f", unhealthy {observed['unhealthy']}{detail}"
+            + f", unhealthy {observed['unhealthy']}; known so far: {_fault_text(report, limit)}; {UNVERIFIED_NOTE}",
         )
-    return None, (
-        f"trial: known failures are a lower bound, {counts}{detail}; failures recorded only as zero rewards "
-        "cannot be ruled out"
+    return verdict(
+        None,
+        f"trial: UNVERIFIED, known failures are a lower bound: {_fault_text(report, limit)}; failures recorded only "
+        f"as zero rewards cannot be ruled out; {UNVERIFIED_NOTE}",
     )
+
+
+# Rollout states counted as trial failures: every failed, masked or unowned outcome, settled or not.
+_TRIAL_FAILURE_STATES = (
+    IdentityState.MODEL_FINAL,
+    IdentityState.JUDGE_RECOVERABLE,
+    IdentityState.RETRYABLE,
+    IdentityState.EXHAUSTED,
+    IdentityState.TERMINAL,
+    IdentityState.MASKED,
+    IdentityState.UNKNOWN,
+)
+RESPONSE_FAILURE_CAUSES = ("truncated", "empty", "malformed")
+TRIAL_FAILURE_CAUSES = ("request", "judge", "sandbox", "harness", "timeout", "other")
+
+
+def trial_failure_cause(kind: Any) -> str:
+    """A trial failure's cause from its failure kind: request, judge, sandbox, harness, timeout, or other."""
+    if not isinstance(kind, str):
+        return "other"
+    if "timeout" in kind:
+        return "timeout"
+    if kind in (JUDGE_FAILED, JUDGE_UNPARSEABLE, VERIFIER_ERROR, GRADING_WITHOUT_VERDICT):
+        return "judge"
+    if kind.startswith(("provider_", "session_")):
+        return "sandbox"
+    if kind.startswith(("model_", "transport_")):
+        return "request"
+    if kind.startswith(("agent_", "environment_", "harness_")) or kind in (
+        HARBOR_FAILED,
+        INFRASTRUCTURE_ERROR,
+        SERVER_START_FAILED,
+    ):
+        return "harness"
+    return "other"
+
+
+def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any] | None:
+    """Response and trial failures by cause, each with a count and a rate over the expected rollouts.
+
+    Reported facts, never a verdict: no limit applies to them here. The denominator is the trial gate's
+    (``trial_population``): every expected rollout, failed and missing ones included; rows an accepted partial stage
+    omitted are no rollout of the run and are reported separately as ``omitted``.
+
+    A response failure is a scored rollout whose saved answer is truncated (left incomplete), empty (no assistant
+    output) or malformed (no response with an output list). A trial failure is a rollout in a failed, masked or
+    unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, or an observed
+    grading without a valid verdict, by the cause its failure kind names (``trial_failure_cause``).
+    """
+    population = trial_population(decision)
+    if population <= 0:
+        return None
+    final_zero = final_zero_trials(decision, collected)
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    responses: Counter = Counter()
+    for row in (collected.results or []) if collected is not None else []:
+        if _identity(row) not in scored or _identity(row) in final_zero:
+            continue
+        answer = row.get("response")
+        output = answer.get("output") if isinstance(answer, dict) else None
+        if not isinstance(output, list):
+            responses["malformed"] += 1
+        elif _truncated_answer(row):
+            responses["truncated"] += 1
+        elif not any(isinstance(item, dict) and item.get("role") == "assistant" for item in output):
+            responses["empty"] += 1
+    invalid_grades: list[Identity] = []
+    _observed_trial_operations(decision, collected, grading_failures=invalid_grades)
+    causes = Counter(
+        "judge" if e.state == IdentityState.JUDGE_RECOVERABLE else trial_failure_cause(e.failure_kind)
+        for e in decision.evidence
+        if e.state in _TRIAL_FAILURE_STATES
+    )
+    causes.update(trial_failure_cause(kind) for kind in final_zero.values())
+    causes["judge"] += len(invalid_grades)
+
+    def family(found: Counter, names: tuple[str, ...]) -> dict[str, Any]:
+        count = sum(found.values())
+        return {
+            "count": count,
+            "rate": count / population,
+            "by_cause": {name: {"count": found[name], "rate": found[name] / population} for name in names},
+        }
+
+    return {
+        "expected": population,
+        "omitted": decision.counts.get(IdentityState.OMITTED, 0),
+        "response_failures": family(responses, RESPONSE_FAILURE_CAUSES),
+        "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
+    }
+
+
+def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | None) -> str:
+    """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...``."""
+    text = f"evaluation health: {evaluation['status'] if evaluation else 'NOT EVALUATED'}"
+    if facts is None:
+        return text
+    for name in ("response_failures", "trial_failures"):
+        found = facts[name]
+        named = ", ".join(f"{cause} {fact['count']}" for cause, fact in found["by_cause"].items() if fact["count"])
+        text += f"; {name.replace('_', ' ')}: {found['rate']:.2%} ({named or 'none'} of {facts['expected']})"
+    if facts["omitted"]:
+        text += f"; {facts['omitted']} accepted stage omission(s) are not counted"
+    return text
 
 
 _MAX_FACTS = 20
@@ -3460,43 +3735,33 @@ def gate_summary_from_collected(
     """The acceptance gate task entry from the collected run: decision counts, the named score and the quality summary.
 
     ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
-    ``criteria`` are the response and trial limits (default: the bounded failure policy's); the entry reports the
-    effective values under ``criteria``.
+    ``criteria`` are accepted and reported under ``criteria`` but not applied (``GateCriteria``). The only health
+    verdict is ``evaluation_health``; ``failures`` reports response and trial failures by cause, never a verdict.
     """
     criteria = criteria or GateCriteria()
     summary_valid, summary_reasons, rollout_health, rollout_reasons = quality_inputs(
         decision, collected, max_unhealthy_fraction=max_unhealthy_fraction
     )
-    # The acceptance gate's response and trial health need their own counters and denominators; quality_summary's
-    # verdicts are per rollout, so they are reported in warnings, never used as either. A positive trial gate
-    # requires source-bound operation evidence. Only recovered grading failures with complete joins are accepted.
-    trial_passed, trial_reason = trial_health(decision, collected, limit=criteria.max_trial_failure_fraction)
+    # Only evaluation health (evaluation-side trial faults, ``trial_verdict``) decides the gate's health; quality_summary's
+    # verdicts are per rollout, so they are reported in warnings. A positive trial gate requires source-bound
+    # operation evidence. Only recovered grading failures with complete joins are accepted. Model health and the raw
+    # response faults are reported beside it and never fail the gate.
+    trial_passed, trial_reason, evaluation = trial_verdict(decision, collected)
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
-    bound_quality = (
-        collected.quality if collected.quality and collected.quality.get("source_matches") is True else None
-    )
-    response_passed, response_reason = response_health(
-        decision, bound_quality, limit=criteria.max_response_failure_fraction
-    )
-    gates = [(response_passed, response_reason), (trial_passed, trial_reason)]
-    if any(passed is False for passed, _ in gates):
-        health = False
-    elif all(passed is True for passed, _ in gates):
-        health = True
-    else:
-        health = None
-    health_reasons = [reason for passed, reason in gates if passed is not True]
     task = gate_task_summary(
         decision,
         score=collected.score,
         summary_valid=summary_valid,
         summary_reasons=summary_reasons,
-        health_passed=health,
-        health_reasons=health_reasons,
+        health_passed=trial_passed,
+        health_reasons=[] if trial_passed else [trial_reason],
     )
     task["criteria"] = criteria.report()
     task["trial_counts"] = trial_counts(decision, collected)
+    task["evaluation_health"] = evaluation
+    task["failures"] = failure_facts(decision, collected)
+    task["health_verdict"] = health_verdict(evaluation, task["failures"])
     judge_recovery: dict[str, int] = {}
     _observed_trial_operations(decision, collected, judge_recovery=judge_recovery, grading_failures=[])
     task["observed_grading_recovery"] = judge_recovery or None
@@ -3508,7 +3773,8 @@ def gate_summary_from_collected(
         task["warnings"]
         + [f"per-rollout health {judged} the configured criterion: {rollout_reasons}"]
         + health_check_facts(collected.quality)
-        + [f"health gate within the bounded failure policy: {reason}" for passed, reason in gates if passed]
+        + ([f"health gate within the bounded failure policy: {trial_reason}"] if trial_passed else [])
+        + [task["health_verdict"]]
     )
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:

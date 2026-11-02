@@ -1,0 +1,227 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Evaluation health fails only on evaluation-side faults; model faults and response and trial failures are reported.
+
+Runs are built from the one-trial programmatic-grading fixture, repeated with fresh operation identities.
+"""
+
+import json
+from pathlib import Path
+
+from nemo_gym.orchestration.recovery import (
+    CollectedEvidence,
+    decide_from_collected,
+    gate_summary_from_collected,
+    trial_counts,
+    trial_verdict,
+)
+from tests.unit_tests.test_eval_resubmit_decision import final_model_zero
+
+
+FIXTURE = Path(__file__).parent / "fixtures/cpu-grading-mcqa-healthy.json"
+IDS = (
+    "resp_scripted_1",
+    "cc9b71700e2e47bcb280552c053e1ba9",  # pragma: allowlist secret
+    "db88801997f34c978b960e86a4abc542",  # pragma: allowlist secret
+    "verify-a188f19c8d794e77bbae490042027a9c",
+    "grade-bbef44c2491649afb24ebd10d87ad6d8",
+)
+
+
+def _run(scored: int, *, settled: dict[str, int] | None = None) -> CollectedEvidence:
+    """``scored`` graded trials (reward 1) and, after them, settled counts-as-zero failures by kind."""
+    base = json.loads(FIXTURE.read_text())
+    template = json.dumps(base["results"][0])
+    rows, materialized, selection, failures = [], [], [], []
+    for task in range(scored):
+        text = template.replace('"task_id": "0"', f'"task_id": "{task}"').replace('"0-0"', f'"{task}-0"')
+        for value in IDS:
+            text = text.replace(value, f"{value}-{task}")
+        row = json.loads(text)
+        row["_ng_task_index"], row["_line"] = task, task
+        rows.append(row)
+    task = scored
+    for kind, count in (settled or {}).items():
+        for _ in range(count):
+            failure = final_model_zero(task, 0)
+            failure["failure_kind"] = kind
+            failure["_ng_failure_events"][f"f-{task}-0"]["failure_kind"] = kind
+            failure["_line"] = len(failures)
+            failures.append(failure)
+            task += 1
+    for index in range(task):
+        materialized.append({"_ng_task_index": index, "_ng_rollout_index": 0, "_ng_collected_task_id": str(index)})
+        selection.append(
+            {"identity": [index, 0], "attempts": 0, "max_attempts": 3, "pending": False, "reserved": True}
+        )
+    base |= {"results": rows, "materialized": materialized, "managed_selection": selection, "failures": failures}
+    base["quality"]["artifacts"]["expected"] = task
+    return CollectedEvidence.model_validate(base)
+
+
+def _truncate(row: dict) -> None:
+    """The model ran into its output cap; the verifier scored the cut-off answer zero."""
+    row["reward"] = 0.0
+    row["response"]["status"] = "incomplete"
+    row["response"]["output"] = [{"type": "reasoning", "status": "incomplete"}]
+    [call] = row["ng_trial_observations"]["model_calls"]
+    call["response_metadata"] |= {
+        "response_status": "incomplete",
+        "error_category": "incomplete",
+        "finish_reason": "length",
+        "dialect": "responses",
+    }
+    call["output_items"] = [{"type": "reasoning", "status": "incomplete"}]
+
+
+def _empty(row: dict) -> None:
+    row["reward"] = 0.0
+    row["response"]["output"] = [{"type": "reasoning", "status": "completed"}]
+    [call] = row["ng_trial_observations"]["model_calls"]
+    call["output_items"] = [{"type": "reasoning", "status": "completed"}, *call["output_items"]]
+
+
+def _gate(collected: CollectedEvidence):
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
+    return decision, trial_verdict(decision, collected), task
+
+
+def _health_errors(task: dict) -> list[str]:
+    return [e for e in task["errors"] if e.startswith("response/trial health")]
+
+
+def test_a_run_of_answers_truncated_at_the_output_cap_passes_evaluation_health_with_the_response_failures():
+    collected = _run(1000)
+    for row in collected.results[:123]:
+        _truncate(row)
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is True, reason
+    assert report["status"] == "PASS" and report["exact"] is True
+    assert report["evaluation"] == {"count": 0, "fraction": 0.0, "kinds": {}, "server": 0}
+    assert report["model"] == {"count": 123, "fraction": 0.123, "kinds": {"truncated_answer": 123}}
+    assert "model faults: 123 of 1000 (12.30%) (truncated_answer 123)" in reason
+    assert "lower bound" not in reason and "UNVERIFIED" not in reason
+    assert not _health_errors(task)
+    assert task["failures"]["response_failures"]["by_cause"]["truncated"] == {"count": 123, "rate": 0.123}
+    assert task["health_verdict"] == (
+        "evaluation health: PASS; response failures: 12.30% (truncated 123 of 1000); "
+        "trial failures: 0.00% (none of 1000)"
+    )
+    assert "model_health" not in task
+
+
+def test_three_percent_transport_errors_fail_evaluation_health():
+    _, (passed, reason, report), task = _gate(_run(97, settled={"model_transport_error": 3}))
+    assert passed is False and report["status"] == "FAIL"
+    assert report["evaluation"]["kinds"] == {"model_transport_error": 3} and report["evaluation"]["server"] == 3
+    assert reason == (
+        "trial: evaluation-side faults: 3 of 100 (3.00%) is not below 2% (server 3: model_transport_error 3); "
+        "model faults: 0 of 100 (0.00%)"
+    )
+    assert _health_errors(task)[0].startswith("response/trial health failed")
+    assert task["status"] == "FAILED"
+    assert task["health_verdict"].startswith("evaluation health: FAIL; ")
+    assert task["failures"]["trial_failures"]["by_cause"]["request"] == {"count": 3, "rate": 0.03}
+
+
+def test_a_mixed_run_fails_on_its_evaluation_share_and_reports_both_classes():
+    collected = _run(90, settled={"model_transport_error": 3, "model_context_limit": 7})
+    for row in collected.results[:5]:
+        _truncate(row)
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is False
+    assert report["model"]["kinds"] == {"model_context_limit": 7, "truncated_answer": 5}
+    assert reason == (
+        "trial: evaluation-side faults: 3 of 100 (3.00%) is not below 2% (server 3: model_transport_error 3); "
+        "model faults: 12 of 100 (12.00%) (model_context_limit 7, truncated_answer 5)"
+    )
+    assert task["health_verdict"] == (
+        "evaluation health: FAIL; response failures: 5.00% (truncated 5 of 100); "
+        "trial failures: 10.00% (request 10 of 100)"
+    )
+
+
+def test_a_mixed_run_under_the_evaluation_limit_passes_with_many_model_faults():
+    collected = _run(170, settled={"model_transport_error": 1, "model_context_limit": 29})
+    for row in collected.results[:20]:
+        _truncate(row)
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is True, reason
+    assert reason.startswith(
+        "trial: evaluation-side faults: 1 of 200 (0.50%) is below 2% (server 1: model_transport_error 1); "
+        "model faults: 49 of 200 (24.50%) (model_context_limit 29, truncated_answer 20); exact count:"
+    )
+    assert not _health_errors(task)
+
+
+def test_unverified_coverage_withholds_a_pass_without_a_health_failure():
+    collected = _run(100)
+    for row in collected.results[:10]:
+        row["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"] = None
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is None and report["status"] == "UNVERIFIED" and report["exact"] is False
+    assert reason.startswith("trial: UNOBSERVED 10 of 100 expected trials")
+    assert "unverified: this withholds a pass and is no health failure" in reason
+    [health] = _health_errors(task)
+    assert health.startswith("response/trial health unknown")
+    assert task["status"] == "FAILED" and task["health_verdict"].startswith("evaluation health: UNVERIFIED")
+
+
+def test_records_that_do_not_cover_every_trial_keep_the_lower_bound_wording():
+    collected = _run(99, settled={"model_transport_error": 1})
+    # A bound, completed grading operation, but a policy capture that does not join the saved answer.
+    collected.results[0]["response"]["id"] = "another-response"
+    _, (passed, reason, report), _ = _gate(collected)
+    assert passed is None and report["exact"] is False
+    assert reason.startswith("trial: UNVERIFIED, known failures are a lower bound: evaluation-side faults: 1 of 100")
+
+
+def test_full_coverage_gives_the_exact_count_with_kinds_and_classes():
+    collected = _run(97, settled={"model_transport_error": 1, "model_request_error": 2})
+    _, (passed, reason, report), task = _gate(collected)
+    assert passed is True and report["exact"] is True
+    assert "lower bound" not in reason and "exact count:" in reason
+    assert report["evaluation"]["kinds"] == {"model_transport_error": 1}
+    assert report["model"]["kinds"] == {"model_request_error": 2}
+    assert task["trial_counts"] == {"observed_healthy": 97, "unhealthy": 3, "unobserved": 0, "verifier_recorded": 0}
+
+
+def test_response_failures_are_reported_and_never_a_second_verdict():
+    collected = _run(1000)
+    for row in collected.results[:41]:
+        _truncate(row)
+    for row in collected.results[41:47]:
+        _empty(row)
+    _, (passed, reason, _), task = _gate(collected)
+    assert passed is True, reason
+    assert task["health_verdict"] == (
+        "evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); "
+        "trial failures: 0.00% (none of 1000)"
+    )
+    assert task["failures"]["response_failures"]["rate"] == 0.047
+    assert not _health_errors(task) and "PASS" not in str(task["failures"])
+    assert task["criteria"]["response"]["applied"] is False and task["criteria"]["trial"]["applied"] is False
+
+
+def test_trial_counts_follow_the_gates_classification_of_a_grading_without_a_verdict():
+    collected = _run(1)
+    grade = collected.results[0]["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"][0]
+    grade["outcome"] = "unknown"
+    decision, (passed, _, _), task = _gate(collected)
+    # A programmatic grading with no verdict is not joined, so it is unresolved, never healthy.
+    assert passed is None
+    assert trial_counts(decision, collected) == task["trial_counts"]
+    assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
