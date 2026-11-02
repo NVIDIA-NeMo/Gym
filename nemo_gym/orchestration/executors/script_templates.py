@@ -260,11 +260,12 @@ def render_driver_entrypoint(
                 'mkdir -p "$GYM_SRC/uv-bin"',
                 'export PATH="$HOME/.local/bin:$PATH"',
                 # Run a private copy, never the shared binary another host's installer may replace; a copy that
-                # does not run is replaced by a private install.
+                # does not run is replaced by a private install. That install is unmanaged: it writes no user-level
+                # receipt pointing at a directory this read deletes, and leaves PATH files alone.
                 'if _gym_uv="$(command -v uv)" && "$_gym_uv" --version >/dev/null 2>&1 '
                 '&& cp "$_gym_uv" "$GYM_SRC/uv-bin/uv" && "$GYM_SRC/uv-bin/uv" --version >/dev/null 2>&1; then :; '
                 "else curl -LsSf https://astral.sh/uv/install.sh | "
-                'env UV_INSTALL_DIR="$GYM_SRC/uv-bin" UV_NO_MODIFY_PATH=1 sh; fi',
+                'env UV_UNMANAGED_INSTALL="$GYM_SRC/uv-bin" sh; fi',
                 # The cache and managed Pythons stay on this host's local disk, reused by its later readers: a
                 # rename there leaves a running uv's open files intact, where a network home does not. A shared
                 # temporary-directory name is used only when it is this user's own directory, not a link and not

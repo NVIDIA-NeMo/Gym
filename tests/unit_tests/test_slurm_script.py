@@ -769,10 +769,13 @@ def _run_private_uv_entrypoint(
         shared.chmod(0o755)
     (tools / "git").write_text('#!/bin/bash\n[[ $1 == clone ]] && mkdir -p "$3"\nexit 0\n')
     curl_log = tmp_path / "curl.log"
+    # Like uv's installer: the target is UV_UNMANAGED_INSTALL, else UV_INSTALL_DIR, and only an install that is not
+    # unmanaged writes the user-level receipt.
     installer = (
-        'mkdir -p "$UV_INSTALL_DIR"; printf %s '
+        'dir="${UV_UNMANAGED_INSTALL:-${UV_INSTALL_DIR:-$HOME/.local/bin}}"; mkdir -p "$dir"; printf %s '
         + shlex.quote(fake_uv)
-        + ' > "$UV_INSTALL_DIR/uv"; chmod +x "$UV_INSTALL_DIR/uv"'
+        + ' > "$dir/uv"; chmod +x "$dir/uv"; if [ -z "${UV_UNMANAGED_INSTALL:-}" ]; then '
+        'mkdir -p "$HOME/.config/uv"; echo "{\\"install_prefix\\":\\"$dir\\"}" > "$HOME/.config/uv/uv-receipt.json"; fi'
     )
     (tools / "curl").write_text(
         f"#!/bin/bash\necho called >> {shlex.quote(str(curl_log))}\necho {shlex.quote(installer)}\n"
@@ -812,6 +815,8 @@ def test_a_private_uv_entrypoint_runs_its_own_uv_and_cache(tmp_path: Path, share
     assert shared.exists() is (shared_uv != "missing")
     if shared_uv == "broken":
         assert shared.read_text() == "#!/bin/bash\nexit 1\n"
+    # The disposable install is unmanaged: no user-level receipt points at a directory deleted after the read.
+    assert not (shared.parents[2] / ".config/uv/uv-receipt.json").exists()
 
 
 @pytest.mark.skipif(shutil.which("uv") is None, reason="needs a real uv to select the interpreter")
