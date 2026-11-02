@@ -352,6 +352,42 @@ async def test_a_reverification_that_fails_again_leaves_the_saved_result_as_it_w
     assert len(due_judge_failures(output)) == 1
 
 
+async def test_a_result_scored_in_a_separate_rescoring_output_is_still_settled_into_its_run(
+    tmp_path, verifier, monkeypatch
+) -> None:
+    """A rescore of the run into a separate output (``gym eval reverify`` on a managed run) scores the saved answer
+    there and leaves the run as it was; the run's own settle still grades that answer and settles it, once."""
+    import nemo_gym.rollout_reverification as reverify
+    from nemo_gym.rollout_records import RUN_ID_KEY, materialized_path_for, read_records
+
+    monkeypatch.setattr(reverify, "get_exporters", list)
+    output = _run(tmp_path, [verify_transport_masked()])
+    (identity,) = due_judge_failures(output)
+    run_bytes = output.read_bytes()
+    rescored = tmp_path / "rescored" / "rollouts.jsonl"
+    await reverify.RolloutReverificationHelper().run_from_config(
+        reverify.RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(rescored),
+            disable_aggregation=True,
+            upload_rollouts=False,
+        )
+    )
+    [row] = list(read_records(rescored))
+    assert row["reward"] == 1.0 and row["response"] == ANSWER and RUN_ID_KEY not in row
+    assert row["_ng_reverification_source_run_id"] == RolloutStore.read(output).manifest.run_id
+    # The rescoring output is a separate grading artifact: the run itself is untouched and still due.
+    assert output.read_bytes() == run_bytes and due_judge_failures(output) == [due_judge_failures(output)[0]]
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    settled = _selected(output)[0][identity]
+    assert settled["reward"] == 1.0 and not settled.get("mask_sample") and settled["response"] == ANSWER
+    assert "_ng_reverification_source_run_id" not in settled
+    assert due_judge_failures(output) == [] and list(read_records(rescored)) == [row]
+
+
 async def test_an_unsupported_verifier_is_never_asked_to_reverify(tmp_path, verifier) -> None:
     output = _run(tmp_path, [verify_transport_masked()])
     verifier["mode"] = "unsupported"
