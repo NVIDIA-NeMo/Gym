@@ -14649,6 +14649,13 @@ class TestRunRecordWriter:
         materialized = self._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
         assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4] and RUN_ID_KEY not in materialized[0]
         assert (run_dir / "rollouts-step_1_manifest.json").is_file()
+        # The shard's saved progress, as gym eval status and aggregation read it for any run.
+        status = orjson.loads((run_dir / "rollouts-step_1_batch_status.json").read_bytes())
+        assert status["tracking"] == "enabled"
+        member = status["members"]["agent"]
+        assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (1, 1)
+        assert member["failures_by_class"] == {"agent_request_failed": 1}
+        assert member["failures_by_kind"] == {"agent_request_failed": 1}
 
         # The Store reads the shard as it reads an eval run: the expected rows, the selected successes, the failures,
         # and the rollouts it would run again.

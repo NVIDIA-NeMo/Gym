@@ -1113,7 +1113,10 @@ gym eval status gym-job-20261016T120000Z-abcdef --json
 ```
 
 Collection without a batch manifest writes `<output-stem>_batch_status.json` next to its output JSONL
-(for example, `gsm8k_batch_status.json`). Manifest-backed runs retain `batch_status.json`.
+(for example, `gsm8k_batch_status.json`), and a shard recorded through `run_examples` writes
+`rollouts-<shard>_batch_status.json`. Manifest-backed runs retain `batch_status.json`. A status without a
+manifest carries the count, failure and aggregation keys only; the manifest-only keys (recipe, dataset and
+metric expectations, repeat policy) belong to `batch_status.json`.
 The directory command lists every stem-derived status file and the legacy `batch_status.json` when present. Progress is
 written at initialization, on the first durable result, at most every five seconds thereafter,
 and at completion. Counts report completed and remaining rollouts and the

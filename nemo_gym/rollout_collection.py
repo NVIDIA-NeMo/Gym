@@ -1653,7 +1653,8 @@ class _RunRecordWriter:
     the records the collector's own builder produced. A caller writing rows of its own would bypass that builder.
 
     A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
-    given, its materialized inputs and run manifest beside it, so a folder of shards is what ``gym eval aggregate``, the run health
+    given, its materialized inputs, run manifest and saved progress (``rollouts-<shard>_batch_status.json``) beside
+    it, so a folder of shards is what ``gym eval aggregate``, the run health
     check, the Store and EvalRDL's reader already read. The caller picks the shard label (for example a training step
     and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
     the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
@@ -1669,6 +1670,7 @@ class _RunRecordWriter:
         record_omitted_rollouts: bool = False,
         rows: Optional[List[Dict[str, Any]]] = None,
         run_id: Optional[str] = None,
+        status_rows: Optional[List[Dict[str, Any]]] = None,
     ) -> None:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
@@ -1679,6 +1681,7 @@ class _RunRecordWriter:
         self.failures_fpath = failures_path_for(self.rollouts_fpath)
         self.materialized_fpath = materialized_path_for(self.rollouts_fpath)
         self.manifest_fpath = manifest_path_for(self.rollouts_fpath)
+        self.status_fpath = batch_status_path_for(self.rollouts_fpath)
         self.record_omitted_rollouts = record_omitted_rollouts
         # The run this shard's typed failure records belong to, named by the shard's run manifest. The rows and
         # records stay untagged, as in an eval run written before run manifests, which the Store imports as well.
@@ -1689,6 +1692,7 @@ class _RunRecordWriter:
             self.failures_fpath.unlink(missing_ok=True)
             self.materialized_fpath.unlink(missing_ok=True)
             self.manifest_fpath.unlink(missing_ok=True)
+            self.status_fpath.unlink(missing_ok=True)
             # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
             # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
             # inode, which write() checks to notice a later writer of the same shard.
@@ -1712,6 +1716,24 @@ class _RunRecordWriter:
                     for row in rows:
                         file.write(orjson.dumps(row) + b"\n")
                 RunManifest.import_legacy(rows).model_copy(update={"run_id": self.run_id}).write(self.manifest_fpath)
+            # The shard's own saved progress, `rollouts-<shard>_batch_status.json`, read by `gym eval status` and
+            # marked by aggregation like any run's. It counts the records this writer writes, which are what the
+            # Store reads back, and is best-effort: an error disables it with its reason.
+            self._status: Optional[RunStatusTracker] = None
+            self._status_agent_refs: Dict[Tuple[int, int], Dict] = {}
+            self._status_completed: List[Dict] = []
+            self._status_failures: List[Dict] = []
+            if status_rows is not None:
+                try:
+                    self._status_agent_refs = {
+                        (row[TASK_INDEX_KEY_NAME], row[ROLLOUT_INDEX_KEY_NAME]): row[AGENT_REF_KEY_NAME]
+                        for row in status_rows
+                    }
+                    self._status = RunStatusTracker(self.status_fpath, status_rows)
+                    self._status.write_status([], [], force=True)
+                except Exception as error:
+                    disable_run_status(self.status_fpath, error)
+                    self._status = None
 
     @contextmanager
     def _locked(self) -> Iterator[Any]:
@@ -1759,6 +1781,10 @@ class _RunRecordWriter:
                 raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
             with fpath.open("ab") as f:
                 f.write(line + b"\n")
+        if self._status is not None and self._status.enabled:
+            status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
+            (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
+            self._status.write_status(self._status_completed, self._status_failures, force=True)
         return fpath
 
 
@@ -6009,8 +6035,9 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
 
         ``record_output_dir`` with ``record_shard`` also writes each rollout to that run folder through
         :class:`_RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
-        with the typed failure rows collection writes, and the rows as the shard's materialized inputs (omitted-rollout
-        rows with ``record_omitted_rollouts``). It implies ``enrich_results``, dispatches as collection does (typed
+        with the typed failure rows collection writes, the rows as the shard's materialized inputs, its run manifest
+        and its saved progress for ``gym eval status`` (omitted-rollout rows with ``record_omitted_rollouts``). It
+        implies ``enrich_results``, dispatches as collection does (typed
         failure records under ``route_failures_to_sidecar``, validated results) on copies of the rows that name the
         shard's run, and the Store, the run health check and ``gym eval aggregate`` read the shard like an eval run.
         """
@@ -6081,17 +6108,24 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
             ),
         )
         # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
-        writer = (
-            _RunRecordWriter(
+        writer = None
+        if record_output_dir is not None:
+            # The shard's status members, as collection names them: the agent, or the Environment Server a row
+            # is routed to.
+            status_rows = []
+            for row in examples:
+                status_row = _batch_status_row(row, {})
+                if AGENT_REF_KEY_NAME not in status_row:
+                    status_row[AGENT_REF_KEY_NAME] = {"name": self._dispatch_name(row)}
+                status_rows.append(status_row)
+            writer = _RunRecordWriter(
                 record_output_dir,
                 record_shard,
                 record_omitted_rollouts=record_omitted_rollouts,
                 rows=examples,
                 run_id=run_id,
+                status_rows=status_rows,
             )
-            if record_output_dir is not None
-            else None
-        )
         return _RowResultIterator(completions, enrich=enrich)
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:

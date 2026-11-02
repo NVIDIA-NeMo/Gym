@@ -53,7 +53,8 @@ evidence with two opt-in options:
   calls are on the record, and needs the payloads kept.
 - `record_output_dir` with `record_shard` also writes each rollout to that folder as collection lays out a run:
   `rollouts-<shard>.jsonl`, its failures sidecar with the typed failure rows collection writes, the rows as the shard's
-  materialized inputs, and the shard's run manifest. The caller picks the shard label (for example a training step and
+  materialized inputs, the shard's run manifest, and its saved progress (`rollouts-<shard>_batch_status.json`, read by
+  `gym eval status`). The caller picks the shard label (for example a training step and
   worker) and Gym owns the file names, so `gym eval aggregate +input_glob='run/rollouts-*.jsonl'`, the run health
   check and the Store read a folder of shards like an eval run. Reopening a shard replaces it, so a replayed step does
   not duplicate rows. Rows need their task and rollout indices; `record_omitted_rollouts=True` also keeps an
