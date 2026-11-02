@@ -71,6 +71,7 @@ from nemo_gym.models.model_call_capture import (
     _with_report_field,
     _with_stream_report,
     install_model_call_capture,
+    install_model_rollout_routing,
 )
 from nemo_gym.models.responses_streaming import (
     NamespaceMap,
@@ -316,6 +317,8 @@ class BaseResponsesAPIModel(BaseServer):
 
 
 class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
+    routes_rollouts_to_owner = True
+
     # Subclasses can declare successful metadata or health routes here.
     # Unknown successful routes fail closed during training-token capture.
     non_generating_model_routes: ClassVar[frozenset[tuple[str, str]]] = frozenset()
@@ -360,6 +363,17 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
     def history_transport_protocol(self) -> HistoryTransportProtocol | None:
         """Override to select a native continuation protocol; None uses the shim header."""
         return None
+
+    def setup_rollout_routing(self, app: FastAPI, *, socket_dir: str, backlog: int) -> None:
+        install_model_rollout_routing(
+            app,
+            socket_dir=socket_dir,
+            backlog=backlog,
+            non_generating_requests=self.non_generating_model_routes
+            | frozenset(
+                (request.method, request.path) for request in self.config.token_id_capture_non_generating_requests
+            ),
+        )
 
     def setup_webserver(self) -> FastAPI:
         if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
