@@ -125,10 +125,17 @@ class RequestFailureLog:
 
     The server middleware opens one per request with ``capture``; code serving the request reaches it through
     ``current``, so a retry loop deep in a client can record an attempt without threading it through calls.
+
+    A retry loop can fail without end, so the log keeps the first ``MAX_EVENTS`` events and counts the events of
+    every later report in ``dropped_events``; the report is then marked ``omitted``. A report is kept or dropped
+    whole, so every kept event's causes stay in the log.
     """
 
     report: FailureReport = field(default_factory=FailureReport)
     model_operations: dict[str, ModelOperationObservation] = field(default_factory=dict)
+    dropped_events: int = 0
+
+    MAX_EVENTS: ClassVar[int] = 64
 
     _current: ClassVar[ContextVar["RequestFailureLog | None"]] = ContextVar("ng_request_failure_log", default=None)
 
@@ -150,7 +157,19 @@ class RequestFailureLog:
 
     def add(self, report: FailureReport) -> None:
         """Add ``report``'s events as observations; the log never has a ``failure_id`` of its own."""
-        self.report = self.report.merged(report.model_copy(update={"failure_id": None}))
+        kept = self.report.events
+        new = {key: event for key, event in report.events.items() if key not in kept}
+        omitted = report.omitted
+        if len(kept) + len(new) > self.MAX_EVENTS:
+            self.dropped_events += len(new)
+            new, omitted = {}, True
+        if not new and (self.report.omitted or not omitted):
+            return
+        # Both maps were validated when their reports were built, and each report is closed under its causes, so
+        # their union is valid. It is not checked again, which would cost the whole history on every insert.
+        self.report = FailureReport.model_construct(
+            failure_id=None, events=new | kept, omitted=self.report.omitted or omitted
+        )
 
     def reply_report(self, error: BaseException | None) -> FailureReport:
         """The report for this request's reply: its own failure (``error``, ``None`` on success) and the log."""
