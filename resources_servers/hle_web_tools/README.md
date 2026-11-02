@@ -69,8 +69,9 @@ of `/` collapsed, the fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./
 
 Beyond the families, the protocol's own refusals:
 
-- **Queries** are refused (each check runs on the query as written and NFKC-folded with format
-  characters such as zero-width spaces and soft hyphens removed) when they match `url_patterns` or
+- **Queries** are refused (each check runs on the query as written and NFKC-folded, with format
+  characters such as zero-width spaces, soft hyphens and word joiners read both as removed and as a
+  space) when they match `url_patterns` or
   `patterns_case_sensitive`, when a `site:`
   operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
   site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; one leading dot, the

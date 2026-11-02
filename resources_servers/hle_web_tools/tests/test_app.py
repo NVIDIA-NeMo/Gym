@@ -241,11 +241,19 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
             "question_span",
         ),
         ("how many odd sp\u200bin structures admit a nonvanishing", "question_span"),  # zero-width space
+        ("how\u2060many\u2060odd\u2060spin\u2060structures\u2060admit\u2060a\u2060nonvanishing", "question_span"),
         ("how many odd spi\u0301n structures admit a nonvanishing", "question_span"),  # combining mark
         ("how_many_odd_spin_structures_admit_a_nonvanishing", "question_span"),  # underscore-joined
         ("humanity\u00ads last exam answers", "url_patterns"),  # soft hyphen inside a blocked phrase
     ],
-    ids=["full-width", "zero-width-space", "combining-mark", "underscore-joined", "soft-hyphen-pattern"],
+    ids=[
+        "full-width",
+        "zero-width-space",
+        "word-joiner-separated",
+        "combining-mark",
+        "underscore-joined",
+        "soft-hyphen-pattern",
+    ],
 )
 async def test_presentation_variants_of_a_blocked_query_are_refused(server, caplog, query, family):
     backend = stub_backend(server, results=[result("https://example.com/ok")])

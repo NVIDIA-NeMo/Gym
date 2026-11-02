@@ -433,7 +433,7 @@ class Blocklist:
 
         The patterns and ``site:`` operands are checked on the query as written and as ``fold_text`` reads it.
         """
-        forms = list(dict.fromkeys((query, fold_text(query))))
+        forms = list(dict.fromkeys((query, fold_text(query), fold_text(query, " "))))
         for form in forms:
             block = self.text_block(form, "query")
             if block is not None:
@@ -586,18 +586,23 @@ def markdown_heading_title(markdown: str) -> str:
     return ""
 
 
-def fold_text(text: str) -> str:
-    """NFKC with format characters (category Cf: zero-width space, soft hyphen, word joiner) removed: the spelling
-    search engines index, so full-width, mathematical and zero-width variants read as the plain text."""
+def fold_text(text: str, format_chars: str = "") -> str:
+    """NFKC with each format character (category Cf: zero-width space, soft hyphen, word joiner) replaced by
+    ``format_chars``: the spelling search engines index, so full-width, mathematical and zero-width variants read
+    as the plain text. Whether an engine drops a format character or splits words at it is not known, so the
+    checks read text both ways: removed (``sp<ZWSP>in`` is ``spin``) and as a space (``How<WJ>many`` is two words).
+    """
     if text.isascii():
         return text
-    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+    return "".join(
+        format_chars if unicodedata.category(ch) == "Cf" else ch for ch in unicodedata.normalize("NFKC", text)
+    )
 
 
-def question_words(text: str) -> Tuple[str, ...]:
+def question_words(text: str, format_chars: str = "") -> Tuple[str, ...]:
     """Case-folded maximal runs of letters and digits after ``fold_text`` and with combining marks removed
     (``holomorphíc`` is ``holomorphic``): the unit of the verbatim-span rule."""
-    text = fold_text(text)
+    text = fold_text(text, format_chars)
     if not text.isascii():
         decomposed = unicodedata.normalize("NFD", text)
         text = unicodedata.normalize("NFC", "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn"))
@@ -616,16 +621,17 @@ class QuestionSpans:
         self.digest = hashlib.sha256("\x1f".join(words).encode()).hexdigest()
         self.span_words = min(span_words, len(words)) if words else 0
         n = self.span_words
-        self.ngrams = frozenset(words[i : i + n] for i in range(len(words) - n + 1)) if n else frozenset()
+        readings = (words, question_words(question, " ")) if n else ()
+        self.ngrams = frozenset(reading[i : i + n] for reading in readings for i in range(len(reading) - n + 1))
 
     def longest_shared_span(self, query: str) -> Optional[int]:
         """The span length when the query repeats that many consecutive question words, else ``None``."""
         n = self.span_words
         if not n:
             return None
-        words = question_words(query)
-        if any(words[i : i + n] in self.ngrams for i in range(len(words) - n + 1)):
-            return n
+        for words in dict.fromkeys((question_words(query), question_words(query, " "))):
+            if any(words[i : i + n] in self.ngrams for i in range(len(words) - n + 1)):
+                return n
         return None
 
 
