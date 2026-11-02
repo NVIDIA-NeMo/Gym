@@ -1,6 +1,6 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Task-data schema for LMArena v2 and v3 prompt rows."""
+"""Task-data schema for Arena text and vision prompt rows."""
 
 from typing import Any
 

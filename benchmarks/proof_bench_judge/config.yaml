@@ -24,6 +24,6 @@ proof_bench_judge_math_proof_judgement_simple_agent:
 proof_bench_judge_math_proof_judgement_environment_server:
   _inherit_from: math_proof_judgement_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: proof_bench_judge_math_proof_judgement_simple_agent

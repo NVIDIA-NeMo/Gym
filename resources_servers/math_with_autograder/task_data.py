@@ -35,6 +35,6 @@ class TaskData(MathWithJudgeTaskData):
     )
     source: Optional[str] = Field(
         default=None,
-        description="Original competition source, e.g. 'IMO Shortlist 2021'; null in some rows.",
+        description="Original competition source, e.g. 'IMO Shortlist 2021'.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )

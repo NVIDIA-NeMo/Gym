@@ -44,8 +44,8 @@ class InlineTask(Task):
                 collect=[
                     VerifierCollectConfig(
                         command=(
-                            "set -eu; cd /app; mkdir -p /logs/artifacts; "
-                            "git config --global --add safe.directory /app; "
+                            f"set -eu; cd {data.workdir}; mkdir -p /logs/artifacts; "
+                            f"git config --global --add safe.directory {data.workdir}; "
                             "git diff --binary --no-ext-diff --no-textconv --no-color "
                             f"{data.base_commit} HEAD -- . > /logs/artifacts/model.patch"
                         ),

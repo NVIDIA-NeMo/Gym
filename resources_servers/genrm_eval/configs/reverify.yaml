@@ -1,0 +1,8 @@
+# CPU-only reverification of saved outputs; no model calls.
+config_paths:
+  - responses_api_models/openai_model/configs/openai_model.yaml
+
+policy_base_url: http://127.0.0.1:9/v1
+policy_api_key: unused
+policy_model_name: unused
+model_endpoint_readiness_timeout_seconds: 0

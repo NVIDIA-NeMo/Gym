@@ -43,6 +43,36 @@ Because the generated code runs in this server's own venv, `requirements.txt` pi
   `problem_accuracy`. The headline `subtask_accuracy` (total passed / total over all rollouts) is
   computed on the **agent** (`/aggregate_metrics` runs there), not this server.
 
+**Per-sub-step execution records (opt-in).** By default the server keeps only the pass/fail bit per
+sub-step: the subprocess's stdout is never read and its stderr is discarded after the exit code is
+known. Set `record_step_outputs: true` to add `step_outputs` to the verify response (and therefore to
+every rollout row): one record per scored sub-step, aligned with `step_results`, with `step_id`,
+`step_number`, `environment` (the grading interpreter whose run the record describes: under the OR rule
+the one that passed, else the last one tried; `null` for a sentinel step), `status` (`executed`, or
+`out_of_context` / `empty` for sentinels that never ran), `passed`, `returncode` (`null` on a timeout),
+`timed_out`, `duration_s`, `exception_class` (the class named on the last traceback line, e.g.
+`AssertionError`, `ImportError`, `numpy.linalg.LinAlgError`; `null` when there is none) and the last
+`output_tail_chars` characters (default 2000; 0 keeps none, negative values are rejected) of `stdout_tail`
+and `stderr_tail`. The per-environment
+pass bits and error text of SciCode-Verified's OR grading stay in `step_environment_results` /
+`step_environment_errors`; the record adds the execution details of the decisive run. The tails contain model-generated output and tracebacks, so the flag is off by
+default and the rows grow by up to `2 * output_tail_chars` per sub-step when it is on. With
+`record_step_code: true` as well, each record also carries `code`: the accumulated program the
+sub-step's tests ran against (the agent's `solutions[step_id]`: the problem's dependency header and any
+prefilled reference steps from the dataset, then the model's code for the previous sub-steps and this
+one; `null` for a sentinel step that never ran). That mixes dataset text with model-generated code and
+grows a row by the size of every scored program, so it is a second opt-in. The agent's raw per-step
+generations are a separate concern: enable model-call observability to keep them.
+
+```yaml
+scicode:
+  resources_servers:
+    scicode:
+      record_step_outputs: true
+      output_tail_chars: 2000
+      record_step_code: true
+```
+
 ## Test data (required, staged manually)
 
 `test_data.h5` (~1 GB) holds the numeric ground-truth targets. It is **not** auto-downloaded — stage
@@ -89,9 +119,10 @@ gym eval run --no-serve \
 gym env test +entrypoint=resources_servers/scicode
 ```
 
-Covers test sanitization, the program builder, subprocess pass/fail/timeout, and the `verify()`
-paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
-out-of-context).
+Covers test sanitization, the program builder, subprocess pass/fail/timeout and the execution
+details it reports (exit code, timeout, duration, bounded output tails, exception class), and the
+`verify()` paths (no solutions, missing/unconfigured test data, all-pass, all-fail, prefilled-excluded,
+out-of-context, `step_outputs` on and off, `code` on and off).
 
 ## Licensing
 

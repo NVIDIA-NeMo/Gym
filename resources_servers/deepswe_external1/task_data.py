@@ -51,12 +51,20 @@ class TaskData(BaseModel):
     task_id: str = Field(pattern=r"^[A-Za-z0-9][A-Za-z0-9_.-]{0,199}$", json_schema_extra=VERIFY)
     image: str = Field(min_length=1, json_schema_extra=VERIFY)
     verifier_image: str = Field(min_length=1, json_schema_extra=VERIFY)
-    workdir: Literal["/app"] = Field(default="/app", json_schema_extra=VERIFY)
+    workdir: Literal["/app", "/workspace/repo"] = Field(default="/app", json_schema_extra=VERIFY)
     base_commit: str = Field(pattern=r"^[a-f0-9]{40}$", json_schema_extra=VERIFY)
     agent: PhaseLimits = Field(json_schema_extra=VERIFY)
     verifier: PhaseLimits = Field(json_schema_extra=VERIFY)
     solution_timeout_sec: float = Field(default=1800, gt=0, allow_inf_nan=False, json_schema_extra=VERIFY)
     collect_timeout_sec: float = Field(default=300, gt=0, allow_inf_nan=False, json_schema_extra=VERIFY)
+    grader_applies_model_patch: bool = Field(
+        default=True,
+        description=(
+            "DeepSWE v1.0 graders apply /logs/artifacts/model.patch themselves; v1.1 graders grade the tree as-is, "
+            "so when this is False the server applies the candidate patch in the verifier workdir before test.sh."
+        ),
+        json_schema_extra=VERIFY,
+    )
     files: TaskFiles = Field(json_schema_extra=VERIFY)
     public_source: dict[str, str] | None = Field(
         default=None,

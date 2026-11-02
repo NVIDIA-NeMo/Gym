@@ -1,0 +1,8 @@
+config_paths:
+  - responses_api_models/genrm_model/configs/genrm_model.yaml
+
+policy_model:
+  _inherit_from: genrm_model
+  responses_api_models:
+    genrm_model:
+      model: ${policy_model_name}

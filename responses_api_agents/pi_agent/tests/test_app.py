@@ -25,16 +25,16 @@ import pytest
 import yaml
 from fastapi import Request
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import AgentInvocation, ContextCompactionObservation, ToolCallObservation
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, ContextCompactionObservation, ToolCallObservation
 from responses_api_agents.pi_agent.app import (
     PiAgent,
     PiAgentConfig,
@@ -72,6 +72,13 @@ def _config(**kwargs) -> PiAgentConfig:
 
 def _make_agent(**kwargs) -> PiAgent:
     return PiAgent(config=_config(**kwargs), server_client=MagicMock(spec=ServerClient))
+
+
+def test_prompt_control_defaults_and_validation() -> None:
+    config = _config()
+    assert config.enable_tools is True and config.system_prompt_mode == "append"
+    with pytest.raises(ValueError, match="system_prompt_mode"):
+        _config(system_prompt_mode="invalid")
 
 
 def _msg_end(role, content, **extra) -> str:
@@ -115,7 +122,9 @@ async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope
     with patch.object(agent, "_run_pi", AsyncMock(return_value=(items, usage, "configured-model", []))) as run:
         result = await agent.responses(request, body)
 
-    run.assert_awaited_once_with("fix the code", "config", rollout_id=None, collect_observations=False)
+    run.assert_awaited_once_with(
+        "fix the code", "config", rollout_id=None, collect_observations=False, timeout=agent.config.timeout
+    )
     assert result.output[0].content[0].text == "fixed"
     assert result.model == "configured-model"
     assert result.usage.total_tokens == 3
@@ -125,11 +134,17 @@ async def test_legacy_runner_request_preserves_configured_pi_controls(with_scope
 
 class TestLocalRuntimeSetup:
     @pytest.mark.parametrize("timed_out, collect", [(False, True), (True, True), (True, False)])
-    async def test_local_exit_preserves_events_and_removes_workspace(self, tmp_path, timed_out, collect) -> None:
+    @pytest.mark.parametrize("mode", ["append", "replace"])
+    @pytest.mark.parametrize("enable_tools", [True, False])
+    async def test_local_exit_preserves_events_and_removes_workspace(
+        self, tmp_path, timed_out, collect, mode, enable_tools
+    ) -> None:
         agent = _make_agent(
             workspace_root=str(tmp_path),
             timeout=1,
             thinking="high",
+            system_prompt_mode=mode,
+            enable_tools=enable_tools,
             model_server=ModelServerRef(type="responses_api_models", name="policy"),
         )
         process = MagicMock(returncode=None if timed_out else 0)
@@ -163,6 +178,9 @@ class TestLocalRuntimeSetup:
         assert process.kill.call_count == int(timed_out)
         assert not list(tmp_path.iterdir())
         assert "--thinking" in spawn.call_args.args and "system rules" in spawn.call_args.args
+        assert ("--no-builtin-tools" in spawn.call_args.args) is (not enable_tools)
+        flag = "--system-prompt" if mode == "replace" else "--append-system-prompt"
+        assert spawn.call_args.args[-3:] == (flag, "system rules", "task")
         expected_events = [json.loads(event)] if collect else []
         if collect and timed_out:
             expected_events.append({"type": "_ng_process_exit", "timed_out": True})
@@ -402,7 +420,10 @@ async def test_run_stages_private_mcp_config_and_cleans_workspace(tmp_path, with
             returncode=0,
         )
 
-    with patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch):
+    with (
+        patch("responses_api_agents.pi_agent.app.ensure_pi"),
+        patch("responses_api_agents.pi_agent.app.asyncio.create_subprocess_exec", side_effect=launch),
+    ):
         items, _, _, _ = await agent._run_pi("task", None)
     assert items[0].content[0].text == "done"
     assert homes and all(not home.exists() for home in homes)
@@ -848,3 +869,23 @@ def test_uncorrelated_pi_provider_has_no_invocation_header() -> None:
     agent = _make_agent(model_server=ModelServerRef(type="responses_api_models", name="policy"))
     with patch.object(PiAgent, "resolve_model_base_url", return_value="http://model/v1"):
         assert "headers" not in agent._build_models_config()["providers"]["nemo"]
+
+
+@pytest.mark.parametrize("budget,expected", [(None, 1800), ("12.5", 12.5), ("3600", 1800), ("invalid", 1800)])
+async def test_task_timeout_reaches_local_subprocess_wait(tmp_path: Path, budget: str | None, expected: float) -> None:
+    agent = _make_agent(timeout=1800, workspace_root=str(tmp_path))
+    body = NeMoGymResponseCreateParamsNonStreaming(
+        input="task", metadata=None if budget is None else {"agent_timeout_sec": budget}
+    )
+    process = MagicMock(returncode=0)
+    process.communicate = AsyncMock(return_value=(b"", b""))
+    module = "responses_api_agents.pi_agent.app"
+    with (
+        patch(f"{module}.asyncio.create_subprocess_exec", AsyncMock(return_value=process)),
+        patch(f"{module}.asyncio.wait_for", wraps=asyncio.wait_for) as wait,
+    ):
+        episode = await agent._create_episode(body, collect_observations=False)
+    wait.assert_awaited_once()
+    assert wait.await_args.kwargs["timeout"] == expected
+    assert episode.response.metadata == {"agent_timeout_sec": str(float(expected))}
+    assert agent.config.timeout == 1800

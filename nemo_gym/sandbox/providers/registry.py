@@ -84,6 +84,11 @@ def _entry_point_loaders() -> dict[str, ProviderLoader]:
     return _ENTRY_POINT_LOADERS
 
 
+def plugin_distributions() -> list[str]:
+    """Names of the installed distributions that publish providers as entry points."""
+    return sorted({ep.dist.name for ep in entry_points(group=ENTRY_POINT_GROUP) if getattr(ep, "dist", None)})
+
+
 def register_provider(name: str, provider_class: ProviderClass, *, override: bool = False) -> None:
     """Register a sandbox provider class."""
     if not name:
@@ -118,6 +123,16 @@ def create_provider(config: Mapping[str, Any]) -> SandboxProvider:
 
     provider_class = get_provider_class(provider_name)
     return provider_class(**dict(provider_kwargs))
+
+
+def provider_service_option_fields(name: str) -> frozenset[str]:
+    """The Compose service options (``tmpfs``, ``ulimits``, ``sysctls``, ``security_opt``) provider ``name`` can apply.
+
+    Read from the provider class's ``SERVICE_OPTION_FIELDS`` (see ``SupportsSandboxServiceOptions``), so
+    prepare can check a task against the deployment's provider without instantiating it. A provider
+    without the attribute applies none of them.
+    """
+    return frozenset(getattr(get_provider_class(name), "SERVICE_OPTION_FIELDS", frozenset()))
 
 
 def list_providers() -> list[str]:

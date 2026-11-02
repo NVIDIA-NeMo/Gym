@@ -22,8 +22,8 @@ def _turn(call_id: str, args: str, output: str) -> list:
 
 
 def _calls_and_outputs(items):
-    calls = [i for i in items if getattr(i, "type", None) == "function_call"]
-    outputs = [i for i in items if getattr(i, "type", None) == "function_call_output"]
+    calls = [i for i in items if i["type"] == "function_call"]
+    outputs = [i for i in items if i["type"] == "function_call_output"]
     return calls, outputs
 
 
@@ -33,7 +33,7 @@ def test_repeated_ids_across_turns_become_unique():
     _, items = convert_stirrup_history_to_output_items(history)
     calls, _ = _calls_and_outputs(items)
 
-    ids = [c.call_id for c in calls]
+    ids = [c["call_id"] for c in calls]
     assert len(set(ids)) == len(ids) == 4, f"call ids are not unique: {ids}"
 
 
@@ -44,11 +44,11 @@ def test_each_call_still_pairs_with_its_own_output():
     _, items = convert_stirrup_history_to_output_items(history)
     calls, outputs = _calls_and_outputs(items)
 
-    by_id = {o.call_id: o.output for o in outputs}
+    by_id = {o["call_id"]: o["output"] for o in outputs}
     for i, call in enumerate(calls):
-        assert call.arguments == f"arg{i}"
-        assert by_id[call.call_id] == f"out{i}", (
-            f"call with arguments {call.arguments!r} resolved to output {by_id[call.call_id]!r}"
+        assert call["arguments"] == f"arg{i}"
+        assert by_id[call["call_id"]] == f"out{i}", (
+            f"call with arguments {call['arguments']!r} resolved to output {by_id[call['call_id']]!r}"
         )
 
 
@@ -58,8 +58,8 @@ def test_distinct_ids_are_left_alone():
     _, items = convert_stirrup_history_to_output_items(history)
     calls, outputs = _calls_and_outputs(items)
 
-    assert [c.call_id for c in calls] == ["code_exec:0", "code_exec:1", "code_exec:2"]
-    assert [o.call_id for o in outputs] == ["code_exec:0", "code_exec:1", "code_exec:2"]
+    assert [c["call_id"] for c in calls] == ["code_exec:0", "code_exec:1", "code_exec:2"]
+    assert [o["call_id"] for o in outputs] == ["code_exec:0", "code_exec:1", "code_exec:2"]
 
 
 def test_interleaved_tools_pair_independently():
@@ -74,8 +74,8 @@ def test_interleaved_tools_pair_independently():
     _, items = convert_stirrup_history_to_output_items(history)
     calls, outputs = _calls_and_outputs(items)
 
-    by_id = {o.call_id: o.output for o in outputs}
-    resolved = {c.arguments: by_id[c.call_id] for c in calls}
+    by_id = {o["call_id"]: o["output"] for o in outputs}
+    resolved = {c["arguments"]: by_id[c["call_id"]] for c in calls}
     assert resolved == {
         "code-a": "code-out-a",
         "code-b": "code-out-b",
@@ -95,10 +95,10 @@ def test_suffix_shaped_raw_ids_cannot_collide_with_generated_suffixes():
     _, items = convert_stirrup_history_to_output_items(history)
     calls, outputs = _calls_and_outputs(items)
 
-    ids = [call.call_id for call in calls]
+    ids = [call["call_id"] for call in calls]
     assert len(ids) == len(set(ids)) == 3
-    by_id = {output.call_id: output.output for output in outputs}
-    assert {call.arguments: by_id[call.call_id] for call in calls} == {
+    by_id = {output["call_id"]: output["output"] for output in outputs}
+    assert {call["arguments"]: by_id[call["call_id"]] for call in calls} == {
         "first": "out-first",
         "second": "out-second",
         "literal-suffix": "out-literal-suffix",

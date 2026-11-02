@@ -287,6 +287,10 @@ def parse_genrm_output(
         if not any(k in parsed for k in ("score_1", "score_2", "ranking")):
             return None
 
+        # Reject booleans before float() turns them into 0 or 1.
+        if any(isinstance(parsed.get(key), bool) for key in ("score_1", "score_2", "ranking")):
+            return None
+
         try:
             score_1 = float(parsed.get("score_1", default_score))
             score_2 = float(parsed.get("score_2", default_score))

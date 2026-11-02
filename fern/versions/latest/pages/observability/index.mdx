@@ -13,6 +13,12 @@ NeMo Gym provides two independent observability features:
 
 Each feature has its own configuration. You can enable either or both.
 
+Runs on the Harbor task path (`gym dataset validate`, `gym eval run <task target>`) add a third source that
+needs no configuration: a per-run summary, `rollouts_run_summary.json` beside the rollouts, that points at
+the files of the run and, per task, at its verifier logs, trajectory and collected artifacts by relative path,
+with the input each row carried. `-v` / `--verbose` raises the spun-up servers' log level with the CLI's. See
+[Harbor Tasks](/main/data/harbor-tasks#run-summary-and-verbosity).
+
 ## Get Started
 
 <Cards>

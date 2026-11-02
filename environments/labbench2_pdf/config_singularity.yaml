@@ -11,15 +11,6 @@ harbor_agent_general:
       harbor_ray_task_num_cpus: 0.25
       harbor_resolve_paths_from_gym_root: true
       harbor_unique_job_names: true
-      harbor_jobs_dir: "results/labbench2_pdf/harbor_jobs"
-
-      harbor_dataset:
-        path: "environments/labbench2_pdf/data/tasks_singularity"
-
-      harbor_environment:
-        type: singularity
-        kwargs:
-          singularity_image_cache_dir: "responses_api_agents/harbor_agent_general/singularity_cache"
 
       harbor_worker_env:
         OPENAI_API_KEY: ${oc.select:policy_api_key,''}
@@ -28,16 +19,27 @@ harbor_agent_general:
         JUDGE_BASE_URL: ${oc.select:judge_base_url,''}
         JUDGE_MODEL: ${oc.select:judge_model_name,''}
 
-      harbor_agent:
-        name: opencode
-        model_name: openai/${oc.select:policy_model_name,''}
-        override_setup_timeout_sec: 900
-        env:
-          OPENAI_API_KEY: \${OPENAI_API_KEY}
-          OPENAI_BASE_URL: \${OPENAI_BASE_URL}
+      job:
+        jobs_dir: "results/labbench2_pdf/harbor_jobs"
 
-      harbor_verifier:
-        disable: false
+        datasets:
+          - path: "environments/labbench2_pdf/data/tasks_singularity"
+
+        environment:
+          type: singularity
+          kwargs:
+            singularity_image_cache_dir: "responses_api_agents/harbor_agent_general/singularity_cache"
+
+        agents:
+          - name: opencode
+            model_name: openai/${oc.select:policy_model_name,''}
+            override_setup_timeout_sec: 900
+            env:
+              OPENAI_API_KEY: \${OPENAI_API_KEY}
+              OPENAI_BASE_URL: \${OPENAI_BASE_URL}
+
+        verifier:
+          disable: false
 
 harbor_agent_general_environment_server:
   environment_servers:

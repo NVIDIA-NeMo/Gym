@@ -14,6 +14,7 @@
 # limitations under the License.
 
 import getpass
+import os
 import re
 import shlex
 import tempfile
@@ -21,22 +22,27 @@ from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 from pathlib import Path
 
+import yaml
+
 from nemo_gym import __version__
-from nemo_gym.orchestration.api import SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
+from nemo_gym.orchestration.api import SAVED_CONFIG, SlurmComputeConfig, SubmitConfig, VllmPDServiceConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor
 from nemo_gym.orchestration.executors.connection import Connection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
+    collector_config_path,
     otel_active,
     render_collector_config,
     resolve_token,
     validate_destination,
     validate_gym_telemetry,
 )
+from nemo_gym.orchestration.executors.resume_script import RESUBMIT_ENV
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.jobs import (
+    RESOLVED_CONFIG_NAME,
     BenchmarkJob,
     SubmissionRecord,
     installed_gym_commit,
@@ -60,6 +66,9 @@ _VALID_BENCHMARK_NAME = re.compile(r"^[A-Za-z0-9._-]+$")
 # adjustments are routine on production Slurm) — so only the payload's last
 # whitespace-delimited token is checked against this, not the whole line.
 _JOB_ID_RE = re.compile(r"^\d+(;\S+)?$")
+
+# Held by `gym eval resubmit` from its scheduler check to its sbatch, so two resubmits cannot both queue a job.
+_RESUBMIT_LOCK = ".gym_resubmit.lock"
 
 
 def _validate_benchmark_names(benchmarks: list[str]) -> None:
@@ -148,6 +157,24 @@ def _validate_mounts(config: SubmitConfig, conn: Connection) -> None:
         raise ValueError(f"Mount src paths do not exist:\n{details}")
 
 
+def _submission_env_exports(compute: SlurmComputeConfig) -> list[str]:
+    """Forward explicitly selected values over SSH stdin, never into artifacts."""
+    missing = [name for name in compute.forward_env if name not in os.environ]
+    if missing:
+        raise ValueError(f"compute.forward_env variables are unset: {', '.join(missing)}")
+    return [f"export {name}={shlex.quote(os.environ[name])}" for name in sorted(set(compute.forward_env))]
+
+
+def _submission_exports(config: SubmitConfig) -> list[str]:
+    """What `run()` exports ahead of sbatch: the forwarded values, then the telemetry token when it is on."""
+    exports = _submission_env_exports(next(iter(config.compute.values())))
+    token = resolve_token(config)
+    validate_destination(config)
+    if token is not None:
+        exports.append(f"export {config.otel.token_env}={shlex.quote(token)}")
+    return exports
+
+
 class SlurmExecutor(BaseExecutor):
     """Slurm executor for Pyxis-enabled clusters (https://github.com/NVIDIA/pyxis).
 
@@ -157,10 +184,12 @@ class SlurmExecutor(BaseExecutor):
     """
 
     supports_resumable = True
+    name = "slurm"
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
         cluster = next(iter(config.compute))
+        submission_env = _submission_env_exports(compute) if not dry_run else []
         benchmark_names = list(config.driver.benchmarks)
         _validate_benchmark_names(benchmark_names)
         # The remote lookup overlaps the other validation, staging, the SSH connect and the mount
@@ -170,9 +199,9 @@ class SlurmExecutor(BaseExecutor):
         pool.shutdown(wait=False)
         token = None
         if otel_active(config):
+            token = resolve_token(config)
             validate_destination(config)
             validate_gym_telemetry(config)
-            token = resolve_token(config)
         now = utc_now()
         gym_job_id = new_gym_job_id(now)
         remote_run_dir = Path(config.job.output_path) / gym_job_id
@@ -190,7 +219,8 @@ class SlurmExecutor(BaseExecutor):
                 conn.copy(staging, remote_run_dir)
                 token_export = [f"export {config.otel.token_env}={shlex.quote(token)}"] if token is not None else []
                 output = conn.run(
-                    token_export
+                    submission_env
+                    + token_export
                     + [_sbatch_command(name, remote_run_dir / name / "job.sh") for name in benchmark_names]
                 )
                 record = self._build_record(cluster, compute, gym_job_id, now, remote_run_dir, benchmark_names, output)
@@ -200,6 +230,77 @@ class SlurmExecutor(BaseExecutor):
                 self.persist(record, config, conn.write_text)
 
         return record
+
+    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+        """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
+
+        Refuses while any of the caller's jobs runs in that job dir, so two jobs never write one run, and
+        refuses a run with rollouts whose `gym eval run` job.sh predates resubmit: it would start the run
+        fresh and delete them. A `command` benchmark's job.sh runs its own command, so it is not refused.
+        """
+        job = record.benchmark_job(benchmark)
+        job_dir = Path(job.job_dir)
+        with get_connection(record.hostname) as conn:
+            config = self._saved_config(conn, Path(record.run_dir))
+            exports = _submission_exports(config)
+            # A resubmit can lose access to the remote token. Refresh only this benchmark's
+            # collector config, inside the lock and after refusing any active job in its dir.
+            collector_update = []
+            if otel_active(config):
+                collector_yaml = render_collector_config(config, benchmark, job_dir)
+                collector_path = shlex.quote(str(collector_config_path(job_dir)))
+                collector_update = [
+                    f"printf %s {shlex.quote(collector_yaml)} > {collector_path} || fail 'cannot update collector config'"
+                ]
+            # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
+            # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
+            results = _parse_sbatch_results(
+                conn.run(
+                    exports
+                    + [
+                        'fail() { echo "Error: $*" >&2; exit 1; }',
+                        f"cd {shlex.quote(str(job_dir))} || fail 'cannot enter the job dir'",
+                        # bash's noclobber creates the lock with O_EXCL, which is atomic on shared filesystems
+                        # that do not support flock. Not mkdir: uutils mkdir (Ubuntu 26.04's default) can
+                        # report success to two concurrent callers.
+                        f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
+                        f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
+                        f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+                        # --all: without it squeue does not list jobs, ours included, in a hidden partition.
+                        "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'squeue failed'",
+                        'for d in $workdirs; do [ "$d" != "$PWD" ] || '
+                        'fail "A job of this run is still pending or running in $PWD."; done',
+                        # Only the built-in runner's fresh start deletes rollouts; its job.sh lists
+                        # `gym eval run` on a line of its own (see `render_gym_cmd`).
+                        "if [ -s artifacts/rollouts.jsonl ] && grep -qx -- '[[:space:]]*gym eval run' job.sh "
+                        "&& ! grep -qF -- ++resubmit=True job.sh; then "
+                        'fail "job.sh in $PWD predates resubmit, so it could start the run fresh and delete its '
+                        'rollouts; submit the run again instead"; fi',
+                        # Saved runners may predate normalization of the resume flag. Upgrade only the built-in
+                        # resubmit command, under the same lock, before queueing the existing script.
+                        "if grep -qx -- '[[:space:]]*gym eval run' job.sh "
+                        "&& grep -qF -- 'GYM_CMD+=(++resubmit=True)' job.sh; then "
+                        "sed -i 's/GYM_CMD+=(++resubmit=True)/GYM_CMD+=(++resubmit=True ++resume_from_cache=True)/g' "
+                        "job.sh || fail 'cannot normalize resubmit flags in job.sh'; fi",
+                        *collector_update,
+                        f"export {RESUBMIT_ENV}=1",
+                        _sbatch_command(benchmark, job_dir / "job.sh"),
+                    ]
+                )
+            )
+            job_id, error = results.get(benchmark, (None, "sbatch produced no result"))
+            if job_id is None:
+                raise RuntimeError(f"Resubmit of {benchmark} failed: {error}")
+            job = job.model_copy(update={"job_id": job_id, "error": None})
+            self.persist_record(record.with_benchmark(job), conn.write_text)
+        return job
+
+    @staticmethod
+    def _saved_config(conn: Connection, run_dir: Path) -> SubmitConfig:
+        """The resolved config `persist()` saved for this run, so a resubmit repeats what submit did."""
+        resolved = run_dir / RESOLVED_CONFIG_NAME
+        text = conn.run([f"cat {shlex.quote(str(resolved))}"])
+        return SubmitConfig.model_validate(yaml.safe_load(text), context={SAVED_CONFIG: True})
 
     def _build_record(
         self,
@@ -233,7 +334,7 @@ class SlurmExecutor(BaseExecutor):
             submitted_at=utc_timestamp(now),
             run_dir=str(remote_run_dir),
             cluster=cluster,
-            executor="slurm",
+            executor=self.name,
             hostname=compute.hostname,
             submitted_by=getpass.getuser(),
             benchmarks=benchmarks,

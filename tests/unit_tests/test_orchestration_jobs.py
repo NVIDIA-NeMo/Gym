@@ -196,6 +196,9 @@ def test_persist_writes_the_local_index_even_when_the_manifest_fails(tmp_path, m
         def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
             raise NotImplementedError
 
+        def resubmit(self, record, benchmark):  # pragma: no cover - unused
+            raise NotImplementedError
+
     def _explode(path, text, **_):
         raise OSError("remote is read-only")
 
@@ -214,6 +217,9 @@ def test_persist_names_the_queued_jobs_when_the_manifest_fails(tmp_path, monkeyp
         def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
             raise NotImplementedError
 
+        def resubmit(self, record, benchmark):  # pragma: no cover - unused
+            raise NotImplementedError
+
     record = _record()
     with pytest.raises(RuntimeError, match=r"Already queued: .*gsm8k=12345"):
         _Executor().persist(
@@ -226,6 +232,9 @@ def test_persist_writes_the_resolved_config_next_to_the_manifest(tmp_path, monke
 
     class _Executor(BaseExecutor):
         def run(self, config, *, dry_run: bool = False):  # pragma: no cover - unused
+            raise NotImplementedError
+
+        def resubmit(self, record, benchmark):  # pragma: no cover - unused
             raise NotImplementedError
 
     run_dir = tmp_path / "run"

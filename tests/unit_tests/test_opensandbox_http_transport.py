@@ -12,7 +12,6 @@ import httpx
 import pytest
 from aiohttp import web
 
-from nemo_gym import server_utils
 from nemo_gym.sandbox.providers import _http_transport
 from nemo_gym.sandbox.providers._http_transport import GymAiohttpTransport
 from nemo_gym.sandbox.providers.e2b import _sdk as e2b_sdk
@@ -53,7 +52,7 @@ async def shared_server(monkeypatch):
     await site.start()
     port = site._server.sockets[0].getsockname()[1]
     async with aiohttp.ClientSession(connector=aiohttp.TCPConnector(limit=1, limit_per_host=1)) as client:
-        monkeypatch.setattr(server_utils, "_GLOBAL_AIOHTTP_CLIENT", client)
+        monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", client)
         try:
             yield SimpleNamespace(
                 url=f"http://127.0.0.1:{port}",
@@ -122,7 +121,9 @@ async def test_global_connection_limit_applies_across_providers(shared_server):
 async def test_tls_is_set_per_request_and_timeouts_are_not_retried(monkeypatch, verify):
     provider = OpenSandboxProvider(connection={"tls_verify": verify})
     request = AsyncMock(side_effect=aiohttp.SocketTimeoutError("read timed out"))
-    monkeypatch.setattr(server_utils, "get_global_aiohttp_client", lambda: SimpleNamespace(request=request))
+    monkeypatch.setattr(
+        "nemo_gym.client.http_client.get_global_aiohttp_client", lambda: SimpleNamespace(request=request)
+    )
     async with httpx.AsyncClient(transport=provider._get_transport()) as client:
         with pytest.raises(httpx.ReadTimeout, match="read timed out"):
             await client.post("https://sandbox.example/command", content=b"run once", timeout=7)
@@ -172,7 +173,7 @@ async def test_e2b_and_opensandbox_share_connections(shared_server):
 )
 async def test_transport_maps_errors_without_retrying(monkeypatch, error, expected):
     request = AsyncMock(side_effect=error)
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", request)
     async with httpx.AsyncClient(transport=GymAiohttpTransport()) as client:
         with pytest.raises(expected):
             await client.post("https://sandbox.example/command", content=b"run once")
@@ -183,7 +184,7 @@ async def test_transport_maps_errors_without_retrying(monkeypatch, error, expect
 async def test_transport_preserves_proxy_auth_and_headers(monkeypatch):
     proxy = httpx.Proxy("http://proxy.example:8080", auth=("user", "password"), headers={"X-Proxy": "value"})
     request = AsyncMock(side_effect=aiohttp.ConnectionTimeoutError("timeout"))
-    monkeypatch.setattr(server_utils, "request", request)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", request)
     async with httpx.AsyncClient(transport=GymAiohttpTransport(proxy=proxy)) as client:
         with pytest.raises(httpx.ConnectTimeout):
             await client.get("https://sandbox.example/command")
@@ -280,7 +281,7 @@ async def test_rate_limited_upload_stream_is_not_replayed(shared_server, monkeyp
 async def test_cancelling_rate_limit_sleep_closes_response_without_retrying(monkeypatch):
     response = Mock(status=429, headers={"Retry-After": "27"})
     send = AsyncMock(return_value=response)
-    monkeypatch.setattr(server_utils, "request", send)
+    monkeypatch.setattr("nemo_gym.client.http_client.request", send)
 
     async def cancel_sleep(delay):
         response.close.assert_called_once_with()

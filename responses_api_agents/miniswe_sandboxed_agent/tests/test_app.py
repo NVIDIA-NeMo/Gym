@@ -10,7 +10,7 @@ import yaml
 from minisweagent.config import builtin_config_dir
 from minisweagent.models.utils.actions_toolcall_response import BASH_TOOL_RESPONSE_API
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.miniswe_sandboxed_agent import harness as module
 
 
