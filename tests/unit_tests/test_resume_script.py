@@ -1410,3 +1410,37 @@ def test_a_sentinel_keeps_a_deliberate_stop_on_a_complete_run(tmp_path, monkeypa
     assert "Run complete" not in result.stdout
     assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop + "\n"
     assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("pkill") is None, reason="bash and pkill needed")
+@pytest.mark.parametrize(
+    "death",
+    [{"admission_command": "kill -9 $$"}, {"extra_env": {"FAKE_SACCT_KILLS_JOB": "1"}}],
+    ids=["after-the-counter-write", "before-the-counter-write"],
+)
+def test_a_sentinel_debits_the_parent_once_when_its_follow_up_died_around_the_counter_write(tmp_path, death):
+    _write_inventory(tmp_path)
+    (tmp_path / "artifacts" / "rollouts_manifest.json").write_text("{}\n")  # the follow-up runs admission
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    # Follow-up 777 of parent 100 (60 s) records itself, then dies (in admission, after it wrote the counter, or in
+    # its accounting query, before).
+    followup = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", job_id="777", **death)
+    assert followup.returncode == -9 and "REACHED_WORK" not in followup.stdout, followup.stdout + followup.stderr
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n"
+    after_followup = (
+        (tmp_path / ".gym_accumulated_walltime").read_text().strip() if "admission_command" in death else ""
+    )
+    assert after_followup in ("60", "")
+
+    sentinel = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        admission_command="echo __GYM_CONTINUATION:segment",
+        extra_env=_sentinel_of("13"),
+    )
+
+    assert sentinel.returncode == 0 and "REACHED_WORK" in sentinel.stdout, sentinel.stdout + sentinel.stderr
+    # Parent 100 (60 s) and dead follow-up 777 (13 s), each once: 73, not 60 + 60 + 13.
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "73"
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n200\n"

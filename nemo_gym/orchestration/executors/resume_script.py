@@ -526,6 +526,17 @@ if [[ "$_prev_slurm_job_id" != "" ]]; then
     esac
     [[ -z "$_extra" && "$_prev_elapsed" =~ ^[0-9]{{1,15}}$ ]] || \
         _gym_stop_accounting_unknown "Previous job elapsed accounting is unknown or malformed."
+    # The previous job is debited exactly once. Before the counter changes, the value it had before that debit is kept
+    # beside it, named by the previous job. A follow-up can write the counter and then die; the sentinel that takes
+    # its place has the same previous job, so it starts again from the kept value instead of debiting that job twice.
+    _gym_before_debit="$OUTPUT_DIR/.gym_walltime_before.$_prev_slurm_job_id"
+    if [[ -e "$_gym_before_debit" ]]; then
+        _gym_accumulated=$(cat "$_gym_before_debit") || _gym_stop_accounting_unknown "Cannot read the walltime before the previous job's debit."
+        [[ "$_gym_accumulated" =~ ^[0-9]{{1,15}}$ ]] || _gym_stop_accounting_unknown "The walltime before the previous job's debit is malformed."
+        _gym_accumulated=$((10#$_gym_accumulated))
+    else
+        {{ echo "$_gym_accumulated" > "$_gym_before_debit.tmp" && mv -f "$_gym_before_debit.tmp" "$_gym_before_debit"; }} ||             _gym_stop_incomplete "Cannot preserve elapsed walltime."
+    fi
     _gym_accumulated=$((_gym_accumulated + 10#$_prev_elapsed + _gym_sentinel_debit))
     echo "$_gym_accumulated" > "$_walltime_file" || _gym_stop_incomplete "Cannot preserve elapsed walltime."
     # A driver that failed before collection ran anything left its kind; the next segment would fail the same way.
