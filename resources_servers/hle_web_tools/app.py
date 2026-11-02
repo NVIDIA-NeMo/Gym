@@ -34,6 +34,7 @@ import hashlib
 import json
 import logging
 import re
+import unicodedata
 from asyncio import sleep, to_thread
 from collections import OrderedDict
 from dataclasses import dataclass
@@ -141,7 +142,8 @@ _SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re
 _SLASH_RUN_RE = re.compile(r"/{2,}")
 _WAYBACK_PATH_RE = re.compile(r"^/web/[^/]*/(.+)$", re.IGNORECASE | re.DOTALL)
 _GOOGLE_CACHE_RE = re.compile(r"cache:(?:[A-Za-z0-9_-]+:)?(.+)$", re.DOTALL)
-_WORD_RE = re.compile(r"\w+")
+# Word characters without the underscore: ``odd_spin_structures`` is three words, as search engines read it.
+_WORD_RE = re.compile(r"[^\W_]+")
 # A data URI with or without media-type parameters, base64 or percent-encoded, up to the end of its Markdown
 # destination: the payload stops at whitespace, ``)``, a quote or ``>``, so following prose is kept. Every
 # repetition is bounded, so the scan stays linear on adversarial pages.
@@ -411,11 +413,16 @@ class Blocklist:
         return None
 
     def query_block(self, query: str, question_spans: Optional["QuestionSpans"]) -> Optional[Block]:
-        """The protocol's query refusals: blocked patterns, a blocked ``site:`` domain, a verbatim question span."""
-        block = self.text_block(query, "query")
-        if block is not None:
-            return block
-        for match in _SITE_OPERATOR_RE.finditer(query):
+        """The protocol's query refusals: blocked patterns, a blocked ``site:`` domain, a verbatim question span.
+
+        The patterns and ``site:`` operands are checked on the query as written and as ``fold_text`` reads it.
+        """
+        forms = list(dict.fromkeys((query, fold_text(query))))
+        for form in forms:
+            block = self.text_block(form, "query")
+            if block is not None:
+                return block
+        for match in (match for form in forms for match in _SITE_OPERATOR_RE.finditer(form)):
             host = schemeless(match.group(1)).split("/", 1)[0].split(":", 1)[0]
             try:
                 host = normalize_hostname(_WWW_RE.sub("", host, count=1))
@@ -560,8 +567,21 @@ def markdown_heading_title(markdown: str) -> str:
     return ""
 
 
+def fold_text(text: str) -> str:
+    """NFKC with format characters (category Cf: zero-width space, soft hyphen, word joiner) removed: the spelling
+    search engines index, so full-width, mathematical and zero-width variants read as the plain text."""
+    if text.isascii():
+        return text
+    return "".join(ch for ch in unicodedata.normalize("NFKC", text) if unicodedata.category(ch) != "Cf")
+
+
 def question_words(text: str) -> Tuple[str, ...]:
-    """Case-folded maximal runs of word characters: the unit of the verbatim-span rule."""
+    """Case-folded maximal runs of letters and digits after ``fold_text`` and with combining marks removed
+    (``holomorphíc`` is ``holomorphic``): the unit of the verbatim-span rule."""
+    text = fold_text(text)
+    if not text.isascii():
+        decomposed = unicodedata.normalize("NFD", text)
+        text = unicodedata.normalize("NFC", "".join(ch for ch in decomposed if unicodedata.category(ch) != "Mn"))
     return tuple(_WORD_RE.findall(text.casefold()))
 
 

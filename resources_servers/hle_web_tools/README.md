@@ -67,15 +67,19 @@ of `/` collapsed, the fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./
 
 Beyond the families, the protocol's own refusals:
 
-- **Queries** are refused when they match `url_patterns` or `patterns_case_sensitive`, when a `site:`
+- **Queries** are refused (each check runs on the query as written and NFKC-folded with format
+  characters such as zero-width spaces and soft hyphens removed) when they match `url_patterns` or
+  `patterns_case_sensitive`, when a `site:`
   operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
   site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; one leading dot, the
   scheme, `www.` and any path are stripped before the check; an operand that is not a valid hostname is
   refused as `malformed_url` rather than skipped), or when they
   repeat a long verbatim span of the question. Upstream states no span length; this server refuses a
   query that contains **8 consecutive words of the question** (`verbatim_span_words`, default 8), where
-  words are case-folded maximal runs of word characters, so punctuation, case and whitespace differences
-  do not evade the rule. A question shorter than the threshold is protected as a whole. The question
+  words are case-folded maximal runs of letters and digits after that folding and with combining marks
+  removed, so punctuation, case, whitespace, underscores, full-width or mathematical letters, zero-width
+  characters and accents do not evade the rule. Letters from another script that look alike (a Cyrillic
+  `о` for a Latin `o`) are not folded. A question shorter than the threshold is protected as a whole. The question
   reaches the server through `/seed_session`: an Agent seeds its tool servers with its run request,
   whose extra fields are the task row (`question` for the HLE presets, configurable as
   `question_field`); the last user message of `responses_create_params.input` is the fallback, and an

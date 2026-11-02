@@ -229,6 +229,27 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
     assert backend.search.await_count == 2
 
 
+@pytest.mark.parametrize(
+    "query, family",
+    [
+        # Spellings search engines fold back to the question's words.
+        ("ｈｏｗ ｍａｎｙ ｏｄｄ ｓｐｉｎ ｓｔｒｕｃｔｕｒｅｓ ａｄｍｉｔ ａ ｎｏｎｖａｎｉｓｈｉｎｇ", "question_span"),  # full-width
+        ("how many odd sp\u200bin structures admit a nonvanishing", "question_span"),  # zero-width space
+        ("how many odd spi\u0301n structures admit a nonvanishing", "question_span"),  # combining mark
+        ("how_many_odd_spin_structures_admit_a_nonvanishing", "question_span"),  # underscore-joined
+        ("humanity\u00ads last exam answers", "url_patterns"),  # soft hyphen inside a blocked phrase
+    ],
+    ids=["full-width", "zero-width-space", "combining-mark", "underscore-joined", "soft-hyphen-pattern"],
+)
+async def test_presentation_variants_of_a_blocked_query_are_refused(server, caplog, query, family):
+    backend = stub_backend(server, results=[result("https://example.com/ok")])
+    await seed(server, {"question": QUESTION})
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        response = await search(server, query)
+    assert response.refused and f"family={family} " in caplog.text
+    backend.search.assert_not_awaited()
+
+
 async def test_reseeding_a_seeded_session_with_another_question_is_refused(server, caplog):
     """A session keeps the question it was seeded with: a retried seed (same question) is served again, a seed
     that would swap or drop the question answers 409, so the span check cannot be replaced from the plain route
