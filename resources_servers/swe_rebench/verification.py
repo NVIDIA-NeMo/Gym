@@ -28,7 +28,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
-from resources_servers.swebench.start_state import SETUP_PATCH_PATH
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
+    SETUP_PATCH_FAILED_EXIT,
+    apply_setup_patch_command,
+    setup_files,
+)
 
 
 # The marker delimits the graded test output from the install noise that precedes it. Parsers
@@ -37,7 +42,6 @@ from resources_servers.swebench.start_state import SETUP_PATCH_PATH
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SWE_REBENCH_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SWE_REBENCH_TEST_END___"
 TEST_PATCH_FAILED = "___NEMO_GYM_SWE_REBENCH_TEST_PATCH_FAILED___"
-SETUP_PATCH_FAILED_EXIT = 96
 
 PASSED = "PASSED"
 
@@ -159,11 +163,7 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     install_block = "\n".join(as_command_list(inputs.install))
     test_block = "\n".join(as_command_list(inputs.test_cmd))
 
-    # Unlike the agent's patch, the start state is the task itself: if it does not apply
-    # exactly, the run says nothing about the agent and must not be graded.
-    apply_setup_patch = ""
-    if inputs.setup_patch.strip():
-        apply_setup_patch = f"git apply {SETUP_PATCH_PATH} || exit {SETUP_PATCH_FAILED_EXIT}"
+    apply_setup_patch = apply_setup_patch_command(inputs.setup_patch)
     apply_patch = ""
     if inputs.patch.strip():
         apply_patch = (
@@ -275,8 +275,7 @@ def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: 
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
     # Harmless for non-JVM rows, which never read them.
     files.update(_mirror_files(maven_settings=overwrite_maven_settings))
-    if inputs.setup_patch.strip():
-        files[SETUP_PATCH_PATH] = inputs.setup_patch
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -314,7 +313,7 @@ async def run_verification(
             patch_applied=False,
             test_results=None,
             test_output=output,
-            error="start-state setup patch did not apply",
+            error=SETUP_PATCH_FAILED_ERROR,
         )
     if result.return_code == 97:
         return VerificationResult(

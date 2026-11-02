@@ -35,9 +35,10 @@ from pathlib import Path
 from typing import Any, Sequence
 
 from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
     SETUP_PATCH_FAILED_EXIT,
-    SETUP_PATCH_PATH,
     apply_setup_patch_command,
+    setup_files,
 )
 from resources_servers.swemer_v1.verification import mirror_files
 from resources_servers.swemer_v2.verification import drop_patch_sections, drop_test_patch_files
@@ -173,8 +174,7 @@ def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: 
     # Most packages embed test.patch in test.sh; a few `cp "$SCRIPT_DIR/test.patch"` instead.
     if inputs.test_patch.strip():
         files[f"{TESTS_DIR}/test.patch"] = inputs.test_patch
-    if inputs.setup_patch.strip():
-        files[SETUP_PATCH_PATH] = inputs.setup_patch
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files[PATCH_FILE] = inputs.patch
     # Maven Central 429s under concurrent load (seen in this dataset's first smoke); the
@@ -219,7 +219,7 @@ def parse_verification_output(output: str, return_code: int, inputs: Verificatio
             patch_applied=False,
             test_results=None,
             test_output=output,
-            error="start-state setup patch did not apply",
+            error=SETUP_PATCH_FAILED_ERROR,
         )
 
     applied_match = _PATCH_APPLIED_RE.search(output)

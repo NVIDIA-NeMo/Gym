@@ -20,7 +20,6 @@ from types import SimpleNamespace
 import pytest
 
 from resources_servers.swe_rebench.verification import (
-    SETUP_PATCH_FAILED_EXIT,
     VerificationInputs,
     build_eval_script,
     run_verification,
@@ -134,7 +133,7 @@ def test_grading_applies_the_start_state_exactly_before_the_agent_patch():
         instance_id="toy", repo="o/r", base_commit="abc", patch="agent\n", setup_patch="setup\n"
     )
     script = build_eval_script(inputs)
-    setup_line = f"git apply {start_state.SETUP_PATCH_PATH} || exit {SETUP_PATCH_FAILED_EXIT}"
+    setup_line = f"git apply {start_state.SETUP_PATCH_PATH} || exit {start_state.SETUP_PATCH_FAILED_EXIT}"
     assert setup_line in script
     assert script.index(setup_line) < script.index("/tmp/nemo_gym_patch.diff")
     assert verification_files(inputs)[start_state.SETUP_PATCH_PATH] == "setup\n"
@@ -147,7 +146,7 @@ def test_grading_applies_the_start_state_exactly_before_the_agent_patch():
 async def test_a_start_state_that_does_not_apply_is_incomplete_not_a_zero():
     class Failing:
         async def exec(self, command, timeout_s=None):
-            return SimpleNamespace(stdout="", stderr="patch failed", return_code=SETUP_PATCH_FAILED_EXIT)
+            return SimpleNamespace(stdout="", stderr="patch failed", return_code=start_state.SETUP_PATCH_FAILED_EXIT)
 
     inputs = VerificationInputs(instance_id="toy", repo="o/r", base_commit="abc", patch="", setup_patch="s\n")
     result = await run_verification(Failing(), inputs, parser=lambda log: {})

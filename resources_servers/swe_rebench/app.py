@@ -63,7 +63,6 @@ from resources_servers.swe_rebench.verification import (
     run_verification,
     verification_files,
 )
-from resources_servers.swebench.anti_cheat import apply_anti_cheat_setup
 from resources_servers.swebench.patch_capture import (
     PatchCapture,
     PatchCaptureMode,
@@ -71,9 +70,7 @@ from resources_servers.swebench.patch_capture import (
     prepare_git_for_commits,
 )
 from resources_servers.swebench.start_state import (
-    assert_unreachable,
-    commit_start_state,
-    normalize_tree,
+    seed_start_state,
     seeded_head,
     setup_files,
     wants_start_state,
@@ -288,18 +285,20 @@ class SWERebenchResourcesServer(SimpleResourcesServer):
         self._session_id_to_pristine_untracked.pop(session_id, None)
         self._session_id_to_seeded_head.pop(session_id, None)
         workdir = repo_directory(body.repo)
-        start_state = wants_start_state(body.setup_patch, body.squash_history)
         sandbox = await self._create_sandbox(body, files=setup_files(body.setup_patch))
         try:
-            if start_state:
-                original = await seeded_head(sandbox, workdir)
-                await commit_start_state(sandbox, workdir, squash_history=body.squash_history)
-            # A start state rewrites HEAD, so the scrub that prunes the original commit is required.
-            if self.config.apply_anti_cheating or start_state:
-                await apply_anti_cheat_setup(sandbox, workdir, body.instance_id, "swe_rebench")
-            if start_state:
-                await assert_unreachable(sandbox, workdir, original)
-                await normalize_tree(sandbox, workdir)
+            # Grading here checks out base_commit afresh, so the image's tracked edits are dropped.
+            await seed_start_state(
+                sandbox,
+                workdir,
+                body.instance_id,
+                "swe_rebench",
+                setup_patch=body.setup_patch,
+                squash_history=body.squash_history,
+                apply_anti_cheating=self.config.apply_anti_cheating,
+                keep_worktree=False,
+            )
+            if wants_start_state(body.setup_patch, body.squash_history):
                 self._session_id_to_seeded_head[session_id] = await seeded_head(sandbox, workdir)
         except Exception:
             await self._stop_sandbox(sandbox)

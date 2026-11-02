@@ -56,9 +56,10 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_ERROR,
     SETUP_PATCH_FAILED_EXIT,
-    SETUP_PATCH_PATH,
     apply_setup_patch_command,
+    setup_files,
 )
 
 
@@ -185,8 +186,7 @@ def _slice(log: str, begin: str, end: str) -> str:
 
 def verification_files(inputs: VerificationInputs) -> dict[str, str]:
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
-    if inputs.setup_patch.strip():
-        files[SETUP_PATCH_PATH] = inputs.setup_patch
+    files.update(setup_files(inputs.setup_patch))
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -304,7 +304,7 @@ async def run_verification(
             patch_applied=False,
             test_results=None,
             test_output=output,
-            error="start-state setup patch did not apply",
+            error=SETUP_PATCH_FAILED_ERROR,
         )
     if result.return_code == 97:
         return VerificationResult(

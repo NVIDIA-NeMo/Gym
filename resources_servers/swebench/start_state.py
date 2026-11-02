@@ -137,16 +137,18 @@ async def seed_start_state(
     setup_patch: str,
     squash_history: bool,
     apply_anti_cheating: bool,
+    keep_worktree: bool = True,
 ) -> None:
     """Steps 1-3 around the anti-cheat scrub, for a sandbox whose ``workdir`` is a git repo
-    at the base commit and whose grading applies patches to the image's tree as shipped.
-    Without a start state this is only the configured scrub; with one the scrub is required,
-    since the rewritten HEAD must leave the original unreachable.
+    at the base commit. Without a start state this is only the configured scrub; with one the
+    scrub is required, since the rewritten HEAD must leave the original unreachable.
+    ``keep_worktree`` is as for ``commit_start_state``: on for servers whose grading applies
+    patches to the image's tree as shipped.
     """
     start_state = wants_start_state(setup_patch, squash_history)
     if start_state:
         original = await seeded_head(sandbox, workdir)
-        await commit_start_state(sandbox, workdir, squash_history=squash_history, keep_worktree=True)
+        await commit_start_state(sandbox, workdir, squash_history=squash_history, keep_worktree=keep_worktree)
     if apply_anti_cheating or start_state:
         await apply_anti_cheat_setup(sandbox, workdir, instance_id, log_prefix)
     if start_state:
@@ -155,6 +157,7 @@ async def seed_start_state(
 
 
 SETUP_PATCH_FAILED_EXIT = 96
+SETUP_PATCH_FAILED_ERROR = "start-state setup patch did not apply"
 
 
 def apply_setup_patch_command(setup_patch: str) -> str:
