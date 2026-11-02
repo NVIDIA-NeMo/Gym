@@ -429,3 +429,32 @@ def test_optional_continuation_metadata_serialization(model, metadata, legacy_nu
         schema = type(model).model_json_schema(mode=mode)
         assert schema["type"] == "object"
         assert set(schema["properties"]) == set(type(model).model_fields)
+
+
+async def test_shutdown_cancels_the_shielded_continuation_close_task(agent, monkeypatch):
+    request, body = await seed(agent)
+    entered, canceled = asyncio.Event(), asyncio.Event()
+
+    async def cleanup(state):
+        entered.set()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            canceled.set()
+            raise
+
+    monkeypatch.setattr(agent, "_close_agent_session_state", cleanup)
+    waiter = asyncio.create_task(agent.close_agent_session(request, close(body)))
+    await entered.wait()
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    record = agent._session_records[body.agent_session_id]
+    assert record.close_task is not None and not record.close_task.done()
+    agent.config.session_close_timeout_seconds = 0.01
+    app = agent.setup_webserver()
+    async with app.router.lifespan_context(app):
+        pass
+    assert canceled.is_set()
+    assert record.close_task.cancelled()
+    assert record.state is not None and record.close_response is None
