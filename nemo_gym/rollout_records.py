@@ -44,6 +44,7 @@ from nemo_gym.rollout_recovery import (
     has_recorded_grade,
     has_saved_generation,
     has_unclassified_execution_failure,
+    is_answered_agent_deadline,
     is_terminal_failure,
     keeps_partial_response,
     load_resubmit_offset,
@@ -621,8 +622,10 @@ class RolloutRecords:
             masked=bool(row.get("mask_sample")),
             has_reward=type(row.get("reward")) in (int, float),
             elapsed_seconds=observed_elapsed(row),
-            # The producer settled this rollout as a scored zero: final, so no policy reopens it.
-            final_zero=row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")),
+            # The producer settled this rollout as a scored zero, or the agent's deadline ended it with its answer
+            # kept (the model's result, as recovery classifies it): final, so no policy reopens it.
+            final_zero=(row.get("_ng_failure_counts_as_zero") is True and bool(row.get("_ng_failure_terminal")))
+            or is_answered_agent_deadline(row),
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would

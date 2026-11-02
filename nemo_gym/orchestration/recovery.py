@@ -1451,10 +1451,15 @@ if len(sys.argv) > 2:
     except (OSError, ValueError, KeyError, TypeError, IndexError):
         pass
 coverage_allocation_id = None
+coverage_scored = None
 try:
     # The allocation that last opened the Store for writing; only its id leaves the run host.
-    value = json.load(open(os.path.join(a, "rollouts_coverage.json"))).get("allocation_id")
+    report = json.load(open(os.path.join(a, "rollouts_coverage.json")))
+    value = report.get("allocation_id")
     coverage_allocation_id = value if isinstance(value, str) and value.isascii() and value.isdecimal() else None
+    # Collection's own count of the rollouts whose score entered the metrics, and its expected count.
+    if all(type(report.get(k)) is int and report[k] >= 0 for k in ("scored", "expected")):
+        coverage_scored = [report["scored"], report["expected"]]
 except (OSError, ValueError, AttributeError):
     pass
 collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "results": rows("rollouts.jsonl"),
@@ -1464,7 +1469,7 @@ collected = {"materialized": rows("rollouts_materialized_inputs.jsonl"), "result
                   "walltime_state": "unknown" if unknown_accounting else num(".gym_accumulated_walltime")[1], "job_chain": chain,
                   "chain_incomplete": os.path.exists(os.path.join(d, ".gym_chain_incomplete")),
                   "quality": quality, "score": score, "mlflow": mlflow, "managed_store": any(managed_store),
-                  "coverage_allocation_id": coverage_allocation_id}
+                  "coverage_allocation_id": coverage_allocation_id, "coverage_scored": coverage_scored}
 # One closing snapshot: every source hash above is the opening one, so a change during collection shows up here.
 closing_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 if quality is not None and (source_snapshot != closing_snapshot or changed_while_reading):
@@ -1560,6 +1565,8 @@ class CollectedEvidence(BaseModel):
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
+    # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
+    coverage_scored: tuple[int, int] | None = None
     # Why the chain's accounting is unknown (the marker's reason or an unobserved claim), and the counter files' own
     # states (absent, ok, malformed) when the sources were stable.
     accounting_unknown_reason: str | None = None
@@ -4521,11 +4528,41 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "omitted": decision.counts.get(IdentityState.OMITTED, 0),
         "response_failures": family(responses, RESPONSE_FAILURE_CAUSES),
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
+        "metric_coverage": metric_coverage(decision, collected),
     }
 
 
+def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any]:
+    """How many expected trials the benchmark's metric covered: ``{"trials": N, "expected": M, "source": ...}``.
+
+    The source is collection's own count when its coverage report has one for this inventory (``coverage_report``):
+    the rollouts whose score entered the metrics, a failure counted as zero by configuration included. Otherwise it is
+    read from the saved rows (``saved_rows``): the scored results and the failures their producer marked as counted
+    zeros, which is what collection hands the metrics unless it counts more by configuration. A failure the benchmark
+    leaves out of its metric, such as an agent deadline that kept its answer, is a trial the metric did not cover.
+    The denominator is the trial gate's: every expected trial, less the rows an accepted partial stage omitted.
+    """
+    from nemo_gym.rollout_collection import is_non_superseding_rollout_row
+
+    expected = trial_population(decision)
+    report = collected.coverage_scored if collected is not None else None
+    if report is not None and report[1] == decision.expected:
+        return {"trials": report[0], "expected": expected, "source": "coverage_report"}
+    standing: dict[Identity, Mapping[str, Any]] = {}
+    for row in (collected.failures or []) if collected is not None else []:
+        if (identity := _identity(row)) is not None and not is_non_superseding_rollout_row(row):
+            standing[identity] = row
+    counted = sum(
+        standing.get(identity, {}).get(COUNTS_AS_ZERO) is True
+        for identity in decision.identities.get(IdentityState.MODEL_FINAL.value, [])
+    )
+    trials = decision.counts.get(IdentityState.SCORED, 0) + counted
+    return {"trials": trials, "expected": expected, "source": "saved_rows"}
+
+
 def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | None) -> str:
-    """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...``."""
+    """``evaluation health: PASS; response failures: 4.70% (truncated 41, empty 6 of 1000); trial failures: ...;
+    metric over 1000 of 1000 trials``."""
     text = f"evaluation health: {evaluation['status'] if evaluation else 'NOT EVALUATED'}"
     if facts is None:
         return text
@@ -4535,6 +4572,9 @@ def health_verdict(evaluation: dict[str, Any] | None, facts: dict[str, Any] | No
         text += f"; {name.replace('_', ' ')}: {found['rate']:.2%} ({named or 'none'} of {facts['expected']})"
     if facts["omitted"]:
         text += f"; {facts['omitted']} accepted stage omission(s) are not counted"
+    coverage = facts.get("metric_coverage")
+    if coverage is not None:
+        text += f"; metric over {coverage['trials']} of {coverage['expected']} trials"
     return text
 
 
