@@ -885,7 +885,12 @@ def test_checker_error_preserves_independent_ci_measurements(
             "tier": scenario.tier,
             "exercised": True,
             "verdict": "fulfilled",
-            "checks": [],
+            "checks": [{"id": "calls.outcome", "kind": "schema", "tier": "P0", "status": "pass"}]
+            + (
+                [{"id": "compaction.event", "kind": "behavioral", "tier": "P1", "status": "pass"}]
+                if scenario.compaction
+                else []
+            ),
             "evidence": {},
         }
 
@@ -902,8 +907,9 @@ def test_checker_error_preserves_independent_ci_measurements(
     )
     output = tmp_path / "table.mdx"
     ci_table.render_ci(artifacts=artifacts, commit=commit, output=output, run_url="https://example.com/run")
-    expected = f"Passed | {len(scenarios) - 1}/{len(scenarios)} | Failed" if code == 0 else "Unavailable | —"
-    assert f"`pi` | {expected}" in output.read_text()
+    count = len(scenarios) - 1
+    p1 = "—" if failed_scenario == "context_compaction" else '<Badge intent="launch" minimal>1/1</Badge>'
+    assert f'`pi` | <Badge intent="launch" minimal>{count}/{count}</Badge> | {p1} | —' in output.read_text()
 
 
 def test_interrupted_run_does_not_publish_completed_summary(tmp_path, monkeypatch):
@@ -949,7 +955,7 @@ def test_compaction_runs_for_every_harness_and_reports_its_own_priority(retained
     assert set(launched) == {(h, s.name) for h in HARNESSES for s in scenarios}
     assert code == (0 if gate_tier == "P0" else 1)
     for row in summary["harnesses"].values():
-        assert row["tier_verdicts"] == {"P0": "fulfilled", "P1": "not_fulfilled"}
+        assert row["verdict"] == ("fulfilled" if gate_tier == "P0" else "not_fulfilled")
         result = row["scenarios"][1]
         assert result["p0_verdict"] == "fulfilled" and result["verdict"] == "not_fulfilled"
         assert next(c for c in result["checks"] if c["id"] == "compaction.event")["status"] == "fail"

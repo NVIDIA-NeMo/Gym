@@ -287,13 +287,6 @@ def run_suite(
             "verdict": "fulfilled"
             if all(r["verdict"] == "fulfilled" for r in results if r["tier"] <= gate_tier)
             else "not_fulfilled",
-            "tier_verdicts": {
-                tier: "fulfilled"
-                if all(r["verdict"] == "fulfilled" for r in results if r["tier"] <= tier)
-                else "not_fulfilled"
-                for tier in ("P0", "P1")
-                if any(r["tier"] == tier for r in results)
-            },
         }
     passed = all(row["verdict"] == "fulfilled" for row in rows.values())
     summary = {
