@@ -1189,10 +1189,14 @@ def build_sbatch_script(
     if resume and benchmark.command is None:
         # Run only the saved-state reader, with the same pinned install, image and mounted artifacts as the
         # driver. This step precedes every service; plain host Python need not have Gym installed.
+        # The run's recovery_outcome_policy, when set, is the seventh argument: a continuation decides with it.
+        policy = resume.recovery_outcome_policy
         admission_python = (
             "import sys; from nemo_gym.orchestration.recovery import continuation_admission; "
             "print('__GYM_CONTINUATION:' + continuation_admission(sys.argv[1], int(sys.argv[2]), "
-            "None if sys.argv[3] == 'None' else float(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6]))"
+            "None if sys.argv[3] == 'None' else float(sys.argv[3]), sys.argv[4], sys.argv[5], sys.argv[6]"
+            + (", sys.argv[7]" if policy is not None else "")
+            + "))"
         )
         cap = _walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None
         admission_entrypoint = render_driver_entrypoint(
@@ -1201,7 +1205,8 @@ def build_sbatch_script(
             prepare_cmd=None,
             command=f"python -c {shlex.quote(admission_python)} {shlex.quote(str(remote_bench_dir))} "
             # The configured cap: the reader adds the recorded extension itself.
-            f'{resume.max_retries} {cap} "$GYM_PREVIOUS_EXIT_CODE" "$GYM_PREVIOUS_JOB_ID" "$GYM_PREVIOUS_STATE"',
+            f'{resume.max_retries} {cap} "$GYM_PREVIOUS_EXIT_CODE" "$GYM_PREVIOUS_JOB_ID" "$GYM_PREVIOUS_STATE"'
+            + (f" {shlex.quote(json.dumps(policy, sort_keys=True))}" if policy is not None else ""),
         )
         admission_command = (
             f'{driver_env_prefix}GYM_PREVIOUS_STATE="$_prev_state" GYM_PREVIOUS_JOB_ID="$_prev_slurm_job_id" GYM_PREVIOUS_EXIT_CODE="$_gym_exit_code" srun --overlap --nodes=1 --ntasks=1 '

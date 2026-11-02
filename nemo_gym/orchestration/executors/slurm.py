@@ -103,6 +103,7 @@ from nemo_gym.orchestration.recovery import (
     allocation_cut_from_accounting,
     chain_accounting,
     decide_from_collected,
+    effective_outcome_policy,
     live_chain_job,
     reconcile_requeued_chain,
     requeue_note,
@@ -1270,6 +1271,9 @@ class SlurmExecutor(BaseExecutor):
                     evidence=[],
                 )
                 return stop, None
+            # The policy is read from the run's saved config, so every recovery and resubmit applies the one the run
+            # was started with. An explicit Python argument wins over that section, which wins over the defaults.
+            outcome_policy, policy_source = effective_outcome_policy(outcome_policy, resume.recovery_outcome_policy)
             cap_s = _walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None
             raised_cap = None
             if max_walltime is not None:
@@ -1334,6 +1338,7 @@ class SlurmExecutor(BaseExecutor):
                             max_walltime_s=cap_s,
                             live_job=None,
                             outcome_policy=outcome_policy,
+                            outcome_policy_source=policy_source,
                             extend_retries=extend_retries,
                         ), collected
             try:
@@ -1403,6 +1408,7 @@ class SlurmExecutor(BaseExecutor):
             max_walltime_s=cap_s,
             live_job=True if live_job_name is not None else None if workdirs is None else str(job_dir) in workdirs,
             outcome_policy=outcome_policy,
+            outcome_policy_source=policy_source,
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
             live_job_name=live_job_name,
@@ -1799,6 +1805,8 @@ class SlurmExecutor(BaseExecutor):
                 if accounting_snapshot is None:
                     raise RuntimeError(f"Resubmit of {benchmark} refused: no collected accounting snapshot")
                 resume = config.driver.benchmarks[benchmark].resume_config
+                # resume_config includes recovery_outcome_policy. A policy that changed since the evidence was
+                # collected changes which rows run again, so like semantic drift it is refused, never resumed across.
                 files = {name: digest for name, digest in accounting_snapshot.items() if name != "resume_config"}
                 if accounting_snapshot.get("resume_config") != (resume.model_dump_json() if resume else None):
                     raise RuntimeError(f"Resubmit of {benchmark} refused: {stale}")

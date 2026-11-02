@@ -321,6 +321,8 @@ class RecoveryDecision(BaseModel):
     # A RESUBMIT of a run that also has saved answers to grade again names them: the resumed run re-verifies them
     # from their saved answers first, while its servers are up, and then runs the policy work.
     reverify_first: list[Identity] = Field(default_factory=list)
+    # The outcome policy this decision applied: its ``source`` (default, config or python) and its entries.
+    outcome_policy: dict[str, Any] | None = None
 
     @property
     def complete(self) -> bool:
@@ -380,6 +382,46 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
         }:
             raise ValueError("recovery outcome policy does not support count_as_zero")
         return self
+
+
+class OutcomePolicySource(StrEnum):
+    """Where the recovery outcome policy in effect came from."""
+
+    DEFAULT = "default"
+    CONFIG = "config"
+    PYTHON = "python"
+
+
+def configured_outcome_policy(overrides: Mapping[str, Any] | None) -> RecoveryOutcomePolicyConfig | None:
+    """A benchmark's ``resumable.recovery_outcome_policy`` section as a policy, or None when it is not set.
+
+    It is a partial override: ``RecoveryOutcomePolicyConfig`` merges the entries it names into its defaults, and
+    validates them exactly as the Python API does. A bad section raises, naming each problem.
+    """
+    if overrides is None:
+        return None
+    try:
+        return RecoveryOutcomePolicyConfig.model_validate(overrides)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or 'policy'}: {e['msg'].removeprefix('Value error, ')}"
+            for e in error.errors()
+        )
+        raise ValueError(f"invalid recovery_outcome_policy: {problems}") from None
+
+
+def effective_outcome_policy(
+    explicit: RecoveryOutcomePolicyConfig | None, overrides: Mapping[str, Any] | None
+) -> tuple[RecoveryOutcomePolicyConfig, OutcomePolicySource]:
+    """The policy recovery applies and its source. Precedence: an explicit Python ``outcome_policy`` argument
+    replaces the run's saved config section (it is not merged with it); the section overrides the defaults. The
+    budget options (``extend_retries``, ``max_walltime``) are separate and never change the policy."""
+    if explicit is not None:
+        return explicit, OutcomePolicySource.PYTHON
+    configured = configured_outcome_policy(overrides)
+    if configured is not None:
+        return configured, OutcomePolicySource.CONFIG
+    return RecoveryOutcomePolicyConfig(), OutcomePolicySource.DEFAULT
 
 
 def _legacy_agent_outcome(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
@@ -2271,7 +2313,14 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed (see
     ``resume_drift_note``) and a continuation that ended before it queued its follow-up, so an inspection, a recovery
     and a chain continuation all say it."""
-    decision = _decide_from_collected(collected, **options)
+    explicit = options.get("outcome_policy")
+    source = options.pop("outcome_policy_source", None) or (
+        OutcomePolicySource.PYTHON if explicit is not None else OutcomePolicySource.DEFAULT
+    )
+    policy = explicit or RecoveryOutcomePolicyConfig()
+    decision = _decide_from_collected(collected, **options).model_copy(
+        update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
+    )
     notes = [resume_drift_note(collected.resume_drift_keys)]
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
@@ -2499,11 +2548,14 @@ def continuation_admission(
     exit_code: str,
     previous_job_id: str,
     previous_state: str = "FAILED",
+    outcome_policy: str | None = None,
 ) -> str:
     """Read saved state in the driver's installed runtime before a terminal allocation continues.
 
     The shell has already validated and persisted terminal elapsed accounting. This reader never changes
     artifacts, starts servers, resets budgets, or treats an exit code as sufficient retry evidence.
+    ``outcome_policy`` is the run's ``recovery_outcome_policy`` section as JSON, rendered from its saved config, so
+    an automatic continuation decides with the policy a recovery would apply.
     """
     import json
     import subprocess
@@ -2581,11 +2633,14 @@ def continuation_admission(
                 f"{collected.managed_reader_error or 'no authoritative selection'}"
             )
             return "stop"
+        policy, source = effective_outcome_policy(None, json.loads(outcome_policy) if outcome_policy else None)
         decision = decide_from_collected(
             collected,
             max_infra_retries=max_retries,
             max_walltime_s=max_walltime_s,
             live_job=False,
+            outcome_policy=policy,
+            outcome_policy_source=source,
             planned_missing_continuation=segment,
             allocation_cut=_store_writer_ended(collected, previous_job_id),
         )
