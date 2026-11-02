@@ -160,6 +160,8 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
         require_complete=False,
         disable_aggregation=True,
         disable_health_check=True,
+        # The strict limit alone; the connect grace period is covered in test_dispatch_connect_grace.py.
+        dispatch_connect_grace_s=0,
     )
     connections = []
     trace = TraceConfig()
@@ -172,7 +174,8 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
         monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
         with pytest.raises(IncompleteEvaluationError if routed else aiohttp.ClientConnectorError):
             await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=2)
-    # One bounded resend of a refused connection; every attempt failed to connect, so /run was never sent.
+    # Without a grace period, one bounded resend of a refused connection; every attempt failed to connect, so
+    # /run was never sent.
     assert len(connections) == 2
     failure = json.loads(output.with_name("rollouts_failures.jsonl").read_text())
     assert failure["_ng_failure_type"] == "ClientConnectorError"
