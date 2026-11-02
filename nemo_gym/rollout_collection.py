@@ -1097,6 +1097,9 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "model_operations",
                 "error_category",
                 "latency_ttft_ms",
+                "requested_max_tokens",
+                "applied_max_tokens",
+                "output_budget_refit",
             )
             if raw_call.get(key) is not None
         }
@@ -4280,16 +4283,19 @@ class RolloutCollectionHelper(BaseModel):
             has_recorded_grade,
             has_saved_generation,
             has_unclassified_execution_failure,
+            is_infrastructure_agent_timeout,
             keeps_partial_response,
         )
 
+        # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
         unclassified = {
             k
             for k, row in latest_by_key.items()
             if has_unclassified_execution_failure(row)
-            or has_saved_generation(row)
-            or has_recorded_grade(row)
-            or keeps_partial_response(row)
+            or (
+                (has_saved_generation(row) or has_recorded_grade(row) or keeps_partial_response(row))
+                and not is_infrastructure_agent_timeout(row)
+            )
         }
         gated = successes_seen | terminal_keys | maxed_out | unclassified
 
@@ -5213,7 +5219,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         config.check_completion(
             expected=completion["expected"],
             results=persisted_results,
-            completed=completion["successful"] + completion["final_zeros"],
+            completed=completion["successful"] - completion.get("masked_retryable", 0) + completion["final_zeros"],
             intentionally_omitted=completion["intentionally_omitted"],
             retryable=completion["retryable"] > 0,
             made_progress=store.progress_outcomes_recorded > 0,

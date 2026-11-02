@@ -632,7 +632,7 @@ async def test_failure_sidecar_preserves_producer_diagnostics(runner_config, mon
     assert next(row for row in returned if row["_ng_task_index"] == 1) == saved
 
 
-async def test_repeated_interruption_reserves_new_identities_without_spending_retries(tmp_path, monkeypatch):
+async def test_repeated_interruption_reserves_new_identities_and_charges_only_the_later_ends(tmp_path, monkeypatch):
     from nemo_gym.rollout_store import RolloutStore
 
     rows = [failing_row(index) for index in range(4)]
@@ -677,11 +677,21 @@ async def test_repeated_interruption_reserves_new_identities_without_spending_re
 
     reader = RolloutStore.read(output)
     assert reader.coverage()["missing"] == len(rows)
-    assert reader.coverage()["counted_failures"] == 0
+    # Three allocations ended with every row in flight. The first end was free; the resume after the second charged
+    # attempt 1 of each, and the end of the third is charged by the next writer.
+    assert reader.coverage()["counted_failures"] == len(rows)
     retry = reader.pending(3)
     assert len(retry) == len(rows)
     assert all(row["_ng_attempt_index"] == 3 for row in retry)
-    assert reader.selected("success") == [] and reader.failures() == []
+    assert reader.selected("success") == []
+    # The charge is a saved outcome of the earlier attempt; the newest attempt is the reservation with no outcome.
+    from nemo_gym.rollout_records import read_records
+    from nemo_gym.utils.path_utils import failures_path_for
+
+    assert {
+        (row["_ng_task_index"], row["_ng_attempt_index"], row["failure_kind"])
+        for row in read_records(failures_path_for(output))
+    } == {(index, 1, "rollout_allocation_ended") for index in range(len(rows))}
 
 
 async def test_runner_accepts_nested_hydra_overrides_and_unused_unresolved_server(runner_config, monkeypatch):
@@ -1015,7 +1025,8 @@ async def test_runner_reserves_before_request_and_resumes_only_failed_work(
     runner_config.resume_from_cache = True
     calls.clear()
     await helper.run_from_config(runner_config)
-    assert [(row["task"], row["_ng_attempt_index"]) for row in calls] == [(1, 1)]
+    # The failed rollout runs again, and so does the result its verifier_error masked: infrastructure left it unmeasured.
+    assert sorted((row["task"], row["_ng_attempt_index"]) for row in calls) == [(0, 1), (1, 1)]
     assert collection.failures_path_for(output).read_bytes() == original_failures
     assert not journal_path_for(output).exists()
     report = json.loads(coverage_path_for(output).read_text())
@@ -1189,7 +1200,7 @@ def test_auth_headers_need_not_resolve_but_task_headers_still_affect_identity(sa
 async def test_judge_failure_saves_token_evidence_without_retiring_capture(
     runner_config, monkeypatch, tmp_path, native_tokens
 ):
-    from nemo_gym.token_id_capture import TokenCaptureStore
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
     from tests.unit_tests.test_rollout_collection import TestFinalizeRolloutTokenCapture
 
     captures = TokenCaptureStore(tmp_path / "tokens")
@@ -1561,8 +1572,8 @@ async def test_resumed_collector_dispatches_longest_previous_failure_first(runne
 async def test_incomplete_capture_policy_preserves_recovery_accounting(
     runner_config, monkeypatch, tmp_path, mask_setting, judge_failed
 ):
-    from nemo_gym.token_id_capture import ParentResolutionStatus, TokenCaptureStore, stamp_lineage
-    from nemo_gym.token_id_capture.records import TokenEntry
+    from nemo_gym.token_id_capture.records import ParentResolutionStatus, TokenEntry, stamp_lineage
+    from nemo_gym.token_id_capture.store import TokenCaptureStore
 
     runner_config.limit = 1
     captures = TokenCaptureStore(tmp_path / "tokens")

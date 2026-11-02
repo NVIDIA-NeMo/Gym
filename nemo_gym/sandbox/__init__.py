@@ -117,8 +117,10 @@ if TYPE_CHECKING:
     from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
     from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S, sandbox_credentials_rejected
     from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
-    from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
+    from nemo_gym.sandbox.providers.local.provider import LocalProvider
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider, SandboxBackendUnreachableError
     from nemo_gym.sandbox.transfer import (
+        TRANSFER_USER,
         SandboxProbeError,
         SandboxTransferError,
         SandboxUnavailableError,
@@ -130,23 +132,27 @@ if TYPE_CHECKING:
         upload_dir,
         upload_path,
     )
-    from nemo_gym.sandbox.utils import cpu_cap_env, read_text, upload_text
+    from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS, cpu_cap_env, read_text, upload_text
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
     "ApptainerProvider": "providers.apptainer.provider",
+    "CPU_CAP_ENV_VARS": "utils",
     "DirectSandboxConnection": "access",
     "DockerCreateConfig": "providers.docker.provider",
     "DockerProvider": "providers.docker.provider",
+    "LocalProvider": "providers.local.provider",
     "ORPHAN_REAP_TIMEOUT_S": "providers.base",
+    "OpenSandboxProvider": "providers.opensandbox.provider",
     "SandboxAccess": "access",
     "SandboxBackendUnreachableError": "providers.opensandbox.provider",
     "SandboxConfig": "config",
     "SandboxProbeError": "transfer",
     "SandboxTransferError": "transfer",
     "SandboxUnavailableError": "transfer",
+    "TRANSFER_USER": "transfer",
     "adapt_non_root_sidecars": "compose_config",
     "cpu_cap_env": "utils",
     "deployment_platform": "compose_config",

@@ -24,6 +24,12 @@ declared CPU and memory for each sandbox while preserving its storage request. T
 `task_memory_multiplier` resources-server settings can override that scaling; explicit `sandbox_config.resources`
 values take final precedence.
 
+A verifier attempt that produces no verdict (no `reward.json`, or a verifier sandbox that could not be created or
+run) is run again on a fresh sandbox with the same collected patch, at most `inconclusive_verification_retries`
+(default 2) more times; the response records `verification_attempts` and the reason of each inconclusive attempt. A
+malformed verdict, a timeout and a conclusive result are not run again, and a patch that breaks the test script stays
+an inconclusive, masked result after the bound as before.
+
 ## Oracle checkpoint
 
 Start the resources server with golden-patch mode enabled:

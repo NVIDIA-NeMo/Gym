@@ -460,3 +460,51 @@ def test_a_resume_through_the_other_name_of_the_run_directory_replays_the_journa
     err = capsys.readouterr().err
     assert "resuming multi-stage run from cache (fingerprint match)" in err and "STALE" not in err
     assert set(resume.plans) == {0} and set(resume.outcomes) == {0}
+
+
+def _reference_and_deliverables(reference: str, deliverables: str) -> Callable[[Dict[str, Any]], None]:
+    def mutate(inputs: Dict[str, Any]) -> None:
+        gdpval = inputs["resolved_global_config"]["gdpval_resources_server"]["resources_servers"]["gdpval"]
+        gdpval["reference_deliverables_dir"] = reference
+        gdpval["persist_deliverables_dir"] = deliverables
+
+    return mutate
+
+
+def test_a_deliverables_directory_created_between_segments_keeps_the_fingerprint(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # Both directories are named through a symlinked mount; the deliverables one is created by the first segment.
+    _, linked = _two_names(tmp_path)
+    reference = linked / "reference"
+    reference.mkdir()
+    deliverables = linked / "deliverables"
+    cfg, reference_elos, distribution, inputs = _fixture()
+    _reference_and_deliverables(str(reference), str(deliverables))(inputs)
+    first, first_components = compute_fingerprint_with_components(cfg, reference_elos, distribution, **inputs)
+    run = tmp_path / "journal"
+    run.mkdir()
+    out, journal = _journal(run, first, first_components)
+
+    deliverables.mkdir()
+    second, second_components = compute_fingerprint_with_components(cfg, reference_elos, distribution, **inputs)
+    legacy = compute_fingerprint(cfg, reference_elos, distribution, **inputs, canonical_paths=False)
+    resume = _prepare_resume(
+        SimpleNamespace(resume_from_cache=True),
+        out,
+        journal,
+        second,
+        fingerprint_components=second_components,
+        accepted_fingerprints=(legacy,),
+    )
+
+    assert second == first
+    err = capsys.readouterr().err
+    assert "resuming multi-stage run from cache (fingerprint match)" in err and "STALE" not in err
+    assert set(resume.plans) == {0} and set(resume.outcomes) == {0}
+
+
+def test_a_missing_path_under_a_symlinked_mount_is_named_by_its_real_location(tmp_path: Path) -> None:
+    real, linked = _two_names(tmp_path)
+
+    assert _digests(_persist_dir(str(real / "not-yet"))) == _digests(_persist_dir(str(linked / "not-yet")))

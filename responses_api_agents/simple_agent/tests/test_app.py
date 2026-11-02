@@ -66,28 +66,27 @@ from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess
 from nemo_gym.server_runtime import (
+    AgentSessionParticipant,
+    AgentSessionRecord,
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    CheckpointRequest,
+    CommitRequest,
     DirectHTTPToolAccess,
+    EnvironmentParticipant,
     FailureBoundary,
     FailureReport,
     MCPStreamableHTTPConnection,
     MCPToolAccess,
-    RolloutIdRequiredError,
-    SimpleResourcesServer,
-)
-from nemo_gym.server_runtime._checkpoint.agent import AgentSessionParticipant, AgentSessionRecord
-from nemo_gym.server_runtime._checkpoint.control import (
-    CheckpointRequest,
-    CommitRequest,
     ParticipantControlPlane,
     RestoreRequest,
+    RolloutIdRequiredError,
+    SimpleResourcesServer,
+    StaleAttemptError,
 )
-from nemo_gym.server_runtime._checkpoint.environment import EnvironmentParticipant
-from nemo_gym.server_runtime._checkpoint.errors import StaleAttemptError
 from nemo_gym.server_runtime.episode_types import FailureEvent, SdkErrorDetails
 from nemo_gym.testing.agent_session_conformance import check_agent_seed_rejected
 from nemo_gym.testing.failure_assertions import raises_agent_failure

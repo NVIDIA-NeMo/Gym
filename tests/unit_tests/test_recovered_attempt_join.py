@@ -173,7 +173,8 @@ def test_a_recovered_attempt_never_stands_in_for_the_answers_grading_binding():
     assert recovered_attempt_joins(decision, collected) == {"attempts": 1, "operations": 1}
     passed, reason, evaluation = trial_verdict(decision, collected)
     assert passed is None, reason
-    assert reason.startswith("trial: UNVERIFIED, known failures are a lower bound"), reason
+    # The unbound grading leaves the trial unobserved, never healthy.
+    assert reason.startswith("trial: UNOBSERVED 1 of 1 expected trials"), reason
     assert "1 failed model attempt(s) in 1 operation(s) were retried" in reason
     assert evaluation["status"] == "UNVERIFIED" and evaluation["exact"] is False
 

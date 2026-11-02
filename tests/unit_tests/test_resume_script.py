@@ -115,6 +115,13 @@ _FAKE_SACCT = """#!/bin/bash
 echo call >> "$FAKE_LOG_DIR/sacct_calls"
 # The node dies under the job: kill the job's shell, found by its script path (never the test runner).
 if [[ -n "${FAKE_SACCT_KILLS_JOB:-}" ]]; then pkill -KILL -f "$FAKE_LOG_DIR/job.sh"; exit 1; fi
+# A chain query (a sentinel waiting on a requeued chain) reads chain_accounting.<poll>, else chain_accounting.
+if [[ "$*" == *Restarts* ]]; then
+    _poll=$(( $(cat "$FAKE_LOG_DIR/chain_polls" 2>/dev/null || echo 0) + 1 )); echo "$_poll" > "$FAKE_LOG_DIR/chain_polls"
+    if [[ -e "$FAKE_LOG_DIR/chain_accounting.$_poll" ]]; then cat "$FAKE_LOG_DIR/chain_accounting.$_poll"
+    else cat "$FAKE_LOG_DIR/chain_accounting" 2>/dev/null; fi
+    exit 0
+fi
 if [[ -n "${FAKE_FOLLOWUP:-}" && " $* " == *" -j ${FAKE_FOLLOWUP} "* ]]; then echo "${FAKE_FOLLOWUP_ELAPSED:-}"; exit 0; fi
 if [[ "$*" == *State,ElapsedRaw* ]]; then echo "${FAKE_STATE:-}|${FAKE_ELAPSED:-}";
 elif [[ "$*" == *ExitCode* ]]; then echo "${FAKE_EXIT:-1:0}";
@@ -122,6 +129,7 @@ elif [[ "$*" == *ElapsedRaw* ]]; then echo "${FAKE_ELAPSED:-}"; else echo "${FAK
 """
 _FAKE_SBATCH = """#!/bin/bash
 echo "$* sentinel=${GYM_FOLLOWUP_SENTINEL:-}" >> "$FAKE_LOG_DIR/sbatch_calls"
+echo "${GYM_RESUBMIT:-}|${GYM_RESUBMIT_KEEP_BUDGET:-}" >> "$FAKE_LOG_DIR/sbatch_env"
 if [[ -n "${FAKE_SBATCH_FAILS:-}" ]]; then echo "sbatch: error: Socket timed out"; exit 1; fi
 # The queued follow-up waits on its dependency in this job dir, as squeue would list it. In a hidden partition
 # squeue lists it only with --all.
@@ -1402,3 +1410,37 @@ def test_a_sentinel_keeps_a_deliberate_stop_on_a_complete_run(tmp_path, monkeypa
     assert "Run complete" not in result.stdout
     assert (tmp_path / INCOMPLETE_MARKER_NAME).read_text() == stop + "\n"
     assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None or shutil.which("pkill") is None, reason="bash and pkill needed")
+@pytest.mark.parametrize(
+    "death",
+    [{"admission_command": "kill -9 $$"}, {"extra_env": {"FAKE_SACCT_KILLS_JOB": "1"}}],
+    ids=["after-the-counter-write", "before-the-counter-write"],
+)
+def test_a_sentinel_debits_the_parent_once_when_its_follow_up_died_around_the_counter_write(tmp_path, death):
+    _write_inventory(tmp_path)
+    (tmp_path / "artifacts" / "rollouts_manifest.json").write_text("{}\n")  # the follow-up runs admission
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    # Follow-up 777 of parent 100 (60 s) records itself, then dies (in admission, after it wrote the counter, or in
+    # its accounting query, before).
+    followup = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", job_id="777", **death)
+    assert followup.returncode == -9 and "REACHED_WORK" not in followup.stdout, followup.stdout + followup.stderr
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n"
+    after_followup = (
+        (tmp_path / ".gym_accumulated_walltime").read_text().strip() if "admission_command" in death else ""
+    )
+    assert after_followup in ("60", "")
+
+    sentinel = _run_prologue(
+        tmp_path,
+        ResumeConfig(),
+        "TIMEOUT",
+        admission_command="echo __GYM_CONTINUATION:segment",
+        extra_env=_sentinel_of("13"),
+    )
+
+    assert sentinel.returncode == 0 and "REACHED_WORK" in sentinel.stdout, sentinel.stdout + sentinel.stderr
+    # Parent 100 (60 s) and dead follow-up 777 (13 s), each once: 73, not 60 + 60 + 13.
+    assert (tmp_path / ".gym_accumulated_walltime").read_text().strip() == "73"
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n777\n200\n"

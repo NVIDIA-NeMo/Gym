@@ -186,13 +186,14 @@ def test_a_rollout_that_ended_on_a_failed_policy_request_and_scored_zero_is_a_se
     _end_on_a_failed_request(collected)
     decision = _decide(collected)
     assert decision.counts == {"scored": 1}  # the decision and the score are unchanged
-    assert final_zero_trials(decision, collected) == {(0, 0): "model_request_error"}
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}
     passed, reason = trial_health(decision, collected)
-    # A rejected policy request is the model's fault: counted and named, never a health failure.
+    # A policy request the server refused at the context limit is the model's fault: counted and named, never a health
+    # failure.
     assert passed is True
     assert reason.startswith(
         "trial: evaluation-side faults: 0 of 1 (0.00%) is below 2%; model faults: 1 of 1 (100.00%) "
-        "(model_request_error 1); exact count:"
+        "(model_context_limit 1); exact count:"
     )
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
     assert not any(e.startswith("response/trial health") for e in task["errors"]), task["errors"]

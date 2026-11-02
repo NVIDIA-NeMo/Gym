@@ -176,3 +176,189 @@ async def test_the_real_reverify_path_settles_a_saved_judge_failure_without_any_
     # Running the pass again judges nothing: the settled failure is not due any more.
     assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
     assert len(posted) == 1
+
+
+def _verifier(monkeypatch, reply) -> list[int]:
+    """The run's resources server: ``reply(task, json)`` answers each /verify of a saved answer, or raises."""
+    from unittest.mock import AsyncMock, MagicMock
+
+    posted: list[int] = []
+
+    async def post(*, server_name, url_path, json, **kwargs):
+        posted.append(json["_ng_task_index"])
+        response = MagicMock()
+        response.verified = await reply(json["_ng_task_index"], json)
+        return response
+
+    client = MagicMock(global_config_dict={}, post=post)
+    monkeypatch.setattr("nemo_gym.rollout_reverification.setup_server_client", lambda: client)
+    monkeypatch.setattr(
+        "nemo_gym.rollout_reverification._build_agent_to_resources_server_mapping", lambda _: {"agent": "judge_rs"}
+    )
+    monkeypatch.setattr("nemo_gym.rollout_reverification.raise_for_status", AsyncMock())
+    monkeypatch.setattr(
+        "nemo_gym.rollout_reverification.get_response_json", AsyncMock(side_effect=lambda r: r.verified)
+    )
+    return posted
+
+
+def _job(tmp_path: Path, judge_failures: int) -> tuple[Path, Path, list[str]]:
+    job = tmp_path / "job"
+    (job / "artifacts").mkdir(parents=True)
+    output, failures = _run(job / "artifacts", judge_failures=judge_failures)
+    return job, output, [logical_rollout_id(f) for f in failures]
+
+
+def _decision(job: Path, live_job: bool | None = False):
+    import subprocess
+    import sys
+
+    from nemo_gym.orchestration.recovery import (
+        COLLECT_SCRIPT,
+        CollectedEvidence,
+        decide_from_collected,
+        select_managed_evidence,
+    )
+
+    raw = subprocess.run([sys.executable, "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True)
+    collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
+    return decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=live_job)
+
+
+def _state(output: Path) -> tuple[dict, list[str], dict]:
+    store = RolloutStore.read(output, import_legacy=False)
+    scored = {logical_rollout_id(r): r["reward"] for r in store.selected("success")}
+    assert store.unresolved_rejudgments() == []
+    return scored, sorted(logical_rollout_id(r) for r in store.failures()), store.manifest.pending_rejudge
+
+
+async def test_a_pass_that_fails_after_admitting_leaves_the_judge_failure_for_reverify(tmp_path, monkeypatch):
+    from nemo_gym.orchestration.recovery import RecoveryAction
+
+    job, output, (identity,) = _job(tmp_path, judge_failures=1)
+
+    async def reply(task, json):
+        raise RuntimeError("Event loop is closed")  # the pass fails in-process after its admission
+
+    _verifier(monkeypatch, reply)
+    with pytest.raises(RuntimeError, match="Event loop is closed"):
+        await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output)
+
+    _, failed, pending = _state(output)
+    assert pending == {} and failed == [identity]  # the admission is withdrawn; the row stays judge_failed
+    assert due_judge_failures(output) == [identity]  # a later pass may judge it again
+    decision = _decision(job)
+    assert decision.action == RecoveryAction.REVERIFY, decision.reason
+
+
+async def test_a_regrade_that_answered_is_settled_when_a_later_one_disconnects(tmp_path, monkeypatch):
+    import asyncio
+
+    from aiohttp import ServerDisconnectedError
+
+    from nemo_gym.orchestration.recovery import RecoveryAction
+
+    job, output, (answered, lost) = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        if task == 1:
+            await asyncio.sleep(0.05)  # the first re-grade has answered by then
+            raise ServerDisconnectedError()
+        return json | {"reward": 1.0}
+
+    _verifier(monkeypatch, reply)
+    with pytest.raises(ServerDisconnectedError):
+        await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output)
+
+    scored, failed, pending = _state(output)
+    assert scored[answered] == 1.0 and pending == {}  # the known outcome is settled and its admission closed
+    assert failed == [lost] and due_judge_failures(output) == [lost]  # the lost one is withdrawn, not unknown
+    decision = _decision(job)
+    assert decision.action == RecoveryAction.REVERIFY, decision.reason
+
+
+@pytest.mark.parametrize(
+    "masked",
+    [
+        {"reward": 0.0, "mask_sample": True},
+        {"reward": 0.0, "mask_sample": True, "_ng_failure_class": "verifier_error"},
+    ],
+)
+async def test_a_masked_reply_does_not_keep_another_regrade_from_settling(tmp_path, monkeypatch, masked):
+    import asyncio
+
+    job, output, (answered, masked_identity) = _job(tmp_path, judge_failures=2)
+
+    async def reply(task, json):
+        if task == 1:
+            await asyncio.sleep(0.05)
+            return json | masked
+        return json | {"reward": 1.0}
+
+    posted = _verifier(monkeypatch, reply)
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    scored, failed, pending = _state(output)
+    assert scored[answered] == 1.0 and pending == {}
+    # The verifier answered without a grade: the judge failure stays as it was, and its admission is closed.
+    assert failed == [masked_identity] and sorted(posted) == [0, 1]
+
+
+def test_only_a_judge_failure_with_no_saved_outcome_is_withdrawn(tmp_path):
+    output, failures = _run(tmp_path, judge_failures=1)
+    identity = logical_rollout_id(failures[0])
+    with RolloutStore.open_for_rejudgment(output) as store:
+        pending = store.admit_rejudgment(failures[0])
+        with pytest.raises(ConfigError, match="no admitted saved-result re-verification"):
+            store.withdraw_rejudgment(identity, pending.operation_id)  # its re-judgment saves its failed outcome
+        store.withdraw_rejudgment(identity, pending.operation_id, unsaved_judge_failure=True)
+        assert store.manifest.pending_rejudge == {}
+    assert due_judge_failures(output) == [identity]
+
+
+# --- an admission whose pass died ------------------------------------------------------------------------------
+
+
+def _admitted_by_a_dead_pass(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A run whose re-judge pass admitted its judge failure and was then killed: no outcome was saved."""
+    job, output, (identity,) = _job(tmp_path, judge_failures=1)
+    store = RolloutStore.open_for_rejudgment(output)
+    store.admit_rejudgment(next(iter(store.failures())))
+    assert RolloutStore.read(output, import_legacy=False).unresolved_rejudgments() == [identity]
+    return job, output, identity
+
+
+@pytest.mark.parametrize(
+    ("live_job", "action"),
+    [(False, "reverify"), (True, "noop"), (None, "stop")],
+    ids=["no-live-job", "live-job", "scheduler-unknown"],
+)
+def test_an_admission_whose_pass_died_is_reverified_once_no_job_is_live(tmp_path, live_job, action):
+    job, _, identity = _admitted_by_a_dead_pass(tmp_path)
+
+    decision = _decision(job, live_job=live_job)
+
+    assert decision.action.value == action, decision.reason
+    if live_job is False:
+        assert [f"{t}-{r}" for t, r in decision.identities["judge_recoverable"]] == [identity]
+    if live_job is None:
+        assert "admitted re-judgment outcome unknown" in decision.reason
+
+
+def test_the_recovery_pass_withdraws_an_admission_whose_pass_died(tmp_path):
+    _, output, identity = _admitted_by_a_dead_pass(tmp_path)
+    with pytest.raises(ConfigError, match="has an admitted re-judgment"):
+        bind_judge_failures(output)  # an ordinary pass still refuses it
+
+    binding = bind_judge_failures(output, withdraw_unresolved=True)
+
+    assert list(binding["failures"]) == [identity]  # bound again for its re-judgment
+    assert RolloutStore.read(output, import_legacy=False).manifest.pending_rejudge == {}
+    with pytest.raises(ValueError, match="only valid together with `settle_into_source`"):
+        RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(tmp_path / "other.jsonl"),
+            judge_failed_only=True,
+            withdraw_unresolved_admissions=True,
+        )
