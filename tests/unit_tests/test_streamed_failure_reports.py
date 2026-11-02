@@ -192,6 +192,42 @@ def test_the_reader_keeps_malformed_and_omitted_reports_unaccepted() -> None:
         assert (None if reader.report is None else reader.report.omitted) is omitted
 
 
+@pytest.mark.parametrize("chunk_size", [65536, 4093, None], ids=["64k-chunks", "odd-chunks", "one-chunk"])
+def test_a_large_event_is_omitted_only_when_it_carries_a_report(chunk_size: int | None) -> None:
+    """An event over the line bound is skipped; only one that carries the report field loses evidence. The lines
+    after it are still framed and read."""
+    from nemo_gym.failure_transport import StreamFailureReportReader
+
+    field = FailureHeader.STREAM_FIELD
+    large = "x" * (StreamFailureReportReader._MAX_LINE_BYTES + 10)
+    clean = b"data: " + json.dumps({"type": "response.completed", "response": {"text": large}}).encode() + b"\n"
+    reported = _report_with_compact_size(FailureHeader.MAX_BYTES)
+    terminal = (
+        b"data: "
+        + json.dumps({"type": "response.completed", field: FailureHeader.stream_value(reported)}).encode()
+        + b"\n"
+    )
+    carrying = b"data: " + json.dumps({"type": "response.completed", "text": large, field: {}}).encode() + b"\n"
+
+    def read(body: bytes) -> StreamFailureReportReader:
+        reader = StreamFailureReportReader()
+        step = chunk_size or len(body)
+        for offset in range(0, len(body), step):
+            reader.feed(body[offset : offset + step])
+        reader.finish()
+        return reader
+
+    assert read(clean + b"data: [DONE]\n").report is None
+    assert read(clean + terminal).report == reported
+    assert read(carrying).report.omitted
+    # The field split across two chunks, after the line went over the bound, is still found.
+    split = StreamFailureReportReader()
+    cut = carrying.index(field.encode()) + 3
+    split.feed(carrying[:cut])
+    split.feed(carrying[cut:])
+    assert split.report.omitted
+
+
 def test_invalid_terminal_report_locations_are_omitted() -> None:
     from nemo_gym.failure_transport import RequestFailureLog, StreamFailureReportReader
 

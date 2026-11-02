@@ -230,6 +230,10 @@ class StreamFailureReportReader:
 
     def __init__(self) -> None:
         self._pending = b""
+        # Inside a line over ``_MAX_LINE_BYTES``: its bytes are dropped up to its newline, keeping only enough at the
+        # end of ``_pending`` to find the report field across chunks. Whether that line carried the field so far.
+        self._skipping = False
+        self._skipped_field = False
         self.report: FailureReport | None = None
 
     def _merge(self, report: FailureReport) -> None:
@@ -246,37 +250,50 @@ class StreamFailureReportReader:
     def feed(self, chunk: bytes) -> None:
         lines = (self._pending + chunk).split(b"\n")
         self._pending = lines.pop()
-        if len(self._pending) > self._MAX_LINE_BYTES:
-            self._merge(FailureReport(omitted=True))
-            self._pending = b""
         for line in lines:
+            if self._skipping:
+                # The newline that ends an oversized line: the line after it is framed as usual.
+                carried = self._skipped_field or self._FIELD in line
+                self._skipping = self._skipped_field = False
+                if carried:
+                    self._merge(FailureReport(omitted=True))
+                continue
             if len(line) > self._MAX_LINE_BYTES:
-                self._merge(FailureReport(omitted=True))
+                # An oversized event is not read; only one that carries a report loses failure evidence.
+                if self._FIELD in line:
+                    self._merge(FailureReport(omitted=True))
                 continue
-            if not line.startswith(b"data: ") or self._FIELD not in line:
-                continue
-            try:
-                payload = json.loads(line[len(b"data: ") :])
-            except (ValueError, RecursionError):
-                self._merge(FailureReport(omitted=True))
-                continue
-            if not isinstance(payload, dict) or FailureHeader.STREAM_FIELD not in payload:
-                continue
-            event_type = payload.get("type")
-            choices = payload.get("choices")
-            final_choice = isinstance(choices, list) and any(
-                isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str) for choice in choices
-            )
-            final_usage = choices == [] and isinstance(payload.get("usage"), dict)
-            terminal = (isinstance(event_type, str) and event_type in self._TERMINAL_TYPES) or (
-                event_type is None and (final_choice or final_usage or isinstance(payload.get("error"), dict))
-            )
-            if not terminal:
-                self._merge(FailureReport(omitted=True))
-                continue
-            report = FailureHeader.decode_stream_event(payload)
-            if report is not None:
-                self._merge(report)
+            self._read_line(line)
+        if self._skipping or len(self._pending) > self._MAX_LINE_BYTES:
+            self._skipping = True
+            self._skipped_field = self._skipped_field or self._FIELD in self._pending
+            self._pending = self._pending[-(len(self._FIELD) - 1) :]
+
+    def _read_line(self, line: bytes) -> None:
+        if not line.startswith(b"data: ") or self._FIELD not in line:
+            return
+        try:
+            payload = json.loads(line[len(b"data: ") :])
+        except (ValueError, RecursionError):
+            self._merge(FailureReport(omitted=True))
+            return
+        if not isinstance(payload, dict) or FailureHeader.STREAM_FIELD not in payload:
+            return
+        event_type = payload.get("type")
+        choices = payload.get("choices")
+        final_choice = isinstance(choices, list) and any(
+            isinstance(choice, dict) and isinstance(choice.get("finish_reason"), str) for choice in choices
+        )
+        final_usage = choices == [] and isinstance(payload.get("usage"), dict)
+        terminal = (isinstance(event_type, str) and event_type in self._TERMINAL_TYPES) or (
+            event_type is None and (final_choice or final_usage or isinstance(payload.get("error"), dict))
+        )
+        if not terminal:
+            self._merge(FailureReport(omitted=True))
+            return
+        report = FailureHeader.decode_stream_event(payload)
+        if report is not None:
+            self._merge(report)
 
     def feed_text(self, text: str) -> None:
         """Read an existing capture without copying its entire body or accepting invalid Unicode."""
@@ -288,9 +305,10 @@ class StreamFailureReportReader:
 
     def finish(self) -> FailureReport | None:
         """Close the body; an unfinished data line is not complete report evidence."""
-        if self._pending.strip().startswith(b"data:") or self._FIELD in self._pending:
+        if self._skipping or self._pending.strip().startswith(b"data:") or self._FIELD in self._pending:
             self._merge(FailureReport(omitted=True))
         self._pending = b""
+        self._skipping = self._skipped_field = False
         return self.report
 
     def observe(self) -> None:
