@@ -151,7 +151,8 @@ _DATA_URI_RE = re.compile(
     r"\bdata:[\w.+-]{1,127}/[\w.+-]{1,127}(?:;[\w.+-]{1,127}=[^;,\s)]{0,256}){0,16}(?:;base64)?,[^\s)\"'>]*",
     re.IGNORECASE,
 )
-_TITLE_SEPARATOR_RE = re.compile(r"\s+(?:\||-|–|—|·|•|»|::)\s+")
+# Starts only at the first blank of a run, so a long run of blanks is scanned once, not once per blank.
+_TITLE_SEPARATOR_RE = re.compile(r"(?<!\s)\s+(?:\||-|–|—|·|•|»|::)\s+")
 # Linear on every line: the capture starts at a non-blank character and runs to the end of the line, and the
 # closing ``#`` sequence and trailing blanks are stripped afterwards, outside the regex.
 _MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(\S.*)$", re.MULTILINE)
@@ -171,6 +172,13 @@ MAX_URL_CHARS = 4096
 MAX_URL_CANDIDATES = 64
 MAX_URL_DECODE_ROUNDS = 4
 MAX_SESSION_QUESTIONS = 10_000
+# A result or page title longer than this is cut, with an ellipsis, before it is shown or checked against
+# ``answer_title_patterns``; providers put no bound on titles.
+MAX_TITLE_CHARS = 1_000
+
+
+def cap_title(title: str) -> str:
+    return title if len(title) <= MAX_TITLE_CHARS else title[:MAX_TITLE_CHARS] + "…"
 
 
 def normalize_hostname(value: str) -> str:
@@ -825,7 +833,7 @@ def build_page(raw: str, title: Any, final_url: str) -> CachedPage:
     markdown = _DATA_URI_RE.sub("[data URI removed]", raw)
     if not isinstance(title, str) or not title.strip():
         title = markdown_heading_title(markdown)
-    return CachedPage(final_url=final_url, title=title.strip(), markdown=markdown)
+    return CachedPage(final_url=final_url, title=cap_title(title.strip()), markdown=markdown)
 
 
 class HLEWebToolsResourcesServer(SimpleResourcesServer):
@@ -1028,7 +1036,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             if block is not None:
                 self._log_block("web_search", session_id, block, dropped_result=True)
                 continue
-            kept.append({"url": url, "title": title, "snippet": snippet})
+            kept.append({"url": url, "title": cap_title(title), "snippet": snippet})
             if len(kept) == self.config.max_results:
                 break
         if not kept:
@@ -1136,7 +1144,8 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             host = normalize_hostname(urlsplit(url).hostname or "")
         except (ValueError, UnicodeError):
             host = ""
-        block = self._blocklist.answer_title_block(title, host)
+        # The text families see the whole title (linear); the answer-title variants see the title as shown.
+        block = self._blocklist.answer_title_block(cap_title(title), host)
         block = block or self._blocklist.text_block(title, "result title")
         return block or self._blocklist.text_block(snippet, "result snippet")
 

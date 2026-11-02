@@ -449,12 +449,25 @@ async def test_long_urls_and_headings_are_handled_in_linear_time(server, url, pa
         assert response.text.startswith("Title: a ")
 
 
+@pytest.mark.parametrize("title", ["x" + " " * 20_000 + "y", "a | " * 5_000], ids=["blank-run", "separators"])
+async def test_long_result_titles_are_checked_in_linear_time(server, title):
+    stub_backend(server, results=[result("https://example.com/ok", title=title)])
+    started = time.perf_counter()
+    response = await search(server, "spin structures")
+    assert time.perf_counter() - started < 1.0
+    assert response.result_count == 1 and len(response.text) < 2_000  # the title is shown cut
+
+
 async def test_fetched_markdown_is_capped_at_60000_characters_with_a_marker(server):
     stub_backend(server, page="x" * 70_000)
     response = await fetch(server, "https://example.com/long")
     assert response.truncated
     assert "x" * 60_000 in response.text and "x" * 60_001 not in response.text
     assert response.text.endswith("[Content truncated at 60,000 characters; 10,000 characters omitted]")
+    stub_backend(server, page="# " + "t" * 100_000 + "\n\nbody")
+    titled = await fetch(server, "https://example.com/titled")
+    assert titled.text.startswith("Title: " + "t" * 1_000 + "…\nURL: ")  # the title is cut too
+    assert len(titled.text) < 60_000 + 1_200
     stub_backend(server, page="y" * 60_000)
     response = await fetch(server, "https://example.com/exact")
     assert not response.truncated and "truncated" not in response.text
