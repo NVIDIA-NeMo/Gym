@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import asyncio
 import re
 from asyncio import create_subprocess_shell
 from asyncio.subprocess import PIPE, STDOUT
@@ -55,6 +56,8 @@ class CommandOutput(BaseModel):
 
 async def _run_command(command: str, log_fpath: Path) -> CommandOutput:
     async with aiofiles.open(log_fpath, "a") as log_file:
+        await log_file.write(f"Command:\n{command}\n")
+
         process = await create_subprocess_shell(command, stdout=PIPE, stderr=STDOUT, start_new_session=True)
         output_lines = []
 
@@ -290,15 +293,51 @@ class FlashInferBuilder(BaseBuilder):
 class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
-    def run(self) -> None:
-        pass
+    async def run(self) -> None:
+        try:
+            await self._run()
+        except:
+            await self._clean_on_failure()
+            raise
+
+    async def _run(self) -> None:
+        self.config.log_file.parent.mkdir(parents=True, exist_ok=True)
+        self.config.output_container_fpath.parent.mkdir(parents=True, exist_ok=True)
+
+        command_output = await _run_command(
+            command=join(
+                ["cp", "-f", "--", str(self.config.input_container_fpath), str(self.config.output_container_fpath)]
+            ),
+            log_fpath=self.config.log_file,
+        )
+        assert command_output.returncode == 0
+
+        if self.config.flashinfer:
+            fib = FlashInferBuilder(config=self.config.flashinfer, log_file=self.config.log_file)
+            await fib.perform_preflight_checks()
+            command_output = await self._run_single_srun(
+                builder_command_str=fib.get_srun_command_str(),
+                builder_env_vars=fib.get_srun_env_vars(self.config),
+                builder_srun_slurm_vars=fib.get_srun_slurm_vars(self.config),
+            )
+            if command_output.returncode != 0:
+                raise RuntimeError(
+                    f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
+                )
+
+    async def _clean_on_failure(self) -> None:
+        command_output = await _run_command(
+            command=join(["rm", "-f", "--", str(self.config.output_container_fpath)]),
+            log_fpath=self.config.log_file,
+        )
+        assert command_output.returncode == 0
 
     async def _run_single_srun(
         self,
         builder_command_str: str,
         builder_env_vars: Dict[str, Any],
         builder_srun_slurm_vars: Dict[str, Any],
-    ) -> None:
+    ) -> CommandOutput:
         env_vars = builder_env_vars.copy()
         srun_slurm_vars = self.config.slurm | builder_srun_slurm_vars
 
@@ -318,15 +357,10 @@ srun \\
     {srun_slurm_vars_str} \\
     {builder_command_str}"""
 
-        command_output = await _run_command(srun_command_str, self.config.log_file)
-
-        if command_output.returncode != 0:
-            raise RuntimeError(
-                f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
-            )
+        return await _run_command(srun_command_str, self.config.log_file)
 
 
 if __name__ == "__main__":
     global_config_dict = get_global_config_dict()
     bch = BuildContainerHelper(config=BuildContainerConfig.model_validate(global_config_dict))
-    bch.run()
+    asyncio.run(bch.run())
