@@ -31,7 +31,6 @@ from nemo_gym.artifacts.run_files import (
     QUALITY_SUMMARY_SOURCES_KEY,
     ROLLOUT_VERDICTS_FILENAME,
 )
-from nemo_gym.config.config_types import ConfigError
 from nemo_gym.health.checks import (
     _INCOMPLETE_MODEL_CALL_GAPS,
     _LENGTH_LIMIT_FINISH_REASONS,
@@ -77,9 +76,9 @@ from nemo_gym.health.types import (
     _TaskRepeat,
     _WorkerInput,
 )
-from nemo_gym.rollout_records import RUN_ID_KEY, resolve_rollout_path
+from nemo_gym.rollout_records import RUN_ID_KEY, logical_rollout_id, resolve_rollout_path
 from nemo_gym.rollout_recovery import is_answered_agent_deadline, manifest_path_for
-from nemo_gym.rollout_store import RolloutStore, raw_outcomes_are_selected
+from nemo_gym.rollout_store import RolloutStore
 from nemo_gym.utils.path_utils import (
     aggregation_sources_path_for,
     failures_path_for,
@@ -89,10 +88,6 @@ from nemo_gym.utils.path_utils import (
 
 
 logger = logging.getLogger(__name__)
-
-
-class JournalHealthUnavailable(ConfigError):
-    """This history contains superseded outcomes and requires an exported projection."""
 
 
 _PROCESS_POOL_CHUNKS_PER_WORKER = 4
@@ -126,12 +121,21 @@ def _process_pool_chunksize(item_count: int, workers: int) -> int:
 
 def _read_record(line: _LineSlice) -> tuple[dict[str, Any], str | None]:
     with open(line.path, "rb") as handle:
+        stat = os.fstat(handle.fileno())
+        if (stat.st_dev, stat.st_ino) != line.file_identity:
+            return {}, "rollout file was replaced after indexing"
         handle.seek(line.offset)
         raw = handle.read(line.length).strip()
     try:
         parsed = orjson.loads(raw)
         if not isinstance(parsed, dict):
             raise ValueError("rollout line is not an object")
+        if line.legacy_attempt_index is not None:
+            parsed["_ng_attempt_index"] = line.legacy_attempt_index
+        if line.expected_identity is not None:
+            identity = (parsed.get(RUN_ID_KEY), logical_rollout_id(parsed), parsed.get("_ng_attempt_index", 0))
+            if identity != line.expected_identity:
+                return {}, "rollout identity changed after indexing"
         return parsed, None
     except Exception as exc:
         return {}, type(exc).__name__
@@ -360,11 +364,38 @@ def _observed_upstream_recovery(calls: list[dict[str, Any]]) -> dict[str, int] |
     }
 
 
-def _index_jsonl(paths: Sequence[Path], *, source_indices: Mapping[str, int] | None = None) -> list[_LineSlice]:
+def _index_jsonl(
+    paths: Sequence[Path],
+    *,
+    histories: Mapping[Path, RolloutStore | None] | None = None,
+) -> list[_LineSlice]:
     slices: list[_LineSlice] = []
     ordinal = 0
     for source_index, path in enumerate(paths):
+        if not path.is_file():
+            raise FileNotFoundError(f"Rollout JSONL not found: {path}")
+        store = histories[path] if histories is not None else RolloutStore.read(path, import_legacy=False)
+        if store is not None:
+            for record in store.selected_records("success").values():
+                assert record.file_identity is not None  # Captured by the store's index scan.
+                slices.append(
+                    _LineSlice(
+                        path=str(record.path),
+                        offset=record.offset,
+                        length=record.length,
+                        ordinal=ordinal,
+                        source_index=source_index,
+                        line_number=record.line_number,
+                        file_identity=record.file_identity,
+                        expected_identity=record.expected_identity,
+                        legacy_attempt_index=record.legacy_attempt_index,
+                    )
+                )
+                ordinal += 1
+            continue
         with path.open("rb") as handle:
+            stat = os.fstat(handle.fileno())
+            file_identity = (stat.st_dev, stat.st_ino)
             line_number = 0
             while True:
                 offset = handle.tell()
@@ -374,14 +405,6 @@ def _index_jsonl(paths: Sequence[Path], *, source_indices: Mapping[str, int] | N
                 line_number += 1
                 if not line.strip():
                     continue
-                if source_indices is not None:
-                    try:
-                        record = orjson.loads(line)
-                        source_index = source_indices[record[RUN_ID_KEY]]
-                    except (ValueError, KeyError, TypeError) as error:
-                        raise ConfigError(
-                            f"Selected projection {path}:{line_number} must identify one of its source runs."
-                        ) from error
                 slices.append(
                     _LineSlice(
                         path=str(path),
@@ -390,6 +413,7 @@ def _index_jsonl(paths: Sequence[Path], *, source_indices: Mapping[str, int] | N
                         ordinal=ordinal,
                         source_index=source_index,
                         line_number=line_number,
+                        file_identity=file_identity,
                     )
                 )
                 ordinal += 1
@@ -703,7 +727,12 @@ def _landed_in(landed: set[tuple[Any, ...]], source_index: int) -> set[tuple[Any
     return {(0, *key[1:]) for key in landed if key[0] == source_index}
 
 
-def _last_failed_attempts(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -> list[dict[str, Any]]:
+def _last_failed_attempts(
+    landed: set[tuple[Any, ...]],
+    paths: Sequence[Path],
+    *,
+    histories: Mapping[Path, RolloutStore | None] | None = None,
+) -> list[dict[str, Any]]:
     """The selected failed attempt of every rollout that never landed.
 
     A run with a manifest selects it from its run history, as its accounting does; a legacy output's sidecar row
@@ -711,8 +740,9 @@ def _last_failed_attempts(landed: set[tuple[Any, ...]], paths: Sequence[Path]) -
     """
     rows: list[dict[str, Any]] = []
     for source_index, path in enumerate(paths):
-        if manifest_path_for(path).exists():
-            rows += RolloutStore.read(path).selected("failure")
+        history = histories[path] if histories is not None else RolloutStore.read(path, import_legacy=False)
+        if history is not None:
+            rows += history.selected("failure")
         else:
             rows += _read_failures(_landed_in(landed, source_index), [path]).rows.values()
     return rows
@@ -1005,45 +1035,32 @@ def run_health_checks(
     limits: RunHealthLimits = RunHealthLimits(),
     limits_source: LimitsSource | Mapping[str, LimitsSource] = "config",
     run_coverage: Sequence[Mapping[str, Any] | None] | None = None,
-    selected_projection: Path | None = None,
+    source_histories: Mapping[Path, RolloutStore | None] | None = None,
     model_call_capture_dirs: Sequence[Path] = (),
 ) -> HealthCheckResult:
-    """Run the RFC's map/group/reduce pipeline and write both reports.
+    """Check selected completed attempts while retaining run-wide failure and timeout evidence.
 
-    ``model_call_capture_dirs`` are the run's model-call capture directories. A failed rollout's row carries no
-    capture, so its timing in ``run.stats.timeouts`` is read from these instead.
-    ``selected_projection`` is the merged output of these managed runs, used when
-    their raw files contain superseded outcomes. Source histories still own failure
-    accounting; each projected row's run ID retains its source identity.
+    Workers read selected byte ranges from the original histories, which own selection and identity.
+    Aggregation supplies its scoring snapshots so health cannot select a later attempt while retaining older
+    coverage counts. Standalone calls load the current histories; explicit None entries denote loose inputs.
+    Loose JSONL and explicit failure sidecars retain their line-by-line behavior.
     """
     ignored = frozenset(normalize_ignored_checks(ignored_checks))
     paths = list([rollout_paths] if isinstance(rollout_paths, Path) else rollout_paths)
     if not paths:
         raise ValueError("at least one rollout JSONL path is required")
-    needs_projection = any(not raw_outcomes_are_selected(path, artifacts=(path,)) for path in paths)
-    if needs_projection and selected_projection is None:
-        raise JournalHealthUnavailable(
-            "Health reports for histories with superseded outcomes are a follow-up to evaluation resume. "
-            "Run health checks on a merged selected-result projection from `gym eval aggregate`."
-        )
-    for path in paths:
-        if not path.is_file():
-            raise FileNotFoundError(f"Rollout JSONL not found: {path}")
-
-    # A legacy run reached through a link keeps the link's name when its companions sit beside the link, as the
-    # aggregation that read it did; otherwise its companions are the ones beside the file the link resolves to.
     paths = [resolve_rollout_path(path, read_only=True) for path in paths]
     source_digests = _health_artifact_digests(paths)
-    if needs_projection:
-        source_indices = {}
-        for index, path in enumerate(paths):
-            history = RolloutStore.read(path, import_legacy=False)
-            if history is None or history.manifest.run_id in source_indices:
-                raise JournalHealthUnavailable("A selected projection requires distinct manifest-backed source runs.")
-            source_indices[history.manifest.run_id] = index
-        lines = _index_jsonl([selected_projection], source_indices=source_indices)
-    else:
-        lines = _index_jsonl(paths)
+    # Freeze each run once so worker selection, budgets and timeout failures refer
+    # to the same reservations even if a collector appends while the report runs.
+    histories = (
+        {path: RolloutStore.read(path, import_legacy=False) for path in paths}
+        if source_histories is None
+        else {path: source_histories[path] for path in paths}
+    )
+    if run_coverage is None:
+        run_coverage = [histories[path].coverage() if histories[path] is not None else None for path in paths]
+    lines = _index_jsonl(paths, histories=histories)
     worker_inputs = [
         _WorkerInput(
             line=line,
@@ -1105,7 +1122,8 @@ def run_health_checks(
     # Every rollout's final record: its saved row, or the last failed attempt of one that never landed.
     timings = [digest.timing for digest in digests if digest.timing is not None]
     timings += map(
-        read_rollout_timing, _with_captured_calls(_last_failed_attempts(landed, paths), model_call_capture_dirs)
+        read_rollout_timing,
+        _with_captured_calls(_last_failed_attempts(landed, paths, histories=histories), model_call_capture_dirs),
     )
     # Every failed attempt in the sidecars, so a limit or enforcer that only an earlier attempt named is sent as 0.
     attempts = (
@@ -1519,7 +1537,6 @@ def health_check_run_dir(
     limits_source = {name: "override" if name in overrides else "persisted" for name in RunHealthLimits.model_fields}
     result = run_health_checks(
         rollout_paths,
-        selected_projection=path / "rollouts.jsonl" if shards is not None else None,
         output_dir=path,
         workers=workers,
         ignored_checks=ignored_checks,
@@ -1588,8 +1605,6 @@ def _health_check_collected_rollouts(
                 ignored_checks=config.health_check_ignored_checks,
                 run_coverage=coverage,
             )
-        except JournalHealthUnavailable as error:
-            print(f"Rollout health checks skipped: {error}")
         except Exception:
             logger.exception("Writing the provisional quality summary failed; rollout artifacts are still available.")
         else:
@@ -1601,7 +1616,6 @@ def _health_check_collected_rollouts(
         shards = _aggregated_shards(output_fpath.parent, rollout_name=output_fpath.name)
         health_result = run_health_checks(
             shards if shards is not None else output_fpath,
-            selected_projection=output_fpath if shards is not None else None,
             output_dir=output_fpath.parent,
             workers=config.health_check_workers,
             ignored_checks=config.health_check_ignored_checks,
@@ -1610,8 +1624,6 @@ def _health_check_collected_rollouts(
             run_coverage=None if shards is not None else [coverage],
             model_call_capture_dirs=model_call_capture_dirs,
         )
-    except JournalHealthUnavailable as error:
-        print(f"Rollout health checks skipped: {error}")
     except Exception:
         logger.exception("Rollout health checks failed after collection; rollout artifacts are still available.")
     else:
