@@ -168,11 +168,8 @@ def get_global_aiohttp_client(
             running_loop = asyncio.get_running_loop()
         except RuntimeError:
             running_loop = None
-        if (
-            not isinstance(owner_loop, asyncio.AbstractEventLoop)
-            or owner_loop is running_loop
-            or (running_loop is None and not owner_loop.is_closed())
-        ):
+        # Outside a running loop no new client can be made, so the cached one is returned as before.
+        if not isinstance(owner_loop, asyncio.AbstractEventLoop) or running_loop in (None, owner_loop):
             return _GLOBAL_AIOHTTP_CLIENT
         _close_detached_clients(owner_loop, _detach_global_aiohttp_clients())
 

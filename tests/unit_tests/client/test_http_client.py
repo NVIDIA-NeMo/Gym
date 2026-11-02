@@ -391,6 +391,8 @@ class TestHTTPClient:
 
         try:
             first, first_text = asyncio.run(get_once())
+            # Outside a running loop nothing can be made or closed: the cached client is returned as before.
+            assert nemo_gym.client.http_client.get_global_aiohttp_client() is first
             second, second_text = asyncio.run(get_once())
         finally:
             nemo_gym.client.http_client.global_aiohttp_client_exit()
