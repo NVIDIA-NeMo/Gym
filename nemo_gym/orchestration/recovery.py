@@ -448,7 +448,10 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
     # Match the saved input used by _rollout_response: diagnostic response bodies are not verifier inputs.
     # A present response takes precedence over the native judge-failure partial response, even if unusable.
     answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
-    return has_saved_generation({"response": answer})
+    # The failure's stage stays with it, so this is the Store's predicate: an agent-stage response the outcome policy
+    # rejected as failed is diagnostic output (an earlier tool turn, say), not an answer a rerun would replace.
+    stage = {key: row[key] for key in ("_ng_failure_record", "_ng_failure_stage") if key in row}
+    return has_saved_generation({"response": answer, **stage})
 
 
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
@@ -1060,7 +1063,7 @@ def job_identity():
 initial_job_identity = job_identity()
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
-        "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
+        "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
         "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission",
         "ng_policy_model_server", "_ng_rejudge_operation_id")

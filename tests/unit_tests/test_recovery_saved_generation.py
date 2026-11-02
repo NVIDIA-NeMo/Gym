@@ -449,3 +449,53 @@ async def test_producer_null_is_omitted_before_saved_native_partial_selection(tm
     assert _rollout_response(failure) == response()
     assert decision.action.value == "reverify"
     assert store.pending() == []
+
+
+def _agent_stage_503(stage_field: str) -> dict:
+    """An agent-stage 503 after an earlier tool turn: the failed response keeps that turn's output as diagnostics."""
+    failed = response(
+        [{"type": "function_call", "call_id": "c1", "name": "shell", "arguments": "{}", "status": "completed"}]
+    ) | {"status": "failed"}
+    row = {
+        "_ng_task_index": 0,
+        "_ng_rollout_index": 0,
+        "_ng_failure_class": "agent_run_error",
+        "failure_kind": "agent_run_error",
+        "_ng_failure_http_status": 503,
+        "_ng_failure_max_attempts": 3,
+        "response": failed,
+    }
+    if stage_field == "record":
+        row["_ng_failure_record"] = {"source": "environment", "failure": {"stage": "agent", "failure_kind": None}}
+    else:
+        row["_ng_failure_stage"] = "agent"
+    return row
+
+
+@pytest.mark.parametrize("stage_field", ["record", "legacy"])
+def test_an_agent_stage_failed_response_is_diagnostic_in_recovery_as_in_the_store(tmp_path, stage_field):
+    from nemo_gym.rollout_recovery import has_saved_generation
+
+    row = _agent_stage_503(stage_field)
+    # The Store's predicate: the agent outcome policy rejected this response, so it is no saved answer.
+    assert not has_saved_generation(row)
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    (artifacts / "rollouts_materialized_inputs.jsonl").write_text(
+        json.dumps({"_ng_task_index": 0, "_ng_rollout_index": 0, "responses_create_params": {"input": "q"}}) + "\n"
+    )
+    (artifacts / "rollouts.jsonl").write_text("")
+    (artifacts / "rollouts_failures.jsonl").write_text(json.dumps(row) + "\n")
+    raw = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(tmp_path)], capture_output=True, text=True, check=True
+    )
+    collected = CollectedEvidence.model_validate_json(raw.stdout)
+    for failures in ([row], collected.failures):
+        decision = decide_from_collected(
+            collected.model_copy(update={"failures": failures}),
+            max_infra_retries=3,
+            max_walltime_s=None,
+            live_job=False,
+        )
+        assert decision.counts == {"retryable": 1}, decision.evidence[0]
+        assert decision.action.value == "resubmit"
