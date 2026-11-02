@@ -67,7 +67,7 @@ def test_a_requested_extension_resumes_each_exhausted_rollout(tmp_path):
 
     assert (result.action.value, result.counts) == ("resubmit", {"retryable": 1})
     assert result.evidence[0].max_attempts == 4
-    assert result.reason.endswith("(attempt cap 4: 3 configured + 0 recorded extension + 1 requested now)")
+    assert "(attempt cap 4: 3 configured + 0 recorded extension + 1 requested now" in result.reason
 
 
 @pytest.mark.parametrize("case,state", [("final_zero", "model_final"), ("healthy", "scored")])
@@ -137,7 +137,7 @@ def test_recover_records_the_extension_journals_it_and_a_later_recovery_counts_i
     out = recover(*_handle(job), extend_attempts=1)
 
     assert out.dispatched == "resubmit", out.decision.reason
-    assert "(attempt cap 4: 3 configured + 0 recorded extension + 1 requested now)" in out.decision.reason
+    assert "(attempt cap 4: 3 configured + 0 recorded extension + 1 requested now" in out.decision.reason
     assert (job / "artifacts" / EXTENSION).read_text() == "1\n"
     [entry] = [json.loads(line) for line in (job / RETRY_EXTENSION_JOURNAL_NAME).read_text().splitlines()]
     assert (entry["kind"], entry["by"]) == ("attempts", 1) and entry["at"]
@@ -216,3 +216,56 @@ def test_the_remote_reader_reports_the_applied_extension_and_an_older_reader_is_
     assert (pinned.attempt_extension, pinned.attempt_extension_applied) == (1, None)
     result = decide_from_collected(pinned, max_infra_retries=3, max_walltime_s=None, live_job=False, extend_attempts=1)
     assert "the run's pinned Gym predates attempt extensions" in result.reason
+
+
+_ANSWER = {
+    "status": "completed",
+    "output": [
+        {
+            "type": "message",
+            "role": "assistant",
+            "status": "completed",
+            "content": [{"type": "output_text", "text": "a saved answer"}],
+        }
+    ],
+}
+
+
+def _judge_exhausted(job):
+    """One rollout whose three attempts all ended as judge failures that kept the saved answer (cap 3)."""
+    (job / "artifacts").mkdir(parents=True, exist_ok=True)
+    rows = [{"_ng_task_index": 0, "_ng_rollout_index": 0}]
+    (job / "source.jsonl").write_text(json.dumps(rows[0]) + "\n")
+
+    def prepare():
+        inputs = json.loads(json.dumps(rows))
+        manifest = RunManifest.create(job / "source.jsonl", inputs, {}, {})
+        return inputs, manifest.model_copy(update={"max_rollout_attempts": 3})
+
+    output = job / "artifacts" / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for _ in range(3):
+            row = dict(rows[0])
+            store.allocate_attempt(row)
+            store.record_outcome(
+                row | {"_ng_failure_class": "judge_failed", "failure_kind": "judge_failed", "response": _ANSWER}
+            )
+    return output
+
+
+def test_a_rollout_whose_attempts_went_to_judge_failures_keeps_its_cap(tmp_path):
+    from nemo_gym.rollout_reverification import due_judge_failures
+
+    output = _judge_exhausted(tmp_path)
+    assert _decide(tmp_path).counts == {"exhausted": 1}
+
+    # Its saved answer is graded again, never sampled; the re-judgment budget is the saved cap, so the extension
+    # does not reach it, asked for or recorded, and the decision agrees with the executor.
+    requested = _decide(tmp_path, extend_attempts=1)
+    assert (requested.action.value, requested.counts) == ("stop", {"exhausted": 1})
+    assert "a model failure or a judge failure that kept its saved answer does not" in requested.reason
+    (output.parent / EXTENSION).write_text("1\n")
+    recorded = _decide(tmp_path)
+    assert (recorded.action.value, recorded.counts) == ("stop", {"exhausted": 1})
+    assert recorded.evidence[0].max_attempts == 3
+    assert due_judge_failures(output) == []

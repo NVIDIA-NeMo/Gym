@@ -206,8 +206,9 @@ class ManagedRecoveryFact(BaseModel):
 
 # What an exhausted-attempts stop says an operator can do; the extension is explicit and journaled.
 EXTEND_ATTEMPTS_HINT = (
-    "to give each exhausted identity N more attempts, gym eval resubmit --recover --extend-attempts N "
-    "(explicit and journaled; a rollout that ended with a model failure is never run again)"
+    "an exhausted identity whose attempts went to infrastructure failures or allocation cuts gets N more with "
+    "gym eval resubmit --recover --extend-attempts N (explicit and journaled); a model failure or a judge failure "
+    "that kept its saved answer does not"
 )
 # The most attempts one recovery may add to every rollout's cap.
 MAX_EXTEND_ATTEMPTS = 100
@@ -218,9 +219,9 @@ def _with_attempt_extension(
 ) -> list[ManagedRecoveryFact] | None:
     """The Store's facts as they read once ``extend_attempts`` more attempts are recorded for every rollout.
 
-    The cap rises by that many, and a rollout the Store would run again under some cap (``replayable``) is pending
-    while it has attempts left. Nothing else changes: a rollout that ended with a model failure, or any other outcome
-    the Store does not run again, stays as it was.
+    Only a rollout the Store would run again under some cap (``replayable``) gets the higher cap, and it is pending
+    while it has attempts left. Any other rollout keeps its cap and state: a model failure, a judge failure that kept
+    its saved answer (its re-judgment budget is the saved cap), a saved result.
     """
     if not extend_attempts or facts is None:
         return facts
@@ -228,12 +229,23 @@ def _with_attempt_extension(
         fact.model_copy(
             update={
                 "max_attempts": fact.max_attempts + extend_attempts,
-                "pending": fact.pending
-                or bool(fact.replayable and fact.attempts < fact.max_attempts + extend_attempts),
+                "pending": fact.pending or fact.attempts < fact.max_attempts + extend_attempts,
             }
         )
+        if fact.replayable
+        else fact
         for fact in facts
     ]
+
+
+def _saved_attempt_cap(collected: "CollectedEvidence") -> int | None:
+    """The run's saved per-rollout attempt cap, from the Store's facts; None when they do not say."""
+    applied = collected.attempt_extension_applied
+    for fact in collected.managed_selection or []:
+        if fact.replayable is None or applied is None:
+            return None
+        return fact.max_attempts - applied if fact.replayable else fact.max_attempts
+    return None
 
 
 def retry_budget(collected: "CollectedEvidence") -> dict[str, dict[str, int | None]]:
@@ -244,17 +256,12 @@ def retry_budget(collected: "CollectedEvidence") -> dict[str, dict[str, int | No
     """
     recorded = {"absent": 0, "ok": collected.infra_retry_extension}.get(collected.infra_retry_extension_state)
     attempts = {"absent": 0, "ok": collected.attempt_extension}.get(collected.attempt_extension_state)
-    applied = collected.attempt_extension_applied
-    facts = collected.managed_selection or []
     return {
         "infra": {
             "configured": collected.infra_retries_configured,
             "extension": None if recorded is None else int(recorded),
         },
-        "attempts": {
-            "configured": facts[0].max_attempts - applied if facts and applied is not None else None,
-            "extension": attempts,
-        },
+        "attempts": {"configured": _saved_attempt_cap(collected), "extension": attempts},
     }
 
 
@@ -2327,7 +2334,10 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 ManagedRecoveryFact(
                     identity=identity,
                     attempts=store.attempt_count(row),
-                    max_attempts=coverage["max_rollout_attempts"],
+                    # The recorded extension reaches only a rollout the Store would run again; any other keeps the
+                    # saved cap that its own readers (the judge re-judgment budget) apply.
+                    max_attempts=coverage["max_rollout_attempts"]
+                    - (0 if logical in replayable else store.attempt_extension),
                     pending=logical in pending,
                     reserved=logical in store.manifest.next_attempt,
                     replayable=logical in replayable,
@@ -2665,14 +2675,13 @@ def _decide_from_collected(
                 "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}",
             }
         )
-    if extend_attempts and decision.action == RecoveryAction.RESUBMIT and collected.managed_selection:
-        # Every fact carries the Store's one cap: the saved cap plus the recorded extension.
-        cap = collected.managed_selection[0].max_attempts
+    saved = _saved_attempt_cap(collected)
+    if extend_attempts and decision.action == RecoveryAction.RESUBMIT and saved is not None:
         applied = collected.attempt_extension_applied or 0
         decision = decision.model_copy(
             update={
-                "reason": f"{decision.reason} (attempt cap {cap + extend_attempts}: {cap - applied} configured + "
-                f"{applied} recorded extension + {extend_attempts} requested now)"
+                "reason": f"{decision.reason} (attempt cap {saved + applied + extend_attempts}: {saved} configured + "
+                f"{applied} recorded extension + {extend_attempts} requested now, for rollouts the Store runs again)"
             }
         )
     if collected.unresolved_rejudgments and live_job is None:
