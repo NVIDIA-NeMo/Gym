@@ -12,19 +12,24 @@ The server holds the search provider's credentials. The sandbox receives the per
 token minted by `/seed_session`, and the token lists exactly these two tools. Gym's MCP exposure keeps
 the plain `POST /web_search` and `POST /web_fetch` routes served next to `/mcp`, and a sandbox whose
 egress policy admits the tool-server host can call them directly; a call without the rollout's cookie or
-token lands in a fresh session that carries no question. The policy therefore does not depend on the
-transport: every blocklist family applies on both routes, and `web_search` is refused for any session
-that was not seeded with a question (`require_seeded_question`, default on), so the one session-dependent
-rule fails closed instead of being skipped. A seeded session keeps its question for its whole life: a
-retried seed with the same question is served again, and a seed that would change or drop the question
-is refused with HTTP 409, so a caller holding a session cannot swap the span check out from under it.
-What this server still cannot tell apart is a seed sent by the agent server from one sent by the sandbox
-itself for a **fresh** session: `/seed_session` is an unauthenticated route, and a sandbox whose egress
-policy admits the tool-server host (`network_access: model_and_tools` allows the whole host, so it always
-does) can seed a new session with a question of its choice and search from it without the span rule.
-Closing that needs an authenticated seed channel (a secret the agent server holds and the sandbox never
-sees); until then the span rule is a check on a cooperative harness, not on the sandboxed model, and the
-Diamond README lists it as a residual under Reference preset.
+token lands in a fresh session that carries no question. Every blocklist family applies on both routes,
+and `web_search` is refused for any session that was not seeded with a question
+(`require_seeded_question`, default on), so such a session fails closed rather than being served without
+the span rule. A seeded session keeps its question for its whole life: a retried seed with the same
+question is served again, and a seed that would change or drop the question is refused with HTTP 409, so
+a caller holding a session cannot swap the span check out from under it.
+
+**Residual: sandbox-seeded sessions.** The span rule can still be bypassed. `/seed_session` is an
+unauthenticated route, and a sandbox whose egress policy admits the tool-server host
+(`network_access: model_and_tools` admits the whole host, so it always does) can `POST /seed_session` for
+a **fresh** session with a question of its choice and search from that session; the 409 above refuses
+re-seeding an existing session and does not cover a new one. The session cookie and MCP token are signed
+with a key derived from public config (`get_session_middleware_key`: the server class name and the
+instance name), so they are not a secret that could tell the agent server's seed from the sandbox's.
+Closing this needs an authenticated seed channel, a secret the agent server holds and the sandbox never
+sees; until then the span rule is a check on a cooperative harness, not on the sandboxed model. Tracking
+issue: TRACKING_ISSUE_TBD. The Diamond README lists this next to the backend under Sandboxed agents (with
+tools) > Upstream web tools, and both belong next to any with-tools number from that preset.
 
 ## Tools
 
@@ -33,9 +38,9 @@ Diamond README lists it as a residual under Reference preset.
 | `web_search(query)` | URLs, titles and snippets; at most 20 results per call before filtering | Tavily `/search` with `max_results: 20`, `search_depth: advanced`, no generated answer, no page bodies, no images; every result is filtered by URL, title and snippet; the survivors (at most 20) are rendered as `[n] title / URL / Snippet` |
 | `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDFs come back as text); `data:` URIs (base64 or percent-encoded, with or without media-type parameters) are replaced by `[data URI removed]`; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]` |
 
-Tavily is the backend for both, which is the one residual difference from upstream's wrapper: the
-protocol does not name a search or extraction provider, so which pages a query surfaces, how they are
-ranked and how a page is turned into Markdown are Tavily's. The protocol's filtering, caps and refusals
+Tavily is the backend for both, a difference from upstream's wrapper next to the sandbox-seeded session
+residual above: the protocol does not name a search or extraction provider, so which pages a query
+surfaces, how they are ranked and how a page is turned into Markdown are Tavily's. The protocol's filtering, caps and refusals
 are all applied here, after Tavily returns. The provider is reached through Gym's shared aiohttp client
 (`nemo_gym.client.http_client.request`) rather than the `tavily-python` SDK: two JSON endpoints need no SDK,
 and the server keeps the key pool, retry budget and body redaction that `resources_servers/tavily_search`

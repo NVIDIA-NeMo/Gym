@@ -802,8 +802,9 @@ that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
   with **all seven rule families** enforced with the semantics the protocol describes, plus its query
   refusals (a blocked `site:` domain, a verbatim span of the question: 8 consecutive words, the
   server's choice where upstream states no length; a search from a session not seeded with the
-  question, such as a plain-HTTP call from the sandbox carrying no session, is refused outright so
-  the span rule cannot be skipped), its fetch-URL checks after percent-decoding
+  question, such as a plain-HTTP call from the sandbox carrying no session, is refused outright rather
+  than served without the span rule; a session the sandbox seeds itself is not covered, see below),
+  its fetch-URL checks after percent-decoding
   archive and proxy wrappers, its title-and-Markdown re-check of fetched and cached pages, and a log
   line per blocked call naming the family and rule. This closes the four unenforced and one
   approximated families of the `opencode_search` preset (Search exclusions below), which stays as the
@@ -811,12 +812,22 @@ that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
 - The environment note tells the model that external information is available only through
   `web_search` and `web_fetch`.
 
-The residual difference from upstream's wrapper is the backend: the protocol names no search or
-extraction provider, and this server uses Tavily (`/search` at `max_results: 20`, `search_depth:
-advanced`; `/extract` in Markdown). Which pages a query surfaces, their ranking and the page-to-Markdown
-rendering are therefore Tavily's, and a with-tools number from this preset should say so. Everything
-else that departs from upstream in this section (harness, sandbox image and Python version, text rows
-only, effort transmission, and on the Docker provider the open egress) still applies.
+Two residual differences from upstream's wrapper remain, and a with-tools number from this preset
+should state both:
+
+- Backend: the protocol names no search or extraction provider, and this server uses Tavily (`/search`
+  at `max_results: 20`, `search_depth: advanced`; `/extract` in Markdown). Which pages a query
+  surfaces, their ranking and the page-to-Markdown rendering are therefore Tavily's.
+- Sandbox-seeded sessions: `/seed_session` is unauthenticated and `network_access: model_and_tools`
+  admits the tool-server host, so a process in the sandbox can `POST /seed_session` for a fresh
+  session with a question of its choice and search from it without the span rule applying to the
+  real question. The server refuses re-seeding an existing session (HTTP 409), which does not cover a
+  new one, and the session and MCP-token signing key derives from public config. Closing it needs an
+  authenticated seed channel; tracking issue: TRACKING_ISSUE_TBD. Until then the span rule binds a
+  cooperative harness, not the sandboxed model.
+
+Everything else that departs from upstream in this section (harness, sandbox image and Python version,
+text rows only, effort transmission, and on the Docker provider the open egress) still applies.
 
 Pilot evidence (2026-10-26, 5 text rows, GPT-6 Astra, judge o3-mini, local Docker with host
 networking and `++use_absolute_ip=false`, egress unrestricted; comparison infrastructure only): exit 0,

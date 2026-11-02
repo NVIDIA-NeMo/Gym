@@ -25,7 +25,9 @@ The sandbox is meant to reach the tools over MCP with the per-rollout session to
 ``POST /web_search`` and ``POST /web_fetch`` routes stay served, and a call without the rollout's cookie
 or token lands in a fresh session that carries no question. The policy therefore does not depend on the
 transport: every family applies on both routes, and ``web_search`` fails closed on a session that was never
-seeded with a question (``require_seeded_question``, default on) rather than skipping the span rule.
+seeded with a question (``require_seeded_question``, default on) rather than skipping the span rule. It does
+not cover a fresh session the sandbox seeds itself with a question of its choice: ``/seed_session`` is not
+authenticated (README, residual: sandbox-seeded sessions).
 """
 
 import hashlib
