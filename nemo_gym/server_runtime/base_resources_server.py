@@ -499,6 +499,10 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
     # Each waits out a checkpoint before its handler runs, needs a rollout prefix,
     # and binds the session to that rollout when it succeeds.
     checkpoint_session_starts: ClassVar[tuple[str, ...]] = ("/seed_session",)
+    # True for a server whose /verify may ask a model through a client that notes no request (an external SDK such
+    # as openai or anthropic). Its verifier then saves no grading record of its own, so its trials are observed only
+    # through a recorded grading operation or a saved grading artifact.
+    grading_may_use_uninstrumented_model: ClassVar[bool] = False
     _checkpoint: Optional[ResourcesParticipant] = PrivateAttr(default=None)
     _mcp_token_serializer: Any = PrivateAttr(default=None)
     routes_sessions_to_owner = True
@@ -547,6 +551,7 @@ class SimpleResourcesServer(BaseResourcesServer, AggregateMetricsMixin, SimpleSe
                     judge_failsafe(self.verify),
                     enabled=TypeAdapter(bool).validate_python(config.get("observability_enabled", False)),
                     verifier_name=self.config.name,
+                    uninstrumented_models=self.grading_may_use_uninstrumented_model,
                 ),
                 static_attributes={"nemo.gym.server.name": self.config.name},
             )
