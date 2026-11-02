@@ -12,8 +12,8 @@ from typing import Any
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.reward_profile import MASK_SAMPLE_FIELD
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.metrics import MASK_SAMPLE_FIELD
 from resources_servers.agentic_turn_simulation.app import (
     AgenticTurnSimulationRunRequest,
     AgenticTurnSimulationVerifyRequest,

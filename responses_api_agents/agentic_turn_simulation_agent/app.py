@@ -31,9 +31,9 @@ from typing import Any, NamedTuple, TypedDict
 
 from pydantic import Field, ValidationError
 
-from nemo_gym._checkpoint.agent import Activation
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -41,7 +41,8 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.server_runtime import Activation, DirectHTTPToolAccess
+from nemo_gym.trajectory import (
     AgentInvocation,
     ModelCallRef,
     ObservationGap,
@@ -49,8 +50,6 @@ from nemo_gym.rollout_observability import (
     TrajectoryToolCall,
     TrajectoryTurn,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
-from nemo_gym.tool_access import DirectHTTPToolAccess
 from resources_servers.agentic_turn_simulation import cline_xml
 from resources_servers.agentic_turn_simulation.simulator import simulator_failure
 from responses_api_agents.simple_agent.app import SimpleAgent, SimpleAgentConfig, _cookies
