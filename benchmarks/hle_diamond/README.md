@@ -529,9 +529,17 @@ model-call capture:
   `++...opencode_config.attachment.image.max_width=2000 ...max_height=2000 ...max_base64_bytes=5242880`:
   every captured `image_url` carried a 2000x372 PNG of 105,698 bytes, not the dataset's bytes, which
   shows the resizer loads and runs in the science image.
-- As committed (limits lifted by the adapter): NOT YET CAPTURED. The adapter's unit test asserts the
-  lifted keys in the generated config; the capture smoke of this row with the lifted limits, whose
-  `image_url` must equal the dataset's data URI byte for byte, is the open acceptance step.
+- As committed (limits lifted by the adapter): captured by the 272-image-row run of
+  `hle_diamond/opencode_search_full` on 2026-10-26 (GPT-6 Astra, judge o3-mini, same recipe). The
+  first policy call of every row carried exactly one `image_url` part whose data URI has the
+  dataset's length and media type on 272/272 rows, with no `detail` key; for this row the
+  991,822-character data URI reached the gateway unchanged on every call. The same run shows the cost
+  of the lifted limits: the provider rejected this image on every call with HTTP 400
+  `invalid_request_error` ("The image you provided requires 40716 patches after processing, exceeding
+  the limit of 30000"), and OpenCode re-issued the identical request until the sandbox timeout
+  (2,400 s in that run) killed the container, so the row scored 0 without a judge call. With the
+  committed `sandbox_timeout` of 14,400 s the same row would retry for four hours before scoring 0.
+  That run scored 73.2 % (199/272) over the image rows, with this row inside as a zero.
 
 Both are labelled as every run through this recipe ("local Docker; egress not restricted; comparison
 infrastructure only") and say nothing about the score.
@@ -744,7 +752,9 @@ support a **comparison, not a reproduction**, of that column:
   `opencode_full` and `opencode_search_full`, whose image rows go through OpenCode's file-attachment
   path rather than as a direct `image_url` input (see Image questions through OpenCode below). The
   adapter lifts OpenCode's image limits so that all 272 images, the 26 larger than 2000 px on a side
-  included, reach the model as the dataset's bytes, as upstream sends them. The Pi adapter accepts
+  included, are sent as the dataset's bytes, as upstream sends them; an endpoint with an image-size
+  limit can still reject one (GPT-6 Astra rejects the 14950x2780 PNG of `66f1b940f8bb4425f74e4299`,
+  which then scores 0, see Image questions through OpenCode). The Pi adapter accepts
   text parts only.
 - Reasoning effort: requested through the harness's own knob; transmitted by OpenCode, not by Pi
   (see Prompting > Reasoning effort).
@@ -871,9 +881,12 @@ at tag `v1.17.11` (`packages/opencode/src/cli/cmd/run.ts`, `session/prompt.ts`, 
   rows (12 PNG, 14 JPEG; sides from 2042 to 14950 px; none over 5 MiB of base64, none with a declared
   type that differs from its bytes) exceed that threshold. The adapter therefore sets
   `attachment.image.max_width`, `max_height` and `max_base64_bytes` to 2^31 - 1 in the generated
-  config whenever the turn carries images, so every image reaches the model as the dataset's bytes,
-  which is what upstream's `run_model_predictions.py` sends; override those keys through
-  `opencode_config` to restore a limit.
+  config whenever the turn carries images, so every image is sent as the dataset's bytes, which is
+  what upstream's `run_model_predictions.py` sends; override those keys through `opencode_config` to
+  restore a limit. The cost: an endpoint with its own image-size limit rejects an oversized image
+  outright, and OpenCode retries the rejected request until `sandbox_timeout`, so that row scores 0
+  (one row on GPT-6 Astra in the 272-row run; see Sandboxed presets on a local Docker host).
+  Restoring OpenCode's limits for a run trades that loss for downscaled images and changes the label.
 - Formats: PNG (186 rows), JPEG (81), WebP (4) and GIF (1) are all sniffable. Any other media type, a
   remote `image_url` (the sandbox has no internet) or a `file_id` input fails the row before anything
   runs, with the reason in the error.
