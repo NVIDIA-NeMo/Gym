@@ -593,7 +593,7 @@ class TestApp:
 
         def get_model(config: dict[str, Any]) -> SimpleNamespace:
             holder["model_config"] = config
-            return SimpleNamespace(config=config)
+            return SimpleNamespace(config=config, query=MagicMock())
 
         module_specs = {
             "swebench": ModuleType("swebench"),
@@ -736,6 +736,58 @@ class TestApp:
 
         with pytest.raises(ValueError, match="instance_dict"):
             _run_mini_swe_v2(**(params | {"instance_dict": None}))
+
+    def test_run_mini_swe_v2_keeps_policy_api_key_out_of_trajectory(self, monkeypatch, tmp_path) -> None:
+        pytest.importorskip("minisweagent.agents.default")
+        litellm = pytest.importorskip("litellm")
+        import minisweagent.environments
+
+        policy_api_key = "policy-fixture-value"  # pragma: allowlist secret
+        completion_kwargs: list[dict[str, Any]] = []
+
+        def completion(**kwargs: Any) -> Any:
+            completion_kwargs.append(kwargs)
+            return litellm.ModelResponse(choices=[{"message": {"role": "assistant", "content": "no tool call"}}])
+
+        class FakeEnv:
+            def get_template_vars(self) -> dict[str, Any]:
+                return {}
+
+            def serialize(self) -> dict[str, Any]:
+                return {}
+
+        config_path = tmp_path / "swebench.yaml"
+        config_path.write_text(
+            yaml.safe_dump({"agent": {"system_template": "sys", "instance_template": "{{ task }}"}}),
+            encoding="utf-8",
+        )
+        monkeypatch.setattr(litellm, "completion", completion)
+        monkeypatch.setattr(minisweagent.environments, "get_environment", lambda _config: FakeEnv())
+        monkeypatch.setattr(mini_swe_app_module, "get_config_path", lambda _config: config_path)
+        monkeypatch.setattr(mini_swe_app_module, "_run_eval_v2", lambda **_kwargs: {})
+
+        _run_mini_swe_v2(
+            instance_dict={"instance_id": "django__django-123", "problem_statement": "Fix the bug"},
+            output=str(tmp_path / "out"),
+            config="swebench",
+            model="hosted_vllm/model",
+            api_key=policy_api_key,
+            base_url="http://model/v1",
+            subset="verified",
+            step_timeout=30,
+            eval_timeout=60,
+            step_limit=1,
+            run_golden=False,
+        )
+
+        assert [kwargs["api_key"] for kwargs in completion_kwargs] == [policy_api_key]
+        trajectories = list((tmp_path / "out").rglob("*.traj.json"))
+        assert len(trajectories) == 1
+        trajectory = json.loads(trajectories[0].read_text())
+        assert trajectory["info"]["config"]["model"]["model_kwargs"]["base_url"] == "http://model/v1"
+        for path in (tmp_path / "out").rglob("*"):
+            if path.is_file():
+                assert policy_api_key not in path.read_text(), path
 
     @patch("responses_api_agents.mini_swe_agent_2.app.get_first_server_config_dict")
     @patch("responses_api_agents.mini_swe_agent_2.app.get_config_path")
