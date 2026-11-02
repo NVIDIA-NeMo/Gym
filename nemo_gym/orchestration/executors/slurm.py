@@ -814,7 +814,7 @@ def _remote_managed_evidence(
     try:
         command = f"python -c {shlex.quote(_remote_managed_reader_script())} {shlex.quote(str(job_dir))} {shlex.quote(install.ref)} <&3"
         entrypoint = render_driver_entrypoint(
-            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True
+            repo=install.repo, ref=install.ref, prepare_cmd=None, command=command, cleanup=True, private_uv=True
         )
         # The login host need not contain Gym. Keep this isolated from an inherited caller environment,
         # and bound bootstrap as well as selection. FD 3 keeps large inventories out of argv and away from
