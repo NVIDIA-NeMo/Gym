@@ -45,6 +45,10 @@ def lacking_agent_sessions(agent: type) -> object | None:
     return None if agent.supports_agent_sessions() else agent
 
 
+def defined_aggregate_metrics(agent: type) -> object | None:
+    return vars(agent).get("aggregate_metrics")
+
+
 RULES = (
     Rule(
         "A1", AGENT_SERVER, "Agent servers should not define `run()`; implement agent sessions instead.", defined_run
@@ -54,6 +58,12 @@ RULES = (
         AGENT_SERVER,
         "Agent servers should implement agent sessions: seed and close.",
         lacking_agent_sessions,
+    ),
+    Rule(
+        "A3",
+        AGENT_SERVER,
+        "Agent servers should not override `aggregate_metrics`; aggregation belongs to the environment server.",
+        defined_aggregate_metrics,
     ),
 )
 
