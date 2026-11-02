@@ -8733,6 +8733,11 @@ async def test_a_budget_over_the_window_is_refitted_once_from_the_stated_prompt(
     execution = request.state.nemo_gym_model_execution
     assert execution["requested_max_tokens"] == 131072
     assert execution["applied_max_tokens"] == _REFIT_APPLIED
+    assert execution["output_budget_refit"] == {
+        "requested_max_tokens": 131072,
+        "window": _REFIT_WINDOW,
+        "applied_max_tokens": _REFIT_APPLIED,
+    }
     assert execution["response_source"] == "upstream"
     assert execution["local_response_reason"] is None
     assert "error_category" not in execution
@@ -8780,6 +8785,7 @@ async def test_a_budget_that_fits_is_sent_once_without_tokenize(
     execution = request.state.nemo_gym_model_execution
     assert "requested_max_tokens" not in execution
     assert "applied_max_tokens" not in execution
+    assert "output_budget_refit" not in execution
 
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
@@ -8882,6 +8888,11 @@ def test_the_trajectory_carries_the_refitted_budget() -> None:
                         "finish_reason": "length",
                         "requested_max_tokens": 131072,
                         "applied_max_tokens": _REFIT_APPLIED,
+                        "output_budget_refit": {
+                            "requested_max_tokens": 131072,
+                            "window": _REFIT_WINDOW,
+                            "applied_max_tokens": _REFIT_APPLIED,
+                        },
                     },
                     {"model_call_id": "unchanged", "status_code": 200, "finish_reason": "stop"},
                 ]
@@ -8891,7 +8902,13 @@ def test_the_trajectory_carries_the_refitted_budget() -> None:
 
     refitted, unchanged = (call.response_metadata for call in trajectory.model_calls)
     assert (refitted.requested_max_tokens, refitted.applied_max_tokens) == (131072, _REFIT_APPLIED)
+    assert refitted.output_budget_refit.model_dump() == {
+        "requested_max_tokens": 131072,
+        "window": _REFIT_WINDOW,
+        "applied_max_tokens": _REFIT_APPLIED,
+    }
     assert (unchanged.requested_max_tokens, unchanged.applied_max_tokens) == (None, None)
+    assert unchanged.output_budget_refit is None
 
 
 @mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
@@ -8938,6 +8955,7 @@ async def test_a_budget_within_the_window_keeps_the_overflow_refusal(
     assert execution["local_response_reason"] == (None if propagate else "context_length_exceeded")
     assert "requested_max_tokens" not in execution
     assert "applied_max_tokens" not in execution
+    assert "output_budget_refit" not in execution
 
 
 @mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
@@ -8965,8 +8983,10 @@ async def test_only_a_budget_over_the_window_is_refitted(
         assert [call["max_tokens"] for call in calls] == [budget, _REFIT_APPLIED]
         assert result.choices[0].finish_reason == "stop"
         assert (execution["requested_max_tokens"], execution["applied_max_tokens"]) == (budget, _REFIT_APPLIED)
+        assert execution["output_budget_refit"]["window"] == _REFIT_WINDOW
     else:
         assert [call["max_tokens"] for call in calls] == [budget]
         assert result.choices[0].finish_reason == "length"
         assert execution["error_category"] == "context_length_exceeded"
         assert "applied_max_tokens" not in execution
+        assert "output_budget_refit" not in execution

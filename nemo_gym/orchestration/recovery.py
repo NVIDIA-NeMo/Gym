@@ -1250,6 +1250,8 @@ def trial_metadata(value):
     result["dialect"] = value.get("dialect") if value.get("dialect") in ("chat", "responses") else None
     result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call", "max_output_tokens", "max_tokens") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
+    refit = value.get("output_budget_refit")
+    result["output_budget_refit"] = {k: refit.get(k) for k in ("requested_max_tokens", "window", "applied_max_tokens")} if isinstance(refit, dict) else None
     operations = value.get("model_operations")
     result["model_operations_recorded"] = "model_operations" in value
     result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms")}
@@ -5091,7 +5093,30 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "response_failures": family(responses, RESPONSE_FAILURE_CAUSES),
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
+        "output_budget_refits": output_budget_refits(collected),
     }
+
+
+def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many model calls in the saved results were sent again with an output budget lowered to fit the context
+    window (``output_budget_refit`` in a call's response metadata), and in how many result rows.
+
+    A count, never a failure: the call generated within the window it was served at. A reader flags a cell whose
+    requests were budget-capped from it.
+    """
+    count = rows = 0
+    for row in (collected.results or []) if collected is not None else []:
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        refits = sum(
+            isinstance(call, dict)
+            and isinstance(call.get("response_metadata"), dict)
+            and isinstance(call["response_metadata"].get("output_budget_refit"), dict)
+            for call in calls or []
+        )
+        count += refits
+        rows += refits > 0
+    return {"count": count, "rows": rows}
 
 
 def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any]:

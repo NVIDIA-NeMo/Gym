@@ -418,7 +418,8 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
             "or `max_tokens`, whichever the call used) alone exceeds the context window the refusal names, send the "
             "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
             "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
-            "records `requested_max_tokens` and `applied_max_tokens`. A budget within the window is never changed: "
+            "records `requested_max_tokens` and `applied_max_tokens` and an `output_budget_refit` event with the "
+            "window, which the gate's facts count. A budget within the window is never changed: "
             "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
             "(or empty completion), so a harness that compacts its history still gets the cue. A prompt that leaves "
             "no output token keeps the refusal too. Turn it off to keep every length refusal."
@@ -771,7 +772,15 @@ class VLLMModel(SimpleResponsesAPIModel):
         if applied < 1:
             return False
         outbound[key] = applied
-        execution.update(requested_max_tokens=budget, applied_max_tokens=applied)
+        execution.update(
+            requested_max_tokens=budget,
+            applied_max_tokens=applied,
+            output_budget_refit={
+                "requested_max_tokens": budget,
+                "window": int(window.group(1)),
+                "applied_max_tokens": applied,
+            },
+        )
         LOG.info(
             "engine window %s holds a %s-token prompt; refitting %s from %s to %s (rollout %s)",
             window.group(1),

@@ -1059,6 +1059,7 @@ def _build_trajectory_record(row: dict[str, Any], result: dict[str, Any]) -> Tra
                 "latency_ttft_ms",
                 "requested_max_tokens",
                 "applied_max_tokens",
+                "output_budget_refit",
             )
             if raw_call.get(key) is not None
         }

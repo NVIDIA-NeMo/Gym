@@ -68,6 +68,15 @@ class TrajectoryTokenStats(ObservationModel):
     cached_tokens: Optional[int] = Field(default=None, ge=0)
 
 
+class OutputBudgetRefit(ObservationModel):
+    """A model call the server sent again with its output budget lowered, because the budget it requested exceeded
+    the engine's whole context window."""
+
+    requested_max_tokens: int = Field(ge=1)
+    window: int = Field(ge=1)
+    applied_max_tokens: int = Field(ge=1)
+
+
 class TrajectoryResponseMetadata(ObservationModel):
     response_id: Optional[str] = None
     model_ref: Optional[ModelServerRef] = None
@@ -87,6 +96,7 @@ class TrajectoryResponseMetadata(ObservationModel):
     # The output budget the call asked for and the one sent after it was lowered to fit the context window.
     requested_max_tokens: Optional[int] = Field(default=None, ge=1)
     applied_max_tokens: Optional[int] = Field(default=None, ge=1)
+    output_budget_refit: Optional[OutputBudgetRefit] = None
 
 
 class TrajectoryModelCall(ObservationModel):
