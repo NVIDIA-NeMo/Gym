@@ -197,6 +197,11 @@ finite. Until then the next stage is not planned:
   writes its rollouts and then fails, without aggregate metrics. That needs a
   `partial_completion` policy or a data fix, not a resume.
 
+An agent timeout (`agent_timeout`) that kept the agent's answer is the model's
+result: it is never run again, in process or on `--resume`, and it holds no
+battle. In a stage without `partial_completion`, one such row therefore leaves
+the stage short of evidence with nothing to retry, and the run fails as above.
+
 Single-stage runs and the final stage are not held open this way: the run
 reports whatever final-stage rows succeeded and withholds the headline
 `comparison/eval_elo` if any are missing (see [Aggregate metrics](#aggregate-metrics)).
@@ -451,7 +456,8 @@ gym eval run \
   by changing `gdpval_pi` in the export above. A run into another run's directory replaces that run's files, and
   re-judging the earlier run then judges the later one's.
 - A Pi run that reaches its `timeout` while still working, before a successful `finish` or `abandon_task_finish`,
-  reports `stop_reason: wall_time`, as Stirrup does, so GDPVal masks it as `agent_timeout` and `--resume` reruns it.
+  reports `stop_reason: wall_time`, as Stirrup does, so GDPVal masks it as `agent_timeout`; the answer it kept is the
+  model's result, so `--resume` does not rerun it.
   A run that reaches its `timeout` after such a call, or after a last reply that ended the run without a tool call, is
   judged as usual. Pi has no turn limit like Stirrup's `agent_max_turns`, so a Pi run that keeps
   calling tools without submitting runs until its `timeout` and stays out of the score, where Stirrup would stop and

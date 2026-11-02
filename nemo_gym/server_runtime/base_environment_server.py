@@ -28,6 +28,7 @@ from nemo_gym.server_runtime._checkpoint.errors import ControlError
 from nemo_gym.server_runtime._checkpoint.participant_workers import install_server_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import StepType
+from nemo_gym.server_runtime.base_server import SimpleServer
 from nemo_gym.server_runtime.episode_types import (
     BaseEpisodeRequest,
     BaseEpisodeResponse,
@@ -35,7 +36,6 @@ from nemo_gym.server_runtime.episode_types import (
     FailureBoundary,
     FailureReport,
 )
-from nemo_gym.server_utils import SimpleServer
 from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
 
 

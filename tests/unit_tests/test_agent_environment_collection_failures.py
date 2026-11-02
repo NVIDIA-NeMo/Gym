@@ -13,7 +13,7 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client
 import nemo_gym.openai_utils as openai_utils_module
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from environment_servers.legacy_agent.app import LegacyAgentEnvironmentServer, LegacyAgentEnvironmentServerConfig
 from nemo_gym.artifacts.rollout_rows import NG_FAILURE_CLASS_KEY
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent

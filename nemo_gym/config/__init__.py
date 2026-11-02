@@ -36,6 +36,10 @@ if TYPE_CHECKING:
         EnvironmentServerRef,
         ModelServerRef,
         ResourcesServerRef,
+        ResourcesServerTypeConfig,
+        ResponsesAPIAgentServerTypeConfig,
+        is_almost_server,
+        maybe_get_server_instance_config,
     )
     from nemo_gym.config.global_config import (
         AGENT_REF_KEY_NAME,
@@ -61,6 +65,7 @@ if TYPE_CHECKING:
         get_global_config_dict,
         get_hf_token,
         maybe_get_global_config_dict,
+        taskset_environment_server_name,
     )
     from nemo_gym.config.server_metadata import ServerMetadata, visit_agent_server, visit_resources_server
 
@@ -93,6 +98,8 @@ _PUBLIC_API = {
     "ROLLOUT_INDEX_KEY_NAME": "global_config",
     "ROLLOUT_PATH_PREFIX": "config_types",
     "ResourcesServerRef": "config_types",
+    "ResourcesServerTypeConfig": "config_types",
+    "ResponsesAPIAgentServerTypeConfig": "config_types",
     "SKILLS_REF_KEY_NAME": "global_config",
     "SKIP_VERIFICATION_KEY_NAME": "global_config",
     "SKIP_VERIFICATION_REWARD_KEY_NAME": "global_config",
@@ -105,7 +112,10 @@ _PUBLIC_API = {
     "get_first_server_config_dict": "global_config",
     "get_global_config_dict": "global_config",
     "get_hf_token": "global_config",
+    "is_almost_server": "config_types",
     "maybe_get_global_config_dict": "global_config",
+    "maybe_get_server_instance_config": "config_types",
+    "taskset_environment_server_name": "global_config",
     "visit_agent_server": "server_metadata",
     "visit_resources_server": "server_metadata",
 }

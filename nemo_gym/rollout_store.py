@@ -35,6 +35,7 @@ from pydantic import ValidationError
 
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME
+from nemo_gym.core.failure_kinds import ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollout_records import (
     REJUDGE_OPERATION_ID_KEY,
     REJUDGED_FAILURE_ID_KEY,
@@ -226,6 +227,17 @@ class RolloutStore:
                 manifest.write(manifest_path)
             elif manifest.identity_overridden or manifest.legacy_import or not manifest_path.exists():
                 manifest.write(manifest_path)
+            charges = state.allocation_end_charges()
+            if charges:
+                # Saved before a resubmit resets the budget, so a resubmit gives these identities a fresh one. A
+                # separate writer, so the charges count neither as outcomes nor as progress of this allocation.
+                with cls(output, state) as charging:
+                    for row in charges:
+                        charging.record_outcome(row, sync=True)
+                print(
+                    f"Charged {len(charges)} attempt(s) to rollouts in flight at a second or later allocation end "
+                    f"({ROLLOUT_ALLOCATION_ENDED}). Failures: {failures_path_for(output)}."
+                )
             if resubmit:
                 # Validate before resetting anything, and repair an interrupted
                 # final write before counting physical sidecar lines.
@@ -370,17 +382,20 @@ class RolloutStore:
         self._write_pending({k: v for k, v in self.manifest.pending_rejudge.items() if k != identity})
         self._state.unresolved_dispatches.discard(identity)
 
-    def withdraw_rejudgment(self, identity: str, operation_id: str) -> None:
+    def withdraw_rejudgment(self, identity: str, operation_id: str, *, unsaved_judge_failure: bool = False) -> None:
         """Withdraw the admission of a saved result's re-verification that answered without a grade.
 
         The verifier answered, so its outcome is known; nothing is saved and the saved result stays selected as it
         was. Only a saved-result admission can be withdrawn: a judge failure's re-judgment saves its failed outcome.
+        With ``unsaved_judge_failure`` the caller saves no outcome for this judge failure's re-judgment (its verifier
+        answered without a grade or a judge failure, or its pass raised before it answered), so its admission is
+        withdrawn too: the failure stays selected, and a later pass judges its saved answer again.
         """
         pending = self.manifest.pending_rejudge.get(identity)
         if (
             pending is None
             or pending.operation_id != operation_id
-            or not pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX)
+            or not (unsaved_judge_failure or pending.predecessor_failure_id.startswith(RESULT_PREDECESSOR_PREFIX))
         ):
             raise ConfigError(f"Rollout {identity!r} has no admitted saved-result re-verification {operation_id!r}.")
         latest = self._state.payloads.get((identity, self._state.latest.get(identity)))

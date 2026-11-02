@@ -15,7 +15,7 @@ from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 
 import nemo_gym.client.http_client as http_client
-import nemo_gym.server_utils as server_utils
+import nemo_gym.server_runtime.base_server as server_utils
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog, report_for_current_request
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_runtime.base_environment_server import handled_episode_failure, is_retryable_dependency_error

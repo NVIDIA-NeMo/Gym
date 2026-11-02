@@ -100,7 +100,8 @@ def test_remote_projection_cannot_replace_collection_evidence(tmp_path, mutation
     conn = ProjectionConnection(output)
     result = _remote_managed_evidence(conn, raw, tmp_path, config())
     assert result.managed_selection is None
-    assert decide(result).action.value == "stop"
+    # A transport that could not start the reader read nothing: no verdict, so nothing is decided.
+    assert decide(result).action.value == ("unknown" if mutation == "bootstrap" else "stop")
     assert result.source_digests == raw.source_digests
 
 

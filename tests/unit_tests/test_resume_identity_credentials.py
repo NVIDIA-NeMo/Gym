@@ -20,7 +20,7 @@ from nemo_gym.rollout_recovery import (
     RunManifest,
     _configuration_identity,
     _digest,
-    _without_null_settings,
+    _without_null_defaults,
     config_identity_path_for,
     validate_resume,
 )
@@ -135,7 +135,7 @@ def test_a_semantic_change_still_refuses_and_is_named(tmp_path: Path) -> None:
 def save_run_as_earlier_gym(tmp_path: Path, global_config: dict, *, with_identity: bool = True) -> tuple[Path, Path]:
     """A run saved before the identity was credential-safe: its digest and identity file hold the resolved values."""
     path, materialized = save_run(tmp_path, global_config)
-    earlier = _without_null_settings(_configuration_identity({}, global_config, [], credential_safe=False))
+    earlier = _without_null_defaults(_configuration_identity({}, global_config, [], credential_safe=False))
     manifest = RunManifest.model_validate_json(path.read_bytes())
     path.write_text(json.dumps(manifest.model_dump(mode="json") | {"config_digest": _digest(earlier)}))
     identity = config_identity_path_for(path)

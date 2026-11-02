@@ -143,5 +143,6 @@ def test_cpu_rejudge_existing_accounting(tmp_path, monkeypatch, case):
         assert float((job / ".gym_accumulated_walltime").read_text()) == 60
         script = next(job.glob("reverify-*.sh")).read_text()
         assert "gym eval reverify" in script and "--settle-into-source" in script
+        assert "--withdraw-unresolved-admissions" in script  # dispatched only with no allocation of the run live
         assert "gym eval run" not in script and "afternotok" not in script
         assert "#SBATCH --time=00:05:00" in script

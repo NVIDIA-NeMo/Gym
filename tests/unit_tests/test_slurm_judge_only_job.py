@@ -1,0 +1,318 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+"""`gym eval resubmit --recover` on a run that served its policy on GPUs and only needs its saved answers graded again
+queues a judge-only job on a CPU partition instead of refusing; the job settles the rows through the run's own settle
+path and ends with a receipt that `--inspect` reports. The scheduler is faked at the process level; everything else is
+the real executor, collector and settle path."""
+
+import json
+import os
+import shlex
+from pathlib import Path
+
+import pytest
+
+from nemo_gym.cli import eval as eval_cli
+from nemo_gym.orchestration.api import SubmitConfig
+from nemo_gym.orchestration.executors import slurm as sm
+from nemo_gym.orchestration.executors.connection import LocalConnection
+from nemo_gym.orchestration.executors.slurm import READER_SRUN_ENV, SlurmExecutor
+from nemo_gym.orchestration.jobs import MANIFEST_NAME, BenchmarkJob, SubmissionRecord
+from nemo_gym.orchestration.recovery import JUDGE_JOB_JOURNAL_NAME, RecoveryAction
+from nemo_gym.orchestration.submit import inspect_recovery, recover
+from nemo_gym.rollout_collection import RolloutAggregationHelper
+from nemo_gym.rollout_recovery import RunManifest
+from nemo_gym.rollout_reverification import RolloutReverificationConfig
+from nemo_gym.rollout_store import RolloutStore
+from tests.unit_tests.test_eval_recovery_gate import scored
+from tests.unit_tests.test_eval_resubmit import _handle
+from tests.unit_tests.test_eval_resubmit import _local_index as _local_index  # noqa: F401 - autouse fixture
+from tests.unit_tests.test_reverify_saved_results import verifier as verifier  # noqa: F401 - fixture
+from tests.unit_tests.test_reverify_saved_results import verify_transport_masked
+
+
+def _model_served_run(tmp_path: Path, *, cpu_pool: bool = False) -> Path:
+    """A submitted run with a vLLM policy on a GPU pool, whose managed Store holds one scored row and one result
+    masked by a verify call lost in transport, with its chain accounting complete."""
+    pools = {"gpu": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8}}
+    if cpu_pool:
+        pools["scorer"] = {"partition": "cpu_long", "nodes": 1, "gpus_per_node": 0}
+    config = SubmitConfig.model_validate(
+        {
+            "services": {
+                "policy": {"type": "vllm", "container": "vllm:latest", "model": "org/model", "node_pool": "gpu"}
+            },
+            "compute": {
+                "cluster": {
+                    "type": "slurm",
+                    "account": "a",
+                    "hostname": None,
+                    "walltime": "04:00:00",
+                    "node_pools": pools,
+                }
+            },
+            "driver": {
+                "container": "python:3.12",
+                "policy_model": "policy",
+                "gym_install": {"ref": "a" * 40},
+                "benchmarks": {
+                    "bench": {
+                        "run": {"config_paths": ["fixture.yaml"]},
+                        "resumable": {"max_retries": 3, "max_walltime": "16:00:00"},
+                    }
+                },
+            },
+            "job": {"output_path": str(tmp_path)},
+            "otel": {"enabled": False},
+        }
+    )
+    run_dir = tmp_path / "gym-job-x"
+    job_dir = run_dir / "bench"
+    artifacts = job_dir / "artifacts"
+    artifacts.mkdir(parents=True)
+    record = SubmissionRecord(
+        gym_job_id=run_dir.name,
+        gym_version="0",
+        submitted_at="2026-01-01T00:00:00Z",
+        run_dir=str(run_dir),
+        cluster="cluster",
+        executor="slurm",
+        submitted_by="me",
+        benchmarks=[BenchmarkJob(benchmark="bench", job_dir=str(job_dir), job_id="100")],
+    )
+    SlurmExecutor().persist(record, config, LocalConnection().write_text)
+    (job_dir / "job.sh").write_text("#!/bin/bash\nGYM_CMD=(\n    gym eval run\n)\n")
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(2)]
+    source = job_dir / "source.jsonl"
+    source.write_text("".join(json.dumps(row) + "\n" for row in rows))
+
+    def prepare():
+        inputs = json.loads(json.dumps(rows))
+        manifest = RunManifest.create(source, inputs, {}, {"agent": {"responses_api_agents": {}}})
+        return inputs, manifest.model_copy(update={"max_rollout_attempts": 3})
+
+    output = artifacts / "rollouts.jsonl"
+    with RolloutStore.start_or_resume(output, prepare, resume=False) as store:
+        for row, outcome in zip(store.pending(), [verify_transport_masked(0), scored(1)]):
+            store.record_dispatch(row)
+            store.record_outcome(row | {k: v for k, v in outcome.items() if not k.startswith("_ng_task")})
+    (artifacts / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    (job_dir / ".gym_job_chain").write_text("100\n")
+    (job_dir / ".gym_infra_retries").write_text("0\n")
+    (job_dir / ".gym_accumulated_walltime").write_text("7200\n")
+    return job_dir
+
+
+@pytest.fixture
+def judge_slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    """Process-level scheduler fakes: squeue answers a job query from `squeue_jobs` and a workdir query from
+    `squeue_workdirs`; sbatch records its arguments and numbers each job from 4242; sacct answers the judge-job
+    query (`JobIDRaw,...,ExitCode`) from `judge_accounting` and the chain query from `accounting`; sinfo lists the
+    partitions' MaxTime."""
+    bins = tmp_path / "bin"
+    bins.mkdir()
+    (bins / "squeue").write_text(
+        '#!/bin/bash\nhere="$(dirname "$0")"\n'
+        'if [[ " $* " == *" -j "* ]]; then cat "$here/squeue_jobs" 2>/dev/null; else cat "$here/squeue_workdirs" 2>/dev/null; fi\n'
+        "exit 0\n"
+    )
+    (bins / "sbatch").write_text(
+        '#!/bin/bash\nhere="$(dirname "$0")"\n'
+        'n=$(cat "$here/sbatch_count" 2>/dev/null || echo 0); n=$((n + 1)); echo "$n" > "$here/sbatch_count"\n'
+        'echo "$PWD" > "$here/cwd"\nenv > "$here/env"\nprintf "%s\\n" "$@" >> "$here/sbatch_args"\n'
+        "echo $((4241 + n))\n"
+    )
+    (bins / "sacct").write_text(
+        '#!/bin/bash\nhere="$(dirname "$0")"\n'
+        'if [[ "$*" == *"JobIDRaw,State,ElapsedRaw,ExitCode"* ]]; then cat "$here/judge_accounting" 2>/dev/null; '
+        'else cat "$here/accounting"; fi\n'
+    )
+    (bins / "accounting").write_text("100|COMPLETED|7200|0\n")
+    (bins / "sinfo").write_text('#!/bin/bash\nprintf "cpu 8:00:00\\ncpu_long 2-00:00:00\\ngpu 4:00:00\\n"\n')
+    for stub in ("squeue", "sbatch", "sacct", "sinfo"):
+        (bins / stub).chmod(0o755)
+    monkeypatch.setenv("PATH", f"{bins}{os.pathsep}{os.environ['PATH']}")
+    monkeypatch.delenv(READER_SRUN_ENV, raising=False)
+    monkeypatch.setattr(sm, "installed_gym_commit", lambda: "a" * 40)
+    return bins
+
+
+def _journal(job_dir: Path) -> list[dict]:
+    path = job_dir / JUDGE_JOB_JOURNAL_NAME
+    return [json.loads(line) for line in path.read_text().splitlines()] if path.exists() else []
+
+
+def _accounting(job_dir: Path) -> tuple[str, str, str]:
+    return tuple(
+        (job_dir / name).read_text() for name in (".gym_job_chain", ".gym_infra_retries", ".gym_accumulated_walltime")
+    )
+
+
+def _queued_script(job_dir: Path) -> str:
+    (script,) = job_dir.glob("reverify-*.sh")
+    return script.read_text()
+
+
+def _queued_reverify_config(script: str) -> RolloutReverificationConfig:
+    """The configuration the queued script's `gym eval reverify` line hands the job, as the CLI would parse it."""
+    (line,) = [line.strip() for line in script.splitlines() if line.strip().startswith("gym eval reverify")]
+    words = shlex.split(line.replace("'\"'\"'", "'"))
+    flags = {
+        "--rollouts": "rollouts_jsonl_fpath",
+        "--inputs": "materialized_inputs_jsonl_fpath",
+        "--output": "output_jsonl_fpath",
+        "--settle-receipt": "settle_receipt_fpath",
+        "--settle-source-snapshot": "settle_source_snapshot_json",
+    }
+    values: dict = {
+        "judge_failed_only": "--judge-failed-only" in words,
+        "settle_into_source": "--settle-into-source" in words,
+        "withdraw_unresolved_admissions": "--withdraw-unresolved-admissions" in words,
+    }
+    for index, word in enumerate(words):
+        if word in flags:
+            values[flags[word]] = words[index + 1]
+    values |= {"skip_spent_judge_failures": "--skip-spent-judge-failures" in words, "disable_aggregation": True}
+    return RolloutReverificationConfig.model_validate(values)
+
+
+def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served_run(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    before = _accounting(job_dir)
+
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+
+    assert out.ok and out.dispatched == "reverify" and out.job_id == "4242", out.decision.reason
+    assert out.decision.action == RecoveryAction.REVERIFY and out.decision.counts == {
+        "judge_recoverable": 1,
+        "scored": 1,
+    }
+    job = out.judge_job
+    assert job["job_id"] == "4242" and job["partition"] == "cpu" and job["partition_source"] == "--judge-partition"
+    assert job["walltime"] == "04:00:00" and job["rows"] == 1 and job["gym_commit"] == "a" * 40
+    assert job["receipt"].endswith("receipt.json") and "/reverification/" in job["receipt"]
+    script = _queued_script(job_dir)
+    assert "#SBATCH --partition=cpu" in script and "#SBATCH --nodes=1" in script
+    assert "#SBATCH --gpus-per-node=0" in script and "#SBATCH --time=04:00:00" in script
+    assert "#SBATCH --no-requeue" in script and "vllm serve" not in script and "gym eval run" not in script
+    assert "afternotok" not in script
+    assert "--judge-failed-only" in script and "--settle-into-source" in script and "--settle-receipt" in script
+    # A pass that died left admissions without an outcome: the job withdraws them instead of refusing.
+    assert _queued_reverify_config(script).withdraw_unresolved_admissions is True
+    assert "--model-type openai_model" in script
+    # The judge-only job is not a segment of the policy chain: no chain entry, no walltime charged, no retry spent.
+    assert _accounting(job_dir) == before
+    (entry,) = _journal(job_dir)
+    assert entry["job_id"] == "4242" and entry["partition"] == "cpu" and entry["receipt"] == job["receipt"]
+    assert out.gate_task["status"] == "RESUMING" and out.gate_task["judge_jobs"][-1]["job_id"] == "4242"
+    record = SubmissionRecord.load(json.loads((job_dir.parent / MANIFEST_NAME).read_text()))
+    assert record.benchmark_job("bench").job_id == "4242"
+    assert "--no-requeue" in (judge_slurm_bin / "sbatch_args").read_text()
+    assert not (job_dir / sm._RESUBMIT_LOCK).exists()
+
+
+def test_a_saved_cpu_pool_queues_the_judge_only_job_without_an_option(tmp_path, judge_slurm_bin) -> None:
+    job_dir = _model_served_run(tmp_path, cpu_pool=True)
+    out = recover(*_handle(job_dir))
+    assert out.ok and out.dispatched == "reverify", out.decision.reason
+    assert (
+        out.judge_job["partition"] == "cpu_long"
+        and out.judge_job["partition_source"] == "the saved node pool 'scorer'"
+    )
+    assert "#SBATCH --partition=cpu_long" in _queued_script(job_dir)
+
+
+def test_without_a_cpu_partition_the_refusal_names_the_option_and_queues_nothing(tmp_path, judge_slurm_bin) -> None:
+    job_dir = _model_served_run(tmp_path)
+    out = recover(*_handle(job_dir))
+    assert not out.ok and out.dispatched is None and out.decision.action == RecoveryAction.STOP
+    assert "CPU-only judge execution profile" in out.unsupported and "--judge-partition" in out.unsupported
+    assert not (judge_slurm_bin / "sbatch_args").exists() and _journal(job_dir) == []
+    assert out.gate_task["status"] == "FAILED"
+
+
+def test_a_live_judge_only_job_is_reported_and_never_queued_beside(tmp_path, judge_slurm_bin) -> None:
+    job_dir = _model_served_run(tmp_path)
+    assert recover(*_handle(job_dir), judge_partition="cpu").dispatched == "reverify"
+    (judge_slurm_bin / "squeue_workdirs").write_text(f"{job_dir}\n")
+    (judge_slurm_bin / "judge_accounting").write_text("4242|RUNNING|30|0:0\n")
+
+    inspected = inspect_recovery(*_handle(job_dir))
+    assert inspected.decision.action == RecoveryAction.NOOP and inspected.decision.scheduler_live
+    assert "judge-only job 4242 (RUNNING)" in inspected.decision.reason
+    assert inspected.gate_task["status"] == "RUNNING"
+    (entry,) = inspected.gate_task["judge_jobs"]
+    assert entry["job_id"] == "4242" and entry["state"] == "running"
+
+    again = recover(*_handle(job_dir), judge_partition="cpu")
+    assert again.dispatched is None and (judge_slurm_bin / "sbatch_count").read_text().strip() == "1"
+
+
+def test_a_judge_only_job_that_ended_without_a_receipt_is_reported_and_a_second_failure_stops(
+    tmp_path, judge_slurm_bin
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    assert recover(*_handle(job_dir), judge_partition="cpu").job_id == "4242"
+    (judge_slurm_bin / "judge_accounting").write_text("4242|FAILED|30|1:0\n")
+
+    inspected = inspect_recovery(*_handle(job_dir))
+    assert inspected.decision.action == RecoveryAction.REVERIFY
+    (entry,) = inspected.gate_task["judge_jobs"]
+    assert entry["job_id"] == "4242" and entry["state"] == "failed" and "FAILED" in entry["scheduler_state"]
+    assert any(
+        "judge-only job 4242" in warning and "no receipt" in warning for warning in inspected.gate_task["warnings"]
+    )
+
+    second = recover(*_handle(job_dir), judge_partition="cpu")
+    assert second.dispatched == "reverify" and second.job_id == "4243"
+    (judge_slurm_bin / "judge_accounting").write_text("4242|FAILED|30|1:0\n4243|FAILED|30|1:0\n")
+
+    third = recover(*_handle(job_dir), judge_partition="cpu")
+    assert not third.ok and third.dispatched is None and third.decision.action == RecoveryAction.STOP
+    assert (
+        "4242" in third.unsupported and "4243" in third.unsupported and "ended without settling" in third.unsupported
+    )
+    assert (judge_slurm_bin / "sbatch_count").read_text().strip() == "2"
+    assert [entry["job_id"] for entry in _journal(job_dir)] == ["4242", "4243"]
+
+
+def test_the_queued_job_settles_the_run_through_its_own_settle_path_and_inspect_reports_the_receipt(
+    tmp_path,
+    judge_slurm_bin,
+    monkeypatch,
+    verifier,  # noqa: F811
+) -> None:
+    job_dir = _model_served_run(tmp_path)
+    out = recover(*_handle(job_dir), judge_partition="cpu")
+    assert out.dispatched == "reverify"
+    aggregations = []
+
+    async def run_from_config(self, config):
+        aggregations.append(config)
+
+    monkeypatch.setattr(RolloutAggregationHelper, "run_from_config", run_from_config)
+    monkeypatch.setenv("SLURM_JOB_ID", "4242")
+
+    # The job: the queued script's own reverify command, run against the run's artifacts.
+    config = _queued_reverify_config(_queued_script(job_dir))
+    assert config.settle_receipt_fpath == out.judge_job["receipt"]
+    eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+
+    assert verifier["posted"] == [("rs", "/verify")]  # one verify call of the saved answer; the policy is never called
+    (judge_slurm_bin / "judge_accounting").write_text("4242|COMPLETED|30|0:0\n")
+    inspected = inspect_recovery(*_handle(job_dir))
+    assert inspected.decision.action == RecoveryAction.NOOP and inspected.decision.complete, inspected.decision.reason
+    (entry,) = inspected.gate_task["judge_jobs"]
+    assert entry["job_id"] == "4242" and entry["state"] == "completed" and entry["settled"] == 1
+    assert entry["selected"] == 1 and entry["withdrawn"] == 0 and entry["unsupported"] == 0
+    assert any(
+        "judge-only job 4242" in warning and "settled 1" in warning for warning in inspected.gate_task["warnings"]
+    )
+    coverage = json.loads((job_dir / "artifacts" / "rollouts_coverage.json").read_text())
+    assert coverage["masked"] == 0 and coverage["allocation_id"] == "4242"
+    assert len(aggregations) == 1 and aggregations[0].merge_shards is False
+    assert (job_dir / "artifacts" / "quality_summary.json").exists()
+    # The chain accounting is still the policy chain's.
+    assert (job_dir / ".gym_job_chain").read_text() == "100\n"
