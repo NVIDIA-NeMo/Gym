@@ -81,6 +81,12 @@ A run that hangs instead of failing is not left to hold its allocation: a head s
 answers, or a run stopped by a typed non-resumable condition, exits 76, and the chain queues no
 follow-up for it.
 
+While the chain runs, `gym eval status "$GYM_JOB_ID"` prints each benchmark's saved progress as the
+Store recorded it, without taking the run lock: `updated_at` and `tracking`, the `export receipt`
+per exporter (present or missing, with the live run id), and per agent `completed`, `remaining`,
+`expected`, `aggregation`, `failures by class`, `by kind` and `model-final by kind` (`--json` gives the
+same as data).
+
 Do not resubmit while a job of the run is live; recovery answers NOOP then anyway.
 
 ## 3. Where the evidence lives
