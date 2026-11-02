@@ -61,6 +61,7 @@ from nemo_gym.agent_outcome import (
 )
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
@@ -3354,7 +3355,8 @@ def query_mlflow_status(
 
         status = client_factory(tracking_uri).get_run(run_id).info.status
     except Exception as error:  # a status that cannot be read is reported, whatever the reason
-        return None, f"{type(error).__name__}: {str(error)[:200]}"
+        # Request errors carry the URL, which may hold a password: mask it before cutting the text.
+        return None, f"{type(error).__name__}: {mask_url_passwords(str(error))[:200]}"
     finally:
         for key, value in saved.items():
             if value is None:

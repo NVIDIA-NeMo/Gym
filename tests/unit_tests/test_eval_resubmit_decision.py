@@ -3060,3 +3060,11 @@ def test_a_status_the_caller_passes_is_never_queried(tmp_path) -> None:
         tmp_path, uri="http://tracking.example", client=client, mlflow_status="FINISHED"
     )
     assert client.asked == [] and task["mlflow_delivery"]["state"] == "verified"
+
+
+def test_a_failed_status_query_never_shows_a_password_from_the_error_url(tmp_path) -> None:
+    error = ConnectionError("cannot reach http://user:SECRETPW@tracking.example:5000/api")
+    task = _delivery_with_a_queried_status(tmp_path, uri="http://tracking.example", client=_FakeClient(error=error))
+    reasons = task["mlflow_delivery"]["reasons"]
+    assert task["mlflow_delivery"]["state"] == "unverified" and reasons
+    assert "SECRETPW" not in json.dumps(task) and "tracking.example" in reasons[0]

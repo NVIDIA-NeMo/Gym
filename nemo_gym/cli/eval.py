@@ -1418,7 +1418,10 @@ def export_run() -> None:  # pragma: no cover
         result = exporter.export(artifacts)
     elif isinstance(exporter, BaseExporter):
         with run_lock(artifacts.rollouts_jsonl_fpath):
-            _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
+            # A racing exporter may have finished while this one waited for the lock: its receipt is then only
+            # verified, and the health metrics it prepared are not rewritten.
+            if not artifacts.export_done_fpath(name).exists():
+                _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
             result = exporter.export(artifacts)
     else:
         result = exporter.export(artifacts)
