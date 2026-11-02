@@ -108,3 +108,32 @@ Use `--limit 1` for a quick end-to-end check. For the web-search variant, use
 `finance_sec_search/config_web_search`, agent
 `finance_sec_search_web_search_benchmark_agent`, and
 `data/finance_sec_search_benchmark_web_search.jsonl`.
+
+## Optional: prefetch filing metadata
+
+Eval configs keep `use_cache: false`, so rollouts hit SEC.gov live. To reuse
+ticker mappings and filing metadata across runs, prefetch into a **shared
+absolute** directory and start the server with the same path. Prefetch does not
+write filing bodies; those appear under `filings/` on the first cached
+`parse_html_page`.
+
+Commands live in the [resource server README](../../resources_servers/finance_sec_search/README.md#pre-warming-the-cache-prefetch). For this benchmark, from the Gym repo root:
+
+```bash
+python resources_servers/finance_sec_search/scripts/prefetch_sec_metadata.py \
+  --cache_dir /shared/cache/finance_sec_search \
+  --tickers AAPL MSFT \
+  --supplementary_tickers benchmarks/finance_sec_search/data/supplementary_tickers.json
+```
+
+```bash
+gym env start \
+  --model-type vllm_model \
+  --benchmark finance_sec_search/config_no_web_search \
+  +use_cache=true \
+  +cache_dir=/shared/cache/finance_sec_search
+```
+
+Then collect with `gym eval run --no-serve` as above. Pass `--limit 1` twice:
+the first run should log `live=` for filing bodies; the second should log
+`cache=` for the same EDGAR URLs.

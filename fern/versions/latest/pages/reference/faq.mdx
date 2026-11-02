@@ -28,7 +28,7 @@ hf_dataset_prefix: str  # field to override the default value "Nemotron-RL" prep
 
 Naming convention for Hugging Face datasets is as follows.
 
-`{hf_organization}/{hf_dataset_prefix}-{domain}–{resources_server OR dataset_name}`
+`{hf_organization}/{hf_dataset_prefix}-{domain}-{resources_server OR dataset_name}`
 
 E.g.:
 
@@ -38,10 +38,11 @@ You will only need to manually input the `{dataset_name}` portion of the above w
 
 To upload to Hugging Face, use the below command:
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+dataset_name="my_dataset"  # your dataset name
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
-    --name {your dataset name} \
-    --input data/multineedle_benchmark.jsonl \
+    --name ${dataset_name} \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path}
 ```
 
@@ -50,10 +51,11 @@ Because of the required dataset nomenclature, the resources server config path i
 By default, the `split` parameter for uploading is set to `train`, which will run a check on the required fields `{"responses_create_params"}`. Specifying `validation` or `test` bypasses this check:
 
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+dataset_name="my_dataset"  # your dataset name
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
-    --name {your dataset name} \
-    --input data/multineedle_benchmark_validation.jsonl \
+    --name ${dataset_name} \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     --split validation \
     +resource_config_path=${resource_config_path}
 ```
@@ -61,9 +63,10 @@ gym dataset migrate \
 ## Uploading with Pull Request workflow
 When uploading to an organization repository where you don't have direct write access (e.g., nvidia/), use the `+create_pr=true` flag to create a Pull Request instead of pushing directly. You can also customize the commit message and description.
 
-If you want to specify the revision (branch name), you can add the `+revision={your branch name}` flag. Excluding `create_pr` (or setting it to `false`) assumes you are committing to an existing branch. Including it assumes it will be a brand new branch.
+To target a specific branch, add `--revision <branch-name>`. Without `--create-pr`, the upload commits directly to that branch; with `--create-pr`, it opens a Pull Request against that branch. In both cases the branch must already exist on Hugging Face.
 
 ```bash
+resource_config_path="resources_servers/math_with_judge/configs/math_with_judge.yaml"
 gym dataset upload \
     --name OpenMathReasoning \
     --input data/validation.jsonl \
@@ -88,10 +91,11 @@ The commit_message and commit_description parameters work for both direct pushes
 ## Deleting Datasets from GitLab
 You can optionally pass a `+delete_from_gitlab=true` flag to the above command, which will delete the model and all of its artifacts from GitLab. By default, this is set to `False`.
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+dataset_name="my_dataset"  # your dataset name
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset upload \
-    +dataset_name={your dataset name} \
-    +input_jsonl_fpath=data/multineedle_benchmark.jsonl \
+    +dataset_name=${dataset_name} \
+    +input_jsonl_fpath=resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path} \
     +delete_from_gitlab=true
 ```
@@ -105,17 +109,19 @@ There will be a confirmation dialog to confirm the deletion:
 You can also run the below command which does the same thing without the need for a `+delete_from_gitlab` flag:
 
 ```bash
-resource_config_path="resources_servers/multineedle/configs/multineedle.yaml"
+dataset_name="my_dataset"  # your dataset name
+resource_config_path="resources_servers/example_multi_step/configs/example_multi_step.yaml"
 gym dataset migrate \
-    --name {your dataset name} \
-    --input data/multineedle_benchmark.jsonl \
+    --name ${dataset_name} \
+    --input resources_servers/example_multi_step/data/example.jsonl \
     +resource_config_path=${resource_config_path}
 ```
 
 If you've already uploaded to Hugging Face and just want to do a standalone delete from GitLab:
 ```bash
+dataset_name="my_dataset"  # your dataset name
 gym dataset rm \
-    --name {your dataset name}
+    --name ${dataset_name}
 ```
 
 <Info>
@@ -330,15 +336,36 @@ NeMo Gym automatically sets up Ray for distributed computing for CPU-intensive t
 ## Ray Setup in NeMo Gym
 
 ### Automatic Initialization
-Ray is initialized when you start NeMo Gym servers:
+NeMo Gym starts or joins a Ray cluster only when a configured server needs it:
 
 ```bash
 gym env start --config $config_paths
 ```
 
-The initialization happens in two places:
-1. **Main Process** (`cli.py`): Ray is initialized in the main process when `RunHelper.start()` is called
-2. **Server Process** (`server_utils.py`): Each server invokes `initialize_ray()` during its startup and connects to the same Ray cluster initialized by the main process.
+Ray is involved in two places:
+1. **Main process** (`RunHelper.start()` in `nemo_gym/cli/env.py`): before launching servers, Gym reads each server's `ray_enabled` declaration from its entrypoint. It starts or joins Ray only if a server declares `ray_enabled = True`. Otherwise no Ray cluster is created.
+2. **Server process** (`server_utils.py`): each server process, including Uvicorn managers and workers, connects only when its implementation declares `ray_enabled = True`.
+
+`ray_enabled` defaults to `False`. Server implementations that use Ray declare it as a class attribute:
+```python
+class MyResourcesServer(SimpleResourcesServer):
+    ray_enabled = True
+```
+
+Declare `ray_enabled = True` on the class your entrypoint calls `run_webserver()` on, even if a parent class already declares it. Gym reads only that class's own source before launching servers, and a server whose `ray_enabled` resolves to `True` only through inheritance fails at startup with an error asking you to declare it.
+
+Gym launches servers that don't declare `ray_enabled = True` with `RAY_ENABLE_AUTO_CONNECT=0`. If such a server calls Ray anyway, the call fails with "Ray has not been started yet" instead of starting a private Ray cluster in each server process. Declare `ray_enabled = True` to fix it.
+
+### Installing Ray
+Servers that use Ray need Ray installed both where `gym` runs and in their own environment. Install it with the `ray` extra:
+
+```bash
+pip install "nemo-gym[ray]"
+```
+
+A server that declares `ray_enabled = True` requests the extra in its own dependency file, for example `-e nemo-gym[dev,ray] @ ../../` in `requirements.txt`, so its environment gets Ray. Gym pins the server's Ray to the exact version installed where `gym` runs.
+
+If a configured server declares `ray_enabled = True` and Ray isn't installed where `gym` runs, `gym env start` stops before launching any server and names the servers that need it. A plain `pip install nemo-gym` doesn't include Ray.
 
 ### Ray Configuration
 You can also specify a custom Ray cluster address in your config:
@@ -347,7 +374,7 @@ ray_head_node_address: "ray://your-cluster-address:10001"
 ```
 Training frameworks like [Nemo-RL](https://github.com/NVIDIA-NeMo/RL) will configure the Ray head node address, allowing remote tasks to run across all nodes in the cluster.
 
-If not specified, NeMo Gym will start a local Ray cluster and store the address in the global config for child processes to connect to.
+If no address is specified and a configured server needs Ray, NeMo Gym starts a local Ray cluster and stores the address in the global config. Only servers that need Ray connect to it.
 
 ## Using Ray for CPU-Intensive Tasks
 

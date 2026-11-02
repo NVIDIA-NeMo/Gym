@@ -8,7 +8,7 @@ from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Iterable
 
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import EnvironmentKind, load_manifest
 from nemo_gym.environment.onboarding import VerifierReport
 from nemo_gym.environment.validation import EnvironmentValidationReport
@@ -24,12 +24,15 @@ class EnvironmentPublicationReport:
     name: str
     version: str
     kind: str
-    status: str
+    status: str | None
     manifest_path: str
     verifier_cases: int
 
     def to_dict(self) -> dict[str, Any]:
-        return asdict(self)
+        payload = asdict(self)
+        if self.status is None:
+            payload.pop("status")
+        return payload
 
 
 def _is_placeholder(value: str | None) -> bool:
@@ -92,10 +95,8 @@ def finalize_publication(
             f"Catalog did not resolve {entry.kind} {entry.name!r} to its exact manifest after publication checks."
         )
     published = matches[0]
-    if published.status != "experimental":
-        raise EnvironmentPublicationError(
-            f"Newly published workloads must enter as experimental, observed {published.status!r}."
-        )
+    if published.status not in {"experimental", None}:
+        raise EnvironmentPublicationError(f"Published workload has unsupported catalog status {published.status!r}.")
 
     return EnvironmentPublicationReport(
         name=validation.name,

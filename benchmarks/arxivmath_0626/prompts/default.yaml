@@ -1,0 +1,12 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+# MathArena's ArXivMath prompt (eth-sri/matharena
+# `configs/competitions/arxiv/june.yaml`). Upstream's block scalar leaves the
+# backslash doubled (`\\boxed{}`); normalised to a single backslash here.
+user: |-
+  You are given a difficult question. Your task is to solve the problem.
+  Put the final answer you find within \boxed{{}}.
+
+
+  {question}

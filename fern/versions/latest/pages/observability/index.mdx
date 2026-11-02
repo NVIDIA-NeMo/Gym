@@ -1,0 +1,38 @@
+---
+title: "Observability"
+description: "Collect rollout evidence and monitor Gym services."
+position: 1
+---
+
+NeMo Gym provides two independent observability features:
+
+| Feature | Use it to | Enable with |
+| --- | --- | --- |
+| Rollout evidence | Inspect model calls, agent activity, and saved trajectory health | `observability_enabled` and `model_call_capture_dir` |
+| OpenTelemetry | Trace requests across services and monitor runtime metrics and logs | `telemetry.enabled` or `NEMO_GYM_OTEL_ENABLED=1` |
+
+Each feature has its own configuration. You can enable either or both.
+
+Runs on the Harbor task path (`gym dataset validate`, `gym eval run <task target>`) add a third source that
+needs no configuration: a per-run summary, `rollouts_run_summary.json` beside the rollouts, that points at
+the files of the run and, per task, at its verifier logs, trajectory and collected artifacts by relative path,
+with the input each row carried. `-v` / `--verbose` raises the spun-up servers' log level with the CLI's. See
+[Harbor Tasks](/main/data/harbor-tasks#run-summary-and-verbosity).
+
+## Get Started
+
+<Cards>
+
+<Card title="Rollout Evidence" href="/main/observability/rollout-evidence">
+Collect and inspect model-call capture, agent observations, and normalized trajectories.
+</Card>
+
+<Card title="Collector for Submitted Jobs" href="/main/observability/eval-submit-collector">
+Run an OpenTelemetry Collector beside every `gym eval submit` job: engine, GPU and OTLP data with a per-run identity.
+</Card>
+
+<Card title="OpenTelemetry" href="/main/observability/opentelemetry">
+Export distributed traces, metrics, and correlated logs through nemo-lens.
+</Card>
+
+</Cards>

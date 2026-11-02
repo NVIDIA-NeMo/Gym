@@ -17,7 +17,7 @@ from typing import Any, Optional
 
 from fastapi import FastAPI
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -48,6 +48,7 @@ class GuiCoordinateVerifyResponse(BaseVerifyResponse):
     extracted_x: Optional[float]
     extracted_y: Optional[float]
     distance: Optional[float]
+    metadata: Optional[dict[str, Any]] = None
 
 
 def _extract_last_assistant_text(body: BaseVerifyRequest) -> str:

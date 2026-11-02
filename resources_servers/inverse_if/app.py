@@ -41,20 +41,20 @@ from typing import Any, List, Optional
 from fastapi import FastAPI
 from pydantic import BaseModel, ConfigDict, Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
+    NeMoGymEasyInputMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
 )
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import call_judge
-from nemo_gym.openai_utils import (
-    NeMoGymEasyInputMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
+from nemo_gym.verification import call_judge
 
 
 # ---------------------------------------------------------------------------
@@ -260,6 +260,11 @@ def _extract_verdict(judge_text: str) -> tuple[str, str]:
 
 class InverseIFServer(SimpleResourcesServer):
     """Inverse IF evaluation server."""
+
+    # Each verification judges the request's rubric with the judge model: there is no session state to export,
+    # and a checkpoint can re-run a verification after a crash instead of waiting for it.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
 
     config: InverseIFConfig
 

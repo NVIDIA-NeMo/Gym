@@ -1,0 +1,12 @@
+# The judge of partner_if's example servers.
+partner_if_judge:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${judge_base_url}
+      openai_api_key: ${judge_api_key}
+      openai_model: ${judge_model_name}
+
+judge_base_url: null
+judge_api_key: null
+judge_model_name: null

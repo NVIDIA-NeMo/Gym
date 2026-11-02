@@ -1,0 +1,23 @@
+[
+  {
+    "accessionNo": "0001193125-11-047157",
+    "cik": "1101239",
+    "companyNameLong": "EQUINIX INC (Filer)",
+    "description": "FORM 10-K",
+    "filedAt": "2011-02-25",
+    "filingUrl": "https://www.sec.gov/Archives/edgar/data/1101239/000119312511047157/d10k.htm",
+    "formType": "10-K",
+    "ticker": "EQIX",
+    "type": "10-K"
+  },
+  {
+    "accessionNo": "0001193125-19-218770",
+    "cik": "1778114",
+    "companyNameLong": "AllianzGI Artificial Intelligence Opportunities Fund (Filer)",
+    "filedAt": "2019-08-12",
+    "filingUrl": "https://www.sec.gov/Archives/edgar/data/1778114/000119312519218770/filename1.htm",
+    "formType": "CORRESP",
+    "ticker": "AIO",
+    "type": "CORRESP"
+  }
+]

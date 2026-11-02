@@ -1,0 +1,25 @@
+config_paths:
+  - benchmarks/genrm_mmrb2/dataset.yaml
+  - resources_servers/genrm_eval/configs/llm_as_a_judge_model.yaml
+
+judge_mode: llm_as_a_judge
+genrm_mmrb2_benchmark_agent:
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: genrm_mmrb2_resources_server
+      datasets:
+        - name: genrm_mmrb2_reasoning_text_only
+          type: benchmark
+          jsonl_fpath: benchmarks/genrm_mmrb2/data/genrm_mmrb2_reasoning_text_only_llm_as_a_judge_validation.jsonl
+          prepare_script: benchmarks/genrm_mmrb2/prepare.py
+          prepare_dependencies: [Pillow]
+          prompt_config: null
+          num_repeats: 1
+          license: CC-BY-NC-4.0
+
+genrm_mmrb2_resources_server:
+  _inherit_from: genrm_eval
+  resources_servers:
+    genrm_eval:
+      verdict_format: json_ab

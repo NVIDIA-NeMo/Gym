@@ -29,7 +29,7 @@ The process of evaluating entails different components. For example: to evaluate
 
 ## Environments vs Benchmarks
 
-An **environment** defines the tasks, verifier, and interaction surface, including any tools or state. Gym configuration composes it with agent, model, and runtime components.
+An **environment** is the executable task setup: dataset, resources server, verifier, state, tools, and the agent interaction pattern. It defines what the agent can do and how each attempt is scored.
 
 A **benchmark** is a repeatable, versioned evaluation built on top of an environment. It declares a canonical dataset split, prompt configuration, tracked metrics, and comparison protocol so different models or harnesses can be compared fairly.
 

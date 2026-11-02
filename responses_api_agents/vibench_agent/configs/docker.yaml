@@ -1,0 +1,65 @@
+# Docker sandbox provider for ViBench.
+#
+# Use this INSTEAD OF nemo_gym/sandbox/providers/docker/configs/docker.yaml.
+# Stock docker.yaml uses a 180s exec timeout, which kills long npm/pip installs.
+#
+# The OpenCode harness inside the sandbox must reach the policy model. Gym's
+# get_server_url is a host address (http://127.0.0.1:<port>); inside a bridged
+# container that is the container itself, so the harness makes zero LLM calls
+# and exports an empty app. Do NOT fix that with `network: host` -- that puts
+# model-written code on the host network namespace (the same class of harness
+# breakout as mounting the Docker socket).
+#
+# Instead: keep the default bridge, add host.docker.internal via host-gateway,
+# and let vibench_agent rewrite loopback model URLs to that hostname.
+#
+# Only the model server binds 0.0.0.0, because on Linux Docker Engine a 127.0.0.1
+# bind is not visible from the bridge gateway (172.17.0.1). global_config only
+# applies default_host to servers without an explicit host, so this overrides that
+# one server and leaves the resources server, agent and head server on loopback --
+# a global default_host would publish all of them, and grader API keys live in
+# those processes. Docker Desktop already forwards host.docker.internal.
+#
+# Residual: the sandbox can still reach host-published TCP ports, including the
+# model server. It cannot see host loopback, Unix sockets, or other containers'
+# namespaces. OpenSandbox sandboxes have their own address and do not need this
+# file; pass sandbox_model_base_url on the agent instead.
+# EXPOSURE: 0.0.0.0 publishes the model server on *every* host interface, not just the
+# Docker bridge -- including the run's token-capture path (/ng-rollout/<id>). On a host with
+# a public or shared interface that is reachable by anything that can route to it, and the
+# server takes a dummy API key. Only run this on a single-tenant box, or firewall the port.
+#
+# Narrower alternative: bind the bridge gateway address instead of 0.0.0.0. Not the default
+# here because the gateway is not a fixed value -- ViBench's own setup configures custom
+# bridge address pools -- so it has to be resolved per host and verified before use.
+#
+# The other three servers stay on loopback; grader credentials live in those processes.
+policy_model:
+  responses_api_models:
+    openai_model:
+      host: "0.0.0.0"
+
+sandbox:
+  default_metadata:
+    sandbox-api: docker-cli
+  docker:
+    create:
+      keepalive_shell: /bin/sh
+      keepalive_cmd: "while :; do sleep 2147483647; done"
+      start_timeout_s: 600
+      use_init: true
+      apply_resource_limits: true
+      publish_host: 127.0.0.1
+      extra_run_args:
+        - --add-host
+        - host.docker.internal:host-gateway
+    exec:
+      # ViBench builds a whole app in one exec; the stock 180s default kills long installs.
+      default_timeout_s: 5400
+      concurrency: 32
+    probe:
+      command: printf docker-sandbox-ready
+      expected_stdout: docker-sandbox-ready
+      timeout_s: 30
+      deadline_s: 60
+      stable_count: 1

@@ -13,7 +13,6 @@ Spin up the server alongside a compatible agent:
 ```bash
 gym env start \
     --model-type openai_model \
-    --config responses_api_agents/gymnasium_agent/configs/gymnasium_agent.yaml \
     --resources-server grl_sokoban
 ```
 

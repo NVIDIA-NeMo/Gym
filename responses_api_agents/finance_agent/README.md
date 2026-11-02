@@ -17,6 +17,10 @@ Three fields have no default, so each instance states its own policy:
 | `max_time_seconds` | `null` (turn-bounded) | `3600` |
 | `abort_on_tool_error_types` | `[]` (every tool error is fed back) | `[RetryExhaustedError]` |
 
+`continue_if_not_tool_call` defaults to `true` in the agent (eval keeps nudging).
+GRPO sets `false` in the NVFlow overlay so training does not inject a synthetic
+user turn. Shipped yaml does not need to set it.
+
 The v2 values mirror `vals-ai/finance-agent-v2` and are checked against the installed upstream
 package by `resources_servers/finance_agent_v2/tests/test_upstream_parity.py`.
 

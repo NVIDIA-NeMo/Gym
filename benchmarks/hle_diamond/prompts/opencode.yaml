@@ -1,0 +1,13 @@
+# The HLE authors' SYSTEM_PROMPT, verbatim, from hle_eval/run_model_predictions.py in
+# https://github.com/centerforaisafety/hle (MIT) at commit 22ed3074b1e7b134bcbc09028d0ba320839b0655,  # pragma: allowlist secret
+# folded into the single user message after the question for the OpenCode and Pi sandboxed
+# harnesses, whose native system prompts stay intact (the structure of benchmarks/hle/prompts/
+# opencode.yaml). Braces are doubled only for nemo_gym.prompt's str.format_map; the rendered
+# message carries upstream's single braces.
+user: |-
+  {question}
+
+  Your response should be in the following format:
+  Explanation: {{your explanation for your answer choice}}
+  Answer: {{your chosen answer}}
+  Confidence: {{your confidence score between 0% and 100% for your answer}}

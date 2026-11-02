@@ -18,7 +18,50 @@ Standard path. Configure with `configs/vllm_model.yaml` (rollouts) or
 
 Supports the full schema: tool-calling, multi-turn assistant/tool messages,
 images via `image_url` content blocks, and the audio sidechannel
-(`metadata.audio_path` / `audio_paths` / `audio_data`).
+(`metadata.audio_path` / `audio_paths` / `audio_data` / `audio_ref`).
+
+### Audio archives
+
+Reuse `simple_agent` with compact rows carrying a JSON-encoded archive/member
+reference in `responses_create_params.metadata.audio_ref`:
+
+```json
+{
+  "responses_create_params": {
+    "input": [{"role": "user", "content": "Please respond to the spoken request."}],
+    "metadata": {
+      "audio_ref": "{\"archive\":\"alpaca.tar\",\"member\":\"audio/alpacaeval_full/test_0.wav\"}"
+    }
+  }
+}
+```
+
+Configure the Gym model server (the process reading the archives):
+
+```yaml
+audio_root: /path/to/voicebench
+audio_content_order: after_text  # before_text is the compatible default
+```
+
+`archive` must name an uncompressed `.tar` relative to `audio_root`, and `member`
+must be a normalized relative POSIX path. Archive paths cannot escape the root
+through traversal or symlinks. Only regular, non-sparse members are supported;
+links, duplicate member names, malformed references, and unknown audio
+extensions fail with an explicit error. `audio_ref` is mutually exclusive with
+the existing audio metadata keys. No archive extraction is performed.
+
+Gym caches member offsets per archive file identity and uses an independent
+file handle for every read. File reads and base64 encoding run outside the async
+event loop. Immediately before calling vLLM's `/v1/chat/completions`, the adapter
+replaces the reference in its outbound request with an `audio_url` data URI in
+the most recent user message. Dataset rows, original Responses input, and normal
+saved Responses remain compact; explicitly enabled transport logs still include
+the complete outbound payload. The custom vLLM server receives self-contained
+audio and does not need archive access. `audio_content_order` applies to all four
+audio modes.
+
+Archive audio is unsupported with `is_responses_native: true` or
+`use_completions_api: true`.
 
 ## `use_completions_api: true`
 

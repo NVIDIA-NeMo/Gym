@@ -17,14 +17,15 @@ from unittest.mock import AsyncMock, MagicMock
 import orjson
 from pytest import approx, fixture
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.server_runtime import ReverifyMode
 from resources_servers.simpleqa.app import (
     SimpleQAConfig,
     SimpleQAServer,
@@ -192,6 +193,10 @@ class TestSimpleQAServer:
             ),
             judge_responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
         )
+
+    async def test_reverify_mode(self, config: SimpleQAConfig) -> None:
+        resources_server = SimpleQAServer(config=config, server_client=MagicMock(spec=ServerClient))
+        assert await resources_server.get_reverify_mode() == ReverifyMode.STATELESS
 
     async def test_verify_correct(self, config: SimpleQAConfig) -> None:
         server_mock = MagicMock(spec=ServerClient)

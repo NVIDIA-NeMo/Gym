@@ -1,4 +1,4 @@
--e nemo-gym[dev] @ ../../
+-e nemo-gym[dev,ray] @ ../../
 datasets
 swebench
 transformers

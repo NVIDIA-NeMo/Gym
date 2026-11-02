@@ -1,0 +1,3 @@
+-e nemo-gym[dev] @ ../../
+
+nemo-usersim @ git+https://github.com/NVIDIA-NeMo/UserSim.git@a5f676bf6dc5a73914c8a0860f97c10dd2c214ee

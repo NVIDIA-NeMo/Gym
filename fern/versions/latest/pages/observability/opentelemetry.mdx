@@ -1,0 +1,68 @@
+---
+title: "OpenTelemetry"
+description: "Trace and measure Gym services with nemo-lens."
+position: 3
+---
+
+NeMo Gym exports traces, metrics, and optional logs through
+[nemo-lens](https://github.com/NVIDIA-NeMo/Lens). Telemetry is off by default.
+
+A distributed trace follows a rollout across agent, model, and resources servers. Use it to find
+slow requests and service failures. For saved model calls and agent activity, see
+[Rollout Evidence](/main/observability/rollout-evidence).
+
+## Quick Start
+
+Install the optional dependency:
+
+```bash
+uv sync --extra dev --extra telemetry
+```
+
+Export to the console:
+
+```bash
+NEMO_GYM_OTEL_ENABLED=1 NEMO_GYM_OTEL_EXPORTER=console \
+gym env start --resources-server example_single_tool_call --model-type vllm_model
+```
+
+Or send telemetry to an OTLP collector:
+
+```bash
+NEMO_GYM_OTEL_ENABLED=1 OTEL_EXPORTER_OTLP_ENDPOINT=http://localhost:4317 \
+gym env start --resources-server example_single_tool_call --model-type vllm_model
+```
+
+| Signal | Contents |
+| --- | --- |
+| Traces | Request spans across agent, model, and resources servers |
+| Metrics | Rollout and verification durations, verification success rate, active servers, and HTTP metrics |
+| Logs | Optional Python log records correlated with traces |
+
+Instrumentation is a no-op when disabled or when nemo-lens is absent.
+
+## Next Steps
+
+<Cards>
+
+<Card title="Configuration" href="/main/observability/configuration">
+Set environment variables, exporters, and the telemetry config block.
+</Card>
+
+<Card title="Distributed Tracing" href="/main/observability/distributed-tracing">
+Follow requests across processes and correlate traces with rollout IDs.
+</Card>
+
+<Card title="Span Groups" href="/main/observability/span-groups">
+Choose which spans to emit.
+</Card>
+
+<Card title="Metrics" href="/main/observability/metrics">
+Review the emitted metrics.
+</Card>
+
+<Card title="Extending" href="/main/observability/extending">
+Add instrumentation to a server.
+</Card>
+
+</Cards>

@@ -1,0 +1,13 @@
+legacy_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: ???
+      # Required by BaseEnvironmentServerConfig. A relay applies none of them; the agent
+      # keeps its own limits.
+      max_concurrent_episodes: null
+      queue_timeout_seconds: null
+      default_episode_timeout_seconds: 21600
+      cleanup_timeout_seconds: 180

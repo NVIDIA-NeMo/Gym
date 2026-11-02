@@ -1,0 +1,57 @@
+{
+    "name": "example",
+    "type": "example",
+    "jsonl_fpath": "resources_servers/wordle/data/example.jsonl",
+    "num_repeats": 1,
+    "source": null,
+    "gitlab_identifier": null,
+    "huggingface_identifier": null,
+    "license": "Apache 2.0",
+    "Number of examples": 5,
+    "Number of tools": {
+        "Total # non-null values": 5,
+        "Average": 3.0,
+        "Min": 3.0,
+        "Max": 3.0,
+        "Standard deviation": 0.0
+    },
+    "Json-dumped number of words (proxy for token count)": {
+        "Total # non-null values": 5,
+        "Average": 291.0,
+        "Min": 291.0,
+        "Max": 291.0,
+        "Standard deviation": 0.0
+    },
+    "Number of turns": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "Temperature": {
+        "Total # non-null values": 5,
+        "Average": 1.0,
+        "Min": 1.0,
+        "Max": 1.0,
+        "Standard deviation": 0.0
+    },
+    "word_length": {
+        "Total # non-null values": 5,
+        "Average": 5.0,
+        "Min": 5.0,
+        "Max": 5.0,
+        "Standard deviation": 0.0
+    },
+    "max_turns": {
+        "Total # non-null values": 5,
+        "Average": 6.0,
+        "Min": 6.0,
+        "Max": 6.0,
+        "Standard deviation": 0.0
+    },
+    "custom_target": {
+        "unique_count": 5,
+        "total_count": 5
+    }
+}

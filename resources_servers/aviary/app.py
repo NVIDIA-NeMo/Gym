@@ -33,8 +33,8 @@ from aviary.core import (
     ToolRequestMessage,
     ToolResponseMessage,
 )
-from nemo_gym.base_resources_server import SimpleResourcesServer
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymFunctionCallOutput
+from nemo_gym.server_runtime import SimpleResourcesServer
 
 from .schemas import (
     AviaryAgentVerifyRequest,
@@ -73,10 +73,12 @@ def obs_msg_to_nemo_gym(obs: Message) -> list[NeMoGymEasyInputMessage]:
     is_env_state = isinstance(obs, EnvStateMessage) or (obs.info or {}).get("is_env_state", False)
 
     dump = obs.model_dump()
-    try:
-        content: str | list = json.loads(dump["content"])
-    except json.JSONDecodeError:
-        content = dump["content"]
+    content: str | list = dump["content"]
+    if isinstance(content, str):
+        try:
+            content = json.loads(content)
+        except json.JSONDecodeError:
+            pass
 
     flat_content: list[str] = []
     if isinstance(content, list):

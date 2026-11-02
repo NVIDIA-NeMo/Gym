@@ -1,0 +1,13 @@
+# Isolated Python 3.11 runtime for PyTDC's legacy sklearn models.
+PyTDC==0.4.1
+rdkit-pypi==2022.9.5
+numpy==1.26.4
+scikit-learn==1.2.2
+pandas==2.2.3
+huggingface-hub==0.36.2
+networkx==3.4.2
+# PyTDC imports pkg_resources, removed in newer setuptools.
+setuptools==80.9.0
+
+# Upstream prompt preparation imports its API client (no API requests are made).
+openai==2.44.0

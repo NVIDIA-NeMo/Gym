@@ -1,0 +1,66 @@
+# Resources server for the OML SWE-bench Extended task packages (swemer_oml).
+#
+# Rows are NOT prepared from a public dataset: this is an internal delivery (5,000 tasks, Java /
+# JS-TS / Rust / C-C++), distributed offline as data/swemer_oml_training.jsonl. See the README.
+#
+# Grading runs each package's own tests/test.sh + grade.py (per-test FAIL_TO_PASS enforcement,
+# 0/1 reward file) inside a fresh sandbox of the task's image; there is no per-framework parser
+# here -- see verification.py.
+swemer_oml_resources_server:
+  resources_servers:
+    swemer_oml:
+      allowed_agents: [opencode_sandboxed_agent]
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      # The packages' own [verifier] timeout_sec is 3000 for 4,994 of 5,000 tasks.
+      evaluation_timeout: 3000
+      is_verifying_golden_patch: false
+      apply_anti_cheating: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        # maven/gradle/cargo/cmake suites are install/compile-bound -- same sizing as swemer_v2.
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swemer-oml
+
+# Golden-patch validation: grade the dataset's own patch instead of an agent's. A row whose golden
+# patch does not resolve is a broken row, and scoring an agent against it measures noise.
+# Run it with resources_servers/swemer_oml/apply_golden_patch.py.
+swemer_oml_golden_patch_resources_server:
+  resources_servers:
+    swemer_oml:
+      entrypoint: app.py
+      domain: coding
+      verified: false
+
+      evaluation_timeout: 3000
+      is_verifying_golden_patch: true
+
+      sandbox_provider: sandbox
+      sandbox_config:
+        ttl_s: 18000
+        ready_timeout_s: 1200
+        resources:
+          cpu: 8
+          memory_mib: 30720
+          disk_gib: 30
+        provider_options:
+          resource_requests:
+            cpu: 1
+            memory_mib: 4096
+            disk_gib: 30
+        metadata:
+          benchmark: swemer-oml-golden-patch

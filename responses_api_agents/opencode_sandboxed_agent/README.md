@@ -1,18 +1,30 @@
 # OpenCode Sandboxed Agent
+
+> [!WARNING]
+> **Deprecated.** `opencode_sandboxed_agent` runs each episode through its own legacy `/run` path, behind a
+> `legacy_agent` environment server, and will be removed after the environment-server migration.
+> Do not build new benchmarks, agents or configs on this harness. Where the resources server returns
+> `sandbox_access`, switch to a session harness that its `allowed_agents` lists, under an environment server:
+> [`opencode_agent`](../opencode_agent/README.md#environmentserver-sessions) where it is listed (Terminal Bench 2.1),
+> otherwise another such as `pi_agent` or `codex_agent` (SWE-bench Pro).
+>
+> Some setups have no session path yet and stay on this agent until they do: the SWE resources servers that
+> return only a `sandbox_handle` (such as `swebench`, `swe_gym` and `r2e_gym`), the HLE search presets
+> (`tool_servers`), and `vibench_agent`, which extends this agent. Existing configs keep working; the agent logs a
+> deprecation warning when it starts.
+
 ```bash
 # In terminal 1
 gym env start \
     --config responses_api_models/vllm_model/configs/vllm_model.yaml \
     --config nemo_gym/sandbox/providers/opensandbox/configs/opensandbox.yaml \
-    --config responses_api_agents/opencode_sandboxed_agent/configs/opencode_agent.yaml \
+    --config responses_api_agents/opencode_sandboxed_agent/configs/opencode_sandboxed_agent.yaml \
     --config resources_servers/swebench/configs/swebench.yaml
 
 # In terminal 2
 python responses_api_agents/opencode_sandboxed_agent/client.py \
     +benchmark_jsonl=benchmarks/swebench/data/swebench_verified_benchmark.jsonl
 ```
-
-For E2E functional testing, run as above and remove the actual opencode run command from the exec.
 
 ## Prefetch OpenCode binary and upload to S3
 ```bash
@@ -36,3 +48,166 @@ aws s3 cp opencode /path/to/folder/opencode/$APP-$target
 # Double check they are uploaded properly.
 aws s3 ls /path/to/folder/opencode/
 ```
+
+## Optional offline ripgrep
+
+OpenCode's `glob` and `grep` tools also need ripgrep (`rg`). Without it, OpenCode
+tries downloading from GitHub, which fails in network-restricted sandboxes.
+Optionally set `local_ripgrep_binary_path` to a predownloaded, version-pinned
+executable on each Gym agent-server host, for example
+`/opt/gym-assets/ripgrep/15.1.0/rg`. Match the sandbox architecture/libc
+(for Linux x86_64, the official musl build is portable) and verify its release
+checksum before use. Gym uploads it through the sandbox file API and installs it
+alongside OpenCode before execution; no sandbox internet access or root package
+installation is needed. The default is `null`, preserving existing behavior.
+
+## Offline scientific evaluation with OpenCode or Pi
+
+The dedicated `opencode_sandboxed_agent` and `pi_sandboxed_agent` run their native
+CLIs inside a provider-managed sandbox. Gym stays on the host: it provisions the
+sandbox, routes model requests, seeds authenticated MCP tools, collects transcripts,
+and calls the existing verifier. No Gym installation is needed inside the sandbox.
+
+For benchmark selection, prompts, and repeat counts, see the
+[HLE](../../benchmarks/hle/README.md#sandboxed-agents) and
+[APEX Shortlist](../../benchmarks/apex_shortlist/README.md#sandboxed-agents) instructions.
+
+Set `OPENCODE_SANDBOX_IMAGE` or `PI_SANDBOX_IMAGE` to your validated image digest,
+plus `OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` for your assigned sandbox API.
+Set `OPENCODE_ARTIFACTS_DIR` or `PI_ARTIFACTS_DIR` to durable host storage.
+Search additionally reads `TAVILY_API_KEY`, accepting either one key or a
+comma-separated pool. Provider credentials remain on the host; the sandbox receives
+only per-session Gym MCP headers. See [Tavily search](../../fern/versions/latest/pages/infrastructure/tavily-search.mdx)
+for exclusions, retry limits, and the source-only search response contract.
+
+```bash
+gym eval run --benchmark hle/pi_search --model-type vllm_model
+```
+
+The presets use 512 concurrent requests per agent worker, 2 CPUs and 8 GiB per
+sandbox, four-hour execution/TTL limits, and 20-minute readiness limits. Collection
+concurrency controls how many requests actually arrive across workers. Align proxy
+and rollout timeouts with the four-hour execution limit. Native
+OpenCode runs at most 400 steps and disables background titles. Pi caps each Bash
+call at 120 seconds while preserving shorter positive model-specified deadlines;
+invalid or nonpositive deadlines use the configured cap. Both
+presets disable compaction and use `output_token_policy: remaining_context` to
+omit a fixed output-token request. Configure the inference server for the intended
+262,144-token context; the hook cannot recover history already exceeding it or
+remove a server-side default output cap.
+
+OpenCode also accepts `opencode_model_call_timeout` in milliseconds for each model
+request. The general-purpose OpenCode config defaults to one hour; these benchmark
+presets leave it unset, so the sandbox execution budget bounds the run. The stream
+idle timeout follows `sandbox_timeout`.
+
+Native agent prompts receive only a short note about network availability and the
+preinstalled scientific tools at `/opt/science/README.md`. The search variants
+mention Tavily explicitly. OpenCode accepts its existing single-user-turn input
+contract, text or one `input_text` part plus any number of `input_image` data URIs
+(PNG, JPEG, GIF or WebP): each image is decoded on the host, uploaded to
+`/tmp/nemo-gym-attachments/` in the sandbox and attached with `opencode run -f`, and
+OpenCode's Read tool turns it into an `image_url` part of the first model call; the
+`detail` field is not transmitted. For such a turn the generated OpenCode config also
+declares the model's `modalities.input` as text and image, without which OpenCode
+replaces every image with an "ERROR: Cannot read ... (this model does not support
+image input)" text, and lifts OpenCode's `attachment.image` limits (2000 px on a side,
+5 MiB of base64), below which OpenCode otherwise downscales and re-encodes the image
+(PNG, else JPEG at quality 80 down to 40) whenever its bundled resizer loads; the model
+therefore receives the caller's bytes. Set `opencode_config.attachment.image.max_width`,
+`max_height` or `max_base64_bytes` to restore a limit (`auto_resize: false` is not that
+knob: it fails the turn on an oversized image instead). A text-only turn leaves the
+declaration, the limits, and the launch command exactly as before. Remote image URLs and other formats fail the row
+before anything runs, since the sandbox has no internet and OpenCode cannot show them.
+`opencode_attachment_count` on each row records how many images were attached. Pi also
+combines supplied system/developer messages with its native prompt.
+
+Restricted network policies require OpenSandbox. Python-only allows the Gym model
+host; search additionally allows the Gym tool host. Other destinations are denied.
+The allowlist permits **all ports and paths on each allowed host**. If model, tool,
+head, or verifier services share a host, the sandbox may reach those services too;
+this policy alone does not isolate privileged Gym APIs. Deploy on appropriately
+isolated hosts when that separation is required. An isolated gateway enforcing
+per-session routes is outside this adapter's scope.
+
+Restricted modes reject loopback and wildcard service addresses. Set
+`use_absolute_ip: true` (enabled by these presets) or configure an explicit
+sandbox-reachable bind address for each model/tool server before starting Gym; changing an advertised URL does
+not change the server's listening interface. Inherited networking preserves
+loopback addresses for host-network Docker deployments. Remote sandboxes still
+require endpoints reachable from their network.
+Resource-owned sandboxes cannot be used with a restricted policy because the agent
+cannot verify their existing policy. Direct unseeded `/v1/responses` is unsupported
+for Pi, and OpenCode requires `/run` when tool servers are configured.
+
+Generation receipts and native logs are written before grading. OpenCode includes
+native turns in top-level `ng_trajectory`; Pi preserves its native event stream,
+per-event timing, response tool calls, and agent observations. Completed execution
+failures receive zero reward when `execution_failure_reward_zero` is enabled.
+A terminal token-limit stop is also an execution failure: the benchmark presets
+score it zero even if the partial answer is correct. The returned response is
+marked `incomplete` with reason `max_output_tokens`, and retains the partial output
+for inspection. This changes OpenCode's previous behavior of grading truncated
+answers, and makes Pi's zero-score behavior independent of observation collection.
+Both adapters label provider-reported timeouts as `timeout`, including exit code
+124 when no provider error type is supplied.
+The adapter verifies an empty output to obtain the resource's native score fields,
+so failed attempts remain in metrics such as APEX symbolic pass@1. The verifier
+must score empty output as an unmasked zero; incompatible verifiers fail the
+request. The returned result and generation receipt retain the original output
+for inspection. This replaces the previous zero-reward shortcut, which omitted
+resource-specific fields and could inflate native aggregate metrics.
+
+Failure to initialize configured Gym MCP tools is a setup failure: neither agent
+continues silently without those tools. Setup, transcript export, and judge
+failures propagate as request failures; use Gym's failure sidecar to continue unrelated rows and account for those missing rows
+when reporting coverage. Export failure propagation is stricter than the previous
+OpenCode adapter's best-effort empty result. Configured OpenCode overrides are deep
+merged; prefer `permission` over legacy `tools`, whose native precedence can
+otherwise defeat permission denies.
+
+`sandbox_config.files` maps remote paths to text contents, not local filenames.
+Image, working directory, and entrypoint are configurable. Request temperature
+and top-p are forwarded to OpenCode's build agent.
+
+### Reproducible offline images
+
+Build OpenCode's scientific base from
+`responses_api_agents/opencode_sandboxed_agent/offline_science_image`:
+
+```bash
+docker build --platform linux/amd64 -t gym-opencode-science:local \
+  responses_api_agents/opencode_sandboxed_agent/offline_science_image
+```
+
+It includes OpenCode 1.17.11 and its preinstalled plugin dependency, Python 3.13.14
+scientific packages, SageMath 10.8 with its own Python 3.13.14 environment, and
+Lean/Mathlib 4.34.0. Tool use instructions and dependency provenance are included. See the
+[image README](offline_science_image/README.md)
+for dependency updates and offline validation.
+The Dockerfile pins downloads and image digests, and package locks pin transitive
+dependencies. Builds need network access; sandbox startup performs no package installs.
+
+For `benchmarks/hle_diamond/opencode_reference.yaml` build the reference image instead
+(`OPENCODE_REFERENCE_SANDBOX_IMAGE`): upstream's Python 3.11.16 with its twelve pinned packages, a
+shell and the same OpenCode 1.17.11 install, nothing else. See the
+[reference image README](hle_reference_image/README.md) for the protocol source and verification.
+
+```bash
+docker build --platform linux/amd64 -t gym-opencode-hle-reference:local \
+  responses_api_agents/opencode_sandboxed_agent/hle_reference_image
+```
+
+Pi adds Node 22.23.2 and Pi 0.85.1 in a small layer:
+
+```bash
+docker build --platform linux/amd64 \
+  --build-arg SCIENCE_IMAGE=gym-opencode-science:local \
+  -t gym-pi-science:local \
+  responses_api_agents/pi_sandboxed_agent/offline_science_image
+```
+
+Use an immutable base digest for published deployments. No API credentials, model
+checkpoints, benchmark questions or reference answers belong in either image.
+Validate real Python and MCP rollouts, network isolation, and sandbox cleanup before
+promoting a new image.

@@ -19,19 +19,19 @@ from unittest.mock import AsyncMock, MagicMock, call
 import orjson
 from pytest import approx, fixture
 
-from nemo_gym.server_utils import SESSION_ID_KEY
+from nemo_gym.client import SESSION_ID_KEY
 
 
 _TEST_DIR = os.path.dirname(os.path.abspath(__file__))
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 from resources_servers.tavily_search.app import (
     FindInPageRequest,
     ScrollPageRequest,
@@ -145,7 +145,7 @@ class TestApp:
         assert "raw content" not in joined
 
     def test_postprocess_search_results_with_answer(self, server: TavilySearchResourcesServer) -> None:
-        """Test that _postprocess_search_results returns just the answer when present."""
+        """Aggregate answers cannot be attributed to allowed URLs and must be discarded."""
         raw_results = {
             "answer": "The capital of France is Paris.",
             "results": [
@@ -154,10 +154,9 @@ class TestApp:
         }
         formatted = server._postprocess_search_results(raw_results)
         joined = "".join(formatted)
-        assert "Search Answer" in joined
-        assert "The capital of France is Paris." in joined
-        # Individual results should NOT be shown
-        assert "[1]" not in joined
+        assert "Search Answer" not in joined
+        assert "The capital of France is Paris." not in joined
+        assert "[1]" in joined
 
     # ---- web_search ----
 
@@ -187,6 +186,8 @@ class TestApp:
             max_results=10,
             exclude_domains=["blacklisteddomain.com"],
             search_depth="advanced",
+            include_answer=False,
+            include_raw_content=False,
         )
         assert expected_call_args == actual_call_args
 

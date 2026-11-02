@@ -1,0 +1,15 @@
+# Nemotron 3 Ultra as the autograder judge, in the style of judge_gptoss20b.yaml.
+# Override JUDGE_BASE_URL / JUDGE_MODEL to point at any OpenAI-compatible endpoint.
+judge_model:
+  responses_api_models:
+    openai_model:
+      entrypoint: app.py
+      openai_base_url: ${oc.env:JUDGE_BASE_URL,https://integrate.api.nvidia.com/v1}
+      openai_api_key: ${oc.env:NVIDIA_API_KEY,null}
+      openai_model: ${oc.env:JUDGE_MODEL,nvidia/nemotron-3-ultra-550b-a55b}
+math_with_autograder:
+  resources_servers:
+    math_with_autograder:
+      judge_responses_create_params:
+        max_output_tokens: 131072
+      verified: false

@@ -38,3 +38,11 @@ anyswe_openclaw:
         - name: example
           type: example
           jsonl_fpath: responses_api_agents/anyswe_agent/data/example.jsonl
+
+anyswe_openclaw_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: anyswe_openclaw

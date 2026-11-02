@@ -1,0 +1,4 @@
+-e nemo-gym[dev] @ ../../
+# The authors' metric code and HGNC gene mapper (MIT). Pinned: the release that accompanies the
+# paper's public repo at commit 640c68b. A different version can change a score.
+assaybench==0.2.0

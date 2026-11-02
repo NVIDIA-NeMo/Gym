@@ -1,11 +1,31 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
-"""Dependency-light parser for Cline's newline-delimited JSON event stream."""
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""Dependency-light parser for Cline's newline-delimited JSON event stream.
+
+The Cline agent (`responses_api_agents/cline_agent/app.py`) and the SWE-agents
+Cline harness (`responses_api_agents/swe_agents/app.py`) both materialize the
+same `cline --json` stream into Responses items, so the parsing lives here and
+imports nothing beyond the shared response types.
+"""
+
 import json
 import logging
 from typing import Any
 from uuid import uuid4
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymFunctionCallOutput,
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
@@ -13,8 +33,8 @@ from nemo_gym.openai_utils import (
 )
 
 
-
 LOG = logging.getLogger(__name__)
+
 
 def _message(index: int, text: str) -> NeMoGymResponseOutputMessage:
     return NeMoGymResponseOutputMessage(

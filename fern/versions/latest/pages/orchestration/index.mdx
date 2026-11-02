@@ -1,0 +1,120 @@
+---
+title: "Orchestration"
+description: "Deploy model services and run benchmarks on a cluster with gym eval submit."
+position: 1
+---
+
+<Warning>
+
+`gym eval submit` is **experimental**. It prints a warning each time it runs, and its configuration schema, job layout, and record format may change or be removed without notice.
+
+</Warning>
+
+The orchestration layer turns one YAML file into batch jobs on a cluster. You describe the model services to deploy (for example vLLM), the compute to run them on, and the benchmarks to evaluate. `gym eval submit` validates the file, renders one job script per benchmark, copies the scripts to the cluster, queues them, and writes a record you can use to find the run again.
+
+Use it when a benchmark needs more than one machine can offer: a model that spans GPUs or nodes, many data-parallel replicas for rollout throughput, or a prefill/decode split. For a single-machine run, use [`gym eval run`](/evaluation) directly.
+
+<Note>
+
+Slurm (with [Pyxis](https://github.com/NVIDIA/pyxis) container support) is the only executor today. The configuration and the [job record](/orchestration/job-records) are executor-neutral by design, so the schema does not assume Slurm, but nothing else is implemented.
+
+</Note>
+
+## How it fits together
+
+A submit config has four required sections and one optional one:
+
+| Section | Describes | Reference |
+| --- | --- | --- |
+| `services` | Long-running servers to deploy beside the benchmark: `vllm`, `vllm_pd` (prefill/decode), or `ray`. | [Services](/orchestration/configuration#services) |
+| `compute` | The cluster to run on. One resource, of type `slurm`, with named node pools. | [Compute](/orchestration/configuration#compute) |
+| `driver` | The process that runs `gym eval prepare` and `gym eval run` against the services, and the benchmarks it runs. | [Driver](/orchestration/configuration#driver) |
+| `job` | Where run directories are created on the cluster (`output_path`). | [Job](/orchestration/configuration#job) |
+| `otel` (optional) | The OpenTelemetry collector that runs beside each benchmark job. **On by default.** | [Collector for Submitted Jobs](/observability/eval-submit-collector) |
+
+Submission works in these steps:
+
+1. **Compose and validate.** Hydra composes the YAML, resolves interpolations and `env` prefixes, and validates it against a strict schema. Unknown keys are errors, so typos fail immediately.
+2. **Render.** One job script is rendered for each entry in `driver.benchmarks`.
+3. **Stage and copy.** The scripts are staged in a temporary directory and copied to a new run directory on the cluster, `<job.output_path>/gym-job-<timestamp>-<id>/`.
+4. **Queue.** One `sbatch` is issued per benchmark. Each benchmark is its own Slurm job and deploys its own copy of the services.
+5. **Record.** A manifest (`gym-job.json`) and the resolved config are written to the run directory, and a copy of the manifest to a local index on your machine.
+
+See [Slurm Executor](/orchestration/slurm-executor) for what each job script does and [Job Records](/orchestration/job-records) for the files left behind.
+
+## The command
+
+```bash
+gym eval submit --config path/to/submit.yaml [overrides...]
+```
+
+| Flag | Effect |
+| --- | --- |
+| `--config`, `-c` (required) | Path to the submit config YAML. The file must exist; a missing path or a directory is reported before anything else runs. |
+| `--dry-run` | Render every job script and print it, then stop. Nothing is copied or queued, and no record is written. |
+| `--resolve-only` | Compose, resolve, and validate the config, print it as YAML (JSON with `--json`), and stop before any script is rendered. |
+| `--json` | Print the submission record as JSON instead of the human-readable summary. With `--resolve-only`, print the resolved config as JSON. |
+
+Anything after the flags is passed to Hydra as an override, so `job.output_path=/lustre/me/evals` changes a value without editing the file.
+
+```bash
+gym eval submit -c submit.yaml job.output_path=/lustre/me/evals compute.cluster.walltime=04:00:00
+```
+
+### Scratch keys
+
+A top-level key that starts with `_` is a scratch namespace. It is not part of the schema and is dropped after interpolation, so other parts of the file can reference it:
+
+```yaml
+_images:
+  vllm: vllm/vllm-openai:v0.9.0
+
+services:
+  policy:
+    type: vllm
+    container: ${_images.vllm}
+    # ...
+```
+
+You can override an existing scratch value (`_images.vllm=...`), but `+_images.new=...` and `++_images.new=...` are rejected, so a typo cannot silently create a value that nothing reads. Any other unrecognized top-level key is a validation error.
+
+### Output and exit status
+
+On success the command prints the run directory and one line per benchmark:
+
+```text
+Run directory: /lustre/me/evals/gym-job-20260101T120000Z-a1b2c3
+submitted gpqa → Slurm job 1234567
+```
+
+If `sbatch` rejects a benchmark, that benchmark prints `failed <name>: <error>`. The other benchmarks in the same submission are still queued and recorded. The command then prints `Error: N benchmark(s) failed to submit` to stderr and exits with status 1.
+
+## Pages in this section
+
+<Cards>
+
+<Card title="Quickstart" href="/orchestration/quickstart">
+Write a minimal config, validate it, inspect the generated script, and submit.
+</Card>
+
+<Card title="Configuration Reference" href="/orchestration/configuration">
+Every field of the submit config, the env-value prefixes, and the validation rules.
+</Card>
+
+<Card title="Slurm Executor" href="/orchestration/slurm-executor">
+How a config becomes sbatch scripts, how files reach the cluster, and what lives in a run directory.
+</Card>
+
+<Card title="Job Records" href="/orchestration/job-records">
+The manifest, the resolved config, and the local index that let you find a run again.
+</Card>
+
+<Card title="How-To Guides" href="/orchestration/how-to">
+Multi-node vLLM, prefill/decode disaggregation, node pools and Ray, custom harnesses, and resumable runs.
+</Card>
+
+<Card title="Troubleshooting" href="/orchestration/troubleshooting">
+Error messages you may hit, what they mean, and how to fix them.
+</Card>
+
+</Cards>

@@ -1,0 +1,198 @@
+---
+title: "NVCF Long Requests (h2-ping-sidecar)"
+description: "Keep requests to NVCF endpoints alive past 340 seconds by letting Gym start an HTTP/2 PING sidecar."
+position: 6
+---
+
+# NVCF Long Requests (h2-ping-sidecar)
+
+NVCF endpoints (`*.invocation.api.nvcf.nvidia.com`, `integrate.api.nvidia.com`) sit behind AWS Global
+Accelerator, which drops a connection that carries **no application data for 340 seconds**. The limit
+is fixed by AWS and TCP keepalive does not reset it. A request that takes longer than 340 seconds to
+produce its first response byte, such as a large-prompt judge or reasoning model, fails with
+`ServerDisconnectedError` after about 340 seconds.
+
+## Which fix do I need?
+
+Gym has more than one defence against connections that go silent. They fix different drops:
+
+| Connection | What drops it | Fix |
+|---|---|---|
+| A Gym server to another Gym server, or any outgoing aiohttp connection, through a NAT or firewall | The device's idle-connection timer, which TCP keepalive probes reset | TCP keepalive, on by default: `global_aiohttp_tcp_keepalive_idle_seconds`, `_interval_seconds`, `_probes`. The same settings apply to connections Gym servers accept. |
+| A Gym model server to an endpoint behind AWS Global Accelerator (NVCF) | Global Accelerator's 340 s timer, which counts only application-layer bytes, so keepalive probes do not reset it | **This sidecar**: HTTP/2 PING frames count as application data. |
+
+If a request dies at almost exactly 340 seconds with `ServerDisconnectedError` against NVCF, you need the
+sidecar. If connections die much sooner, or somewhere that is not Global Accelerator, look at the TCP
+keepalive settings first.
+
+## How it works
+
+HTTP/2 PING frames are application data and do reset the timer, but Gym's aiohttp client speaks only
+HTTP/1.1. The **h2-ping-sidecar** closes the gap. It listens on `127.0.0.1`, accepts plain HTTP/1.1
+from Gym, forwards each request to the endpoint over HTTP/2, and sends a PING whenever the connection has
+been idle for `ping_interval`. Gym needs no client changes: its model URL points at localhost and the
+sidecar forwards the call.
+
+```text
+Gym model server --HTTP/1.1--> 127.0.0.1:1250  h2-ping-sidecar --HTTPS + HTTP/2 + PING--> endpoint
+```
+
+The sidecar holds no credentials. Your API key stays in Gym's config and the `Authorization` header passes
+through unchanged. The sidecar has no authentication of its own, so keep it on a loopback address; Gym
+prints a warning at startup if an instance's `listen` is not one.
+
+## Enable it
+
+In training the model that needs the sidecar is usually a **judge** such as GenRM, served from NVCF while
+the policy runs locally over plain `http://`. List the judge's host as an instance. Gym starts the sidecar
+before any server, rewrites the judge's `base_url` to the local address, and stops the sidecar after the
+servers.
+
+```yaml
+# env.yaml
+genrm_model:
+  responses_api_models:
+    genrm_model:
+      base_url: ["https://<function-id>.invocation.api.nvcf.nvidia.com/v1"]
+      api_key: ${oc.env:NVIDIA_API_KEY}
+      model: <model>
+      default_headers:
+        NVCF-POLL-SECONDS: "3600"
+
+sidecar:
+  enabled: true
+  instances:
+    - name: genrm
+      upstream: https://<function-id>.invocation.api.nvcf.nvidia.com
+      listen: 127.0.0.1:1250
+  # Gym builds the sidecar on first use (needs Go on PATH). To use a prebuilt one instead:
+  # binary: /abs/path/to/h2-ping-sidecar
+```
+
+`instances` is required. Each entry names one upstream and gets its own sidecar process on its own
+`listen` port. To send a second endpoint through the sidecar too, such as a policy model that is also on
+NVCF, add another entry with a different port and host.
+
+Gym rewrites every `*base_url` key (a string or a list) of a server under `responses_api_models`, such as
+`openai_base_url` or the `base_url` of a `genrm_model`, whose host matches an instance's `upstream`. It
+matches the *resolved* URL, so a URL that comes from a resolver such as `${oc.env:JUDGE_URL}`, or from an
+alias such as `openai_base_url: ${policy_base_url}`, is routed too, and becomes a literal local address in
+Gym's in-memory config for that run. Top-level keys such as `policy_base_url` are not rewritten, and a list
+that aliases another list is rewritten as a copy, so the list it points at never changes. Headers such as
+`NVCF-POLL-SECONDS` in `default_headers` are untouched. Only `scheme://host[:port]` of an upstream is used;
+the path stays on each request.
+
+## Where it runs
+
+Gym starts the sidecar as a child process of the same process that starts the Gym servers, so it is always
+on the node the model servers run on. That includes a Gym run inside a NeMo-RL Ray actor: wherever the
+actor lands, its servers and its sidecar land together. There is no per-node setting. The `binary` only has
+to exist on that node.
+
+Gym waits for each sidecar to bind its port before starting servers, then checks them on every poll of
+`gym env start`. If one dies, the run stops with the tail of its log. A port that is already in use fails
+startup with a message that says so. If something else already starts a sidecar on those ports (for example
+a Slurm launcher script), remove one of them.
+
+## Settings
+
+All keys are optional except `enabled` and `instances`.
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `enabled` | `false` | Master switch. When false Gym starts nothing and leaves every URL untouched. |
+| `instances` | (required) | List of `{name, upstream, listen}`. `listen` defaults to `127.0.0.1:1250`; give each instance its own port. |
+| `binary` | `<cache_dir>/h2-ping-sidecar/<sources hash>/<go version>/h2-ping-sidecar` | Path to the compiled sidecar. When it is missing Gym builds it here. The path contains a hash of the Go sources and, when Go is on PATH, the exact Go version, so a binary built from older sources or an older Go is never reused. Without Go on PATH, Gym uses the newest binary already built from the current sources, so a node with no Go can run a cache built elsewhere. |
+| `build_if_missing` | `true` | Run `go build` when `binary` does not exist. Needs Go on PATH (1.25 or newer; see `nemo_gym/tools/sidecar/go.mod`). Set `false` to require a prebuilt binary. |
+| `ping_interval` | `60s` | Idle time before a PING. Must be below 340s. |
+| `ping_timeout` | `15s` | Close the upstream connection if a PING is not acknowledged in time. See [Limits](#limits). |
+| `shutdown_grace` | `60s` | On shutdown, let in-flight requests finish for up to this long. |
+| `retry_body_limit` | `16777216` | Request bodies up to this many bytes are buffered so a request refused with a GOAWAY is re-sent on a fresh connection. See [Sizing memory](#sizing-memory). `0` disables it. |
+| `max_conn_age` | `50m` | Retire the upstream connection after 90-100% of this age (jittered): requests in flight finish on it and new ones use a fresh connection, at the cost of one TLS handshake. Must be below 3600s, the load balancer's default client keep-alive; `0s` disables it. |
+| `gomemlimit` | unset | Soft memory limit for the Go runtime, passed as `GOMEMLIMIT` (for example `4GiB`). See [Sizing memory](#sizing-memory). |
+| `gomaxprocs` | unset | CPU threads for the Go runtime, passed as `GOMAXPROCS`. Since Go 1.25 the runtime follows a container's CPU quota on its own and keeps that up to date; setting this turns that off. Set it only to cap the runtime below the quota. |
+| `startup_timeout_seconds` | `30` | How long to wait for each sidecar to bind its port. |
+| `log_dir` | `nemo_gym_log_dir`, else a per-user temp dir | Where `h2ping-<instance>-<host>-<run id>.log` is written. Each run has its own log file. |
+| `insecure_skip_verify` | `false` | Skip upstream TLS verification. Tests only. |
+| `rewrite_base_urls` | `true` | Rewrite model URLs automatically. Set `false` to point URLs at the sidecar yourself. |
+
+Durations use Go syntax: `60s`, `15m`, `1m30s`.
+
+## Sizing memory
+
+A request body is kept in memory from the moment it is read until the transport is done with the request,
+so a refused request can be re-sent. For this feature that is the whole wait for the first response byte,
+which can be minutes, and the garbage collector cannot free any of it meanwhile. Peak memory is therefore
+about:
+
+```text
+retry_body_limit (at most) x requests in flight  ~  average body size x requests in flight
+```
+
+For example 2,000 concurrent judge calls with 0.5 MB bodies hold about 1 GB. Size `retry_body_limit` for
+the largest body you expect to retry; larger bodies are streamed through unbuffered and are not retried, so
+they never count against it.
+
+`gomemlimit` is a soft limit. When live memory is above it Go does not fail: it keeps collecting, and can
+spend a large share of the sidecar's CPU doing so. Set it **above** the working set computed above, with
+some headroom. A value below it slows the sidecar down instead of capping its memory.
+
+## Try it
+
+```bash
+# 1. Optional: build and test the sidecar yourself (Go 1.25+). Gym builds it on first use otherwise.
+cd nemo_gym/tools/sidecar
+go vet ./... && go test ./...
+go build -buildvcs=false -trimpath -o h2-ping-sidecar .
+cd -
+
+# 2. Smoke test the proxy by hand against your function.
+export NVIDIA_API_KEY=nvapi-...
+nemo_gym/tools/sidecar/h2-ping-sidecar -listen 127.0.0.1:1250 \
+    -upstream https://<function-id>.invocation.api.nvcf.nvidia.com &
+curl -sS -H "Authorization: Bearer $NVIDIA_API_KEY" http://127.0.0.1:1250/v1/models
+kill %1
+
+# 3. Run Gym with the sidecar: put the sidecar block from above in env.yaml, then start Gym as usual.
+gym env start <your usual arguments>
+```
+
+When the servers are up you should see lines like:
+
+```text
+h2-ping-sidecar <host>: genrm listening on 127.0.0.1:1250 -> https://<function-id>.invocation.api.nvcf.nvidia.com
+h2-ping-sidecar: genrm_model.responses_api_models.genrm_model.base_url[0]: https://<function-id>.invocation.api.nvcf.nvidia.com/v1 -> http://127.0.0.1:1250/v1
+```
+
+In another terminal, run your evaluation (`gym eval run --no-serve ...`). To confirm that PINGs keep a long
+request alive, send one that takes longer than 340 seconds to produce its first byte and check that it
+returns instead of failing with `ServerDisconnectedError`. The sidecar log is
+`<log_dir>/h2ping-<instance>-<host>-<run id>.log`. Ctrl-C drains in-flight requests (up to
+`shutdown_grace`) and exits.
+
+## Limits
+
+- **HTTP/2 only.** The sidecar never falls back to HTTP/1.1, which has no PING frames.
+- **Load balancer idle timeout.** The load balancer behind Global Accelerator has its own idle timeout
+  that PINGs do not reset (3600 s on per-function `*.invocation.api.nvcf.nvidia.com` hosts, lower on
+  `integrate.api.nvidia.com`, 1200 s at the time of writing). A request silent for longer than that fails
+  with or without the sidecar; use the per-function hostname for the longest requests.
+- **Connection rotation.** The load balancer closes a client connection with a GOAWAY once it is about an
+  hour old. The sidecar retires its upstream connection first (`max_conn_age`), so new requests move to a
+  fresh connection and requests in flight finish on the old one. A request that is still running when the
+  limit is reached can still meet the GOAWAY; a body within `retry_body_limit` is re-sent on a fresh
+  connection, a larger one is not. A very long request can therefore still fail once, and Gym's normal
+  retries apply.
+- **One late PING reply fails every request on that connection.** Gym's aiohttp client spreads requests over
+  many connections, but the sidecar folds them into a few HTTP/2 connections, and a load balancer allows
+  many concurrent requests on each (128 on an AWS ALB). If a PING reply arrives later than `ping_timeout`,
+  Go closes the connection and every request on it fails at once, each possibly minutes into its wait; a
+  retry then resends the whole batch. Under heavy load a PING reply can queue behind response data on the
+  same connection. Raise `ping_timeout` if you see this, and watch for `upstream error` lines in the sidecar
+  log. This has not been measured at training scale yet.
+- **Do not replace aiohttp.** Gym stays on aiohttp and HTTP/1.1 (see
+  [aiohttp vs httpx](/main/infrastructure/engineering-notes/aiohttp-vs-httpx)); the sidecar is what speaks
+  HTTP/2.
+- **Only `gym env start`, `gym eval run` and the other commands that start servers** launch the sidecar.
+  Servers started some other way (for example one `srun` step per server) must start their own, as
+  described in `nemo_gym/tools/sidecar/README.md`.

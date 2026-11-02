@@ -3,6 +3,10 @@
     "type": "example",
     "jsonl_fpath": "resources_servers/math_with_autograder/data/example.jsonl",
     "num_repeats": 1,
+    "source": {
+        "unique_count": 4,
+        "total_count": 5
+    },
     "gitlab_identifier": null,
     "huggingface_identifier": null,
     "license": null,
@@ -48,15 +52,11 @@
         "total_count": 5
     },
     "category": {
-        "unique_count": 5,
+        "unique_count": 4,
         "total_count": 5
     },
     "subcategory": {
         "unique_count": 5,
         "total_count": 5
-    },
-    "source": {
-        "unique_count": 3,
-        "total_count": 4
     }
 }

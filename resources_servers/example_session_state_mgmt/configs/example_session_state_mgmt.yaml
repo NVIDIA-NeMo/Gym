@@ -35,3 +35,11 @@ example_session_state_mgmt_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/example_session_state_mgmt/data/example.jsonl
+
+example_session_state_mgmt_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: example_session_state_mgmt_simple_agent

@@ -19,3 +19,13 @@ example_single_tool_call_simple_agent:
       - name: example
         type: example
         jsonl_fpath: resources_servers/example_single_tool_call/data/example.jsonl
+
+example_single_tool_call_environment_server:
+  environment_servers:
+    single_agent_turn_legacy:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: example_single_tool_call_simple_agent
+      resources_tool_transports:
+      - direct_http

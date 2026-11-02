@@ -4,12 +4,11 @@ A unified Responses-API wrapper that runs LLM-driven agents against real-world s
 
 The entrypoint is [`app.py`](app.py), which exposes a `SWEBenchWrapper` (a `SimpleResponsesAPIAgent`) over HTTP. Each `responses` request takes one dataset instance, runs an agent inside an Apptainer container, runs the matching evaluation harness in a second container, and returns the trajectory plus reward.
 
-The wrapper supports two agent harnesses, selected by the `agent_framework` config field:
+The wrapper supports three agent harnesses, selected by the `agent_framework` config field:
 
 - **`openhands`** (default) — runs [nv-OpenHands](https://github.com/sdevare-nv/nv-OpenHands), with a custom NeMo-Gym-aware LLM client baked into the fork.
-- **`cline`** — runs the headless Cline CLI in the SWE task image, captures its JSONL events, and extracts the resulting git diff for the existing evaluator. This is draft-quality and currently eval-only; full Apptainer/SWE-bench runtime validation is not included.
-
 - **`opencode`** — runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop, with a custom `LanguageModelV3` provider (`@opencode-ai/nemo-gym`) that swaps the LLM transport while keeping opencode's tools, prompts, and parsing intact. See [opencode integration](#opencode-integration) below.
+- **`cline`** — runs the headless [Cline](https://cline.bot) CLI in the SWE task image, captures its JSONL events, and extracts the resulting git diff for the existing evaluator. This is draft-quality and currently eval-only; full Apptainer/SWE-bench runtime validation is not included. See [Cline integration](#cline-integration-draft) below.
 
 ---
 
@@ -166,6 +165,12 @@ Key details:
 ## Cline integration (draft)
 
 When `agent_framework: cline`, the wrapper runs the headless Cline CLI in the benchmark image. It uses `/cline_setup/deps/bin/cline`, authenticates an isolated `openai-compatible` provider against the configured Gym model server, resolves the dataset workspace path, writes Cline JSONL under the per-run trajectory mount, and captures `git diff --binary` as the model patch. This path is currently eval-only and has not received full Apptainer/SWE-bench runtime validation.
+
+The CLI's newline-delimited JSON events are materialized into Responses items by [`responses_api_agents/cline_agent/parser.py`](../cline_agent/parser.py), the same parser the standalone `cline_agent` uses, so the two harnesses cannot drift apart.
+
+---
+
+## opencode integration
 
 When `agent_framework: opencode`, the agent container runs [opencode](https://opencode.ai)'s real `processor.ts` agentic loop instead of OpenHands. The design rule is **swap the transport, keep the loop**: opencode's tools (`bash`, `edit`, `read`, `glob`, `grep`, `write`, `apply_patch`), prompts, tool-call parsing, and event machinery are unchanged. Only the LLM transport is swapped for a NeMo-Gym-aware provider that threads RL token IDs through.
 
@@ -413,7 +418,7 @@ The full schema lives in `SWEBenchWrapperConfig` (and the per-override `AgentPro
 | `apptainer_memory_limit_mb`        | `65536` (64 GiB)                                  | Cumulative tree-RSS limit enforced by the gym-side memory watchdog (no cgroups in the enroot sandbox — see [Memory watchdog](#memory-watchdog-oom-handling)). `<= 0` disables it. |
 | `memory_watchdog_enabled`          | `true`                                            | Enable the RSS memory watchdog for the agent and eval containers.       |
 | `memory_watchdog_poll_interval_s`  | `1.0`                                             | Watchdog poll interval (seconds); bounds worst-case RSS overshoot of a fast allocator. |
-| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container.               |
+| `command_exec_timeout`             | `300`                                             | OpenHands per-command timeout inside the agent container. Exported as both `COMMAND_EXEC_TIMEOUT` (caps explicit per-action timeouts) and `SANDBOX_TIMEOUT` (default for actions without one; requires an OpenHands checkout whose eval sandbox config reads `SANDBOX_TIMEOUT`). |
 | `concurrency`                      | `256`                                             | Server-side asyncio semaphore for concurrent instances.                 |
 | `dataset_path`                     | `null`                                            | Optional default dataset JSONL.                                         |
 | `verify_golden_patch`              | `false`                                           | Skip the agent and eval the dataset's own golden patch. Supported for `swe-bench-ext` and the SWE-bench / SWE-bench_Multilingual families. See [Golden-patch validation](#golden-patch-validation). |

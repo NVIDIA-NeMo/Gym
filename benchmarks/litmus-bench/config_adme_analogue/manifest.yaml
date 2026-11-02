@@ -1,0 +1,31 @@
+name: litmus-bench/config_adme_analogue
+version: 0.2.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: knowledge
+description: Litmus-Bench ADME Tier-5 analogue held-out evaluation,
+  scored with per-row comparison rules.
+modality: text
+licensing: LicenseRef-OpenMDW-1.1
+authors:
+- Olivia Viessmann
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+config_path: ../config_adme_analogue.yaml
+resources_server: litmus_agent
+agent_server: simple_agent
+datasets:
+- name: adme-tier5-analogue
+  type: benchmark
+  jsonl_fpath: benchmarks/litmus-bench/data/adme-tier5-analogue_benchmark.jsonl
+  prepare_script: benchmarks/litmus-bench/prepare.py
+  num_repeats: 5
+model_server: policy_model
+canonical_split: benchmark
+prompt_source: prepared
+lifecycle: active

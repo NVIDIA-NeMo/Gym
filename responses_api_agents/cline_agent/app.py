@@ -29,26 +29,24 @@ from uuid import uuid4
 from fastapi import Request
 from pydantic import ConfigDict, Field
 
-from nemo_gym.base_resources_server import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
     NeMoGymResponseInputTokensDetails,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
     NeMoGymResponseOutputTokensDetails,
     NeMoGymResponseUsage,
 )
-from nemo_gym.server_utils import get_response_json, raise_for_status
+from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from responses_api_agents.cline_agent.parser import parse_cline_events
 from responses_api_agents.cline_agent.setup_cline import ensure_cline
 
@@ -241,6 +239,10 @@ class ClineAgent(SimpleResponsesAPIAgent):
             # Local session backend: a shared hub daemon would hand concurrent rollouts the same
             # process and state, which is exactly what the per-run data dir is avoiding.
             "CLINE_SESSION_BACKEND_MODE": "local",
+            # Cline otherwise ends every call by spawning a detached `npm update -g cline`, which
+            # replaces the pinned cline_version mid-collection and briefly removes the binary from
+            # under concurrent spawns. Only the exact value "1" disables it.
+            "CLINE_NO_AUTO_UPDATE": "1",
         }
         # A Gym model server wins over openai_base_url, so a config carrying both cannot point the
         # subprocess at the provider the model server is meant to replace.

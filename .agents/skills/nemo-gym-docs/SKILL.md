@@ -200,19 +200,18 @@ git add fern/
 git commit -s -m "docs: <add|update|remove> <page-title>"
 ```
 
-PRs that touch `fern/**` get an automatic Fern preview URL posted as a comment by `.github/workflows/fern-docs-preview-comment.yml`. No manual step needed.
+Approved upstream PR mirrors that touch `fern/**` get a preview URL comment from `.github/workflows/fern-docs-preview.yml`. Fork-origin PRs require mirror approval first.
 
 ```
-                    ┌─ fern-docs-ci.yml                  → fern check
-PR (touches fern/) ─┼─ fern-docs-preview-build.yml       → upload fern/ artifact (no secrets)
-                    └─ fern-docs-preview-comment.yml     → 🌿 preview URL comment
+Approved PR mirror (touches fern/) -> fern-docs-ci.yml      -> fern check
+                                  -> fern-docs-preview.yml -> verified preview URL comment
 
 Push to main (touches fern/**)          → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
 Tag push (docs/v*)                        → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
 Manual dispatch                           → publish-fern-docs.yml → docs.nvidia.com/nemo/gym
 ```
 
-The preview-comment + publish jobs require the `DOCS_FERN_TOKEN` repository or organization secret (from `fern token`).
+The preview and publish jobs require the `DOCS_FERN_TOKEN` repository or organization secret (from `fern token`).
 
 ## Publishing to Production
 

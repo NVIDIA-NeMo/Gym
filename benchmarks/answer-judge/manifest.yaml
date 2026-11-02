@@ -1,0 +1,31 @@
+name: answer-judge
+version: 0.1.0
+experimental: true
+kind: benchmark
+integration_profile: custom-gym-verifier
+domain: math
+description: 'Binary judgement of math proofs — the policy model reads a problem plus
+  a candidate proof and outputs Judgement: Yes/No.'
+modality: text
+licensing: unknown
+authors:
+- wedu-nvidia
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: unknown
+resources_server: math_proof_judgement
+agent_server: simple_agent
+datasets:
+- name: answer-judge
+  type: benchmark
+  jsonl_fpath: benchmarks/answer-judge/data/answer-judge_benchmark.jsonl
+  prepare_script: benchmarks/answer-judge/prepare.py
+  prompt_config: benchmarks/prompts/judge/math.yaml
+  num_repeats: 1
+model_server: policy_model
+canonical_split: benchmark
+standard_prompt_config: benchmarks/prompts/judge/math.yaml
+lifecycle: active

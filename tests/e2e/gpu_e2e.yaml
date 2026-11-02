@@ -1,0 +1,17 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+config_paths:
+  - resources_servers/string_match/configs/string_match.yaml
+  - responses_api_models/vllm_model/configs/vllm_model.yaml
+
+policy_base_url: http://127.0.0.1:18000/v1
+policy_api_key: not-a-real-key # pragma: allowlist secret
+policy_model_name: Qwen/Qwen2.5-0.5B-Instruct
+skip_venv_if_present: true
+
+policy_model:
+  responses_api_models:
+    vllm_model:
+      uses_reasoning_parser: false
+      uses_interleaved_reasoning: false
