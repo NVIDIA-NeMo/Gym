@@ -244,6 +244,9 @@ zero: masked, out of the score, counted on the evaluation side. In the chain: on
 `OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop the chain; `--recover` is the way on, and it
 dispatches only the missing and retriable identities.
 
+A request the provider rejects for an unsupported parameter value is an evaluation-side fault: it
+invalidates the run and is never the model's zero. Fix the parameter and run again.
+
 What is retriable is one question; whether the score can be trusted is another. The split between
 model faults and evaluation-side faults belongs to the second only: `gate_task.evaluation_health`
 (step 9) counts the evaluation-side faults against the fixed 2% limit, reports the model faults by
