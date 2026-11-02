@@ -195,7 +195,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
-| NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (the warning reads `MLflow delivery <state>: <reasons>`) | The results are complete and the status is whatever they decide: delivery is reported beside the gate, never inside it. Close the delivery: run `gym eval export mlflow` on the run with the current Gym (a repeat on an exported run verifies without touching the run lock); `--recover` on a complete run that requires tracking and has no receipt runs the export too. The reasons say which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then export. "does not name all of the tracking URI, experiment and run name": the run was never tracked; set `mlflow_tracking_required: false` next time (step 1). The inspection asks the tracking server the saved config names for the status of the receipt's run (up to about 10 seconds, one retry); from a host without access it reports `unverified` with `status query failed: ...`, so inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status yourself; passing the two flags avoids the call. |
+| NOOP, `SUCCESS` or `UNVERIFIED`, and `gate_task.mlflow_delivery.state` is `pending` or `unverified` (the warning reads `MLflow delivery <state>: <reasons>`) | The results are complete and the status is whatever they decide: delivery is reported beside the gate, never inside it. Close the delivery: run `gym eval export mlflow --rollouts <run dir>/<benchmark>/artifacts/rollouts.jsonl +mlflow_tracking_uri=<uri> +mlflow_experiment_name=<name> +mlflow_run_name=<name>` with the current Gym, the three values taken from the run's `artifacts/rollouts_resolved_config.yaml` (the export does not read that file itself), the tracking token given as `+mlflow_tracking_token=<token>` or in the `MLFLOW_TRACKING_TOKEN` environment variable, and `--rollouts PATH` the same as `+rollouts_jsonl_fpath=PATH` (a repeat on an exported run verifies without touching the run lock); `--recover` on a complete run that requires tracking and has no receipt runs the export too. The reasons say which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then export. "does not name all of the tracking URI, experiment and run name": the run was never tracked; set `mlflow_tracking_required: false` next time (step 1). The inspection asks the tracking server the saved config names for the status of the receipt's run (up to about 10 seconds, one retry); from a host without access it reports `unverified` with `status query failed: ...`, so inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status yourself; passing the two flags avoids the call. |
 | `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`): once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
@@ -220,8 +220,8 @@ per-rollout attempt allowance. It is not a substitute for a recovery STOP.
   failure. A row at the cap is masked: the stop reads "N identity(ies) used every attempt since the
   last resubmit" and says that `--extend-retries` raises infra retries only, not the per-identity
   attempt cap (`max_rollout_attempts=N`). It is never scored as the model's result, and a resubmit
-  does not revive it. Until Gym has an option that extends the
-  attempts, such rows need a fresh run (step 6).
+  does not revive it. Only `--recover --extend-attempts N` does (below); a pin without that option
+  needs `--repin` in the same resubmit.
 - A resume keeps every finished row and runs only the missing and retriable ones. A rollout in
   flight when an allocation ends starts again from its beginning: the first such cut is free, and
   each later one charges one attempt of that row.
@@ -229,19 +229,24 @@ per-rollout attempt allowance. It is not a substitute for a recovery STOP.
   that spent their attempts on infrastructure or on allocation cuts, never for rows that ended on
   a model failure. Like `--extend-retries`, it is journaled with its reason and keeps the spent
   counts. Inspect first: it names the rows it would reopen.
-- None of this retries a model failure. A scored zero, a clean agent timeout and a typed model
-  failure are final (step 7).
+- A settled result is final and none of this reopens it: a scored zero, including a typed answer
+  failure (a truncated, empty or malformed answer), and a clean agent timeout. A saved failure that
+  kept no answer is retried by the recovery policy's default action, within the attempt caps,
+  unless its kind or HTTP status is listed otherwise (`judge_failed` is re-judged; step 7); a failure
+  the Environment Server marked terminal (a typed model failure such as `model_context_limit`) is
+  never retried.
 - When the launcher's Gym revision differs from the run's pin, the recovery needs
   `--repin <full sha> --repin-reason "<why>"` (step 5).
 - If a resume is refused because the saved configuration fingerprint no longer matches, do not set
   `allow_unsafe_resume` yourself: continue the run at its own pinned version and report it.
+  A resume on a newer Gym than the one that saved the run can be refused after setup, which costs
+  an allocation: `gym eval submit --resolve-only` does not compare the saved identity. Continue at
+  the run's own pin and report it.
 - Never use plain `gym eval resubmit` without `--recover` to continue: it resets the budgets.
 
-Cases that went this way: a Terminal-Bench 4.0 run whose chain cap of 16 hours was spent with
-rows missing was continued with the cap at 24 hours; another had its cap raised from 12 to 16 and
-then to 19 hours 15 minutes, with one retry extension after preemptions; a third ran as a chain of six
-segments, with preemptions and requeues handled by the chain itself and one operator
-continuation, and was reconciled to the second against the scheduler's own accounting.
+For example, a long-task benchmark whose 16-hour chain cap was spent with rows missing is
+continued with `--max-walltime 24:00:00 --walltime-reason "<why>"`, and a run preempted until its
+retry budget was spent is continued with `--extend-retries 1`. Both are journaled.
 
 ## 6. When nothing can be recovered
 
@@ -277,13 +282,19 @@ negotiation (the DPI step-down to 72, the image cap, the text-only fallback) is 
 delivery protocol, counted per row (`document_delivery.input_limit_rejections`,
 `output_truncation_regenerations`) and in the run facts; `regenerate_on_incomplete_output=true`
 reproduces the old main behaviour, for comparison only, so its cells differ from main by design.
+A benchmark agent may also recover from an output cut inside the same episode, as part of its own
+protocol: the Stirrup agent's `truncation_recovery` setting follows a turn that spent its whole
+completion budget without a valid tool call with one more turn that has thinking off and a
+one-time instruction to act now, not recorded in the trajectory. That is the
+agent's protocol, not a retry of a model failure by recovery; regenerating an incomplete answer
+from scratch after a model-side failure stays excluded.
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
 does not extend an exhausted budget, `--extend-retries`, `--extend-attempts` and `--max-walltime` do.
 
 Retries happen in three layers before a failure reaches you. In a call: the policy client retries
-HTTP 429, 502, 503, 504, 520, 404, 408 and 500, the judge client 408 and 429, and the sandbox
+HTTP 429, 502, 503, 504, 520, 404, 408 and 500, the judge client 408, 429, any 5xx, a timeout or a lost connection (three attempts in all), and the sandbox
 client 408, 409, 425, 429 and the 5xx codes. In a run: a resumed segment dispatches again every
 identity that is not settled, within the attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3);
 a judge failure is re-judged from its saved answer, never regenerated, and is never the model's
@@ -372,7 +383,8 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   (`model_request_error`, the policy's own 4xx; `model_policy_response_timeout`;
   `model_context_limit`; `agent_timeout`; `agent_command_not_allowed`; `agent_limit`;
   `agent_invalid_output`; `truncated_answer`; `empty_answer`; `malformed_answer`) and
-  `SERVER_FAULT_KINDS` (`server_start_failed`, `model_transport_error`, `model_server_error`),
+  `SERVER_FAULT_KINDS` (`server_start_failed`, `model_transport_error`, `model_server_error`,
+  `agent_timeout_infrastructure`),
   with every `provider_*` kind, any 5xx and another model's 4xx (`non_policy_model_rejection`)
   on the evaluation side. `criteria.evaluation` records the limit and
   `policy_timeout_counts_as_model` beside the verdict.
@@ -394,8 +406,9 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - Evaluation health is the gate on the collected results. Delivery to MLflow is reported separately
   as `mlflow_delivery` (pending until the export receipt exists, then verified or unverified with
   reasons) and does not fail the gate. A run with `mlflow_tracking_required: false` needs no
-  delivery evidence. To close a pending delivery on a finished run, run `gym eval export mlflow` on
-  the run with the current Gym.
+  delivery evidence. To close a pending delivery on a finished run, run `gym eval export mlflow --rollouts
+  <run dir>/<benchmark>/artifacts/rollouts.jsonl` with the current Gym and the run's saved tracking
+  settings (step 5).
   The fix is that server's grading record, in Gym.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
