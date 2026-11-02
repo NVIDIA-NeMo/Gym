@@ -82,6 +82,8 @@ def fake_slurm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("FAKE_SQUEUE_FAILS", raising=False)
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN", "-p cpu -c 4")
     monkeypatch.setenv("NEMO_GYM_REMOTE_READER_SRUN_WAIT_S", "1")
+    # These tests pin the login-host fallback where it is allowed; test_reader_login_fallback covers the default.
+    monkeypatch.setenv("NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK", "allow")
 
     def use(srun: str) -> Path:
         (bin_dir / "srun").write_text(srun)

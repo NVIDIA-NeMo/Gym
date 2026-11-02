@@ -446,6 +446,11 @@ def _remote_reader_bound_s() -> int | None:
 READER_SRUN_ENV = "NEMO_GYM_REMOTE_READER_SRUN"
 READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
 READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
+# With a reader step, whether a reader that cannot run in its step may read on the login host instead: "forbid" (the
+# default) or "allow". Forbidden, such a read is unavailable: nothing is read on the login host or decided from it.
+READER_LOGIN_FALLBACK_ENV = "NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK"
+# The host a reader reports when its step did not run and the login-host fallback is forbidden.
+READER_NOT_RUN_HOST = "none"
 # After cancelling a reader step that did not start, how long to wait for it to leave the queue.
 _READER_CANCEL_WAIT_S = 60
 _READER_HOST_PREFIX = "__GYM_READER_HOST:"
@@ -455,11 +460,13 @@ _READER_FALLBACK_PREFIX = "__GYM_READER_FALLBACK:"
 @dataclass(frozen=True)
 class ReaderStep:
     """How a heavy reader runs in a Slurm step: the caller's srun arguments (each quoted), how long the step may take
-    to start, and how many reader steps the user may have running or pending before readers stay on the login host."""
+    to start, how many reader steps the user may have running or pending before readers stay on the login host, and
+    whether a reader that cannot run in its step may run on the login host instead."""
 
     args: str
     wait_s: int
     max_readers: int
+    login_fallback: bool = False
 
 
 def _env_count(name: str, default: int) -> int:
@@ -471,10 +478,18 @@ def _env_count(name: str, default: int) -> int:
     return value if value >= 1 else default
 
 
+# The decision of a recovery whose evidence collector could not run in its step, with the fallback forbidden.
+COLLECTOR_NOT_RUN = (
+    "the evidence collector could not run in its Slurm step and the login-host fallback is forbidden, so nothing was "
+    "read or decided"
+)
+
+
 def reader_step() -> ReaderStep | None:
     """The reader step from ``NEMO_GYM_REMOTE_READER_SRUN`` (extra srun arguments, for example ``-p cpu -c 4``),
-    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120) and ``NEMO_GYM_REMOTE_READER_MAX`` (default 8); None when
-    the arguments are unset or empty."""
+    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120), ``NEMO_GYM_REMOTE_READER_MAX`` (default 8) and
+    ``NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK`` (``allow``; anything else forbids it); None when the arguments are unset
+    or empty."""
     raw = os.environ.get(READER_SRUN_ENV, "").strip()
     if not raw:
         return None
@@ -482,6 +497,7 @@ def reader_step() -> ReaderStep | None:
         args=" ".join(shlex.quote(arg) for arg in shlex.split(raw)),
         wait_s=_env_count(READER_SRUN_WAIT_ENV, 120),
         max_readers=_env_count(READER_MAX_ENV, 8),
+        login_fallback=os.environ.get(READER_LOGIN_FALLBACK_ENV, "").strip().lower() == "allow",
     )
 
 
@@ -494,7 +510,8 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
     and ``script`` reads the reader bound as ``$1``. The step is named gym-reader-<token>, and its time limit is the
     reader bound plus 60 s, so Slurm ends an orphan. A step that has not started after the wait is cancelled by name,
     and the reader runs on the login host. With ``watchdog`` (FD 4 is the shell's stdin), srun runs under the EOF
-    watcher (``_watch_lines``), which also cancels the step by name.
+    watcher (``_watch_lines``), which also cancels the step by name. Without ``step.login_fallback``, a reader that
+    would fall back runs nowhere: ``_gym_host`` is ``none``, ``_gym_rc`` 1, and ``_gym_fallback`` says why.
     """
     name = shlex.quote(f"gym-reader-{token}")
     inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
@@ -547,6 +564,19 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "        fi",
         "    fi",
         "fi",
+        *(
+            []
+            if step.login_fallback
+            else [
+                "if [[ $_gym_host == login ]]; then",
+                f"    _gym_host={READER_NOT_RUN_HOST}",
+                "    _gym_rc=1",
+                f'    _gym_fallback="$_gym_fallback; the login-host fallback is forbidden ({READER_LOGIN_FALLBACK_ENV}='
+                'forbid), so nothing was read"',
+                '    echo "gym: the reader did not run: $_gym_fallback" >>"$_gym_err"',
+                "fi",
+            ]
+        ),
     ]
 
 
@@ -616,6 +646,9 @@ def collector_command(collect: str, job_dir: Path, step: ReaderStep, token: str)
         *_reader_step_lines(step, token, script=f"exec {collect}", stdin="</dev/null"),
         *_report_placement_lines(),
         'if [[ $_gym_host == login ]]; then rm -f -- "$_gym_err" "$_gym_step_out"; exec ' + collect + "; fi",
+        # A collector that ran nowhere reports only its placement: the caller decides nothing from it.
+        f'if [[ $_gym_host == {READER_NOT_RUN_HOST} ]]; then cat "$_gym_err" >&2; rm -f -- "$_gym_err" "$_gym_step_out"; '
+        "exit 0; fi",
         f'grep -v "^{_READER_HOST_PREFIX}" "$_gym_step_out"',
         '[[ $_gym_rc == 0 ]] || cat "$_gym_err" >&2',
         'rm -f -- "$_gym_err" "$_gym_step_out"',
@@ -1258,6 +1291,17 @@ class SlurmExecutor(BaseExecutor):
             else:
                 output = conn.run(collector_command(collect, job_dir, step, reader_token()))
                 host, reason = reader_placement(output)
+                if host == READER_NOT_RUN_HOST:
+                    unread = RecoveryDecision(
+                        action=RecoveryAction.UNKNOWN,
+                        reason=f"{COLLECTOR_NOT_RUN}: {reason or 'no cause reported'}; "
+                        "inspect again once the reader step can start",
+                        expected=0,
+                        counts={},
+                        identities={},
+                        evidence=[],
+                    )
+                    return unread, None
                 collected = CollectedEvidence.model_validate_json(without_placement(output)).model_copy(
                     update={"collector_host": host, "collector_fallback_reason": reason}
                 )
