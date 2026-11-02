@@ -203,3 +203,14 @@ canonical-form prefixes, archive.org variants) must be refused before the fetch 
 query URLs stay allowed; `site:` operands are parsed to hostnames; long URLs and a 100,000-character heading
 are handled within a second; data URIs are stripped on fresh and cached fetches without eating the prose
 after them; and a blocked span past every cut still refuses the page.
+
+## Licensing
+
+`blocklist.json` is a byte-exact, unmodified copy of `docs/blocklist.json` from
+[`centerforaisafety/hle`](https://github.com/centerforaisafety/hle) at commit
+`22ed3074b1e7b134bcbc09028d0ba320839b0655`, which is MIT-licensed (Copyright (c) 2025 centerforaisafety). A
+JSON file cannot carry the notice without changing the digest the server verifies, so the upstream
+[`LICENSE`](https://github.com/centerforaisafety/hle/blob/22ed3074b1e7b134bcbc09028d0ba320839b0655/LICENSE)
+at that commit is reproduced unchanged next to it in [`LICENSE-HLE`](LICENSE-HLE), and the file is listed
+under Vendored Components in the repository's `ATTRIBUTIONS.md`. The rest of this server is NVIDIA code
+under Apache-2.0.
