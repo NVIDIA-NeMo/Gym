@@ -58,11 +58,12 @@ Controls and limits:
 
 ### Validation scope (November 2, 2026)
 
-The sandbox implementation is experimental. Full TB2.1 and Observability
-qualification remain incomplete. The
+The sandbox implementation is experimental. Authorized recovery has complete TB2.1
+grade coverage, while saved-evidence and Observability qualification remain failed. The
 [original evaluation record](evaluation-2026-10-30.md) and
-[first missing-grade recovery](evaluation-recovery-2026-11-02.md) preserve separate
-results and source-specific limits. Raw artifacts and the full internal handoff remain with
+[first missing-grade recovery](evaluation-recovery-2026-11-02.md) preserve earlier
+results; the [completed grade recovery](evaluation-complete-recovery-2026-11-02.md)
+records the final aggregate and remaining source-specific limits. Raw artifacts and the full internal handoff remain with
 the evaluation owner. No sandbox-integration PR has been opened.
 
 Evidence belongs to the exact runtime source tested:
@@ -75,7 +76,7 @@ Evidence belongs to the exact runtime source tested:
 | Repository pre-commit | Passed | Passed |
 | Real TB smoke | `regex-log`: reward 1; health, strict evidence and profile passed | Failed at sandbox seed, before model execution; zero rollouts and captures |
 | Configuration-only second pairing | SWE-bench Pro NodeBB: valid zero; health, strict evidence and profile passed | Not rerun |
-| Full TB2.1 | Original segments interrupted; first authorized recovery has 709/712 grades; strict evidence and full profiling remain failed | Not evaluated |
+| Full TB2.1 | Authorized recovery has 712/712 grades; strict full profile passed; saved evidence failed | Not evaluated |
 
 The October 30 first-attempt report contains 306 passes and 246 valid zeros. Of the 712
 planned task/repeat identities, 160 have unavailable grades: one OOM, four
@@ -90,14 +91,18 @@ for missing grades. The first recovery retained all 552 grades, including valid
 zeros, and added 157 grades: selected coverage is 709/712, with 399 passes, 310
 valid zeros and three unavailable grades. Recovered repeat 0 is complete at
 51/89 passes (57.30%). The eight-repeat all-grid observed-pass fraction is 56.04%,
-a lower bound with three grades unavailable. A separate recovery of those three
-identities is in progress and is not included in the closed first-recovery report.
-Every prior attempt and both original interruption flags remain unchanged.
+a lower bound for that closed first-recovery report, with three grades unavailable.
+The separate final recovery added one pass and two valid zeros, retaining all
+709 earlier grades: **400 passes, 312 zeros, 712/712 grades**. The eight-repeat mean
+is **56.18%**, with repeat 0 still **51/89 (57.30%)**. Every prior attempt and both
+original interruption flags remain unchanged; this is not best-of-eight selection.
 
 The first-recovery aggregate has 603 healthy and 106 unhealthy records; strict
 evidence fulfilled 634 and failed 75. Strict complete-grade profiling also failed.
 These are mixed-attempt recovery results, not best-of-eight or a passed
 Observability qualification. Missing grades are never converted into zeros.
+The final aggregate has 605 healthy and 107 unhealthy records; strict evidence
+fulfilled 636 and failed 76. Full profiling passed with all 712 grades.
 
 The original 552 graded rows include 467 healthy and 85 unhealthy outcomes; strict evidence
 fulfilled 493 rows and failed 59. Native validation-error observations were fixed
@@ -113,9 +118,10 @@ TB2.1, so scheduling is also a comparison limitation. See the evaluation record
 for the source-specific evidence and the sandbox-seed failure finding.
 
 These results do not establish a supported TB2.1 pairing or complete Observability
-qualification. The full-evaluation, saved-evidence, fresh real-model smoke and
-benchmark-owner review gates remain open. Pairing catalog and `allowed_agents`
-claims must wait for those gates; this documentation does not change them.
+qualification. Saved-evidence and benchmark-owner review gates remain open; the
+observer fix also lacks a passing fresh real-model smoke. Complete grade coverage
+does not satisfy those remaining gates. Pairing catalog and `allowed_agents`
+claims must wait for them; this documentation does not change them.
 
 ## In-process custom graphs
 
