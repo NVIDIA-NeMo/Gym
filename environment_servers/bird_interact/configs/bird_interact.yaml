@@ -1,0 +1,112 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# BIRD-Interact: interactive text-to-SQL with a simulated user, in both of its modes, with no Resources Server.
+# Each mode has an Environment Server that owns each episode's database sandbox, the simulator and the grader.
+# c-Interact: the Environment Server runs the conversation (environment-driven).
+# a-Interact: the agent reaches the user, the database and the grader through tools that the Environment Server
+# serves for the episode (agent-driven).
+
+environment_server_routes:
+  "bird_interact:c_interact_example": bird_interact_c_interact
+  "bird_interact:a_interact_example": bird_interact_a_interact
+
+# The simulated user runs on its own model, separate from the evaluated policy, so these have no default.
+user_model_base_url: ???
+user_model_api_key: ???
+user_model_name: ???
+user_model_uses_reasoning_parser: false
+
+user_model:
+  responses_api_models:
+    vllm_model:
+      entrypoint: app.py
+      base_url: ${user_model_base_url}
+      api_key: ${user_model_api_key}
+      model: ${user_model_name}
+      uses_reasoning_parser: ${user_model_uses_reasoning_parser}
+      return_token_id_information: false
+
+# The agent under test. Continuation sessions keep its conversation across c-Interact turns.
+bird_interact_agent:
+  responses_api_agents:
+    simple_agent:
+      entrypoint: app.py
+      model_server:
+        type: responses_api_models
+        name: policy_model
+      # a-Interact tool calls; the BIRD-COIN budget ends the episode first.
+      max_steps: 40
+      # One file, one taskset for each mode. The two entries share a name, so they share the file's metrics.
+      # The Environment Server's task_data.py validates the rows.
+      datasets:
+        - name: example
+          type: example
+          jsonl_fpath: environment_servers/bird_interact/data/example.jsonl
+          taskset: bird_interact:c_interact_example
+          num_repeats: 1
+          license: Apache 2.0
+        - name: example
+          type: example
+          jsonl_fpath: environment_servers/bird_interact/data/example.jsonl
+          taskset: bird_interact:a_interact_example
+          num_repeats: 1
+          license: Apache 2.0
+
+# Each episode's database runs in its own sandbox. `sandbox` names the provider block that a provider config binds,
+# such as nemo_gym/sandbox/providers/docker/configs/docker.yaml; add one with a second --config.
+bird_interact_c_interact:
+  environment_servers:
+    bird_interact:
+      mode: c_interact
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: bird_interact_agent
+      database_dir: environment_servers/bird_interact/data/example_databases
+      user_model:
+        type: responses_api_models
+        name: user_model
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.12-slim
+        ttl_s: 7200
+        resources:
+          cpu: 1
+          memory_mib: 1024
+        metadata:
+          benchmark: bird-interact
+      default_episode_timeout_seconds: 3600
+      cleanup_timeout_seconds: 120
+      # Questions (ambiguities + patience), two SQL attempts for each of two phases, with room to spare.
+      max_turns: 20
+      turn_timeout_seconds: 600
+
+bird_interact_a_interact:
+  environment_servers:
+    bird_interact:
+      mode: a_interact
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: bird_interact_agent
+      database_dir: environment_servers/bird_interact/data/example_databases
+      user_model:
+        type: responses_api_models
+        name: user_model
+      sandbox_provider: sandbox
+      sandbox_config:
+        image: python:3.12-slim
+        ttl_s: 7200
+        resources:
+          cpu: 1
+          memory_mib: 1024
+        metadata:
+          benchmark: bird-interact
+      default_episode_timeout_seconds: 3600
+      cleanup_timeout_seconds: 120
+      # simple_agent calls the tools over direct HTTP. Set [mcp] for an agent that takes only MCP grants (Codex, Pi,
+      # Hermes); the first request then declares no tools, which Codex would refuse.
+      tool_transports: [direct_http]
+      max_turns: 1
+      turn_timeout_seconds: 1800
