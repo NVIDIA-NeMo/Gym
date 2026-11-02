@@ -682,6 +682,8 @@ exclude = [
     "build.*",
     "dist",
     "dist.*",
+    "logs",
+    "logs.*",
     # SWE harnesses also create mutable runtime trees inside package directories.
     "responses_api_agents.swe_agents.results",
     "responses_api_agents.swe_agents.results.*",
