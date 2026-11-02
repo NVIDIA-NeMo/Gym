@@ -28,6 +28,8 @@ from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome, Age
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
 from nemo_gym.client import ServerClient
 from nemo_gym.config import (
+    ROLLOUT_INDEX_KEY_NAME,
+    TASK_INDEX_KEY_NAME,
     AgentServerRef,
     AggregateMetrics,
     AggregateMetricsRequest,
@@ -35,6 +37,7 @@ from nemo_gym.config import (
     ResourcesServerRef,
 )
 from nemo_gym.core import MODEL_TRANSPORT_ERROR, EpisodeId, NeMoGymResponse, TaskId, current_rollout_id
+from nemo_gym.metrics import compute_aggregate_metrics
 from nemo_gym.server_runtime import (
     BaseVerifyRequest,
     MaterializedTask,
@@ -622,11 +625,111 @@ async def test_skip_verification_returns_empty_aggregate_metrics_without_calling
 ) -> None:
     environment_server, client = _skipping_environment_server(environment=environment, agent=agent)
 
-    with pytest.warns(RuntimeWarning, match="skip_verification=True"):
-        metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
+    metrics = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=[]))
 
     assert metrics == AggregateMetrics()
     assert client.calls == []
+
+
+@pytest.mark.parametrize("skip_verification", [False, True])
+@pytest.mark.parametrize("masked", [False, True])
+async def test_aggregation_preserves_execution_metrics_without_valid_scores(
+    skip_verification: bool, masked: bool
+) -> None:
+    environment_server, client = _skipping_environment_server(
+        environment={"skip_verification": skip_verification}, agent={}
+    )
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": 0.0,
+            "mask_sample": masked,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": 2},
+        }
+        for repeat, tokens in enumerate((10, 30))
+    ]
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows)
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [10, 30]
+    assert result.agent_metrics["mean_across_repeats/mean_completion_tokens"] == 20
+    assert result.agent_metrics["ci_low_95_across_repeats/mean_completion_tokens"] < 20
+    assert result.agent_metrics["ci_high_95_across_repeats/mean_completion_tokens"] > 20
+    if skip_verification:
+        assert client.calls == []
+        assert result.key_metrics == {}
+        assert result.group_level_metrics == []
+    else:
+        assert client.calls[0][2]["json"] == {"verify_responses": benchmark_rows}
+        assert result.key_metrics == benchmark.key_metrics
+    if skip_verification or masked:
+        assert "mean/reward" not in result.agent_metrics
+
+
+async def test_aggregation_preserves_benchmark_hooks_and_existing_execution_statistics() -> None:
+    environment_server, client = _environment_server()
+    rows = [
+        {
+            TASK_INDEX_KEY_NAME: task,
+            ROLLOUT_INDEX_KEY_NAME: repeat,
+            "reward": float(task == repeat),
+            "response": {"usage": {"output_tokens": 1000}, "metrics": {"latency": 42}},
+            "num_steps_passed": int(task == repeat),
+            "num_steps_total": task + 1,
+            "ng_perf": {"completion_tokens": tokens, "num_turns": turns},
+        }
+        for task, repeat, tokens, turns in ((0, 0, 4, 1), (1, 0, 8, 2), (0, 1, 12, 2), (1, 1, 20, 4))
+    ]
+
+    def subtask_metrics(tasks: list[list[dict[str, Any]]]) -> dict[str, float]:
+        passed = sum(row["num_steps_passed"] for task in tasks for row in task)
+        total = sum(row["num_steps_total"] for task in tasks for row in task)
+        return {"subtask_accuracy": passed / total}
+
+    hooks = {
+        "compute_metrics_fn": subtask_metrics,
+        "compute_repeat_metrics_fn": subtask_metrics,
+        "get_key_metrics_fn": lambda metrics: {"subtask_accuracy": metrics["subtask_accuracy"]},
+    }
+    benchmark_rows = [{k: v for k, v in row.items() if k != "ng_perf"} for row in rows]
+    benchmark = compute_aggregate_metrics(benchmark_rows, **hooks)
+    assert benchmark.perf_summary is None
+    body = AggregateMetricsRequest(verify_responses=rows)
+    original = body.model_dump_json()
+    for _ in range(2):
+        client.responses = [_Response(benchmark.model_dump())]
+        result = await environment_server.aggregate_metrics(body)
+        assert result == compute_aggregate_metrics(rows, **hooks)
+        assert result.key_metrics == {"subtask_accuracy": pytest.approx(1 / 3)}
+        assert [row["mean_completion_tokens"] for row in result.repeat_level_metrics] == [6, 16]
+        assert result.perf_summary["total_completion_tokens"] == 44
+        assert body.model_dump_json() == original
+        assert client.calls[-1][0:2] == ("resources", "/aggregate_metrics")
+        assert client.calls[-1][2]["json"] == {"verify_responses": benchmark_rows}
+
+
+async def test_aggregation_counts_execution_before_resources_filters_quality() -> None:
+    environment_server, client = _environment_server()
+    # A Resources override may select a stage with repeated task/repeat identities.
+    rows = [
+        {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": reward, "ng_perf": perf}
+        for reward, perf in ((0.0, {"completion_tokens": 10}), (1.0, {"completion_tokens": 30}))
+    ]
+    benchmark = compute_aggregate_metrics([{k: v for k, v in rows[1].items() if k != "ng_perf"}])
+    client.responses = [_Response(benchmark.model_dump())]
+
+    result = await environment_server.aggregate_metrics(AggregateMetricsRequest(verify_responses=rows))
+
+    assert result.group_level_metrics == benchmark.group_level_metrics
+    assert result.key_metrics == benchmark.key_metrics
+    assert result.agent_metrics["mean/reward"] == 1.0
+    assert result.perf_summary["total_completion_tokens"] == 40
+    assert result.repeat_level_metrics[0]["mean_completion_tokens"] == 20
 
 
 def _unbound_config(environment_server: SingleAgentTurnEnvironmentServer) -> SingleAgentTurnEnvironmentServerConfig:

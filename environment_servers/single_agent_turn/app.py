@@ -5,7 +5,6 @@
 
 from typing import Any, Literal
 from uuid import uuid4
-from warnings import warn
 
 from fastapi import Body
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter
@@ -31,6 +30,7 @@ from nemo_gym.config import (
     get_first_server_config_dict,
 )
 from nemo_gym.core import NeMoGymResponse
+from nemo_gym.metrics import add_execution_metrics
 from nemo_gym.server_runtime import (
     CHECKPOINT_CLOSE_FOLLOWS_HEADER,
     BaseEnvironmentServer,
@@ -128,25 +128,31 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         return name
 
     async def aggregate_metrics(self, body: AggregateMetricsRequest = Body()) -> AggregateMetrics:
-        """Forward to the resources server, which owns verification in this protocol.
+        """Combine Resources benchmark metrics with execution metrics for the whole batch.
 
-        Without verification there is nothing to aggregate, so a skipping server returns empty metrics.
+        Collector supplies persisted ``ng_perf`` summaries derived from agent observations
+        and model captures. Execution accounting includes masked and unverified rollouts;
+        Resources owns scoring, task-specific weighting, and headline metric selection.
         """
-        if self._skipped_verification_reward() is not None:
-            warn(
-                "Skipping aggregate metrics because skip_verification=True; "
-                "use disable_aggregation=True to avoid writing aggregate metric files.",
-                RuntimeWarning,
-                stacklevel=2,
+        metrics = AggregateMetrics()
+        if self._skipped_verification_reward() is None:
+            # Keep benchmark evidence (including response.usage) intact. The reserved
+            # execution summary is reduced here once, independently of Resources filtering.
+            benchmark_body = body.model_copy(
+                update={
+                    "verify_responses": [
+                        {key: value for key, value in row.items() if key != "ng_perf"} for row in body.verify_responses
+                    ]
+                }
             )
-            return AggregateMetrics()
-        response = await self.server_client.post(
-            server_name=self.resources_server_name,
-            url_path="/aggregate_metrics",
-            json=body,
-        )
-        await raise_for_status(response)
-        return AggregateMetrics.model_validate(await get_response_json(response))
+            response = await self.server_client.post(
+                server_name=self.resources_server_name,
+                url_path="/aggregate_metrics",
+                json=benchmark_body,
+            )
+            await raise_for_status(response)
+            metrics = AggregateMetrics.model_validate(await get_response_json(response))
+        return add_execution_metrics(metrics, body.verify_responses)
 
     async def run(
         self,

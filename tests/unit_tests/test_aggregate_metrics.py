@@ -13,6 +13,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 import warnings
+from copy import deepcopy
 from unittest.mock import MagicMock
 
 import pytest
@@ -28,6 +29,7 @@ from nemo_gym.metrics.metrics_config import ACROSS_REPEATS_MARKER
 from nemo_gym.metrics.reward_profile import (
     RewardProfiler,
     add_avg_sample_std_dev,
+    add_execution_metrics,
     compute_aggregate_metrics,
     compute_pass_majority_metrics,
     compute_perf_summary,
@@ -1290,6 +1292,34 @@ class TestCompletionTokenMetrics:
         assert "mean_tokens_per_turn" not in result.key_metrics
         assert result.repeat_level_metrics == []
         assert result.perf_summary["mean_completion_tokens"] == pytest.approx(20.0)
+
+
+class TestAddExecutionMetrics:
+    @pytest.mark.parametrize("observations", [None, {}, {"completion_tokens": 12, "num_turns": 3}])
+    def test_missing_observations_and_immutable_benchmark_result(self, observations: dict | None) -> None:
+        rows = [{TASK_INDEX_KEY_NAME: 0, "reward": 1.0}, {TASK_INDEX_KEY_NAME: 1, "reward": 0.0}]
+        benchmark = compute_aggregate_metrics(rows)
+        if observations is not None:
+            rows[0]["ng_perf"] = observations
+        original_rows = deepcopy(rows)
+        original_metrics = benchmark.model_dump()
+
+        result = add_execution_metrics(benchmark, rows)
+
+        assert rows == original_rows
+        assert benchmark.model_dump() == original_metrics
+        assert result.group_level_metrics == benchmark.group_level_metrics
+        assert result.key_metrics == benchmark.key_metrics
+        if observations is None:
+            assert result == benchmark
+        else:
+            assert result.perf_summary["overall_observability_coverage"] == 0.5
+            if observations:
+                assert result.perf_summary["mean_completion_tokens"] == 12
+                assert result.repeat_level_metrics[0]["mean_completion_tokens"] == 12
+            else:
+                assert "mean_completion_tokens" not in result.perf_summary
+                assert result.repeat_level_metrics == benchmark.repeat_level_metrics
 
 
 class TestMaskedSamplesAreNotScored:

@@ -1176,6 +1176,30 @@ def _add_completion_token_metrics(
         agent_metrics.update({name: value for name, value in aggregate.items() if name != AGENT_REF_KEY_NAME})
 
 
+def add_execution_metrics(
+    metrics: AggregateMetrics,
+    verify_responses: List[Dict[str, Any]],
+) -> AggregateMetrics:
+    """Return benchmark metrics enriched with execution statistics from ``ng_perf``.
+
+    Account for every supplied rollout, including masked samples, without running
+    benchmark scoring or requiring unique task/repeat identities. Merge token statistics
+    into the corresponding repeat rows and compute their across-repeat confidence intervals.
+    Missing observations do not imply zero usage. Neither input is modified.
+    """
+    result = metrics.model_copy(deep=True)
+    result.perf_summary = compute_perf_summary(
+        [row["ng_perf"] for row in verify_responses if isinstance(row.get("ng_perf"), dict)],
+        total_rollouts=len(verify_responses),
+    )
+    _add_completion_token_metrics(
+        RewardProfiler(), verify_responses, result.repeat_level_metrics, result.agent_metrics
+    )
+    for row in result.repeat_level_metrics:
+        row.pop(AGENT_REF_KEY_NAME, None)
+    return result
+
+
 def compute_aggregate_metrics(
     verify_responses: List[Dict[str, Any]],
     compute_metrics_fn=None,
@@ -1204,17 +1228,17 @@ def compute_aggregate_metrics(
     scored, masked = _partition_on_mask(verify_responses)
     coverage = _coverage_metrics(verify_responses, scored, masked)
 
-    # Observability coverage is measured over every rollout that ran, masked or not: a
-    # masked sample still executed and still reported its own latency.
-    perf_summary = compute_perf_summary(
-        [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)],
-        total_rollouts=len(verify_responses),
-    )
-
     if not scored:
         # Every rollout was masked. Publishing means over an empty set would invent a
-        # zero; report what happened instead.
-        return AggregateMetrics(agent_metrics=dict(coverage), key_metrics=dict(coverage), perf_summary=perf_summary)
+        # zero; preserve the coverage-only shape for direct Resources/Agent callers.
+        return AggregateMetrics(
+            agent_metrics=dict(coverage),
+            key_metrics=dict(coverage),
+            perf_summary=compute_perf_summary(
+                [vr["ng_perf"] for vr in verify_responses if isinstance(vr.get("ng_perf"), dict)],
+                total_rollouts=len(verify_responses),
+            ),
+        )
 
     rp = RewardProfiler()
 
@@ -1292,18 +1316,18 @@ def compute_aggregate_metrics(
             compute_repeat_metrics_fn,
         )
 
-    _add_completion_token_metrics(rp, verify_responses, repeat_level_metrics, serialized_agent)
-
     serialized_repeat_level_metrics = [
         {k: v for k, v in entry.items() if k != AGENT_REF_KEY_NAME} for entry in repeat_level_metrics
     ]
 
-    return AggregateMetrics(
-        group_level_metrics=serialized_group,
-        agent_metrics=serialized_agent,
-        key_metrics=key_metrics,
-        perf_summary=perf_summary,
-        repeat_level_metrics=serialized_repeat_level_metrics,
+    return add_execution_metrics(
+        AggregateMetrics(
+            group_level_metrics=serialized_group,
+            agent_metrics=serialized_agent,
+            key_metrics=key_metrics,
+            repeat_level_metrics=serialized_repeat_level_metrics,
+        ),
+        verify_responses,
     )
 
 
