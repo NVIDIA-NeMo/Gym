@@ -217,7 +217,13 @@ result under the benchmark's time limit (a harness that records its agent deadli
 zero has settled it). That limit is the benchmark's own: for Terminal-Bench 4.0, 8 h per task is
 the official agent budget (TB 4.0 release notes, "Calibrating resources"), and Gym's default
 `agent_timeout_sec` of 28800 matches it. An `agent_timeout` that kept no answer is a saved failure
-the policy decides, retried by default. Successes and final failures are never run again.
+the policy decides, retried by default. Successes and final failures are never run again. For
+GDP-PDF, a policy answer that comes back incomplete because its output budget was spent is the
+row's result, graded as a truncated answer and not regenerated; the HTTP 4xx input-limit
+negotiation (the DPI step-down to 72, the image cap, the text-only fallback) is the benchmark's
+delivery protocol, counted per row (`document_delivery.input_limit_rejections`,
+`output_truncation_regenerations`) and in the run facts; `regenerate_on_incomplete_output=true`
+reproduces the old main behaviour, for comparison only, so its cells differ from main by design.
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
