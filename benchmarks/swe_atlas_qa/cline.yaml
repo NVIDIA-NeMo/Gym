@@ -1,0 +1,12 @@
+config_paths:
+  - benchmarks/swe_atlas_qa/config.yaml
+
+swe_atlas_qa_agent:
+  responses_api_agents:
+    harness_agent:
+      agent: cline
+      agent_kwargs:
+        command: cline
+        # Match the CLI in the harness bundle.
+        cline_version: 3.0.55
+        workspace_root: /tmp/nemo-gym/cline

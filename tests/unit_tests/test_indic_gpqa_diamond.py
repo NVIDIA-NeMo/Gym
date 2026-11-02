@@ -11,7 +11,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.gpqa import prepare as english_module
 from benchmarks.indic.gpqa_diamond import prepare as module
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 
 
@@ -77,9 +77,10 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
             f"{letter}: {text}" for letter, text in zip("ABCD", expected)
         )
         english = expected_english[index]
-        assert {key: row[key] for key in english if key != "uuid"} == {
-            key: value for key, value in english.items() if key != "uuid"
+        assert {key: row[key] for key in english if key not in ("uuid", "task_id")} == {
+            key: value for key, value in english.items() if key not in ("uuid", "task_id")
         }
+        assert row["task_id"] == f"en/{english['task_id']}"
     assert build(records, question_ids=["2"]) == full[2:]
 
     translated = [record(index, "hi") for index in range(3)]
@@ -93,6 +94,8 @@ def test_exact_shuffle_prompt_and_subset_stability(monkeypatch, english_rows):
             {letter: "अनुवाद " + text for letter, text in option.items()} for option in original["options"]
         ]
     assert full[0]["uuid"] != hindi[0]["uuid"]
+    assert [row["task_id"] for row in hindi] == ["hi/record-0", "hi/record-1", "hi/record-2"]
+    assert len({row["task_id"] for row in full + hindi}) == len(full + hindi)
     assert hindi[0]["metadata"]["subset_for_metrics"] == "hi"
     assert hindi[0]["template_metadata"] == {"allow_localized_answer_labels": True}
     assert "template_metadata" not in full[0]
@@ -195,7 +198,10 @@ def test_config_matches_english_pipeline():
     assert dataset["prompt_config"] == english_dataset["prompt_config"]
     environment = config["indic_gpqa_diamond_environment_server"]
     assert environment["_inherit_from"] == english["gpqa_mcqa_environment_server"]["_inherit_from"]
-    assert environment["environment_servers"]["legacy_agent"]["agent_server"]["name"] == "indic_gpqa_diamond_agent"
+    assert (
+        environment["environment_servers"]["single_agent_turn_legacy"]["agent_server"]["name"]
+        == "indic_gpqa_diamond_agent"
+    )
     assert set(config) == {
         "config_paths",
         "indic_gpqa_diamond_resources_server",
@@ -230,7 +236,7 @@ def test_environment_routing_alone_and_with_english_gpqa(
     if "gpqa" in benchmarks:
         expected["gpqa_mcqa_environment_server"] = "gpqa_mcqa_simple_agent"
     environments = {
-        name: block["environment_servers"]["legacy_agent"]
+        name: block["environment_servers"]["single_agent_turn_legacy"]
         for name, block in resolved.items()
         if OmegaConf.is_dict(block) and "environment_servers" in block
     }

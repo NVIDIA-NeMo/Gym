@@ -1,0 +1,52 @@
+prepare_script_args:
+  output_dir: benchmarks/biomysterybench/data
+  docker_image: benchmarks/biomysterybench:latest
+
+biomysterybench:
+  responses_api_agents:
+    harbor_agent_general:
+      entrypoint: app.py
+      domain: agent
+      description: BioMysteryBench evaluates agents on real-world bioinformatics tasks with objective ground-truth answers.
+
+      datasets:
+        - name: biomysterybench
+          type: benchmark
+          jsonl_fpath: ${prepare_script_args.output_dir}/gym.jsonl
+          prepare_script: benchmarks/biomysterybench/harbor/adapter.py
+          prepare_dependencies:
+            - huggingface_hub
+            - tqdm
+            - tyro
+          num_repeats: 4
+
+      harbor_max_retries: 3
+
+      ## TIP: Auto-resolves to a sibling harbor folder when set.
+      harbor_jobs_dir: ${oc.select:output_jsonl_fpath,''}
+
+      harbor_dataset:
+        path: ${prepare_script_args.output_dir}
+
+      harbor_environment:
+        type: singularity
+        kwargs:
+          singularity_image_cache_dir: ${oc.env:SINGULARITY_CACHEDIR}/harbor
+          singularity_force_pull: false
+          singularity_no_mount: home,tmp
+
+      harbor_agent:
+        name: opencode
+        model_name: ${policy_model_name}
+        env:
+          OPENCODE_CONFIG_CONTENT: '{"snapshot": false}'
+          NVINF_API_KEY: \${NVINF_API_KEY:-}
+          VLLM_API_BASE: \${VLLM_API_BASE:-}
+
+biomysterybench_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: biomysterybench

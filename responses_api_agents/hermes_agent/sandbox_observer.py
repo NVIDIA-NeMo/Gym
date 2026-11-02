@@ -135,15 +135,32 @@ class SandboxHermesObserver:
             return
 
         def call(*args: Any, **kwargs: Any) -> Any:
+            # Observation failures must not prevent the underlying model request.
+            try:
+                # The SDK preserves this on HTTP retries, including attempts without a response ID.
+                api_kwargs = dict(args[0] if args else kwargs["api_kwargs"])
+                api_kwargs["extra_headers"] = {
+                    **(api_kwargs.get("extra_headers") or {}),
+                    "x-session-id": invocation_id,
+                }
+                if args:
+                    args = (api_kwargs, *args[1:])
+                else:
+                    kwargs = {**kwargs, "api_kwargs": api_kwargs}
+            except Exception as error:
+                self._gap("hermes_observer_error", invocation_id, f"model_headers:{type(error).__name__}")
             response = original(*args, **kwargs)
-            response_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
-            if isinstance(response_id, str) and response_id:
-                with self._lock:
-                    response_ids = self._invocations[invocation_id]["model_response_ids"]
-                    if response_id not in response_ids:
-                        response_ids.append(response_id)
-            else:
-                self._gap("model_response_id_unavailable", invocation_id)
+            try:
+                response_id = response.get("id") if isinstance(response, dict) else getattr(response, "id", None)
+                if isinstance(response_id, str) and response_id:
+                    with self._lock:
+                        response_ids = self._invocations[invocation_id]["model_response_ids"]
+                        if response_id not in response_ids:
+                            response_ids.append(response_id)
+                else:
+                    self._gap("model_response_id_unavailable", invocation_id)
+            except Exception as error:
+                self._gap("hermes_observer_error", invocation_id, f"model_response:{type(error).__name__}")
             return response
 
         agent._interruptible_api_call = call

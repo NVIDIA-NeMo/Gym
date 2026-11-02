@@ -3,8 +3,11 @@ name = "harbor-agent-general"
 version = "0.1.0"
 requires-python = ">=3.13.14"
 dependencies = [
-    "nemo-gym[dev,ray]",
-    "harbor>=0.22",
+    "nemo-gym[dev,ray,sandbox]",
+    "harbor[opensandbox]>=0.24",
+    # SkillsBench worker harness (MIT), updated 2026-10-23.
+    "openhands-sdk==1.54.0",
+    "openhands-tools==1.54.0",
 ]
 
 [build-system]
@@ -17,3 +20,6 @@ include = ["harbor_agent_general"]
 
 [tool.uv]
 sources.nemo-gym = { path = "../..", editable = true }
+
+# Harbor needs pathspec; LiteLLM must remain compatible with Gym MCP 1.x.
+override-dependencies = ["pathspec", "litellm<1.106", "cryptography>=45,<51"]

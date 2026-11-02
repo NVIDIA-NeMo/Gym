@@ -23,10 +23,9 @@ import pytest
 from fastapi import Request
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.conversational_tool_use_domain_generation.app import (
     FOLLOWUP_INSTRUCTION,
     DomainGenerationAgent,
@@ -55,8 +54,8 @@ class FakeHttpResponse:
         return json.dumps(self.payload).encode()
 
 
-def chat_completion(text: str, *, suffix: str) -> dict:
-    return {
+def chat_completion(text: str, *, suffix: str, usage: dict | None = None) -> dict:
+    completion = {
         "id": f"chatcmpl-{suffix}",
         "choices": [
             {
@@ -70,6 +69,9 @@ def chat_completion(text: str, *, suffix: str) -> dict:
         "model": "domain-model",
         "object": "chat.completion",
     }
+    if usage is not None:
+        completion["usage"] = usage
+    return completion
 
 
 def responses_payload() -> dict:
@@ -232,6 +234,45 @@ async def test_zero_followups_returns_the_initial_completion() -> None:
     assert [phase.phase for phase in result.generation_trace.phases] == ["initial"]
     assert len(agent.server_client.post.await_args_list) == 1
     assert result.response.output[0].content[0].text == json.dumps(candidates)
+
+
+@pytest.mark.asyncio
+async def test_run_usage_sums_every_phase() -> None:
+    agent = make_agent(
+        chat_completion(
+            json.dumps([{"name": "Home Services"}]),
+            suffix="initial",
+            usage={
+                "prompt_tokens": 300,
+                "completion_tokens": 1400,
+                "total_tokens": 1700,
+                "prompt_tokens_details": {"cached_tokens": 100},
+                "completion_tokens_details": {"reasoning_tokens": 1200},
+            },
+        ),
+        chat_completion(
+            "not json",
+            suffix="followup",
+            usage={
+                "prompt_tokens": 1818,
+                "completion_tokens": 24,
+                "total_tokens": 1842,
+                "prompt_tokens_details": {"cached_tokens": 300},
+                "completion_tokens_details": {"reasoning_tokens": 0},
+            },
+        ),
+    )
+
+    result = await agent.run(run_request())
+
+    # A phase whose text fails to parse still spent tokens; usage covers every phase, not just the last.
+    assert result.response.usage.model_dump() == {
+        "input_tokens": 2118,
+        "input_tokens_details": {"cached_tokens": 400},
+        "output_tokens": 1424,
+        "output_tokens_details": {"reasoning_tokens": 1200},
+        "total_tokens": 3542,
+    }
 
 
 @pytest.mark.asyncio

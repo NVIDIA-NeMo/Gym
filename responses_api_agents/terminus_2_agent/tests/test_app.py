@@ -10,9 +10,9 @@ import yaml
 from harbor.agents.terminus_2.terminus_2 import Terminus2
 from harbor.models.agent.context import AgentContext
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.terminus_2_agent.app import (
     LocalEnvironment,
     LocalTmuxSession,
@@ -204,7 +204,7 @@ class TestResponses:
             "final_metrics": {"total_prompt_tokens": 10, "total_completion_tokens": 4},
         }
         context = AgentContext(n_input_tokens=10, n_output_tokens=4, n_cache_tokens=0)
-        agent._run_terminus = AsyncMock(return_value=(trajectory, context, {}, False, True))
+        agent._run_terminus = AsyncMock(return_value=(trajectory, context, {}, False, True, "chatcmpl-terminal"))
 
         body = NeMoGymResponseCreateParamsNonStreaming(
             model="ignored-request-model",
@@ -217,6 +217,7 @@ class TestResponses:
             response = await agent.responses(request=None, body=body)
 
         assert response.model == "test-model"
+        assert response.id == "chatcmpl-terminal"
         assert response.temperature == 0.7
         assert [item.type for item in response.output] == ["message", "function_call", "function_call_output"]
         assert response.usage.total_tokens == 14
@@ -227,7 +228,7 @@ class TestResponses:
     @pytest.mark.asyncio
     async def test_empty_trajectory_gets_assistant_message(self) -> None:
         agent = _make_agent()
-        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
+        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False, None))
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):
@@ -240,7 +241,7 @@ class TestResponses:
     async def test_direct_response_waits_for_concurrency_slot(self) -> None:
         agent = _make_agent()
         agent.sem = asyncio.Semaphore(0)
-        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False))
+        agent._run_terminus = AsyncMock(return_value=({"steps": []}, AgentContext(), {}, False, False, None))
         body = NeMoGymResponseCreateParamsNonStreaming(model="model", input="task")
 
         with patch.object(Terminus2Agent, "resolve_model_base_url", return_value="http://model/v1"):

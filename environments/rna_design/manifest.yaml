@@ -1,0 +1,28 @@
+name: rna_design
+version: 0.1.0
+experimental: true
+kind: environment
+integration_profile: custom-gym-agent-loop
+domain: agent
+description: RNA inverse folding benchmark and training environment. Each rollout is a design campaign with a
+  fixed tool-call budget, rewarded 1.0 when it solves the target structure.
+modality: text
+licensing: MIT
+authors:
+- Christian Munley
+- Youhan Lee
+reward:
+  range:
+  - 0.0
+  - 1.0
+  higher_is_better: true
+determinism: stochastic
+resources_server: rna_design
+agent_server: harness_agent
+datasets:
+- name: example
+  type: example
+  jsonl_fpath: resources_servers/rna_design/data/example.jsonl
+  num_repeats: 1
+model_server: policy_model
+lifecycle: active

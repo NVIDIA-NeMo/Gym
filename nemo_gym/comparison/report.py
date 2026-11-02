@@ -33,7 +33,7 @@ from nemo_gym.comparison.schema import (
     MetricValue,
     RunFile,
 )
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 
 
 if TYPE_CHECKING:

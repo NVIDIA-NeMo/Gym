@@ -15,7 +15,7 @@
 from fastapi import FastAPI
 from pydantic import Field
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
@@ -55,6 +55,9 @@ class SingleStepToolUseArgumentComparisonVerifyResponse(BaseVerifyResponse):
 
 
 class SingleStepToolUseArgumentComparisonResourcesServer(SimpleResourcesServer):
+    # Verification compares the request's expected and predicted actions only.
+    checkpoint_mode = "stateless"
+    checkpoint_verify = "replay"
     config: SingleStepToolUseArgumentComparisonResourcesServerConfig
 
     def setup_webserver(self) -> FastAPI:

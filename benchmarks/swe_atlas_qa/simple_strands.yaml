@@ -1,0 +1,9 @@
+config_paths:
+  - benchmarks/swe_atlas_qa/config.yaml
+
+swe_atlas_qa_agent:
+  responses_api_agents:
+    harness_agent:
+      agent: simple_strands
+      agent_kwargs:
+        workspace_root: /tmp/ssa-workspaces

@@ -21,7 +21,7 @@ import pytest
 from nooa.unifiedllm import CacheBoundary, LLMResponse, Tool, ToolCall
 from pydantic import BaseModel
 
-from nemo_gym.openai_utils import (
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseFunctionToolCallForTraining,
     NeMoGymResponseOutputMessageForTraining,
@@ -96,6 +96,30 @@ def make_llm(
         sampling_overrides=sampling_overrides,
     )
     return llm, server_client, state
+
+
+@pytest.mark.asyncio
+async def test_response_progress_fires_after_capture_and_cookies_before_output_validation() -> None:
+    raw = model_response()
+    raw["incomplete_details"] = {"reason": "max_output_tokens"}
+    llm, client, state = make_llm(raw)
+    client.post.return_value.cookies = SimpleCookie("model_state=updated")
+    captured = []
+
+    def capture() -> None:
+        captured.append((state.calls[-1].response.model_dump(mode="json"), dict(llm._cookies)))
+
+    llm._on_response = capture
+    with pytest.raises(OutputTokenLimitExceeded):
+        await llm.acall([{"role": "user", "content": "task"}])
+    assert len(captured) == 1
+    assert captured[0][0]["id"] == "resp-1"
+    assert captured[0][0]["incomplete_details"]["reason"] == "max_output_tokens"
+    assert captured[0][1] == {"model_state": "updated"}
+    client.post.side_effect = ConnectionError("unavailable")
+    with pytest.raises(ConnectionError):
+        await llm.acall([{"role": "user", "content": "task"}])
+    assert len(captured) == 1
 
 
 @pytest.mark.parametrize(

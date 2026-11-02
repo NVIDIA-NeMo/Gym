@@ -248,8 +248,9 @@ are unaffected.
 
 - **Normal** — the command's real `return_code`, `error_type=None`.
 - **Timeout** — `return_code=125`, `error_type="timeout"`.
-- **Apptainer runtime failure** (instance gone, etc., detected via stderr markers like
-  `FATAL:`) — `return_code=125`, `error_type="sandbox"`.
+- **Apptainer runtime failure** (instance gone, etc., detected via Apptainer's own
+  stderr lines: a line starting with `FATAL:`, a missing-instance message, or an
+  `ERROR:` line with exit code 255) — `return_code=125`, `error_type="sandbox"`.
 
 `125` is the sentinel `SANDBOX_RUNTIME_RETURN_CODE`, signaling "the sandbox runtime
 failed" rather than "the command exited 125".
@@ -264,8 +265,9 @@ failed" rather than "the command exited 125".
   was started *without* fakeroot varies by Apptainer version and host configuration.
 - **Resource enforcement.** CPU/memory cgroup flags require cgroups v2 delegation.
   Disable them with `create.apply_resource_limits: false`.
-- **Runtime-failure detection is heuristic.** It keys off stderr markers, so a user
-  command whose own output contains `FATAL:` could be misclassified as a sandbox error.
+- **Runtime-failure detection is heuristic.** It keys off Apptainer's stderr line format,
+  so a user command that prints a line starting with `FATAL:` could be misclassified as a
+  sandbox error.
 
 ## Development
 

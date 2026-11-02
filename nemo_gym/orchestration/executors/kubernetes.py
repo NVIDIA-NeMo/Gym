@@ -31,7 +31,7 @@ import yaml
 
 from nemo_gym import __version__
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SubmitConfig
-from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.kubernetes_script import build_job_manifest, job_name
 from nemo_gym.orchestration.executors.otel import otel_active
 from nemo_gym.orchestration.jobs import (
@@ -72,6 +72,11 @@ def _kubectl(compute: KubernetesComputeConfig, *args: str, input: str | None = N
 
 class KubernetesExecutor(BaseExecutor):
     """Kubernetes executor. One Job per benchmark; see `kubernetes_script.py` for the pod shape."""
+
+    name = "kubernetes"
+
+    def resubmit(self, record: SubmissionRecord, benchmark: str) -> BenchmarkJob:
+        raise UnsupportedOperationError("Kubernetes executor does not support resubmit")
 
     def run(self, config: SubmitConfig, *, dry_run: bool = False) -> SubmissionRecord | None:
         compute = next(iter(config.compute.values()))
@@ -129,7 +134,7 @@ class KubernetesExecutor(BaseExecutor):
             submitted_at=utc_timestamp(now),
             run_dir=str(base_run_dir),
             cluster=cluster,
-            executor="kubernetes",
+            executor=self.name,
             hostname=None,
             submitted_by=getpass.getuser(),
             benchmarks=benchmarks,
@@ -162,7 +167,7 @@ class KubernetesExecutor(BaseExecutor):
                 submitted_at=utc_timestamp(now),
                 run_dir=str(run_dir),
                 cluster=next(iter(config.compute)),
-                executor="kubernetes",
+                executor=self.name,
                 hostname=None,
                 submitted_by=getpass.getuser(),
                 benchmarks=[BenchmarkJob(benchmark=name, job_dir=str(run_dir), job_id=name_in_cluster)],

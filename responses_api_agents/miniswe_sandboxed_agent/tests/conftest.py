@@ -9,6 +9,7 @@ import os
 import shlex
 import shutil
 import signal
+import subprocess
 import sys
 import threading
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -63,8 +64,21 @@ class ProcessSandbox:
         return SandboxExecResult(stdout.decode(errors="replace"), stderr.decode(errors="replace"), process.returncode)
 
 
+@pytest.fixture(scope="session")
+def native_python(tmp_path_factory: pytest.TempPathFactory) -> Path:
+    """Match the sandbox CLI environment without inheriting Gym's MCP v1 pin."""
+    runtime = tmp_path_factory.mktemp("miniswe-native")
+    subprocess.run(["uv", "--no-config", "venv", str(runtime), "--python", sys.executable], check=True)
+    python = runtime / "bin/python"
+    requirements = Path(module.__file__).with_name("runtime") / "requirements.txt"
+    subprocess.run(
+        ["uv", "--no-config", "pip", "install", "--python", str(python), "-r", str(requirements)], check=True
+    )
+    return python
+
+
 @pytest.fixture
-async def runner_factory(tmp_path, monkeypatch):
+async def runner_factory(tmp_path, monkeypatch, native_python):
     sandboxes = []
     servers = []
     pending_queries = []
@@ -74,7 +88,7 @@ async def runner_factory(tmp_path, monkeypatch):
         remote = Path(harness.remote_directory)
         (remote / "venv/bin").mkdir(parents=True)
         python = remote / "venv/bin/python"
-        python.write_text(f'#!/bin/sh\nexec {shlex.quote(sys.executable)} "$@"\n')
+        python.write_text(f'#!/bin/sh\nexec {shlex.quote(str(native_python))} "$@"\n')
         python.chmod(0o755)
 
     monkeypatch.setattr(module.MiniSWEHarness, "_install_miniswe", install)

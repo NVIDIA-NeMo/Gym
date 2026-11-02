@@ -49,3 +49,37 @@ def test_sandbox_access_rejects_unspecified_connection_fields() -> None:
                 "workdir": "/workspace",
             }
         )
+
+
+def test_sandbox_access_carries_the_agent_user() -> None:
+    """Harnesses run every command as the task's `[agent].user`; absent, the sandbox's default user applies."""
+    connection = DirectSandboxConnection(provider_config_ref="sandbox", descriptor={"sandbox_id": "sandbox-1"})
+    assert SandboxAccess(connection=connection, workdir="/app").user is None
+    named = SandboxAccess(connection=connection, workdir="/app", user="agent")
+    numeric = SandboxAccess(connection=connection, workdir="/app", user=1000)
+    assert SandboxAccess.model_validate(named.model_dump()).user == "agent"
+    assert SandboxAccess.model_validate(numeric.model_dump()).user == 1000
+    with pytest.raises(ValidationError):
+        SandboxAccess(connection=connection, workdir="/app", user=["agent"])
+
+
+def test_sandbox_access_env_defaults_to_nothing_and_round_trips() -> None:
+    """The owner's resolved environment for the harness's commands (the oracle's ``[solution].env``)."""
+    connection = DirectSandboxConnection(provider_config_ref="sandbox", descriptor={"sandbox_id": "sandbox-1"})
+    assert SandboxAccess(connection=connection, workdir="/app").env == {}
+    access = SandboxAccess(connection=connection, workdir="/app", env={"GREETING": "hi"})
+    assert SandboxAccess.model_validate(access.model_dump(mode="json")).env == {"GREETING": "hi"}
+    with pytest.raises(ValidationError):
+        SandboxAccess(connection=connection, workdir="/app", env={"GREETING": 1})
+
+
+def test_sandbox_access_keeps_an_unset_user_and_env_off_the_wire() -> None:
+    """A seed for a harness the task declares nothing for carries the two keys harnesses matched before."""
+    connection = DirectSandboxConnection(provider_config_ref="sandbox", descriptor={"sandbox_id": "sandbox-1"})
+    bare = SandboxAccess(connection=connection, workdir="/app")
+    assert set(bare.model_dump()) == {"connection", "workdir"}
+    assert set(bare.model_dump(mode="json")) == {"connection", "workdir"}
+    assert SandboxAccess.model_validate(bare.model_dump()) == bare
+    # Set values travel, a numeric user of 0 included.
+    full = SandboxAccess(connection=connection, workdir="/app", user=0, env={"GREETING": "hi"})
+    assert full.model_dump()["user"] == 0 and full.model_dump()["env"] == {"GREETING": "hi"}
