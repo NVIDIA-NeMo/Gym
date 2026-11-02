@@ -1038,6 +1038,8 @@ def _remote_managed_evidence(
             "managed_reader_unavailable",
             "source_job_identity",
             "checkpoint_enabled",
+            # The attempt extension the Store applied (--extend-attempts); an older reader leaves it unset.
+            "attempt_extension_applied",
         }
         # A pinned reader older than a host-collected field drops it on its own model (the reader's projection then
         # lacks the key); the host collection owns such fields, and these named ones, either way.
@@ -1366,15 +1368,7 @@ class SlurmExecutor(BaseExecutor):
                     collected = select_managed_evidence(collected, job_dir)
                 else:
                     reader_config = _repinned_config(config, benchmark, reader_ref) if reader_ref else config
-                    read = _remote_managed_evidence(conn, collected, job_dir, reader_config)
-                    # A reader at the run's pinned Gym returns only the fields it knows; the plain collector's
-                    # reading of the attempt extension stands.
-                    collected = read.model_copy(
-                        update={
-                            "attempt_extension": collected.attempt_extension,
-                            "attempt_extension_state": collected.attempt_extension_state,
-                        }
-                    )
+                    collected = _remote_managed_evidence(conn, collected, job_dir, reader_config)
                     try:
                         if self._saved_config(conn, Path(record.run_dir)).model_dump() != config.model_dump():
                             raise ValueError("saved submission config changed during remote selection")

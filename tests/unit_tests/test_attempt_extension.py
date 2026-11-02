@@ -182,3 +182,37 @@ def test_an_extension_needs_a_whole_number_in_range():
     for value in (0, 101, 1.5):
         with pytest.raises(ValueError, match="from 1 to 100"):
             SlurmExecutor._attempt_extension_commands(value, keep_budget=True)
+
+
+def test_the_remote_reader_reports_the_applied_extension_and_an_older_reader_is_refused(tmp_path):
+    from nemo_gym.orchestration.executors.slurm import _remote_managed_evidence
+    from tests.unit_tests.test_remote_managed_recovery import ProjectionConnection, config
+
+    prepare_managed(tmp_path, "exhausted")
+    (tmp_path / "artifacts" / EXTENSION).write_text("1\n")
+    raw = collect(tmp_path)
+    selected = select_managed_evidence(raw, tmp_path)
+
+    reply = "installer output\n__GYM_MANAGED:" + selected.model_dump_json()
+    current = _remote_managed_evidence(ProjectionConnection(reply), raw, tmp_path, config())
+    assert current.managed_reader_error is None
+    assert (current.attempt_extension, current.attempt_extension_applied) == (1, 1)
+
+    # A reader at a pinned Gym that predates attempt extensions knows none of their fields.
+    older = json.loads(selected.model_dump_json())
+    for name in (
+        "attempt_extension",
+        "attempt_extension_state",
+        "attempt_extension_applied",
+        "infra_retries_configured",
+    ):
+        older.pop(name)
+    for fact in older["managed_selection"]:
+        fact.pop("replayable")
+    reply = "installer output\n__GYM_MANAGED:" + json.dumps(older)
+    pinned = _remote_managed_evidence(ProjectionConnection(reply), raw, tmp_path, config())
+    assert pinned.managed_reader_error is None
+    # The host's own reading of the record stands; the pinned Store would not apply it.
+    assert (pinned.attempt_extension, pinned.attempt_extension_applied) == (1, None)
+    result = decide_from_collected(pinned, max_infra_retries=3, max_walltime_s=None, live_job=False, extend_attempts=1)
+    assert "the run's pinned Gym predates attempt extensions" in result.reason
