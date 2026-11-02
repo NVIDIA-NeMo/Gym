@@ -1128,7 +1128,8 @@ def model_call_facts(r):
 def trial_metadata(value):
     if not isinstance(value, dict):
         return None
-    result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category")}
+    result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category",
+                                        "upstream_status_code", "local_response_reason")}
     result["dialect"] = value.get("dialect") if value.get("dialect") in ("chat", "responses") else None
     result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call", "max_output_tokens", "max_tokens") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
@@ -3617,6 +3618,47 @@ def _failed_request(call: Any) -> tuple[str, Any] | None:
     return None
 
 
+# The reason a model server records for a request it rejected because the conversation outgrew the context window.
+CONTEXT_LIMIT_REASON = "context_length_exceeded"
+
+
+def _context_limit_rejection(meta: Any) -> bool:
+    """Whether a captured call was rejected with HTTP 4xx for exceeding the context window.
+
+    The reason is the call's ``error_category`` or its ``local_response_reason``; the status is the call's own, its
+    upstream's, or that of a failure event it reported. A 5xx among them is the server's fault, and an event of another
+    kind than a rejected request (a transport failure) is its own cause, never the context's.
+    """
+    if not isinstance(meta, dict) or CONTEXT_LIMIT_REASON not in (
+        meta.get("error_category"),
+        meta.get("local_response_reason"),
+    ):
+        return False
+    report = meta.get("failure_report")
+    events = report.get("events") if isinstance(report, dict) else None
+    events = [event for event in events.values() if isinstance(event, dict)] if isinstance(events, dict) else []
+    if any(event.get("failure_kind") not in (None, MODEL_REQUEST_ERROR) for event in events):
+        return False
+    statuses = [
+        status
+        for status in [
+            meta.get("status_code"),
+            meta.get("upstream_status_code"),
+            *(event.get("http_status") for event in events),
+        ]
+        if type(status) is int and status >= 400
+    ]
+    return bool(statuses) and all(status <= 499 for status in statuses)
+
+
+def _policy_call(row: Mapping[str, Any], call: Any) -> bool:
+    """Whether a captured call is the evaluated policy's: its model is the row's policy server, or none is named."""
+    policy = row.get("ng_policy_model_server")
+    meta = call.get("response_metadata") if isinstance(call, dict) else None
+    model = meta.get("model_ref") if isinstance(meta, dict) else None
+    return not isinstance(policy, str) or (isinstance(model, dict) and model.get("name") == policy)
+
+
 def _last_captured_call(calls: list) -> Any:
     """The call a rollout ended on, for an agent whose invocations reference none of its calls.
 
@@ -3657,7 +3699,9 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     (its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
     failed that way; an earlier failed call is no end and stays unaccounted. The kind is keyed on the failure's HTTP
     status (``status_fault_kind``): a 5xx reply is the server's fault, and another model's 4xx rejection is
-    evaluation-side.
+    evaluation-side. A policy whose own last call was rejected for exceeding the context window
+    (``_context_limit_rejection``) ended there, with ``model_context_limit``, whatever its event's kind; the policy's
+    last call is its last captured one when its invocations reference none, since another model's capture may follow.
     """
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
@@ -3676,14 +3720,14 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
             and all(isinstance(item, dict) and item.get("model_calls") == [] for item in invocations)
         )
         if unreferenced and isinstance(observed.get("model_calls"), list):
+            own = _last_captured_call([call for call in observed["model_calls"] if _policy_call(row, call)])
+            if own is not None and _context_limit_rejection(own.get("response_metadata")):
+                found[_identity(row)] = MODEL_CONTEXT_LIMIT
+                continue
             last = _last_captured_call(observed["model_calls"])
             failed = _failed_request(last)
             if failed is not None:
-                policy = row.get("ng_policy_model_server")
-                model = ((last.get("response_metadata") or {}).get("model_ref") or {}).get("name")
-                found[_identity(row)] = status_fault_kind(
-                    failed[0], failed[1], policy=not isinstance(policy, str) or model == policy
-                )
+                found[_identity(row)] = status_fault_kind(failed[0], failed[1], policy=_policy_call(row, last))
             continue
         if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
             continue
@@ -3705,6 +3749,9 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
             )
         ]
         meta = last[0]["response_metadata"] if len(last) == 1 else None
+        if meta is not None and _policy_call(row, last[0]) and _context_limit_rejection(meta):
+            found[_identity(row)] = MODEL_CONTEXT_LIMIT
+            continue
         operations = meta.get("model_operations") if isinstance(meta, dict) else None
         report = meta.get("failure_report") if isinstance(meta, dict) else None
         if not isinstance(operations, list) or not operations or not isinstance(operations[-1], dict):
