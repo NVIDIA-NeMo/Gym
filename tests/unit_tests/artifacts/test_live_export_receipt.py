@@ -45,6 +45,7 @@ class Client:
         self.status = "RUNNING"
         self.futures = []
         self.read_hook = None
+        self.run_tags = {}
 
     def get_experiment_by_name(self, name):
         return SimpleNamespace(experiment_id="experiment")
@@ -81,6 +82,9 @@ class Client:
 
     def set_terminated(self, run_id, status):
         self.status = status
+
+    def set_tag(self, run_id, key, value):
+        self.run_tags.setdefault(run_id, {})[key] = value
 
 
 @pytest.fixture
@@ -306,6 +310,45 @@ def test_a_reopened_live_run_is_exported_after_the_run_with_a_bound_receipt(live
     collected = _collected_mlflow(artifacts)
     assert collected["receipt"]["run_id"] == "post-run" and collected["receipt"]["current"] is True
     assert mlflow_errors(collected, "FINISHED", observed_run_id="post-run") == []
+
+
+def test_the_post_run_export_and_the_live_run_it_supersedes_name_each_other(live, monkeypatch):
+    artifacts, exporter, client = live
+    exporter.reopened = True
+    post = _post_run_client(monkeypatch)
+    metrics, params = dict(client.metrics), dict(client.artifacts)
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "post-run"
+    # Both tags go through the live exporter's client; they are tags only, on the two runs.
+    assert client.run_tags == {"live-run": {"superseded_by": "post-run"}, "post-run": {"supersedes": "live-run"}}
+    assert not post.run_tags
+    # The live run keeps its metrics and logged artifacts; finalization adds only the health metrics it always did.
+    assert {k: v for k, v in client.metrics.items() if not k.startswith("health/")} == {
+        k: v for k, v in metrics.items() if not k.startswith("health/")
+    }
+    assert client.artifacts == params
+
+
+def test_a_failed_supersession_tag_is_logged_and_keeps_the_receipt(live, monkeypatch, caplog):
+    artifacts, exporter, client = live
+    exporter.reopened = True
+    _post_run_client(monkeypatch)
+
+    def refused(run_id, key, value):
+        raise PermissionError("tagging refused")
+
+    client.set_tag = refused
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "post-run"
+    assert "could not tag" in caplog.text and "tagging refused" in caplog.text
+    assert not registry.run_failed()
+
+
+def test_a_certified_live_run_is_not_tagged(live):
+    artifacts, exporter, client = live
+    _finalize_live_exporters(artifacts.rollouts_jsonl_fpath)
+    assert orjson.loads(artifacts.export_done_fpath("mlflow").read_bytes())["run_id"] == "live-run"
+    assert client.run_tags == {}
 
 
 def test_an_existing_receipt_is_never_replaced_at_completion(live, monkeypatch):

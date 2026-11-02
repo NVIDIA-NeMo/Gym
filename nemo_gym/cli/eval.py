@@ -919,6 +919,9 @@ def _export_without_receipt(exporter, artifacts) -> None:
             exporter.name,
             result.error,
         )
+    elif result.state is ExportState.SUCCEEDED and result.detail.get("live_run_id") and result.detail.get("run_id"):
+        # The evaluation now has two backend runs: name the run of record on both, after the receipt is written.
+        exporter.link_superseding_export(result.detail["live_run_id"], result.detail["run_id"])
 
 
 _terminated = False
