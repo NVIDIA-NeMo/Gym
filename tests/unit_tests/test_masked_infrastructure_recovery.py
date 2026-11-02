@@ -203,3 +203,43 @@ def _budget():
     from nemo_gym.orchestration.recovery import RecoveryBudget
 
     return RecoveryBudget(live_job=False, max_infra_retries=2, infra_retries_used=0)
+
+
+_ANSWER = {
+    "response": {
+        "object": "response",
+        "id": "r1",
+        "status": "completed",
+        "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "4"}]}],
+    }
+}
+
+
+@pytest.mark.parametrize("kind", ["session_lost", "verifier_error", "infrastructure_error"])
+def test_a_masked_infrastructure_result_that_kept_a_saved_answer_is_not_retried(tmp_path, kind):
+    # A saved model answer is never sampled again: the row keeps the masked-and-kept behaviour.
+    output, _ = _run(tmp_path, [[_masked(kind) | _ANSWER]])
+    store = RolloutStore.read(output, import_legacy=False)
+    assert store.pending() == []
+    coverage = store.coverage()
+    assert (coverage["complete"], coverage["masked_retryable"], coverage["retryable"]) == (True, 0, 0)
+    assert store.attempt_count({"_ng_task_index": 1, "_ng_rollout_index": 0}) == 0
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.action.value == "stop"
+    assert decision.counts == {"scored": 1, "masked": 1}
+
+
+def test_a_masked_infrastructure_result_with_only_a_no_generation_placeholder_is_still_retried(tmp_path):
+    from nemo_gym.artifacts.rollout_rows import NG_NO_GENERATION_METADATA
+
+    placeholder = {
+        "response": {
+            "object": "response",
+            "id": "r1",
+            "output": [],
+            "metadata": dict(NG_NO_GENERATION_METADATA),
+        }
+    }
+    _run(tmp_path, [[_masked("session_lost") | placeholder]])
+    _, decision = _decide(tmp_path, allocation_cut=False)
+    assert decision.counts == {"scored": 1, "retryable": 1}, decision.reason
