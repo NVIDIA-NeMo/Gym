@@ -335,9 +335,13 @@ class E2BProvider:
         options = spec.provider_options or {}
         if not isinstance(options, Mapping):
             raise TypeError("E2B provider_options must be a mapping")
-        unknown = set(options) - {"template"}
+        unknown = set(options) - {"template", "resource_requests"}
         if unknown:
-            raise ValueError(f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template")
+            raise ValueError(
+                f"Unknown E2B provider option(s): {', '.join(sorted(unknown))}. Supported: template, resource_requests"
+            )
+        if not isinstance(options.get("resource_requests") or {}, Mapping):
+            raise TypeError("E2B provider option 'resource_requests' must be a mapping")
         option = options.get("template")
         if option is not None:
             if not isinstance(option, str) or not option:
@@ -373,6 +377,9 @@ class E2BProvider:
             for name in ("cpu", "memory_mib", "disk_gib", "gpu", "gpu_type")
             if getattr(resources, name, None) is not None
         }
+        # Scheduling hints for other providers (OpenSandbox) are also fixed by the template here.
+        scheduling = (spec.provider_options or {}).get("resource_requests") or {}
+        requested.update({f"resource_requests.{name}": value for name, value in scheduling.items()})
         if not requested:
             return
         detail = ", ".join(f"{key}={value}" for key, value in sorted(requested.items()))
