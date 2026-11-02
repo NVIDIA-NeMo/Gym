@@ -48,11 +48,11 @@ and for reading health while you build a benchmark or a harness, follow
    login node, and list every `runtime:` credential in `compute.cluster.forward_env`; only listed
    names reach the job. Site `#SBATCH` directives go in `compute.cluster.extra_args` without
    leading dashes (`{qos: <qos>, exclude: <node>}`).
-7. `gym eval submit` also takes Hydra overrides after its flags, though its `--help` does not
+6. `gym eval submit` also takes Hydra overrides after its flags, though its `--help` does not
    list them: `++key=value` sets or replaces a key, `+key=value` only adds a new one. For example
    `gym eval submit --config submit.yaml --dry-run ++compute.cluster.walltime=00:40:00
    ++driver.benchmarks.<name>.run.limit=2`. Check the result with `--resolve-only` or `--dry-run`.
-6. An evaluation you do not track in MLflow on purpose: set `mlflow_tracking_required: false` in
+7. An evaluation you do not track in MLflow on purpose: set `mlflow_tracking_required: false` in
    each benchmark's `run`. It waives only the delivery requirement of the acceptance gate (step
    9); health checks still run, and a configured MLflow export still happens. Without it, the
    gate of a complete, healthy run stays `FAILED` on "no MLflow run evidence". A Gym pinned
@@ -79,9 +79,17 @@ over only if the successor dies before its own prologue, then reads its predeces
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. |
 | `TIMEOUT` before the task inventory was written | Stops and names the fresh-restart command (step 6). |
 
-A run that hangs instead of failing is not left to hold its allocation: a head server that never
-answers, or a run stopped by a typed non-resumable condition, exits 76, and the chain queues no
-follow-up for it.
+A run that hangs instead of failing is not left to hold its allocation. A driver that stops on a
+typed condition exits at once (76 when another attempt cannot help), and the next segment's guard
+ends the chain and writes the kind and the way out to `.gym_chain_incomplete`:
+
+| Typed stop | What happened | The one command |
+| --- | --- | --- |
+| `server_spinup_timeout` | The Gym servers were not ready within `server_spinup_timeout_seconds` (600 s unless the benchmark's `run` sets it). | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"`: `N` above the recorded limit, 0 for no limit; journaled. |
+| `driver_install_failed` | The job could not install Gym (the installer, the checkout or the package). The stop quotes the installer's error; the rest is in `logs/driver-<job id>.log`. | Fix the cause (the ref, the network, the image), then `--recover`. |
+| `provider_credentials_rejected` | The sandbox provider answered 401 or 403. | Fix the credentials, then `--recover`. |
+| `collection_resume_refused` | The saved rollouts do not verify against this run's inputs and configuration. | A fresh run (step 10), or, only when the operator accepts the difference, `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`. |
+| A resumed segment saved no rollout | Its walltime was shorter than the setup (Gym install, server start) plus one rollout, so the next segment would repeat it. | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
 
 Do not resubmit while a job of the run is live; recovery answers NOOP then anyway.
 
@@ -90,7 +98,7 @@ Do not resubmit while a job of the run is live; recovery answers NOOP then anywa
 | Location | What |
 | --- | --- |
 | Run directory | `gym-job.json` (the submission record), `resolved-config.yaml` (the config as submitted), and the journals `walltime-extension-journal.jsonl`, `repin-journal.jsonl`, `unsafe-resume-journal.jsonl`. |
-| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, and `.gym_chain_incomplete` (why the chain stopped, when it records a reason). |
+| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl`, `spinup-timeout-journal.jsonl` and `operator-continuation-journal.jsonl`. |
 | `artifacts/` | `rollouts.jsonl` (results), `rollouts_failures.jsonl` (failed attempts), `rollouts_materialized_inputs.jsonl` (the task inventory), `rollouts_manifest.json` with its identity and resume-drift journal, `rollouts_coverage.json`, `rollouts_aggregate_metrics.json`, `quality_summary.json` (health), and `rollouts_mlflow_export_done` (the post-run export receipt). |
 | Your machine | A copy of each submission record under the Gym jobs cache (see Job Records). |
 
@@ -109,7 +117,10 @@ The agent name is the rows' `agent_ref.name`, the agent entry in
 `artifacts/rollouts_aggregate_metrics.json`. Without the score flags the score gate reports
 "score unavailable: no requested metric was read".
 
-`--inspect` reads the saved evidence and evaluates the gates without dispatching anything. Read:
+`--inspect` reads the saved evidence and evaluates the gates without dispatching anything. The
+read runs on the run's host; the first time, it installs the run's pinned Gym for its reader with
+a private copy of uv and Python, which takes minutes and replaces nothing in your home. Later reads
+on that host reuse the cache. Read:
 
 - the decision's action and `reason`. When the run's latest resume crossed operational
   configuration drift, the reason ends with `resumed across operational drift: <settings>`.
@@ -124,6 +135,9 @@ The agent name is the rows' `agent_ref.name`, the agent entry in
 | The inspection says | Do |
 | --- | --- |
 | Eligible work, `PLANNED` | Run the same command without `--inspect`. |
+| `reverify`, `PLANNED` (only judge failures remain) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. The executor runs this today only for a submission that deploys no model service; otherwise the outcome says so (`no existing CPU-only judge execution profile`) and the judge failures stay as they are. |
+| NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
+| STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
 | The chain's walltime cap is spent | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. Never below the recorded walltime; journaled. |
 | The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. |
 | The run's chain accounting is unknown | An explicit budget continues it: `--max-walltime` with `--walltime-reason`, optionally `--extend-retries`. Without it, the STOP names these options. |
@@ -226,6 +240,10 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   verdicts. Model failures count in the score and never fail health.
 - Pass `--mlflow-run-id <id> --mlflow-status FINISHED` only after you observed that run and status
   yourself. They do not export anything; acceptance also needs a current export receipt.
+- With MLflow configured, the post-run export logs the same facts as metrics: `health/response/*`,
+  `health/trial/*` (`known`, `passed`, `counts_known`, `expected`, `failed` or
+  `failed_lower_bound`, the rates), `health/upstream_recovery/*` and `health/grading_recovery/*`.
+  Read `known` before a `passed` value: `known=0` means unknown, not failed.
 - `SUCCESS` needs complete results and every gate. A NOOP, a finished job, or a full score alone is
   not acceptance.
 
@@ -235,7 +253,11 @@ low. That is the model or its deployment: fix the deployment and run again, not 
    (in `.gym_followup_queued.<job id>`) and the successor's sentinel (in
    `.gym_followup_sentinel.<job id>`). A successor that is left to start sees `CANCELLED` and stops
    without doing work, but only after it got an allocation. Cancel a pending sentinel after a
-   completed run too: once Slurm cancels the successor, the sentinel's dependency is met.
+   completed run too: once Slurm cancels the successor, the sentinel's dependency is met. If you
+   cancel only the running job, its follow-up starts when it gets an allocation, sees `CANCELLED`,
+   writes the stop to `.gym_chain_incomplete` and exits; cancelling the successor and the sentinel
+   too saves that allocation and leaves no stop record (the inspection reads the state from the
+   scheduler either way).
 2. Then inspect (step 4) before deciding anything else.
 3. Keep the run directory. To evaluate something different, submit a new run to a new location
    rather than reusing this one; a fresh `gym eval run` at an existing output path replaces it.
@@ -247,3 +269,6 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - [ ] `trial_counts` and `quality_summary.json` were read: unobserved and unhealthy counts are
   explained.
 - [ ] Any `resumed across operational drift` settings are listed with the result.
+- [ ] The run is final on its receipts: `rollouts_coverage.json` says complete, the export
+  receipt `rollouts_mlflow_export_done` is current (or `mlflow_tracking_required: false` was set
+  on purpose), and `.gym_chain_incomplete` is absent or explained.
