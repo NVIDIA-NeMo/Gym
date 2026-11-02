@@ -290,9 +290,12 @@ async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog
             bare = client.post("/web_search", json={"query": eight}).json()
     assert bare["refused"] and "seeded with its question" in bare["text"]
     assert "family=unseeded_session rule='require_seeded_question' where=session" in caplog.text
-    # A question with no words cannot drive the span rule, so its seed leaves the session unseeded.
+    # A question with no words cannot drive the span rule, so its seed leaves the session unseeded, whether the
+    # question comes from the row's field or from the last user message.
     await seed(server, {"question": "?!"}, "wordless")
-    assert (await server.web_search(tool_request("wordless"), WebSearchRequest(query=eight))).refused
+    await seed(server, {"responses_create_params": {"input": [{"role": "user", "content": "?!"}]}}, "wordless-message")
+    for session_id in ("wordless", "wordless-message"):
+        assert (await server.web_search(tool_request(session_id), WebSearchRequest(query=eight))).refused
     backend.search.assert_not_awaited()
     # Opting out restores the previous behaviour: an unseeded session is served without the span rule.
     lenient = make_server(require_seeded_question=False)
@@ -303,10 +306,12 @@ async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog
 
 def test_typed_sessions_follow_the_resources_session_contract():
     """An Environment Server's typed seed binds the session to its episode and task, and a close fences the ID
-    against a delayed seed of the same session for the retry window."""
+    against a delayed seed of the same session for the retry window. A close naming another episode leaves an
+    open session, question and binding, untouched."""
     server = make_server()
+    app = server.setup_webserver()
     check_resources_session_contract(
-        server.setup_webserver(),
+        app,
         ResourcesSeedSessionRequest(
             resources_session_id="typed-session",
             episode_id=EpisodeId(rollout_id="rollout", attempt=0),
@@ -314,8 +319,19 @@ def test_typed_sessions_follow_the_resources_session_contract():
             task_data={"question": QUESTION},
         ),
         keeps_state=True,
-        holds_state=lambda resources_session_id: resources_session_id in server._session_spans,
+        holds_state=lambda session_id: session_id in server._session_spans or session_id in server._session_identity,
     )
+    live = ResourcesSeedSessionRequest(
+        resources_session_id="live-session",
+        episode_id=EpisodeId(rollout_id="rollout-a", attempt=0),
+        task_id=TaskId(taskset="hle_diamond", task_id="1"),
+        task_data={"question": QUESTION},
+    )
+    with TestClient(app, base_url="http://127.0.0.1:8000") as client:
+        assert client.post("/seed_session", json=live.model_dump(mode="json")).status_code == 200
+        other = {"resources_session_id": "live-session", "episode_id": {"rollout_id": "rollout-b", "attempt": 0}}
+        assert client.post("/close_session", json=other).status_code == 409
+    assert "live-session" in server._session_spans and "live-session" in server._session_identity
 
 
 async def test_sessions_past_the_cap_are_forgotten_with_a_warning(server, monkeypatch, caplog):
