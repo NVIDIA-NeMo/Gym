@@ -1644,7 +1644,7 @@ class RunRecordWriter:
         self.run_id = run_id or uuid4().hex
         self.rollouts_fpath.parent.mkdir(parents=True, exist_ok=True)
         self._lock_fpath = self.rollouts_fpath.with_name(f".{self.rollouts_fpath.name}.lock")
-        with self._locked():
+        with self._locked() as lock:
             self.failures_fpath.unlink(missing_ok=True)
             self.materialized_fpath.unlink(missing_ok=True)
             # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
@@ -1654,6 +1654,13 @@ class RunRecordWriter:
             os.close(fd)
             Path(partial).replace(self.rollouts_fpath)
             self._generation = self.rollouts_fpath.stat().st_ino
+            # The lock file names the writer that opened the shard last. An inode number can come back to a later
+            # reopening of the same label, so every append checks this token under the lock, not the inode alone.
+            self._writer_token = secrets.token_hex(16)
+            lock.seek(0)
+            lock.truncate()
+            lock.write(self._writer_token)
+            lock.flush()
             # As in a collection run, the failures sidecar exists from the start, and the rows this call dispatches
             # are the shard's materialized inputs: what the Store and the health check expect to find.
             self.failures_fpath.touch()
@@ -1663,12 +1670,16 @@ class RunRecordWriter:
                         file.write(orjson.dumps(row) + b"\n")
 
     @contextmanager
-    def _locked(self) -> Iterator[None]:
-        """Hold the shard's lock across processes, so opening and each write never interleave with another's."""
-        with self._lock_fpath.open("a") as lock:
+    def _locked(self) -> Iterator[Any]:
+        """Hold the shard's lock across processes, so opening and each write never interleave with another's.
+
+        The lock file is never unlinked or replaced, so every writer of a label locks the same object; it also holds
+        the token of the writer that opened the shard last.
+        """
+        with self._lock_fpath.open("a+") as lock:
             fcntl.flock(lock, fcntl.LOCK_EX)
             try:
-                yield
+                yield lock
             finally:
                 fcntl.flock(lock, fcntl.LOCK_UN)
 
@@ -1692,7 +1703,10 @@ class RunRecordWriter:
             )
         else:
             fpath, line = self.rollouts_fpath, orjson.dumps(result)
-        with self._locked():
+        with self._locked() as lock:
+            lock.seek(0)
+            if lock.read() != self._writer_token:
+                raise RuntimeError(f"{self.rollouts_fpath} was replaced by another writer for the same shard")
             try:
                 current = self.rollouts_fpath.stat().st_ino
             except FileNotFoundError:

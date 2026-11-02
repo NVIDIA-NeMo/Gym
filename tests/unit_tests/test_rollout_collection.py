@@ -14657,3 +14657,23 @@ class TestRunRecordWriter:
         [failed] = store.failures()
         assert failed[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
         assert [row[TASK_INDEX_KEY_NAME] for row in store.pending()] == [4]
+
+    def test_every_reopening_invalidates_earlier_writers_even_when_inodes_recur(self, tmp_path: Path) -> None:
+        from nemo_gym.rollout_collection import RunRecordWriter
+
+        first = RunRecordWriter(tmp_path, "step_1")
+        second = RunRecordWriter(tmp_path, "step_1")
+        third = RunRecordWriter(tmp_path, "step_1")
+        # The filesystem may hand the third shard file the number the first writer remembers for its own.
+        first._generation = third.rollouts_fpath.stat().st_ino
+        scored = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
+        failed = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
+        for stale, result in ((first, scored), (first, failed), (second, scored)):
+            with pytest.raises(RuntimeError, match="replaced by another writer"):
+                stale.write(result)
+        assert self._lines(third.rollouts_fpath) == [] and self._lines(third.failures_fpath) == []
+        third.write(scored)
+        assert self._lines(third.rollouts_fpath) == [scored]
+        # Another label is another shard, written independently.
+        RunRecordWriter(tmp_path, "step_2").write(scored)
+        assert self._lines(tmp_path / "rollouts-step_2.jsonl") == [scored]
