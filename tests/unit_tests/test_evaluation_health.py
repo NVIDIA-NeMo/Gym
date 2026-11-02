@@ -187,12 +187,13 @@ def test_unverified_coverage_withholds_a_pass_without_a_health_failure():
 
 def test_records_that_do_not_cover_every_trial_keep_the_lower_bound_wording():
     collected = _run(99, settled={"model_transport_error": 1})
-    # A completed grading operation that is not bound to the saved answer.
+    # A completed grading operation that is not bound to the saved answer: that trial is unobserved, never healthy.
     grade = collected.results[0]["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"][0]
     grade["result_binding_sha256"] = "0" * 64
     _, (passed, reason, report), _ = _gate(collected)
     assert passed is None and report["exact"] is False
-    assert reason.startswith("trial: UNVERIFIED, known failures are a lower bound: evaluation-side faults: 1 of 100")
+    assert reason.startswith("trial: UNOBSERVED 1 of 100 expected trials")
+    assert "observed healthy 98, unhealthy 1; known so far: evaluation-side faults: 1 of 100" in reason
 
 
 def test_a_policy_capture_that_does_not_join_the_bound_answer_is_reported_not_a_coverage_condition():
@@ -261,3 +262,25 @@ def test_an_accepted_omission_leaves_a_fully_observed_run_exact():
     # The omission is no trial: the one observed healthy trial is the whole population, so health passes exactly.
     assert passed is True and report["status"] == "PASS" and report["exact"] is True, reason
     assert task["trial_counts"] == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 0}
+
+
+def test_trial_counts_leave_a_grading_bound_to_another_answer_unobserved():
+    collected = _run(1)
+    # The completed grading operation no longer binds the saved answer and score.
+    collected.results[0]["_ng_collected_grading_binding"] = "0" * 64
+    decision, (passed, _, _), task = _gate(collected)
+    assert passed is None
+    assert task["trial_counts"] == trial_counts(decision, collected)
+    assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
+
+
+def test_trial_counts_leave_an_unbound_grading_artifact_unobserved():
+    from tests.unit_tests.test_grading_artifacts import _ungraded
+
+    collected = _run(1)
+    _ungraded(collected.results[0], sentence_metrics=["sentence_chrf"])
+    # A saved grading artifact counts only with the collector's binding of the saved answer and score.
+    del collected.results[0]["_ng_collected_grading_binding"]
+    decision, (passed, _, _), task = _gate(collected)
+    assert passed is None
+    assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1

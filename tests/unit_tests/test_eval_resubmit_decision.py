@@ -2599,13 +2599,14 @@ def test_cli_outcome_names_the_reader_token(tmp_path, fake_executor, capsys, mon
 
 
 def _graded(task: int) -> dict:
-    """A scored row whose verifier recorded one programmatic grading operation."""
-    verifier = {
-        "invocation_id": f"verify-{task}",
-        "status": "completed",
-        "grading_operations": [{"operation_id": f"grade-{task}", "kind": "programmatic", "outcome": "completed"}],
-    }
-    return ident(task, reward=1.0, ng_trajectory={"verifier_invocations": [verifier]})
+    """A scored row whose verifier recorded one programmatic grading operation bound to its saved answer and score."""
+    from nemo_gym.trajectory.trajectory_record import grading_result_binding
+
+    row = ident(task, reward=1.0, response={"id": f"resp-{task}", "status": "completed", "output": []})
+    operation = {"operation_id": f"grade-{task}", "kind": "programmatic", "outcome": "completed"}
+    operation["result_binding_sha256"] = grading_result_binding(row)
+    verifier = {"invocation_id": f"verify-{task}", "status": "completed", "grading_operations": [operation]}
+    return row | {"ng_trajectory": {"verifier_invocations": [verifier]}}
 
 
 def _quality_naming(server: str, expected: int) -> dict:
