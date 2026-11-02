@@ -35,7 +35,7 @@ from nemo_gym.tasks.harbor.task_data import (
     task_fields,
 )
 from nemo_gym.train_data_utils import TrainDataProcessor
-from tests.unit_tests.test_harbor_tasks import no_real_registry, write_task  # noqa: F401 (autouse fixture)
+from tests.unit_tests.test_harbor_tasks import write_task
 
 
 QA_SCHEMA = """
@@ -515,7 +515,7 @@ class TestMaterializeRefusesTheDataset:
             prepare_target(str(folder), output_root=tmp_path / "out", only=["q1"])
 
     def test_a_module_that_does_not_import_refuses_the_dataset_before_images_are_recorded(self, tmp_path):
-        from tests.unit_tests.test_harbor_tasks import FakeRegistryClient
+        from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
 
         folder = write_dataset(tmp_path / "ds", schema="import nothing_of_the_sort\n")
         with pytest.raises(TaskDataError, match="failed to import: ModuleNotFoundError"):
@@ -526,7 +526,7 @@ class TestMaterializeRefusesTheDataset:
         # The fields need no loaded task, so a dataset refused as a whole does not first resolve every base image
         # against the registry and build and push every Dockerfile; nested task folders are walked like the loader's.
         from nemo_gym.tasks.harbor import cli as cli_module
-        from tests.unit_tests.test_harbor_tasks import FakeRegistryClient
+        from tests.unit_tests.harbor_registry_fakes import FakeRegistryClient
 
         monkeypatch.setattr(FakeRegistryClient, "resolved", [])
         builds: list[Path] = []

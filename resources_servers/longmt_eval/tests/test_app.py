@@ -16,8 +16,8 @@ from app import (
     _assert_no_reasoning,
 )
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
 
 
 def _make_response(text: str) -> NeMoGymResponse:

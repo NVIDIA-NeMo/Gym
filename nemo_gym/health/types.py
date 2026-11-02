@@ -13,6 +13,7 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
+from nemo_gym._moved_paths import moved_names_getattr
 from nemo_gym.config.global_config import (
     ROLLOUT_ID_KEY_NAME,
     ROLLOUT_INDEX_KEY_NAME,
@@ -24,11 +25,6 @@ from nemo_gym.health.timeouts import RolloutTiming
 TASK_INDEX_KEY = TASK_INDEX_KEY_NAME
 ROLLOUT_INDEX_KEY = ROLLOUT_INDEX_KEY_NAME
 ROLLOUT_ID_KEY = ROLLOUT_ID_KEY_NAME
-QUALITY_SUMMARY_FILENAME = "quality_summary.json"
-ROLLOUT_VERDICTS_FILENAME = "rollout_verdicts.jsonl"
-# The key under the quality summary's ``run`` that names the rollouts file(s) it was computed from, relative to
-# the folder it is written in: the reports keep one name per folder whatever the rollouts file is called.
-QUALITY_SUMMARY_SOURCES_KEY = "rollouts"
 
 Verdict = Literal["healthy", "unhealthy", "unobserved"]
 # Where each limit a summary was judged by came from: the run's config, the run's own earlier summary, or an
@@ -240,3 +236,7 @@ class _TaskRepeat:
     verdict: Verdict
     policy_calls_observed: bool
     successful_model_calls: int
+
+
+# Names that moved to other modules stay importable from here until their removal release; see nemo_gym/_moved_paths.py.
+__getattr__ = moved_names_getattr(__name__)

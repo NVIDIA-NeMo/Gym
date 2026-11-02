@@ -18,13 +18,18 @@
 # scans after dropping the marker from its environment. The receipt confirms that no reached
 # process can still run; it is not a sandbox-empty check.
 #
-# usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH -- COMMAND...
+# The expire file, when given, moves the deadline to now: once it appears, the harness ends exactly
+# as at its time limit and the receipt records timed_out. If it appears before launch, the harness
+# never starts. The supervisor never deletes it.
+#
+# usage: process_supervisor.sh --timeout SECONDS --cleanup-timeout SECONDS --receipt PATH --stop-file PATH
+#        [--expire-file PATH] -- COMMAND...
 
 # An inherited BASH_ENV or SHELLOPTS must not turn an expected failure into a missing receipt.
 set +o errexit +o nounset +o pipefail
 
 usage() {
-    echo "usage: process_supervisor.sh --timeout S --cleanup-timeout S --receipt PATH --stop-file PATH -- COMMAND..." >&2
+    echo "usage: process_supervisor.sh --timeout S --cleanup-timeout S --receipt PATH --stop-file PATH [--expire-file PATH] -- COMMAND..." >&2
     exit 2
 }
 
@@ -177,6 +182,8 @@ reached_alive() {
 
 stopped() { ((stopping)) || [[ -e $stop_file ]]; }
 
+expired() { [[ -n $expire_file && -e $expire_file ]]; }
+
 write_receipt() {
     printf '{"cleanup_confirmed": %s, "return_code": %s, "error": %s, "timed_out": %s}' \
         "$1" "$return_code" "$2" "$timed_out" >"$receipt.tmp" && mv -f "$receipt.tmp" "$receipt"
@@ -193,6 +200,7 @@ while (($#)) && [[ $1 != -- ]]; do
     --cleanup-timeout) cleanup=$(centiseconds "$2") || { echo "--cleanup-timeout must be finite and positive" >&2; exit 2; } ;;
     --receipt) receipt=$2 ;;
     --stop-file) stop_file=$2 ;;
+    --expire-file) expire_file=$2 ;;
     *) echo "unexpected argument: $1" >&2; exit 2 ;;
     esac
     shift 2
@@ -223,6 +231,11 @@ if stopped; then
     write_receipt true null # Nothing was launched.
     exit 0
 fi
+if expired; then
+    timed_out=true
+    write_receipt true null # The deadline arrived before launch, so nothing was launched.
+    exit 0
+fi
 if ! now || ! stat_fields $$; then
     write_receipt true '"Sandbox process supervision requires a readable /proc"' # Nothing was launched.
     exit 1
@@ -240,7 +253,7 @@ stat_fields "$harness" && groups[harness]=${fields[19]} tracked[harness]=${field
 
 now
 deadline=$((NOW + timeout))
-while kill -0 "$harness" 2>/dev/null && ! stopped && ((NOW < deadline)); do
+while kill -0 "$harness" 2>/dev/null && ! stopped && ! expired && ((NOW < deadline)); do
     sleep 0.05
     now
 done

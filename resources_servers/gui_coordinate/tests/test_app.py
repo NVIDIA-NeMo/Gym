@@ -24,13 +24,13 @@ from app import (
     _parse_prediction,
 )
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
 
 
 class TestApp:

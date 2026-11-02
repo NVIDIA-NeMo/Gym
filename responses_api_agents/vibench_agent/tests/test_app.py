@@ -19,7 +19,7 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from responses_api_agents.vibench_agent.app import (
     EXPORT_FILENAME,
     PRD_FILENAME,

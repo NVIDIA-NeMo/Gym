@@ -34,4 +34,6 @@ def test_benchmark_agent_has_environment_server(monkeypatch: MonkeyPatch) -> Non
     )
     environment = _environment_server_for_agent("long_transduction_agent", _environment_servers_by_agent(config))
     assert environment == "long_transduction_benchmark_environment_server"
-    assert config[environment].environment_servers.legacy_agent.agent_server.name == "long_transduction_agent"
+    assert (
+        config[environment].environment_servers.single_agent_turn_legacy.agent_server.name == "long_transduction_agent"
+    )

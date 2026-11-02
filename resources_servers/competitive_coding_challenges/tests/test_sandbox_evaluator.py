@@ -30,7 +30,7 @@ import yaml
 
 from nemo_gym.core import VERIFIER_ERROR
 from nemo_gym.sandbox import SandboxExecResult, SandboxHandle
-from nemo_gym.verifier_utils.sandbox_verification import RUNNER_FILE, SandboxVerificationError
+from nemo_gym.verification import RUNNER_FILE, SandboxVerificationError
 from resources_servers.competitive_coding_challenges.ccc_eval import _load_metadata_file
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import (
     _HARNESS_FILES,

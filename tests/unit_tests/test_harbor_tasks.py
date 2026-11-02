@@ -62,6 +62,7 @@ from nemo_gym.tasks.harbor.models import HarborTaskConfig
 from nemo_gym.tasks.harbor.package_store import PackageStoreError
 from nemo_gym.tasks.harbor.records import BUILT_IMAGES_FILE, IMAGE_CONFIGS_FILE
 from nemo_gym.tasks.harbor.task import task_digest
+from tests.unit_tests.harbor_registry_fakes import IMAGE_PATH, FakeRegistryClient
 
 
 HELLO_TOML = """
@@ -96,9 +97,6 @@ def write_task(root: Path, *, dockerfile: str = "FROM ubuntu:24.04\n\nWORKDIR /a
     (root / "solution").mkdir(exist_ok=True)
     (root / "solution" / "solve.sh").write_text("#!/bin/bash\necho hi > hello.txt\n")
     return root
-
-
-IMAGE_PATH = "/usr/local/bin:/usr/bin:/bin"
 
 
 def write_image_config(parent: Path, image: str, **config) -> None:
@@ -2027,55 +2025,6 @@ class TestInstruction:
         # query-optimize starts that way, and the legacy server passed it through).
         path.write_text("\nStarts after a blank line.\n")
         assert read_instruction(path) == "\nStarts after a blank line.\n"
-
-
-class FakeRegistryClient:
-    """Stands in for ``RegistryClient`` at prepare: records every image, except the ones told to fail."""
-
-    missing: set[str] = set()
-    resolved: list[str] = []
-
-    def __init__(self, *args, **kwargs):
-        pass
-
-    def image_config(self, reference: str) -> dict:
-        from nemo_gym.tasks.harbor.registry import ImageConfigError
-
-        FakeRegistryClient.resolved.append(reference)
-        if reference in FakeRegistryClient.missing:
-            raise ImageConfigError(
-                f"library/{reference.partition(':')[0]}: registry returned HTTP 404 for manifests/x"
-            )
-        return {
-            "architecture": "amd64",
-            "config": {"Env": [f"PATH={IMAGE_PATH}"], "WorkingDir": "/"},
-            "config_digest": "sha256:c",
-            "image": reference,
-            "os": "linux",
-            "record_version": RECORD_VERSION,
-        }
-
-
-@pytest.fixture
-def fake_registry(monkeypatch):
-    from nemo_gym.tasks.harbor import image_configs as image_configs_module
-
-    monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
-    monkeypatch.setattr(FakeRegistryClient, "missing", set())
-    monkeypatch.setattr(FakeRegistryClient, "resolved", [])
-    return FakeRegistryClient
-
-
-@pytest.fixture(autouse=True)
-def no_real_registry(monkeypatch):
-    """No test here, or in a module that imports ``write_task``, reaches a registry. Its default Dockerfile is
-    ``FROM ubuntu:24.04`` and prepare records base images, so a test that did not ask for ``fake_registry`` went
-    to Docker Hub and failed on its rate limit (HTTP 429) whatever the code under test did."""
-    from nemo_gym.tasks.harbor import image_configs as image_configs_module
-
-    monkeypatch.setattr(image_configs_module, "RegistryClient", FakeRegistryClient)
-    monkeypatch.setattr(FakeRegistryClient, "missing", set())
-    monkeypatch.setattr(FakeRegistryClient, "resolved", [])
 
 
 @pytest.mark.usefixtures("fake_registry")

@@ -594,7 +594,7 @@ def _switched_server(document: dict, name: str) -> dict:
 
 
 def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    from environment_servers.single_agent_turn.app import SingleAgentTurnEnvironmentServerConfig
+    from environment_servers.single_agent_turn_legacy.app import SingleAgentTurnLegacyEnvironmentServerConfig
 
     config = tmp_path / "my_run.yaml"
     config.write_text(AGENT_CONFIG + RELAY + FOLLOWING)
@@ -609,9 +609,13 @@ def test_switch_replaces_a_simple_agent_relay(tmp_path: Path, capsys: pytest.Cap
     assert server["agent_server"] == {"type": "responses_api_agents", "name": "my_simple_agent"}
     # The agent's /run called the Resources Server's tool routes; the grant gives the session the same routes.
     assert server["resources_tool_transports"] == ["direct_http"]
-    SingleAgentTurnEnvironmentServerConfig.model_validate(
+    assert "default_episode_timeout_seconds" not in server
+    assert "cleanup_timeout_seconds" not in server
+    server_config = SingleAgentTurnLegacyEnvironmentServerConfig.model_validate(
         {**server, "name": "my_environment_server", "host": "h", "port": 1}
     )
+    assert server_config.default_episode_timeout_seconds == 21600
+    assert server_config.cleanup_timeout_seconds == 180
     resolved = _parse(config, strict=True)
     assert _environment_servers_by_agent(resolved) == {"my_simple_agent": ["my_environment_server"]}
     assert "relays switched: 1, staying on the relay: 0" in capsys.readouterr().out

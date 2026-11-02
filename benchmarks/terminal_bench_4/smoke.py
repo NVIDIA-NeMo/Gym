@@ -22,12 +22,12 @@ import uvicorn
 from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
-from nemo_gym import server_utils
+from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient, http_client
 from nemo_gym.config import global_config
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import BaseServerConfig, GlobalAIOHTTPAsyncClientConfig, ServerClient
+from nemo_gym.server_utils import BaseServerConfig
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig
@@ -136,7 +136,7 @@ async def main(args):
     config = OmegaConf.create(OmegaConf.to_container(config, resolve=True))
     global_config._GLOBAL_CONFIG_DICT = config
     client = ServerClient(head_server_config=BaseServerConfig(host="127.0.0.1", port=1), global_config_dict=config)
-    http = server_utils.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
+    http = http_client.set_global_aiohttp_client(GlobalAIOHTTPAsyncClientConfig())
     resource = TerminalBench4ResourcesServer(
         config=TerminalBench4Config.model_validate(OmegaConf.to_container(resource_config, resolve=True)),
         server_client=client,
@@ -244,7 +244,7 @@ async def main(args):
             server.should_exit = True
         await asyncio.gather(*workers, return_exceptions=True)
         await http.close()
-        server_utils._GLOBAL_AIOHTTP_CLIENT = None
+        http_client._GLOBAL_AIOHTTP_CLIENT = None
     if rollout_records:
         rollout_path = args.output / "evaluator_rollouts.jsonl"
         with rollout_path.open("w") as handle:

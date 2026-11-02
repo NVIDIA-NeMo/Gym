@@ -62,13 +62,6 @@ import regex  # noqa: F401
 from fastapi import FastAPI
 from pydantic import ConfigDict, PrivateAttr
 
-from nemo_gym.base_resources_server import (
-    BaseResourcesServerConfig,
-    BaseRunRequest,
-    BaseVerifyRequest,
-    BaseVerifyResponse,
-    SimpleResourcesServer,
-)
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
     NeMoGymChatCompletion,
@@ -77,7 +70,14 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.judge import JudgeError, call_judge
+from nemo_gym.server_runtime import (
+    BaseResourcesServerConfig,
+    BaseRunRequest,
+    BaseVerifyRequest,
+    BaseVerifyResponse,
+    SimpleResourcesServer,
+)
+from nemo_gym.verification import JudgeError, call_judge
 
 
 LOG = logging.getLogger(__name__)

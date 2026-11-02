@@ -40,6 +40,39 @@ LOG = logging.getLogger(__name__)
 ResponseT = TypeVar("ResponseT")
 
 
+def _normalize_reasoning_content(response: Any) -> Any:
+    """Correct the known provider text shape without relaxing native validation."""
+    if not isinstance(response, dict) or not isinstance(response.get("output"), list):
+        return response
+    output = response["output"]
+    corrected_output = None
+    for item_index, item in enumerate(output):
+        if not isinstance(item, dict) or item.get("type") != "reasoning":
+            continue
+        content = item.get("content")
+        if not isinstance(content, list):
+            continue
+        corrected_content = None
+        for part_index, part in enumerate(content):
+            if not isinstance(part, dict) or part.get("type") != "output_text":
+                continue
+            if not isinstance(part.get("text"), str) or set(part) not in (
+                {"type", "text"},
+                {"type", "text", "annotations"},
+            ):
+                continue
+            if "annotations" in part and part["annotations"] != []:
+                continue
+            if corrected_content is None:
+                corrected_content = content.copy()
+            corrected_content[part_index] = part | {"type": "reasoning_text"}
+        if corrected_content is not None:
+            if corrected_output is None:
+                corrected_output = output.copy()
+            corrected_output[item_index] = item | {"content": corrected_content}
+    return response if corrected_output is None else response | {"output": corrected_output}
+
+
 class UpstreamRetriesExhaustedError(RuntimeError):
     """An upstream retry policy ran out of attempts.
 
@@ -338,6 +371,7 @@ class SimpleModelServer(SimpleResponsesAPIModel):
 
         async def create_and_validate() -> NeMoGymResponse:
             response_dict = await self._client.create_response(**body_dict)
+            response_dict = _normalize_reasoning_content(response_dict)
             reasoning = response_dict.get("reasoning") if isinstance(response_dict, dict) else None
             if (
                 self.config.reasoning_effort_none_replacement is not None

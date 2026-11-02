@@ -43,8 +43,6 @@ from nemo_gym.tasks.harbor.materialize import run_config, write_rows
 from nemo_gym.tasks.harbor.task import MAX_DISCOVERY_DEPTH, iter_task_folders, load_task
 from tests.unit_tests.test_harbor_tasks import (  # noqa: F401  (fixtures)
     commit_repo,
-    fake_registry,
-    no_real_registry,  # noqa: F401 (autouse fixture)
     registry_dataset,
     registry_repo,
     write_task,
@@ -1360,7 +1358,9 @@ class TestResultsRowsCarryTheDatasetDigest:
             def _run_examples_with_metadata(self, examples, *args, **kwargs):
                 futures = []
                 for row in examples:
-                    identity = {"episode_id": {"rollout": 0}, "task_id": row["task_id"]}
+                    # The identity the collector dispatched; a reply for any other episode is stale.
+                    episode_id = nemo_gym.rollout_collection._episode_request_body(row)["episode_id"]
+                    identity = {"episode_id": episode_id, "task_id": row["task_id"]}
                     future = Future()
                     future.set_result(
                         _CompletedRollout(

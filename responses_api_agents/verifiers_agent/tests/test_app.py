@@ -22,8 +22,8 @@ import pytest
 from fastapi.testclient import TestClient
 from openai import DEFAULT_MAX_RETRIES, DEFAULT_TIMEOUT, AsyncOpenAI, Timeout
 
+from nemo_gym.client import ServerClient
 from nemo_gym.config import OBSERVABILITY_ENABLED_KEY_NAME, ModelServerRef
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.verifiers_agent.app import (
     VerifiersAgent,
     VerifiersAgentConfig,
@@ -691,10 +691,8 @@ class TestSharedClientTraceContext:
         return VerifiersAgent(config=config, server_client=server_client)
 
     def test_cached_client_has_no_trace_context_while_per_run_copies_do(self, monkeypatch) -> None:
-        from nemo_gym import server_utils
-
         # Stand in for an exporting tracer with a current span at every call.
-        monkeypatch.setattr(server_utils, "trace_context_path_segment", lambda: self.SEGMENT)
+        monkeypatch.setattr("nemo_gym.client.server_client.trace_context_path_segment", lambda: self.SEGMENT)
 
         agent = self._agent(observability=False)
         shared = agent._get_client({"_ng_task_index": 0, "_ng_rollout_index": 0})

@@ -12,8 +12,8 @@ import pytest
 from fastapi.testclient import TestClient
 from httpx import ASGITransport, AsyncClient
 
+from nemo_gym.client import ServerClient
 from nemo_gym.core import EpisodeId
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.miniswe_sandboxed_agent import app as module
 from responses_api_agents.miniswe_sandboxed_agent.harness import HarnessOutcome
 
