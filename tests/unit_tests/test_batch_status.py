@@ -516,6 +516,8 @@ def test_run_status_needs_no_manifest_or_uniform_repeat_policy(tmp_path: Path) -
         "completed_rollout_count": 1,
         "remaining_rollout_count": 1,
         "failures_by_class": {"agent_run_error": 1},
+        "failures_by_kind": {"agent_run_error": 1},
+        "model_final_by_kind": {},
         "aggregation_status": "pending",
     }
     assert status["members"]["b"]["remaining_rollout_count"] == 1
@@ -651,3 +653,35 @@ def test_manifest_status_follows_the_latest_execution_too(
     members = tracker.build_status([], failures)["members"]
 
     assert members["alpha"]["failures_by_class"] == failures_left
+
+
+def test_run_status_reports_failures_and_model_final_results_by_kind(tmp_path: Path) -> None:
+    from nemo_gym.batch_status import RunStatusTracker
+    from nemo_gym.config.global_config import AGENT_REF_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
+
+    def row(task_index: int, **fields) -> dict:
+        return {
+            AGENT_REF_KEY_NAME: {"name": "a"},
+            TASK_INDEX_KEY_NAME: task_index,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            **fields,
+        }
+
+    tracker = RunStatusTracker(tmp_path / "rollouts_batch_status.json", [row(0), row(1), row(2)])
+    failures = [
+        row(0, _ng_failure_class="agent_timeout", failure_kind="agent_timeout", _ng_model_final=True),
+        row(1, _ng_failure_class="agent_request_failed", failure_kind="provider_unavailable"),
+        row(2, _ng_failure_class="judge_failed"),
+    ]
+    member = tracker.build_status([], failures)["members"]["a"]
+    assert member["failures_by_class"] == {"agent_request_failed": 1, "agent_timeout": 1, "judge_failed": 1}
+    assert member["failures_by_kind"] == {"agent_timeout": 1, "judge_failed": 1, "provider_unavailable": 1}
+    assert member["model_final_by_kind"] == {"agent_timeout": 1}
+    assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (0, 3)
+    # A later success clears every count of its rollout, model-final included.
+    member = tracker.build_status([row(0, reward=1.0)], failures)["members"]["a"]
+    assert member["model_final_by_kind"] == {} and member["failures_by_class"] == {
+        "agent_request_failed": 1,
+        "judge_failed": 1,
+    }
+    assert member["failures_by_kind"] == {"judge_failed": 1, "provider_unavailable": 1}

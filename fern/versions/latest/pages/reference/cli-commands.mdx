@@ -1117,8 +1117,12 @@ Collection without a batch manifest writes `<output-stem>_batch_status.json` nex
 The directory command lists every stem-derived status file and the legacy `batch_status.json` when present. Progress is
 written at initialization, on the first durable result, at most every five seconds thereafter,
 and at completion. Counts report completed and remaining rollouts and the
-latest outstanding failures by class. A successful retry clears its earlier failure from
+latest outstanding failures by class and by failure kind, plus the model-final results by kind (an
+answered agent deadline, or a failure its producer settled as a scored zero): these are reported as
+facts and never counted as completed. A successful retry clears its earlier failure from
 these counts. Failed rollouts remain in the remaining count because they have no successful result.
+Status starts from what the run's Store selected (the current attempt of every rollout), never from raw
+`rollouts.jsonl`, so an older success is not counted after a newer retry.
 
 `--json` prints a mapping from each status-file path or submitted benchmark name to its saved status.
 Human-readable output includes the expected count, aggregation status, update time, and tracking state. File targets or path-like

@@ -14756,12 +14756,14 @@ async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
     assert member["failures_by_class"] == {}
 
 
-@pytest.mark.parametrize("mismatch", ["resume", "native_result"])
-async def test_review_run_status_identity_errors_do_not_abort_collection(
-    tmp_path, empty_global_config, mismatch, caplog
-):
-    if mismatch == "native_result":
-        empty_global_config.return_value = OmegaConf.create({"server": {"environment_servers": {"native": {}}}})
+async def test_run_status_errors_do_not_abort_collection(tmp_path, empty_global_config, monkeypatch, caplog):
+    """A status that cannot be built is disabled with its reason, while collection goes on and saves its results.
+
+    Rows that do not belong to the run never reach the status: the Store refuses them when it opens the run.
+    """
+    from nemo_gym.batch_status import RunStatusTracker
+    from nemo_gym.config.config_types import ConfigError
+
     source = tmp_path / "input.jsonl"
     source.write_bytes(b'{"agent_ref":{"name":"a"},"responses_create_params":{"input":[]}}\n')
     output = tmp_path / "rollouts.jsonl"
@@ -14773,43 +14775,24 @@ async def test_review_run_status_identity_errors_do_not_abort_collection(
         retain_results_in_memory=False,
     )
 
-    class Helper(RolloutCollectionHelper):
-        def _preprocess_rows_from_config(self, config):
-            rows = super()._preprocess_rows_from_config(config)
-            if mismatch == "native_result":
-                for row in rows:
-                    row.pop(AGENT_REF_KEY_NAME)
-                    row[NG_ENVIRONMENT_SERVER_KEY] = "server"
-            return rows
+    def refuse(self, *args, **kwargs):
+        raise ConfigError("status rows do not match this run")
 
+    monkeypatch.setattr(RunStatusTracker, "build_status", refuse)
+
+    class Helper(RolloutCollectionHelper):
         def _run_examples_with_metadata(self, examples, *args, **kwargs):
             futures = []
             for row in examples:
                 future = Future()
-                result = {"reward": 1.0}
-                if mismatch == "native_result":
-                    result[AGENT_REF_KEY_NAME] = {"name": "real_agent"}
-                future.set_result(_CompletedRollout(row=row, result=result, rollout_latency_ms=None))
+                future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=None))
                 futures.append(future)
             return futures
 
-    if mismatch == "resume":
-        await Helper().run_from_config(config)
-        with output.open("ab") as results:
-            results.write(
-                orjson.dumps(
-                    {
-                        TASK_INDEX_KEY_NAME: 999,
-                        ROLLOUT_INDEX_KEY_NAME: 0,
-                        AGENT_REF_KEY_NAME: {"name": "a"},
-                        "reward": 1.0,
-                    }
-                )
-                + b"\n"
-            )
-        config.resume_from_cache = True
     await Helper().run_from_config(config)
-    assert output.is_file()
+    assert orjson.loads(output.read_bytes())["reward"] == 1.0
+    status = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())
+    assert status["tracking"] == "disabled" and status["reason"] == "ConfigError"
     assert caplog.text.count("Run status disabled") == 1
 
 
@@ -14907,45 +14890,28 @@ async def test_fresh_run_clears_old_status_before_tracker_construction(tmp_path,
 
 
 class TestRunStatusFiles:
-    def test_resume_reads_the_latest_started_attempt_without_its_payload(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_collection import _latest_status_failure_rows
+    def test_status_rows_carry_the_failure_kind_and_the_model_final_mark(self) -> None:
+        from nemo_gym.rollout_collection import NG_FAILURE_COUNTS_AS_ZERO_KEY, _batch_status_row
 
-        sidecar = tmp_path / "rollouts_failures.jsonl"
-        rows = [
-            {
-                TASK_INDEX_KEY_NAME: 0,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "judge_failed",
-                "big": "x" * 100,
-            },
-            {
-                TASK_INDEX_KEY_NAME: 0,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "kill_shaped",
-                NG_OMITTED_ROLLOUT_KEY: True,
-            },
-            {
-                TASK_INDEX_KEY_NAME: 1,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "agent_run_error",
-                "big": "y" * 100,
-            },
-            {
-                TASK_INDEX_KEY_NAME: 1,
-                ROLLOUT_INDEX_KEY_NAME: 0,
-                NG_FAILURE_CLASS_KEY: "cancelled",
-                NG_OMITTED_ROLLOUT_KEY: True,
-                NG_DISPATCH_DRAINED_KEY: True,
-            },
-        ]
-        sidecar.write_bytes(b"".join(orjson.dumps(row) + b"\n" for row in rows))
-        refs = {(0, 0): {"name": "a"}, (1, 0): {"name": "a"}}
-
-        latest = sorted(_latest_status_failure_rows(sidecar, refs), key=lambda row: row[TASK_INDEX_KEY_NAME])
-
-        assert [row[NG_FAILURE_CLASS_KEY] for row in latest] == ["kill_shaped", "agent_run_error"]
-        assert latest[0][NG_OMITTED_ROLLOUT_KEY] is True
-        assert all("big" not in row for row in latest)
+        settled = {
+            TASK_INDEX_KEY_NAME: 0,
+            ROLLOUT_INDEX_KEY_NAME: 0,
+            NG_FAILURE_CLASS_KEY: "agent_run_error",
+            "_ng_failure_record": {"failure": {"failure_kind": "harness_failed"}},
+            NG_FAILURE_COUNTS_AS_ZERO_KEY: True,
+            "big": "x" * 100,
+        }
+        status = _batch_status_row(settled, {(0, 0): {"name": "a"}})
+        assert status["failure_kind"] == "harness_failed" and status["_ng_model_final"] is True
+        assert "big" not in status and status[AGENT_REF_KEY_NAME] == {"name": "a"}
+        # A plain failure names its kind and is not final; a success carries neither mark.
+        failed = _batch_status_row(
+            {**settled, NG_FAILURE_COUNTS_AS_ZERO_KEY: False, "failure_kind": "judge_failed"}, {}
+        )
+        assert failed["failure_kind"] == "judge_failed" and "_ng_model_final" not in failed
+        assert "failure_kind" not in _batch_status_row(
+            {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1}, {}
+        )
 
     @pytest.mark.parametrize(
         ("metrics", "expected"),

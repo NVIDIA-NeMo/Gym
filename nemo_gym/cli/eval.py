@@ -2244,5 +2244,7 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
                 f"{member['remaining_rollout_count']} remaining; "
                 f"expected: {member.get('expected_rollout_count', 'unknown')}; "
                 f"aggregation: {member.get('aggregation_status', 'unknown')}; "
-                f"failures by class: {json.dumps(member['failures_by_class'], sort_keys=True)}"
+                f"failures by class: {json.dumps(member['failures_by_class'], sort_keys=True)}; "
+                f"by kind: {json.dumps(member.get('failures_by_kind', {}), sort_keys=True)}; "
+                f"model-final by kind: {json.dumps(member.get('model_final_by_kind', {}), sort_keys=True)}"
             )
