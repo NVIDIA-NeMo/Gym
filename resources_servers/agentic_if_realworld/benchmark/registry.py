@@ -18,7 +18,7 @@ from .core import DEFAULT_DATA_DIR, ROOT, digest, read
 
 DATASET_NAME = "agentic_if_realworld"
 DATASET_VERSION = "1.0.0"
-APPROVED_TRACKING_URI_SHA256 = "a6421d96bef6fca89222f16c9e5b128fb86a39f01ab924bd05a2142719e70752"
+APPROVED_TRACKING_URI_SHA256 = "27070047a65d7368ee0c7b1654ce15c2edad3566c27b7b6a32fb611d41811775"
 
 
 def private_path(path: Path) -> Path:

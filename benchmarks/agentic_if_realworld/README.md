@@ -10,8 +10,11 @@ do not authorize training, prompt examples, threshold selection or rubric tuning
 
 Gym contains runtime code, the portable validator, source hashes and independently
 constructed synthetic fixtures. Real inputs, per-item criteria, provenance,
-historical answers, original rubric and judge prompt remain in an authenticated
-private GitLab Model Registry. None of those contents may be committed or uploaded
+historical answers, original rubric and judge prompt remain in the central
+GitLab Model Registry on the organization's internal network. Registry access
+requires that network; Gym preparation also uses a registry token. A project's
+"public" setting on that internal instance does not publish its data to GitHub.
+None of those contents may be committed or uploaded
 publicly. Registry preparation verifies the original artifact hashes; it has no
 public dataset fallback and requires no separate benchmark-repository checkout.
 
@@ -21,6 +24,11 @@ endpoint default. Before making a registry request, the loader checks the URI
 against its fixed SHA-256 allowlist pin. Supply
 `MLFLOW_TRACKING_TOKEN` securely in the process environment. For questions about
 the public implementation, use [Gym maintainer issues](https://github.com/NVIDIA-NeMo/Gym/issues/new/choose).
+
+The registry location changed without changing release `1.0.0` or any artifact
+hash. Existing verified caches remain valid. For new downloads, use the current
+approved tracking URI with this revision; older runtime pins retain their
+original registry binding.
 
 Install Gym with `uv sync --extra dev --extra mlflow`, then install the frozen
 validator dependency with
