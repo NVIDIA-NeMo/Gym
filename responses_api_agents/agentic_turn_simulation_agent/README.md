@@ -91,7 +91,8 @@ Cline sends them. A reply without a tool call gets Cline's own "no tools used" m
 Inherited: `skip_verification`, `skip_verification_reward`, `token_id_capture` (set `true` for training).
 
 Run it through this environment's config (`gym env start --resources-server agentic_turn_simulation`), not alone:
-every episode needs the session `/seed_session` opens on the resources server, so Gym agent sessions are refused.
+every episode needs the session `/seed_session` opens on the resources server. Gym agent sessions are not supported:
+the agent is not in `AGENT_SESSION_AGENT_TYPES`, so Gym relays it through `/run`.
 
 ## Tests
 

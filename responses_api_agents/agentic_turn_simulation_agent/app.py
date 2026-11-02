@@ -32,7 +32,6 @@ from typing import Any, NamedTuple, TypedDict
 from pydantic import Field, ValidationError
 
 from nemo_gym._checkpoint.agent import Activation
-from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse, AgentSeedSessionRequest, AgentSessionState
 from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
 from nemo_gym.openai_utils import (
     NeMoGymEasyInputMessage,
@@ -306,9 +305,13 @@ class AgenticTurnSimulationAgent(SimpleAgent):
         collect_trajectory: bool = False,
         activation: Activation | None = None,
     ) -> tuple[NeMoGymResponse, TrajectoryRecord | None, Any, Any]:
-        # Only the legacy route reaches here: agent sessions are refused at seed (`_seed_agent_session_state`), so
-        # `in_session`, `tool_access`, `resources_prefix` and `activation` are never set, and simple_agent's run() and
-        # responses() refuse execute_tools=false.
+        # Only the legacy /run route is supported: every episode needs the session /seed_session opens on the resources
+        # server. The agent is not in AGENT_SESSION_AGENT_TYPES, so config composition relays it through /run; an
+        # agent session reaching here anyway is refused. `resources_prefix` and `activation` are not session marks:
+        # /run sets them too when Gym's rollout checkpointing is on. simple_agent's run() and responses() refuse
+        # execute_tools=false.
+        if in_session or tool_access is not None:
+            raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
         cfg = self.config
         body = self._strip_resource_only_metadata(body.model_copy(deep=True))
         if isinstance(body.input, str):
@@ -543,16 +546,6 @@ class AgenticTurnSimulationAgent(SimpleAgent):
             output = simulator_failure(f"HTTP {http.status}: {detail}")
         ep.trajectory.tool_call(call, started, output, http.status)
         return output
-
-    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> AgentSessionState:
-        """Environment Server agent sessions are refused: the tool calls need the session ``/seed_session`` opens on
-        the resources server."""
-        raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
-
-    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
-        """Refused with the seed: no agent session is ever bound here, so Simple Agent's close has nothing to
-        release."""
-        raise NotImplementedError("agentic_turn_simulation_agent supports only the legacy /run route")
 
 
 if __name__ == "__main__":

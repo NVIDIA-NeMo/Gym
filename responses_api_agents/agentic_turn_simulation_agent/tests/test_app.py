@@ -14,8 +14,6 @@ from fastapi.testclient import TestClient
 from multidict import CIMultiDict, CIMultiDictProxy
 from yarl import URL
 
-from nemo_gym.base_responses_api_agent import AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
 from nemo_gym.openai_utils import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.reward_profile import MASK_SAMPLE_FIELD
 from nemo_gym.server_utils import ServerClient
@@ -874,19 +872,26 @@ class TestRun:
 
 
 class TestUnsupportedEpisodes:
-    """Environment Server agent sessions are refused at seed, and /run without executing tools before any call."""
+    """Agent-session episodes are refused, and /run without executing tools, before any call."""
 
-    def test_agent_sessions_are_refused_at_seed(self) -> None:
+    @pytest.mark.parametrize(
+        "session_kwargs",
+        [{"in_session": True}, {"tool_access": object()}],
+        ids=["in_session", "tool_access"],
+    )
+    async def test_an_agent_session_episode_is_refused(self, session_kwargs: dict[str, Any]) -> None:
         agent, _ = _agent()
-        client = TestClient(agent.setup_webserver())
-        seed = AgentSeedSessionRequest(
-            agent_session_id="agent-session",
-            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
-            task_id=TaskId(taskset="example", task_id="0"),
-        )
         with pytest.raises(NotImplementedError, match="supports only the legacy /run route"):
-            client.post("/v1/agent_sessions", json=seed.model_dump(mode="json"))
+            await agent._create_episode(_body(), model_url_path="/v1/responses", **session_kwargs)
         agent.server_client.post.assert_not_awaited()
+
+    async def test_a_checkpointed_run_episode_is_not_a_session(self) -> None:
+        # With Gym's rollout checkpointing on, /run passes a resources prefix and an activation without a session.
+        agent, _ = _agent(_model(_msg("Done.")))
+        response, *_ = await _episode(
+            agent, resources_prefix="/rollouts/r1", activation=SimpleNamespace(continuation=None)
+        )
+        assert response.metadata["stop_reason"] == "final_message"
 
     async def test_run_without_executing_tools(self) -> None:
         agent, _ = _agent(execute_tools=False)
