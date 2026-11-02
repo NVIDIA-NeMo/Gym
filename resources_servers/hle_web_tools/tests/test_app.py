@@ -233,7 +233,10 @@ async def test_query_repeating_a_verbatim_question_span_is_refused_per_session(s
     "query, family",
     [
         # Spellings search engines fold back to the question's words.
-        ("ｈｏｗ ｍａｎｙ ｏｄｄ ｓｐｉｎ ｓｔｒｕｃｔｕｒｅｓ ａｄｍｉｔ ａ ｎｏｎｖａｎｉｓｈｉｎｇ", "question_span"),  # full-width
+        (
+            "ｈｏｗ ｍａｎｙ ｏｄｄ ｓｐｉｎ ｓｔｒｕｃｔｕｒｅｓ ａｄｍｉｔ ａ ｎｏｎｖａｎｉｓｈｉｎｇ",  # full-width
+            "question_span",
+        ),
         ("how many odd sp\u200bin structures admit a nonvanishing", "question_span"),  # zero-width space
         ("how many odd spi\u0301n structures admit a nonvanishing", "question_span"),  # combining mark
         ("how_many_odd_spin_structures_admit_a_nonvanishing", "question_span"),  # underscore-joined
