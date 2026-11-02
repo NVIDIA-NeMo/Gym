@@ -1723,6 +1723,10 @@ class _RunRecordWriter:
             self._status_agent_refs: Dict[Tuple[int, int], Dict] = {}
             self._status_completed: List[Dict] = []
             self._status_failures: List[Dict] = []
+            # Status writes are throttled as collection's are; the write after the last expected record, and
+            # flush_status() when the caller stops early, are forced so the file ends current.
+            self._status_expected = len(rows) if rows is not None else None
+            self._status_written = 0
             if status_rows is not None:
                 try:
                     self._status_agent_refs = {
@@ -1755,6 +1759,7 @@ class _RunRecordWriter:
         Raises:
             RuntimeError: Another writer opened the same shard since this one did.
         """
+        self._status_written += 1
         if result.get(NG_NO_PERSIST_KEY):
             if not self.record_omitted_rollouts:
                 return None
@@ -1784,8 +1789,14 @@ class _RunRecordWriter:
         if self._status is not None and self._status.enabled:
             status_row = _batch_status_row(orjson.loads(line), self._status_agent_refs)
             (self._status_completed if fpath == self.rollouts_fpath else self._status_failures).append(status_row)
-            self._status.write_status(self._status_completed, self._status_failures, force=True)
+            last = self._status_expected is not None and self._status_written >= self._status_expected
+            self._status.write_status(self._status_completed, self._status_failures, force=last)
         return fpath
+
+    def flush_status(self) -> None:
+        """Write the shard's status as it stands, for a caller that stops consuming before every row is in."""
+        if self._status is not None and self._status.enabled:
+            self._status.write_status(self._status_completed, self._status_failures, force=True)
 
 
 def _normalize_health_check_ignored_checks(value) -> List[str]:
@@ -3598,10 +3609,18 @@ class _RowResultIterator:
         self,
         completions: Iterator[Future],
         enrich: Optional[Callable[["_CompletedRollout"], Awaitable[Any]]] = None,
+        on_close: Optional[Callable[[], None]] = None,
     ):
         self._completions = completions
         self._enrich = enrich
+        self._on_close = on_close
         self._closed = False
+
+    def _finish(self) -> None:
+        """Run the close hook once, after the outcomes a close still delivers have been enriched."""
+        on_close, self._on_close = self._on_close, None
+        if on_close is not None:
+            on_close()
 
     def __iter__(self):
         return self
@@ -3634,6 +3653,7 @@ class _RowResultIterator:
         """
         self._closed = True
         await self._completions.aclose()
+        self._finish()
 
     async def aclose_and_drain(self) -> list[Future[Tuple[Dict, Dict | RolloutFailureRecord]]]:
         """Stop admission, cancel unfinished client tasks, and preserve completed outcomes.
@@ -3678,6 +3698,7 @@ class _RowResultIterator:
                         continue
                 outcome.set_result((result.row, result.result))
             outcomes.append(outcome)
+        self._finish()
         return outcomes
 
 
@@ -6126,7 +6147,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 run_id=run_id,
                 status_rows=status_rows,
             )
-        return _RowResultIterator(completions, enrich=enrich)
+        return _RowResultIterator(completions, enrich=enrich, on_close=writer.flush_status if writer else None)
 
     def setup_server_client(self, head_server_config: Optional[BaseServerConfig] = None) -> ServerClient:
         """Return a client for the head server, reusing the cached one when the helper opted in.

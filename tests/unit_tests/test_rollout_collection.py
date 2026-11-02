@@ -14714,6 +14714,31 @@ class TestRunRecordWriter:
         assert main.read_bytes() == b'{"reward": 1.0}\n'
         assert sidecar.read_bytes() == b'{"_ng_failure_class": "agent_run_error"}\n'
 
+    def test_shard_status_writes_are_throttled_and_end_current(self, tmp_path: Path, monkeypatch) -> None:
+        import nemo_gym.batch_status as batch_status
+        from nemo_gym.rollout_collection import _RunRecordWriter
+
+        monkeypatch.setattr(batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 3600.0)
+        rows = [
+            {AGENT_REF_KEY_NAME: {"name": "a"}, TASK_INDEX_KEY_NAME: index, ROLLOUT_INDEX_KEY_NAME: 0}
+            for index in range(3)
+        ]
+        writer = _RunRecordWriter(tmp_path, "step_1", rows=rows, status_rows=[dict(row) for row in rows])
+
+        def completed() -> int:
+            status = orjson.loads(writer.status_fpath.read_bytes())
+            return status["members"]["a"]["completed_rollout_count"]
+
+        assert completed() == 0
+        writer.write({**rows[0], "reward": 1.0})
+        assert completed() == 1  # the first durable progress is written at once
+        writer.write({**rows[1], "reward": 1.0})
+        assert completed() == 1  # the next write waits for the interval
+        writer.flush_status()
+        assert completed() == 2  # a caller that stops early flushes through the iterator's close
+        writer.write({**rows[2], "reward": 1.0})
+        assert completed() == 3  # the last expected record is always written
+
 
 @pytest.mark.parametrize("retain_results", [False, True])
 async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
