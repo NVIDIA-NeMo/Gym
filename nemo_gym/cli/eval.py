@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import importlib
+import inspect
 import json
 import logging
 import os
@@ -1167,9 +1168,10 @@ def _refresh_settled_source(
     """Recompute the settled run's aggregate metrics in place and rewrite its quality summary from the settled rows,
     as the run's own completion does after its saved-answer pass.
 
-    A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it), which the
-    health check reads only through a selected-result projection: the Store's selected rows are written under
-    ``workdir`` for the check, which is bound to the run's own artifacts, and removed after it. A step that fails is
+    A settled run's rollouts file holds superseded outcomes (a masked row and the grade that settled it). A health
+    check that selects the Store's attempts itself reads it as it is; an earlier one reads it only through a
+    selected-result projection: the Store's selected rows are written under ``workdir`` for the check, which is bound
+    to the run's own artifacts, and removed after it. A step that fails is
     printed and reported in the receipt, never raised: the settlement stands, and the operator reruns the step the
     message names.
     """
@@ -1206,17 +1208,24 @@ def _refresh_settled_source(
             write_disabled_summary([output], output.parent)
             return refreshed
         store = RolloutStore.read(output, import_legacy=False)
-        # Until NVIDIA-NeMo/Gym#3881 lands (health reads the Store's selected attempts), the health check reads a
-        # history with superseded outcomes only through a selected projection; drop the projection once it has.
-        if store is not None and not raw_outcomes_are_selected(output, artifacts=(output,)):
+        # A health check that selects the Store's attempts itself (NVIDIA-NeMo/Gym#3881) takes the history as it is.
+        # An earlier one refuses a history with superseded outcomes and reads it only through a selected projection,
+        # which it names as a parameter; drop this branch once every supported Gym selects the attempts itself.
+        projected = {}
+        if (
+            "selected_projection" in inspect.signature(run_health_checks).parameters
+            and store is not None
+            and not raw_outcomes_are_selected(output, artifacts=(output,))
+        ):
             workdir.mkdir(parents=True, exist_ok=True)
             projection = workdir / "selected_rollouts.jsonl"
             with projection.open("w", encoding="utf-8") as handle:
                 for row in store.selected("success"):
                     handle.write(json.dumps(row) + "\n")
+            projected["selected_projection"] = projection
         result = run_health_checks(
             output,
-            selected_projection=projection,
+            **projected,
             output_dir=output.parent,
             workers=settings.health_check_workers,
             ignored_checks=settings.health_check_ignored_checks,
@@ -1404,8 +1413,14 @@ def export_run() -> None:  # pragma: no cover
     artifacts = RunArtifacts(RunExportConfig.model_validate(global_config_dict).rollouts_jsonl_fpath)
     from nemo_gym.artifacts.exporters.base import BaseExporter
 
-    if isinstance(exporter, BaseExporter):
+    if isinstance(exporter, BaseExporter) and artifacts.export_done_fpath(name).exists():
+        # An exported run's repeat only verifies its receipt and writes nothing: it must not take the run lock, whose
+        # holder record it would overwrite.
+        result = exporter.export(artifacts)
+    elif isinstance(exporter, BaseExporter):
         with run_lock(artifacts.rollouts_jsonl_fpath):
+            # A racing exporter may have finished while this one waited for the lock: its receipt is then only
+            # verified, and the health metrics it prepared are not rewritten.
             if not artifacts.export_done_fpath(name).exists():
                 _prepare_run_health_metrics(artifacts.rollouts_jsonl_fpath)
             result = exporter.export(artifacts)

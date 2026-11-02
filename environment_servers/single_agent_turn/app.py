@@ -277,7 +277,13 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
             action = agent_outcome_policy(agent_response, config=self.config.agent_outcome_policy)
             cause = self._agent_failure(agent_response)
             if agent_response.status == "failed" and AGENT_OUTCOME_METADATA_KEY in (agent_response.metadata or {}):
-                if cause is None and "failure_report" in (agent_response.model_extra or {}):
+                extra = agent_response.model_extra or {}
+                report = extra.get("failure_report")
+                # A report that selects nothing (e.g. a provider 400 without a Gym failure) keeps the policy action.
+                unselected = (
+                    isinstance(report, dict) and report.get("failure_id") is None and not report.get("omitted")
+                )
+                if cause is None and "failure_report" in extra and not unselected:
                     action = OutcomeAction.FAIL
                 elif cause is not None and cause.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT:
                     action = self._timeout_action(action)

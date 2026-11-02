@@ -402,3 +402,70 @@ def test_a_strict_rejection_is_decided_from_the_settled_run(tmp_path, monkeypatc
         eval_cli._collect_and_rejudge(_Collection([], stale), config, {}, output)
     assert raised.value is not stale and raised.value.exit_code == 75
     assert "after the saved-answer re-verification" in str(raised.value)
+
+
+def pairwise_partial(task: int = 0) -> dict:
+    """A scored pairwise-judge result as saved: one of its two games has no verdict, so its reward is partial."""
+    return ungraded(task, games=[_game("A>B"), _game(None)], policy_answer="saved policy answer") | {"reward": 0.5}
+
+
+def _game(verdict: str | None) -> dict:
+    return {"responses_create_params": {"input": "kept on the run host"}, "response": ANSWER, "verdict": verdict}
+
+
+def _replay(verdicts: tuple, reward: float):
+    """A pairwise verifier: plays every game again from the saved answer and returns the whole new row."""
+
+    def grade(json: dict) -> dict:
+        # Only the saved answer is sent beside the task input: no old game, verdict or reward goes with it.
+        assert json["response"] == ANSWER and not {"games", "reward", "policy_answer"} & json.keys()
+        return json | {
+            "reward": reward,
+            "games": [_game(verdict) for verdict in verdicts],
+            "policy_answer": "saved policy answer",
+        }
+
+    return grade
+
+
+async def test_a_pairwise_result_with_a_game_lacking_its_verdict_is_replaced_whole_by_a_full_rejudgment(
+    tmp_path, verifier
+) -> None:
+    output = _run(tmp_path, [pairwise_partial()])
+    (identity,) = due_judge_failures(output)
+    before, _ = _selected(output)
+    verifier["grade"] = _replay(("A>B", "B>A"), 1.0)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    assert verifier["posted"] == [("rs", "/verify")]  # one verify call: every game is played again in it
+    after, store = _selected(output)
+    settled = after[identity]
+    assert settled["response"] == ANSWER and settled["policy_answer"] == "saved policy answer"  # the same saved answer
+    assert [game["verdict"] for game in settled["games"]] == ["A>B", "B>A"]  # both games are new, none is kept
+    assert settled["reward"] == 1.0 and before[identity]["reward"] == 0.5
+    assert settled["_ng_rejudged_failure_id"] == rejudge_predecessor_id(before[identity])
+    assert store.manifest.pending_rejudge == {} and due_judge_failures(output) == []
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+
+
+async def test_a_rejudgment_that_again_lacks_a_game_verdict_settles_once_and_the_gate_still_counts_it(
+    tmp_path, verifier
+) -> None:
+    from nemo_gym.orchestration.recovery import _scored_fault, reverification_cause, saved_row_evidence
+
+    output = _run(tmp_path, [pairwise_partial()])
+    (identity,) = due_judge_failures(output)
+    verifier["grade"] = _replay((None, "B>A"), 0.5)
+
+    assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 1
+
+    settled = _selected(output)[0][identity]
+    assert settled["response"] == ANSWER and settled["_ng_rejudge_operation_id"]
+    evidence = saved_row_evidence(settled)
+    assert _scored_fault(evidence, None) == "judge_unparseable"  # still a counted grading fault
+    assert reverification_cause(evidence) is None  # a settled result is never selected again
+    assert due_judge_failures(output) == []
+    for _ in range(2):  # later passes judge nothing: no loop
+        assert await rejudge_saved_judge_failures({"output_jsonl_fpath": str(output)}, output) == 0
+    assert len(verifier["posted"]) == 1

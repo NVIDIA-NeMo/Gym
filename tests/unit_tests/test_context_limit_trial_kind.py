@@ -184,3 +184,126 @@ def test_a_saved_upstream_context_rejection_is_typed_when_the_run_is_read_again(
     collected = collect(a)
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}
+
+
+def _parameter_value_refusals(count: int):
+    """The policy's only call refused with HTTP 400 because a request parameter carries a value the deployment does not
+    support (vllm_model records ``invalid_request_parameter``), its event typed ``model_request_error``, the row scored
+    zero: the shape of a baseline whose every policy call was refused for its reasoning effort."""
+    collected = _run(100)
+    for task, row in enumerate(collected.results[:count]):
+        row["reward"] = 0.0
+        [call] = row["ng_trial_observations"]["model_calls"]
+        event = _reject(call, status=400, event_id=f"param-{task}")
+        call["response_metadata"]["error_category"] = "invalid_request_parameter"
+        row["_ng_failure_events"] = {event["event_id"]: dict(event)}
+    return collected
+
+
+@pytest.mark.parametrize(("refused", "status"), [(1, "PASS"), (2, "FAIL")])
+def test_a_policy_call_refused_for_an_unsupported_parameter_value_is_an_evaluation_side_setup_failure(refused, status):
+    """Not the model's request error: the trial counts toward evaluation health, which fails at the 2% limit."""
+    _, (passed, reason, report), _ = _gate(_parameter_value_refusals(refused))
+    assert report["status"] == status and passed is (status == "PASS"), reason
+    # A failure at the limit is decided on the known faults before coverage is proven, so only a pass is exact.
+    assert report["exact"] is (status == "PASS"), reason
+    assert report["model"]["count"] == 0
+    assert report["evaluation"]["kinds"] == {"invalid_request_parameter": refused}
+    assert report["evaluation"]["server"] == 0
+
+
+def _tau3_style_saved_row(a, rows, invocations):
+    """A saved tool-transcript trial whose only policy call was rejected at the context limit (HTTP 400, no later
+    call) and scored zero; the call kept its error category and a failure event of a model request error."""
+    trajectory = rows[0]["ng_trajectory"]
+    meta = trajectory["model_calls"][0]["response_metadata"]
+    [operation] = meta["model_operations"]
+    operation["outcome"], operation["failure_id"] = "failed", "rejected-1"
+    event = {
+        "event_id": "rejected-1",
+        "boundary": "model",
+        "operation": "model_request",
+        "operation_id": operation["operation_id"],
+        "attempt_id": operation["final_attempt_id"],
+        "cause_id": None,
+        "failure_kind": "model_request_error",
+        "http_status": 400,
+    }
+    meta["failure_report"]["events"] = {"rejected-1": event}
+    meta |= {"status_code": 400, "response_status": None, "error_category": "context_length_exceeded"}
+    trajectory["invocations"], trajectory["turns"] = invocations, []
+    rows[0]["ng_policy_model_server"] = "policy"
+    rows[0]["_ng_failure_events"] = {"rejected-1": dict(event)}
+    save_rows(a, rows)
+    return collect(a)
+
+
+@pytest.mark.parametrize(
+    "invocations",
+    [
+        [],
+        [{"invocation_id": "agent", "status": "unknown", "in_session": None, "model_calls": []}],
+    ],
+    ids=["no-invocation", "unreferenced-invocation"],
+)
+def test_a_saved_tool_transcript_trial_that_ended_on_the_context_limit_is_typed_when_read(tmp_path, invocations):
+    """The agent recorded a tool exchange for none of its calls, or for some: the policy's last captured call ended
+    the rollout either way."""
+    a, rows = setup(tmp_path)
+    collected = _tau3_style_saved_row(a, rows, invocations)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}
+
+
+def _local_context_rejection(a, rows, invocations, *, events=1, error_category=None):
+    """A saved trial whose last policy call the model server answered locally (status 200) after its upstream
+    rejected the request with 400 for the context window: the failure report holds model request errors only."""
+    trajectory = rows[0]["ng_trajectory"]
+    meta = trajectory["model_calls"][0]["response_metadata"]
+    [operation] = meta["model_operations"]
+    operation["outcome"], operation["failure_id"] = "failed", f"rejected-{events}"
+    saved = {}
+    for number in range(1, events + 1):
+        saved[f"rejected-{number}"] = {
+            "event_id": f"rejected-{number}",
+            "boundary": "model",
+            "operation": "model_request",
+            "operation_id": operation["operation_id"],
+            "attempt_id": f"{operation['final_attempt_id']}-{number}",
+            "cause_id": None,
+            "failure_kind": "model_request_error",
+            "http_status": 400,
+        }
+    meta["failure_report"]["events"] = saved
+    meta |= {
+        "status_code": 200,
+        "response_status": None,
+        "error_category": error_category,
+        "finish_reason": "length",
+        "response_source": "local",
+        "upstream_attempted": True,
+        "upstream_status_code": 400,
+        "local_response_reason": "context_length_exceeded",
+    }
+    trajectory["invocations"], trajectory["turns"] = invocations, []
+    rows[0]["ng_policy_model_server"] = "policy"
+    save_rows(a, rows)
+    return collect(a)
+
+
+_TOOL_INVOCATION = {"invocation_id": "agent", "status": "unknown", "in_session": None, "model_calls": []}
+
+
+@pytest.mark.parametrize(
+    "invocations,events",
+    [([], 1), ([_TOOL_INVOCATION], 1), ([], 2)],
+    ids=["no-invocation", "one-unreferenced-invocation", "no-invocation-two-request-errors"],
+)
+@pytest.mark.parametrize("error_category", [None, "context_length_exceeded"])
+def test_a_local_reply_to_an_upstream_context_rejection_is_typed_when_read(
+    tmp_path, invocations, events, error_category
+):
+    a, rows = setup(tmp_path)
+    collected = _local_context_rejection(a, rows, invocations, events=events, error_category=error_category)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}

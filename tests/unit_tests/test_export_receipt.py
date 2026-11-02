@@ -268,3 +268,65 @@ def test_a_receipt_with_a_coerced_or_missing_field_fails_closed(tmp_path: Path, 
     result = backend.export(artifacts)
     assert result.state is ExportState.FAILED and backend.calls == []
     assert marker.read_bytes() == written
+
+
+def test_a_repeat_export_of_an_exported_run_leaves_the_run_lock_untouched(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    from nemo_gym.cli import eval as eval_cli
+    from nemo_gym.rollout_recovery import run_lock_path_for
+
+    artifacts = _run(tmp_path)
+    assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
+    lock = run_lock_path_for(artifacts.rollouts_jsonl_fpath)
+    lock.write_bytes(b"holder record of the run's last writer")
+    before = (lock.read_bytes(), lock.stat().st_mtime_ns)
+
+    class Registered:
+        @staticmethod
+        def from_global_config(_config: object) -> ReceiptBackend:
+            return _backend(artifacts)
+
+    monkeypatch.setattr(
+        eval_cli,
+        "get_global_config_dict",
+        lambda **_: {"exporter": "mlflow", "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath)},
+    )
+    monkeypatch.setattr("nemo_gym.artifacts.exporters.load_run_exporter_class", lambda _name: Registered)
+    eval_cli.export_run()
+
+    assert "Export mlflow: skipped" in capsys.readouterr().out
+    # Verifying an existing receipt writes nothing, so it neither takes the run lock nor rewrites its holder record.
+    assert (lock.read_bytes(), lock.stat().st_mtime_ns) == before
+
+
+def test_a_receipt_that_appears_while_waiting_for_the_lock_is_verified_not_prepared(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture
+) -> None:
+    import contextlib
+
+    from nemo_gym.cli import eval as eval_cli
+
+    artifacts = _run(tmp_path)
+    prepared: list[Path] = []
+
+    @contextlib.contextmanager
+    def racing_lock(_output: Path):
+        # Another exporter finishes, and writes its receipt, before this one gets the lock.
+        assert _backend(artifacts).export(artifacts).state is ExportState.SUCCEEDED
+        yield
+
+    class Registered:
+        @staticmethod
+        def from_global_config(_config: object) -> ReceiptBackend:
+            return _backend(artifacts)
+
+    config = {"exporter": "mlflow", "rollouts_jsonl_fpath": str(artifacts.rollouts_jsonl_fpath)}
+    monkeypatch.setattr(eval_cli, "get_global_config_dict", lambda **_: config)
+    monkeypatch.setattr(eval_cli, "_prepare_run_health_metrics", lambda output: prepared.append(output))
+    monkeypatch.setattr("nemo_gym.artifacts.exporters.load_run_exporter_class", lambda _name: Registered)
+    monkeypatch.setattr("nemo_gym.rollout_recovery.run_lock", racing_lock)
+    eval_cli.export_run()
+
+    assert "Export mlflow: skipped" in capsys.readouterr().out
+    assert prepared == []

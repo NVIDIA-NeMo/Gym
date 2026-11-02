@@ -45,7 +45,7 @@ import hashlib
 import math
 import os
 from collections import Counter
-from collections.abc import Iterable, Mapping
+from collections.abc import Callable, Iterable, Mapping, Sequence
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
@@ -61,6 +61,7 @@ from nemo_gym.agent_outcome import (
 )
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.secret_utils import mask_url_passwords
 from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
@@ -70,6 +71,7 @@ from nemo_gym.core.failure_kinds import (
     HARNESS_TERMINATION_UNCONFIRMED,
     INFRASTRUCTURE_ERROR,
     INVALID_OUTPUT_BUDGET,
+    INVALID_REQUEST_PARAMETER,
     JUDGE_FAILED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
@@ -198,6 +200,88 @@ class ManagedRecoveryFact(BaseModel):
     max_attempts: int = Field(ge=1, strict=True)
     pending: bool
     reserved: bool
+    # Whether the Store would run it again under some attempt cap (its replay rule without the cap). None from a
+    # Store reader that predates attempt extensions (`--extend-attempts`), which then cannot be applied to the run.
+    replayable: bool | None = None
+
+
+# What an exhausted-attempts stop says an operator can do; the extension is explicit and journaled.
+EXTEND_ATTEMPTS_HINT = (
+    "an exhausted identity whose attempts went to infrastructure failures or allocation cuts gets N more with "
+    "gym eval resubmit --recover --extend-attempts N (explicit and journaled); a model failure or a judge failure "
+    "that kept its saved answer does not"
+)
+# The most attempts one recovery may add to every rollout's cap.
+MAX_EXTEND_ATTEMPTS = 100
+
+
+def _with_attempt_extension(
+    facts: list[ManagedRecoveryFact] | None, extend_attempts: int
+) -> list[ManagedRecoveryFact] | None:
+    """The Store's facts as they read once ``extend_attempts`` more attempts are recorded for every rollout.
+
+    Only a rollout the Store would run again under some cap (``replayable``) gets the higher cap, and it is pending
+    while it has attempts left. Any other rollout keeps its cap and state: a model failure, a judge failure that kept
+    its saved answer (its re-judgment budget is the saved cap), a saved result.
+    """
+    if not extend_attempts or facts is None:
+        return facts
+    return [
+        fact.model_copy(
+            update={
+                "max_attempts": fact.max_attempts + extend_attempts,
+                "pending": fact.pending or fact.attempts < fact.max_attempts + extend_attempts,
+            }
+        )
+        if fact.replayable
+        else fact
+        for fact in facts
+    ]
+
+
+def _saved_attempt_cap(collected: "CollectedEvidence") -> int | None:
+    """The run's saved per-rollout attempt cap, from the Store's facts; None when they do not say."""
+    applied = collected.attempt_extension_applied
+    for fact in collected.managed_selection or []:
+        if fact.replayable is None or applied is None:
+            return None
+        return fact.max_attempts - applied if fact.replayable else fact.max_attempts
+    return None
+
+
+def retry_budget(collected: "CollectedEvidence") -> dict[str, dict[str, int | None]]:
+    """The run's two retry budgets as the gate reports them, each its configured cap and its recorded extension.
+
+    ``infra`` is the chain's infra-retry cap (``--extend-retries``); ``attempts`` is every rollout's attempt cap
+    (``--extend-attempts``). A value that could not be read is None.
+    """
+    recorded = {"absent": 0, "ok": collected.infra_retry_extension}.get(collected.infra_retry_extension_state)
+    attempts = {"absent": 0, "ok": collected.attempt_extension}.get(collected.attempt_extension_state)
+    return {
+        "infra": {
+            "configured": collected.infra_retries_configured,
+            "extension": None if recorded is None else int(recorded),
+        },
+        "attempts": {"configured": _saved_attempt_cap(collected), "extension": attempts},
+    }
+
+
+def _extend_attempts_refusal(collected: "CollectedEvidence") -> str | None:
+    """Why this run cannot take an attempt extension, or None when it can."""
+    if collected.attempt_extension_state == "malformed":
+        return "the recorded attempt extension (artifacts/rollouts_attempt_extension) is unreadable"
+    if not collected.managed_store or not collected.managed_selection:
+        return "only a run written by a rollout store, whose saved selection was read, keeps a per-rollout attempt cap"
+    if collected.attempt_extension_applied is None or any(
+        fact.replayable is None for fact in collected.managed_selection
+    ):
+        return (
+            "the run's pinned Gym predates attempt extensions, so its Store would not run the extra attempts; repin the "
+            "run to a Gym that has them (--repin COMMIT --repin-reason TEXT) in the same resubmit"
+        )
+    if collected.attempt_extension_applied != (collected.attempt_extension or 0):
+        return "the recorded attempt extension changed while it was read; inspect again"
+    return None
 
 
 # The chain's accounting counters in the job dir (see resume_script); an operator continuation fills unknown ones.
@@ -1148,7 +1232,16 @@ def decide_recovery(
             return decision(
                 RecoveryAction.STOP,
                 f"{counts[IdentityState.EXHAUSTED]} identity(ies) used every attempt since the last resubmit, so a "
-                "resume would run nothing; the run is not complete",
+                "resume would run nothing; the run is not complete; "
+                + _EXTEND_RETRIES_SCOPE.format(
+                    cap="/".join(
+                        str(cap)
+                        for cap in sorted(
+                            {item.max_attempts for item in evidence if item.state == IdentityState.EXHAUSTED} - {None}
+                        )
+                    )
+                )
+                + f"; {EXTEND_ATTEMPTS_HINT}",
             )
         if counts.get(IdentityState.MASKED):
             return decision(
@@ -1172,7 +1265,7 @@ def decide_recovery(
     if not segment and budget.infra_retries_used >= budget.max_infra_retries:
         return decision(
             RecoveryAction.STOP,
-            f"the stored infra-retry budget is used ({budget.infra_retries_used} of {budget.max_infra_retries})",
+            f"{_INFRA_BUDGET_USED_PREFIX} ({budget.infra_retries_used} of {budget.max_infra_retries})",
         )
     if budget.walltime_capped:
         if budget.walltime_used_s is None or budget.max_walltime_s is None:
@@ -1193,6 +1286,13 @@ def decide_recovery(
         + (f"; {populations}" if counts.get(IdentityState.UNKNOWN) or counts.get(IdentityState.MASKED) else ""),
         reverify_first=reverify_first,
     )
+
+
+_INFRA_BUDGET_USED_PREFIX = "the stored infra-retry budget is used"
+_EXTEND_RETRIES_SCOPE = (
+    "--extend-retries raises infra retries only; it does not raise the per-identity attempt cap "
+    "(max_rollout_attempts={cap})"
+)
 
 
 def omission_summary(evidence: Iterable[IdentityEvidence]) -> str:
@@ -1393,6 +1493,10 @@ def judge_unparsed(value):
     return any(isinstance(item, dict) and "verdict_label" in item and (item["verdict_label"] is None or (
         isinstance(item["verdict_label"], str) and item["verdict_label"].strip().casefold() in UNPARSED_VERDICT_LABELS))
         for item in value)
+def games_unjudged(value):
+    # Whether a pairwise judge's saved games include one without a verdict: its reward then averages the other games.
+    return isinstance(value, list) and any(isinstance(item, dict) and "verdict" in item and item["verdict"] is None
+        for item in value)
 def rubric(r):
     # A rubric judge's verdict and scores as scalars only; the judge's text stays local.
     if "rubric_score" not in r and "scoring_threshold" not in r:
@@ -1416,6 +1520,7 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
         "sentence_metrics": sorted(k for k, v in r.items() if k.startswith("sentence_") and finite(v) is not None),
@@ -1525,6 +1630,11 @@ def rows(name, skip=0):
                 # A zero is a fact (a wrong answer's library_reward, a passing exit code), so compare by identity.
                 if any(value is not None and value is not False and value != [] for value in facts.values()):
                     selected["_ng_collected_grading_facts"] = facts
+                adaptations = r.get("agent_adaptations")
+                if isinstance(adaptations, dict):
+                    # An agent's own per-row adaptation counts: bounded names and non-negative integers only.
+                    selected["agent_adaptations"] = {k[:64]: v for k, v in adaptations.items()
+                                                     if isinstance(k, str) and type(v) is int and v >= 0}
             record = r.get("_ng_failure_record")
             if isinstance(record, dict):
                 failure = record.get("failure")
@@ -1774,6 +1884,22 @@ if os.path.exists(os.path.join(a, "rollouts_mlflow_export_done")):
         mlflow["receipt"] = {"run_id": text.strip(), "current": None}
     else:
         mlflow["receipt"] = "malformed"
+# A run whose health report predates `provenance.mlflow.tracking_required` still states it in its saved config.
+try:
+    config_match = re.search(r"^mlflow_tracking_required:[ 	]*['\"]?(true|false)['\"]?[ 	]*(?:#.*)?$",
+                             open(os.path.join(a, "rollouts_resolved_config.yaml")).read(), re.MULTILINE | re.IGNORECASE)
+    mlflow["config_tracking_required"] = None if config_match is None else config_match.group(1).lower() == "true"
+except OSError:
+    pass
+# The tracking server named by the saved config, for the reader to ask the receipt's run for its status; an absent,
+# null or interpolated value names none.
+try:
+    uri_match = re.search(r"^mlflow_tracking_uri:[ \t]*['\"]?([^\s'\"#]+)",
+                          open(os.path.join(a, "rollouts_resolved_config.yaml")).read(), re.MULTILINE)
+    uri = uri_match.group(1) if uri_match is not None else None
+    mlflow["config_tracking_uri"] = uri if uri and "${" not in uri and uri.lower() not in ("null", "~") else None
+except OSError:
+    pass
 quality = None
 try:
     run = json.load(open(os.path.join(a, "quality_summary.json")))["run"]
@@ -1908,6 +2034,17 @@ def operator_epoch():
         return None
     return {"chain_length": length, "walltime_s": walltime} if walltime >= 0 else None
 collected["operator_epoch"] = operator_epoch()
+def attempt_extension():
+    # Attempts an explicit recovery added to every rollout's cap (see --extend-attempts), and the file's state.
+    path = os.path.join(a, "rollouts_attempt_extension")
+    if not os.path.exists(path):
+        return None, "absent"
+    try:
+        text = open(path).read(64).strip()
+    except OSError:
+        return None, "malformed"
+    return (int(text), "ok") if text.isascii() and text.isdecimal() else (None, "malformed")
+collected["attempt_extension"], collected["attempt_extension_state"] = attempt_extension()
 def resume_drift_keys():
     # The operational settings the latest resume crossed (the drift journal's last line), keys only and bounded.
     try:
@@ -2050,6 +2187,14 @@ class CollectedEvidence(BaseModel):
     reader_fallback_reason: str | None = None
     # The operational settings the run's latest resume crossed (its resume-drift journal), None when it crossed none.
     resume_drift_keys: list[str] | None = None
+    # Attempts an explicit recovery added to every rollout's cap (artifacts/rollouts_attempt_extension) and its state
+    # (absent, ok, malformed), as the plain collector read them; and the extension the run's Store reader applied,
+    # None from a reader that predates attempt extensions.
+    attempt_extension: int | None = None
+    attempt_extension_state: str = "absent"
+    attempt_extension_applied: int | None = None
+    # The run's configured infra-retry cap (its saved resume_config), set by the executor that read it.
+    infra_retries_configured: int | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
     # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
@@ -2195,6 +2340,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             raise ValueError("managed inventory is ambiguous or its identity is not verified")
         with redirect_stdout(StringIO()):
             pending = {logical_rollout_id(row) for row in store.pending()}
+        replayable = store.replayable_identities()
         facts = []
         for row in collected.materialized:
             identity = _identity(row)
@@ -2205,9 +2351,13 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 ManagedRecoveryFact(
                     identity=identity,
                     attempts=store.attempt_count(row),
-                    max_attempts=coverage["max_rollout_attempts"],
+                    # The recorded extension reaches only a rollout the Store would run again; any other keeps the
+                    # saved cap that its own readers (the judge re-judgment budget) apply.
+                    max_attempts=coverage["max_rollout_attempts"]
+                    - (0 if logical in replayable else store.attempt_extension),
                     pending=logical in pending,
                     reserved=logical in store.manifest.next_attempt,
+                    replayable=logical in replayable,
                 )
             )
         selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
@@ -2239,6 +2389,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 "managed_selection": facts,
                 "checkpoint_enabled": checkpoint_enabled,
                 "unresolved_rejudgments": unresolved_rejudgments,
+                "attempt_extension_applied": store.attempt_extension,
             }
         )
     except ImportError as error:
@@ -2407,8 +2558,12 @@ def _decide_from_collected(
     extend_retries: int = 0,
     live_job_name: str | None = None,
     operator_budget: OperatorBudget | None = None,
+    extend_attempts: int = 0,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing result file stops the decision.
+
+    ``extend_attempts`` is the attempts this recovery asks to add to every rollout's cap (``--extend-attempts``):
+    the Store's facts are read as they would be once it is recorded (see ``_with_attempt_extension``).
 
     When the chain accounting is unknown, ``operator_budget`` may continue the run instead (see
     ``_operator_continuation``); without it, the stop names the options that allow that.
@@ -2516,17 +2671,36 @@ def _decide_from_collected(
             evidence=[],
             scheduler_live=live,
         )
+    attempts_refused = _extend_attempts_refusal(collected) if extend_attempts else None
     inputs = dict(
         materialized=collected.materialized,
         results=collected.results or [],
         failures=collected.failures,
         resubmit_offset=collected.resubmit_offset,
         outcome_policy=outcome_policy,
-        managed_selection=collected.managed_selection,
+        managed_selection=collected.managed_selection
+        if attempts_refused
+        else _with_attempt_extension(collected.managed_selection, extend_attempts),
         planned_missing_continuation=planned_missing_continuation,
         allocation_cut=allocation_cut and live_job is False,
     )
     decision = decide_recovery(**inputs, budget=budget)
+    if attempts_refused:
+        return decision.model_copy(
+            update={
+                "action": RecoveryAction.STOP,
+                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}",
+            }
+        )
+    saved = _saved_attempt_cap(collected)
+    if extend_attempts and decision.action == RecoveryAction.RESUBMIT and saved is not None:
+        applied = collected.attempt_extension_applied or 0
+        decision = decision.model_copy(
+            update={
+                "reason": f"{decision.reason} (attempt cap {saved + applied + extend_attempts}: {saved} configured + "
+                f"{applied} recorded extension + {extend_attempts} requested now, for rollouts the Store runs again)"
+            }
+        )
     if collected.unresolved_rejudgments and live_job is None:
         # With no job of the run live, the pass that admitted them died: its rows are still the selected judge
         # failures, re-verified like any other, and the recovery pass withdraws the admissions first. A live job may
@@ -2581,7 +2755,12 @@ def _decide_from_collected(
                 configured_retries=configured,
                 max_walltime_s=max_walltime_s,
             )
-    if max_infra_retries is not None and max_infra_retries != configured:
+    # The cap note explains an infra-cap decision (a resubmit, or the stored budget is used); a stop for the
+    # identities' own states (exhausted, terminal, masked) does not depend on it.
+    infra_cap_decision = decision.action == RecoveryAction.RESUBMIT or decision.reason.startswith(
+        _INFRA_BUDGET_USED_PREFIX
+    )
+    if infra_cap_decision and max_infra_retries is not None and max_infra_retries != configured:
         extension = (
             f"infra-retry cap {max_infra_retries}: {configured} configured + {int(recorded or 0)} recorded extension"
             + (f" + {extend_retries} requested now" if extend_retries else "")
@@ -3149,6 +3328,46 @@ def mlflow_notes(local: Mapping[str, Any] | None) -> list[str]:
     return []
 
 
+MLFLOW_STATUS_NOT_OBSERVED = "MLflow terminal status not observed"
+# The longest a status query of the tracking server may take per HTTP request, and its retries.
+MLFLOW_STATUS_QUERY_TIMEOUT_S = "10"
+MLFLOW_STATUS_QUERY_RETRIES = "1"
+
+
+def query_mlflow_status(
+    tracking_uri: str, run_id: str, client_factory: Callable[[str], Any] | None = None
+) -> tuple[str | None, str | None]:
+    """The status of ``run_id`` on the tracking server, as ``(status, None)``, or ``(None, error)`` when it could not
+    be read: a missing client, an unreachable or refusing server, a missing run. Short timeout and one retry;
+    ``client_factory`` builds the client from the URI (default ``mlflow.MlflowClient``)."""
+    knobs = {
+        "MLFLOW_HTTP_REQUEST_TIMEOUT": MLFLOW_STATUS_QUERY_TIMEOUT_S,
+        "MLFLOW_HTTP_REQUEST_MAX_RETRIES": MLFLOW_STATUS_QUERY_RETRIES,
+    }
+    saved = {key: os.environ.get(key) for key in knobs}
+    os.environ.update(knobs)
+    try:
+        if client_factory is None:
+            from mlflow import MlflowClient
+
+            def client_factory(uri: str) -> Any:
+                return MlflowClient(tracking_uri=uri)
+
+        status = client_factory(tracking_uri).get_run(run_id).info.status
+    except Exception as error:  # a status that cannot be read is reported, whatever the reason
+        # Request errors carry the URL, which may hold a password: mask it before cutting the text.
+        return None, f"{type(error).__name__}: {mask_url_passwords(str(error))[:200]}"
+    finally:
+        for key, value in saved.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+    if not isinstance(status, str) or not status.strip():
+        return None, f"the server reported no status for run {run_id}"
+    return status, None
+
+
 def mlflow_errors(
     local: Mapping[str, Any] | None,
     observed_status: str | None,
@@ -3270,7 +3489,7 @@ def mlflow_errors(
         elif observed_run_id != bound:
             errors.append(f"MLflow observed status is for run {observed_run_id}, not the receipt's run {bound}")
     if observed_status is None:
-        errors.append("MLflow terminal status not observed")
+        errors.append(MLFLOW_STATUS_NOT_OBSERVED)
     elif observed_status != "FINISHED":
         errors.append(f"MLflow run status {observed_status}")
     return errors
@@ -3856,11 +4075,14 @@ def _observed_trial_operations(
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
-            resource = servers[agent["resources_server"]]
+            owner = _verification_owner(row["agent_ref"]["name"], agent)
+            # An agent without a resources server grades its own rollouts (verifiers_agent); it has no resources
+            # server to look up, and only its own grading record can observe such a trial (below).
+            resource = servers[owner] if owner == agent.get("resources_server") else None
             environment = servers[row["_ng_environment_server"]]
             if (
                 agent.get("kind") != "responses_api_agents"
-                or resource.get("kind") != "resources_servers"
+                or (resource is not None and resource.get("kind") != "resources_servers")
                 or environment.get("kind") != "environment_servers"
                 or row.get("_ng_result_type") != environment.get("implementation")
                 or row.get(FAILURE_CLASS) is not None
@@ -3878,7 +4100,10 @@ def _observed_trial_operations(
             # Without a grading operation, a saved grading artifact or the model's own failed answer records the
             # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
             artifact = None
-            if not graded and not (single is not None and _verifier_recorded(single, row, agent["resources_server"])):
+            recorded = single is not None and _verifier_recorded(single, row, owner)
+            if resource is None and not recorded:
+                return False
+            if not graded and not recorded:
                 artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
             if artifact is not None and single is not None and isinstance(calls, list):
                 owned = single.get("model_calls")
@@ -3936,7 +4161,7 @@ def _observed_trial_operations(
                     return False
                 grade = None
                 artifact_trials.append(_identity(row))
-            elif judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
+            elif judge_calls is None and _verifier_recorded(verifier, row, owner):
                 grade = None
                 recorded_trials.append(_identity(row))
             elif not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
@@ -3973,7 +4198,12 @@ def _observed_trial_operations(
                 )
             ):
                 return False
-            if grade is not None and judge_calls is not None and grade["outcome"] == "unknown":
+            if (
+                grade is not None
+                and judge_calls is not None
+                and grade["outcome"] == "unknown"
+                and not _unknown_grading_outcome(row)  # counted once, as ``judge_unparseable`` (``_scored_fault``)
+            ):
                 invalid_grades.append(_identity(row))
             # An agent invocation that says verification was skipped contradicts any recorded grading.
             if any(
@@ -4074,12 +4304,13 @@ def _failed_request(call: Any) -> tuple[str, Any] | None:
     return None
 
 
-# The kind of a request the model server rejected on length, by the reason it recorded: the conversation outgrew the
-# context window (the model's own limit), or the request's output budget alone exceeds it (a setup the deployment
-# cannot serve, evaluation-side).
+# The kind of a request the model server rejected, by the reason it recorded: the conversation outgrew the context
+# window (the model's own limit), the request's output budget alone exceeds it, or a request parameter carries a value
+# the deployment does not support (both setups the deployment cannot serve, evaluation-side).
 LENGTH_REFUSAL_KINDS = {
     "context_length_exceeded": MODEL_CONTEXT_LIMIT,
     "invalid_output_token_parameter": INVALID_OUTPUT_BUDGET,
+    "invalid_request_parameter": INVALID_REQUEST_PARAMETER,
 }
 
 
@@ -4161,7 +4392,7 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
     has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
-    (its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
+    (it has no invocation, or its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
     failed that way; an earlier failed call is no end and stays unaccounted. The kind is keyed on the failure's HTTP
     status (``status_fault_kind``): a 5xx reply is the server's fault, and another model's 4xx rejection is
     evaluation-side. A policy whose own last call was rejected on length (``_length_refusal_kind``) ended there,
@@ -4180,10 +4411,9 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
         if _identity(row) in infrastructure:
             continue  # Counted once, as its agent timeout's server-side fault.
         invocations = observed.get("invocations") if isinstance(observed, dict) else None
-        unreferenced = (
-            isinstance(invocations, list)
-            and bool(invocations)
-            and all(isinstance(item, dict) and item.get("model_calls") == [] for item in invocations)
+        # No invocation names a call: an agent that recorded no tool exchange has none at all.
+        unreferenced = isinstance(invocations, list) and all(
+            isinstance(item, dict) and item.get("model_calls") == [] for item in invocations
         )
         if unreferenced and isinstance(observed.get("model_calls"), list):
             own = _last_captured_call([call for call in observed["model_calls"] if _policy_call(row, call)])
@@ -4254,16 +4484,48 @@ def _unparsed_verdict(facts: Mapping[str, Any]) -> bool:
     )
 
 
-def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
-    """Whether a scored row's grading is ``judge_unparseable``: unmasked, with a reward and no failure kind, while a
-    saved judge evaluation recorded no verdict (``_unparsed_verdict``). Its reward is no grade."""
+def _scored_unmasked(row: Mapping[str, Any]) -> bool:
+    """A scored row: unmasked, with a reward and no failure kind."""
     return (
         row.get(FAILURE_CLASS) is None
         and row.get("failure_kind") is None
         and row.get("mask_sample") is not True
         and _reward(row) is not None
-        and _unparsed_verdict(_grading_facts(row))
     )
+
+
+def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row's grading is ``judge_unparseable`` for a verdict the judge did not give: a saved judge
+    evaluation recorded no verdict (``_unparsed_verdict``), or a pairwise game has none (``games_unjudged``). Its
+    reward is no grade."""
+    facts = _grading_facts(row)
+    return _scored_unmasked(row) and (_unparsed_verdict(facts) or facts.get("games_unjudged") is True)
+
+
+def _unknown_grading_outcome(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row's verifier record reports a judge grading operation with outcome ``unknown``: the grading
+    did not resolve, so its reward is no grade. Read from the verifier invocations the row already saves."""
+    observed = row.get("ng_trial_observations")
+    verifiers = observed.get("verifier_invocations") if isinstance(observed, Mapping) else None
+    return (
+        isinstance(verifiers, list)
+        and _scored_unmasked(row)
+        and any(
+            isinstance(verifier, Mapping)
+            and isinstance(verifier.get("grading_operations"), list)
+            and any(
+                isinstance(op, Mapping) and op.get("kind") == "llm_judge" and op.get("outcome") == "unknown"
+                for op in verifier["grading_operations"]
+            )
+            for verifier in verifiers
+        )
+    )
+
+
+def _judge_unparseable(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row is ``judge_unparseable``: its judge gave no verdict (``_unparsed_judge_verdict``) or its
+    verifier's grading did not resolve (``_unknown_grading_outcome``). Judges are stateless: it is re-judged."""
+    return _unparsed_judge_verdict(row) or _unknown_grading_outcome(row)
 
 
 def _judge_evaluations(facts: Mapping[str, Any], reward: float | None) -> bool:
@@ -4480,11 +4742,20 @@ def _bound_artifact(row: Mapping[str, Any]) -> bool:
     return grading_artifact(row) is None and _model_failure(row)
 
 
+def _verification_owner(agent_name: Any, agent: Mapping[str, Any]) -> Any:
+    """Who verifies an agent's rollouts: its resources server, or the agent itself when it names none.
+
+    An agent that runs its own rubric (verifiers_agent) has no resources server; its grading record names the agent.
+    """
+    server = agent.get("resources_server")
+    return server if server is not None else agent_name
+
+
 def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
     """Whether the row's verifier saved its own grading record for it, in place of a recorded grading operation.
 
     The shared verify path records it only for a verify execution that completed without asking any model. It must
-    name the row's resources server, carry the saved score with a ``scored`` verdict and bind the saved response and
+    name the row's resources server (or the agent, for an agent that verifies its own rollouts), carry the saved score with a ``scored`` verdict and bind the saved response and
     score. A verifier that recorded a grading operation or owns a model call is judged by those, never by the record.
     """
     record = verifier.get("grading_record") if isinstance(verifier, dict) else None
@@ -4520,7 +4791,7 @@ def _recorded_by_verifier(row: Mapping[str, Any], collected: CollectedEvidence) 
         isinstance(agent, dict)
         and isinstance(verifiers, list)
         and len(verifiers) == 1
-        and _verifier_recorded(verifiers[0], row, agent.get("resources_server"))
+        and _verifier_recorded(verifiers[0], row, _verification_owner(agent_ref.get("name"), agent))
     )
 
 
@@ -4742,7 +5013,7 @@ def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     (``_answer_fault``), else ``judge_unparseable`` when its saved judge evaluation recorded no verdict
     (``_unparsed_judge_verdict``)."""
     fault = _scored_kind(row) or _answer_fault(row, collected)
-    if fault is None and _unparsed_judge_verdict(row):
+    if fault is None and _judge_unparseable(row):
         return JUDGE_UNPARSEABLE
     return fault
 
@@ -5400,6 +5671,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
         "output_budget_refits": output_budget_refits(collected),
+        "agent_adaptations": agent_adaptations(decision, collected),
     }
 
 
@@ -5423,6 +5695,25 @@ def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
         count += refits
         rows += refits > 0
     return {"count": count, "rows": rows}
+
+
+def agent_adaptations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, dict[str, int]]:
+    """The scored rollouts' own ``agent_adaptations`` counts, summed by name: ``{name: {"count": total, "rows": N}}``,
+    ``rows`` being the rollouts with a nonzero count. An agent records what it adapted on its own before a result,
+    such as a request the endpoint rejected for its input size; a reported fact, never a failure."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    latest: dict[Identity, Mapping[str, Any]] = {}
+    for row in (collected.results or []) if collected is not None else []:
+        if (identity := _identity(row)) in scored and isinstance(row.get("agent_adaptations"), Mapping):
+            latest[identity] = row["agent_adaptations"]
+    totals: dict[str, dict[str, int]] = {}
+    for adaptations in latest.values():
+        for name, value in adaptations.items():
+            if isinstance(name, str) and type(value) is int and value >= 0:
+                total = totals.setdefault(name, {"count": 0, "rows": 0})
+                total["count"] += value
+                total["rows"] += value > 0
+    return totals
 
 
 def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any]:
@@ -5527,10 +5818,37 @@ MLFLOW_NOT_REQUIRED_NOTE = "no MLflow export by design (mlflow_tracking_required
 
 def mlflow_tracking_required(collected: CollectedEvidence | None) -> bool:
     """False only when the run's saved config snapshot sets ``mlflow_tracking_required`` to false; absent, unread or
-    any other value means tracking is required."""
+    any other value means tracking is required. The health report's provenance states it when its pin did; for a run
+    whose report does not, the collector's read of the saved ``rollouts_resolved_config.yaml`` does."""
     provenance = ((collected.quality or {}) if collected is not None else {}).get("provenance")
     facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
-    return not (isinstance(facts, dict) and facts.get("tracking_required") is False)
+    stated = facts.get("tracking_required") if isinstance(facts, dict) else None
+    if not isinstance(stated, bool):
+        local = collected.mlflow if collected is not None else None
+        stated = local.get("config_tracking_required") if isinstance(local, dict) else None
+    return stated is not False
+
+
+def mlflow_delivery(
+    problems: Sequence[str], *, tracking_required: bool, status_error: str | None = None
+) -> dict[str, Any]:
+    """The MLflow delivery fact of a run: ``not_required`` by design, ``verified`` when ``mlflow_errors`` found nothing,
+    ``pending`` while there is no receipt and no live run to judge or only the run's status was not queried, else
+    ``unverified`` with its reasons. A fact for consumers to read, never a verdict: it does not touch evaluation
+    health or the gate's status. A status that was neither given nor queried reads "status not queried"; a query that
+    failed reads "status query failed: ...": never a silent "not observed"."""
+    if not tracking_required:
+        return {"state": "not_required", "reasons": []}
+    others = [problem for problem in problems if problem != MLFLOW_STATUS_NOT_OBSERVED]
+    status_unknown = len(others) != len(problems)
+    reasons = list(others)
+    if status_unknown:
+        reasons.append(f"status query failed: {status_error}" if status_error else "status not queried")
+    if not reasons:
+        return {"state": "verified", "reasons": []}
+    # Pending: nothing to judge yet (no run evidence) or only the run's status unread. Anything else is unverified.
+    pending = not status_error and all(problem.startswith("no MLflow run evidence") for problem in others)
+    return {"state": "pending" if pending else "unverified", "reasons": reasons}
 
 
 def gate_summary_from_collected(
@@ -5541,14 +5859,18 @@ def gate_summary_from_collected(
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
     criteria: GateCriteria | None = None,
+    status_client_factory: Callable[[str], Any] | None = None,
 ) -> dict[str, Any]:
     """The acceptance gate task entry from the collected run: decision counts, the named score and the quality summary.
 
     ``mlflow_status`` and ``mlflow_run_id`` are the tracking run's status and id as the caller read them together.
+    Without a status, the receipt's run is asked of the tracking server the saved config names (``query_mlflow_status``;
+    ``status_client_factory`` replaces its client).
     ``criteria`` are accepted and reported under ``criteria`` but not applied (``GateCriteria``). The only health
     verdict is ``evaluation_health``; ``failures`` reports response and trial failures by cause, never a verdict.
     ``status`` follows ``gate_task_summary``: an UNVERIFIED evaluation health with nothing failed is UNVERIFIED, and
-    a chain or MLflow error turns SUCCESS or UNVERIFIED into FAILED.
+    a chain error turns SUCCESS or UNVERIFIED into FAILED. MLflow delivery is reported as
+    ``mlflow_delivery``, a fact that never changes the status.
     """
     criteria = criteria or GateCriteria()
     summary_valid, summary_reasons, rollout_health, rollout_reasons = quality_inputs(
@@ -5575,7 +5897,7 @@ def gate_summary_from_collected(
     if collected.unreadable_files:
         # What an unreadable metric, summary or record holds is unknown: never a pass.
         task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
-        if task["status"] == "SUCCESS":
+        if task["status"] in ("SUCCESS", "UNVERIFIED"):
             task["status"] = "FAILED"
     task["trial_counts"] = trial_counts(decision, collected)
     task["evaluation_health"] = evaluation
@@ -5596,6 +5918,7 @@ def gate_summary_from_collected(
         + [task["health_verdict"]]
     )
     # The judge-only jobs queued for the run's saved answers, each with its outcome: facts, never a verdict.
+    task["retry_budget"] = retry_budget(collected)
     task["judge_jobs"] = [dict(job) for job in collected.judge_jobs] or None
     task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []
@@ -5605,6 +5928,20 @@ def gate_summary_from_collected(
     mlflow_facts = provenance.get("mlflow") if isinstance(provenance, dict) else None
     configured = mlflow_facts.get("configured") if isinstance(mlflow_facts, dict) else None
     task["mlflow_tracking_required"] = mlflow_tracking_required(collected)
+    mlflow_problems: list[str] = []
+    status_error = None
+    receipt = (collected.mlflow or {}).get("receipt")
+    uri = (collected.mlflow or {}).get("config_tracking_uri")
+    if (
+        task["mlflow_tracking_required"]
+        and mlflow_status is None
+        and isinstance(receipt, dict)
+        and isinstance(receipt.get("run_id"), str)
+        and isinstance(uri, str)
+    ):
+        # No caller-read status: ask the tracking server for the receipt's own run.
+        mlflow_status, status_error = query_mlflow_status(uri, receipt["run_id"], status_client_factory)
+        mlflow_run_id = receipt["run_id"] if mlflow_status is not None else mlflow_run_id
     if task["mlflow_tracking_required"] is False:
         task["warnings"] = task["warnings"] + [MLFLOW_NOT_REQUIRED_NOTE]
     else:
@@ -5614,9 +5951,18 @@ def gate_summary_from_collected(
             configured=configured if isinstance(configured, bool) else None,
             observed_run_id=mlflow_run_id,
         )
-        extra.extend(mlflow_problems)
         if not mlflow_problems:
             task["warnings"] = task["warnings"] + mlflow_notes(collected.mlflow)
+    # MLflow delivery is a fact, never a verdict: it neither fails evaluation health nor turns the status to FAILED.
+    task["mlflow_delivery"] = mlflow_delivery(
+        mlflow_problems,
+        tracking_required=task["mlflow_tracking_required"],
+        status_error=status_error,
+    )
+    if task["mlflow_delivery"]["state"] in ("pending", "unverified"):
+        task["warnings"] = task["warnings"] + [
+            f"MLflow delivery {task['mlflow_delivery']['state']}: {'; '.join(task['mlflow_delivery']['reasons'])}"
+        ]
     if extra:
         task["errors"] = task["errors"] + extra
         if task["status"] in ("SUCCESS", "UNVERIFIED"):
@@ -5736,7 +6082,7 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
     """Why a saved result row is re-verified from its saved answer, or None when it is not.
 
     ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``), or scored while
-    its saved judge evaluation recorded no verdict (``_unparsed_judge_verdict``).
+    its judge gave no verdict or its grading did not resolve (``_judge_unparseable``).
     ``REVERIFY_VERIFY_TRANSPORT``: masked because its verify call was lost in transport (``_verify_transport_failure``).
     ``REVERIFY_UNGRADED``: scored, but no grading was recorded for it (``_grading_unrecorded``).
     Only a result with a saved answer qualifies; a failures-sidecar row, a result a re-verification already settled
@@ -5756,7 +6102,7 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
         return REVERIFY_VERIFY_TRANSPORT if _verify_transport_failure(row) else None
     if row.get("evaluation_completed") is False or _reward(row) is None:
         return None
-    if _unparsed_judge_verdict(row):
+    if _judge_unparseable(row):
         return REVERIFY_JUDGE
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 
