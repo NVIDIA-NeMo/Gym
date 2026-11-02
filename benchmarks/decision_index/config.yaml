@@ -1,0 +1,32 @@
+# Decision Index 0.3 (public suite), LLM mode: the policy model (any chat model, see --model-type) answers each
+# request as text, and decision_index parses the JSON answer at the end of its reply. For decision engines
+# (/v1/systemone or /v1/decisions, option probabilities) use config_decision.yaml. See README.md.
+config_paths:
+- resources_servers/decision_index/configs/decision_index.yaml
+
+decision_index_llm_resources_server:
+  _inherit_from: decision_index_resources_server
+  resources_servers:
+    decision_index:
+      answer_mode: llm
+      datasets:
+      - name: decision_index
+        type: benchmark
+        jsonl_fpath: benchmarks/decision_index/data/decision_index_benchmark.jsonl
+        prepare_script: benchmarks/decision_index/prepare.py
+        prompt_config: benchmarks/decision_index/prompt.yaml
+        num_repeats: 1
+
+decision_index_llm_agent:
+  _inherit_from: decision_index_simple_agent
+  responses_api_agents:
+    simple_agent:
+      resources_server:
+        name: decision_index_llm_resources_server
+
+decision_index_llm_environment_server:
+  _inherit_from: decision_index_environment_server
+  environment_servers:
+    single_agent_turn_legacy:
+      agent_server:
+        name: decision_index_llm_agent

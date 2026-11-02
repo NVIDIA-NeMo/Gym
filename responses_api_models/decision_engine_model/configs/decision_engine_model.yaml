@@ -1,0 +1,18 @@
+# A typed decision engine (/v1/systemone or /v1/decisions) as the policy model. Set the endpoint and key in env.yaml
+# (decision_engine_base_url, decision_engine_api_key, decision_engine_model_name) or through the environment.
+policy_model:
+  responses_api_models:
+    decision_engine_model:
+      entrypoint: app.py
+      base_url: ${oc.env:DECISION_ENGINE_BASE_URL,${decision_engine_base_url}}
+      api_key: ${oc.env:DECISION_ENGINE_API_KEY,${decision_engine_api_key}}
+      model: ${oc.env:DECISION_ENGINE_MODEL,${decision_engine_model_name}}
+      endpoint: systemone
+      extra_body: {}
+      max_concurrent_requests: 32
+      request_timeout_seconds: 600
+      max_attempts: 4
+
+decision_engine_base_url: null
+decision_engine_api_key: null
+decision_engine_model_name: default
