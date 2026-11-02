@@ -32,51 +32,49 @@ from omegaconf import DictConfig, OmegaConf
 from pytest import MonkeyPatch, mark, raises
 from yarl import URL
 
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym import PARENT_DIR
 from nemo_gym.client import SESSION_ID_KEY, ServerClient, raise_for_status
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.core import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymChatCompletionMessage,
-    NeMoGymChatCompletionMessageForTraining,
-    NeMoGymChoice,
-    NeMoGymEasyInputMessage,
-    NeMoGymFunctionCallOutput,
-    NeMoGymMessage,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseFunctionToolCall,
-    NeMoGymResponseInput,
-    NeMoGymResponseOutputMessage,
-    NeMoGymResponseOutputText,
-    NeMoGymResponseReasoningItem,
-    NeMoGymSummary,
-    rollout_context,
-)
-from nemo_gym.core.responses_api_types import (
     CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS,
+    NeMoGymChatCompletion,
     NeMoGymChatCompletionAssistantMessageForTrainingParam,
     NeMoGymChatCompletionAssistantMessageParam,
     NeMoGymChatCompletionContentPartTextParam,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymChatCompletionMessage,
+    NeMoGymChatCompletionMessageForTraining,
     NeMoGymChatCompletionMessageToolCall,
     NeMoGymChatCompletionMessageToolCallFunctionParam,
     NeMoGymChatCompletionMessageToolCallParam,
     NeMoGymChatCompletionSystemMessageParam,
     NeMoGymChatCompletionToolMessageParam,
     NeMoGymChatCompletionUserMessageParam,
+    NeMoGymChoice,
+    NeMoGymEasyInputMessage,
     NeMoGymFunction,
+    NeMoGymFunctionCallOutput,
     NeMoGymFunctionToolParam,
+    NeMoGymMessage,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+    NeMoGymResponseFunctionToolCall,
+    NeMoGymResponseInput,
     NeMoGymResponseInputText,
+    NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputText,
+    NeMoGymResponseReasoningItem,
+    NeMoGymSummary,
+    rollout_context,
 )
 from nemo_gym.failure_transport import FailureHeader
-from nemo_gym.models._checkpoint import PolicyModelParticipant, generation_cut_requester
+from nemo_gym.models import PolicyModelParticipant, generation_cut_requester
 from nemo_gym.openai_utils import NeMoGymAsyncOpenAI, PermanentEndpointError
 from nemo_gym.rollout_collection import _agent_request_failure_row, is_terminal_failure
-from nemo_gym.server_runtime import FailureBoundary
-from nemo_gym.server_runtime._checkpoint.control import CheckpointRequest
-from nemo_gym.server_runtime._checkpoint.generation_cut import (
+from nemo_gym.server_runtime import (
+    CheckpointRequest,
+    FailureBoundary,
     GenerationCutInventory,
     GenerationCutPrefixAck,
     GenerationCutReceipt,
@@ -5896,7 +5894,9 @@ class TestCompletionsBackendEndToEnd:
         return fake_client, captured
 
     def test_chat_completions_call_routes_to_create_completion(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
 
         model = _make_completions_backend_model()
         _, captured = self._install_fake_client(
@@ -5932,7 +5932,9 @@ class TestCompletionsBackendEndToEnd:
 
     def test_request_chat_template_kwargs_dropped_with_warning(self, monkeypatch: MonkeyPatch, caplog) -> None:
         """The completions path never forwards a request's top-level chat_template_kwargs."""
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
         model = _make_completions_backend_model()
         _, captured = self._install_fake_client(
             model,
@@ -5956,7 +5958,9 @@ class TestCompletionsBackendEndToEnd:
         assert "use_completions_api is true" in caplog.text
 
     def test_responses_with_string_input_routes_to_completions(self, monkeypatch: MonkeyPatch) -> None:
-        monkeypatch.setattr(nemo_gym.server_utils, "get_global_config_dict", MagicMock(return_value=dict()))
+        monkeypatch.setattr(
+            nemo_gym.server_runtime.base_server, "get_global_config_dict", MagicMock(return_value=dict())
+        )
         monkeypatch.setattr("nemo_gym.responses_converter.uuid4", lambda: FakeUUID())
         monkeypatch.setattr("responses_api_models.vllm_model.app.time", lambda: FIXED_TIME)
 

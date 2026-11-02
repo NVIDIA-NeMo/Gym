@@ -21,12 +21,19 @@ from nemo_gym._public_api import lazy_exports
 
 
 if TYPE_CHECKING:
-    from nemo_gym.models._checkpoint import note_generation_backend, note_generation_request
+    from nemo_gym.models._checkpoint import (
+        PolicyModelParticipant,
+        generation_cut_requester,
+        note_generation_backend,
+        note_generation_request,
+    )
 
 
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "PolicyModelParticipant": "_checkpoint",
+    "generation_cut_requester": "_checkpoint",
     "note_generation_backend": "_checkpoint",
     "note_generation_request": "_checkpoint",
 }
