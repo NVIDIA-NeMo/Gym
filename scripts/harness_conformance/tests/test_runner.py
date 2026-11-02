@@ -538,7 +538,7 @@ def test_overflow_fixture_retains_error_and_resumes_policy_after_summary(tmp_pat
     assert len(captures) == 5
 
 
-def test_summary_after_final_answer_is_auxiliary_but_policy_requests_still_fail(tmp_path):
+def test_finishing_without_history_does_not_allow_summary(tmp_path):
     probe = Probe(dataclasses.replace(SCENARIO["context_compaction"], tool_steps=0), tmp_path)
     body = {"model": "conformance-model", "messages": [{"role": "user", "content": "Run checks"}], "tools": [TOOL]}
     with TestClient(probe.model_app()) as client:
