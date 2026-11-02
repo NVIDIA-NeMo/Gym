@@ -112,6 +112,14 @@ class GdpPdfAgentConfig(SimpleAgentConfig):
         default=True,
         description="Remove base64 input_image blocks from serialized rollout artifacts.",
     )
+    regenerate_on_incomplete_output: bool = Field(
+        default=False,
+        description="Regenerate the answer with a smaller image footprint when the policy response comes back "
+        "incomplete. Off by default: an incomplete response means the model spent its output budget, so it is "
+        "the row's result and goes to the verifier as is; regenerating would re-sample a model result. Turn it "
+        "on only to reproduce the earlier behaviour for comparison. Each regeneration is counted in "
+        "document_delivery.output_truncation_regenerations.",
+    )
 
 
 class DocumentDelivery:
@@ -140,6 +148,16 @@ class DocumentDelivery:
             "image_coverage_end_page": self.image_coverage_end_page,
             "text_only_fallback": self.text_only_fallback,
             "limit": limit,
+        }
+
+    def adaptation_counts(self) -> dict[str, int]:
+        """Rejected requests by kind: input-limit rejections (the endpoint refused the request's size, a
+        delivery negotiation) and regenerations of an incomplete answer (only with
+        ``regenerate_on_incomplete_output``)."""
+        regenerations = sum(attempt["limit"] == "output_truncated" for attempt in self.attempts)
+        return {
+            "input_limit_rejections": len(self.attempts) - regenerations,
+            "output_truncation_regenerations": regenerations,
         }
 
     def adapt(self, limit: str, image_cap: Optional[int], *, min_dpi: int) -> bool:
@@ -566,15 +584,13 @@ class GdpPdfAgent(SimpleAgent):
                     model_response = _terminal_failure_response(self.config.model_server.name)
                     break
                 else:
-                    # vLLM doesn't always reject an oversized request outright -- it can accept
-                    # it and simply run out of room mid-generation instead (status=incomplete),
-                    # which raises nothing for the except clauses above to catch. That's the same
-                    # underlying problem as a rejected request (not enough room in the context
-                    # window), so it gets the same reactive response: free up room by shrinking
-                    # the image footprint and retry, rather than silently keeping the truncated
-                    # answer. Only worth trying when images are actually part of the payload.
+                    # An incomplete response means the model spent its output budget: an input that
+                    # does not fit is rejected up front (handled above), so this is the model's
+                    # result and is verified as is. Regenerating it with a smaller image footprint
+                    # re-samples a model result, so it only happens when explicitly enabled.
                     if (
                         model_response.status == "incomplete"
+                        and self.config.regenerate_on_incomplete_output
                         and self.config.include_images
                         and delivery.adapt("output_truncated", None, min_dpi=self.config.min_dpi)
                     ):
@@ -622,7 +638,12 @@ class GdpPdfAgent(SimpleAgent):
                     failure_reason=failure.failure_reason,
                 )
 
-        result["document_delivery"] = delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts}
+        adaptations = delivery.adaptation_counts()
+        result["document_delivery"] = (
+            delivery.record(terminal_limit) | {"rejected_attempts": delivery.attempts} | adaptations
+        )
+        # The generic per-row counts the run's failure facts sum (recovery.failure_facts).
+        result["agent_adaptations"] = adaptations
         if pages_truncated:
             print(f"[gdp_pdf_agent] WARNING: truncated {pages_truncated} page(s) of {manifest_relpath} (max_pages)")
             result.setdefault("verifier_metadata", meta)["pages_truncated"] = pages_truncated

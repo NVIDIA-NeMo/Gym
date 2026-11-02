@@ -1525,6 +1525,11 @@ def rows(name, skip=0):
                 # A zero is a fact (a wrong answer's library_reward, a passing exit code), so compare by identity.
                 if any(value is not None and value is not False and value != [] for value in facts.values()):
                     selected["_ng_collected_grading_facts"] = facts
+                adaptations = r.get("agent_adaptations")
+                if isinstance(adaptations, dict):
+                    # An agent's own per-row adaptation counts: bounded names and non-negative integers only.
+                    selected["agent_adaptations"] = {k[:64]: v for k, v in adaptations.items()
+                                                     if isinstance(k, str) and type(v) is int and v >= 0}
             record = r.get("_ng_failure_record")
             if isinstance(record, dict):
                 failure = record.get("failure")
@@ -5400,6 +5405,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
         "output_budget_refits": output_budget_refits(collected),
+        "agent_adaptations": agent_adaptations(decision, collected),
     }
 
 
@@ -5423,6 +5429,25 @@ def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
         count += refits
         rows += refits > 0
     return {"count": count, "rows": rows}
+
+
+def agent_adaptations(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, dict[str, int]]:
+    """The scored rollouts' own ``agent_adaptations`` counts, summed by name: ``{name: {"count": total, "rows": N}}``,
+    ``rows`` being the rollouts with a nonzero count. An agent records what it adapted on its own before a result,
+    such as a request the endpoint rejected for its input size; a reported fact, never a failure."""
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    latest: dict[Identity, Mapping[str, Any]] = {}
+    for row in (collected.results or []) if collected is not None else []:
+        if (identity := _identity(row)) in scored and isinstance(row.get("agent_adaptations"), Mapping):
+            latest[identity] = row["agent_adaptations"]
+    totals: dict[str, dict[str, int]] = {}
+    for adaptations in latest.values():
+        for name, value in adaptations.items():
+            if isinstance(name, str) and type(value) is int and value >= 0:
+                total = totals.setdefault(name, {"count": 0, "rows": 0})
+                total["count"] += value
+                total["rows"] += value > 0
+    return totals
 
 
 def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any]:
