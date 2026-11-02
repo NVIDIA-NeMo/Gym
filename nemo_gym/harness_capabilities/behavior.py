@@ -366,7 +366,7 @@ def inspect_behavior(
         + model_checks(record, attempts + judges, fingerprint=fingerprint, available=available)
         + tool_checks(
             record,
-            tools,
+            tools + _objects((witness or {}).get("native_tool_calls")),
             finish_id=((witness or {}).get("finish_call") or {}).get("id"),
             applies=tool_steps > 0,
             available=available,

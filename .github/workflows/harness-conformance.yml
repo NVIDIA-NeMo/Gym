@@ -47,6 +47,8 @@ jobs:
     if: needs.select.outputs.harnesses != '' && needs.select.outputs.harnesses != '[]'
     runs-on: ubuntu-latest
     timeout-minutes: 35
+    # NOOA's private task runtime belongs to a disposable container, never the runner host.
+    container: ${{ matrix.harness == 'nooa' && fromJSON('{"image":"python:3.13.14-slim","options":"--init"}') || '' }}
     strategy:
       fail-fast: false
       matrix:
@@ -54,10 +56,19 @@ jobs:
     env:
       HARNESS: ${{ matrix.harness }}
     steps:
+      - name: Install NOOA container tools
+        if: matrix.harness == 'nooa'
+        run: apt-get update && apt-get install -y --no-install-recommends git curl
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
           submodules: recursive
           persist-credentials: false
+      - name: Trust checkout for NOOA container builds
+        if: matrix.harness == 'nooa'
+        run: |
+          # Checkout adds safe.directory under a temporary HOME. Later packaging
+          # needs the same trust in this disposable container's normal Git config.
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - name: Set output and runtime directories
         run: |
           echo "RESULTS=$RUNNER_TEMP/harness-conformance-$HARNESS" >> "$GITHUB_ENV"

@@ -465,23 +465,30 @@ class GymResponsesLLM(UnifiedLLM):
         if self._on_call is not None:
             self._on_call(call)
         try:
-            http_response = await self._server_client.post(
-                server_name=self._model_server_name,
-                url_path=self._model_url_path,
-                json=body,
-                cookies=self._cookies,
-                headers={"x-session-id": call.invocation_id} if call.invocation_id is not None else {},
-            )
-            try:
-                await raise_for_status(http_response)
-            except aiohttp.ClientResponseError as error:
-                # Expose the response body for NOOA context-overflow detection.
-                content = getattr(error, "response_content", b"")
-                if content:
-                    if isinstance(content, bytes):
-                        content = content.decode(errors="replace")
-                    error.message = f"{error.message}: {content}"
-                raise
+            # CodeAct rebuilds context after an LLM error. Retry throttling here
+            # so every wire attempt retains this logical call's exact request.
+            for attempt in range(3):
+                try:
+                    http_response = await self._server_client.post(
+                        server_name=self._model_server_name,
+                        url_path=self._model_url_path,
+                        json=body,
+                        cookies=self._cookies,
+                        headers={"x-session-id": call.invocation_id} if call.invocation_id is not None else {},
+                    )
+                    await raise_for_status(http_response)
+                except aiohttp.ClientResponseError as error:
+                    if error.status == 429 and attempt < 2:
+                        await asyncio.sleep(2**attempt)
+                        continue
+                    # Expose the response body for NOOA context-overflow detection.
+                    content = getattr(error, "response_content", b"")
+                    if content:
+                        if isinstance(content, bytes):
+                            content = content.decode(errors="replace")
+                        error.message = f"{error.message}: {content}"
+                    raise
+                break
             raw = await get_response_json(http_response)
             response = NeMoGymResponse.model_validate(raw)
             call.response = response
