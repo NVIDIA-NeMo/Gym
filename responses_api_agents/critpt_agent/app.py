@@ -12,29 +12,37 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-import logging
+import asyncio
 import re
+from dataclasses import dataclass
 from pathlib import Path
+from time import monotonic
 from typing import Any
 
 import yaml
-from fastapi import Request, Response
+from fastapi import HTTPException, Request, Response
 from pydantic import ConfigDict
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, Body, SimpleResponsesAPIAgent
+from nemo_gym.base_responses_api_agent import (
+    AgentCloseSessionResponse,
+    AgentSeedRejectedError,
+    AgentSeedSessionRequest,
+    AgentSessionState,
+    BaseResponsesAPIAgentConfig,
+    Body,
+    SimpleResponsesAPIAgent,
+)
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
-    NeMoGymResponseUsage,
     accumulate_response_usage,
 )
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, ModelCallRef
 
-
-LOG = logging.getLogger(__name__)
 
 _THINK_BLOCK_PATTERN = re.compile(r"<think>.*?</think>|<thinking>.*?</thinking>", re.DOTALL)
 
@@ -60,6 +68,13 @@ class CritPtAgentVerifyResponse(BaseVerifyResponse):
     model_config = ConfigDict(extra="allow")
 
 
+@dataclass
+class CritPtSessionState(AgentSessionState):
+    """Per-episode evidence retained until the environment closes the session."""
+
+    observations: AgentObservationBundle | None = None
+
+
 class CritPtAgent(SimpleResponsesAPIAgent):
     config: CritPtAgentConfig
 
@@ -71,22 +86,102 @@ class CritPtAgent(SimpleResponsesAPIAgent):
         prompt_yaml = yaml.safe_load(path.read_text())
         self._turn2_user_template: str = prompt_yaml["user"]
 
+    async def _seed_agent_session_state(self, body: AgentSeedSessionRequest) -> CritPtSessionState:
+        if body.sandbox_access is not None:
+            raise AgentSeedRejectedError("CritPt Agent does not support sandbox access")
+        if any(access.required for access in self.effective_tool_accesses(body)):
+            raise AgentSeedRejectedError("CritPt Agent does not support required tool access")
+        return CritPtSessionState(request=body)
+
+    async def _close_agent_session_state(self, state: AgentSessionState) -> AgentCloseSessionResponse:
+        if not isinstance(state, CritPtSessionState):
+            raise TypeError("Expected CritPt session state")
+        return AgentCloseSessionResponse(
+            agent_session_id=state.request.agent_session_id,
+            agent_observations=state.observations,
+        )
+
     async def responses(
         self,
         request: Request,
         response: Response,
         body: NeMoGymResponseCreateParamsNonStreaming = Body(),
     ) -> NeMoGymResponse:
-        model_response = await self.server_client.post(
-            server_name=self.config.model_server.name,
-            url_path=self.url_path_for_request("/v1/responses", request),
-            json=body,
-            cookies=request.cookies,
-        )
-        await raise_for_status(model_response)
-        for k, v in model_response.cookies.items():
-            response.set_cookie(k, v)
-        return NeMoGymResponse.model_validate(await get_response_json(model_response))
+        """Solve, then format using the deferred final user message in prepared input.
+
+        Input ends with two user messages: the problem and the prepared formatting prompt.
+        The formatting prompt is withheld from the solve call. Only the formatting output
+        is returned for verification; usage covers both model calls.
+        """
+        messages = body.input
+        if (
+            not isinstance(messages, list)
+            or len(messages) < 2
+            or any(getattr(message, "role", None) != "user" for message in messages[-2:])
+        ):
+            raise HTTPException(
+                422,
+                "CritPt input must end with the problem and formatting user messages; "
+                "run gym eval prepare --benchmark critpt to prepare both turns.",
+            )
+        session_id = self._agent_session_id_from_request(request)
+        state = self._require_agent_session(session_id) if session_id is not None else None
+        invocation = AgentInvocation(invocation_id="root", conversation=messages[:-1])
+        if state is not None:
+            if not isinstance(state, CritPtSessionState):
+                raise TypeError("Expected CritPt session state")
+            state.observations = AgentObservationBundle(source=self.config.name, records=[invocation])
+        cookies = request.cookies
+        started = monotonic()
+
+        async def call_model(params: NeMoGymResponseCreateParamsNonStreaming) -> NeMoGymResponse:
+            nonlocal cookies
+            model_response = await self.server_client.post(
+                server_name=self.config.model_server.name,
+                url_path=self.url_path_for_request("/v1/responses", request),
+                json=params,
+                cookies=cookies,
+            )
+            await raise_for_status(model_response)
+            cookies = cookies | {key: value.value for key, value in model_response.cookies.items()}
+            for key, value in model_response.cookies.items():
+                response.set_cookie(key, value.value)
+            result = NeMoGymResponse.model_validate(await get_response_json(model_response))
+            invocation.model_calls.append(ModelCallRef(model_ref=self.config.model_server, response_id=result.id))
+            invocation.conversation = list(params.input) + result.output
+            return result
+
+        try:
+            turn1 = await call_model(body.model_copy(update={"input": messages[:-1]}))
+            if turn1.status == "failed" or turn1.error is not None:
+                invocation.status = "failed"
+                return turn1
+            turn1_text = _strip_thinking_blocks(_extract_output_text(turn1.model_dump()))
+            turn2_input = messages[:-1] + [
+                NeMoGymEasyInputMessage(role="assistant", content=turn1_text),
+                messages[-1],
+            ]
+            turn2 = await call_model(body.model_copy(update={"input": turn2_input}))
+            invocation.status = (
+                "failed"
+                if turn2.status == "failed" or turn2.error is not None
+                else "incomplete"
+                if turn2.status == "incomplete"
+                else "completed"
+            )
+            usage = None
+            if turn1.usage is not None and turn2.usage is not None:
+                usage = accumulate_response_usage(turn1.usage, turn2.usage)
+            return turn2.model_copy(update={"usage": usage})
+        except asyncio.CancelledError:
+            invocation.status = "incomplete"
+            raise
+        except Exception as error:
+            invocation.status = "failed"
+            invocation.error_type = type(error).__name__
+            raise
+        finally:
+            invocation.duration_ms = (monotonic() - started) * 1000
 
     async def run(self, request: Request, body: CritPtAgentRunRequest) -> CritPtAgentVerifyResponse:
         cookies = request.cookies
@@ -102,49 +197,27 @@ class CritPtAgent(SimpleResponsesAPIAgent):
 
         self_responses_url_path = self.url_path_for_run("/v1/responses", body)
 
-        # Turn 1: solve the problem
-        turn1_response = await self.server_client.post(
+        # Older flat rows carry only the solve input. Adapt them to the same two-turn
+        # request used by sessions, keeping verifier-only row fields out of model input.
+        params = body.responses_create_params
+        messages = params.input
+        if isinstance(messages, str):
+            messages = [NeMoGymEasyInputMessage(role="user", content=messages)]
+        if len(messages) < 2 or any(getattr(message, "role", None) != "user" for message in messages[-2:]):
+            messages = list(messages) + [
+                NeMoGymEasyInputMessage(
+                    role="user", content=self._turn2_user_template.format(code_template=body.code_template)
+                )
+            ]
+        agent_response = await self.server_client.post(
             server_name=self.config.name,
             url_path=self_responses_url_path,
-            json=body.responses_create_params,
+            json=params.model_copy(update={"input": messages}),
             cookies=cookies,
         )
-        await raise_for_status(turn1_response)
-        cookies = turn1_response.cookies
-        turn1_json = await get_response_json(turn1_response)
-        # Strip reasoning blocks: the Turn 2 user message asks the model not to reason again, so
-        # the Turn 2 assistant context should contain only the conclusion, not the thinking trace.
-        turn1_text = _strip_thinking_blocks(_extract_output_text(turn1_json))
-
-        # Turn 2: populate code template using Turn 1 reasoning as context
-        turn2_user_msg = self._turn2_user_template.format(code_template=body.code_template)
-        turn2_input = list(body.responses_create_params.input) + [
-            NeMoGymEasyInputMessage(role="assistant", content=turn1_text),
-            NeMoGymEasyInputMessage(role="user", content=turn2_user_msg),
-        ]
-        turn2_params = body.responses_create_params.model_copy(update={"input": turn2_input})
-
-        turn2_response = await self.server_client.post(
-            server_name=self.config.name,
-            url_path=self_responses_url_path,
-            json=turn2_params,
-            cookies=cookies,
-        )
-        await raise_for_status(turn2_response)
-        cookies = turn2_response.cookies
-        turn2_json = await get_response_json(turn2_response)
-
-        # Report the full two-turn cost, without presenting partial usage as a total.
-        turn1_usage = turn1_json.get("usage")
-        turn2_usage = turn2_json.get("usage")
-        if turn1_usage is not None and turn2_usage is not None:
-            usage = accumulate_response_usage(
-                NeMoGymResponseUsage.model_validate(turn1_usage),
-                NeMoGymResponseUsage.model_validate(turn2_usage),
-            )
-            turn2_json["usage"] = usage.model_dump()
-        else:
-            turn2_json["usage"] = None
+        await raise_for_status(agent_response)
+        cookies = agent_response.cookies
+        turn2_json = await get_response_json(agent_response)
 
         # Verify Turn 2 output against the Artificial Analysis API
         verify_request_data = body.model_dump() | {"response": turn2_json}

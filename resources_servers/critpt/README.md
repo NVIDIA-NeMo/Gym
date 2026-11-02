@@ -45,19 +45,19 @@ uniform `num_repeats` across problems (which `gym eval run --no-serve` enforces)
 
 ## Dataset Format
 
-Two JSONL files coexist with different shapes:
+Both JSONL files contain prepared model input:
 
 - **`benchmarks/critpt/data/critpt_benchmark.jsonl`** (full 70-row dataset, gitignored;
-  produced by `prepare.py`). **Flat-field**: each row has `problem_id`, `problem` (Markdown
-  question), `code_template` (Python stub), and `uuid`. Prompt templating happens at
-  rollout time via the dataset entry's `prompt_config:
-  benchmarks/critpt/prompts/turn1.yaml`.
+  produced by `prepare.py`). Each row has `problem_id`, `problem` (Markdown question),
+  `code_template` (Python stub), `uuid`, and `responses_create_params.input` containing both
+  the solve prompt and the deferred formatting user message.
 - **`resources_servers/critpt/data/example.jsonl`** (5-row hand-curated fixture,
   committed). **Pre-materialized**: same flat fields plus `responses_create_params.input`
-  already filled in from the Turn 1 template, matching the convention of every other
-  paired server's example fixture. Because it's pre-materialized, callers must NOT pass
-  `+prompt_config` when running rollouts against this file (the framework rejects rows
-  that have both).
+  containing both turns. The agent withholds the final user message until the solve call
+  completes, then inserts the cleaned solve answer before the formatting prompt.
+
+Re-prepare old benchmark data after upgrading. Do not pass `prompt_config` for either file;
+the framework rejects rows that already contain input when a prompt config is also supplied.
 
 ## Observability
 
