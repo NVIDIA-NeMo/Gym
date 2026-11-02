@@ -14648,11 +14648,13 @@ class TestRunRecordWriter:
         assert RUN_ID_KEY not in written_failure
         materialized = self._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
         assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4] and RUN_ID_KEY not in materialized[0]
+        assert (run_dir / "rollouts-step_1_manifest.json").is_file()
 
         # The Store reads the shard as it reads an eval run: the expected rows, the selected successes, the failures,
         # and the rollouts it would run again.
         store = RolloutStore.read(run_dir / "rollouts-step_1.jsonl")
         assert store is not None
+        assert store.manifest.run_id == written_failure["_ng_failure_record"]["run_id"]
         assert [record.read()["reward"] for record in store.selected_records("success").values()] == [1.0]
         [failed] = store.failures()
         assert failed[NG_FAILURE_CLASS_KEY] == "agent_request_failed"

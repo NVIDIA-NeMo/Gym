@@ -1613,7 +1613,7 @@ class RunRecordWriter:
     """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
 
     A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
-    given, its materialized inputs beside it, so a folder of shards is what ``gym eval aggregate``, the run health
+    given, its materialized inputs and run manifest beside it, so a folder of shards is what ``gym eval aggregate``, the run health
     check, the Store and EvalRDL's reader already read. The caller picks the shard label (for example a training step
     and worker); Gym owns the file names. A result goes to the rollouts file, a failed one to the failures sidecar as
     the typed failure row collection writes, with its attempt cap, and an interrupted or never-started try to the
@@ -1638,15 +1638,17 @@ class RunRecordWriter:
         self.rollouts_fpath = Path(record_output_dir) / f"rollouts-{shard}.jsonl"
         self.failures_fpath = failures_path_for(self.rollouts_fpath)
         self.materialized_fpath = materialized_path_for(self.rollouts_fpath)
+        self.manifest_fpath = manifest_path_for(self.rollouts_fpath)
         self.record_omitted_rollouts = record_omitted_rollouts
-        # The run a typed failure record written here belongs to. The shard's rows and records are not tagged with
-        # it, so the Store imports the shard as it imports an eval run written before run manifests.
+        # The run this shard's typed failure records belong to, named by the shard's run manifest. The rows and
+        # records stay untagged, as in an eval run written before run manifests, which the Store imports as well.
         self.run_id = run_id or uuid4().hex
         self.rollouts_fpath.parent.mkdir(parents=True, exist_ok=True)
         self._lock_fpath = self.rollouts_fpath.with_name(f".{self.rollouts_fpath.name}.lock")
         with self._locked() as lock:
             self.failures_fpath.unlink(missing_ok=True)
             self.materialized_fpath.unlink(missing_ok=True)
+            self.manifest_fpath.unlink(missing_ok=True)
             # The rollouts file exists from the start, even empty, so a shard whose every rollout failed is still
             # found by readers that discover shards by it. A new file (not a truncation) gives this writer its own
             # inode, which write() checks to notice a later writer of the same shard.
@@ -1661,13 +1663,15 @@ class RunRecordWriter:
             lock.truncate()
             lock.write(self._writer_token)
             lock.flush()
-            # As in a collection run, the failures sidecar exists from the start, and the rows this call dispatches
-            # are the shard's materialized inputs: what the Store and the health check expect to find.
+            # As in a collection run, the failures sidecar exists from the start, the rows this call dispatches are
+            # the shard's materialized inputs, and the run manifest names the run the typed failure records belong
+            # to: what the Store and the health check expect to find.
             self.failures_fpath.touch()
             if rows is not None:
                 with self.materialized_fpath.open("wb") as file:
                     for row in rows:
                         file.write(orjson.dumps(row) + b"\n")
+                RunManifest.import_legacy(rows).model_copy(update={"run_id": self.run_id}).write(self.manifest_fpath)
 
     @contextmanager
     def _locked(self) -> Iterator[Any]:
