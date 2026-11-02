@@ -5,6 +5,8 @@ slurm:
   account: nemotron_n4_post
   partition: batch
   qos: interactive
+  gpus-per-node: "4"
+  mem: "0"
 
 flashinfer:
   repo: https://github.com/bxyu-nvidia/flashinfer
