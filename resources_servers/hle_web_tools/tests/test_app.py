@@ -265,6 +265,9 @@ async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog
             bare = client.post("/web_search", json={"query": eight}).json()
     assert bare["refused"] and "seeded with its question" in bare["text"]
     assert "family=unseeded_session rule='require_seeded_question' where=session" in caplog.text
+    # A question with no words cannot drive the span rule, so its seed leaves the session unseeded.
+    await seed(server, {"question": "?!"}, "wordless")
+    assert (await server.web_search(tool_request("wordless"), WebSearchRequest(query=eight))).refused
     backend.search.assert_not_awaited()
     # Opting out restores the previous behaviour: an unseeded session is served without the span rule.
     lenient = make_server(require_seeded_question=False)

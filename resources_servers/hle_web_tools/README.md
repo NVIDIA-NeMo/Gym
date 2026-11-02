@@ -75,7 +75,8 @@ Beyond the families, the protocol's own refusals:
   whose extra fields are the task row (`question` for the HLE presets, configurable as
   `question_field`); the last user message of `responses_create_params.input` is the fallback, and an
   Environment Server's `task_data` is read the same way. A search from a session that was not seeded
-  with a question (a seed without one, or a plain-HTTP call carrying no session) is refused with the
+  with a question (a seed without one or whose question has no words, such as `"?!"`, or a plain-HTTP
+  call carrying no session) is refused with the
   family `unseeded_session`, and a seed without a question is logged at WARNING; set
   `require_seeded_question: false` to serve such sessions without the span rule instead. A seeded
   session cannot be re-seeded with another question (HTTP 409; a retry with the same question is

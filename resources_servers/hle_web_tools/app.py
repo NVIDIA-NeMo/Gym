@@ -550,11 +550,17 @@ def extract_question(seed_body: Dict[str, Any], field: str) -> Optional[str]:
     """The question text of a seed: the task row's ``field``, else the last user message of its create params.
 
     An Agent seeds a tool server with its run request, whose extra fields are the task row (``question`` for
-    the HLE presets); an Environment Server seeds with ``task_data`` holding the same row.
+    the HLE presets); an Environment Server seeds with ``task_data`` holding the same row. A text with no words
+    (``"?!"``) cannot drive the verbatim-span rule and counts as no question, so such a session fails closed.
     """
+    question = _question_text(seed_body, field)
+    return question if question is not None and question_words(question) else None
+
+
+def _question_text(seed_body: Dict[str, Any], field: str) -> Optional[str]:
     data = seed_body.get("task_data") if isinstance(seed_body.get("task_data"), dict) else seed_body
     value = data.get(field)
-    if isinstance(value, str) and value.strip():
+    if isinstance(value, str) and question_words(value):
         return value
     params = data.get("responses_create_params")
     messages = params.get("input") if isinstance(params, dict) else None
