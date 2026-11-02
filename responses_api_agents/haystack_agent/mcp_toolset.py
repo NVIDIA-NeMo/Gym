@@ -16,7 +16,7 @@ from haystack_integrations.tools.mcp.mcp_tool import (
 )
 from haystack_integrations.tools.mcp.mcp_toolset import MCPToolset
 
-from nemo_gym.base_resources_server import NEMO_GYM_MCP_SESSION_TOKEN_HEADER
+from nemo_gym.server_runtime import NEMO_GYM_MCP_SESSION_TOKEN_HEADER
 from responses_api_agents.haystack_agent import chat_generator
 
 

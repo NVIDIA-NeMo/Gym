@@ -97,7 +97,8 @@ def _check_overlay_result(result: SandboxExecResult, label: str, what: str | Non
         raise HarborOverlayError(f"{subject} exited {result.return_code}; output tail: {_output_tail(result)}")
 
 
-# The separate verifier's sandbox could not take the task's Dockerfile overlay after the rollout ran.
+# The separate verifier's sandbox could not take the task's Dockerfile overlay after the rollout ran (a shared-mode
+# task the server verifies separately, see `separate_verifier_for_artifacts`).
 OVERLAY_FAILED_KIND = "harbor:overlay_failed"
 
 

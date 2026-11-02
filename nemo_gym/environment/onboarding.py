@@ -12,11 +12,11 @@ from types import ModuleType
 from typing import Any
 
 from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym.config_types import ConfigError
+from nemo_gym.config.config_types import ConfigError
 from nemo_gym.environment.manifest import load_manifest
 from nemo_gym.environment.validation import EnvironmentValidationReport, ResolvedComponent, validate_environment
 from nemo_gym.registry import EnvironmentCatalogEntry
-from nemo_gym.verifier_fixture import (
+from nemo_gym.verification.verifier_fixture import (
     VerifierFixture,
     VerifierFixtureError,
     VerifierFixtureResult,
@@ -94,6 +94,8 @@ def _resources_server_app(component: ResolvedComponent) -> tuple[Path, Path, Pat
     for root in component_search_roots():
         component_root = root.expanduser().resolve()
         server_dir = component_root / relative_dir
+        if all((server_dir / name).is_file() for name in ("pyproject.toml", "requirements.txt")):
+            raise EnvironmentOnboardingError(f"Use only one of pyproject.toml and requirements.txt in {server_dir}")
         if not any((server_dir / name).is_file() for name in ("pyproject.toml", "requirements.txt")):
             continue
         candidate = server_dir / entrypoint

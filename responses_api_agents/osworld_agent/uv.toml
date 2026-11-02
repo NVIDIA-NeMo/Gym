@@ -2,10 +2,10 @@
 # complete training image Gym is a member of /opt/nemo-rl's uv workspace, whose
 # trainer dependencies are intentionally incompatible with this CPU agent venv.
 # The component is an independent uv project, synced from its committed uv.lock.
-required-version = ">=0.11.25"
+required-version = ">=0.13.4"
 constraint-dependencies = [
-    "ray==2.58.0",
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
 ]
 
@@ -37,7 +37,6 @@ exclude-dependencies = [
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",

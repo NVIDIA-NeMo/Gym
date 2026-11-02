@@ -25,6 +25,6 @@ ruler_pretrain_simple_agent:
 ruler_pretrain_environment_server:
   _inherit_from: ruler_environment_server
   environment_servers:
-    legacy_agent:
+    single_agent_turn_legacy:
       agent_server:
         name: ruler_pretrain_simple_agent

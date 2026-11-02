@@ -22,7 +22,7 @@ import pytest
 from omegaconf import OmegaConf
 from yaml import safe_load
 
-import nemo_gym.global_config
+import nemo_gym.config.global_config
 from benchmarks.lmarena_v2 import prepare as lmarena_prepare
 from nemo_gym.cli.eval import list_benchmarks, prepare_benchmark
 
@@ -52,7 +52,7 @@ def test_pinchbench_tavily_key_is_derived_from_environment() -> None:
 @pytest.fixture(autouse=True)
 def _mock_port_allocation(monkeypatch):
     """Keep benchmark-discovery tests independent of socket availability."""
-    monkeypatch.setattr(nemo_gym.global_config, "_find_open_port_using_range", lambda **_: 12345)
+    monkeypatch.setattr(nemo_gym.config.global_config, "_find_open_port_using_range", lambda **_: 12345)
 
 
 class TestListBenchmarks:
@@ -343,9 +343,9 @@ class TestDiscoverBenchmarksInDir:
         from nemo_gym.benchmarks import BenchmarkConfig
 
         monkeypatch.setattr(
-            nemo_gym.global_config,
+            nemo_gym.config.global_config,
             "_nemo_gym_openai_requirement",
-            lambda: f"openai=={nemo_gym.global_config.openai_version}",
+            lambda: f"openai=={nemo_gym.config.global_config.openai_version}",
         )
         repo_root = Path(__file__).parents[2]
         suite_path = repo_root / "benchmarks/nemotron_3.5_super" / suite_name
@@ -921,7 +921,7 @@ class TestBenchmarkAgentResolution:
 
     def test_agent_pin_on_agent_declared_dataset_must_name_the_declarer(self) -> None:
         """Dispatch routes rows to the declaring agent, so a pin elsewhere would silently not apply."""
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
 
         with pytest.raises(ConfigError, match="the pin would silently not apply"):
             self._config(
@@ -959,7 +959,7 @@ class TestBenchmarkAgentResolution:
         assert cfg.agent_name == "my_agent"
 
     def test_rs_declared_dataset_with_two_agents_requires_pin(self) -> None:
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
 
         with pytest.raises(ConfigError, match="Pin the harness with an `agent:` key"):
             self._config(
@@ -994,7 +994,7 @@ class TestBenchmarkAgentResolution:
 
     def test_rs_declared_pin_must_reference_the_declaring_rs(self) -> None:
         """A pin naming an agent wired to a different RS would list one agent and run another."""
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
 
         with pytest.raises(ConfigError, match="no agent of that name references resources server 'my_rs'"):
             self._config(
@@ -1015,7 +1015,7 @@ class TestBenchmarkAgentResolution:
             )
 
     def test_rs_declared_pin_naming_unknown_agent_errors(self) -> None:
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
 
         with pytest.raises(ConfigError, match="pins agent 'ghost'"):
             self._config(
@@ -1118,7 +1118,7 @@ class TestMaterializedTasksetBenchmark:
         [("agent", "pins agent 'other_agent'"), ("resources", "must bind declaring resources server")],
     )
     def test_collation_rejects_conflicting_route_before_writing(self, config, tmp_path, conflict, message):
-        from nemo_gym.config_types import ConfigError
+        from nemo_gym.config.config_types import ConfigError
         from nemo_gym.train_data_utils import TrainDataProcessor
 
         source = tmp_path / "source.jsonl"
@@ -1146,14 +1146,14 @@ class TestMaterializedTasksetBenchmark:
         assert not (tmp_path / "source_metrics.json").exists()
 
     def test_taskset_route_resolves_the_servers_agent(self, config):
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         assert resolve_dataset_agent(config, "resources", taskset="swe:test") == "agent"
 
     @pytest.mark.parametrize("pin", ["agent", "other"])
     def test_taskset_route_rejects_any_pin(self, config, pin):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         # A taskset routes to its Environment Server; even a pin naming that server's agent is rejected.
         with pytest.raises(ConfigError, match=f"pins agent '{pin}', but a taskset routes to Environment Server"):
@@ -1171,16 +1171,16 @@ class TestMaterializedTasksetBenchmark:
         ],
     )
     def test_invalid_taskset_route_never_falls_back(self, config, change, message):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         config.update(change)
         with pytest.raises(ConfigError, match=message):
             resolve_dataset_agent(config, "resources", taskset="swe:test")
 
     def test_conflicting_pin_is_rejected(self, config):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         with pytest.raises(ConfigError, match="pins agent"):
             resolve_dataset_agent(config, "resources", pin="other", taskset="swe:test")
@@ -1198,16 +1198,16 @@ class TestMaterializedTasksetBenchmark:
             _resolve_dataset_owner_agent(config, "resources")
 
     def test_route_must_match_declaring_resources(self, config):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         config.environment.environment_servers.single_agent_turn.resources_server.name = "other"
         with pytest.raises(ConfigError, match="must bind declaring resources server"):
             resolve_dataset_agent(config, "resources", taskset="swe:test")
 
     def test_agent_declared_taskset_must_route_to_that_agent(self, config):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         assert resolve_dataset_agent(config, "agent", taskset="swe:test") == "agent"
         config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
@@ -1224,7 +1224,7 @@ class TestMaterializedTasksetBenchmark:
         return config
 
     def test_multi_agent_route_resolves_without_a_pin(self, multi_agent_config):
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         # The server fronts two agents and names no agent_server, so no single agent is reported.
         assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") is None
@@ -1235,15 +1235,15 @@ class TestMaterializedTasksetBenchmark:
         assert resolve_dataset_agent(multi_agent_config, "resources", taskset="swe:test") == "agent"
 
     def test_multi_agent_route_rejects_a_pin(self, multi_agent_config):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         with pytest.raises(ConfigError, match="pins agent 'agent', but a taskset routes to Environment Server"):
             resolve_dataset_agent(multi_agent_config, "resources", pin="agent", taskset="swe:test")
 
     def test_multi_agent_route_accepts_a_declaring_participant(self, multi_agent_config):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         assert resolve_dataset_agent(multi_agent_config, "user", taskset="swe:test") == "user"
         multi_agent_config.other = {"responses_api_agents": {"impl": {"entrypoint": "app.py"}}}
@@ -1251,8 +1251,8 @@ class TestMaterializedTasksetBenchmark:
             resolve_dataset_agent(multi_agent_config, "other", taskset="swe:test")
 
     def test_multi_agent_route_rejects_a_reference_to_a_non_agent(self, multi_agent_config):
-        from nemo_gym.config_types import ConfigError
-        from nemo_gym.global_config import resolve_dataset_agent
+        from nemo_gym.config.config_types import ConfigError
+        from nemo_gym.config.global_config import resolve_dataset_agent
 
         multi_agent_config.environment.environment_servers.single_agent_turn.user_agent.name = "resources"
         with pytest.raises(ConfigError, match="references 'resources', which is not an agent"):
@@ -1310,7 +1310,7 @@ class TestAgentPinDiscoveryCollateRollout:
         import json
 
         from nemo_gym.benchmarks import BenchmarkConfig
-        from nemo_gym.config_types import maybe_get_server_instance_config
+        from nemo_gym.config.config_types import maybe_get_server_instance_config
         from nemo_gym.rollout_collection import RolloutCollectionHelper
         from nemo_gym.train_data_utils import TrainDataProcessor
 

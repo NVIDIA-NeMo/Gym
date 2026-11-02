@@ -25,13 +25,14 @@ from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.eval as cli_eval
-import nemo_gym.global_config
+import nemo_gym.client.server_client
+import nemo_gym.config.global_config
 import nemo_gym.server_utils
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME
 from nemo_gym.cli.eval import _validate_prepared_split_file_exists, _validate_split_datasets_declared
 from nemo_gym.cli.main import main
-from nemo_gym.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.config_types import ConfigError, ResponsesAPIAgentServerInstanceConfig
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 def _make_agent_instance_config(name: str, dataset_specs: list) -> ResponsesAPIAgentServerInstanceConfig:
@@ -178,7 +179,7 @@ def test_aggregate_cli_exits_nonzero_after_saving_failed_agent_entry(tmp_path: P
 class TestPrepareDependencies:
     @staticmethod
     def _benchmark(project=None, dependencies=()):
-        from nemo_gym.config_types import BenchmarkDatasetConfig
+        from nemo_gym.config.config_types import BenchmarkDatasetConfig
 
         dataset = BenchmarkDatasetConfig(
             name="b",
@@ -265,7 +266,7 @@ class TestPrepareDependencies:
         ]
 
     def test_non_benchmark_config_preserves_dependency_arguments(self, monkeypatch):
-        from nemo_gym.config_types import DatasetConfig
+        from nemo_gym.config.config_types import DatasetConfig
 
         dataset = DatasetConfig(
             name="training",
@@ -454,7 +455,7 @@ class TestEvalRunNoServeWithoutHeadServer:
         monkeypatch.delenv(NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME, raising=False)
         (tmp_path / "env.yaml").write_text("")
         monkeypatch.chdir(tmp_path)
-        monkeypatch.setattr(nemo_gym.global_config, "_GLOBAL_CONFIG_DICT", None)
+        monkeypatch.setattr(nemo_gym.config.global_config, "_GLOBAL_CONFIG_DICT", None)
         # Rich soft-wraps at 80 columns when stdout is not a TTY, which would split the message mid-sentence.
         monkeypatch.setenv("COLUMNS", "1000")
 
@@ -463,7 +464,7 @@ class TestEvalRunNoServeWithoutHeadServer:
         def refuse(*args, **kwargs):
             raise requests.exceptions.ConnectionError("[Errno 61] Connection refused")
 
-        monkeypatch.setattr(nemo_gym.server_utils.requests, "get", refuse)
+        monkeypatch.setattr(nemo_gym.client.server_client.requests, "get", refuse)
 
     def test_exits_one_with_a_single_error_line_and_no_traceback(
         self, tmp_path: Path, monkeypatch: MonkeyPatch, capsys
@@ -508,3 +509,77 @@ class TestLockedPrepareSearchRoots:
             Path(sys.executable), reference, "inspect", tmp_path / "data.jsonl", {"check_cache": False}
         )
         assert result == {"has_prepare": True, "cache_current": False}
+
+
+@pytest.mark.parametrize("retryable, expected_exit", [(1, 75), (0, 76)])
+@pytest.mark.parametrize("require_complete", [False, True])
+def test_collect_rollouts_preserves_incomplete_exit_and_shuts_down_telemetry(
+    tmp_path, monkeypatch, retryable, expected_exit, require_complete
+):
+    from nemo_gym.rollout_collection import RolloutCollectionHelper
+    from nemo_gym.rollout_records import coverage_path_for
+    from nemo_gym.telemetry import setup
+
+    output = tmp_path / "output.jsonl"
+    config = DictConfig(
+        {"input_jsonl_fpath": "input.jsonl", "output_jsonl_fpath": str(output), "require_complete": require_complete}
+    )
+    monkeypatch.setattr(cli_eval, "get_global_config_dict", lambda: config)
+    events = []
+    monkeypatch.setattr(setup, "configure_telemetry_env", lambda config: events.append("configure"))
+    monkeypatch.setattr(setup, "init_telemetry", lambda **kwargs: events.append("init"))
+    monkeypatch.setattr(setup, "shutdown_telemetry", lambda: events.append("shutdown"))
+
+    async def collect(self, config):
+        events.append("collect")
+        coverage_path_for(output).write_text(
+            json.dumps(
+                {
+                    "complete": False,
+                    "expected": 1,
+                    "successful": 0,
+                    "retryable": retryable,
+                    "outcomes_recorded": 1,
+                }
+            )
+        )
+
+    monkeypatch.setattr(RolloutCollectionHelper, "run_from_config", collect)
+    if require_complete:
+        with pytest.raises(SystemExit) as error:
+            cli_eval.collect_rollouts()
+        assert error.value.code == expected_exit
+    else:
+        cli_eval.collect_rollouts()
+    assert events == ["configure", "init", "collect", "shutdown"]
+
+
+def test_isolated_prepare_receives_hf_config_and_structured_arguments(tmp_path, monkeypatch):
+    """Use the real config reader in a child with OmegaConf values and path arguments."""
+    monkeypatch.chdir(tmp_path)
+    script = tmp_path / "configured_preparer.py"
+    script.write_text(
+        "from pathlib import Path\n"
+        "from nemo_gym.config.global_config import get_hf_token\n"
+        "def prepare(target, values, settings):\n"
+        "    assert get_hf_token() == 'fixture-token'\n"
+        "    assert values == [2, 3]\n"
+        "    assert settings == {'size': 2}\n"
+        "    path = Path(target)\n"
+        "    path.write_text('prepared')\n"
+        "    return path\n"
+    )
+    output = tmp_path / "prepared.jsonl"
+    arguments = DictConfig(
+        {"target": output, "values": ["${settings.size}", 3], "settings": {"size": 2}}, flags={"allow_objects": True}
+    )
+    result = cli_eval._run_isolated_prepare(
+        Path(sys.executable),
+        str(script),
+        "prepare",
+        output,
+        arguments,
+        config=DictConfig({"hf_token": "fixture-token"}),
+    )
+    assert result == {"output": str(output)}
+    assert output.read_text() == "prepared"

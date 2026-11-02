@@ -18,7 +18,7 @@ Accessing its public helpers here resolves them lazily from the new location wit
 `DeprecationWarning`. Remove once the old import path is dropped.
 """
 
-from nemo_gym.cli._compat import moved_attr_getter
+from nemo_gym.utils.compat import moved_attr_getter
 
 
 __getattr__ = moved_attr_getter(

@@ -148,7 +148,7 @@ The driver runs the benchmarks against the services.
 | Field | Default | Description |
 | --- | --- | --- |
 | `container` | `python:3.12` | Image the driver runs in. |
-| `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. |
+| `gym_install` | `null` | `repo` (default `https://github.com/NVIDIA-NeMo/gym`) and `ref` (required; a git tag or commit). When set, the driver installs Gym from that checkout into a fresh virtual environment, with `uv`, before running. When unset, the image must already contain Gym. The install includes the `ray` extra, which `gym` needs to start a server that declares `ray_enabled = True`. |
 | `policy_model` | `null` | Name of a service to use as the policy model. See [Policy wiring](#policy-wiring). |
 | `policy_host` | `localhost` | Host used in the injected `policy_base_url`. Use an address routable from elsewhere when an agent runs remotely, for example `${oc.env:HEAD_NODE_IP}`, which is resolved when the driver runs. |
 | `policy_model_type` | `openai_model` | The `responses_api_models` asset passed to `gym eval run` as `--model-type`. Set it to `""` to pass none, for a benchmark whose own config already declares a complete policy model. |

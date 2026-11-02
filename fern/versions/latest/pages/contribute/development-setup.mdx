@@ -28,7 +28,10 @@ Cloning over HTTPS needs no GitHub credentials. If you have an SSH key registere
 ## Optional component dependencies
 
 Each component is an independent project with a committed `pyproject.toml` and
-`uv.lock`. Setup uses `uv sync --locked`; it never resolves missing or stale locks.
+`uv.lock`. Setup uses `uv sync --locked --inexact`; stale committed locks fail setup.
+Use uv 0.13.4 or newer, which includes the corrected certificate trust store.
+Custom components and new scaffolds without a lock retain dependency resolution
+from their `pyproject.toml` or `requirements.txt`.
 Select optional extras per component in the environment configuration (paths are
 `<server_type>/<component>`):
 
@@ -38,10 +41,30 @@ component_extras:
   responses_api_agents/haystack_agent: [example-tools]
 ```
 
-Only the named component receives these extras. Unselected extras are removed by
-normal sync; use the same selection when manually running `uv sync --locked`.
-Parent OpenAI/Ray/telemetry constraints are verified after sync. If they conflict
-with a lock, update and commit the lock rather than using an unlocked fallback.
+Only the named component receives these extras. Setup preserves additional packages
+already installed in the environment. To remove them, recreate the component venv
+or run an exact `uv sync --locked` with the selected extras.
+
+Parent OpenAI, Ray, provider, and telemetry requirements are verified after sync.
+When the committed lock cannot satisfy the parent's installed requirements, setup
+resolves the component with those inherited requirements and rechecks the result.
+This compatibility path leaves the committed lock unchanged and reuses the
+compatible environment on later starts while the lock and parent contract match.
+Sync failures, inaccessible sources, and stale locks do not trigger this path.
+
+`UV_INDEX_URL`, `UV_EXTRA_INDEX_URL`, `UV_DEFAULT_INDEX`, and `UV_INDEX` are supported:
+setup validates and exports the committed lock, then installs its pinned versions
+through the configured indexes. Mirror users must provide the locked distributions.
+
+After changing root dependencies or resolver policy, update all managed locks:
+
+```bash
+python scripts/component_locks.py --update
+python scripts/component_locks.py
+```
+
+Component exceptions to the root uv policy are recorded in
+`scripts/component-lock-policy.json`. CI checks every lock on Linux and macOS.
 
 ## Development Commands
 

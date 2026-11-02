@@ -105,6 +105,6 @@ pytest tests/unit_tests/telemetry/ -x
 ```
 
 The load-bearing test is `test_propagation.py`: two Gym apps, an in-memory span exporter,
-one request through `server_utils.request()`, asserting a single trace id and a correct
+one request through `nemo_gym.client.http_client.request()`, asserting a single trace id and a correct
 parent/child edge across the boundary. If you change one thing about this module, make
 sure that test still fails when propagation breaks.

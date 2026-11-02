@@ -12,7 +12,7 @@ import subprocess
 from dataclasses import replace
 from pathlib import Path
 
-from nemo_gym.tasks.harbor.build_compose import compose_build_env, main_build_settings, validate_task_compose
+from nemo_gym.tasks.harbor.build_compose import compose_build_env, service_build_settings, validate_task_compose
 from nemo_gym.tasks.harbor.build_plan import BuildPlanEntry, plan_builds
 from nemo_gym.tasks.harbor.build_tools import ImageBuilder
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION
@@ -68,11 +68,14 @@ UBUNTU_RECORD = {
 }
 
 
-def write_base_record(folder: Path, image: str = "ubuntu:24.04") -> None:
-    """Record a base image's configuration next to the task folders, as prepare does before planning builds."""
+def write_base_record(folder: Path, image: str = "ubuntu:24.04", *, inputs_digest: str | None = None) -> None:
+    """Record a base image's configuration next to the task folders, as prepare does before planning builds; with
+    ``inputs_digest``, the record of a built image, as the build writes it."""
     path = folder / IMAGE_CONFIGS_FILE
     recorded = json.loads(path.read_text()) if path.is_file() else {}
     recorded[image] = {**UBUNTU_RECORD, "image": image}
+    if inputs_digest is not None:
+        recorded[image]["inputs_digest"] = inputs_digest
     path.write_text(json.dumps(recorded))
 
 
@@ -151,13 +154,15 @@ def harbor_hash(context: Path) -> str:
     return environment_content_hash(context)
 
 
-def task_inputs_digest(task: Path, *, repository: str | None = None, platform: str | None = None) -> str:
-    """The inputs digest prepare records for ``task``'s build context: the plan entry settled as a builder for
-    ``repository`` and ``platform`` settles it."""
+def task_inputs_digest(
+    task: Path, *, service: str = "main", repository: str | None = None, platform: str | None = None
+) -> str:
+    """The inputs digest prepare records for ``service`` of ``task``'s build context: the plan entry settled as a
+    builder for ``repository`` and ``platform`` settles it."""
     from nemo_gym.tasks.harbor.build_plan import DEFAULT_PLATFORM
     from nemo_gym.tasks.harbor.build_records import build_inputs_digest, settle_entry
 
-    (entry,) = plan_builds(task)
+    entry = next(entry for entry in plan_builds(task) if entry.service == service)
     return build_inputs_digest(settle_entry(entry, repository=repository, platform=platform or DEFAULT_PLATFORM))
 
 
@@ -168,12 +173,19 @@ def tagged_buildah(tmp_path: Path, **kwargs) -> tuple[ImageBuilder, FakeTool]:
     return builder, tool
 
 
+def main_record(image: str, tasks: list[str], tool: str, pushed: bool) -> dict:
+    """A ``built-images.json`` entry of ``main`` alone: the top-level keys older readers use plus ``services``, each
+    service with its own ``tool`` and ``pushed``."""
+    service = {"image": image, "tool": tool, "pushed": pushed}
+    return {"image": image, "tasks": tasks, "tool": tool, "pushed": pushed, "services": {"main": service}}
+
+
 def settled(entry: BuildPlanEntry, image: str = "hb__x") -> BuildPlanEntry:
     """``entry`` with ``main``'s build section applied, as ``ImageBuilder.build`` applies it once the task's Compose
     file is checked and before the build command."""
     env = compose_build_env(entry, image, None)
     document = validate_task_compose(entry.context, env, tasks=entry.tasks)
-    return replace(entry, **main_build_settings(entry, document, env))
+    return replace(entry, **service_build_settings(entry, document, env))
 
 
 HEREDOC_DOCKERFILE = "FROM docker.io/library/alpine:3.20\nCOPY tools/ /opt/tools/\nRUN <<EOF\necho hello > /x\nEOF\n"

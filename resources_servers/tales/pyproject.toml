@@ -7,14 +7,17 @@ version = "0.0.0"
 requires-python = ">=3.13.14"
 dependencies = [
     "nemo-gym[dev]",
-    "tale-suite @ git+https://github.com/microsoft/tale-suite.git@train_test_splits",
+    "tale-suite@ git+https://github.com/microsoft/tale-suite.git@ef349ba7cfdebf339e9aedcd09d89d6c917f86e5",
 ]
 
 [tool.uv]
 package = false
 constraint-dependencies = [
-    "grpcio>=1.81.0rc1",
+    "grpcio>=1.84.1,!=1.85.0rc1",
+    "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 override-dependencies = [
     "spacy>=3.8.13",
@@ -32,7 +35,6 @@ exclude-dependencies = [
     "fasttext-wheel",
     "alembic",
     "blinker",
-    "cryptography",
     "flask",
     "flask-cors",
     "graphene",
@@ -47,11 +49,14 @@ exclude-dependencies = [
     "waitress",
     "diskcache",
 ]
+required-version = ">=0.13.4"
 
 [tool.uv.sources]
-"nemo-lens" = { git = "https://github.com/NVIDIA-NeMo/Lens.git", rev = "4d045c03186b90afdc815db46b671f6a21bc7e98" }
 "nemo-gym" = { path = "../..", editable = true }
 
+[tool.uv.sources.nemo-lens]
+git = "https://github.com/NVIDIA-NeMo/Lens.git"
+rev = "4d045c03186b90afdc815db46b671f6a21bc7e98"
 [project.optional-dependencies]
 telemetry = ["nemo-gym[telemetry]"]
 

@@ -28,17 +28,18 @@ def load_preparer(reference: str):
 
 
 def main() -> None:
+    """Run the selected preparer with arguments read from a private file."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", required=True)
     parser.add_argument("--module", required=True)
     parser.add_argument("--action", choices=("inspect", "prepare"), required=True)
     parser.add_argument("--expected", type=Path, required=True)
-    parser.add_argument("--args", required=True)
+    parser.add_argument("--args-file", type=Path, required=True)
     parser.add_argument("--result", type=Path, required=True)
     args = parser.parse_args()
     sys.path.insert(0, args.root)
     module = load_preparer(args.module)
-    options = json.loads(args.args)
+    options = json.loads(args.args_file.read_text())
     if args.action == "inspect":
         current = False
         if options["check_cache"] and args.expected.exists():

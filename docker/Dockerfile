@@ -104,7 +104,7 @@ apt-get clean
 rm -rf /var/lib/apt/lists/*
 EOF
 
-ARG UV_VERSION=0.11.29
+ARG UV_VERSION=0.13.4
 ARG PYTHON_VERSION=3.13.14
 ARG TARGETARCH
 ENV UV_PYTHON_INSTALL_DIR=/opt/uv/python
@@ -113,12 +113,12 @@ RUN case "${TARGETARCH}" in \
         amd64) \
             uv_arch="x86_64"; \
 # pragma: allowlist nextline secret
-            uv_sha256="04f8b82f5d47f0512dcd32c67a4a6f16a0ea27c81537c338fd0ad6b23cebe829"; \
+            uv_sha256="2b428396f12572d4429cf210ca234dd599a33b3af0958a4d5ed569d63e3f344f"; \
             ;; \
         arm64) \
             uv_arch="aarch64"; \
 # pragma: allowlist nextline secret
-            uv_sha256="94500fb064ae3c971a873cba64d94694c50677e0a4dbf78735c80509e7429919"; \
+            uv_sha256="1ae72b4718729e2ccc4f1ae2c6d1e531ca8467800e0546e9130b3886023a60ab"; \
             ;; \
         *) \
             echo "Unsupported TARGETARCH for uv: ${TARGETARCH}" >&2; \

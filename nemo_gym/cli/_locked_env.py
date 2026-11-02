@@ -5,12 +5,14 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import importlib.metadata
 import json
 import os
 import shutil
 import subprocess
 import sys
+import tarfile
 import tomllib
 from pathlib import Path
 from tempfile import TemporaryDirectory
@@ -18,6 +20,9 @@ from urllib.parse import parse_qs, unquote, urlsplit
 
 from packaging.requirements import Requirement
 from packaging.utils import canonicalize_name
+
+
+INDEX_VARIABLES = {"UV_INDEX", "UV_DEFAULT_INDEX", "UV_INDEX_URL", "UV_EXTRA_INDEX_URL"}
 
 
 def _source_matches(requirement_url: str, direct_url: dict) -> bool:
@@ -142,8 +147,18 @@ def _wheel_project(project: Path, venv: Path) -> Path:
             continue
         target = destination / child.name
         if child.name in ("pyproject.toml", "uv.lock"):
-            if not target.is_file() or target.read_bytes() != child.read_bytes():
-                shutil.copyfile(child, target)
+            content = child.read_bytes()
+            if child.name == "uv.lock" and content.startswith(
+                b"# Stored in nemo_gym/resources/component-locks.tar.xz"
+            ):
+                archive_path = install_root / "nemo_gym/resources/component-locks.tar.xz"
+                with tarfile.open(archive_path, "r:xz") as archive:
+                    archived = archive.extractfile(child.relative_to(install_root).as_posix())
+                    if archived is None:
+                        raise RuntimeError(f"The installed Gym wheel is missing the lock for {project}")
+                    content = archived.read()
+            if not target.is_file() or target.read_bytes() != content:
+                target.write_bytes(content)
         elif not target.exists():
             target.symlink_to(child, target_is_directory=child.is_dir())
     return destination
@@ -187,6 +202,49 @@ def _install_parent_compatible(
         subprocess.run(command, cwd=project, env=env, check=True)
 
 
+def _sync_from_mirror(command: list[str], project: Path, venv: Path, env: dict[str, str]) -> None:
+    """Install locked versions through the caller's configured package indexes."""
+    lock_env = {key: value for key, value in env.items() if key not in INDEX_VARIABLES}
+    with TemporaryDirectory(prefix="gym-mirror-") as directory:
+        requirements = Path(directory) / "requirements.txt"
+        export = [value for value in command[2:] if value != "--inexact"]
+        export[export.index("--python") : export.index("--python") + 2] = []
+        subprocess.run(
+            ["uv", "export", *export, "--output-file", str(requirements)],
+            env=lock_env,
+            cwd=project,
+            check=True,
+            stdout=subprocess.DEVNULL,
+        )
+        python = command[command.index("--python") + 1]
+        subprocess.run(
+            ["uv", "venv", "--allow-existing", "--seed", "--python", python, str(venv)], env=env, check=True
+        )
+        subprocess.run(
+            ["uv", "pip", "install", "--python", str(venv / "bin/python"), "--no-deps", "-r", str(requirements)],
+            env=env,
+            cwd=project,
+            check=True,
+        )
+
+
+def _compatibility_identity(project: Path, requirements: list[str], constraints: list[str], extras: tuple) -> str:
+    """Fingerprint the lock and inherited contract used for compatibility setup."""
+    values = [requirements, constraints, extras, str(project)]
+    digest = hashlib.sha256(json.dumps(values).encode())
+    for name in ("pyproject.toml", "uv.lock", "uv.toml"):
+        path = project / name
+        if path.is_file():
+            digest.update(path.read_bytes())
+    metadata = tomllib.loads((project / "pyproject.toml").read_text())
+    source = metadata.get("tool", {}).get("uv", {}).get("sources", {}).get("nemo-gym", {}).get("path")
+    if source:
+        path = project / source / "pyproject.toml"
+        if path.is_file():
+            digest.update(path.read_bytes())
+    return digest.hexdigest()
+
+
 def sync_environment(
     project: Path,
     venv: Path,
@@ -210,21 +268,35 @@ def sync_environment(
     env = os.environ.copy()
     env["UV_PROJECT_ENVIRONMENT"] = str(venv)
     # An enclosing training workspace or an inherited active venv must not redirect sync.
-    command = ["uv", "sync", "--locked", "--project", str(project), "--python", python, "--no-dev"]
+    command = ["uv", "sync", "--locked", "--project", str(project), "--python", python, "--no-dev", "--inexact"]
     selected_extras = list(extras)
-    if any(canonicalize_name(Requirement(value).name) == "nemo-lens" for value in requirements):
+    if "telemetry" in metadata.get("project", {}).get("optional-dependencies", {}) and any(
+        canonicalize_name(Requirement(value).name) == "nemo-lens" for value in requirements
+    ):
         selected_extras.append("telemetry")
     selected_extras = tuple(dict.fromkeys(selected_extras))
     for extra in selected_extras:
         command.extend(["--extra", extra])
     if verbose:
         command.append("--verbose")
-    subprocess.run(command, env=env, check=True)
     check = [str(venv / "bin/python"), "-I", str(Path(__file__).resolve()), "--check"]
     for value in requirements:
         check.extend(["--requirement", value])
     for value in constraints:
         check.extend(["--constraint", value])
+    marker = venv / ".nemo-gym-parent.json"
+    identity = _compatibility_identity(project, requirements, constraints, selected_extras)
+    if marker.is_file() and marker.read_text() == identity:
+        readiness = subprocess.run(check, check=False)
+        if readiness.returncode == 0:
+            lock_env = {key: value for key, value in env.items() if key not in INDEX_VARIABLES}
+            subprocess.run(["uv", "lock", "--check", "--project", str(project)], env=lock_env, check=True)
+            return
+    marker.unlink(missing_ok=True)
+    if any(env.get(key) for key in INDEX_VARIABLES):
+        _sync_from_mirror(command, project, venv, env)
+    else:
+        subprocess.run(command, env=env, check=True)
     try:
         subprocess.run(check, check=True)
     except subprocess.CalledProcessError as error:
@@ -235,9 +307,11 @@ def sync_environment(
         print("Resolving component dependencies with inherited parent requirements.", file=sys.stderr)
         _install_parent_compatible(project, venv, requirements, constraints, selected_extras, env, verbose)
         subprocess.run(check, check=True)
+        marker.write_text(identity)
 
 
 def main() -> None:
+    """Set up a component or report the inherited contract check result."""
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--project", type=Path)
     parser.add_argument("--venv", type=Path)
@@ -267,11 +341,14 @@ def main() -> None:
         print(
             f"Locked environment command failed: {error}\n"
             "See the command output above for dependency access, cache, build, or lock errors; "
-            "setup will not fall back to an unlocked install.",
+            "only an inherited parent mismatch permits compatibility resolution.",
             file=sys.stderr,
         )
         raise SystemExit(1) from error
     except RuntimeError as error:
+        if args.check:
+            print(f"Component requires parent compatibility resolution: {error}", file=sys.stderr)
+            raise SystemExit(2) from error
         print(
             f"Locked environment setup failed: {error}\n"
             "Parent mismatches use compatibility resolution during component setup; "

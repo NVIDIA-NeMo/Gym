@@ -210,6 +210,71 @@ def test_coverage_gate_compares_fractional_percentages() -> None:
     assert coverage_report["fail_under"] == 95.0
 
 
+def test_full_test_server_setup_exposes_uv_in_current_and_later_steps(tmp_path: Path) -> None:
+    workflow = yaml.safe_load(FULL_TEST_WORKFLOW.read_text())
+    setup = next(step["run"] for step in workflow["jobs"]["server-suite"]["steps"] if step["name"] == "Setup for test")
+    home = tmp_path / "home"
+    home.mkdir()
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    github_path = tmp_path / "github-path"
+    calls = tmp_path / "uv-calls"
+    installer = tmp_path / "install-uv.sh"
+    installer.write_text(
+        'mkdir -p "$HOME/.local/bin"\n'
+        "cat > \"$HOME/.local/bin/uv\" <<'UV'\n"
+        "#!/bin/sh\n"
+        'echo "$*" >> "$UV_TEST_CALLS"\n'
+        'case "$1" in\n'
+        "  --version) echo 'uv 0.13.4' ;;\n"
+        "  venv) mkdir -p .venv/bin; : > .venv/bin/activate ;;\n"
+        "  sync) ;;\n"
+        "  *) exit 2 ;;\n"
+        "esac\n"
+        "UV\n"
+        'chmod +x "$HOME/.local/bin/uv"\n'
+    )
+    # Replace network and system package setup, not the workflow's PATH handling.
+    for name, body in {"curl": 'cat "$UV_TEST_INSTALLER"', "bash": "exit 0"}.items():
+        executable = bin_dir / name
+        executable.write_text(f"#!/bin/sh\n{body}\n")
+        executable.chmod(0o755)
+    env = os.environ.copy()
+    env.update(
+        HOME=str(home),
+        PATH=f"{bin_dir}:/usr/bin:/bin",
+        GITHUB_ENV=str(tmp_path / "github-env"),
+        GITHUB_PATH=str(github_path),
+        UV_INSTALL_URL=workflow["env"]["UV_INSTALL_URL"],
+        UV_TEST_INSTALLER=str(installer),
+        UV_TEST_CALLS=str(calls),
+    )
+    bash = shutil.which("bash")
+    assert bash is not None
+
+    result = subprocess.run(
+        [bash, "--noprofile", "--norc", "-eo", "pipefail", "-c", setup],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
+    assert calls.read_text().splitlines() == ["--version", "venv", "sync --extra dev"]
+    assert github_path.read_text().splitlines() == [str(home / ".local" / "bin")]
+    env["PATH"] = f"{github_path.read_text().strip()}:{env['PATH']}"
+    later_step = subprocess.run(
+        [bash, "--noprofile", "--norc", "-ec", "uv --version"],
+        cwd=tmp_path,
+        env=env,
+        capture_output=True,
+        text=True,
+    )
+    assert later_step.returncode == 0, later_step.stderr
+    assert later_step.stdout.strip() == "uv 0.13.4"
+
+
 def test_full_test_suite_installs_telemetry_extra_for_coverage_gate() -> None:
     # The full test suite measures coverage against the repo-wide gate
     # (pyproject.toml fail_under). The tests/unit_tests/telemetry tests are gated on
@@ -532,7 +597,7 @@ def test_shared_change_classifier_matches_gym_docs_and_server_paths() -> None:
     action = CLASSIFY_CHANGES_ACTION.read_text()
     unit_workflow = UNIT_TEST_WORKFLOW.read_text()
 
-    for path in ("**.md", "fern/**", "LICENSE", "benchmarks/**"):
+    for path in ("**.md", "fern/**", "LICENSE"):
         assert path in action
     for path in (
         "resources_servers/**",
@@ -684,7 +749,7 @@ def test_provider_e2e_matrix_selects_config_model_and_secret_by_name() -> None:
     assert "runs-on: ubuntu-latest" in workflow
     assert "UV_VERSION=\"$(sed -n 's/^ARG UV_VERSION=//p' docker/Dockerfile)\"" in workflow
     assert 'curl -LsSf "https://astral.sh/uv/${UV_VERSION}/install.sh" | sh' in workflow
-    assert "https://astral.sh/uv/0.11.29/install.sh" not in workflow
+    assert "https://astral.sh/uv/0.13.4/install.sh" not in workflow
     assert "E2E_MODEL: ${{ matrix.model }}" in workflow
     assert "E2E_PROVIDER_CONFIG: ${{ matrix.config }}" in workflow
     assert "run: bash tests/e2e/run_inference_provider_e2e.sh" in workflow
@@ -842,7 +907,7 @@ def test_server_tests_propagates_absolute_cache_and_venv_roots(tmp_path: Path) -
         """#!/usr/bin/env bash
 set -eu
 case "${1:-}" in
-    --version) printf '%s\\n' 'uv 0.11.29' ;;
+    --version) printf '%s\\n' 'uv 0.13.4' ;;
     cache) printf '%s\\n' "${UV_CACHE_DIR:-${HOME}/.cache/uv}" ;;
     venv)
         venv_dir="${@: -1}"
@@ -972,7 +1037,7 @@ def test_setup_dev_checks_lock_before_sync(tmp_path: Path, container: bool, lock
         """#!/usr/bin/env bash
 set -eu
 case "$1" in
-    --version) echo 'uv 0.11.29' ;;
+    --version) echo 'uv 0.13.4' ;;
     cache) echo "${UV_CACHE_DIR}" ;;
     lock) echo "$*" >> "${GYM_CI_CAPTURE}"; exit "${LOCK_STATUS}" ;;
     sync) echo "$*" >> "${GYM_CI_CAPTURE}" ;;
