@@ -31,9 +31,9 @@ from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client
 from nemo_gym.client.server_client import ServerClient
+from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.server_runtime._checkpoint import coordination
 from nemo_gym.server_runtime.runtime_dir import RUNTIME_ROOT
-from nemo_gym.server_utils import BaseServerConfig
 
 
 HERE = Path(__file__).resolve().parent

@@ -20,8 +20,7 @@ from fastapi import HTTPException
 from nemo_gym.agent_utils import sandbox_session as sandbox_session_module
 from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
 from nemo_gym.client import ServerClient
-from nemo_gym.sandbox import AsyncSandbox, SandboxSpec
-from nemo_gym.sandbox.providers.local.provider import LocalProvider
+from nemo_gym.sandbox import AsyncSandbox, LocalProvider, SandboxSpec
 from responses_api_agents.openclaw_agent.app import OpenClawAgent, OpenClawAgentConfig
 from responses_api_agents.openclaw_agent.sandbox import OpenClawSandboxSession
 
