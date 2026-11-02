@@ -48,17 +48,25 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 | Family | Rules | Applied to | Semantics |
 | --- | --- | --- | --- |
 | `domains` | 220 | every URL (requested, returned, redirected, wrapped) and `site:` operands | exact hostname or any subdomain, after IDNA and lower-casing |
-| `url_prefixes` | 66 | every URL | prefix of the URL with the scheme and a leading `www.` removed, ignoring case |
-| `serp_url_patterns` | 12 | every URL | regexes anchored at the start of the scheme-less URL; `www.` is kept, the patterns allow subdomains themselves |
+| `url_prefixes` | 66 | every URL | prefix of the URL with the scheme and a leading `www.` removed, ignoring case; tried on the URL as written and on its canonical form |
+| `serp_url_patterns` | 12 | every URL | regexes anchored at the start of the scheme-less URL; `www.` is kept, the patterns allow subdomains themselves; tried on the URL as written and on its canonical form |
 | `url_patterns` | 22 | queries, URLs, result titles and snippets, fetched titles and Markdown | case-insensitive regexes |
 | `patterns_case_sensitive` | 4 | the same | regexes as written (`\bHLE\b ...`) |
 | `answer_title_patterns` | 5 | result titles | case-insensitive; also tried on the title with each trailing ` \| Site`, ` - Site`, ` – Site`, ` · Site`, ` » Site`, ` :: Site` segment removed |
 | `answer_title_allow_hosts` | 7 | result titles | hosts (and subdomains) exempt from `answer_title_patterns` only; every other family still applies |
 
+The canonical form is the URL as a fetcher resolves it: the host IDNA-encoded, lower-cased and without a
+trailing dot, userinfo and a default port (`:443`, `:80`) dropped, `.` and `..` path segments resolved, the
+fragment dropped. So `arxiv.org:443/abs/...`, `arxiv.org./abs/...` and `arxiv.org/x/../abs/...` all match the
+prefix `arxiv.org/abs/...`.
+
 Beyond the families, the protocol's own refusals:
 
 - **Queries** are refused when they match `url_patterns` or `patterns_case_sensitive`, when a `site:`
-  operand names a blocked domain (scheme, `www.` and path stripped before the check), or when they
+  operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
+  site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; one leading dot, the
+  scheme, `www.` and any path are stripped before the check; an operand that is not a valid hostname is
+  refused as `malformed_url` rather than skipped), or when they
   repeat a long verbatim span of the question. Upstream states no span length; this server refuses a
   query that contains **8 consecutive words of the question** (`verbatim_span_words`, default 8), where
   words are case-folded maximal runs of word characters, so punctuation, case and whitespace differences
@@ -72,12 +80,22 @@ Beyond the families, the protocol's own refusals:
   `require_seeded_question: false` to serve such sessions without the span rule instead. A seeded
   session cannot be re-seeded with another question (HTTP 409; a retry with the same question is
   served). The words of a blocked span are never logged, only their count.
-- **Fetch URLs** must be `http(s)` without credentials. The URL, its percent-decoded forms (up to four
-  rounds, so double encoding does not help) and every URL wrapped inside any of them are checked
-  against the URL-shaped families and the text families: the path remainder of the Wayback Machine
-  (`web.archive.org/web/<timestamp>/<url>`), of `archive.org`, of `r.jina.ai` and of Google's cache
+- **Fetch URLs** must be `http(s)` URLs with a host, at most 4,096 characters long, with no userinfo
+  (no `@` anywhere in the authority, even an empty `https://@host`) and no backslash, whitespace or
+  control character anywhere: those are the characters on which WHATWG fetchers and Python's
+  `urlsplit` disagree about where the host ends (`https://blocked.example\.other.example/` is
+  `blocked.example` to a browser). Anything else is refused as `malformed_url`. The URL, its
+  percent-decoded forms and every URL wrapped inside any of them are then expanded breadth first and
+  each is checked against the URL-shaped families and the text families: the path remainder of the
+  Wayback Machine and every other `*.archive.org` host (`web.archive.org/web/<timestamp>/<url>`,
+  `wayback.archive.org/...`), of `r.jina.ai` and of Google's cache
   (`webcache.googleusercontent.com/search?q=cache:<url>`); every query-string value that names a host
-  (`?url=`, `?u=`, `?q=`, ...), with or without a scheme; and any `https?://` found inside the URL.
+  (`?url=`, `?u=`, `?q=`, ...), with or without a scheme; and any `http(s):/` found inside the URL, each
+  taken up to the next one. A wrapped `https:/host`, `https:///host` or `https:host` is read as
+  `https://host`, and a wrapped or decoded URL is also read as a WHATWG fetcher reads it (backslash as
+  `/`, tab and newlines deleted). The expansion checks the original and four further rounds of decoding
+  and unwrapping, and at most 64 distinct candidates; a URL that still has unexplored candidates when
+  either bound is reached is refused as `malformed_url` instead of being certified on a partial check.
   The other wrappers upstream names (`archive.ph`, `archive.today`, `archive.is`, `archive.md`,
   `archive.li`, `archive.vn`, `archive.fo`, `translate.goog`, `translate.google.com`, `r.jina.ai`,
   `12ft.io`, `corsproxy.io`, `allorigins.win`, `codetabs.com`, `thingproxy.freeboard.io`,
@@ -163,4 +181,7 @@ Model-free; the Tavily transport is stubbed. Each rule family has one test built
 the upstream blocklist, plus the two query refusals, the fail-closed refusal of a cookie-less
 `POST /web_search` after a seed, the 409 on re-seeding a session with another question, wrapper decoding, the cap and marker, the exact two-tool list over a
 real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and exhaustion of the key
-pool, malformed provider bodies (a tool error, not an HTTP 500) and the blocklist digest pin.
+pool, malformed provider bodies (a tool error, not an HTTP 500) and the blocklist digest pin. A table of URL
+spellings from review (expansion overflow, a fourth decoded form, backslash, whitespace and userinfo,
+canonical-form prefixes, archive.org variants) must be refused before the fetch while ordinary redirect and
+query URLs stay allowed; `site:` operands are parsed to hostnames; and long URLs are decided within a second.

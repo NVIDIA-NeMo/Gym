@@ -110,23 +110,44 @@ TAVILY_RETRY_CODES = frozenset({408, 429, 500, 502, 503, 504})
 
 _SCHEME_RE = re.compile(r"^[a-z][a-z0-9+.-]*://", re.IGNORECASE)
 _WWW_RE = re.compile(r"^www\.", re.IGNORECASE)
-# A lookahead, so a URL nested inside another (``https://reader.example/https://blocked.example``) is found
-# at its own position rather than swallowed by the outer match.
-_EMBEDDED_URL_RE = re.compile(r"(?=(https?://[^\s\"'<>]+))", re.IGNORECASE)
+# Characters on which WHATWG fetchers and ``urllib.parse`` disagree about where a URL's parts are: a
+# backslash is a path separator to WHATWG and part of the host to ``urlsplit`` (``https://a.example\.b.example``),
+# and whitespace and control characters are removed or rejected by one and kept by the other.
+_AMBIGUOUS_URL_CHAR_RE = re.compile(r"[\\\s\x00-\x1f\x7f-\x9f]")
+# Tab and newlines, which WHATWG parsers delete wherever they appear in a URL.
+_WHATWG_REMOVED_RE = re.compile(r"[\t\n\r]")
+# Where an embedded URL starts, and where it ends: at a delimiter or at the start of the next embedded URL,
+# so a URL nested inside another (``https://reader.example/https://blocked.example``) is found at its own
+# position and the substrings taken from one URL never add up to more than its length.
+_EMBEDDED_URL_START_RE = re.compile(r"https?:/", re.IGNORECASE)
+_EMBEDDED_URL_END_RE = re.compile(r"[\s\"'<>]|https?:/", re.IGNORECASE)
+# ``https:/host``, ``https:///host`` and ``https:host``: WHATWG parsers (and archive.org) read all of them as
+# ``https://host``.
+_LOOSE_SCHEME_RE = re.compile(r"^(https?):/*", re.IGNORECASE)
 # A query value or path remainder that names a host, with or without a scheme: ``hf.co/datasets/x``.
 _BARE_URL_RE = re.compile(r"^(?:https?:)?(?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}(?:[:/?#]|$)", re.IGNORECASE)
-_SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"']?([^\s\"']+)", re.IGNORECASE)
+# The operand is host characters only, so ``(site:a.org OR site:b.org)``, ``site:a.org|site:b.org`` and
+# ``site:b.org,`` yield the bare hosts; one leading dot (``site:.b.org``) is dropped.
+_SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re.IGNORECASE)
 _WAYBACK_PATH_RE = re.compile(r"^/web/[^/]*/(.+)$", re.IGNORECASE | re.DOTALL)
 _GOOGLE_CACHE_RE = re.compile(r"cache:(?:[A-Za-z0-9_-]+:)?(.+)$", re.DOTALL)
 _WORD_RE = re.compile(r"\w+")
 _DATA_URI_RE = re.compile(r"data:[a-z]+/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+", re.IGNORECASE)
 _TITLE_SEPARATOR_RE = re.compile(r"\s+(?:\||-|–|—|·|•|»|::)\s+")
 _MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
-# Hosts whose job is to serve another page: their path remainder is treated as the wrapped URL. Hosts the
-# blocklist names outright (archive.ph and friends, r.jina.ai, translate.goog, translate.google.com,
-# 12ft.io, corsproxy.io, allorigins, codetabs, thingproxy, whateverorigin) are refused by the ``domains``
-# family before any unwrapping is needed.
-WRAPPER_HOSTS = frozenset({"web.archive.org", "archive.org", "webcache.googleusercontent.com", "r.jina.ai"})
+# Hosts whose job is to serve another page: their path remainder is treated as the wrapped URL. Every host
+# under ``WRAPPER_DOMAINS`` counts (``web.archive.org``, ``wayback.archive.org``, ...). Hosts the blocklist
+# names outright (archive.ph and friends, r.jina.ai, translate.goog, translate.google.com, 12ft.io,
+# corsproxy.io, allorigins, codetabs, thingproxy, whateverorigin) are refused by the ``domains`` family
+# before any unwrapping is needed.
+WRAPPER_HOSTS = frozenset({"webcache.googleusercontent.com", "r.jina.ai"})
+WRAPPER_DOMAINS = ("archive.org",)
+DEFAULT_PORTS = {"http": 80, "https": 443}
+# A longer URL is refused as ``malformed_url`` before any parsing.
+MAX_URL_CHARS = 4096
+# The URL, its percent-decoded forms and the URLs wrapped in them are expanded breadth first for the original
+# plus this many rounds and up to this many distinct candidates; a URL that still has unexplored candidates
+# when either bound is reached is refused as ``malformed_url`` rather than certified on a partial check.
 MAX_URL_CANDIDATES = 64
 MAX_URL_DECODE_ROUNDS = 4
 MAX_SESSION_QUESTIONS = 10_000
@@ -145,6 +166,59 @@ def schemeless(url: str) -> str:
 def prefix_form(url: str) -> str:
     """The URL as ``url_prefixes`` see it: scheme and leading ``www.`` removed, lower-cased."""
     return _WWW_RE.sub("", schemeless(url), count=1).lower()
+
+
+def remove_dot_segments(path: str) -> str:
+    """RFC 3986 section 5.2.4 on an absolute path: ``.`` and ``..`` segments resolved, ``//`` runs kept."""
+    segments = path.split("/")
+    out: List[str] = []
+    for i, segment in enumerate(segments[1:], 1):
+        if segment in (".", ".."):
+            if segment == ".." and out:
+                out.pop()
+            if i == len(segments) - 1:
+                out.append("")
+        else:
+            out.append(segment)
+    return "/" + "/".join(out)
+
+
+def canonical_schemeless(url: str) -> Optional[str]:
+    """The scheme-less URL as a fetcher resolves it: IDNA, lower-cased host without a trailing dot, userinfo
+    and a default port dropped, dot segments resolved, fragment dropped. None when it has no parseable host."""
+    try:
+        parts = urlsplit(url)
+        if not parts.hostname:
+            return None
+        host = normalize_hostname(parts.hostname)
+        port = parts.port
+    except (ValueError, UnicodeError):
+        return None
+    netloc = host if port in (None, DEFAULT_PORTS.get(parts.scheme.lower())) else f"{host}:{port}"
+    return netloc + remove_dot_segments(parts.path or "/") + (f"?{parts.query}" if parts.query else "")
+
+
+def url_shape_problem(url: str) -> Optional[str]:
+    """Why a URL is refused before any expansion (``malformed_url``), else None."""
+    if len(url) > MAX_URL_CHARS:
+        return f"URL of at most {MAX_URL_CHARS} characters"
+    if _AMBIGUOUS_URL_CHAR_RE.search(url):
+        return "URL without backslashes, whitespace or control characters"
+    try:
+        parts = urlsplit(url)
+        if parts.scheme.lower() not in DEFAULT_PORTS or not parts.hostname:
+            return "http(s) URL with a host"
+        if "@" in parts.netloc:
+            return "http(s) URL without userinfo"
+        normalize_hostname(parts.hostname)
+        parts.port  # noqa: B018 - raises ValueError on a port that is not a number in range
+    except (ValueError, UnicodeError):
+        return "parseable URL"
+    return None
+
+
+class URLExpansionLimitError(ValueError):
+    """Candidate expansion stopped with candidates unexplored: the URL cannot be certified."""
 
 
 def sha256_file(path: Path) -> str:
@@ -169,7 +243,9 @@ class Block:
             "patterns_case_sensitive": f"the {self.where} matches a blocked pattern",
             "answer_title_patterns": "the page title matches an answer-key pattern",
             QUESTION_SPAN_FAMILY: f"the query repeats {self.rule} verbatim; rephrase it in your own words",
-            MALFORMED_URL_FAMILY: "the URL is not a valid http(s) URL",
+            MALFORMED_URL_FAMILY: "the site: operand is not a valid hostname"
+            if self.where == "site: operator"
+            else "the URL is not a valid http(s) URL the policy can check",
             UNSEEDED_SESSION_FAMILY: "search is served only to a rollout session seeded with its question",
         }[self.family]
         return f"Refused by the HLE web-tool policy: {reason}."
@@ -181,6 +257,7 @@ class Blocklist:
     - ``domains``: exact hostnames and all their subdomains.
     - ``url_prefixes``: prefixes of the URL after removing the scheme and a leading ``www.``, ignoring case.
     - ``serp_url_patterns``: regexes anchored at the start of the scheme-less URL of a search-engine result page.
+      Both URL families are tried on the URL as written and on its canonical form (``canonical_schemeless``).
     - ``url_patterns`` / ``patterns_case_sensitive``: regexes applied to queries, URLs, result titles and
       snippets, and fetched titles and Markdown; the first family case-insensitively, the second as written.
     - ``answer_title_patterns``: case-insensitive regexes applied only to result titles, also with trailing
@@ -245,7 +322,11 @@ class Blocklist:
         return None
 
     def _single_url_block(self, url: str, where: str) -> Optional[Block]:
-        """The URL-shaped families against one URL string, plus the text families against the string itself."""
+        """The URL-shaped families against one URL string, plus the text families against the string itself.
+
+        ``url_prefixes`` and ``serp_url_patterns`` see both the string as written and its canonical form, so
+        ``arxiv.org:443/abs/...``, ``arxiv.org./abs/...`` and ``arxiv.org/x/../abs/...`` match ``arxiv.org/abs/...``.
+        """
         try:
             parts = urlsplit(url)
             host = normalize_hostname(parts.hostname) if parts.hostname else ""
@@ -255,26 +336,33 @@ class Blocklist:
             block = self.host_block(host, url, where)
             if block is not None:
                 return block
-        form = prefix_form(url)
+        serp_forms = [schemeless(url)]
+        canonical = canonical_schemeless(url)
+        if canonical is not None and canonical != serp_forms[0]:
+            serp_forms.append(canonical)
+        prefix_forms = {_WWW_RE.sub("", form, count=1).lower() for form in serp_forms}
         for prefix in self.url_prefixes:
-            if form.startswith(prefix.lower()):
+            if any(form.startswith(prefix.lower()) for form in prefix_forms):
                 return Block("url_prefixes", prefix, url, where)
-        bare = schemeless(url)
         for pattern in self.serp_url_patterns:
-            if pattern.search(bare):
+            if any(pattern.search(form) for form in serp_forms):
                 return Block("serp_url_patterns", pattern.pattern, url, where)
         return self.text_block(url, where)
 
     def url_block(self, url: str, where: str = "URL") -> Optional[Block]:
-        """Every URL-shaped rule against the URL, its percent-decoded forms and the URLs it wraps."""
+        """Every URL-shaped rule against the URL, its percent-decoded forms and the URLs it wraps.
+
+        Fails closed: a URL whose shape fetchers could read differently, or whose expansion would need more
+        candidates or rounds than are checked, is refused as ``malformed_url``.
+        """
+        problem = url_shape_problem(url)
+        if problem is not None:
+            return Block(MALFORMED_URL_FAMILY, problem, url, where)
         try:
-            parts = urlsplit(url)
-            if parts.scheme.lower() not in {"http", "https"} or not parts.hostname or parts.username or parts.password:
-                return Block(MALFORMED_URL_FAMILY, "http(s) URL without credentials", url, where)
-            normalize_hostname(parts.hostname)
-        except (ValueError, UnicodeError):
-            return Block(MALFORMED_URL_FAMILY, "parseable URL", url, where)
-        for candidate in url_candidates(url):
+            candidates = url_candidates(url)
+        except URLExpansionLimitError as error:
+            return Block(MALFORMED_URL_FAMILY, str(error), url, where)
+        for candidate in candidates:
             block = self._single_url_block(candidate, where)
             if block is not None:
                 return block
@@ -290,7 +378,10 @@ class Blocklist:
             try:
                 host = normalize_hostname(_WWW_RE.sub("", host, count=1))
             except UnicodeError:
-                continue
+                # An operand that is no hostname cannot be checked against ``domains``: refuse, do not skip it.
+                return Block(
+                    MALFORMED_URL_FAMILY, "site: operand that is a hostname", match.group(0), "site: operator"
+                )
             block = self.host_block(host, match.group(0), "site: operator")
             if block is not None:
                 return block
@@ -314,21 +405,37 @@ def title_variants(title: str) -> List[str]:
     return variants
 
 
+def _is_wrapper_host(host: str) -> bool:
+    return host in WRAPPER_HOSTS or any(host == d or host.endswith("." + d) for d in WRAPPER_DOMAINS)
+
+
+def _embedded_urls(url: str) -> List[str]:
+    """Every ``http(s):/`` inside the URL (not at its start), each up to a delimiter or the next one: linear."""
+    found: List[str] = []
+    for match in _EMBEDDED_URL_START_RE.finditer(url):
+        if match.start() == 0:
+            continue
+        end = _EMBEDDED_URL_END_RE.search(url, match.end())
+        found.append(url[match.start() : end.start() if end else len(url)])
+    return found
+
+
 def _wrapped_urls(url: str) -> List[str]:
-    """URLs a proxy or archive wrapper carries: the path remainder of known wrappers, ``cache:`` targets and
-    every query value that names a host."""
+    """URLs a proxy or archive wrapper carries: the path remainder of known wrappers, ``cache:`` targets,
+    every query value that names a host and every URL embedded in the string."""
     found: List[str] = []
     try:
         parts = urlsplit(url)
         host = normalize_hostname(parts.hostname) if parts.hostname else ""
     except (ValueError, UnicodeError):
         return found
-    if host in WRAPPER_HOSTS:
+    if _is_wrapper_host(host):
         remainder = parts.path
         wayback = _WAYBACK_PATH_RE.match(remainder)
         if wayback:
             remainder = wayback.group(1)
-        remainder = remainder.lstrip("/")
+        if not _LOOSE_SCHEME_RE.match(remainder):
+            remainder = remainder.lstrip("/")
         if parts.query and host != "webcache.googleusercontent.com":
             remainder += "?" + parts.query
         if remainder:
@@ -338,10 +445,11 @@ def _wrapped_urls(url: str) -> List[str]:
         if cache:
             found.append(cache.group(1))
         found.append(value)
-    found.extend(match.group(1) for match in _EMBEDDED_URL_RE.finditer(url) if match.start() > 0)
+    found.extend(_embedded_urls(url))
     urls: List[str] = []
     for item in found:
-        item = item.strip()
+        # ``https:/host`` and ``https:///host`` reach the same page as ``https://host``.
+        item = _LOOSE_SCHEME_RE.sub(lambda m: m.group(1) + "://", item.strip(), count=1)
         if not item:
             continue
         if _SCHEME_RE.match(item):
@@ -352,23 +460,33 @@ def _wrapped_urls(url: str) -> List[str]:
 
 
 def url_candidates(url: str) -> List[str]:
-    """The URL, its percent-decoded forms (several rounds) and every URL wrapped inside any of them."""
+    """The URL, its percent-decoded forms and every URL wrapped inside any of them, breadth first.
+
+    A wrapped or decoded URL is also read the way a WHATWG fetcher reads it (backslashes as ``/``, tabs and
+    newlines deleted). Raises ``URLExpansionLimitError`` rather than return a partial list: when more than
+    ``MAX_URL_CANDIDATES`` distinct candidates exist, or candidates remain after the original and
+    ``MAX_URL_DECODE_ROUNDS`` rounds.
+    """
     seen: List[str] = []
+    seen_set: Set[str] = set()
     frontier = [url]
-    for _ in range(MAX_URL_DECODE_ROUNDS):
+    for _ in range(MAX_URL_DECODE_ROUNDS + 1):
         next_frontier: List[str] = []
         for candidate in frontier:
-            if candidate in seen or len(seen) >= MAX_URL_CANDIDATES:
+            if candidate in seen_set:
                 continue
+            if len(seen) == MAX_URL_CANDIDATES:
+                raise URLExpansionLimitError(f"URL expanding to at most {MAX_URL_CANDIDATES} candidates")
             seen.append(candidate)
+            seen_set.add(candidate)
             next_frontier.extend(_wrapped_urls(candidate))
-            decoded = unquote(candidate)
-            if decoded != candidate:
-                next_frontier.append(decoded)
-        if not next_frontier:
-            break
-        frontier = next_frontier
-    return seen
+            for form in (unquote(candidate), _WHATWG_REMOVED_RE.sub("", candidate).replace("\\", "/")):
+                if form != candidate:
+                    next_frontier.append(form)
+        frontier = [candidate for candidate in next_frontier if candidate not in seen_set]
+        if not frontier:
+            return seen
+    raise URLExpansionLimitError(f"URL nested or encoded at most {MAX_URL_DECODE_ROUNDS} levels deep")
 
 
 def question_words(text: str) -> Tuple[str, ...]:

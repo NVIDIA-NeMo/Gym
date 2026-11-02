@@ -7,6 +7,7 @@ import json
 import logging
 import re
 import signal
+import time
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
@@ -289,6 +290,86 @@ async def test_archive_and_proxy_wrappers_are_decoded_before_the_url_check(serve
     assert response.refused
     backend.extract.assert_not_awaited()
     assert f"rule={rule!r}" in caplog.text
+
+
+OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
+
+
+@pytest.mark.parametrize(
+    "url, family",
+    [
+        # Expansion that stops with candidates unexplored fails closed.
+        (f"https://reader.example/fetch?{OVERFLOW_DECOYS}&url=https://scale.com/leaderboard", "malformed_url"),
+        ("https://example.com/%2525252Famphtml/", "url_patterns"),  # the fourth decoded form is checked
+        ("https://example.com/%252525252Famphtml/", "malformed_url"),  # a fifth is never certified
+        # Shapes fetchers read differently from urlsplit.
+        ("https://scale.com\\.example.org/leaderboard", "malformed_url"),
+        ("https://arxiv.org\t/abs/2605.02442", "malformed_url"),
+        ("https://@arxiv.org/abs/2605.02442", "malformed_url"),
+        ("https://reader.example/?u=https://scale.com%5C.example.org/x", "domains"),
+        # url_prefixes and serp_url_patterns on the canonical form.
+        ("https://arxiv.org:443/abs/2605.02442", "url_prefixes"),
+        ("https://arxiv.org./abs/2605.02442", "url_prefixes"),
+        ("https://arxiv.org/x/../abs/2605.02442", "url_prefixes"),
+        ("https://www.google.com:443/search?q=x", "serp_url_patterns"),
+        # Every archive.org host is a wrapper, and https:/ or https:/// in the remainder still names the target.
+        ("https://web.archive.org/web/2024/https:/scale.com/leaderboard", "domains"),
+        ("https://web.archive.org/web/2024/https:///scale.com/leaderboard", "domains"),
+        ("https://wayback.archive.org/web/2024/scale.com/leaderboard", "domains"),
+        # Ordinary URLs, redirects and query strings stay allowed.
+        ("https://www.google.com/url?q=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSpin_structure&sa=D&ust=17", None),
+        ("https://duckduckgo.com/l/?uddg=https%3A%2F%2Fen.wikipedia.org%2Fwiki%2FSpin_structure&rut=ab", None),
+        ("https://example.org/a/./b/../c?next=%2Fhome%3Fq%3Da%2520b&utm_source=x#top", None),
+        ("https://web.archive.org/web/2024/https://en.wikipedia.org/wiki/Spin_structure", None),
+        ("https://medium.com/@someone/notes-on-spin-structures-123", None),
+        ("http://example.org:8080/path?x=1", None),
+    ],
+)
+async def test_url_spellings_of_a_blocked_page_are_refused_before_the_fetch(server, caplog, url, family):
+    backend = stub_backend(server, page="A page body")
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        response = await fetch(server, url)
+    assert response.refused is (family is not None)
+    assert backend.extract.await_count == (0 if family else 1)
+    if family:
+        assert f"family={family} " in caplog.text
+
+
+@pytest.mark.parametrize(
+    "query, family",
+    [
+        ("(site:example.org OR site:scale.com) leaderboard", "domains"),
+        ("site:example.org|site:scale.com leaderboard", "domains"),
+        ("site:scale.com, leaderboard", "domains"),
+        ("site:.huggingface.co puzzles", "domains"),
+        ("site:example..org puzzles", "malformed_url"),  # no hostname: refused, not skipped
+    ],
+)
+async def test_site_operands_are_read_as_hostnames(server, caplog, query, family):
+    backend = stub_backend(server, results=[result("https://example.com/ok")])
+    with caplog.at_level(logging.WARNING, logger=module.__name__):
+        response = await search(server, query)
+    assert response.refused
+    assert f"family={family} " in caplog.text and "where=site: operator" in caplog.text
+    backend.search.assert_not_awaited()
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        # 3,898 characters: under the cap, 190 distinct embedded URLs, more candidates than are checked
+        "https://a.example/" + "".join(f"https://e{i}.example/" for i in range(190)),
+        "https://a.example/" + "https://" * 1_250,  # 10,018 characters: over the cap
+    ],
+    ids=["url-under-cap", "url-over-cap"],
+)
+async def test_long_urls_are_decided_in_linear_time(server, url):
+    backend = stub_backend(server, page="A page body")
+    started = time.perf_counter()
+    response = await fetch(server, url)
+    assert time.perf_counter() - started < 1.0
+    assert response.refused
+    backend.extract.assert_not_awaited()
 
 
 async def test_fetched_markdown_is_capped_at_60000_characters_with_a_marker(server):
