@@ -62,21 +62,25 @@ from nemo_gym.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
-    AGENT_INVALID_OUTPUT,
-    AGENT_LIMIT,
-    AGENT_TIMEOUT,
     COLLECTION_DISPATCH_FAILED,
+    EMPTY_ANSWER,
     HARBOR_FAILED,
     HARNESS_TERMINATION_UNCONFIRMED,
     INFRASTRUCTURE_ERROR,
     JUDGE_FAILED,
     JUDGE_UNPARSEABLE,
+    MALFORMED_ANSWER,
     MODEL_CONTEXT_LIMIT,
+    MODEL_FAULT_KINDS,
     MODEL_POLICY_RESPONSE_TIMEOUT,
     MODEL_REQUEST_ERROR,
+    MODEL_SERVER_ERROR,
     MODEL_TRANSPORT_ERROR,
+    NON_POLICY_MODEL_REJECTION,
     PROVIDER_CREDENTIALS_REJECTED,
+    SERVER_FAULT_KINDS,
     SERVER_START_FAILED,
+    TRUNCATED_ANSWER,
     VERIFIER_ERROR,
     is_namespaced,
     is_registered,
@@ -2624,6 +2628,12 @@ class GateCriteria(BaseModel):
 
     max_response_failure_fraction: float = GATE_FAILURE_LIMIT
     max_trial_failure_fraction: float = GATE_FAILURE_LIMIT
+    # Whether a policy-model response timeout (``model_policy_response_timeout``: every attempt of the policy's
+    # request timed out after its upload) is the model's fault. True by default: the deployment serving the evaluated
+    # model is part of what is evaluated, so its slowness is on the model's side, never the evaluation's. A
+    # self-hosted evaluation that owns the serving deployment may set it to false, and the timeout then counts as a
+    # server fault (evaluation-side). Applied by the trial gate (``fault_class``).
+    policy_timeout_counts_as_model: bool = Field(default=True, strict=True)
 
     @field_validator("max_response_failure_fraction", "max_trial_failure_fraction", mode="before")
     @classmethod
@@ -2641,7 +2651,11 @@ class GateCriteria(BaseModel):
         """The effective criterion and the accepted, unapplied fractions, as reported beside the gate results."""
         rule = "strictly below, before rounding"
         return {
-            "evaluation": {"max_failure_fraction": GATE_FAILURE_LIMIT, "passes": rule},
+            "evaluation": {
+                "max_failure_fraction": GATE_FAILURE_LIMIT,
+                "passes": rule,
+                "policy_timeout_counts_as_model": self.policy_timeout_counts_as_model,
+            },
             "response": {"max_failure_fraction": self.max_response_failure_fraction, "applied": False},
             "trial": {"max_failure_fraction": self.max_trial_failure_fraction, "applied": False},
         }
@@ -3771,33 +3785,10 @@ def _predates_operation_observations(decision: RecoveryDecision, collected: Coll
     return True
 
 
-# The trial gate's fault classes. A model fault is the evaluated model's own outcome under the benchmark protocol (a
-# rejected or timed-out request, its context limit, an agent limit, timeout or invalid output, or an answer cut off at
-# its output cap) and never fails evaluation health. Every other counted failure is evaluation-side and counts
-# against the trial limit: server faults (a server that did not start, a model transport error, any provider failure)
-# are named as such, and any other kind is named by its kind alone.
-TRUNCATED_ANSWER = "truncated_answer"
-# A model server that replied with a 5xx status, whatever kind the failure names: the server's fault.
-MODEL_SERVER_ERROR = "model_server_error"
-# A model other than the evaluated policy (a simulated user, a tool's model) rejected its request with a 4xx status.
-NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
-EMPTY_ANSWER = "empty_answer"
-MALFORMED_ANSWER = "malformed_answer"
+# The trial gate's fault classes are the shared default (``MODEL_FAULT_KINDS``, ``SERVER_FAULT_KINDS`` in
+# ``nemo_gym.core.failure_kinds``), keyed on a failure's recorded HTTP status first (``status_fault_kind``) and on the
+# run's ``policy_timeout_counts_as_model`` setting (``fault_class``). The gate-derived classes are named there too.
 GRADING_WITHOUT_VERDICT = "grading_without_verdict"
-MODEL_FAULT_KINDS = frozenset(
-    {
-        MODEL_REQUEST_ERROR,
-        MODEL_POLICY_RESPONSE_TIMEOUT,
-        MODEL_CONTEXT_LIMIT,
-        AGENT_TIMEOUT,
-        AGENT_LIMIT,
-        AGENT_INVALID_OUTPUT,
-        TRUNCATED_ANSWER,
-        EMPTY_ANSWER,
-        MALFORMED_ANSWER,
-    }
-)
-SERVER_FAULT_KINDS = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR})
 
 
 def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> Any:
@@ -3820,8 +3811,14 @@ def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> An
 UNVERIFIED_NOTE = "unverified: this withholds a pass and is no health failure"
 
 
-def fault_class(kind: Any) -> str | None:
-    """A counted trial failure's class: ``model``, ``server``, or None for another evaluation-side kind."""
+def fault_class(kind: Any, *, policy_timeout_counts_as_model: bool = True) -> str | None:
+    """A counted trial failure's class: ``model``, ``server``, or None for another evaluation-side kind.
+
+    A policy-model response timeout is the model's fault by default (``GateCriteria.policy_timeout_counts_as_model``)
+    and the server's when a run sets that to false.
+    """
+    if kind == MODEL_POLICY_RESPONSE_TIMEOUT and not policy_timeout_counts_as_model:
+        return "server"
     if kind in MODEL_FAULT_KINDS:
         return "model"
     if kind in SERVER_FAULT_KINDS or (isinstance(kind, str) and kind.startswith("provider_")):
@@ -4214,24 +4211,37 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     return +kinds
 
 
-def fault_report(kinds: Counter, trials: int) -> dict[str, Any]:
+def fault_report(kinds: Counter, trials: int, *, policy_timeout_counts_as_model: bool = True) -> dict[str, Any]:
     """Model and evaluation-side fault counts, fractions and kinds over the trials; ``server`` counts server faults."""
 
     def side(found: dict) -> dict[str, Any]:
         count = sum(found.values())
         return {"count": count, "fraction": count / trials, "kinds": dict(sorted(found.items(), key=str))}
 
-    model = {kind: n for kind, n in kinds.items() if fault_class(kind) == "model"}
-    evaluation = {kind: n for kind, n in kinds.items() if fault_class(kind) != "model"}
-    server = sum(n for kind, n in evaluation.items() if fault_class(kind) == "server")
-    return {"trials": trials, "evaluation": side(evaluation) | {"server": server}, "model": side(model)}
+    def class_of(kind):
+        return fault_class(kind, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
+
+    model = {kind: n for kind, n in kinds.items() if class_of(kind) == "model"}
+    evaluation = {kind: n for kind, n in kinds.items() if class_of(kind) != "model"}
+    server = sum(n for kind, n in evaluation.items() if class_of(kind) == "server")
+    report = {"trials": trials, "evaluation": side(evaluation) | {"server": server}, "model": side(model)}
+    return report if policy_timeout_counts_as_model else report | {"policy_timeout_counts_as_model": False}
 
 
 def _fault_text(report: dict[str, Any], limit: float) -> str:
     """``evaluation-side faults: N of M (x%) is [not] below L (server S: kind n; kind n); model faults: ...``."""
     trials, evaluation, model = report["trials"], report["evaluation"], report["model"]
-    server = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if fault_class(kind) == "server"]
-    other = [f"{kind} {n}" for kind, n in evaluation["kinds"].items() if fault_class(kind) != "server"]
+    flag = report.get("policy_timeout_counts_as_model", True)
+    server = [
+        f"{kind} {n}"
+        for kind, n in evaluation["kinds"].items()
+        if fault_class(kind, policy_timeout_counts_as_model=flag) == "server"
+    ]
+    other = [
+        f"{kind} {n}"
+        for kind, n in evaluation["kinds"].items()
+        if fault_class(kind, policy_timeout_counts_as_model=flag) != "server"
+    ]
     named = ([f"server {evaluation['server']}: {', '.join(server)}"] if server else []) + other
     below = "is below" if evaluation["fraction"] < limit else "is not below"
     return (
@@ -4243,15 +4253,25 @@ def _fault_text(report: dict[str, Any], limit: float) -> str:
 
 
 def trial_health(
-    decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None = None,
+    *,
+    limit: float = GATE_FAILURE_LIMIT,
+    policy_timeout_counts_as_model: bool = True,
 ) -> tuple[bool | None, str]:
     """Evaluation health from the trial gate (``trial_verdict``): passed, failed or None, with its reason."""
-    passed, reason, _ = trial_verdict(decision, collected, limit=limit)
+    passed, reason, _ = trial_verdict(
+        decision, collected, limit=limit, policy_timeout_counts_as_model=policy_timeout_counts_as_model
+    )
     return passed, reason
 
 
 def trial_verdict(
-    decision: RecoveryDecision, collected: CollectedEvidence | None = None, *, limit: float = GATE_FAILURE_LIMIT
+    decision: RecoveryDecision,
+    collected: CollectedEvidence | None = None,
+    *,
+    limit: float = GATE_FAILURE_LIMIT,
+    policy_timeout_counts_as_model: bool = True,
 ) -> tuple[bool | None, str, dict[str, Any] | None]:
     """Evaluation health: evaluation-side trial faults over the expected trials, including repeats.
 
@@ -4271,7 +4291,7 @@ def trial_verdict(
     if not decision.complete or trials <= 0:
         return None, f"trial: not evaluated, the run is not complete ({dict(decision.counts)})", None
     kinds = trial_faults(decision, collected)
-    report = fault_report(kinds, trials)
+    report = fault_report(kinds, trials, policy_timeout_counts_as_model=policy_timeout_counts_as_model)
 
     def verdict(passed: bool | None, reason: str, *, exact: bool = False):
         state = {True: "PASS", False: "FAIL", None: "UNVERIFIED"}[passed]
@@ -4344,7 +4364,11 @@ def trial_verdict(
     recovered = _recovered_note(joined) if isinstance(recovery, dict) else ""
     if covered:
         if invalid_grades:
-            report = fault_report(kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}), trials)
+            report = fault_report(
+                kinds + Counter({GRADING_WITHOUT_VERDICT: len(invalid_grades)}),
+                trials,
+                policy_timeout_counts_as_model=policy_timeout_counts_as_model,
+            )
         retried = (
             f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "
             "(recovered, no trial failure); "
@@ -4586,7 +4610,9 @@ def gate_summary_from_collected(
     # verdicts are per rollout, so they are reported in warnings. A positive trial gate requires source-bound
     # operation evidence. Only recovered grading failures with complete joins are accepted. Model health and the raw
     # response faults are reported beside it and never fail the gate.
-    trial_passed, trial_reason, evaluation = trial_verdict(decision, collected)
+    trial_passed, trial_reason, evaluation = trial_verdict(
+        decision, collected, policy_timeout_counts_as_model=criteria.policy_timeout_counts_as_model
+    )
     if trial_passed is None and decision.complete:
         trial_reason = f"{trial_reason} ({trial_boundary(collected.quality)})"
     task = gate_task_summary(

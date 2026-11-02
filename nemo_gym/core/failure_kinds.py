@@ -190,6 +190,51 @@ FAILURE_KINDS: frozenset[str] = frozenset(
 )
 
 
+# --- derived by the acceptance gate from saved rows; no producer emits them ------------- #
+# The trial gate names these from what a saved row shows, never from a producer's report: a scored-zero answer the
+# benchmark's rule scored without a grade (cut off with a cutoff signal, empty, or malformed), a model server's 5xx
+# reply whatever kind the failure names, and another model's 4xx rejection. They are registered here so their names
+# are shared, and kept out of ``FAILURE_KINDS`` so no producer can emit one (``require_failure_kind`` refuses them).
+TRUNCATED_ANSWER = "truncated_answer"
+EMPTY_ANSWER = "empty_answer"
+MALFORMED_ANSWER = "malformed_answer"
+MODEL_SERVER_ERROR = "model_server_error"
+NON_POLICY_MODEL_REJECTION = "non_policy_model_rejection"
+GATE_DERIVED_KINDS: frozenset[str] = frozenset(
+    {TRUNCATED_ANSWER, EMPTY_ANSWER, MALFORMED_ANSWER, MODEL_SERVER_ERROR, NON_POLICY_MODEL_REJECTION}
+)
+
+
+# --- fault classes: the shared default for evaluation and RL ---------------------------- #
+# A model fault is the evaluated model's own outcome under the benchmark protocol: its request rejected or timed out
+# (``MODEL_POLICY_RESPONSE_TIMEOUT``: a deployment's slowness is on the model's side by default; the acceptance gate's
+# ``policy_timeout_counts_as_model`` setting can move it to the server class), its context limit, its agent's limit, timeout, invalid output or a command the
+# harness refused (the model issued it), or an answer it left cut off, empty or malformed. The evaluation gate counts
+# these by kind and never fails health on them; RL treats them as the policy's own failures. A server fault is a
+# server that did not start, a model transport error or a model server's 5xx reply: evaluation-side. Any other kind is
+# evaluation-side by its kind alone. A recorded HTTP status refines the class: the gate keys it on the status first.
+MODEL_FAULT_KINDS: frozenset[str] = frozenset(
+    {
+        MODEL_REQUEST_ERROR,
+        MODEL_POLICY_RESPONSE_TIMEOUT,
+        MODEL_CONTEXT_LIMIT,
+        AGENT_TIMEOUT,
+        AGENT_COMMAND_NOT_ALLOWED,
+        AGENT_LIMIT,
+        AGENT_INVALID_OUTPUT,
+        TRUNCATED_ANSWER,
+        EMPTY_ANSWER,
+        MALFORMED_ANSWER,
+    }
+)
+SERVER_FAULT_KINDS: frozenset[str] = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR, MODEL_SERVER_ERROR})
+
+
+def is_gate_derived(name: str) -> bool:
+    """Whether ``name`` is a class the acceptance gate derives from saved rows (``GATE_DERIVED_KINDS``)."""
+    return name in GATE_DERIVED_KINDS
+
+
 def is_registered(name: str) -> bool:
     """Whether ``name`` is part of the shared vocabulary."""
     return name in FAILURE_KINDS
@@ -226,7 +271,14 @@ def validate_failure_kind(name: str | None) -> str | None:
 
 
 def require_failure_kind(name: str | None) -> str:
-    """Validate a canonical event kind; legacy outcome envelopes keep their migration validator."""
+    """Validate a canonical event kind; legacy outcome envelopes keep their migration validator.
+
+    A gate-derived class (``GATE_DERIVED_KINDS``) is no producer's kind and is refused like any unregistered name.
+    """
+    if name is not None and is_gate_derived(name):
+        raise ValueError(
+            f"failure_kind {name!r} is derived by the acceptance gate from saved rows; no producer emits it"
+        )
     if name is None or not (is_registered(name) or is_namespaced(name)):
         raise ValueError(f"failure_kind {name!r} is not registered in nemo_gym/core/failure_kinds.py or namespaced")
     return name
