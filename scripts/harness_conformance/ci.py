@@ -104,8 +104,9 @@ def install_runtime(harness: str) -> None:
         cwd=adapter,
         check=True,
     )
-    if harness in ("hermes", "stirrup", "simple"):
-        return  # Hermes is pinned in its component lock; Stirrup provisions the task sandbox.
+    if harness in ("hermes", "stirrup", "simple", "openclaw"):
+        # Simple is built in; Hermes is locked; Stirrup and OpenClaw provision the task sandbox.
+        return
     defaults = yaml.safe_load((adapter / "configs" / f"{harness}_agent.yaml").read_text())
     config = defaults[f"{harness}_agent"]["responses_api_agents"][f"{harness}_agent"]
     if harness == "opencode":
