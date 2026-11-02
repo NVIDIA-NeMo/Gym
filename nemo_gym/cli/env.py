@@ -75,7 +75,11 @@ from nemo_gym.environment.registry import (
     resolve_catalog_entry,
 )
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
-from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
+from nemo_gym.environment.validation import (
+    EnvironmentValidationReport,
+    resolve_config_servers,
+    validate_environment,
+)
 from nemo_gym.orchestration.server_supervisor import (
     RunHelper,
     _configured_servers,
@@ -1188,6 +1192,9 @@ def _inspect_environment(
 
 
 def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
+    resources_server, agent_server = entry.resources_server, entry.agent_server
+    if entry.manifest_path is None:
+        resources_server, agent_server = resolve_config_servers(entry.config_path)
     payload = {
         "name": entry.name,
         "kind": entry.kind,
@@ -1203,6 +1210,8 @@ def _catalog_payload(entry: EnvironmentCatalogEntry) -> Dict[str, object]:
         "path": str(entry.path.resolve()),
         "config_path": str(entry.config_path.resolve()),
         "manifest_path": str(entry.manifest_path.resolve()) if entry.manifest_path else None,
+        "resources_server": resources_server,
+        "agent_server": agent_server,
     }
     if entry.status is None:
         payload.pop("status")

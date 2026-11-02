@@ -69,6 +69,10 @@ class EnvironmentCatalogEntry:
     licensing: Optional[str] = None
     lifecycle: Optional[str] = None
     resources_server_selector: Optional[str] = None
+    # Set from the manifest. Entries without one leave these unset, because resolving every legacy config would
+    # slow discovery; `nemo_gym.environment.validation.resolve_config_servers` reads them when needed.
+    resources_server: Optional[str] = None
+    agent_server: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -130,6 +134,8 @@ def _manifest_entry(
         "modality": manifest.modality,
         "licensing": manifest.licensing,
         "lifecycle": _enum_value(manifest.lifecycle),
+        "resources_server": manifest.resources_server,
+        "agent_server": manifest.agent_server,
     }
     if expected_kind == "environment":
         return EnvironmentEntry(**values)

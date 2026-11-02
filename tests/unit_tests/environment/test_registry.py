@@ -321,10 +321,13 @@ class TestEnvironmentCatalog:
         assert manifest_entry.manifest_path == manifest_path
         assert manifest_entry.version == "0.1.0"
         assert manifest_entry.integration_profile == "custom-gym-verifier"
+        assert (manifest_entry.resources_server, manifest_entry.agent_server) == ("manifest_env", "simple_agent")
         legacy_benchmark = entries[("benchmark", "legacy_benchmark")]
         assert legacy_benchmark.status == "no-manifest"
         assert legacy_benchmark.domain == "math"
         assert legacy_benchmark.description == "Legacy benchmark"
+        # Discovery does not resolve configs without a manifest.
+        assert (legacy_benchmark.resources_server, legacy_benchmark.agent_server) == (None, None)
 
     def test_nested_manifest_identity_uses_its_relative_path(self, tmp_path: Path, monkeypatch) -> None:
         _write_manifest(tmp_path, "environments", "suite/alpha", _manifest("suite/alpha"))

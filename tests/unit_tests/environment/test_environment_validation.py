@@ -20,6 +20,7 @@ from nemo_gym.environment.validation import (
     _only_raises_not_implemented,
     _resolve_manifest_composition,
     _with_component_root,
+    resolve_config_servers,
     validate_environment,
 )
 
@@ -120,6 +121,29 @@ def test_manifest_selects_named_config_and_dataset_owner(tmp_path: Path) -> None
         _resolve_manifest_composition(selected_config)
     with pytest.raises(EnvironmentValidationError, match="dataset_owner"):
         _resolve_manifest_composition(selected_config, dataset_owner="missing")
+
+
+def test_resolve_config_servers_reads_the_wiring_of_a_config(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
+
+
+def test_resolve_config_servers_is_unknown_when_the_config_needs_run_time_servers(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    # A judge model server that only a run defines, as in environments/abstention.
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace(
+            "      grading_mode: exact\n",
+            "      grading_mode: exact\n"
+            "      judge_model_server:\n"
+            "        type: responses_api_models\n"
+            "        name: judge_model\n",
+        ),
+        encoding="utf-8",
+    )
+
+    assert resolve_config_servers(config_path) == (None, None)
 
 
 def test_manifest_accepts_external_agent_without_resources(tmp_path: Path) -> None:

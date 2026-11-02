@@ -1646,6 +1646,8 @@ class TestListEnvironments:
         modality="text",
         licensing="Apache-2.0",
         lifecycle="active",
+        resources_server="alpha",
+        agent_server="simple_agent",
     )
     _BETA = EnvironmentCatalogEntry(
         name="beta",
@@ -1712,8 +1714,29 @@ class TestListEnvironments:
                 "path": str(tmp_path.resolve() / "environments/alpha"),
                 "config_path": str(tmp_path.resolve() / "environments/alpha/config.yaml"),
                 "manifest_path": str(tmp_path.resolve() / "environments/alpha/manifest.yaml"),
+                "resources_server": "alpha",
+                "agent_server": "simple_agent",
             }
         ]
+
+    def test_json_output_reads_servers_from_the_config_only_without_a_manifest(
+        self, monkeypatch: MonkeyPatch, capsys
+    ) -> None:
+        resolved = []
+
+        def resolve(config_path: Path) -> tuple[str, str]:
+            resolved.append(config_path)
+            return "beta", "simple_agent"
+
+        monkeypatch.setattr(nemo_gym.cli.env, "resolve_config_servers", resolve)
+        self._mock_catalog(monkeypatch, overrides={"json": True})
+
+        list_environments()
+
+        payloads = {payload["name"]: payload for payload in json.loads(capsys.readouterr().out)}
+        assert resolved == [self._BETA.config_path]
+        assert (payloads["beta"]["resources_server"], payloads["beta"]["agent_server"]) == ("beta", "simple_agent")
+        assert (payloads["alpha"]["resources_server"], payloads["alpha"]["agent_server"]) == ("alpha", "simple_agent")
 
     def test_json_output_without_manifest_has_null_manifest_path(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path

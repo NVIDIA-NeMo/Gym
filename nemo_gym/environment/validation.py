@@ -317,6 +317,19 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
     )
 
 
+def resolve_config_servers(config_path: Path) -> tuple[str | None, str | None]:
+    """The resources server and agent server a workload config wires, as a manifest would mirror them.
+
+    Returns ``(None, None)`` when the config does not resolve on its own, for example because it references a
+    judge model or an environment variable that only a run supplies.
+    """
+    try:
+        composition = _resolve_manifest_composition(config_path)
+    except ConfigError:
+        return None, None
+    return composition.resources_server, composition.agent_server
+
+
 def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:
     return {
         "resources_server": composition.resources_server,
