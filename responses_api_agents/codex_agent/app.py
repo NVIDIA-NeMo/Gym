@@ -72,6 +72,7 @@ from nemo_gym.skills import stage_skills
 from nemo_gym.tool_access import MCPToolAccess
 from responses_api_agents.codex_agent.observability import (
     TESTED_CODEX_VERSION,
+    associate_codex_compaction_calls,
     parse_codex_observations,
     parse_codex_usage,
     read_codex_observations,
@@ -1177,6 +1178,9 @@ class CodexAgent(SimpleResponsesAPIAgent):
                 status=invocation_status,
                 error_type=invocation_error,
                 gaps=gaps,
+            )
+            state.observations = associate_codex_compaction_calls(
+                state.observations, state.model_attempts or [], model_ref=self.config.model_server
             )
         else:
             gaps.append(ObservationGap(code="compaction_observations_unavailable"))
