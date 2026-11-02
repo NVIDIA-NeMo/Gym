@@ -470,7 +470,10 @@ def list_submissions(*, limit: int | None = None) -> list[SubmissionRecord]:
     records: list[SubmissionRecord] = []
     for path in sorted(index.glob("*.json")) if index.is_dir() else []:
         try:
-            records.append(SubmissionRecord.load(json.loads(path.read_text(encoding="utf-8"))))
+            payload = json.loads(path.read_text(encoding="utf-8"))
+            if not isinstance(payload, dict):
+                raise ValueError("Job record must be a JSON object")
+            records.append(SubmissionRecord.load(payload))
         except (OSError, ValueError) as error:
             logger.warning("Skipping %s in the job index: %s", path, error)
     records.sort(key=lambda record: record.submitted_at, reverse=True)
