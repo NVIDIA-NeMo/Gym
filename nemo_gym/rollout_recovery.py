@@ -327,7 +327,22 @@ def masked_infrastructure_kind(row: Mapping[str, Any]) -> str | None:
         or kind.startswith("transport_")
     ):
         return None
+    if _keeps_saved_answer(row):
+        return None
     return kind
+
+
+def _keeps_saved_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the masked result holds a model answer a rerun would replace: never sampled again.
+
+    Same facts as recovery's saved-answer test: a collector projection's own flag, else the retained generation of the
+    response (``has_saved_generation``, which leaves out a no-generation placeholder) or of a native partial response.
+    """
+    flag = row.get("_ng_collected_saved_answer")
+    if isinstance(flag, bool):
+        return flag
+    answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
+    return has_saved_generation({"response": answer}) or keeps_partial_response(row)
 
 
 def holds_response(row: Mapping[str, Any]) -> bool:
