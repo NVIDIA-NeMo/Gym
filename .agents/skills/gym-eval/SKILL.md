@@ -170,7 +170,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | The inspection says | Do |
 | --- | --- |
 | Eligible work, `PLANNED` | Run the same command without `--inspect`. |
-| `reverify`, `PLANNED` (only judge failures remain) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. A run that served its own model gets a judge-only job on a CPU partition (the saved config's CPU pool, or `--judge-partition <partition>`); without a CPU partition the refusal names the option. A mixed run re-judges its saved answers first, then resubmits the policy work. |
+| `reverify`, `PLANNED` (only judge failures remain) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. A run that served its own model gets a judge-only job on a CPU partition (the saved config's CPU pool, or `--judge-partition <partition>`); without a CPU partition the refusal names the option. A run with both judge failures and policy work is resubmitted; the resumed run re-judges the saved judge failures before its policy work, while its judge servers are up, and again at the end of the run. |
 | NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
 | The chain's walltime cap is spent | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. Never below the recorded walltime; journaled. |
@@ -209,8 +209,10 @@ HTTP status, else its failure kind, else the default. The defaults: `judge_faile
 saved failure is retried too (`default_action: retry`), within the caps. Settled results are final
 and never reopened: a scored answer or zero, and a clean agent timeout, which is the model's
 result under the benchmark's time limit (a harness that records its agent deadline as a graded
-zero has settled it). An `agent_timeout` that kept no answer is a saved failure the policy
-decides, retried by default. Successes and final failures are never run again.
+zero has settled it). That limit is the benchmark's own: for Terminal-Bench 4.0, 8 h per task is
+the official agent budget (TB 4.0 release notes, "Calibrating resources"), and Gym's default
+`agent_timeout_sec` of 28800 matches it. An `agent_timeout` that kept no answer is a saved failure
+the policy decides, retried by default. Successes and final failures are never run again.
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command

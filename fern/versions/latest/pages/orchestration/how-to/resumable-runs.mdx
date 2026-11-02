@@ -95,7 +95,7 @@ The JSON response separates dispatch from acceptance:
 | `FAILED` | Recovery stopped, the action is unsupported, or required acceptance evidence is missing or failed. Read `errors` and `unsupported`. |
 | `SUCCESS` | Requires complete results and every acceptance gate. Trial health can pass only when supported, source-bound operation and grading observations cover every expected identity; completion alone is insufficient. |
 
-Completed answers, ordinary incorrect answers and supported final model zeros are not regenerated. Judge-only failures request re-verification of saved answers; Slurm does not yet implement that operation and reports it as unsupported. A run containing both judge failures and missing/retryable policy work stops until a supported separate saved-answer recovery path is available.
+Completed answers, ordinary incorrect answers and supported final model zeros are not regenerated. Judge-only failures request re-verification of saved answers: on Slurm, a submission that deploys no model service re-judges in place within its remaining allowance, and a run that served its own model gets a judge-only job on a CPU partition (the saved config's CPU pool, or `--judge-partition`; without a CPU partition the refusal names the option). A run containing both judge failures and missing or retryable policy work is resubmitted; the resumed run re-judges the saved judge failures before its policy work, while its judge servers are up, and again at the end of the run.
 
 ### Where the remote readers run
 
