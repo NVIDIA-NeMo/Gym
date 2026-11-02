@@ -71,6 +71,7 @@ def test_shared_or_unknown_dependencies_run_all(path):
         ["responses_api_models/vllm_model/app.py"],
         ["environment_servers/unrelated/app.py"],
         ["benchmarks/example/config.yaml"],
+        ["scripts/environment_server_compliance/rules.py"],
         ["nemo_gym/orchestration/api.py"],
         ["nemo_gym/cli/__init__.py", "nemo_gym/cli/utils.py"],
         ["nemo_gym/eval/comparison/__init__.py"],
