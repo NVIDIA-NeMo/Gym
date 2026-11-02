@@ -184,6 +184,8 @@ servers and are described in that benchmark's README.
 
 `data/example.jsonl` holds 5 synthetic placeholder rows (general-knowledge questions, not HLE items; each
 row carries a `placeholder` field saying so) for the data validation CI runs on every resources server.
+`task_data.py` declares the row schema that validation checks: an optional `question` (read by
+`/seed_session`) and the optional `placeholder` note, which the server never reads.
 The `hle_web_tools_simple_agent` and `hle_web_tools_environment_server` instances in
 `configs/hle_web_tools.yaml` exist for that check and reach the tools over the plain HTTP routes.
 `data/example_metrics.json` was generated from those rows with
