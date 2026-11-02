@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException, Request
 from fastapi.testclient import TestClient
 
-from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+from nemo_gym.base_responses_api_agent import ROLLOUT_STOP_METADATA_KEY, AgentCloseSessionRequest
 from nemo_gym.config import ResourcesServerRef
 from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.langgraph_agent.tests.test_app import (
@@ -98,6 +98,46 @@ def test_graph_rejects_required_tools_before_connecting(sandbox_boundary, kind, 
     assert "required-tools" in response.json()["detail"]
     factory.connect.assert_not_awaited()
     assert not agent._session_records
+
+
+def test_model_url_carries_trace_context_after_the_capture_prefix(sandbox_boundary, monkeypatch):
+    from responses_api_agents.langgraph_agent import app as module
+
+    sandbox, _ = sandbox_boundary
+    traceparent = "00-" + "a" * 32 + "-" + "b" * 16 + "-01"
+    monkeypatch.setattr(module, "trace_context_path_segment", lambda: f"/ng-trace/{traceparent}")
+    agent = _agent()
+    seed = _seed()
+    prefix = f"/ng-rollout/{seed.episode_id.capture_key}/training-token-capture"
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        assert client.post(f"{prefix}/v1/responses", json={"input": "question"}).status_code == 200
+    payload = json.loads(next(value for path, value in sandbox.uploads.items() if path.endswith("/input.json")))
+    assert payload["model_url"] == f"http://model-server:8080{prefix}/ng-trace/{traceparent}/v1/responses"
+
+
+@pytest.mark.parametrize("stopped", [False, True])
+def test_graph_stopped_at_its_deadline_returns_an_incomplete_response(sandbox_boundary, stopped):
+    # A graph the supervisor ended at its deadline, or through a rollout stop, is verified as incomplete
+    # instead of failing with a 500 the Environment Server would retry.
+    sandbox, _ = sandbox_boundary
+    sandbox.output = {"error": "LangGraph workflow cancelled.", "error_type": "CancelledError", "runtime": {}}
+    sandbox.timed_out = True
+    agent = _agent()
+    seed = _seed()
+    rollout_id = seed.episode_id.capture_key
+    with TestClient(agent.setup_webserver()) as client:
+        assert client.post("/v1/agent_sessions", json=seed.model_dump(mode="json")).status_code == 200
+        if stopped:
+            stop = client.post(f"/rollouts/{rollout_id}/stop", json={"reason": "budget"})
+            assert stop.status_code == 200, stop.text
+            assert stop.json()["stopped"] is True
+        result = client.post(f"/ng-rollout/{rollout_id}/v1/responses", json={"input": "question"})
+    assert result.status_code == 200, result.text
+    assert result.json()["status"] == "incomplete"
+    assert result.json()["output"] == []
+    assert result.json()["usage"] is None
+    assert (ROLLOUT_STOP_METADATA_KEY in result.json()["metadata"]) is stopped
 
 
 def test_optional_tools_and_failed_activation_can_close(sandbox_boundary):

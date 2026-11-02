@@ -5,6 +5,7 @@
 import asyncio
 import logging
 import sys
+import time
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
 from typing import ClassVar
@@ -25,7 +26,7 @@ from nemo_gym.base_responses_api_agent import (
     SimpleResponsesAPIAgent,
     assert_model_url_reachable_from_sandbox,
 )
-from nemo_gym.client import get_response_json, raise_for_status
+from nemo_gym.client import get_response_json, raise_for_status, trace_context_path_segment
 from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
 from nemo_gym.core import EpisodeId, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.sandbox import (
@@ -51,7 +52,8 @@ class LangGraphAgentConfig(BaseResponsesAPIAgentConfig):
         default_factory=lambda: {"image": "ubuntu:24.04", "workdir": "/workspace"}
     )
     sandbox_install_timeout_seconds: float = Field(default=900, gt=0, allow_inf_nan=False)
-    sandbox_runner_timeout_seconds: float = Field(default=600, gt=0, allow_inf_nan=False)
+    # A ceiling, not a budget: the episode's agent_timeout_sec, which is usually shorter, decides when a graph stops.
+    sandbox_runner_timeout_seconds: float = Field(default=21600, gt=0, allow_inf_nan=False)
     session_close_timeout_seconds: float = Field(default=30, gt=0, allow_inf_nan=False)
     uv_cache_dir: str = DEFAULT_UV_CACHE_DIR
 
@@ -168,6 +170,9 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
             raise
         return state
 
+    def _rollout_sandbox_session(self, state: AgentSessionState) -> SandboxSession | None:
+        return state.session if isinstance(state, LangGraphSandboxSession) else None
+
     def _require_agent_session(self, agent_session_id: str) -> LangGraphSandboxSession:
         state = super()._require_agent_session(agent_session_id)
         if not isinstance(state, LangGraphSandboxSession):
@@ -198,17 +203,45 @@ class LangGraphAgentAdapter(SimpleResponsesAPIAgent):
         root = self.resolve_model_base_url(self.config.model_server.name, trace_context=False).removesuffix("/v1")
         # resolve_model_base_url can apply configured training capture even without a rollout.
         root = root.removesuffix("/training-token-capture")
+        # The graph runs in a process Gym does not instrument, so its parent span travels in the URL, after the
+        # rollout prefix as apply_rollout_prefix places it.
+        rollout_prefix = model_url_path.removesuffix("/v1/responses")
         graph_fields = type(self.config).model_fields.keys() - LangGraphAgentConfig.model_fields.keys()
         payload = {
             "workflow": self.workflow,
             "config": self.config.model_dump(mode="json", include=set(graph_fields)),
-            "request": body.model_dump(mode="json"),
-            "model_url": root + model_url_path,
+            # Unset fields stay unset, so the Model Server's own defaults (such as extra_body sampling) still apply.
+            "request": body.model_dump(mode="json", exclude_unset=True),
+            "model_url": f"{root}{rollout_prefix}{trace_context_path_segment()}/v1/responses",
         }
         timeout = resolve_agent_timeout(body.metadata, ceiling=self.config.sandbox_runner_timeout_seconds)
         if state.request.agent_timeout_sec is not None:
             timeout = min(timeout, state.request.agent_timeout_sec)
-        output = await state.execute(payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds)
+        try:
+            output = await state.execute(
+                payload, timeout=timeout, close_timeout=self.config.session_close_timeout_seconds
+            )
+        except RuntimeError:
+            # The supervisor stopped the graph at its deadline (or a rollout stop): an agent limit the episode
+            # verifies as incomplete, not a dependency failure to retry. The graph leaves no partial answer.
+            if not (state.session.cleanup and state.session.cleanup["timed_out"]):
+                raise
+            LOG.warning(
+                "LangGraph graph reached its %ss activation deadline; returning an incomplete response", timeout
+            )
+            response = NeMoGymResponse(
+                id=f"resp_{uuid4().hex}",
+                created_at=time.time(),
+                model=body.model or "",
+                object="response",
+                output=[],
+                parallel_tool_calls=body.parallel_tool_calls,
+                tool_choice=body.tool_choice,
+                tools=body.tools,
+                status="incomplete",
+                metadata={"harness_execution": "sandbox"},
+            )
+            return self.report_rollout_stop(response, state.session)
         response = NeMoGymResponse.model_validate(output["response"])
         runtime = output.get("runtime") or {}
         response.metadata = {

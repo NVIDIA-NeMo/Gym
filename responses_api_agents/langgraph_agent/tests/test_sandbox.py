@@ -1,17 +1,20 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import importlib.metadata
 import io
 import json
 import subprocess
 import tarfile
 import tomllib
 from pathlib import Path
+from shlex import quote
 from types import SimpleNamespace
 from unittest.mock import AsyncMock
 
 import pytest
 from fastapi import HTTPException
+from packaging.utils import canonicalize_name
 from pydantic import ValidationError
 
 import nemo_gym
@@ -69,6 +72,27 @@ def test_runtime_bundle_contains_current_sources_and_only_runtime_dependencies()
     assert len(bundle.digest) == 64
 
 
+def test_runtime_bundle_constrains_dependencies_to_the_host_versions():
+    constraints = dict(line.split("==", 1) for line in module.build_runtime_bundle().constraints.splitlines())
+    names = {canonicalize_name(name) for name in constraints}
+    # Base dependencies resolve to what this server runs, so episodes cannot drift between index releases.
+    for dependency in ("pydantic", "fastapi", "aiohttp"):
+        name = next(name for name in constraints if canonicalize_name(name) == dependency)
+        assert constraints[name] == importlib.metadata.version(dependency)
+    # The bundled source and the exact graph pins are never constrained to a conflicting host version.
+    assert "nemo-gym" not in names
+    assert not names & {"langgraph", "langchain-core"}
+    assert all("+" not in version for version in constraints.values())
+
+
+def test_agent_test_environment_installs_the_sandbox_graph_pins():
+    # CI builds the agent's test environment from requirements.txt, so the graph tests run only with these pins.
+    agent_dir = Path(module.__file__).parent
+    runtime = {line for line in (agent_dir / "runtime-requirements.txt").read_text().splitlines() if line.strip()}
+    host = {line.strip() for line in (agent_dir / "requirements.txt").read_text().splitlines()}
+    assert runtime <= host
+
+
 @pytest.fixture
 def runtime_uv(monkeypatch, tmp_path):
     uv = tmp_path / "uv"
@@ -85,11 +109,14 @@ async def test_runtime_install_uploads_exact_archive_and_validates_import(runtim
     assert uploaded_archive == module.build_runtime_bundle().archive
     assert sandbox.uploads[f"{state.session.session_dir}/uv"] == runtime_uv.read_bytes()
     assert state.runtime_digest == module.build_runtime_bundle().digest
+    constraints_path = f"{state.session.session_dir}/constraints.txt"
+    assert sandbox.uploads[constraints_path].decode() == module.build_runtime_bundle().constraints
     install = [entry for entry in sandbox.commands if "pip install" in entry[0]]
     assert len(install) == 1
     command, directory, timeout = install[0]
     assert timeout == 37
     assert directory == state.session.session_dir
+    assert f"--constraint {quote(constraints_path)}" in command
     assert "--python 3.13.14" in command
     assert " -I -c " in command
     assert "from responses_api_agents.langgraph_agent.workflows import run_workflow" in command

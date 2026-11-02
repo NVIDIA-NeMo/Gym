@@ -73,6 +73,20 @@ async def _run(workflows, workflow: str, config: dict | None = None):
     )
 
 
+@pytest.mark.parametrize("workflow", ["reflection", "orchestrator", "parallel_thinking", "rewoo"])
+async def test_model_calls_send_only_caller_set_fields(workflows, monkeypatch, workflow) -> None:
+    # The runner rebuilds the request from JSON; unset fields must stay unset, or explicit nulls would override
+    # Model Server defaults such as extra_body sampling settings.
+    model = AsyncMock(
+        side_effect=lambda *_args, **_kwargs: _model_response("Plan: #E1 = solve[x] <answer>42</answer>")
+    )
+    monkeypatch.setattr(workflows, "request", model)
+    await _run(workflows, workflow, {"max_reflections": 0, "max_subtasks": 1, "num_parallel_paths": 2})
+    assert model.call_args_list
+    for call in model.call_args_list:
+        assert set(call.kwargs["json"]) == {"input", "temperature", "max_output_tokens"}
+
+
 def test_usage_preserves_provider_fields_and_unknowns(workflows) -> None:
     first = NeMoGymResponseUsage.model_validate(_usage(10, 20, 7, cached_tokens=2))
     second = NeMoGymResponseUsage.model_validate(_usage(11, 21, 8, cached_tokens=3))

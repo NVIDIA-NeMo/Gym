@@ -203,7 +203,9 @@ class _Workflow(ABC):
         self, request_body: NeMoGymResponseCreateParamsNonStreaming, *, cookies: dict[str, str]
     ) -> ClientResponse:
         # model_url already includes the episode/capture prefix. Never rebuild it from a host config.
-        return await request("POST", self.model_url, json=request_body.model_dump(mode="json"), cookies=cookies)
+        # Send only the fields the caller set (as ServerClient does), so the Model Server's defaults still apply.
+        body = request_body.model_dump(mode="json", exclude_unset=True)
+        return await request("POST", self.model_url, json=body, cookies=cookies)
 
     @abstractmethod
     def build_graph(self) -> CompiledStateGraph:

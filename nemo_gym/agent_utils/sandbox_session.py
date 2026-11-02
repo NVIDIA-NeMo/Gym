@@ -253,14 +253,12 @@ class SandboxSession[Artifacts]:
                 stdlib_runner=command.stdlib_runner,
             )
             self.launch_started = True
+            # Only a borrowed sandbox's access supplies env/user; leave them out otherwise, as before they existed.
+            launch_options = {
+                name: value for name, value in (("env", self.env), ("user", self.user)) if value is not None
+            }
             self._exec_task = asyncio.create_task(
-                self.sandbox.exec(
-                    launch,
-                    cwd=self.workdir,
-                    timeout_s=provider_timeout,
-                    env=self.env,
-                    user=self.user,
-                )
+                self.sandbox.exec(launch, cwd=self.workdir, timeout_s=provider_timeout, **launch_options)
             )
             result = await asyncio.shield(self._exec_task)
             if result.error_type == "timeout":

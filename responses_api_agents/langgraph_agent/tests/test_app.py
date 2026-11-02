@@ -124,6 +124,7 @@ class MemorySandbox:
             "runtime": {"hostname": "task-sandbox", "pid": 123, "python": "/sandbox/venv/bin/python"},
         }
         self.cleanup_confirmed = True
+        self.timed_out = False
         self.release_error: Exception | None = None
         self.stops = 0
         self.disconnects = 0
@@ -142,7 +143,7 @@ class MemorySandbox:
                 "cleanup_confirmed": self.cleanup_confirmed,
                 "return_code": 0,
                 "error": None,
-                "timed_out": False,
+                "timed_out": self.timed_out,
             }
             self.events.append("cleanup-receipt")
         elif str(remote_path).endswith("/output.json"):
@@ -212,8 +213,8 @@ def test_sessionless_responses_use_owned_sandbox_and_preserve_usage(
     assert response.json()["metadata"]["harness_execution"] == "sandbox"
     payload = json.loads(next(value for path, value in sandbox.uploads.items() if path.endswith("/input.json")))
     assert payload["workflow"] == workflow
-    assert payload["request"]["input"] == body["input"]
-    assert payload["request"]["temperature"] == body["temperature"]
+    # Only caller-set fields cross, so unset sampling fields cannot override the Model Server's defaults.
+    assert payload["request"] == body
     assert payload["config"] == options
     assert payload["model_url"] == "http://model-server:8080/v1/responses"
     assert "do-not-copy" not in json.dumps(payload)

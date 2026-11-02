@@ -15,6 +15,7 @@ from pathlib import Path
 from shlex import quote
 
 from packaging.requirements import Requirement
+from packaging.utils import canonicalize_name
 from pydantic import JsonValue
 
 import nemo_gym
@@ -26,10 +27,11 @@ from nemo_gym.sandbox import read_text, upload_text
 
 @dataclass(frozen=True)
 class RuntimeBundle:
-    """Source snapshot and dependency manifest installed by every graph runner."""
+    """Source snapshot, dependency manifest and version constraints installed by every graph runner."""
 
     digest: str
     archive: bytes
+    constraints: str
 
 
 @lru_cache(maxsize=1)
@@ -48,11 +50,23 @@ def build_runtime_bundle() -> RuntimeBundle:
         or Requirement(item).marker.evaluate({"extra": ""})
     ]
     agent_dir = Path(__file__).parent
-    dependencies.extend(
+    runtime_requirements = [
         line.strip()
         for line in (agent_dir / "runtime-requirements.txt").read_text().splitlines()
         if line.strip() and not line.startswith("#")
-    )
+    ]
+    dependencies.extend(runtime_requirements)
+    # Hold every other dependency at the version this server resolved, so sandboxes install what it was tested
+    # with rather than whatever the index serves that day. Packages the host lacks still resolve freely, and a
+    # local build ("+" version) cannot come from an index, so it stays unconstrained.
+    pinned: dict[str, str] = {}
+    for installed in importlib.metadata.distributions():
+        name = installed.metadata["Name"]
+        if name and "+" not in installed.version:
+            pinned.setdefault(canonicalize_name(name), f"{name}=={installed.version}")
+    for name in ["nemo-gym", *(Requirement(item).name for item in runtime_requirements)]:
+        pinned.pop(canonicalize_name(name), None)
+    constraints = "".join(f"{line}\n" for line in sorted(pinned.values()))
     files: dict[str, bytes] = {}
     gym_dir = Path(nemo_gym.__file__).parent
     for path in sorted(gym_dir.rglob("*")):
@@ -69,7 +83,7 @@ def build_runtime_bundle() -> RuntimeBundle:
         '[tool.setuptools.package-data]\n"*" = ["**/*.yaml", "**/*.yml", "**/*.json", "**/*.sh", "**/*.toml", "**/*.j2"]\n'
     )
     files["pyproject.toml"] = project.encode()
-    digest = hashlib.sha256()
+    digest = hashlib.sha256(constraints.encode() + b"\0")
     stream = io.BytesIO()
     with tarfile.open(fileobj=stream, mode="w:gz") as archive:
         for name, content in sorted(files.items()):
@@ -78,7 +92,7 @@ def build_runtime_bundle() -> RuntimeBundle:
             info.size = len(content)
             info.mode = 0o644
             archive.addfile(info, io.BytesIO(content))
-    return RuntimeBundle(digest=digest.hexdigest(), archive=stream.getvalue())
+    return RuntimeBundle(digest=digest.hexdigest(), archive=stream.getvalue(), constraints=constraints)
 
 
 @dataclass
@@ -120,7 +134,8 @@ class LangGraphSandboxSession(AgentSessionState):
             archive = Path(temporary) / "runtime.tar.gz"
             archive.write_bytes(bundle.archive)
             await sandbox.upload(archive, f"{directory}/runtime.tar.gz")
-        # The executable and archive arrive through file transfer, never shell interpolation.
+        await upload_text(sandbox, path=f"{directory}/constraints.txt", text=bundle.constraints)
+        # The executable, archive and constraints arrive through file transfer, never shell interpolation.
         executable = await sandbox.exec(f"chmod 755 {quote(remote_uv)}", timeout_s=30)
         if executable.error_type or executable.return_code != 0:
             raise RuntimeError("Could not make the LangGraph runtime installer executable")
@@ -131,7 +146,8 @@ class LangGraphSandboxSession(AgentSessionState):
         }
         installed = await sandbox.exec(
             f"{quote(remote_uv)} venv {quote(directory + '/venv')} --python 3.13.14 && "
-            f"{quote(remote_uv)} pip install --python {quote(self.python)} {quote(directory + '/runtime.tar.gz')} && "
+            f"{quote(remote_uv)} pip install --python {quote(self.python)} "
+            f"--constraint {quote(directory + '/constraints.txt')} {quote(directory + '/runtime.tar.gz')} && "
             f"{quote(self.python)} -I -c 'from responses_api_agents.langgraph_agent.workflows import run_workflow'",
             cwd=directory,
             env=install_env,

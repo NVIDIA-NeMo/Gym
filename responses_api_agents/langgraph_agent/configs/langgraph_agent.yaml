@@ -2,12 +2,14 @@ langgraph_agent:
   responses_api_agents:
     langgraph_agent:
       num_workers: 1
-      # This directory ships four distinct agents, selected by entrypoint. There is no default, so pick
-      # a flavor rather than setting this by hand:
-      #   --agent langgraph_agent/orchestrator_agent
-      #   --agent langgraph_agent/parallel_thinking_agent
-      #   --agent langgraph_agent/reflection_agent
-      #   --agent langgraph_agent/rewoo_agent
+      # This directory ships four distinct agents, selected by entrypoint. There is no default, so start
+      # from a flavor config rather than setting this by hand:
+      #   responses_api_agents/langgraph_agent/configs/orchestrator_agent.yaml
+      #   responses_api_agents/langgraph_agent/configs/parallel_thinking_agent.yaml
+      #   responses_api_agents/langgraph_agent/configs/reflection_agent.yaml
+      #   responses_api_agents/langgraph_agent/configs/rewoo_agent.yaml
+      # or from an environments/langgraph_* pairing. `--agent-type` does not swap these onto a benchmark;
+      # see the README.
       entrypoint: ???
       sandbox_provider: sandbox
       sandbox_config:
