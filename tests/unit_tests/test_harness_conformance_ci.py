@@ -72,6 +72,7 @@ def test_shared_or_unknown_dependencies_run_all(path):
         ["responses_api_models/vllm_model/app.py"],
         ["environment_servers/unrelated/app.py"],
         ["benchmarks/example/config.yaml"],
+        ["scripts/environment_server_compliance/rules.py"],
         ["nemo_gym/orchestration/api.py"],
         ["environments/arc_agi/app.py"],
         ["docker/Dockerfile"],
