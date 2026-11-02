@@ -10,6 +10,7 @@ import yaml
 from nemo_gym.cli.main import build_parser
 from nemo_gym.orchestration.executors.slurm import UNSAFE_RESUME_JOURNAL_NAME, WALLTIME_JOURNAL_NAME
 from tests.unit_tests.test_eval_resubmit import _handle
+from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_resubmit_repin import _digests
 from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at

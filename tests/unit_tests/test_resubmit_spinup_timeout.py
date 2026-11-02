@@ -12,6 +12,7 @@ from nemo_gym.orchestration.executors.resume_script import SPINUP_TIMEOUT_REASON
 from nemo_gym.orchestration.executors.slurm import SPINUP_TIMEOUT_JOURNAL_NAME, UNSAFE_RESUME_JOURNAL_NAME
 from nemo_gym.rollout_recovery import _is_semantic
 from tests.unit_tests.test_eval_resubmit import _handle
+from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_resubmit_repin import _digests
 from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
