@@ -30,12 +30,12 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputItem,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from nemo_gym.server_runtime import ReverifyMode
-from nemo_gym.telemetry.resources_operations import ResourcesOperation
+from nemo_gym.telemetry import ResourcesOperation
 from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.verification.judge import is_judge_failure
 from resources_servers.math_with_judge.app import (

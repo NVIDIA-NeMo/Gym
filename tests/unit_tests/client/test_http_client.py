@@ -48,6 +48,7 @@ from aiohttp import (
     RequestInfo,
     ServerDisconnectedError,
     TCPConnector,
+    web,
 )
 from multidict import CIMultiDict, CIMultiDictProxy
 from omegaconf import DictConfig
@@ -58,7 +59,7 @@ from yarl import URL
 import nemo_gym.client.http_client
 import nemo_gym.client.server_client
 import nemo_gym.config.global_config
-import nemo_gym.server_utils
+import nemo_gym.server_runtime.base_server
 from nemo_gym.client.http_client import (
     GlobalAIOHTTPAsyncClientConfig,
     _format_upstream_error_log,
@@ -364,6 +365,41 @@ class TestHTTPClient:
         assert nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT_QUEUE_TELEMETRY is False
         await asyncio.sleep(0)
         assert client.closed
+
+    def test_global_aiohttp_client_is_not_reused_by_a_later_event_loop(self, monkeypatch: MonkeyPatch) -> None:
+        """A second ``asyncio.run`` in one process, as the end-of-run re-judge after collection, gets its own client."""
+        for name in ("_GLOBAL_AIOHTTP_CLIENT", "_GLOBAL_AIOHTTP_CLIENT_LOOP", "_GLOBAL_AIOHTTP_CONTROL_CLIENT"):
+            monkeypatch.setattr(f"nemo_gym.client.http_client.{name}", None)
+
+        async def handler(_request: web.Request) -> web.Response:
+            return web.Response(text="ok")
+
+        async def get_once() -> tuple[ClientSession, str]:
+            app = web.Application()
+            app.router.add_get("/", handler)
+            runner = web.AppRunner(app)
+            await runner.setup()
+            site = web.TCPSite(runner, "127.0.0.1", 0)
+            await site.start()
+            port = runner.addresses[0][1]
+            try:
+                session = nemo_gym.client.http_client.get_global_aiohttp_client()
+                async with session.get(f"http://127.0.0.1:{port}/") as response:
+                    return session, await response.text()
+            finally:
+                await runner.cleanup()
+
+        try:
+            first, first_text = asyncio.run(get_once())
+            # Outside a running loop nothing can be made or closed: the cached client is returned as before.
+            assert nemo_gym.client.http_client.get_global_aiohttp_client() is first
+            second, second_text = asyncio.run(get_once())
+        finally:
+            nemo_gym.client.http_client.global_aiohttp_client_exit()
+
+        assert (first_text, second_text) == ("ok", "ok")
+        assert second is not first
+        assert first.closed
 
     def test_global_aiohttp_client_exit_closes_control_client_on_owner_loop(self, monkeypatch: MonkeyPatch) -> None:
         owner_loop = asyncio.new_event_loop()
@@ -1190,7 +1226,7 @@ class TestHTTPClient:
 
 
 def test_a_process_that_imports_only_the_client_closes_its_sessions_at_exit() -> None:
-    # In a fresh interpreter: the other tests here import nemo_gym.server_utils, which would hide a missing hook.
+    # In a fresh interpreter: the other tests here import nemo_gym.server_runtime.base_server, which would hide a missing hook.
     code = (
         "import asyncio, sys\n"
         "from nemo_gym.client import http_client\n"
@@ -1199,7 +1235,7 @@ def test_a_process_that_imports_only_the_client_closes_its_sessions_at_exit() ->
         "loop = asyncio.new_event_loop()\n"
         "asyncio.set_event_loop(loop)\n"
         "loop.run_until_complete(open_client())\n"
-        "assert 'nemo_gym.server_utils' not in sys.modules\n"
+        "assert 'nemo_gym.server_runtime.base_server' not in sys.modules\n"
     )
     result = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True, check=True)
     assert "Unclosed client session" not in result.stderr

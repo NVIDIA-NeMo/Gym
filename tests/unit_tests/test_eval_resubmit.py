@@ -108,7 +108,8 @@ def _record(job_dir: Path) -> SubmissionRecord:
 
 @pytest.fixture
 def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242."""
+    """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242; sinfo
+    fails, so a walltime raise is planned with the partition's MaxTime unknown, also on a host with real Slurm."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     # A job in a hidden partition is listed only with --all.
@@ -121,7 +122,9 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     (bin_dir / "sacct").write_text('#!/bin/bash\ncat "$(dirname "$0")/accounting"\n')
     (bin_dir / "accounting").write_text("100|FAILED|7200|0\n101|FAILED|60|0\n")
-    for stub in ("squeue", "sbatch", "sacct"):
+    # Shadows a real sinfo; a test that needs a partition listing writes its own.
+    (bin_dir / "sinfo").write_text('#!/bin/bash\necho "sinfo: error: not available in this test" >&2\nexit 1\n')
+    for stub in ("squeue", "sbatch", "sacct", "sinfo"):
         (bin_dir / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
@@ -195,6 +198,32 @@ def test_which_executors_support_resubmit(tmp_path: Path, slurm_bin: Path, execu
             resubmit(*_handle(job_dir))
     assert "resubmit" in BaseExecutor.__abstractmethods__
     assert set(_EXECUTORS_BY_NAME) == {"slurm", "kubernetes"}
+
+
+def test_recover_on_an_executor_without_a_collector_stops_with_every_recovery_control(
+    tmp_path: Path, slurm_bin: Path
+) -> None:
+    from nemo_gym.orchestration.recovery import RecoveryAction
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _staged_run(tmp_path, executor=KubernetesExecutor.name)
+    sbatch_env = slurm_bin / "env"
+
+    # An operator budget (walltime with a reason), retries and a spin-up raise all reach the executor's evidence
+    # read; one without a collector reports that it cannot decide instead of failing on the new keywords.
+    out = recover(
+        *_handle(job_dir),
+        extend_retries=2,
+        max_walltime="08:00:00",
+        walltime_reason="longer segments",
+        server_spinup_timeout_seconds=1800,
+        spinup_timeout_reason="cold server installs",
+    )
+
+    assert out.decision.action == RecoveryAction.STOP
+    assert out.decision.reason.startswith("KubernetesExecutor cannot collect the run's evidence")
+    assert out.ok is False and out.dispatched is None
+    assert not sbatch_env.exists()
 
 
 def test_resubmit_refuses_while_a_job_runs_in_the_job_dir(tmp_path: Path, slurm_bin: Path) -> None:
@@ -530,7 +559,11 @@ def test_resubmit_with_telemetry_off_needs_no_token(
 
 # --- The saved config round trip: what submit persists, resubmit loads -----------------------------------------
 
-_ENV = {"HF_HOME": "lit:/cache/huggingface", "API_KEY": "host:GYM_TEST_SECRET", "LATE": "runtime:LATE"}
+_ENV = {
+    "HF_HOME": "lit:/cache/huggingface",
+    "API_KEY": "host:GYM_TEST_SECRET",  # pragma: allowlist secret
+    "LATE": "runtime:LATE",
+}
 
 
 def _policy_config(tmp_path: Path, env: dict[str, str]) -> dict:

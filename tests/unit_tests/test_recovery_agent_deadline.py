@@ -23,6 +23,8 @@ import json
 import subprocess
 import sys
 
+import pytest
+
 from nemo_gym.orchestration.recovery import (
     COLLECT_SCRIPT,
     CollectedEvidence,
@@ -196,3 +198,25 @@ async def test_collection_keeps_an_answered_agent_deadline_and_a_resume_does_not
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
     assert task["failures"]["metric_coverage"] == {"trials": 0, "expected": 1, "source": "coverage_report"}
     assert task["health_verdict"].endswith("; metric over 0 of 1 trials")
+
+
+@pytest.mark.parametrize("marked", [False, True])
+def test_an_answered_deadline_is_a_scored_sample_only_when_the_metric_scores_it(marked) -> None:
+    from nemo_gym.orchestration.recovery import gate_task_summary
+    from nemo_gym.rollout_collection import _counted_failure_rows
+
+    timeout = deadline(1) | ({"_ng_failure_counts_as_zero": True} if marked else {})
+    collected = CollectedEvidence(materialized=inventory(2), results=[scored(0)], failures=[timeout])
+    d = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+    # Settled either way: the kept answer is the model's result and no resume runs it again.
+    assert d.action == RecoveryAction.NOOP and d.identities[IdentityState.MODEL_FINAL] == [(1, 0)]
+    # The metric input: collection's default policy counts the row only when its producer marked it a zero.
+    metric_input = _counted_failure_rows([timeout], [])
+    assert len(metric_input) == int(marked)
+    task = gate_task_summary(
+        d, score=1.0, summary_valid=True, summary_reasons=[], health_passed=True, health_reasons=[]
+    )
+    coverage = failure_facts(d, collected)["metric_coverage"]
+    assert task["scored_samples"] == coverage["trials"] == 1 + len(metric_input)
+    if not marked:
+        assert any("not scored by the metric" in warning for warning in task["warnings"]), task["warnings"]

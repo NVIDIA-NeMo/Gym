@@ -1,0 +1,102 @@
+# SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+# http://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+"""A saved judge evaluation without a verdict is a grading fault, never a healthy grade.
+
+A scored row whose judge evaluation recorded no verdict (a null label, or a parse/judge error label such as XSTest's
+``judge_parsing_error``) is counted as ``judge_unparseable`` and selected for re-judging. On the artifact path the
+verifier's captured judge reply must also have completed; a truncated reply leaves the trial unobserved.
+"""
+
+import pytest
+
+from nemo_gym.orchestration.recovery import grading_artifact, reverification_cause, saved_row_evidence
+from tests.unit_tests.test_eval_resubmit_decision import collect_with_score, ident, write_job_dir
+from tests.unit_tests.test_evaluation_health import _run
+from tests.unit_tests.test_grading_artifacts import _judge_call, _observed, _ungraded
+
+
+COMPLETED = {"id": "resp-answer", "status": "completed", "output": [{"type": "message", "role": "assistant"}]}
+
+
+def _xstest_row(label):
+    """A scored row as XSTest saves it: one judge evaluation with this verdict label, unmasked, reward 0."""
+    evaluation = {"responses_create_params": {"input": "kept on the run host"}, "verdict_label": label}
+    return ident(0, reward=0.0, response=COMPLETED, judge_evaluations=[evaluation])
+
+
+def _collected(tmp_path, row: dict) -> dict:
+    job = write_job_dir(tmp_path / "job", n=1, results=[row], failures=[])
+    [collected] = collect_with_score(job, "[]").results
+    return collected
+
+
+@pytest.mark.parametrize("label", ["judge_parsing_error", "JUDGE_ERROR", None])
+def test_an_unparsed_judge_verdict_is_no_grade_and_is_selected_for_rejudging(tmp_path, label):
+    row = _xstest_row(label)
+    collected = _collected(tmp_path, row)
+    assert collected["_ng_collected_grading_facts"]["judge_unparsed"] is True
+    assert grading_artifact(collected) is None
+    assert reverification_cause(collected) == "judge"
+    assert reverification_cause(saved_row_evidence(row)) == "judge"
+
+
+@pytest.mark.parametrize("label", ["full_compliance", "[[A!=B]]"])
+def test_a_parsed_judge_verdict_is_unchanged(tmp_path, label):
+    row = _xstest_row(label)
+    collected = _collected(tmp_path, row)
+    assert grading_artifact(collected) == "judge_record"
+    assert reverification_cause(collected) is None
+    assert reverification_cause(saved_row_evidence(row)) is None
+
+
+def _unparsed(row: dict) -> None:
+    _ungraded(row, judge_evaluations=True, judge_verdicts=[None], judge_unparsed=True)
+    row["reward"] = 0.0
+
+
+def test_the_gate_counts_an_unparsed_judge_verdict_as_a_grading_fault():
+    collected = _run(100)
+    _unparsed(collected.results[0])
+    passed, reason, report, task = _observed(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert report["evaluation"]["kinds"] == {"judge_unparseable": 1}
+    assert task["trial_counts"]["unhealthy"] == 1 and task["trial_counts"]["observed_healthy"] == 99
+
+
+def test_unparsed_judge_verdicts_at_the_limit_fail_evaluation_health():
+    collected = _run(100)
+    for row in collected.results[:2]:
+        _unparsed(row)
+    passed, reason, report, _ = _observed(collected)
+    assert passed is False and report["status"] == "FAIL", reason
+    assert report["evaluation"]["kinds"] == {"judge_unparseable": 2}
+
+
+@pytest.mark.parametrize("truncated", [False, True])
+def test_a_judge_record_needs_its_captured_judge_reply_to_have_completed(truncated):
+    collected = _run(100)
+    for task, row in enumerate(collected.results[:10]):
+        # A label-less judge evaluation (the math judge's shape): its verdict is in the judge reply itself.
+        _ungraded(row, judge_evaluations=True, judge_verdicts=[None])
+        row["reward"] = 0.0
+        _judge_call(row, task)
+        if truncated:
+            meta = row["ng_trial_observations"]["model_calls"][-1]["response_metadata"]
+            meta |= {"response_status": "incomplete", "finish_reason": "length", "error_category": "incomplete"}
+    passed, reason, report, _ = _observed(collected)
+    if truncated:
+        assert passed is None and report["status"] == "UNVERIFIED", reason
+    else:
+        assert passed is True and report["exact"] is True, reason

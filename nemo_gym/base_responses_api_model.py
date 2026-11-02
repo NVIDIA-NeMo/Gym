@@ -89,8 +89,8 @@ from nemo_gym.responses_streaming import (
 )
 from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
-from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -183,6 +183,11 @@ class ModelExecutionOutcome(TypedDict):
     response_source: Literal["upstream", "local"] | None
     upstream_status_code: int | None
     local_response_reason: str | None
+    # Set when the adapter lowered the calls output budget to fit the engines context window and sent it again.
+    requested_max_tokens: NotRequired[int]
+    applied_max_tokens: NotRequired[int]
+    # The same refit as one event: ``requested_max_tokens``, the engine's ``window`` and ``applied_max_tokens``.
+    output_budget_refit: NotRequired[dict[str, int]]
 
 
 def start_model_execution(request: Request, *, upstream_attempted: bool) -> ModelExecutionOutcome:

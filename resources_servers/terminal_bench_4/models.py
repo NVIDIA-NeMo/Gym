@@ -105,6 +105,8 @@ class SeedSessionResponse(SessionRequest):
     sandbox_provider: dict[str, Any] = Field(default_factory=dict)
     instruction: str = ""
     user: str | int | None = None
+    # The task's agent timeout; 8 h per task is the official Terminal-Bench 4.0 agent budget (TB 4.0 release notes,
+    # "Calibrating resources").
     agent_timeout_sec: float = Field(default=28800, gt=0)
     mcp_servers: list[dict[str, Any]] = Field(default_factory=list)
     skills_dir: str | None = None

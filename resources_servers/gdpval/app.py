@@ -611,6 +611,9 @@ class _TaskSession:
 
 
 class GDPValResourcesServer(SimpleResourcesServer):
+    # Its judge calls go through an external SDK client that notes no model request.
+    grading_may_use_uninstrumented_model = True
+
     config: GDPValResourcesServerConfig
 
     def model_post_init(self, context: Any) -> None:

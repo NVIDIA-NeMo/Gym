@@ -53,7 +53,14 @@ def test_a_command_the_harness_refused_is_the_models_fault():
 
 @pytest.mark.parametrize(
     "kind",
-    ["truncated_answer", "empty_answer", "malformed_answer", "model_server_error", "non_policy_model_rejection"],
+    [
+        "truncated_answer",
+        "empty_answer",
+        "malformed_answer",
+        "model_server_error",
+        "non_policy_model_rejection",
+        "invalid_output_budget",
+    ],
 )
 def test_the_gate_derived_classes_are_registered_but_no_producer_may_emit_them(kind):
     assert kind in failure_kinds.GATE_DERIVED_KINDS and failure_kinds.is_gate_derived(kind)
