@@ -41,9 +41,19 @@ def defined_run(agent: type) -> object | None:
     return vars(agent).get("run")
 
 
+def lacking_agent_sessions(agent: type) -> object | None:
+    return None if agent.supports_agent_sessions() else agent
+
+
 RULES = (
     Rule(
         "A1", AGENT_SERVER, "Agent servers should not define `run()`; implement agent sessions instead.", defined_run
+    ),
+    Rule(
+        "A2",
+        AGENT_SERVER,
+        "Agent servers should implement agent sessions: seed and close.",
+        lacking_agent_sessions,
     ),
 )
 
