@@ -84,6 +84,9 @@ class TrajectoryResponseMetadata(ObservationModel):
     model_operations: list[ModelOperationObservation] | None = None
     error_category: Optional[str] = None
     latency_ttft_ms: Optional[float] = Field(default=None, ge=0)
+    # The output budget the call asked for and the one sent after it was lowered to fit the context window.
+    requested_max_tokens: Optional[int] = Field(default=None, ge=1)
+    applied_max_tokens: Optional[int] = Field(default=None, ge=1)
 
 
 class TrajectoryModelCall(ObservationModel):
