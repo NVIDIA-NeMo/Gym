@@ -36,6 +36,7 @@ from environment_servers.harbor.verifier import _verifier_image, _verifier_key, 
 from nemo_gym.agents import sandbox_server_url
 from nemo_gym.client import apply_rollout_prefix
 from nemo_gym.config import get_global_config_dict
+from nemo_gym.core import MODEL_SAMPLING_NULL, model_call_sampling_config
 from nemo_gym.data.tasks.harbor import (
     MAIN_SERVICE,
     RECORD_VERSION,
@@ -952,6 +953,12 @@ class HarborSandboxMixin:
         server is a configuration error (422).
         """
         values: dict[str, str] = {}
+        # A sidecar is never the agent being trained: in a training run, its model calls keep their own sampling.
+        sidecar_sampling = (
+            MODEL_SAMPLING_NULL
+            if model_call_sampling_config(getattr(self.server_client, "global_config_dict", None)) is not None
+            else None
+        )
         for name, source in self.config.compose_variables.items():
             if source.value is not None:
                 values[name] = source.value
@@ -964,5 +971,5 @@ class HarborSandboxMixin:
                     base_url = sandbox_server_url(source.model_server, require_reachable=True)
                 except Exception as exc:
                     raise HTTPException(422, f"compose_variables.{name}: {type(exc).__name__}: {exc}") from exc
-                values[name] = apply_rollout_prefix(base_url, episode_key)
+                values[name] = apply_rollout_prefix(base_url, episode_key, model_sampling=sidecar_sampling)
         return values
