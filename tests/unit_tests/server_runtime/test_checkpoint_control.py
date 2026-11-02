@@ -611,8 +611,6 @@ async def test_an_episode_woken_by_resume_stays_parked_if_a_new_checkpoint_close
 async def test_control_calls_use_a_reserved_pool_when_data_calls_fill_theirs() -> None:
     from aiohttp import web
 
-    import nemo_gym.server_utils as server_utils
-
     release = asyncio.Event()
 
     async def slow(request: web.Request) -> web.Response:
@@ -640,7 +638,7 @@ async def test_control_calls_use_a_reserved_pool_when_data_calls_fill_theirs() -
     try:
         # One data connection per host, and a long call holding it.
         nemo_gym.client.http_client.set_global_aiohttp_client(
-            server_utils.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=1)
+            nemo_gym.client.http_client.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=1)
         )
         held = asyncio.create_task(nemo_gym.client.http_client.request("GET", f"http://127.0.0.1:{port}/slow"))
         await asyncio.sleep(0.1)

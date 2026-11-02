@@ -47,15 +47,14 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.sandbox import SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
+from nemo_gym.sandbox import CPU_CAP_ENV_VARS, SandboxHandle
 from nemo_gym.trajectory import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
+from nemo_gym.utils import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
