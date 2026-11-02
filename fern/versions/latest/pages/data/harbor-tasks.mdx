@@ -9,7 +9,7 @@ position: 5
 A task folder holds everything one task needs: the instruction, the software environment, the verifier and a
 reference solution. NeMo Gym reads task folders in the [Harbor](https://github.com/harbor-framework/harbor) task
 format and runs them on the `harbor` Environment Server, which starts a sandbox from the folder, runs the agent
-session in it, then runs the task's own verifier there. No Resources Server takes part.
+session in it, then runs the task's own verifier, in that sandbox or in a fresh one. No Resources Server takes part.
 
 ```text
 my-dataset/
@@ -30,7 +30,8 @@ run. [Task Folder Format](/main/data/task-folder-format) lists every file and se
 - A Gym checkout with the sandbox extra (`uv sync --extra sandbox`). Run every command from its root.
 - Docker running on the machine, for the `docker` sandbox provider (see [Docker Provider](/main/infrastructure/sandbox/docker)).
   On a cluster, use [OpenSandbox](/main/infrastructure/sandbox/opensandbox) and pass `--sandbox opensandbox` instead.
-- For the agent run, a model endpoint that serves the OpenAI API and that the sandbox can reach.
+- For the agent run, a model endpoint that serves the OpenAI API and that the machine running `gym` can reach.
+  Sandboxes must reach that machine, because some harnesses call Gym's Model Server from inside them.
 
 ## Scaffold a dataset
 
@@ -104,8 +105,10 @@ Name a prebuilt image in `[environment].docker_image` and leave `environment/` e
 a Dockerfile in `environment/`. A Dockerfile with only `FROM`, `WORKDIR`, `ENV`, `USER` and `LABEL` lines, like
 Hello World's, needs no build: Gym starts the base image and applies those settings. `RUN` lines on top run inside
 the sandbox when the episode starts. Any other instruction, such as `COPY`, means Gym builds the image when it
-prepares the dataset, by default with `docker`. See [Dockerfile modes](/main/data/task-folder-format#dockerfile-modes)
-and [Harbor image builds](/main/reference/configuration#harbor-image-builds).
+prepares the dataset. It builds with `docker` by default. When a build repository is set (`builds.repository`,
+default `$NEMO_GYM_BUILD_REPOSITORY`), it uses the first of `buildah`, `podman` and `docker` on `PATH`. See
+[Dockerfile modes](/main/data/task-folder-format#dockerfile-modes) and
+[Harbor image builds](/main/reference/configuration#harbor-image-builds).
 
 ### tests/test.sh
 
@@ -123,7 +126,8 @@ else
 fi
 ```
 
-A verifier that writes no reward file scores 0. To grade in Python instead, write `tests/verifier.py`. See
+A verifier that writes no reward file scores 0. To grade in Python instead, replace `tests/test.sh` with
+`tests/verifier.py`: when both exist, `test.sh` grades the task. See
 [Task Folder Verifiers](/main/data/task-folder-verifiers).
 
 ### solution/
@@ -159,8 +163,8 @@ solution is listed as `unvalidated` and does not fail the command, unless no sel
 - `failed: <message>` or `missing result`: the rollout produced no result.
 - `masked (<failure_kind>)`: Gym could not score the task.
 
-Validate records each task's digest in `my-dataset/manifest.toml` and writes its results to
-`results/harbor/validation/my-dataset/`, apart from any agent run. Select tasks with `--only-tasks` or
+Validate records each task's digest in `my-dataset/manifest.toml` (unless git tracks the folder) and writes its
+results to `results/harbor/validation/my-dataset/`, apart from any agent run. Select tasks with `--only-tasks` or
 `--exclude-tasks` (comma-separated names or globs), and add `-v` for debug logs. When a reward is wrong, start from
 `rollouts_run_summary.json` in that folder, which names each task's verifier logs (see
 [The run summary](/main/reference/task-folder-storage#the-run-summary)). When no rollout produces a result, for
@@ -174,15 +178,17 @@ gym eval run my-dataset --agent hermes_agent --sandbox docker \
   --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
-`--agent` takes the harness's full name: a short name that matches two harnesses, such as `hermes`, is refused.
-`--model-type openai_model` serves any OpenAI-compatible endpoint, with `<url>` as its base URL.
+`--agent` takes the harness's folder name under `responses_api_agents/`. You can drop a trailing `_agent` or
+`_sandboxed_agent` when only one harness matches. `hermes` matches both `hermes_agent` and `hermes_sandboxed_agent`,
+so it is refused. `--model-type openai_model` serves any OpenAI-compatible endpoint, with `<url>` as its base URL.
 
 Gym prepares the dataset, starts the servers and collects one rollout per task by default (`--num-repeats`
 changes that). The results land in `results/harbor/my-dataset/`. A task that does not load stops the run before
 any server starts; `--skip-unloadable` runs the rest.
 
-Hermes calls the model from inside the sandbox, so the endpoint must be reachable from there. It also installs its
-runtime into each sandbox unless the image already holds it, so the sandbox needs outbound network access. Other
+Hermes calls the model from inside the sandbox through Gym's Model Server, which forwards to `<url>`, so the
+sandbox must reach the machine running `gym`. It also installs its runtime into each sandbox unless the image
+already holds it, so the sandbox needs outbound network access. Other
 harnesses that work inside the task sandbox can take its place: see
 [Harbor Environment Server](/main/agent-interactions/harbor).
 
@@ -208,8 +214,10 @@ gym dataset pull terminal_bench_2_1
 gym dataset validate terminal_bench_2_1 --sandbox opensandbox
 ```
 
-The pull fetches into the entry's own folder (the task folders are gitignored). `gym dataset validate <entry>`
-and `gym eval run <entry>` then resolve the name to that folder without fetching.
+The pull fetches into the entry's own folder (the task folders are gitignored), or into
+`$NEMO_GYM_DATASETS_DIR/<entry>/` when that variable is set. Pulling the reference an entry declares lands there
+too, so the first pull above fills the `terminal_bench_4` entry. `gym dataset validate <entry>` and
+`gym eval run <entry>` then resolve the name to that folder without fetching.
 [Evaluate Terminal-Bench 2.1 on the Harbor Path](/main/tutorials/evaluation-tutorials/terminal-bench-2-1-harbor)
 runs this entry end to end.
 

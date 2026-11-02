@@ -407,10 +407,11 @@ gym dataset validate terminal_bench_4 --sandbox opensandbox      # the committed
 ### `gym dataset publish`
 
 Write a Gym-authored dataset as plain Harbor task folders that run under Harbor as they are. Template rows are
-expanded into task folders, each Python verifier is wrapped in a `tests/test.sh`, each `solution/answer.md` becomes a
-`solution/solve.sh`, and `dataset.toml` is written without its `[gym]` table. `tasks.jsonl`, `task_data.py` and a
-dataset-level `verifier.py` stay behind. When the `harbor` package is installed, Harbor's own format check runs over
-every folder first; a refused publish leaves nothing under `--output`.
+expanded into task folders, each single-step task's Python verifier is wrapped in a `tests/test.sh`, each
+`solution/answer.md` becomes a `solution/solve.sh`, and `dataset.toml` is written without its `[gym]` table. The
+publish is refused if a Python verifier's `verify` takes `response`, or if the verifier would grade in separate
+verifier mode. `tasks.jsonl`, `task_data.py` and a dataset-level `verifier.py` stay behind. When the `harbor` package is installed,
+Harbor's own format check runs over every folder first; a refused publish leaves nothing under `--output`.
 
 | Option | Description |
 | --- | --- |
@@ -843,7 +844,7 @@ gym eval plan --schema
 
 Collate data, start the servers, and collect rollouts. This is the main evaluation command. By default it spins up all required servers. Pass `--no-serve` to collect against servers you already started with `gym env start`.
 
-In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Such a run needs `--agent`, starts its own servers (`--no-serve` is refused) and writes under `results/harbor/<taskset>/`. Refer to [Author Task Folders](/main/data/harbor-tasks) for the layout and to [Task Folder Files and Storage](/main/reference/task-folder-storage) for what it writes.
+In place of `--benchmark`, a positional `TARGET` runs a dataset in the Harbor task format: a task folder, a folder of task folders, a `harbor:<dataset>[@<version>]` hub reference, or the name of a committed entry under `environments/harbor/` (for example `terminal_bench_4`) after `gym dataset pull`. Such a run needs `--agent <harness>`: a folder under `responses_api_agents/`, given as `NAME` or `NAME/FLAVOR` (such as `hermes_agent`). It starts its own servers (`--no-serve` is refused) and writes under `results/harbor/<taskset>/`. Refer to [Author Task Folders](/main/data/harbor-tasks) for the layout and to [Task Folder Files and Storage](/main/reference/task-folder-storage) for what it writes.
 
 | Option | Description |
 | --- | --- |

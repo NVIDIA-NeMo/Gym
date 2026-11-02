@@ -17,13 +17,14 @@ Field names and defaults are Harbor's (`task.toml` schema 1.4). To write your fi
 | `task.toml` | Yes | The task's settings. |
 | `instruction.md` | Single-step tasks | The agent's prompt. Leading canary lines (an HTML comment or `#` line containing `canary`) are dropped. |
 | `environment/` | No | A `Dockerfile` or `docker-compose.yaml`, plus their files. With a prebuilt `docker_image` and neither file, its files go to the working directory. |
-| `tests/` | Unless the dataset has `verifier.py` | `test.sh` or `verifier.py`, plus fixtures. |
+| `tests/` | Single-step tasks, unless the dataset has `verifier.py` | `test.sh` or `verifier.py`, plus fixtures. A multi-step task may keep its tests in `steps/<name>/tests/` instead. |
 | `solution/` | No | `solve.sh` or `answer.md`. Only the oracle of `gym dataset validate` sees it. |
 | `task_data.json` | No | The task's own fields. See [Typed task fields](/main/data/task-folder-patterns#typed-task-fields). |
 | `steps/` | Multi-step tasks | One folder per step. |
 
 The dataset root holds `dataset.toml`, and optionally `task_data.py` (the model that types task fields) and
-`verifier.py` (a verifier for every task without `tests/`). Do not edit the records Gym writes there at prepare.
+`verifier.py` (a verifier for every single-step task without `tests/`). Do not edit the records Gym writes there
+at prepare.
 
 The folder name is the task ID, unique across the dataset. Task folders may sit up to six levels down. Hidden
 folders are skipped, and a task folder must not be a symbolic link.
@@ -73,7 +74,7 @@ Dockerfile's final `USER`, else the image's.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `timeout_sec` | `600` | Bound on `test.sh`. |
-| `user` | none | The user `test.sh` runs as. |
+| `user` | none | The user `test.sh` runs as. Unset, the user the verifier's image starts with, never `[agent].user`. In the task's own image, root when `[agent].user` is set and Gym has no record of the image's user. |
 | `env` | `{}` | The variables `test.sh` receives from the server. |
 | `environment_mode` | `shared` | `shared` runs `test.sh` in the agent's sandbox, `separate` in a fresh one. |
 | `environment` | none | A `[verifier.environment]` table with the keys of `[environment]`. Selects separate mode. |
@@ -111,7 +112,7 @@ memory_mb = 4096
 | --- | --- | --- |
 | `type` | `validation` with a license, else `benchmark` | The split the rows enter: `train`, `validation`, `example` or `benchmark`. |
 | `license` | none | One of Gym's dataset license values. Required for `train` and `validation`. |
-| `allowed_agents` | any | Harnesses that may run the dataset, by `--agent` name. The oracle is always admitted. |
+| `allowed_agents` | any | Harnesses that may run the dataset, by full folder name under `responses_api_agents/`, such as `hermes_agent`. The oracle is always admitted. `--allow-unsupported-pairing` skips the check. |
 | `domain` | none | One of Gym's domain values, such as `coding`. |
 | `verified` | `false` | Whether the rewards were baselined and reviewed. |
 | `source` | none | The hub reference a committed entry under `environments/harbor/` is pulled from. |
@@ -131,8 +132,8 @@ None of these keys enters a task digest.
 Per-task overrides, keyed by folder name. `environment` and `verifier` take any key of the task's table: `env`
 merges over the task's own, and every other key replaces it. `verifier` also takes the Gym-only `inputs` list (see
 [Sidecar inputs](/main/data/task-folder-verifiers#sidecar-inputs)). `artifacts` adds entries after the task's own.
-Once the table sets a multiplier or any override, every task's digest includes the defaults and its own (possibly
-empty) override, so adding the first such key, or removing the last, changes every digest.
+Once `dataset.toml` sets a multiplier other than `1.0` or any override, every task's digest includes the defaults
+and its own (possibly empty) override, so adding the first such key, or removing the last, changes every digest.
 
 <Note>
 `harbor add`, `harbor remove` and `harbor sync` rewrite `dataset.toml` without the `[gym]` table. Keep the
@@ -146,7 +147,7 @@ Prepare puts each distinct `environment/Dockerfile` in one of three modes.
 | Mode | Dockerfile | How it runs |
 | --- | --- | --- |
 | Pull | `FROM` plus `WORKDIR`, `ENV`, `USER` and `LABEL` | The base image starts, pinned to its digest at prepare, with the Dockerfile's settings applied. |
-| Overlay | The same plus `RUN` lines | The base image starts and each `RUN` line runs at seed, with no build or registry. A failing line fails the seed with its output. |
+| Overlay | The same plus `RUN` lines | The base image starts and each `RUN` line runs at seed. Nothing is built or pushed. A failing line fails the seed with its output. |
 | Build | Anything else, such as `COPY`, multi-stage builds or `ENTRYPOINT` | Gym builds the image once from `environment/` and runs it like a pulled image. |
 
 Pull and overlay mode read the base image's configuration from its registry at prepare. A built image is named
@@ -171,7 +172,7 @@ Gym differs here:
 
 | Behavior | In Gym |
 | --- | --- |
-| Shared verification | `/tests` and `/logs/verifier` are emptied before `test.sh` runs, so the agent cannot plant a reward. |
+| Shared verification | `/tests` and `/logs/verifier` are emptied before `test.sh` runs, apart from the files `[verifier].inputs` names, so the agent cannot plant a reward. |
 | Overlay-mode Dockerfile | `RUN` lines run in the sandbox at seed, not in a build. |
 | Prebuilt `docker_image` | In a single-sandbox task its `ENTRYPOINT` and `HEALTHCHECK` do not run, unless a pull-mode `environment/Dockerfile` (`FROM` that image) sits beside it. In a Compose task they run, as under Harbor. |
 | Network restrictions | Only on `[verifier]` in separate mode, on OpenSandbox. |
@@ -181,7 +182,8 @@ Gym differs here:
 ## What the loader refuses
 
 The loader refuses a task with the reason in its message. `gym eval run` lists refused tasks in `skipped.json` and
-stops unless you pass `--skip-unloadable`. `gym dataset validate` lists them and exits 1.
+stops unless you pass `--skip-unloadable`. `gym dataset validate` lists them as `skipped: <reason>` and exits 1.
+When no task loads at all, it prints the error instead of a table and exits 2.
 
 | Category | Causes |
 | --- | --- |
@@ -189,7 +191,7 @@ stops unless you pass `--skip-unloadable`. `gym dataset validate` lists them and
 | Missing images | A build-mode Dockerfile, base image or `tests/Dockerfile` with no record from prepare, or a separate verifier with no image. |
 | Unsupported settings | Windows, TPU, network restrictions outside separate-mode `[verifier]`, or a shared verifier with its own environment. |
 | Invalid values | A malformed `task.toml` or override, a bad `inputs` entry, an MCP server without an endpoint, or an artifact under `/tests` or `/logs/verifier`. |
-| Dataset settings | `type = "example"`, a harness outside `allowed_agents`, or a `[gym.tasks]` table naming no task. These stop the whole command. |
+| Dataset settings | `type = "example"`, a harness outside `allowed_agents` (without `--allow-unsupported-pairing`), or a `[gym.tasks]` table naming no task. These stop the whole command. |
 
 A `tests/` folder with neither `test.sh` nor `verifier.py` loads. Unless a separate verifier's image ships
 `/tests/test.sh`, it scores 0 with `harbor:missing_reward`. For fixes, see

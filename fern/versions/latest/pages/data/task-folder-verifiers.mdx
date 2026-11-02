@@ -21,7 +21,7 @@ In the default shared mode, the server does this in the agent's sandbox:
    image's `/tests`.
 3. Uploads `tests/` to `/tests` and makes `test.sh` executable.
 4. Writes the agent's transcript to `/logs/agent/trajectory.json` in
-   [ATIF v1.7](/main/reference/trajectory-capabilities#atif-export), the format Harbor's verifiers read.
+   [ATIF v1.7](/main/reference/atif-export), the format Harbor's verifiers read.
 5. Runs `bash /tests/test.sh` from the working directory under `timeout`, with its output in
    `/logs/verifier/test-stdout.txt`.
 
@@ -47,7 +47,8 @@ Two tasks of one dataset may write different keys. Gym pads no missing key and r
 | `test.sh` runs past `timeout_sec` without writing a reward | 0 | `harbor:verifier_timeout` |
 
 These rows count in the score, and a reward written before a timeout still stands. Only infrastructure failures,
-such as a lost sandbox or a reward that could not be copied out, set `mask_sample` and leave the row out.
+such as a lost sandbox or a reward that could not be copied out, set `mask_sample`: the rollout stays in
+`rollouts.jsonl` but is left out of the score.
 
 ## Python verifiers
 
@@ -72,12 +73,14 @@ def verify(workspace: Path, task_data: dict) -> float:
 | --- | --- |
 | `workspace` | The task's working directory in the sandbox, as a `Path`. |
 | `task_data` | The task's fields, from `task_data.json` or a parameterized row. |
-| `response` | The agent's final response, as a dict. Gym only: Harbor cannot provide it. |
-| `state` | `{"workspace": Path}`. |
+| `response` | The agent's final Responses API response, as a dict. Only Gym's `harbor` server passes it. |
+| `state` | `{"workspace": Path}`, the same directory as `workspace` and nothing else. |
 
-`verify` returns a number, or a dict with a `reward` key and other numeric keys as metrics. An `async def verify`
-is awaited. A `verify` that raises, requires an argument the runner does not supply, or returns anything else writes no reward, which
-scores 0 with `harbor:missing_reward` and the error in `test-stdout.txt`.
+`verify` returns a number, or a dict of numbers. A `reward` key is the score and the other keys are metrics.
+Without `reward`, the dict must hold exactly one key, which is the score. Unlike in `reward.json`, several keys are
+not summed. An `async def verify` is awaited. A `verify` that raises, requires an argument the runner does not
+supply, or returns anything else writes no reward, which scores 0 with `harbor:missing_reward` and the error in
+`test-stdout.txt`.
 
 The helpers use the standard library only:
 
@@ -85,12 +88,14 @@ The helpers use the standard library only:
 - `nemo_gym.verifiers.files`: `read_text`, `file_exists` and `text_file_equals`. They read only inside the
   workspace. `read_text` drops one trailing newline unless you pass `strip_trailing_newline=False`.
 
-No verifier code runs on the host. At verification the server uploads a shim over `/tests`: a `test.sh` that
-finds `python3` or `python` 3.8 or newer in the image, a runner, a copy of `nemo_gym.verifiers`, the task's fields
-and the agent's response. The shim runs like any `test.sh`, under the same timeout, user and mode.
+No verifier code runs on the host. At verification the server uploads a shim over `/tests`: a `test.sh`, a runner,
+a copy of `nemo_gym.verifiers`, the task's fields and the agent's response. Its `test.sh` runs `python3`, else
+`python`, and needs that interpreter to be 3.8 or newer. The shim runs like any `test.sh`, under the same timeout,
+user and mode.
 
 In separate mode, a verifier that reads `workspace` needs the working directory in `artifacts`.
-`gym dataset publish --harbor` refuses a Python verifier that declares `response` or runs in separate mode.
+`gym dataset publish --harbor` refuses a Python verifier that runs in separate mode or declares `response`, even
+with a default.
 
 ## Reference answers
 
@@ -133,13 +138,14 @@ The separate verifier's image:
 | --- | --- |
 | `[verifier.environment].docker_image` | That image. |
 | No `[verifier.environment]`, and `[environment].docker_image` | The task's own image. |
-| Neither image, and `tests/Dockerfile` | An image prepare builds from `tests/`, named `hb__<hash>-verifier`. |
+| A `[verifier.environment]` without `docker_image`, or no image at all, and `tests/Dockerfile` | An image prepare builds from `tests/`, named `hb__<hash>-verifier`. |
 
 A separate-mode task with none of these is refused. When Gym has the verifier image's configuration on record, its
 `ENTRYPOINT` and `HEALTHCHECK` run before `test.sh`. A `tests/docker-compose.yaml` may declare service `main` only, with no runtime keys such as `volumes`.
 
-`[verifier].network_mode` (`no-network`, or `allowlist` with `allowed_hosts`) applies to separate verification on
-OpenSandbox only. The server option `separate_verifier_for_artifacts: true` verifies every task that declares
+`[verifier].network_mode` (`no-network`, or `allowlist` with `allowed_hosts`) restricts the separate verifier's
+sandbox. It needs OpenSandbox, or the episode fails at seed. Under shared verification the task is refused at
+load. The server option `separate_verifier_for_artifacts: true` verifies every task that declares
 `artifacts` separately; see [Configure the server](/main/agent-interactions/harbor#configure-the-server).
 
 ## Environment variables and secrets
@@ -155,8 +161,9 @@ hints such as `OMP_NUM_THREADS`, derived from its CPU limit; a variable the task
 ## Users
 
 `test.sh` runs as `[verifier].user`. Unset, it runs as the user the verifier's image starts with, never
-`[agent].user`; when Gym has no record of that user and `[agent].user` is set, it runs as root. A numeric user is resolved to its name in the image. A user with a group (`name:group`) works on
-the Docker provider only and is refused at seed elsewhere.
+`[agent].user`; when Gym has no record of that user and `[agent].user` is set, it runs as root. A numeric image
+`USER` runs `test.sh` as that uid. A `[verifier].user` is used as written, so write a numeric one as a TOML integer,
+not a string. A user with a group (`name:group`) works on the Docker provider only and is refused at seed elsewhere.
 
 ## Image entrypoint
 

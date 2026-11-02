@@ -264,11 +264,16 @@ Command failures return `SandboxExecResult` with the command's exit code. A comm
 
 When the `harbor` Environment Server runs [task folders](/main/data/harbor-tasks) on Docker:
 
-- A task whose Dockerfile needs a build is built with `docker` into the local daemon, so no registry is needed (see
+- A task whose Dockerfile needs a build is built with `docker` into the local daemon, so no registry is needed. This
+  holds while no build repository is set. When `builds.repository` or `NEMO_GYM_BUILD_REPOSITORY` names one, the
+  image is built with `builds.tool`, else the first of buildah, podman or docker on `PATH`, and pushed there (see
   [Harbor image builds](/main/reference/configuration#harbor-image-builds)).
 - Compose tasks do not start on Docker, which cannot network a group of sandboxes. A task with a Compose file in
   `environment/`, or any task when the server's `compose_overlay` names Compose `files`, fails at seed with
-  `Sandbox provider does not support networking between sandboxes`. Run these tasks on OpenSandbox (see
-  [Multi-Container Tasks](/main/data/compose-tasks)).
-- `exec.default_timeout_s` also bounds how long Gym tracks a running image entrypoint; past it, the entrypoint is no
-  longer tracked.
+  `Could not set up sandbox for '<task>': Sandbox provider does not support networking between sandboxes`. The
+  failure is reported as retryable, so each `--resume` runs these tasks again and they fail the same way. Leave them
+  out with `--exclude-tasks`, or run them on OpenSandbox (see [Multi-Container Tasks](/main/data/compose-tasks)).
+- Gym holds a running image `ENTRYPOINT` in one `docker exec`. That exec ends at `exec.default_timeout_s` (180
+  seconds by default), but the entrypoint keeps running, untracked. If it then exits non-zero during the rollout, the
+  sample is still scored, not masked with `harbor:entrypoint_failed`. The exit status is only logged and kept as
+  `entrypoint-exit.txt`.

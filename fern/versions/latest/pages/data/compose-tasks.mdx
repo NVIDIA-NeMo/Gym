@@ -91,7 +91,7 @@ gym dataset validate my-dataset --sandbox opensandbox --config compose-deploymen
 | --- | --- |
 | `networking.enabled` | Always. |
 | `networking.loopback_forwarding` | A service uses `network_mode: service:<name>`. |
-| `runtime_requirements.shm_size_metadata_key` | A service sets `shm_size`. Your cluster operator knows the label. |
+| `runtime_requirements.shm_size_metadata_key` | A service sets `shm_size`. Name the label your cluster reads shared-memory size from, such as `nemo.nvidia.com/shm`. |
 | `runtime_requirements.capability_probes` | A service uses `cap_add`: one probe command per capability. |
 | `shared_storage.host_path` | A service mounts a named volume, or a sidecar binds a `/logs` path. |
 | `volume_sources` | A volume is `external: true`, or a bind source sits outside the task. |
@@ -158,6 +158,7 @@ such as `privileged` or `secrets`, leaves the task out.
 | Field | Meaning in a sandbox group |
 | --- | --- |
 | `deploy.resources` | `limits.cpus` and `limits.memory` size the sandbox. A numeric GPU `count` routes the service to the server's `gpu_sandbox_provider`, when set. `count: all` and `limits.pids` fail. |
+| `cpus`, `mem_limit` | Size the sandbox's CPUs or memory when `deploy.resources` does not. |
 | `restart` | Accepted. Nothing restarts. |
 | `pull_policy` | `always`, `missing` or `never`. |
 | `platform` | Must match the deployment platform, `linux/amd64` by default. |
@@ -211,4 +212,5 @@ harbor_environment_server:
 - Prepare reads the block too, records the overlay's images and checks each merged document. Put it in `env.yaml` or
   a `--config` file that both prepare and the server read, and prepare again after you change it. Image references
   must resolve at prepare, without `compose_variables`.
-- Restart the servers after you edit the template. Prepare needs Jinja2: install the `ray` extra.
+- Restart the servers after you edit the template. Prepare also compiles it, so install `jinja2>=3.1` where you run
+  `gym` (the `ray` extra includes it).

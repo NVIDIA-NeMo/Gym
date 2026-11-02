@@ -7,15 +7,18 @@ position: 2
 # Task Folders
 
 Each entry gives the symptom, cause and fix for a task-folder run of `gym eval run <target>` or
-`gym dataset validate <target>`. Start with the run summary, `results/harbor/<taskset>/rollouts_run_summary.json`,
-which lists every task's status, `failure_kind` and verifier log folder (see
-[The run summary](/main/reference/task-folder-storage#the-run-summary)). Add `-v` for DEBUG logs from every server.
+`gym dataset validate <target>`. Start with the run summary, `rollouts_run_summary.json` in
+`results/harbor/<taskset>/` (in `results/harbor/validation/<taskset>/` for `gym dataset validate`). It lists every
+task's status, `failure_kind` and verifier log folder (see
+[The run summary](/main/reference/task-folder-storage#the-run-summary)). A command refused before its servers start
+writes no summary: read the error it prints, and `skipped.json` when the error names it. Add `-v` for DEBUG logs
+from every server.
 
 ## Docker Hub answers 429
 
-**Symptom.** Prepare stops with `Could not record the configuration of image ...` followed by
-`registry returned HTTP 429 for <path>`. Or an image build fails with `toomanyrequests`, and its tasks are listed
-in `skipped.json`.
+**Symptom.** Prepare stops with `Could not record the configuration of base image ...` (or `of Compose image ...`),
+followed by `registry returned HTTP 429 for <path>`. Or an image build fails with `toomanyrequests`, and its tasks
+are listed in `skipped.json`.
 
 **Cause.** Docker Hub limits anonymous pulls per IP address. Prepare reads every image it has no record of, and the
 build tool pulls each build's base image. Every job on one login node shares an address.
@@ -23,8 +26,9 @@ build tool pulls each build's base image. Every job on one login node shares an 
 **Fix.**
 
 - Log the build tool in to Docker Hub: `buildah login docker.io`, `podman login docker.io` or `docker login`.
-- Give prepare a Docker Hub account under the prefix `"docker.io/"` of the sandbox provider block, with keys you
-  add to `env.yaml`:
+- Give prepare a Docker Hub account. Only the OpenSandbox provider block takes one. With any other provider, such
+  as Docker, prepare reads Docker Hub anonymously. On OpenSandbox, add the account under the prefix `"docker.io/"`,
+  with keys you add to `env.yaml`:
 
   ```yaml
   sandbox:
@@ -129,8 +133,9 @@ output, or `Installing a sandbox runtime requires uv on the agent host`.
 index, unless the image already holds it.
 
 **Fix.** Allow the sandbox outbound access to GitHub and the package index, or bake the runtime into the image at
-`/tmp/nemo-gym-hermes-runtime-<commit>/venv` (see the
+`/tmp/nemo-gym-hermes-runtime-<key>/venv` (see the
 [Hermes agent README](https://github.com/NVIDIA-NeMo/Gym/blob/main/responses_api_agents/hermes_agent/README.md#runtime-and-model-requirements)).
+`<key>` is the first 12 characters of the installed Hermes commit, or the package version for an index install.
 On a slow network, raise the agent's `sandbox_install_timeout_seconds` (900 s). Put `uv` on the host's `PATH`.
 
 ## Verifier or agent timeout
@@ -142,8 +147,10 @@ On a slow network, raise the agent's `sandbox_install_timeout_seconds` (900 s). 
 
 - `harbor:verifier_timeout`: `test.sh` ran past `[verifier].timeout_sec` (600 s by default) without writing a
   reward.
-- `harbor:task_deadline`: the episode ran past its task's budget (harness setup, `[agent].timeout_sec`, collect
-  hooks, `[verifier].timeout_sec` and a grace period, from the moment the sandbox is ready).
+- `harbor:task_deadline`: the episode ran past its task's budget, which starts when the sandbox is ready. The
+  budget is harness setup, `[agent].timeout_sec`, collect hooks, `[verifier].timeout_sec` and a grace period, plus a
+  sandbox start for a separate verifier. A multi-step task sums this per step, adding each step's `setup.sh` and
+  health check bounds (see [Episode time budget](/main/data/multi-step-tasks#episode-time-budget)).
 
 **Fix.** Raise the budgets in the dataset, not in the task: `timeout_multiplier` in `[gym.defaults]` scales every
 agent and verifier budget, and `[gym.tasks."<task>".verifier] timeout_sec = <seconds>` raises one task's verifier
@@ -162,7 +169,7 @@ A row's `failure_kind` says why the verifier gave no reward, or why the row is l
 | `harbor:verifier_timeout` | `test.sh` ran past its timeout without a reward. | Yes, as 0 |
 | `harbor:task_deadline` | The episode ran past its task's budget. | No, retried |
 | `harbor:trajectory_export_failed` | The transcript could not be written for the verifier. | No, masked |
-| `harbor:entrypoint_failed` | The image's entrypoint exited non-zero. | No, masked |
+| `harbor:entrypoint_failed` | The image's entrypoint exited non-zero after the seed: during the rollout, or in a separate verifier's sandbox. At seed, it fails the episode instead, with stage `seed`. | No, masked |
 | `harbor:overlay_failed` | An overlay-mode `RUN` line failed in the verifier's own sandbox. | No, masked |
 
 Other masked kinds come from Gym's shared list: `provider_unavailable` (a sandbox operation failed during
@@ -191,9 +198,11 @@ inputs = ["actions.jsonl"]
 
 ## A multi-step task stops at a step
 
-**Symptom.** The episode stops early, `stopped_after_turn` names a step, and the turn's `failure_kind` is
-`harbor:step_setup_failed` (`workdir/setup.sh` failed), `harbor:step_workdir_failed` (`workdir/` could not be
-unpacked) or `harbor:step_healthcheck_failed` (`[steps.healthcheck]` never passed).
+**Symptom.** A step's `failure_kind` is `harbor:step_setup_failed` (`workdir/setup.sh` failed),
+`harbor:step_workdir_failed` (`workdir/` could not be unpacked) or `harbor:step_healthcheck_failed`
+(`[steps.healthcheck]` never passed). When the first step fails, no agent has run: the episode has no result row, and
+`rollouts_failures.jsonl` holds it with that `failure_kind`. When a later step fails, the episode stops, the row's
+turn for that step carries the `failure_kind`, and `stopped_after_turn` names the step unless it was the last.
 
 **Cause.** The step's preparation failed in the sandbox the earlier steps used: the task is broken, or an earlier
 agent left the sandbox in a state the step cannot handle.
@@ -222,8 +231,9 @@ dataset whose folders no longer match its `manifest.toml`.
 **Cause.** A task folder was edited after its rows were written, or a pulled task folder was edited by hand.
 
 **Fix.** For your own dataset, run the command again; prepare writes new rows. For a pulled dataset, move the edited
-folder aside and run again to fetch it fresh. Put changes in `dataset.toml` overrides instead of editing pulled
-tasks.
+task folder out of the dataset folder, then fetch it again with `gym dataset pull` on the entry or `harbor:`
+reference. A run by entry name or folder path does not fetch, so it refuses the dataset until you pull. Put changes
+in `dataset.toml` overrides instead of editing pulled tasks.
 
 `Note: <folder> holds an earlier fetch of <reference>` means a committed entry now declares that reference as its
 `[gym] source` and fetches it into its own folder. Nothing reads the old one, so move it aside or delete it.
@@ -242,9 +252,11 @@ tasks.
 **Symptom.** Two runs of one dataset from one checkout report each other's tasks, or a run summary lists
 `stale_files`.
 
-**Cause.** Both runs write the same files under `results/harbor/<taskset>/`: the rows, the run config,
-`skipped.json`, `images.json` and the rollouts. `--output` separates only the rollouts.
+**Cause.** Whatever their harnesses, both runs write `skipped.json`, `images.json` and `rollouts.jsonl` (with the
+files named after it) under `results/harbor/<taskset>/`. Two runs with one harness also share `tasks_<agent>.jsonl`
+and `run_config_<agent>.yaml`. `--output` separates only the rollouts and the files named after them. The health
+check's `quality_summary.json` and `rollout_verdicts.jsonl` keep one name per folder.
 
-**Fix.** Run one job per taskset and harness at a time on a checkout, or give each concurrent job its own checkout.
+**Fix.** Run one job per taskset at a time on a checkout, or give each concurrent job its own checkout.
 Point every checkout at one shared `NEMO_GYM_DATASETS_DIR` so they share the task folders and image records (see
 [Pulled datasets](/main/reference/task-folder-storage#pulled-datasets)).

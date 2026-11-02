@@ -18,12 +18,8 @@ The two tasks are independent. Open either directory and you will find its instr
 ## Run it
 
 ```bash
-export OPENAI_API_KEY="<api-key>"
-
-gym eval run environments/hello_dataset \
-  --agent opencode_agent \
-  --model openai/gpt-5 \
-  --sandbox docker
+gym eval run environments/hello_dataset --agent opencode_agent --sandbox docker \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
 The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
@@ -34,8 +30,10 @@ Every task ships a `solution/` (a `solve.sh` here; the parameterized dataset shi
 row instead). The oracle plays it through the task's verifier and expects reward 1:
 
 ```bash
-gym dataset validate environments/hello_dataset --sandbox opensandbox
+gym dataset validate environments/hello_dataset --sandbox docker
 ```
+
+On a cluster, pass `--sandbox opensandbox` instead.
 
 ## Check the result
 

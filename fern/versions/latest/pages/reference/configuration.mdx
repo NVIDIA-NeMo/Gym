@@ -448,21 +448,24 @@ builds:
 | Key | Default | Description |
 |-----|---------|-------------|
 | `tool` | detected | `buildah`, `podman` or `docker`. With a repository, the first of the three on `PATH`; without one, `docker` only. |
-| `repository` | `$NEMO_GYM_BUILD_REPOSITORY` | Registry path that built images are pushed under, as `<repository>/hb__<hash>`. Unset, images stay in the local Docker daemon, which only the Docker sandbox provider can start. OpenSandbox needs pushed images. |
+| `repository` | `$NEMO_GYM_BUILD_REPOSITORY` | Registry path that built images are pushed under: `<repository>/hb__<hash>` for a task's image, `hb__<hash>-<service>` for a Compose sidecar and `hb__<hash>-verifier` for a separate verifier built from `tests/`. Unset, images stay in the local Docker daemon, which only the Docker sandbox provider can start. OpenSandbox needs pushed images. |
 | `platform` | `linux/amd64` | Platform asked of the tool. An image that comes out for another platform is refused, and so is an amd64 level above the baseline, such as `linux/amd64/v3`. |
 | `enabled` | `true` | `false` never builds; tasks that need a build are left out with a message. |
 | `force` | `false` | Also build the Dockerfile of a task that declares `docker_image`, and run the built image, as Harbor's `--force-build` does. |
 
-Images are named `hb__<hash>`, where the hash is Harbor's hash of the task's `environment/` folder, so identical
-build contexts share one image. The tool pulls base images and pushes built ones with its own login
+The hash is Harbor's hash of the task's `environment/` folder (of `tests/` for a separate verifier), so identical
+folders share one image. The tool pulls base images and pushes built ones with its own login
 (`buildah login`, `podman login` or `docker login`).
 
 - **buildah** runs rootless with the `vfs` storage driver, under `/raid/scratch/<user>/nemo-gym-buildah` when
-  `/raid/scratch` exists, else in the system temp folder. Keep build contexts on local disk for Dockerfiles with
-  heredocs, which fail on Lustre.
+  `/raid/scratch` exists, else in the system temp folder. It reads each build context (`environment/`, or a Compose
+  service's `build.context`) in place inside the dataset folder. Its heredoc support fails on Lustre, so keep a
+  dataset whose Dockerfiles use heredocs on local disk while it builds.
 - **buildah and podman** run with Gym's own `containers.conf` and `registries.conf`, and build Docker-format
   images. Dockerfile heredocs need a tool built with openshift/imagebuilder 1.2.6 or later (upstream buildah 1.33.0
-  or later); prepare checks once and stops with the remedy.
+  or later); Ubuntu 24.04's packaged buildah 1.33.7 and podman 4.9.3 do not qualify. Prepare checks the tool before
+  the first heredoc build. If the check fails, tasks whose Dockerfiles use heredocs are left out, with the remedy as
+  their reason in `skipped.json`.
 - **docker** builds through `docker compose build`, so it needs the Compose v2 plugin (`docker-compose-plugin`).
 - **Proxies.** A proxy that answers 403 to the registry fails the push. Add the registry host to `no_proxy`.
 

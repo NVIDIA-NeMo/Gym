@@ -9,8 +9,8 @@ position: 2
 The `harbor` Environment Server (`environment_servers/harbor/`) runs tasks written as task folders in the
 [Harbor](https://github.com/harbor-framework/harbor) format. A task folder holds everything one episode needs: the
 settings in `task.toml`, the instruction in `instruction.md`, the software environment in `environment/`, the
-verifier in `tests/` and an optional reference solution in `solution/`. No Resources Server takes part. To write
-task folders, see [Author Task Folders](/main/data/harbor-tasks).
+verifier in `tests/` (or a `verifier.py` the dataset shares) and an optional reference solution in `solution/`. No
+Resources Server takes part. To write task folders, see [Author Task Folders](/main/data/harbor-tasks).
 
 ## One episode
 
@@ -23,14 +23,15 @@ row, the server runs one episode:
 2. **Activate.** Open an agent session on the configured Agent Server, hand it access to the sandbox and send it
    the instruction. The harness works in the sandbox until it finishes or runs out of time.
 3. **Close.** Close the agent session and keep what the agent observed. The agent leaves the sandbox to the server.
-4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json`, upload the task's `tests/` and run
-   the verifier in the same sandbox, or in a fresh one when the task asks for separate verification. Read the
+4. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json`, upload the verifier to `/tests` and
+   run it in the same sandbox, or in a fresh one when the task asks for separate verification. Read the
    reward from `/logs/verifier/reward.json` or `/logs/verifier/reward.txt`.
 5. **Clean up.** Stop every sandbox of the episode, whatever happened before.
 
 Once the verifier has run, the attempt counts: a missing or invalid reward file scores 0 with a `failure_kind`.
-Only a failure on Gym's side, such as a lost sandbox, sets `mask_sample` and leaves the attempt out of the score. A
-task with several steps runs one turn per step; see [Multi-Step Task Folders](/main/data/multi-step-tasks).
+A failure on Gym's side, such as a lost sandbox, sets `mask_sample` and leaves the attempt out of the score. So does
+a task image whose `ENTRYPOINT` exits non-zero after the seed (`harbor:entrypoint_failed`). A task with several
+steps runs one turn per step; see [Multi-Step Task Folders](/main/data/multi-step-tasks).
 
 ## Task folders or a Resources Server
 
@@ -41,12 +42,14 @@ serves tools to any agent over HTTP or MCP.
 
 ## Run task folders
 
-Check the reference solutions first. `gym dataset validate` runs each task's `solution/` through its verifier and
-exits non-zero unless every solution scores 1:
+Check the reference solutions first:
 
 ```bash
 gym dataset validate <target> --sandbox docker
 ```
+
+It runs each task's `solution/` through its verifier and lists tasks without one as unvalidated. It exits non-zero
+if a selected task fails to load or prepare, a solution does not score 1, or no selected task has a `solution/`.
 
 Then run a model:
 
@@ -64,7 +67,8 @@ writes the rows and a run configuration, then starts the servers and collects ro
 ### Harnesses
 
 The harness must accept a sandbox when its agent session is seeded and leave the sandbox to the server when the
-session closes. A harness that refuses a sandbox, such as `simple_agent`, fails every episode at seed.
+session closes. A harness that refuses a sandbox, such as `simple_agent`, fails every episode when its agent session
+is seeded (`_ng_failure_stage: agent`).
 
 | Harness | How it works |
 | --- | --- |
@@ -115,18 +119,18 @@ Pass the file with `--config <file>`, or set one key with
 | `sandbox_provider_options` | `{}` | Provider options for every sandbox. |
 | `sandbox_metadata` | `{benchmark: harbor}` | Metadata added to every sandbox. |
 | `sandbox_resources_override` | none | Replaces task resources: `cpu`, `memory_mib`, `disk_gib`. |
-| `enforce_task_timeouts` | `true` | Bound each episode by its task's own timeouts, from the moment the sandbox is ready. `false` uses `default_episode_timeout_seconds` alone. |
+| `enforce_task_timeouts` | `true` | Bound each episode by its task's own timeouts, counted from when the sandbox is ready. The episode stays within `default_episode_timeout_seconds` unless a multi-step task needs more. `false` uses the default alone and refuses a multi-step task that does not fit in it with one sandbox start. |
 | `harness_setup_allowance_s` | `300` | Harness setup time before the agent's budget starts. |
 | `verifier_grace_s` | `30` | Extra seconds for a timed-out verifier to stop. |
 | `step_setup_timeout_s` | none | Bound on a step's setup script. Unset, the step's agent budget. |
 | `default_episode_timeout_seconds` | `21600` | Run-wide bound on one episode. A larger multi-step task bound replaces it; see [Episode time budget](/main/data/multi-step-tasks#episode-time-budget). |
 | `cleanup_timeout_seconds` | `180` | Bound on each cleanup step. |
 | `sandbox_ttl_slack_s` | `900` | Extra sandbox lifetime beyond the episode and cleanup budgets. |
-| `max_concurrent_episodes` | none | Cap on episodes at once. Requires `queue_timeout_seconds`. |
+| `max_concurrent_episodes` | none | Cap on episodes at once, per server worker. Requires `queue_timeout_seconds`. |
 | `queue_timeout_seconds` | none | How long an episode may wait for a slot. |
 | `separate_verifier_for_artifacts` | `false` | Verify tasks that declare `artifacts` in a fresh sandbox. See [Shared and separate verification](/main/data/task-folder-verifiers#shared-and-separate-verification). |
 | `secrets` | `{}` | Secrets by variable name. They fill `${NAME}` in a task's `[verifier].env` only. |
-| `task_mcp_grants` | `off` | Grant a task's `streamable-http` MCP servers to the agent: `optional` or `required`. |
+| `task_mcp_grants` | `off` | Grant the `streamable-http` MCP servers of the task and the `compose_overlay` to the agent: `optional` or `required`. With `required`, an agent that cannot connect fails. A harness that cannot start task tools can then take a task whose MCP servers are all granted, if the task has no `skills_dir`. Ungranted entries reach the harness only in `/tmp/.nemo-gym/task.json`. |
 | `turn_sessions` | `fresh` | Multi-step tasks: `fresh` opens a session per step, `continue` keeps one. See [Continue one harness session](/main/data/multi-step-tasks#continue-one-harness-session). |
 | `compose_variables` | `{}` | Values for `${NAME}` that a task's Compose file leaves unset. See [Template variables](/main/data/compose-tasks#template-variables). |
 | `compose_overlay` | none | Compose files, MCP servers and a prompt template for every task. See [Job-level Compose overlay](/main/data/compose-tasks#job-level-compose-overlay). |

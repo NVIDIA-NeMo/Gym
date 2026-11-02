@@ -44,9 +44,9 @@ my-task/
     └── 02-select-frosting/
 ```
 
-Step names are unique folder names of letters, digits, `.`, `_` and `-`. Every step needs `steps/<name>/instruction.md` and a `test.sh` in
-`steps/<name>/tests/` or `tests/`. [Python verifiers](/main/data/task-folder-verifiers#python-verifiers) are
-single-step only. Gym's rows carry one `turns` entry per step instead of one `responses_create_params`.
+Step names are unique folder names of letters, digits, `.`, `_` and `-`, starting with a letter or digit. Every
+step needs `steps/<name>/instruction.md` and a `test.sh` in `steps/<name>/tests/` or `tests/`.
+[Python verifiers](/main/data/task-folder-verifiers#python-verifiers) are single-step only. Gym's rows carry one `turns` entry per step instead of one `responses_create_params`.
 
 | Step key | Default | What it does |
 | --- | --- | --- |
@@ -167,14 +167,15 @@ divided by 2 under `mean`. Harbor leaves that turn out; Gym counts it, so an age
 is penalized. At step 1 no agent has acted, so the episode is a terminal failure with the step's `failure_kind`: no
 row in `rollouts.jsonl`, one in `rollouts_failures.jsonl`, and no retry.
 
-The result lists each turn under `turns`. The episode's `response` is the last turn's, and `stopped_after_turn` names
-the step after which it stopped early.
+The result lists each turn under `turns`. The episode's `response` comes from the last turn whose agent ran, and
+`stopped_after_turn` names the step after which it stopped early.
 
 ## Early stop
 
 The episode stops after a turn that is masked, writes no valid reward file, or misses `min_reward`. A number gates
-the `reward` key, and a table such as `{ core_pass_rate = 0.5 }` gates each key it names. An agent failure that
-`agent_outcome_policy` retries or fails ends the episode ungraded.
+the reward file's `reward` key, so a `reward.json` with only component keys always misses it. A table such as
+`{ core_pass_rate = 0.5 }` gates each key it names. An agent failure that `agent_outcome_policy` retries or fails
+ends the episode ungraded.
 
 ## Reference solutions per step
 
@@ -199,7 +200,8 @@ it is refused at seed. An episode past its deadline fails with `harbor:task_dead
 
 ## Compose sidecars
 
-Size a sidecar the steps share with `deploy.resources.limits`, or it runs at the provider's default size. See
+Size a sidecar the steps share with `deploy.resources.limits` (or `reservations`, or the legacy `cpus` and
+`mem_limit`). Without any of them it runs at the provider's default size. See
 [Multi-Container Tasks](/main/data/compose-tasks).
 
 ## Continue one harness session

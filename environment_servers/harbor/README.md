@@ -1,4 +1,4 @@
-# Harbor environment server
+# Harbor Environment Server
 
 The `harbor` Environment Server runs task folders in the [Harbor](https://github.com/harbor-framework/harbor) task
 format: a folder with `task.toml`, `instruction.md`, `environment/`, `tests/test.sh` and an optional `solution/`.
@@ -15,15 +15,17 @@ One `/run` call is one whole episode, and no Resources Server takes part. For ea
 2. **Agent.** Open a session on the configured Agent Server with a `SandboxAccess` for that sandbox, post the
    task's `responses_create_params`, then close the session and keep what the agent observed. When the agent is
    `harbor_oracle_agent`, the seed first uploads the task's `solution/` to `/solution`.
-3. **Verify.** Write the agent's transcript to `/logs/agent/trajectory.json` (ATIF), clear `/tests` and the
-   grader's files in `/logs/verifier`, upload `tests/` and run `test.sh` in the same sandbox, or in a fresh one in
-   separate mode, then read `reward.json` or `reward.txt`.
+3. **Verify.** Run the `[[verifier.collect]]` hooks. In shared mode, empty `/tests` and `/logs/verifier` in the
+   agent's sandbox, keeping only the task's `[verifier].inputs`; in separate mode, start a fresh sandbox. Then
+   upload `tests/`, write the agent's transcript to `/logs/agent/trajectory.json` (ATIF), run `test.sh` and read
+   `reward.json`, else `reward.txt`.
 4. **Cleanup.** Stop every sandbox of the episode, whatever happened before.
 
 Once `test.sh` has run, the sample counts: a missing or invalid reward file scores 0 with a `failure_kind`, and only
 a Gym-side failure (a lost sandbox, a failed transfer) sets `mask_sample`. A task that cannot be set up fails at
 `stage: seed`, terminally when the task is at fault and retryably when the provider failed. A task with `[[steps]]`
-runs one such turn per step in the same sandbox.
+runs one such turn per step in the same sandbox. It stops early after a step whose preparation fails, or one that is
+masked, leaves no valid reward or misses its `min_reward`.
 
 ## How it fits
 
@@ -32,9 +34,10 @@ describes the usual split: an Environment Server orders the episode, and for JSO
 tools and the verifier. Task folders are the second way to define a task: the folder is the whole task, verifier
 included, so this server seeds the sandbox from the folder and runs the task's own verifier itself. `gym eval run`
 and `gym dataset validate` load the folders with `nemo_gym.tasks.harbor`, write one row per task and a run
-configuration with a per-taskset instance of this server, and bind it to the harness named by `--agent`. The harness must accept a sandbox in its session seed and leave the
-sandbox to the server when the session closes. `harbor_agent` and `harbor_agent_general` are deprecated Agent
-Servers that run Harbor's own runtime; they are not this path.
+configuration with a per-taskset instance of this server, and bind it to a harness: the one `gym eval run` names
+with `--agent`, or `harbor_oracle_agent` for `gym dataset validate`. The harness must accept a sandbox in its
+session seed and leave the sandbox to the server when the session closes. `harbor_agent` and `harbor_agent_general`
+are separate Agent Servers that run Harbor's own runtime; they are not this path.
 
 ## Run it
 

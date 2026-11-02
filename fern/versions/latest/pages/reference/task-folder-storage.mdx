@@ -1,7 +1,7 @@
 ---
 title: "Task Folder Files and Storage"
 description: "Where task-folder runs write their files, which digests identify a task and a dataset, what a rerun reuses and what you can delete."
-position: 6
+position: 7
 ---
 
 # Task Folder Files and Storage
@@ -16,7 +16,9 @@ run's results folder. This page lists what each file is for and what you can del
 | `results/harbor/<taskset>/` | Rows, run config, rollouts, run summary and verifier logs of `gym eval run` |
 | `results/harbor/validation/<taskset>/` | The same, for `gym dataset validate` |
 
-`<taskset>` is the dataset folder's name. `results/harbor/` is relative to the directory you run `gym` from.
+`<taskset>` is the name of the target's folder: the dataset folder (for an entry or `harbor:` reference, the folder
+it was pulled into), or the task folder for a single task. `results/harbor/` is relative to the directory you run
+`gym` from.
 
 ## Pulled datasets
 
@@ -46,9 +48,10 @@ pulled into `<entry>/` under the datasets folder with copies of its Gym files, r
 - `[tasks."<id>"]`: the task's folder digest and its upstream pin.
 
 Prepare writes a `manifest.toml` with `source = "local"` for a dataset you author, unless git tracks the folder. A
-later fetch downloads only the task folders the manifest does not record. Registry references
-(`harbor:<dataset>[@<version>]`) resolve through Harbor's registry, cached at `.harbor/registry.json` in the
-datasets folder; nothing refreshes it, so move it aside to see datasets added since.
+later fetch downloads only the task folders missing from disk, even ones the manifest records. It keeps the folders
+whose digests still match. Registry references (`harbor:<dataset>[@<version>]`) resolve through Harbor's registry,
+cached at `.harbor/registry.json` in the datasets folder; nothing refreshes it, so move it aside to see datasets
+added since.
 
 ## Image records
 
@@ -56,7 +59,7 @@ Prepare writes two record files at the dataset root, beside the task folders:
 
 | File | What it holds |
 | --- | --- |
-| `compose-images.json` | The configuration (`Entrypoint`, `Env`, `User`, `WorkingDir` and more) of every image a task starts from, pinned to a digest. |
+| `compose-images.json` | The configuration (`Entrypoint`, `Env`, `User`, `WorkingDir` and more) of each image prepare reads or builds. The base image of a pull-mode or overlay-mode Dockerfile and each Compose service image are pinned to a digest; a built image is pinned once pushed. A prebuilt `docker_image` gets no record unless a pull-mode Dockerfile (`FROM` that image) sits beside it or the task runs under Compose. |
 | `built-images.json` | Every built image, keyed by the hash of its build context: the image per Compose service, the tool, whether it was pushed, and the tasks that use it. |
 
 A record found on disk is reused without asking the registry. Each built image is recorded once it is built (and
@@ -92,13 +95,16 @@ other's entries.
   under the same name is listed under `stale_files`.
 - `counts`: selected, results, masked, failed and missing.
 - `tasks`: per task and repeat, its `status` (`result`, `failed` or `missing`), `reward`, `mask_sample`,
-  `failure_kind`, verifier mode, wall time and return code, the relative paths of its verifier logs, and the input
-  its row carried. A path missing on disk is listed under `missing_paths`.
+  `failure_kind` and the input its row carried. A result adds `verifier` (mode, run time in seconds, return code);
+  a failure adds `failure` (class, stage, message, attempt). Both list the relative paths of any verifier logs. A
+  path missing on disk is listed under `missing_paths`.
 - `skipped`: the tasks that did not load. `unvalidated`: the tasks `gym dataset validate` left out because they have
   no `solution/`.
 
-Paths are relative to the summary's folder, so a results folder can move as a whole. The summary is written
-whatever the run did.
+Paths are relative to the summary's folder, so a results folder can move as a whole. A command writes the summary
+once it starts its servers, whatever happens next. So does a `gym dataset validate` in which no task has a
+`solution/`. A command refused earlier, while it prepares the tasks or on a `--resume` that no longer matches them,
+writes none.
 
 ## Verifier log folders
 
@@ -135,7 +141,9 @@ dataset digest under `tasksets.<name>.dataset_digest`.
 
 ## What is safe to delete
 
-- **A results folder**, once you no longer need its results.
+- **A results folder**, once you no longer need its results. For a parameterized dataset, its `rendered/` folder is
+  the dataset folder and holds `manifest.toml` and the image records. Deleting it rebuilds every built image on the
+  next run.
 - **A pulled dataset folder**, for a fresh fetch. The image records live there too, so every task that needs a
   build is built again. In a committed entry's folder, delete only the task folders and `manifest.toml`.
 - **`.harbor/registry.json`**, to refresh the registry.
@@ -150,6 +158,9 @@ dataset digest under `tasksets.<name>.dataset_digest`.
 Otherwise keep `compose-images.json` and `built-images.json` with the task folders while you still run the dataset.
 
 <Tip>
-On a cluster, put the datasets folder and results that must outlive the job on shared storage, and keep buildah
-layers and build contexts on node-local disk.
+On a cluster, put the datasets folder and results that must outlive the job on shared storage. Keep buildah layers
+on node-local disk: they go under `/raid/scratch` when it exists; elsewhere, point `TMPDIR` at local disk. buildah
+reads each build context (`environment/`, or a Compose service's `build.context`) in place inside the dataset
+folder. Its heredoc support fails on Lustre, so keep a dataset whose Dockerfiles use heredocs on local disk while it
+builds.
 </Tip>

@@ -52,7 +52,9 @@ Prepare renders one plain task folder per row into `results/harbor/<taskset>/ren
 - A file named `<stem>.template<suffix>` has its `{{ task_data.<key> }}` placeholders filled and is written as
   `<stem><suffix>`. Values are inserted as they are, so put a value that must survive shell quoting in a text file,
   not inside a quoted string of a `solve.template.sh`.
-- Every other file is copied, apart from `tasks.jsonl` and the template's root `README.md`.
+- Every other file is copied, apart from `tasks.jsonl`, the root `README.md`, prepare's records, hidden root entries
+  other than `.gitignore`, and byte-code caches or editor leftovers. `dataset.toml`, `task_data.py` and a root
+  `verifier.py` are copied once, beside the rendered folders, not into each one.
 - The row's fields become the task's `task_data.json`.
 - When the template's `task.toml` has a `[task]` table, each rendered `[task].name` becomes `<org>/<task_id>`, so every
   task has its own name under Harbor.
@@ -139,8 +141,8 @@ Keep scoring logic in one place in one of three ways.
 
 **Gym's verifier helpers.** `nemo_gym.verifiers` (`final_text`, `exact_match`, `numeric_match`) and
 `nemo_gym.verifiers.files` (`read_text`, `file_exists`, `text_file_equals`) are copied into the sandbox with every
-Python verifier, so the task image needs nothing installed. `environments/hello_verifier_reuse` uses them both ways.
-One task reuses a complete verifier with its own settings:
+Python verifier, so the task image needs no Gym package, only `python3` or `python` 3.8 or newer.
+`environments/hello_verifier_reuse` uses them both ways. One task reuses a complete verifier with its own settings:
 
 ```python
 # exact-greeting/tests/verifier.py
@@ -165,9 +167,9 @@ def verify(workspace: Path) -> float:
     return float(content == "HELLO FROM NEMO GYM!" and content.isupper())
 ```
 
-**One dataset-level verifier.** A `verifier.py` beside `dataset.toml` grades every task that has no `tests/` folder,
-and its content enters those tasks' digests. Only that one file is uploaded, so it can import the helpers above but
-no other file of the dataset.
+**One dataset-level verifier.** A `verifier.py` beside `dataset.toml` grades every single-step task that has no
+`tests/` folder, and its content enters those tasks' digests. Only that one file is uploaded, so it can import the
+helpers above but no other file of the dataset.
 
 **One template.** A parameterized dataset shares its `tests/verifier.py` by construction, and each task's values reach
 it as `task_data`.

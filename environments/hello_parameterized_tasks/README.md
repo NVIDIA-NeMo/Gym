@@ -41,12 +41,8 @@ The generated task directories can be inspected, exported, and run as an ordinar
 ## Run it
 
 ```bash
-export OPENAI_API_KEY="<api-key>"
-
-gym eval run environments/hello_parameterized_tasks \
-  --agent opencode_agent \
-  --model openai/gpt-5 \
-  --sandbox docker
+gym eval run environments/hello_parameterized_tasks --agent opencode_agent --sandbox docker \
+  --model-type openai_model --model <model> --model-url <url> --model-api-key <key>
 ```
 
 The command uses OpenCode because it can work with files and tools in the task sandbox while keeping model choice separate. It uses Docker for a simple local sandbox. You can replace either one with another compatible agent or sandbox provider.
@@ -59,8 +55,10 @@ runs the verifier and expects reward 1; `gym dataset publish --harbor` turns the
 Harbor's oracle:
 
 ```bash
-gym dataset validate environments/hello_parameterized_tasks --sandbox opensandbox
+gym dataset validate environments/hello_parameterized_tasks --sandbox docker
 ```
+
+On a cluster, pass `--sandbox opensandbox` instead.
 
 ## Check the result
 
