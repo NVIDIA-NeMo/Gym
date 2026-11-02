@@ -315,6 +315,9 @@ def _recover(
             decision = decision.model_copy(
                 update={"reason": f"{decision.reason}; --max-walltime is required: {command}"}
             )
+        if decision.action == RecoveryAction.UNKNOWN:
+            command = f"gym eval resubmit {gym_job_id} {benchmark} --recover --inspect"
+            decision = decision.model_copy(update={"reason": f"{decision.reason}: {command}"})
         gate_task = (
             gate_summary_from_collected(
                 decision,
@@ -356,7 +359,7 @@ def _recover(
             }
         return RecoveryOutcome(
             decision=decision,
-            ok=decision.action != RecoveryAction.STOP,
+            ok=decision.action not in (RecoveryAction.STOP, RecoveryAction.UNKNOWN),
             dispatched=None,
             gate_task=gate_task,
             mlflow=mlflow,

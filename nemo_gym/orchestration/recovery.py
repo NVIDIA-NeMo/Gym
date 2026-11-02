@@ -180,6 +180,8 @@ class RecoveryAction(StrEnum):
     # The run has no task inventory, so nothing to recover: it is queued again as a fresh run with a longer walltime.
     FRESH_RESTART = "fresh-restart"
     STOP = "stop"
+    # Nothing was decided: the evidence could not be read (its Store reader could not run), so ask again.
+    UNKNOWN = "unknown"
 
 
 # Gym writes the task inventory before any rollout runs: a run that ended before it saved nothing a resume keeps.
@@ -1907,6 +1909,9 @@ class CollectedEvidence(BaseModel):
     managed_reader_error: str | None = None
     # Rollouts with an admitted re-judgment and no saved outcome: its row is still the selected judge failure.
     unresolved_rejudgments: list[str] = Field(default_factory=list)
+    # True when the Store reader could not run (install failure, crash, timeout, lost transport): nothing was read,
+    # unlike a reader that ran and could not verify the artifacts.
+    managed_reader_unavailable: bool = False
     # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
     # Artifacts that exist but could not be read, relative to the job dir: what they hold is unknown.
@@ -2126,8 +2131,18 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 "unresolved_rejudgments": unresolved_rejudgments,
             }
         )
-    except (ImportError, OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
+    except ImportError as error:
+        update = {"managed_selection": None, "managed_reader_error": str(error), "managed_reader_unavailable": True}
+        return collected.model_copy(update=update)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
         return collected.model_copy(update={"managed_selection": None, "managed_reader_error": str(error)})
+
+
+# A Store reader that could not run read nothing; the decision says so instead of stopping the run.
+STORE_READER_UNAVAILABLE = (
+    "the run was written by a rollout store and its Store reader could not run, so nothing was decided and the "
+    "saved artifacts were not judged"
+)
 
 
 def _live_reason(live_job_name: str | None) -> str:
@@ -2334,6 +2349,25 @@ def _decide_from_collected(
         # Selecting from these files here could pick a superseded attempt or lose a reservation, so every known
         # input stays unknown and no saved row is read as its outcome.
         known = sorted({i for i in map(_identity, collected.materialized or []) if i is not None})
+        unread = dict(
+            expected=len(known),
+            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
+            identities={IdentityState.UNKNOWN.value: known} if known else {},
+            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+        )
+        if collected.managed_reader_unavailable:
+            # The reader read nothing, so this is no verdict on the artifacts: a live job keeps the run live, and
+            # otherwise nothing is decided until the reader runs.
+            if live_job:
+                return RecoveryDecision(
+                    action=RecoveryAction.NOOP, reason=_live_reason(live_job_name), scheduler_live=True, **unread
+                )
+            return RecoveryDecision(
+                action=RecoveryAction.UNKNOWN,
+                reason=f"{STORE_READER_UNAVAILABLE}: {collected.managed_reader_error or 'no cause reported'}; "
+                "inspect again once the reader can run",
+                **unread,
+            )
         return RecoveryDecision(
             action=RecoveryAction.STOP,
             reason=(
@@ -2341,10 +2375,7 @@ def _decide_from_collected(
                 "an authoritative Store reader is unavailable or could not verify these artifacts; recovery stops"
                 + (f": {collected.managed_reader_error}" if collected.managed_reader_error else "")
             ),
-            expected=len(known),
-            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
-            identities={IdentityState.UNKNOWN.value: known} if known else {},
-            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+            **unread,
         )
     if collected.materialized is None:
         if live_job is False and not collected.results and not collected.failures:
@@ -2530,6 +2561,13 @@ def continuation_admission(
                     and all(report.get(key) == value for key, value in store.coverage().items())
                 )
         # The selection above verified the snapshot and read the Store once; a second read only hashes it again.
+        if collected.managed_selection is None and collected.managed_reader_unavailable:
+            print(
+                f"{CONTINUATION_REASON_PREFIX}the Store reader could not run, so nothing was decided: "
+                f"{collected.managed_reader_error or 'no cause reported'}; the saved artifacts were not judged: "
+                "`gym eval resubmit --recover --inspect` reads them again"
+            )
+            return "unknown"
         if collected.managed_selection is None:
             print(
                 f"{CONTINUATION_REASON_PREFIX}the Store could not verify the saved artifacts: "
@@ -2854,6 +2892,8 @@ def gate_task_summary(
         errors.append(f"duplicate result rows: {decision.duplicate_results[:5]}")
     if decision.action == RecoveryAction.STOP:
         errors.append(f"recovery stopped: {decision.reason}")
+    if decision.action == RecoveryAction.UNKNOWN:
+        errors.append(f"recovery undecided: {decision.reason}")
     if summary_valid is not True:
         (errors if summary_valid is False else warnings).append(
             "summary validity "

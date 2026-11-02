@@ -945,9 +945,11 @@ def _remote_managed_evidence(
                 break
             if not timed_out or attempt == 2:
                 retried = " (after one retry with twice the bound)" if attempt == 2 else ""
-                return collected.model_copy(
-                    update={"managed_selection": None, "managed_reader_error": failure + retried} | placement
-                )
+                failed = {"managed_selection": None, "managed_reader_error": failure + retried}
+                # The wrapper reports the exit code of a reader that crashed, timed out or was killed; output
+                # without one is a malformed answer, refused like any other.
+                crashed = any(line.startswith("__GYM_READER_RC:") for line in output.splitlines())
+                return collected.model_copy(update=failed | {"managed_reader_unavailable": crashed} | placement)
         lines = [
             line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
         ]
@@ -967,6 +969,7 @@ def _remote_managed_evidence(
             "failures",
             "managed_selection",
             "managed_reader_error",
+            "managed_reader_unavailable",
             "source_job_identity",
             "checkpoint_enabled",
         }
@@ -993,6 +996,9 @@ def _remote_managed_evidence(
             update={
                 "managed_selection": None,
                 "managed_reader_error": _remote_reader_error_text(error),
+                # A transport or host failure read nothing; a ValueError is a projection the reader returned and
+                # this host refused.
+                "managed_reader_unavailable": not isinstance(error, ValueError),
             }
             | placement
         )
@@ -1273,9 +1279,11 @@ class SlurmExecutor(BaseExecutor):
                             update={
                                 "managed_selection": None,
                                 "managed_reader_error": "saved submission config changed or could not be rechecked",
+                                "managed_reader_unavailable": False,
                             }
                         )
-                    if collected.managed_selection is None:
+                    # A reader that could not run decides nothing, so the scheduler is asked whether the run is live.
+                    if collected.managed_selection is None and not collected.managed_reader_unavailable:
                         return decide_from_collected(
                             collected,
                             max_infra_retries=resume.max_retries,

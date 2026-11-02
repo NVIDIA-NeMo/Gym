@@ -592,6 +592,9 @@ if [[ -n "$_gym_stop_reason" || ( -n "$_prev_slurm_job_id" && -e "$OUTPUT_DIR/ar
             __GYM_CONTINUATION:segment|__GYM_CONTINUATION:retry)
                 [[ "$_gym_admission" == __GYM_CONTINUATION:retry ]] && _gym_needs_retry=1 || _gym_needs_retry=0
                 [[ -z "$_gym_admission_reason" ]] || echo "Saved recovery evidence: $_gym_admission_reason" ;;
+            # The installed reader could not run: no verdict on the saved artifacts, which an inspection reads again.
+            __GYM_CONTINUATION:unknown)
+                _gym_stop_incomplete "Saved recovery evidence was not read; ${{_gym_admission_reason}} (previous job $_prev_slurm_job_id ended $_prev_state)" ;;
             *) _gym_stop_incomplete "Saved recovery evidence has no eligible retries; ${{_gym_admission_reason:-$_gym_stop_reason}}${{_gym_admission_reason:+ (previous job $_prev_slurm_job_id ended $_prev_state)}}" ;;
         esac
     else
