@@ -245,6 +245,7 @@ Make sure your input JSONL respects the selected mode in the [Constraint matrix]
 | `replace_developer_role_with_system` | `bool` | `false` | Convert "developer" role to "system" for models that don't support developer role. |
 | `chat_template_kwargs` | `dict` | `null` | Override chat template parameters. Forwarded to upstream chat completions when `use_completions_api: false`, or to `apply_chat_template` when `use_completions_api: true` and `render_chat_template: true`. |
 | `forward_request_chat_template_kwargs` | `bool` | `false` | Merge a request's top-level `chat_template_kwargs` over the configured value. When `false`, the request field is accepted and dropped, with a warning logged once. Chat path only: ignored when `use_completions_api: true`. |
+| `default_chat_template_kwargs` | `dict` | `null` | Chat template parameters with the lowest precedence: a key set by `chat_template_kwargs`, the request, `metadata.chat_template_kwargs`, or `extra_body` overrides it. For a caller, such as a training framework, that supplies defaults without replacing the kwargs an environment configures. |
 | `extra_body` | `dict` | `null` | Pass additional vLLM-specific parameters (e.g., `guided_json`). |
 | `use_completions_api` | `bool` | `false` | When `true`, drives vLLM's `/v1/completions` instead of `/v1/chat/completions`. See [Two upstream backends](#two-upstream-backends). |
 | `render_chat_template` | `bool` | `false` | Only consulted when `use_completions_api: true`. When `true`, renders messages to the `prompt` string client-side via `AutoTokenizer.apply_chat_template`. Lifts the multi-turn restriction. See [Render modes](#render-modes). |
@@ -272,6 +273,8 @@ Per-request values can come from two places, merged over the configured value in
 2. `metadata.chat_template_kwargs`, a JSON-encoded object on the request.
 
 With `use_completions_api: true`, only the configured value and `metadata.chat_template_kwargs` apply. Streaming (`stream: true`) requests never forward the top-level field.
+
+`default_chat_template_kwargs` sits under all of these, and under `extra_body.chat_template_kwargs`: it fills only the keys that no other source sets.
 
 ### Advanced: `extra_body`
 

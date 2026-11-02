@@ -357,10 +357,18 @@ class NeMoGymAsyncOpenAI(BaseModel):  # pragma: no cover
         await self._raise_for_status(response, request_kwargs)
         return await get_response_json(response)
 
-    async def create_chat_completion(self, *, _resend_after_disconnect: bool = True, **kwargs) -> Dict[str, Any]:
+    async def create_chat_completion(
+        self,
+        *,
+        _resend_after_disconnect: bool = True,
+        extra_headers: Optional[Dict[str, str]] = None,
+        **kwargs,
+    ) -> Dict[str, Any]:
+        # ``extra_headers`` apply to this request only, over ``default_headers``.
         request_kwargs = dict(
             url=f"{self.base_url}/chat/completions",
             json=kwargs,
+            headers=extra_headers or {},
         )
         if not _resend_after_disconnect:
             request_kwargs["_resend_after_disconnect"] = False
