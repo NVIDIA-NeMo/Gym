@@ -353,6 +353,8 @@ OVERFLOW_DECOYS = "&".join(f"u{i}=https://example.org/{i}" for i in range(63))
         ("https://arxiv.org./abs/2605.02442", "url_prefixes"),
         ("https://arxiv.org/x/../abs/2605.02442", "url_prefixes"),
         ("https://www.google.com:443/search?q=x", "serp_url_patterns"),
+        ("https://openreview.net/pdf?&id=46UGfq8kMI", "url_prefixes"),  # query pairs in any order
+        ("https://openreview.net/pdf?x=1&id=46UGfq8kMI", "url_prefixes"),
         # Hosts are mapped as UTS #46 fetchers map them: U+1F130 is "a" to a browser and to yarl.
         ("https://sc\U0001f130le.com/leaderboard", "domains"),
         # Every archive.org host is a wrapper, and https:/ or https:/// in the remainder still names the target.

@@ -53,7 +53,7 @@ Every family of `blocklist.json` is enforced with the meaning the protocol gives
 | Family | Rules | Applied to | Semantics |
 | --- | --- | --- | --- |
 | `domains` | 220 | every URL (requested, returned, redirected, wrapped) and `site:` operands | exact hostname or any subdomain, after UTS #46 mapping (as browsers and `yarl` map a host), IDNA and lower-casing |
-| `url_prefixes` | 66 | every URL | prefix of the URL with the scheme and a leading `www.` removed, ignoring case; tried on the URL as written and on its canonical form |
+| `url_prefixes` | 66 | every URL | prefix of the URL with the scheme and a leading `www.` removed, ignoring case; tried on the URL as written and on its canonical form; a prefix with a query (`openreview.net/pdf?id=...`) also matches its path as a prefix with each of its `key=value` pairs among the URL's query pairs, in any order (`pdf?&id=...`, `pdf?x=1&id=...`) |
 | `serp_url_patterns` | 12 | every URL | regexes anchored at the start of the scheme-less URL; `www.` is kept, the patterns allow subdomains themselves; tried on the URL as written and on its canonical form |
 | `url_patterns` | 22 | queries, URLs, result titles and snippets, fetched titles and Markdown | case-insensitive regexes |
 | `patterns_case_sensitive` | 4 | the same | regexes as written (`\bHLE\b ...`) |

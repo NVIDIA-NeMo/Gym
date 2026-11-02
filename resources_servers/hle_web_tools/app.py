@@ -280,7 +280,8 @@ class Blocklist:
     """Upstream's ``docs/blocklist.json`` with the semantics of ``docs/evaluation-with-tools.md``.
 
     - ``domains``: exact hostnames and all their subdomains.
-    - ``url_prefixes``: prefixes of the URL after removing the scheme and a leading ``www.``, ignoring case.
+    - ``url_prefixes``: prefixes of the URL after removing the scheme and a leading ``www.``, ignoring case; a
+      prefix with a query also matches with its ``key=value`` pairs in any order among the URL's.
     - ``serp_url_patterns``: regexes anchored at the start of the scheme-less URL of a search-engine result page.
       Both URL families are tried on the URL as written and on its canonical form (``canonical_schemeless``).
     - ``url_patterns`` / ``patterns_case_sensitive``: regexes applied to queries, URLs, result titles and
@@ -296,6 +297,14 @@ class Blocklist:
             raise ValueError(f"Unsupported blocklist families: {sorted(unknown)}")
         self.domains: List[str] = [normalize_hostname(d) for d in data.get("domains", [])]
         self.url_prefixes: List[str] = list(data.get("url_prefixes", []))
+        # A prefix with a query (``openreview.net/pdf?id=X``) also matches its path as a prefix of the URL's path
+        # with each of its ``key=value`` pairs among the URL's query pairs, in any order: a server reads
+        # ``pdf?&id=X`` and ``pdf?x=1&id=X`` as ``pdf?id=X``.
+        self.query_prefixes: List[Tuple[str, str, List[Tuple[str, str]]]] = []
+        for prefix in self.url_prefixes:
+            path, separator, query = prefix.lower().partition("?")
+            if separator:
+                self.query_prefixes.append((prefix, path, parse_qsl(query, keep_blank_values=True)))
         self.serp_url_patterns = [re.compile(p, re.IGNORECASE) for p in data.get("serp_url_patterns", [])]
         self.url_patterns = [re.compile(p, re.IGNORECASE) for p in data.get("url_patterns", [])]
         self.patterns_case_sensitive = [re.compile(p) for p in data.get("patterns_case_sensitive", [])]
@@ -371,6 +380,9 @@ class Blocklist:
         for prefix in self.url_prefixes:
             if any(form.startswith(prefix.lower()) for form in prefix_forms):
                 return Block("url_prefixes", prefix, url, where)
+        for prefix, path, pairs in self.query_prefixes:
+            if any(_query_prefix_matches(form, path, pairs) for form in prefix_forms):
+                return Block("url_prefixes", prefix, url, where)
         for pattern in self.serp_url_patterns:
             if any(pattern.search(form) for form in serp_forms):
                 return Block("serp_url_patterns", pattern.pattern, url, where)
@@ -422,6 +434,15 @@ class Blocklist:
                     "query",
                 )
         return None
+
+
+def _query_prefix_matches(form: str, path: str, pairs: List[Tuple[str, str]]) -> bool:
+    """Whether a prefix form's path starts with ``path`` and its query holds every pair (a value as a prefix)."""
+    form_path, _, query = form.partition("?")
+    if not form_path.startswith(path):
+        return False
+    form_pairs = parse_qsl(query.partition("#")[0], keep_blank_values=True)
+    return all(any(key == k and value.startswith(v) for key, value in form_pairs) for k, v in pairs)
 
 
 def title_variants(title: str) -> List[str]:
