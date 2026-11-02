@@ -253,3 +253,57 @@ def test_a_saved_tool_transcript_trial_that_ended_on_the_context_limit_is_typed_
     collected = _tau3_style_saved_row(a, rows, invocations)
     decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
     assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}
+
+
+def _local_context_rejection(a, rows, invocations, *, events=1, error_category=None):
+    """A saved trial whose last policy call the model server answered locally (status 200) after its upstream
+    rejected the request with 400 for the context window: the failure report holds model request errors only."""
+    trajectory = rows[0]["ng_trajectory"]
+    meta = trajectory["model_calls"][0]["response_metadata"]
+    [operation] = meta["model_operations"]
+    operation["outcome"], operation["failure_id"] = "failed", f"rejected-{events}"
+    saved = {}
+    for number in range(1, events + 1):
+        saved[f"rejected-{number}"] = {
+            "event_id": f"rejected-{number}",
+            "boundary": "model",
+            "operation": "model_request",
+            "operation_id": operation["operation_id"],
+            "attempt_id": f"{operation['final_attempt_id']}-{number}",
+            "cause_id": None,
+            "failure_kind": "model_request_error",
+            "http_status": 400,
+        }
+    meta["failure_report"]["events"] = saved
+    meta |= {
+        "status_code": 200,
+        "response_status": None,
+        "error_category": error_category,
+        "finish_reason": "length",
+        "response_source": "local",
+        "upstream_attempted": True,
+        "upstream_status_code": 400,
+        "local_response_reason": "context_length_exceeded",
+    }
+    trajectory["invocations"], trajectory["turns"] = invocations, []
+    rows[0]["ng_policy_model_server"] = "policy"
+    save_rows(a, rows)
+    return collect(a)
+
+
+_TOOL_INVOCATION = {"invocation_id": "agent", "status": "unknown", "in_session": None, "model_calls": []}
+
+
+@pytest.mark.parametrize(
+    "invocations,events",
+    [([], 1), ([_TOOL_INVOCATION], 1), ([], 2)],
+    ids=["no-invocation", "one-unreferenced-invocation", "no-invocation-two-request-errors"],
+)
+@pytest.mark.parametrize("error_category", [None, "context_length_exceeded"])
+def test_a_local_reply_to_an_upstream_context_rejection_is_typed_when_read(
+    tmp_path, invocations, events, error_category
+):
+    a, rows = setup(tmp_path)
+    collected = _local_context_rejection(a, rows, invocations, events=events, error_category=error_category)
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    assert final_zero_trials(decision, collected) == {(0, 0): "model_context_limit"}
