@@ -19,7 +19,8 @@ from fastapi.testclient import TestClient
 from openai import AsyncAzureOpenAI
 from pytest import MonkeyPatch
 
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionMessage,
     NeMoGymChoice,
@@ -27,7 +28,6 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_models.azure_openai_model.app import (
     AzureOpenAIModelServer,
     AzureOpenAIModelServerConfig,

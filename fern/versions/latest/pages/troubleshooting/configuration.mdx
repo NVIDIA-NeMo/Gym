@@ -19,7 +19,7 @@ Errors that prevent servers from starting.
 ### Unset Required Config Value(s)
 
 ```
-nemo_gym.config_types.ConfigMissingValuesError: 1 required config value(s) are unset (still '???') after merging:
+nemo_gym.config.config_types.ConfigMissingValuesError: 1 required config value(s) are unset (still '???') after merging:
   - policy_api_key
 
 Provide each value via a CLI override, in env.yaml, or in a config you pass via config_paths.
@@ -47,7 +47,7 @@ gym env start \
 ### Server Reference Not Found
 
 ```
-nemo_gym.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
+nemo_gym.config.config_types.ServerRefNotFoundError: In server instance 'my_agent', field 'resources_server' references resources_servers/'typo_weather', which is not defined in the merged config.
 Did you mean: 'weather'?
 ```
 
@@ -75,7 +75,7 @@ gym env start \
 ### Config Path Not Found
 
 ```
-nemo_gym.config_types.ConfigPathNotFoundError: config_paths entry 'resources_servers/weather/config.yaml' was not found. Looked in:
+nemo_gym.config.config_types.ConfigPathNotFoundError: config_paths entry 'resources_servers/weather/config.yaml' was not found. Looked in:
   - /path/to/cwd/resources_servers/weather/config.yaml
   - /path/to/gym/resources_servers/weather/config.yaml
 Check the path is spelled correctly and is relative to your working directory or the Gym install root.
@@ -90,7 +90,7 @@ Gym install root, so running from the repository root usually fixes it; an absol
 ### Malformed `config_paths`
 
 ```
-nemo_gym.config_types.MalformedConfigPathsError: 'config_paths' must be a list of paths. Got: 'resources_servers/weather/config.yaml'.
+nemo_gym.config.config_types.MalformedConfigPathsError: 'config_paths' must be a list of paths. Got: 'resources_servers/weather/config.yaml'.
 Pass each config with --config (it builds the list for you), e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml
 ```
@@ -107,7 +107,7 @@ config_paths:
 ### Malformed `head_server` Values
 
 ```
-nemo_gym.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
+nemo_gym.config.config_types.HeadServerConfigMalformedError: 'head_server' is invalid: head_server.port (Input should be a valid integer, unable to parse string as an integer).
 `head_server.host` must be a hostname or IP; `head_server.port` and, if set, `head_server.num_workers` must be integers. Set them in a config or as overrides, e.g.:
   ++head_server.host=127.0.0.1 ++head_server.port=11000
 ```
@@ -129,7 +129,7 @@ head_server:
 ### No Server Instances Configured
 
 ```
-nemo_gym.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
+nemo_gym.config.config_types.NoServerInstancesError: No server instances are configured, so there is nothing to run. Pass one or more configs, e.g.:
   gym env start --config resources_servers/<env>/configs/<env>.yaml --config responses_api_models/<model>/configs/<model>.yaml
 ```
 

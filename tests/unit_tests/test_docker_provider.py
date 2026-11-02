@@ -726,7 +726,7 @@ async def test_exec_keeps_the_group_of_the_default_user(fake_binary: str, monkey
     """Review (round 14): the probe through the sandbox facade. A ``name:group`` default (Harbor's ``[agent].user``
     ``agent:shared``) must reach ``docker exec`` as ``--user agent:shared``, as Harbor's ``-u`` passes it, not as
     the name alone."""
-    from nemo_gym.sandbox import AsyncSandbox
+    from nemo_gym.sandbox.api import AsyncSandbox
 
     def responder(argv: list[str]) -> tuple[int, str, str]:
         if "run" in argv:

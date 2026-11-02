@@ -26,7 +26,7 @@ from unittest.mock import MagicMock
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.rna_design.app import RnaDesignResourcesServer, RnaDesignResourcesServerConfig
 
 
@@ -69,7 +69,7 @@ def _server(tmp_path: Path, **overrides) -> RnaDesignResourcesServer:
 
 
 def _client(tmp_path: Path, server: RnaDesignResourcesServer | None = None) -> TestClient:
-    from nemo_gym.mcp_auto_exposure import maybe_auto_expose
+    from nemo_gym.server_runtime.mcp_auto_exposure import maybe_auto_expose
 
     server = server or _server(tmp_path)
     app = server.setup_webserver()

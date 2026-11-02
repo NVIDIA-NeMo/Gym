@@ -95,3 +95,76 @@ __all__ = [
     "rewrite_image",
     "clamp_resource_requests",
 ]
+
+# Public API
+from typing import TYPE_CHECKING
+
+from nemo_gym._public_api import lazy_exports
+
+
+if TYPE_CHECKING:
+    from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+    from nemo_gym.sandbox.compose_config import (
+        adapt_non_root_sidecars,
+        deployment_platform,
+        document_volume_sources,
+        opensandbox_shm_labels,
+        resolve_compose,
+        sandbox_platform,
+    )
+    from nemo_gym.sandbox.compose_fields import service_gpus, service_resources
+    from nemo_gym.sandbox.config import SandboxConfig
+    from nemo_gym.sandbox.providers.apptainer.provider import ApptainerProvider
+    from nemo_gym.sandbox.providers.base import ORPHAN_REAP_TIMEOUT_S
+    from nemo_gym.sandbox.providers.docker.provider import DockerCreateConfig, DockerProvider
+    from nemo_gym.sandbox.providers.opensandbox.provider import SandboxBackendUnreachableError
+    from nemo_gym.sandbox.transfer import (
+        SandboxProbeError,
+        SandboxTransferError,
+        SandboxUnavailableError,
+        download_dir,
+        download_path,
+        exec_as_root,
+        remote_kind,
+        upload_archive,
+        upload_dir,
+        upload_path,
+    )
+    from nemo_gym.sandbox.utils import cpu_cap_env, read_text, upload_text
+
+
+# What code outside the library, such as servers, imports from this package. Each name's submodule loads
+# on first use. Code inside nemo_gym imports the submodules directly.
+_PUBLIC_API = {
+    "ApptainerProvider": "providers.apptainer.provider",
+    "DirectSandboxConnection": "access",
+    "DockerCreateConfig": "providers.docker.provider",
+    "DockerProvider": "providers.docker.provider",
+    "ORPHAN_REAP_TIMEOUT_S": "providers.base",
+    "SandboxAccess": "access",
+    "SandboxBackendUnreachableError": "providers.opensandbox.provider",
+    "SandboxConfig": "config",
+    "SandboxProbeError": "transfer",
+    "SandboxTransferError": "transfer",
+    "SandboxUnavailableError": "transfer",
+    "adapt_non_root_sidecars": "compose_config",
+    "cpu_cap_env": "utils",
+    "deployment_platform": "compose_config",
+    "document_volume_sources": "compose_config",
+    "download_dir": "transfer",
+    "download_path": "transfer",
+    "exec_as_root": "transfer",
+    "opensandbox_shm_labels": "compose_config",
+    "read_text": "utils",
+    "remote_kind": "transfer",
+    "resolve_compose": "compose_config",
+    "sandbox_platform": "compose_config",
+    "service_gpus": "compose_fields",
+    "service_resources": "compose_fields",
+    "upload_archive": "transfer",
+    "upload_dir": "transfer",
+    "upload_path": "transfer",
+    "upload_text": "utils",
+}
+__getattr__, __dir__ = lazy_exports(__name__, _PUBLIC_API)
+__all__ = sorted({*__all__, *_PUBLIC_API})

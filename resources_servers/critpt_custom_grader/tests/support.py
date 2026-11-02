@@ -6,7 +6,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from nemo_gym.sandbox.providers.base import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
+from nemo_gym.sandbox import SandboxExecResult, SandboxHandle, SandboxSpec, SandboxStatus
 from resources_servers.critpt_custom_grader.execution import ExecutionPolicy, Grader
 from resources_servers.critpt_custom_grader.task_data import WIRE_FORMAT, TaskData
 

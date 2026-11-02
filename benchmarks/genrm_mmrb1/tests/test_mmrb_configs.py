@@ -5,8 +5,7 @@
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import BenchmarkDatasetConfig
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import BenchmarkDatasetConfig, GlobalConfigDictParser, GlobalConfigDictParserConfig
 
 
 @pytest.mark.parametrize("benchmark", ["genrm_mmrb1", "genrm_mmrb2"])
@@ -89,7 +88,7 @@ def test_runnable_modes_are_discoverable(monkeypatch):
     from nemo_gym.benchmarks import BenchmarkConfig, _benchmark_config_name, _benchmark_config_paths
 
     ports = count(12000)
-    monkeypatch.setattr("nemo_gym.global_config._find_open_port_using_range", lambda **kwargs: next(ports))
+    monkeypatch.setattr("nemo_gym.config.global_config._find_open_port_using_range", lambda **kwargs: next(ports))
     root = Path(__file__).resolve().parents[3] / "benchmarks"
     for benchmark in ("genrm_mmrb1", "genrm_mmrb2"):
         configs = list(_benchmark_config_paths(root / benchmark))

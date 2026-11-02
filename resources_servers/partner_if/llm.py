@@ -7,7 +7,7 @@ import re
 
 from pydantic import ConfigDict, Field, JsonValue, StrictInt, model_validator
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.partner_if.evidence import EvidenceBundle, EvidenceTooLarge
 from resources_servers.partner_if.evidence_sources import evidence_sources
 from resources_servers.partner_if.grading_contract import EvidenceQuote, GradingItem, RawJudgment, StrictModel
