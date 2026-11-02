@@ -12,7 +12,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import BaseModel
 
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     EnvironmentServerInstanceConfig,
     ResourcesServerInstanceConfig,
     ResponsesAPIAgentServerInstanceConfig,
@@ -197,6 +197,11 @@ class TestTaskDataValidator:
             1, {"task_id": task, "task_input": {"responses_create_params": {}, "task_data": {"question": 1}}}
         )
         assert v.report.error_rows == 1
+        # A multi-turn row carries its requests as `turns` beside task_data: framework-owned, not an unknown field.
+        turns = [{"name": "plan", "responses_create_params": {}}]
+        fields = {"question": "q", "expected_answer": "a"}
+        v.validate_row(2, {"task_id": task, "task_input": {"turns": turns, "task_data": fields}})
+        assert v.report.unknown_keys == {} and v.report.error_rows == 1
 
     def test_generic_materialized_task_validates_flat_fields(self):
         v = self._validator()
@@ -674,7 +679,7 @@ class TestHarborLayoutThroughTheProcessor:
     def _processor_and_configs(self, tmp_path, monkeypatch, rows):
         from omegaconf import DictConfig
 
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config.global_config import GlobalConfigDictParser
         from nemo_gym.train_data_utils import TrainDataProcessorConfig
 
         env_dir = tmp_path / "environment_servers" / "harbor"
@@ -763,7 +768,7 @@ class TestLegacyWrapperLayoutThroughTheProcessor:
     def _processor_and_configs(self, tmp_path, monkeypatch, rows):
         from omegaconf import DictConfig
 
-        from nemo_gym.global_config import GlobalConfigDictParser
+        from nemo_gym.config.global_config import GlobalConfigDictParser
         from nemo_gym.train_data_utils import TrainDataProcessorConfig
 
         agent_dir = tmp_path / "responses_api_agents" / "tau2"

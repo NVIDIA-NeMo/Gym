@@ -17,11 +17,13 @@
 import math
 import subprocess
 import sys
+import warnings
 from pathlib import Path
 
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.token_id_capture.staging import records as staging_records
 from nemo_gym.token_id_capture.staging.conformance import assert_golden_vectors, load_golden_vectors
 from nemo_gym.token_id_capture.staging.digest import (
     EMPTY_EXTRAS_DIGEST,
@@ -35,8 +37,11 @@ from nemo_gym.token_id_capture.staging.digest import (
 from nemo_gym.token_id_capture.staging.records import (
     CallRecord,
     CaptureAdmission,
+    CaptureLedgerCommit,
     CommitCoords,
+    RolloutManifest,
     RolloutReceipt,
+    StagedCallBaseSnapshot,
     StagedCallRecord,
     StagedCallSnapshot,
     StageResult,
@@ -50,7 +55,7 @@ def _digest_args() -> dict:
         "schema_version": STAGING_SCHEMA_VERSION,
         "digest_version": STAGING_DIGEST_VERSION,
         "extras_digest_version": 1,
-        "rollout_id": "rollout-1",
+        "capture_key": "rollout-1",
         "model_call_id": "call-1",
         "parent_call_id": "parent-1",
         "mode": "token_in",
@@ -89,7 +94,7 @@ def test_digest_golden_vectors() -> None:
 @pytest.mark.parametrize(
     ("field", "value"),
     [
-        ("rollout_id", "rollout-2"),
+        ("capture_key", "rollout-2"),
         ("model_call_id", "call-2"),
         ("parent_call_id", "parent-2"),
         ("mode", "text"),
@@ -161,7 +166,7 @@ def test_build_staging_delta_layout_and_errors() -> None:
 
 def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None:
     admission = CaptureAdmission(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="c",
         parent_call_id="p",
         prev_len=2,
@@ -172,7 +177,7 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
     assert admission.model_dump(mode="json")["model_call_id"] == "c"
     with pytest.raises(ValidationError, match="length must equal prev_len"):
         CaptureAdmission(
-            rollout_id="r",
+            capture_key="r",
             model_call_id="c",
             parent_call_id="p",
             prev_len=2,
@@ -182,7 +187,7 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
         )
     with pytest.raises(ValidationError, match="parent's chain hash"):
         CaptureAdmission(
-            rollout_id="r",
+            capture_key="r",
             model_call_id="c",
             parent_call_id="p",
             prev_len=2,
@@ -191,7 +196,7 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
         )
     with pytest.raises(ValidationError, match="text admission"):
         CaptureAdmission(
-            rollout_id="r",
+            capture_key="r",
             model_call_id="c",
             parent_call_id="p",
             prev_len=2,
@@ -199,7 +204,7 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
             required_prefix_token_ids=[10, 11],
         )
     chain_admission = CaptureAdmission(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="c",
         parent_call_id="p",
         prev_len=2,
@@ -210,14 +215,14 @@ def test_admission_uses_canonical_model_call_identity_and_exact_prefix() -> None
     assert chain_admission.required_prefix_token_ids == []
     with pytest.raises(ValidationError, match="text admission"):
         CaptureAdmission(
-            rollout_id="r",
+            capture_key="r",
             model_call_id="c",
             mode="text",
             staging_chain=["r/p"],
         )
     with pytest.raises(ValidationError, match="text admission"):
         CaptureAdmission(
-            rollout_id="r",
+            capture_key="r",
             model_call_id="c",
             mode="text",
             parent_chain_hash="1" * 64,
@@ -236,7 +241,8 @@ def test_staged_record_and_snapshot_round_trip() -> None:
     ("version_field", "version"),
     [
         ("schema_version", 1),
-        ("schema_version", 3),
+        ("schema_version", 2),
+        ("schema_version", STAGING_SCHEMA_VERSION + 1),
         ("digest_version", 1),
         ("digest_version", 3),
         ("extras_digest_version", 0),
@@ -266,7 +272,7 @@ def test_staged_record_rejects_digest_covered_mutation(field: str, value) -> Non
 def test_coords_enforce_staged_and_failed_shapes() -> None:
     payload = _record_payload()
     staged = CommitCoords(
-        rollout_id=payload["rollout_id"],
+        capture_key=payload["capture_key"],
         model_call_id=payload["model_call_id"],
         parent_call_id=payload["parent_call_id"],
         prev_len=payload["prev_len"],
@@ -283,7 +289,7 @@ def test_coords_enforce_staged_and_failed_shapes() -> None:
     with pytest.raises(ValidationError, match="chain_hash"):
         CommitCoords.model_validate({**staged.model_dump(), "chain_hash": None})
     failed = CommitCoords(
-        rollout_id="r",
+        capture_key="r",
         model_call_id="c",
         prev_len=0,
         delta_len=0,
@@ -324,7 +330,7 @@ def test_stage_result_and_receipt_validate_identity() -> None:
 
     manifest = _manifest_row()
     receipt = RolloutReceipt(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         terminal_model_call_id="call-1",
         manifest=[manifest],
         terminal_selection="declared",
@@ -332,7 +338,7 @@ def test_stage_result_and_receipt_validate_identity() -> None:
     assert receipt.terminal_model_call_id == "call-1"
     with pytest.raises(ValidationError, match="absent"):
         RolloutReceipt(
-            rollout_id="rollout-1",
+            capture_key="rollout-1",
             terminal_model_call_id="ghost",
             manifest=[manifest],
             terminal_selection="declared",
@@ -341,18 +347,18 @@ def test_stage_result_and_receipt_validate_identity() -> None:
     # selection stays unset rather than being stamped with a method, and the
     # receipt must be poisoned so the row is not trainable.
     unattributed = RolloutReceipt(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         manifest=[manifest],
         capture_poisoned=True,
         failure_reason="invalid_manifest_row",
     )
     assert unattributed.terminal_selection is None
     with pytest.raises(ValidationError):
-        RolloutReceipt(rollout_id="rollout-1", manifest=[manifest], terminal_selection="guess")
+        RolloutReceipt(capture_key="rollout-1", manifest=[manifest], terminal_selection="guess")
     # Attribution succeeded before a later call poisoned the rollout: the
     # terminal and its method stay on the poisoned receipt.
     poisoned_after_attribution = RolloutReceipt(
-        rollout_id="rollout-1",
+        capture_key="rollout-1",
         terminal_model_call_id="call-1",
         manifest=[manifest],
         capture_poisoned=True,
@@ -360,6 +366,84 @@ def test_stage_result_and_receipt_validate_identity() -> None:
         terminal_selection="heuristic",
     )
     assert poisoned_after_attribution.terminal_model_call_id == "call-1"
+
+
+@pytest.mark.filterwarnings("ignore::FutureWarning")
+def test_capture_owner_wire_names_accept_pre_rename_names_without_changing_storage_keys() -> None:
+    record = StagedCallRecord.model_validate(_record_payload())
+    row = _manifest_row().model_copy(update={"source_capture_key": "rollout-1"})
+    models = [
+        CaptureAdmission(capture_key="rollout-1-a1", model_call_id="call-2", mode="text"),
+        record,
+        CommitCoords(
+            capture_key="rollout-1-a1",
+            model_call_id="call-2",
+            prev_len=0,
+            delta_len=0,
+            cum_len=0,
+            weight_version=7,
+            disposition="capture_failed",
+        ),
+        CaptureLedgerCommit(capture_key="rollout-1-a1", record=row, request_items=[], response_items=[]),
+        RolloutManifest(capture_key="rollout-1-a1", records=[row]),
+        RolloutReceipt(
+            capture_key="rollout-1-a1", manifest=[row], terminal_model_call_id="call-1", terminal_selection="declared"
+        ),
+    ]
+    for model in models:
+        payload = model.model_dump(mode="json")
+        assert "rollout_id" not in payload
+        assert model.__class__.model_validate_json(model.model_dump_json()) == model
+        assert model.rollout_id == model.capture_key
+        old_payload = {**payload, "rollout_id": payload["capture_key"]}
+        del old_payload["capture_key"]
+        restored = model.__class__.model_validate(old_payload)
+        assert restored == model
+        assert restored.model_dump(mode="json") == payload
+        with pytest.raises(ValidationError, match="rollout_id"):
+            model.__class__.model_validate({**payload, "rollout_id": "other"})
+    old_snapshot_args = {**_digest_args(), "rollout_id": "rollout-1"}
+    del old_snapshot_args["capture_key"]
+    old_snapshot = StagedCallBaseSnapshot(**old_snapshot_args, digest=record.digest)
+    assert old_snapshot == StagedCallBaseSnapshot.model_validate(record.model_dump(exclude={"extras"}))
+    assert old_snapshot.rollout_id == "rollout-1"
+    assert record.staging_key == staging_key(capture_key="rollout-1", model_call_id="call-1") == "rollout-1/call-1"
+
+    payload = row.model_dump(mode="json")
+    assert "capture_key" not in payload
+    assert CallRecord.model_validate_json(row.model_dump_json()) == row
+    assert row.capture_key == row.source_capture_key == "rollout-1"
+    old_payload = {**payload, "capture_key": payload["source_capture_key"]}
+    del old_payload["source_capture_key"]
+    assert CallRecord.model_validate(old_payload) == row
+    with pytest.raises(ValidationError, match="capture_key"):
+        CallRecord.model_validate({**payload, "capture_key": "other"})
+
+
+def test_pre_rename_names_warn_once_and_new_names_never_warn(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        admission = CaptureAdmission(capture_key="rollout-1", model_call_id="call-1", mode="text")
+        assert admission.capture_key == "rollout-1"
+        assert _manifest_row().source_capture_key is None
+
+    with pytest.warns(FutureWarning, match="`rollout_id` is deprecated .* use `capture_key` instead"):
+        old_admission = CaptureAdmission(rollout_id="rollout-1", model_call_id="call-1", mode="text")
+    with pytest.warns(
+        FutureWarning, match="`CallRecord.capture_key` is deprecated .* use `CallRecord.source_capture_key` instead"
+    ):
+        assert _manifest_row().capture_key is None
+    with warnings.catch_warnings():
+        warnings.simplefilter("error")
+        assert old_admission.rollout_id == "rollout-1"
+        CaptureAdmission(rollout_id="rollout-1", model_call_id="call-2", mode="text")
+        CallRecord.model_validate({**_manifest_row().model_dump(exclude={"source_capture_key"}), "capture_key": None})
+
+    # Reading the old name warns too when it is the first use.
+    monkeypatch.setattr(staging_records, "_WARNED_RENAMES", set())
+    with pytest.warns(FutureWarning, match="`rollout_id` is deprecated"):
+        assert admission.rollout_id == "rollout-1"
 
 
 @pytest.mark.parametrize(
@@ -383,7 +467,7 @@ def test_stage_result_and_receipt_validate_identity() -> None:
 )
 def test_rollout_receipt_rejects_inconsistent_attribution_state(fields: dict, match: str) -> None:
     with pytest.raises(ValidationError, match=match):
-        RolloutReceipt(rollout_id="rollout-1", manifest=[_manifest_row()], **fields)
+        RolloutReceipt(capture_key="rollout-1", manifest=[_manifest_row()], **fields)
 
 
 def test_staging_namespace_has_no_serving_or_framework_dependencies() -> None:

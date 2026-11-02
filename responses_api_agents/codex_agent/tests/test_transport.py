@@ -6,14 +6,14 @@ import socket
 import pytest
 from aiohttp import web
 
-from nemo_gym.server_utils import get_global_aiohttp_client, request
+from nemo_gym.client import get_global_aiohttp_client, request
 from responses_api_agents.codex_agent.transport import rate_limit_proxy
 
 
 @pytest.mark.parametrize("statuses", [(429, 429, 200), (429, 429, 429), (400,), (500,)])
 async def test_only_rate_limits_retry_and_every_attempt_keeps_body_and_owner(statuses, monkeypatch) -> None:
-    monkeypatch.setattr("nemo_gym.server_utils.get_global_config_dict", lambda **kwargs: {})
-    monkeypatch.setattr("nemo_gym.server_utils._GLOBAL_AIOHTTP_CLIENT", None)
+    monkeypatch.setattr("nemo_gym.client.http_client.get_global_config_dict", lambda **kwargs: {})
+    monkeypatch.setattr("nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT", None)
     seen = []
 
     async def upstream(incoming):

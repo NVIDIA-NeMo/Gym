@@ -25,7 +25,7 @@ import pytest
 from fastapi import FastAPI
 from omegaconf import DictConfig
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.workplace_assistant import app as workplace_app
 from resources_servers.workplace_assistant.app import (
     WorkbenchResourcesServer,

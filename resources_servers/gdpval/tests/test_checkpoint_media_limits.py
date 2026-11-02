@@ -13,7 +13,7 @@ import pytest
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 from resources_servers.gdpval import app, comparison
 from resources_servers.gdpval.media_conversion import audio_video_block
 

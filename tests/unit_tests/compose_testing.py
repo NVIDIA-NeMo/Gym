@@ -8,6 +8,11 @@ the fixture loader that test_compose_config.py, test_compose_fields.py and test_
 all read. Not a pytest conftest, so each test module imports the names it uses.
 """
 
+from pathlib import Path
+
+import yaml
+
+
 MAIN = "org/task-env@sha256:" + "a" * 64
 SIDECAR = "org/task-sidecar@sha256:" + "b" * 64
 IMAGE_CONFIGS = {
@@ -42,3 +47,9 @@ OVERLAY = {
         "workspace": {"image": MAIN, "expose": ["18073"]},
     }
 }
+
+FIXTURES = Path(__file__).parent / "fixtures" / "harbor_compose_fields"
+
+
+def _fixture(name):
+    return yaml.safe_load((FIXTURES / name / "environment" / "docker-compose.yaml").read_text())

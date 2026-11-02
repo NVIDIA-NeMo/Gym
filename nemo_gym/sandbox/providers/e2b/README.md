@@ -13,7 +13,8 @@ export E2B_API_KEY=<your-api-key>
 ```
 
 For a package install, use `pip install "nemo-gym[sandbox]"`. The provider requires
-`e2b>=2.36.0,<3.0.0`.
+`e2b>=2.46.0,<3.0.0`. Gateway service-port routing requires the
+`ConnectionConfig.sandbox_headers` API available from E2B 2.46.
 
 The shipped config is `nemo_gym/sandbox/providers/e2b/configs/e2b.yaml`. It reads
 `E2B_API_KEY`, `E2B_API_URL`, and `E2B_SANDBOX_URL`; leave the URL variables unset for the
@@ -72,7 +73,7 @@ provisioning the remaining images.
 | Section | Important fields |
 | --- | --- |
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
-| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, and `strict_resources`. |
+| `create` | Default template/mapping, sandbox `timeout_s`, `secure`, `allow_internet_access`, `network` (`allow_out`/`deny_out`), `custom_extension_params` (AgentEnv `customExtensionParams`; creates through `POST /sandboxes`), and `strict_resources`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
 | `operations` | Retry count and exponential-backoff delays for safe, retryable operations. |
 

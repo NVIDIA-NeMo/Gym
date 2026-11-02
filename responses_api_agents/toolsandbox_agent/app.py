@@ -29,10 +29,9 @@ import aiohttp
 from pydantic import ConfigDict, Field, ValidationError
 from tenacity import retry, stop_after_attempt, wait_exponential_jitter
 
-from nemo_gym.base_resources_server import BaseRunRequest
 from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
@@ -43,6 +42,7 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     accumulate_response_usage,
 )
+from nemo_gym.server_runtime import BaseRunRequest
 from resources_servers.toolsandbox.schemas import (
     ToolSandboxNeMoGymResponse,
     ToolSandboxSeedSessionResponse,

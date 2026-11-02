@@ -15,7 +15,7 @@
 
 """Route OpenHands model requests through the rollout-specific Gym URL.
 
-The pinned nv-OpenHands fork calls the model through ``nemo_gym.server_utils.ServerClient``
+The pinned nv-OpenHands fork calls the model through ``nemo_gym.client.server_client.ServerClient``
 (``openhands/agenthub/nemo_gym_client.py``), not through litellm and ``llm.base_url``.
 That client resolves a bare host and port from the global config and knows nothing about
 the ``/ng-rollout/<id>/training-token-capture`` prefix, so the prefixed ``llm.base_url``

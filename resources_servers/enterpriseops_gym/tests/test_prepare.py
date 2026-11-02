@@ -135,7 +135,7 @@ def test_prepare_writes_one_row_per_task_of_every_domain(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare_module, "EXPECTED_TASK_COUNT", len(prepare_module.DOMAINS))
     monkeypatch.setattr(prepare_module, "load_tool_snapshots", lambda: TOOLS_BY_GYM)
     monkeypatch.setattr(datasets, "load_dataset", load_dataset)
-    monkeypatch.setattr("nemo_gym.global_config.get_hf_token", lambda: None)
+    monkeypatch.setattr("nemo_gym.config.global_config.get_hf_token", lambda: None)
 
     assert prepare_module.prepare() == output
 
@@ -152,7 +152,7 @@ def test_prepare_refuses_a_task_set_of_another_size(tmp_path, monkeypatch):
     monkeypatch.setattr(prepare_module, "OUTPUT_FPATH", tmp_path / "benchmark.jsonl")
     monkeypatch.setattr(prepare_module, "load_tool_snapshots", lambda: TOOLS_BY_GYM)
     monkeypatch.setattr(datasets, "load_dataset", lambda *args, **kwargs: {d: [] for d in prepare_module.DOMAINS})
-    monkeypatch.setattr("nemo_gym.global_config.get_hf_token", lambda: None)
+    monkeypatch.setattr("nemo_gym.config.global_config.get_hf_token", lambda: None)
 
     with pytest.raises(ValueError, match="Expected 649 tasks, got 0"):
         prepare_module.prepare()

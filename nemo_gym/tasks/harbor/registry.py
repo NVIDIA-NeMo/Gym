@@ -44,9 +44,72 @@ INDEX_MEDIA_TYPES = {
 DOCKER_HUB_REGISTRY = "registry-1.docker.io"
 PLATFORM = ("linux", "amd64")
 
+# containerd's platform normalisation (``platforms.Normalize``), the rule ``docker --platform`` matches an index
+# entry by: Docker's architecture aliases fold to GOARCH names, an arm64 entry with no variant is ``v8`` (the
+# variant Docker Official Images declare: ubuntu, redis and python all publish ``arm64/v8``), an arm entry with
+# none is ``v7``, and amd64's baseline micro-architecture level ``v1`` is plain amd64. The higher levels ``v2``..``v4``
+# are other platforms: each needs CPU features (SSE4/POPCNT, AVX2, AVX-512) a baseline host may lack, so containerd's
+# matcher answers a ``linux/amd64`` request with a ``v1`` or variant-less entry only (``platforms.Only``: a request for
+# ``amd64/v3`` also accepts v2, v1 and baseline, never the reverse).
+_ARCHITECTURES = {"x86_64": "amd64", "x86-64": "amd64", "aarch64": "arm64", "armhf": "arm", "armel": "arm"}
+_DEFAULT_VARIANTS = {"arm64": "v8", "arm": "v7"}
+_AMD64_BASELINE = "v1"
+
+
+def normalize_platform_parts(os: Any, architecture: Any, variant: Any = "") -> tuple[str, str, str]:
+    """``(os, architecture, variant)`` as containerd spells them, so that two spellings of one platform compare
+    equal: ``linux/arm64``, ``linux/aarch64`` and ``linux/arm64/v8`` are all ``("linux", "arm64", "v8")``, and
+    ``linux/amd64/v1`` is ``("linux", "amd64", "")``; ``linux/amd64/v3`` keeps its ``v3``, another platform. A
+    missing part is an empty string."""
+    os, architecture, variant = (str(part or "").strip().lower() for part in (os, architecture, variant))
+    architecture = _ARCHITECTURES.get(architecture, architecture)
+    if architecture == "amd64" and variant == _AMD64_BASELINE:
+        variant = ""
+    return os, architecture, variant or _DEFAULT_VARIANTS.get(architecture, "")
+
+
+def platform_name(platform: tuple[str, ...]) -> str:
+    """``os/arch[/variant]`` of a (normalised) platform tuple, the variant shown only when it is not the
+    architecture's default: ``linux/amd64``, ``linux/arm64``, ``linux/arm/v6``."""
+    os, architecture, *rest = platform
+    variant = rest[0] if rest else ""
+    if variant == _DEFAULT_VARIANTS.get(architecture, ""):
+        variant = ""
+    return "/".join(part for part in (os, architecture, variant) if part)
+
+
+def platform_pair(platform: str | None) -> tuple[str, str, str]:
+    """The normalised ``(os, architecture, variant)`` of an ``os/arch[/variant]`` platform string such as
+    ``builds.platform`` (:func:`normalize_platform_parts`: ``linux/arm64`` and ``linux/arm64/v8`` are one value);
+    ``None`` (or an empty string) is linux/amd64, the default platform sandboxes run. An amd64 variant other than
+    the baseline ``v1`` is refused: the records keep an image's os and architecture only (``reusable_record``,
+    ``recorded_image_mismatch``), so a configuration read for ``linux/amd64/v3`` would serve a later baseline run."""
+    parts = [part for part in (platform or "").lower().split("/") if part]
+    if not parts:
+        return normalize_platform_parts(*PLATFORM)
+    if len(parts) < 2 or len(parts) > 3:
+        raise ImageConfigError(f"Not a platform: {platform!r} (expected os/arch, for example linux/arm64)")
+    normalized = normalize_platform_parts(*parts)
+    if normalized[1] == "amd64" and normalized[2]:
+        raise ImageConfigError(
+            f"Unsupported platform: {platform!r} (an amd64 micro-architecture level above the baseline is another "
+            "platform to docker, and images are recorded by os/arch only; use linux/amd64)"
+        )
+    return normalized
+
 
 class ImageConfigError(RuntimeError):
-    """An image reference could not be resolved to a linux/amd64 configuration."""
+    """An image reference could not be resolved to a configuration for the platform the sandboxes run."""
+
+
+class PlatformMismatchError(ImageConfigError):
+    """A single-platform reference resolved to an image of another platform than the one asked for; ``resolved``
+    and ``requested`` name the two as ``os/arch[/variant]``."""
+
+    def __init__(self, message: str, *, resolved: str, requested: str) -> None:
+        super().__init__(message)
+        self.resolved = resolved
+        self.requested = requested
 
 
 @dataclass(frozen=True)
@@ -88,6 +151,49 @@ def parse_image_ref(reference: str) -> ImageRef:
     return ImageRef(registry=registry, repository=repository, tag=tag or None, digest=digest or None)
 
 
+def image_prefix_key(prefix: str) -> str:
+    """An ``images.auth`` prefix as :class:`RegistryClient` keys credentials: ``registry/repository-prefix``, the
+    registry read the way Docker reads a reference (:func:`parse_image_ref`: the first component is a host when it
+    has a dot, a colon or is ``localhost``, else the prefix names a Docker Hub repository, and ``docker.io`` is Hub's
+    registry), the rest kept as written. ``registry.example.com:5005/`` is ``registry.example.com:5005/``,
+    ``docker.io/org/`` is ``registry-1.docker.io/org/``, ``org/`` is ``registry-1.docker.io/org/`` and a bare host
+    is that host's whole registry. Raises :class:`ImageConfigError` for text that is not an image prefix."""
+    first, _, rest = prefix.partition("/")
+    registry = parse_image_ref(prefix.rstrip("/") + "/x").registry
+    path = rest if ("." in first or ":" in first or first == "localhost") else prefix
+    return f"{registry}/{path}"
+
+
+def credentials_for_image_prefixes(auth: Any, where: str = "images.auth") -> dict[str, tuple[str, str]]:
+    """:class:`RegistryClient` credentials from a sandbox provider's image-prefix auth map.
+
+    OpenSandbox's ``images.auth`` maps an image prefix (``registry.example.com:5005/``, ``docker.io/org/``)
+    to ``{username, password}``, longest matching prefix first at pull. Each prefix keeps its own entry, keyed as
+    :func:`image_prefix_key` spells it, so the client selects a reference's credentials the way the provider does:
+    two repositories of one registry with different credentials are each read with their own. ``auth`` that is
+    not a mapping of such entries raises :class:`ValueError` naming ``where``.
+    """
+    if auth is None:
+        return {}
+    if not isinstance(auth, dict):
+        raise ValueError(f"`{where}` must map an image prefix to {{username, password}}")
+    credentials: dict[str, tuple[str, str]] = {}
+    for prefix in sorted(auth, key=lambda value: (len(str(value)), str(value))):
+        entry = auth[prefix]
+        if (
+            not isinstance(entry, dict)
+            or not isinstance(entry.get("username"), str)
+            or not isinstance(entry.get("password"), str)
+        ):
+            raise ValueError(f"`{where}.{prefix}` must hold a `username` and a `password` string")
+        try:
+            key = image_prefix_key(str(prefix))
+        except ImageConfigError as exc:
+            raise ValueError(f"`{where}.{prefix}` is not an image prefix: {exc}") from exc
+        credentials[key] = (entry["username"], entry["password"])
+    return credentials
+
+
 class _RedirectHandler(urllib.request.HTTPRedirectHandler):
     """Follow a registry redirect without carrying the registry's token to another host.
 
@@ -109,16 +215,28 @@ class _RedirectHandler(urllib.request.HTTPRedirectHandler):
 class RegistryClient:
     """Read manifests and configuration blobs over the OCI distribution API with the standard library.
 
-    ``credentials`` maps a registry host to ``(username, password)`` for private repositories;
-    public ones use the anonymous token the registry hands out.
+    ``credentials`` maps a registry host, or an image prefix as :func:`image_prefix_key` spells it
+    (``registry/repository-prefix``, what :func:`credentials_for_image_prefixes` returns), to ``(username,
+    password)`` for private repositories: a reference takes the longest matching entry's, a bare host being that
+    whole registry, as the sandbox provider selects an ``images.auth`` entry at pull; public ones use the anonymous
+    token the registry hands out. ``platform`` is the ``(os, architecture)`` or
+    ``(os, architecture, variant)`` an image reference is resolved for (linux/amd64 by default), kept normalised
+    (:func:`normalize_platform_parts`): the manifest an index names for it, matched as ``docker --platform``
+    matches one, and the only one a single-platform reference may be.
     """
 
     def __init__(
-        self, credentials: dict[str, tuple[str, str]] | None = None, *, timeout_s: float = 60, retries: int = 3
+        self,
+        credentials: dict[str, tuple[str, str]] | None = None,
+        *,
+        timeout_s: float = 60,
+        retries: int = 3,
+        platform: tuple[str, ...] = PLATFORM,
     ) -> None:
         self.credentials = credentials or {}
         self.timeout_s = timeout_s
         self.retries = retries
+        self.platform = normalize_platform_parts(*platform)
         self._tokens: dict[tuple[str, str], str] = {}
         self._opener = urllib.request.build_opener(_RedirectHandler())
 
@@ -136,9 +254,13 @@ class RegistryClient:
             manifest, _ = self._manifest(ref, manifest_digest)
         config_digest = manifest["config"]["digest"]
         blob = json.loads(self._get(ref, f"blobs/{config_digest}", accept="*/*")[0])
-        if (blob.get("os"), blob.get("architecture")) != PLATFORM:
-            raise ImageConfigError(
-                f"{reference}: resolved to {blob.get('os')}/{blob.get('architecture')}, not linux/amd64"
+        # os and architecture only: a configuration blob may omit the variant its index entry names.
+        if normalize_platform_parts(blob.get("os"), blob.get("architecture"))[:2] != self.platform[:2]:
+            resolved = f"{blob.get('os')}/{blob.get('architecture')}"
+            raise PlatformMismatchError(
+                f"{reference}: resolved to {resolved}, not {platform_name(self.platform)}",
+                resolved=resolved,
+                requested=platform_name(self.platform),
             )
         config = blob.get("config") or {}
         return {
@@ -151,13 +273,20 @@ class RegistryClient:
         }
 
     def _select_platform(self, ref: ImageRef, index: dict[str, Any]) -> str:
+        """The digest of the first manifest of ``index`` for :attr:`platform`, matched as containerd matches one:
+        an arm64 entry with ``variant: v8`` (the Docker Official Images' shape) or without one both answer
+        ``linux/arm64``, and an amd64 entry with ``variant: v1`` or none answers ``linux/amd64``, while one at a
+        higher level (``v3``) does not: it is another platform, selected only when asked for by variant."""
         for entry in index.get("manifests", []):
             platform = entry.get("platform") or {}
             if (entry.get("annotations") or {}).get("vnd.docker.reference.type") == "attestation-manifest":
                 continue
-            if (platform.get("os"), platform.get("architecture")) == PLATFORM and not platform.get("variant"):
+            candidate = (platform.get("os"), platform.get("architecture"), platform.get("variant"))
+            if normalize_platform_parts(*candidate) == self.platform:
                 return entry["digest"]
-        raise ImageConfigError(f"{ref.pinned_repository}: the image index has no linux/amd64 manifest")
+        raise ImageConfigError(
+            f"{ref.pinned_repository}: the image index has no {platform_name(self.platform)} manifest"
+        )
 
     def _manifest(self, ref: ImageRef, manifest_ref: str) -> tuple[dict[str, Any], str]:
         body, headers = self._get(ref, f"manifests/{manifest_ref}", accept=MANIFEST_ACCEPT)
@@ -194,8 +323,9 @@ class RegistryClient:
         query = {key: params[key] for key in ("service", "scope") if key in params}
         query.setdefault("scope", f"repository:{ref.repository}:pull")
         headers = {}
-        if ref.registry in self.credentials:
-            username, password = self.credentials[ref.registry]
+        credentials = self._credentials_for(ref)
+        if credentials is not None:
+            username, password = credentials
             headers["Authorization"] = "Basic " + base64.b64encode(f"{username}:{password}".encode()).decode()
         try:
             body, _ = self._open(f"{realm}?{urllib.parse.urlencode(query)}", headers)
@@ -206,6 +336,16 @@ class RegistryClient:
         if not token:
             raise ImageConfigError(f"{ref.pinned_repository}: token response carried no token")
         return token
+
+    def _credentials_for(self, ref: ImageRef) -> tuple[str, str] | None:
+        """The credentials of the longest entry that covers ``ref`` (``registry/repository``): a bare host key is
+        the whole registry, a prefix key matches as the provider matches ``images.auth``; ``None`` when no entry
+        covers the reference, which is then read anonymously."""
+        name = f"{ref.registry}/{ref.repository}"
+        matching = [key for key in self.credentials if name.startswith(key if "/" in key else key + "/")]
+        if not matching:
+            return None
+        return self.credentials[max(matching, key=len)]
 
     def _open(self, url: str, headers: dict[str, str]) -> tuple[bytes, dict[str, str]]:
         """One GET; connection-level failures (not HTTP errors) are retried with a short backoff."""

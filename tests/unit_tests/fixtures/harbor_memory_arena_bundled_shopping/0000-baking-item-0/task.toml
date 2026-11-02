@@ -1,0 +1,84 @@
+version = "1.0"
+multi_step_reward_mode = "aggregate"
+
+[metadata]
+source = "MemoryArenaBundledShopping"
+task_type = "execution"
+task_id = "memoryarena-bundled-shopping-row-0"
+row_id = "0"
+category = "baking_item_0"
+
+[environment]
+build_timeout_sec = 7200.0
+cpus = 4
+memory_mb = 16384
+storage_mb = 65536
+gpus = 0
+allow_internet = true
+
+[[environment.mcp_servers]]
+name = "webshop"
+transport = "streamable-http"
+url = "http://mcp-server:8000/mcp"
+
+
+[[steps]]
+name = "01-select-cake-base"
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[steps.verifier]
+timeout_sec = 1800.0
+
+
+[[steps]]
+name = "02-select-frosting"
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[steps.verifier]
+timeout_sec = 1800.0
+
+
+[[steps]]
+name = "03-select-coloring-base"
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[steps.verifier]
+timeout_sec = 1800.0
+
+
+[[steps]]
+name = "04-select-sprinkles"
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[steps.verifier]
+timeout_sec = 1800.0
+
+
+[[steps]]
+name = "05-select-theme-topper"
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[steps.verifier]
+timeout_sec = 1800.0
+
+
+[[steps]]
+name = "06-select-candles"
+
+[steps.agent]
+timeout_sec = 1800.0
+
+[steps.verifier]
+timeout_sec = 1800.0
+
+
