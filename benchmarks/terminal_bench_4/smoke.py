@@ -23,11 +23,10 @@ from dotenv import dotenv_values
 from omegaconf import OmegaConf
 
 from nemo_gym.client import GlobalAIOHTTPAsyncClientConfig, ServerClient, http_client
-from nemo_gym.config import global_config
+from nemo_gym.config import BaseServerConfig, global_config
 from nemo_gym.observability.model_calls import merge_model_call_capture_into_record
 from nemo_gym.rollout_collection import _attach_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
-from nemo_gym.server_utils import BaseServerConfig
 from resources_servers.terminal_bench_4.app import TerminalBench4Config, TerminalBench4ResourcesServer
 from responses_api_agents.miniswe_sandboxed_agent.app import MiniSWESandboxedAgent, MiniSWESandboxedConfig
 from responses_api_models.openai_model.app import SimpleModelServer, SimpleModelServerConfig

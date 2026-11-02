@@ -24,10 +24,10 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
+    NeMoGymResponseOutputRefusal,
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
 )
-from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 from resources_servers.labbench2_vlm.app import (
     LabbenchVLMConfig,
     LabbenchVLMResourcesServer,

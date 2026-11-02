@@ -28,12 +28,12 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
     ConnectableProvider,
+    LocalProvider,
     SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxExecResult,
     SandboxSpec,
 )
-from nemo_gym.sandbox.providers.local import LocalProvider
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,

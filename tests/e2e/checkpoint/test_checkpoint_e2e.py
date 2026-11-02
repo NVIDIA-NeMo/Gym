@@ -44,7 +44,6 @@ from checkpoint_deployment import (
 )
 
 import nemo_gym.client.http_client
-import nemo_gym.server_utils as server_utils
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.server_runtime._checkpoint import coordination
 
@@ -63,7 +62,7 @@ pytestmark = pytest.mark.skipif(
 @pytest.fixture(autouse=True)
 async def gym_http_client() -> AsyncIterator[None]:
     """Coordination calls go through Gym's global aiohttp client, which is bound to this test's loop."""
-    nemo_gym.client.http_client.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
+    nemo_gym.client.http_client.set_global_aiohttp_client(nemo_gym.client.http_client.GlobalAIOHTTPAsyncClientConfig())
     yield
     await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
     nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
@@ -82,7 +81,7 @@ async def lift_connection_limit() -> None:
     await nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT.close()
     nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
     nemo_gym.client.http_client.set_global_aiohttp_client(
-        server_utils.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=0)
+        nemo_gym.client.http_client.GlobalAIOHTTPAsyncClientConfig(global_aiohttp_connector_limit_per_host=0)
     )
 
 
