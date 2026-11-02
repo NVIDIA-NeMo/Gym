@@ -11,9 +11,8 @@ from aiohttp import ClientResponseError, web
 from aiohttp.test_utils import TestServer
 from fastapi.testclient import TestClient
 
-from nemo_gym import server_utils
 from nemo_gym.base_responses_api_model import CaptureStore, read_model_call_records
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient, http_client
 from responses_api_models.openai_model.app import (
     NeMoGymAsyncOpenAI,
     SimpleModelServer,
@@ -196,14 +195,14 @@ def test_passthrough_rejects_settings_it_cannot_apply(config) -> None:
 @pytest.fixture
 async def gym_http_client():
     """A fresh shared aiohttp client, as a running Gym server has, for calls to a real upstream."""
-    saved = (server_utils._GLOBAL_AIOHTTP_CLIENT, server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT)
-    server_utils._GLOBAL_AIOHTTP_CLIENT = server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
-    server_utils.set_global_aiohttp_client(server_utils.GlobalAIOHTTPAsyncClientConfig())
+    saved = (http_client._GLOBAL_AIOHTTP_CLIENT, http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT)
+    http_client._GLOBAL_AIOHTTP_CLIENT = http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT = None
+    http_client.set_global_aiohttp_client(http_client.GlobalAIOHTTPAsyncClientConfig())
     try:
         yield
     finally:
-        await server_utils._GLOBAL_AIOHTTP_CLIENT.close()
-        server_utils._GLOBAL_AIOHTTP_CLIENT, server_utils._GLOBAL_AIOHTTP_CONTROL_CLIENT = saved
+        await http_client._GLOBAL_AIOHTTP_CLIENT.close()
+        http_client._GLOBAL_AIOHTTP_CLIENT, http_client._GLOBAL_AIOHTTP_CONTROL_CLIENT = saved
 
 
 async def test_request_timeout_bounds_each_read_of_a_relayed_stream_not_the_whole_stream(gym_http_client) -> None:

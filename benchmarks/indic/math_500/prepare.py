@@ -13,7 +13,7 @@ from typing import Any
 from datasets import load_dataset
 from huggingface_hub import get_token, hf_hub_download
 
-from nemo_gym.global_config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
+from nemo_gym.config import HF_TOKEN_KEY_NAME, maybe_get_global_config_dict
 
 
 BENCHMARK_DIR = Path(__file__).parent

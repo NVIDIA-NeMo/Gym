@@ -23,7 +23,7 @@ from app import (
     _normalize_answer,
 )
 
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
 
 
 class TestApp:

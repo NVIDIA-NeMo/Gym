@@ -23,7 +23,7 @@ from resources_servers.terminal_multi_harness.common.verification_utils import (
 
 
 if TYPE_CHECKING:
-    from nemo_gym.openai_utils import NeMoGymResponse
+    from nemo_gym.core import NeMoGymResponse
 
 
 def _build_action(tool_calls: list[FunctionCallAction], assistant_text: str | None) -> Optional[ExpectedAction]:

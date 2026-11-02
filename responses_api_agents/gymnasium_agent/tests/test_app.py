@@ -19,10 +19,9 @@ from unittest.mock import AsyncMock, MagicMock
 import anyio
 import pytest
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
-from nemo_gym.openai_utils import NeMoGymResponse
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import NeMoGymResponse
 from responses_api_agents.gymnasium_agent.app import GymnasiumAgent, GymnasiumAgentConfig, GymnasiumAgentRunRequest
 
 
@@ -259,6 +258,71 @@ class TestRun:
         assert urls.count("/close") == 0
         model_calls = [(u, h) for (u, h) in seen if u == model_path]
         assert model_calls == [(model_path, None)]
+
+    @pytest.mark.asyncio
+    async def test_step_failure_fields_reach_the_run_response(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A")],
+            "/step": [
+                {
+                    "observation": None,
+                    "reward": 0.25,
+                    "terminated": False,
+                    "truncated": True,
+                    "info": {"score": 0.25},
+                    "mask_sample": True,
+                    "failure_kind": "my_env:user_sim_failed",
+                    "failure_reason": "user simulator returned no usable reply in 3 attempts",
+                }
+            ],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.truncated is True
+        assert result.reward == 0.25
+        assert result.info == {"score": 0.25}
+        assert result.mask_sample is True
+        assert result.failure_kind == "my_env:user_sim_failed"
+        assert result.failure_reason == "user simulator returned no usable reply in 3 attempts"
+        dumped = result.model_dump(mode="json")
+        assert dumped["mask_sample"] is True and dumped["failure_kind"] == "my_env:user_sim_failed"
+
+    @pytest.mark.asyncio
+    async def test_step_without_failure_fields_is_a_valid_sample(self):
+        agent = _make_agent()
+        model_path = "/ng-rollout/2-0/v1/responses"
+        payloads = {
+            "/reset": [{"observation": "go", "info": {}}],
+            model_path: [_model_response("move A")],
+            "/step": [{"observation": None, "reward": 1.0, "terminated": True, "truncated": False, "info": {}}],
+        }
+
+        async def _post(server_name, url_path, json=None, cookies=None, headers=None, **kw):
+            return _FakeHttpResp(payloads[url_path].pop(0))
+
+        agent.server_client.post = AsyncMock(side_effect=_post)
+        req = MagicMock()
+        req.cookies = {}
+        body = GymnasiumAgentRunRequest(
+            responses_create_params={"input": [{"role": "user", "content": "play"}]},
+            **{TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 0},
+        )
+        result = await agent.run(req, body)
+        assert result.mask_sample is False
+        assert result.failure_kind is None and result.failure_reason is None
 
     @pytest.mark.asyncio
     async def test_successful_rollout_survives_close_http_failure(self):

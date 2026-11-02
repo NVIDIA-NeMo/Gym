@@ -108,8 +108,9 @@ a config that uses `_inherit_from` cannot add new keys to `models`.
 - `context_window`: the served model's context window. Kilo measures the session against it, but only
   auto-compacts when `kilo_config` also sets `compaction.threshold_percent`; `0` turns the accounting
   off entirely. `model_server` only.
-- `max_output_tokens`: per-request output budget. Kilo asks for `min(this, 32000)`, its own
-  `OUTPUT_TOKEN_MAX`, so values above 32000 have no effect. Setting it too high fails silently — see
+- `max_output_tokens`: per-request output budget. The adapter also sets
+  `KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX`, so Kilo's default 32000-token ceiling does not
+  cap larger configured budgets. Setting it too high fails silently — see
   Sizing the output budget. `model_server` only.
 - `reasoning_field`: response field carrying reasoning text, written as `interleaved.field`. Gym model
   servers emit `reasoning_content`; Kilo turns interleaved reasoning off for custom OpenAI-compatible
@@ -165,8 +166,11 @@ gym eval run --no-serve \
   -o rollouts.jsonl --limit 3 --concurrency 3
 ```
 
-Keep `resources_tool_transports: []`: Kilo provides its own sandbox tools and rejects required
-external tool grants. Collection calls the Environment Server's `/run`, never the agent's `/run`.
+This SWE-bench Pro recipe uses `resources_tool_transports: []` because Kilo operates on the task's
+sandbox files. For Resources MCP tools, use `[mcp]`; required direct HTTP grants remain unsupported.
+See [Kilo MCP and sandbox ownership](https://docs.nvidia.com/nemo/gym/main/agent-server/integrate-existing-agents#kilo-mcp-and-sandbox-ownership)
+for MCP readiness checks and the configuration when Resources supplies no sandbox.
+Collection calls the Environment Server's `/run`, never the agent's `/run`.
 
 Set `context_window` / `max_output_tokens` to the served model's limits and raise `timeout` for
 long-horizon benchmarks. `timeout` also sets Kilo's model-stream watchdog (`chunkTimeout`), because

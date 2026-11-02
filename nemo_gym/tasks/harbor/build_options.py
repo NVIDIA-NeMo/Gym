@@ -128,7 +128,7 @@ def _merged_cli_config(overrides: list[str], config_files: Sequence[Path] = ()) 
     """
     from omegaconf import OmegaConf
 
-    from nemo_gym.global_config import CONFIG_PATHS_KEY_NAME, GlobalConfigDictParser, _load_config_yaml
+    from nemo_gym.config.global_config import CONFIG_PATHS_KEY_NAME, GlobalConfigDictParser, _load_config_yaml
 
     parser = GlobalConfigDictParser()
     saved_argv = sys.argv
@@ -155,7 +155,7 @@ def _block_from_overrides(overrides: list[str], key: str, *, config_files: Seque
     from omegaconf import OmegaConf
     from omegaconf.errors import InterpolationResolutionError
 
-    from nemo_gym.global_config import translate_interpolation_error
+    from nemo_gym.config.global_config import translate_interpolation_error
 
     merged = _merged_cli_config(overrides, config_files)
     try:

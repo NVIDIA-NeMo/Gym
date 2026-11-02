@@ -187,7 +187,7 @@ class RolloutControlClient:
 
     async def _request(self, method: str, path: str, **kwargs: Any):
         # Deferred because server_utils loads Gym's aiohttp/server stack.
-        from nemo_gym.server_utils import request
+        from nemo_gym.client.http_client import request
 
         kwargs.setdefault("headers", {}).update(self._headers)
         try:
