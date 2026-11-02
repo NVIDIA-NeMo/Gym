@@ -1,6 +1,6 @@
 ---
 title: "Prepare Tasks"
-description: "Define the tasks NeMo Gym runs, as JSONL rows served by a Resources Server or as task folders."
+description: "Define the tasks NeMo Gym runs, as JSONL rows served by a Resources Server or as Harbor task folders."
 position: 1
 ---
 
@@ -10,13 +10,13 @@ A task is one unit of work that an agent attempts and a verifier scores. NeMo Gy
 
 ## Two kinds of tasks
 
-| | JSONL rows plus a Resources Server | Task folders |
+| | JSONL rows plus a Resources Server | Harbor task folders |
 |---|---|---|
 | What you write | One JSONL line per task (`responses_create_params` plus the fields your verifier reads), a Resources Server that holds the tools and `verify()`, and a YAML config that wires them to an Agent Server. | One folder per task in the Harbor format, holding `task.toml` and usually `instruction.md`, `environment/`, `tests/` and `solution/`. See [Task folder layout](/main/data/task-folder-format#task-folder-layout) for which are required. |
 | Where verification runs | In the Resources Server's `verify()`. | In the task's sandbox, or a fresh one for separate verification, where the task's own `tests/` writes the reward. |
 | Best fit | Many tasks that share one verifier and toolset, such as math, instruction following or tool calling. | Agent tasks that need their own software environment, such as terminal and coding tasks, and datasets from the Harbor hub. |
 
-Task folders run on the `harbor` Environment Server, which starts a sandbox from each folder, runs the agent session in it, then runs the task's verifier in that sandbox, or in a fresh one for separate verification. No Resources Server takes part. Start with [Author Task Folders](/main/data/harbor-tasks), and see [Harbor Environment Server](/main/agent-interactions/harbor) for how an episode runs. To build a Resources Server end to end, see [Build Environments](/main/environment-tutorials).
+Harbor task folders run on the `harbor` Environment Server, which starts a sandbox from each folder, runs the agent session in it, then runs the task's verifier in that sandbox, or in a fresh one for separate verification. No Resources Server takes part. Start with [Author Task Folders](/main/data/harbor-tasks), and see [Harbor Environment Server](/main/agent-interactions/harbor) for how an episode runs. To build a Resources Server end to end, see [Build Environments](/main/environment-tutorials).
 
 The rest of this page covers JSONL rows. A JSONL dataset for reinforcement learning (RL) training connects to an **Agent Server** (orchestrates agent-environment interactions), which routes requests to a **Resources Server** (provides tools and computes rewards).
 

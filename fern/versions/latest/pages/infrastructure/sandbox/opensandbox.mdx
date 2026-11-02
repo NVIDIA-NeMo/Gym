@@ -257,7 +257,7 @@ sandbox_spec:
         - { action: allow, target: "*.nvidia.com" }
 ```
 
-What the control plane does with it, verified live with the OpenSandbox 0.1.15 SDK against an OpenSandbox deployment (October 2026). The probes read neither the control plane's own version nor its egress enforcement mode, `dns` or `dns+nft`, which is a server setting (see [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)). Confirm that setting separately; a connection timeout alone does not identify the enforcement layer:
+What the control plane does with it, verified live with the OpenSandbox 0.1.15 SDK against an OpenSandbox deployment. The probes read neither the control plane's own version nor its egress enforcement mode, `dns` or `dns+nft`, which is a server setting (see [OpenSandbox Best Practices](/infrastructure/sandbox/opensandbox-best-practices)). Confirm that setting separately; a connection timeout alone does not identify the enforcement layer:
 
 - A sandbox created without a `network_policy` has no egress sidecar: it is unrestricted, and its policy can neither be read nor changed afterwards (the egress endpoints answer 502).
 - A sandbox created with a policy keeps its `defaultAction` for life. The SDK's `patch_egress_rules` and `delete_egress_rules` change the rules of a running sandbox and the change is enforced within seconds, but no call changes `defaultAction`, and `*` is not a catch-all target: a `deny *` rule under `defaultAction: allow` blocks nothing, and an `allow *` rule under `deny` opens nothing.

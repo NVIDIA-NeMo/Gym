@@ -35,6 +35,10 @@ edit. See [Digests](/main/reference/task-folder-storage#digests).
 
 ## Task settings
 
+These tables list the `task.toml` keys Gym acts on or treats differently from Harbor. For every key, see
+Harbor's [task configuration reference](https://docs.harborframework.com/tasks/configuration). Gym reads the rest,
+such as `schema_version`, `[metadata]` and `source`, without acting on them.
+
 ### Top level
 
 | Key | Default | What it does |
@@ -54,7 +58,7 @@ Like Harbor, Gym ignores unknown keys (logging each one) and reads the legacy sp
 | `docker_image` | none | A prebuilt image. Without it, Gym uses `environment/Dockerfile` or `docker-compose.yaml`. |
 | `build_timeout_sec` | `600` | The budget all overlay-mode `RUN` lines share. |
 | `cpus`, `memory_mb`, `storage_mb` | none | Resource limits. |
-| `gpus`, `gpu_types` | none | GPU count and type. GPU tasks run on the server's `gpu_sandbox_provider` block when set. |
+| `gpus`, `gpu_types` | none | GPU count and allowed types. Only the first type is sent, and only when the server sets `request_gpu_type: true`. GPU tasks run on the server's `gpu_sandbox_provider` block when set. |
 | `env` | `{}` | Variables for the agent's sandbox. |
 | `workdir` | none | The working directory. Unset, the Dockerfile's final `WORKDIR`, else the image's. |
 | `healthcheck` | none | A `command` polled at seed. After `start_period_sec` (`0`), `retries` (`3`) consecutive failures `interval_sec` (`5`) apart fail the seed (retryable). `timeout_sec` (`30`) bounds each attempt; `start_interval_sec` (`5`) paces the start period. |
@@ -88,7 +92,8 @@ Dockerfile's final `USER`, else the image's.
 ## Dataset settings
 
 `dataset.toml` holds Harbor's `[dataset]` table, which Gym leaves to Harbor, and Gym's `[gym]` table. Deployment
-settings, such as the sandbox provider, never go here.
+settings, such as the sandbox provider, never go here. The `[gym]` tables below are complete: Gym refuses any other
+key in `[gym]`, `[gym.defaults]` or `[gym.tasks."<id>"]`.
 
 ```toml
 [dataset]
@@ -124,13 +129,14 @@ None of these keys enters a task digest.
 | Key | Default | What it does |
 | --- | --- | --- |
 | `num_repeats` | `1` | Rollouts per task for `gym eval run`. `+num_repeats=<n>` replaces it. |
-| `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`. |
-| `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb`, rounded up. GPUs never scale. |
+| `timeout_multiplier` | `1.0` | Scales every `[agent]` and `[verifier]` `timeout_sec`, including a step's own. Collect hooks, health checks and build timeouts do not scale. |
+| `resource_multiplier` | `1.0` | Scales `cpus`, `memory_mb` and `storage_mb` of `[environment]` and `[verifier.environment]`, rounded up. GPUs and `[steps.verifier.environment]` do not scale. |
 
 ### [gym.tasks."task-id"]
 
 Per-task overrides, keyed by folder name. `environment` and `verifier` take any key of the task's table: `env`
-merges over the task's own, and every other key replaces it. `verifier` also takes the Gym-only `inputs` list (see
+merges over the task's own, `verifier.environment` merges field by field like `[environment]`, and every other key
+replaces it. `verifier` also takes the Gym-only `inputs` list (see
 [Sidecar inputs](/main/data/task-folder-verifiers#sidecar-inputs)). `artifacts` adds entries after the task's own.
 Once `dataset.toml` sets a multiplier other than `1.0` or any override, every task's digest includes the defaults
 and its own (possibly empty) override, so adding the first such key, or removing the last, changes every digest.

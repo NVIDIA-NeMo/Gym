@@ -69,6 +69,9 @@ def verify(workspace: Path, task_data: dict) -> float:
     return float(answer is not None and answer.strip() == task_data["answer"])
 ```
 
+`verify` can declare any of these four arguments, by name. The runner passes only the ones it declares, so the
+example above gets `workspace` and `task_data` alone.
+
 | Argument | What it is |
 | --- | --- |
 | `workspace` | The task's working directory in the sandbox, as a `Path`. |
