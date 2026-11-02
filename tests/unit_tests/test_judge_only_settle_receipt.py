@@ -165,3 +165,44 @@ def test_a_job_that_cannot_judge_leaves_a_failed_receipt_and_the_run_as_it_was(
     store = RolloutStore.read(output, import_legacy=False)
     assert store.manifest.pending_rejudge == {}
     assert list(_selected(output)[0].values())[0]["response"] == ANSWER
+
+
+def test_a_health_check_that_reads_the_store_selection_gets_the_settled_history_as_is(
+    tmp_path, monkeypatch, verifier, aggregation
+):  # noqa: F811
+    """A health check that selects the Store's attempts itself (NVIDIA-NeMo/Gym#3881) takes no selected projection:
+    the settled run's quality summary is rewritten through it from the run's own history."""
+    from nemo_gym import rollout_health
+
+    calls = []
+
+    def store_selected_health(
+        rollout_paths,
+        *,
+        output_dir=None,
+        workers=None,
+        ignored_checks=(),
+        limits=None,
+        limits_source="config",
+        run_coverage=None,
+        source_histories=None,
+        model_call_capture_dirs=(),
+    ):
+        calls.append({"rollout_paths": rollout_paths, "output_dir": output_dir, "run_coverage": run_coverage})
+        return "health result"
+
+    monkeypatch.setattr(rollout_health, "run_health_checks", store_selected_health)
+    monkeypatch.setattr(rollout_health, "format_health_report", lambda result: f"report of {result}")
+    output = _run(tmp_path, [verify_transport_masked(0), ungraded(1, judge_response="A")])
+    (output.parent / "rollouts_resolved_config.yaml").write_text("fixture: true\n")
+    config = _job_config(output, settle_source_snapshot_json=_snapshot(output))
+
+    eval_cli._reverify_with_receipt({"config_paths": ["fixture.yaml"], "health_check_workers": 1}, config)
+
+    receipt = read_settle_receipt(Path(config.settle_receipt_fpath))
+    assert receipt["state"] == "completed" and receipt["settled"] == 1
+    assert receipt["health_summary_recomputed"] is True
+    [call] = calls
+    assert call["rollout_paths"] == output and call["output_dir"] == output.parent
+    assert call["run_coverage"][0]["masked"] == 0
+    assert not (Path(config.settle_receipt_fpath).parent / "selected_rollouts.jsonl").exists()
