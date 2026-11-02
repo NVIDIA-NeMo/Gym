@@ -72,7 +72,8 @@ def _run(scored: int, *, settled: dict[str, int] | None = None) -> CollectedEvid
 
 
 def _truncate(row: dict) -> None:
-    """The model ran into its output cap; the verifier scored the cut-off answer zero."""
+    """The model ran into its output cap; the benchmark's rule scored the cut-off answer zero without grading it."""
+    row["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"] = None
     row["reward"] = 0.0
     row["response"]["status"] = "incomplete"
     row["response"]["output"] = [{"type": "reasoning", "status": "incomplete"}]
@@ -87,6 +88,8 @@ def _truncate(row: dict) -> None:
 
 
 def _empty(row: dict) -> None:
+    """The answer holds no assistant message; the benchmark's rule scored it zero without grading it."""
+    row["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"] = None
     row["reward"] = 0.0
     row["response"]["output"] = [{"type": "reasoning", "status": "completed"}]
     [call] = row["ng_trial_observations"]["model_calls"]

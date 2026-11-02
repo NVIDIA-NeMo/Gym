@@ -1005,7 +1005,7 @@ def trial_metadata(value):
         return None
     result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category")}
     result["dialect"] = value.get("dialect") if value.get("dialect") in ("chat", "responses") else None
-    result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call") else None
+    result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call", "max_output_tokens", "max_tokens") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
     operations = value.get("model_operations")
     result["model_operations_recorded"] = "model_operations" in value
@@ -1159,6 +1159,14 @@ def rows(name, skip=0):
                 if isinstance(answer, dict):
                     output = answer.get("output")
                     selected[key] = {k: answer[k] for k in ("object", "id", "status") if k in answer}
+                    # Cutoff facts only: why the answer is incomplete, its output token count and its output cap.
+                    details, usage = answer.get("incomplete_details"), answer.get("usage")
+                    if isinstance(details, dict) and isinstance(details.get("reason"), str):
+                        selected[key]["incomplete_details"] = {"reason": details["reason"][:64]}
+                    if type(answer.get("max_output_tokens")) is int:
+                        selected[key]["max_output_tokens"] = answer["max_output_tokens"]
+                    if isinstance(usage, dict) and type(usage.get("output_tokens")) is int:
+                        selected[key]["usage"] = {"output_tokens": usage["output_tokens"]}
                     metadata = answer.get("metadata")
                     if isinstance(metadata, dict) and "ng_agent_outcome" in metadata:
                         # Export only the bounded public classification, never arbitrary metadata or JSON extras.
@@ -3130,12 +3138,12 @@ def _observed_trial_operations(
         for row in rows:
             if _identity(row) in final_zero:
                 continue
-            if _truncated_zero(row):
-                # A counted model failure (TRUNCATED_ANSWER), like a final zero: only its answer must be observed.
-                if not _observed_cut_off_answer(row):
+            if _answer_fault(row, collected):
+                # A counted model failure (``_answer_fault``), like a final zero: only its answer must be observed.
+                if not _observed_incomplete_answer(row):
                     return False
                 continue
-            truncated = _truncated_answer(row)
+            truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
             resource = servers[agent["resources_server"]]
@@ -3508,7 +3516,7 @@ def _model_failure(row: Mapping[str, Any]) -> bool:
     invalid (``invalid_model_response``), or the model left it incomplete, or it is empty and scored zero."""
     return (
         _grading_facts(row).get("invalid_model_response") is True
-        or _truncated_answer(row)
+        or _incomplete_answer(row)
         or (_empty_answer(row) and _reward(row) == 0)
     )
 
@@ -3624,7 +3632,7 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     rows = [
         row
         for row in collected.results or []
-        if _identity(row) in scored and _identity(row) not in final_zero and not _truncated_zero(row)
+        if _identity(row) in scored and _identity(row) not in final_zero and not _answer_fault(row, collected)
     ]
     recorded = sum(1 for row in rows if not _graded(row) and _recorded_by_verifier(row, collected))
     artifacts = sum(
@@ -3679,6 +3687,8 @@ def _predates_operation_observations(decision: RecoveryDecision, collected: Coll
 # against the trial limit: server faults (a server that did not start, a model transport error, any provider failure)
 # are named as such, and any other kind is named by its kind alone.
 TRUNCATED_ANSWER = "truncated_answer"
+EMPTY_ANSWER = "empty_answer"
+MALFORMED_ANSWER = "malformed_answer"
 GRADING_WITHOUT_VERDICT = "grading_without_verdict"
 MODEL_FAULT_KINDS = frozenset(
     {
@@ -3689,6 +3699,8 @@ MODEL_FAULT_KINDS = frozenset(
         AGENT_LIMIT,
         AGENT_INVALID_OUTPUT,
         TRUNCATED_ANSWER,
+        EMPTY_ANSWER,
+        MALFORMED_ANSWER,
     }
 )
 SERVER_FAULT_KINDS = frozenset({SERVER_START_FAILED, MODEL_TRANSPORT_ERROR})
@@ -3704,15 +3716,69 @@ def fault_class(kind: Any) -> str | None:
     return None
 
 
-def _truncated_answer(row: Mapping[str, Any]) -> bool:
-    """Whether the row's saved answer is a response the model left incomplete, without an error."""
+def _incomplete_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the row's saved answer is a response left incomplete, without an error. An incomplete status alone
+    says nothing about why: an agent also marks an answer incomplete that holds no message."""
     response = row.get("response")
     return isinstance(response, dict) and response.get("status") == "incomplete" and response.get("error") is None
 
 
-def _truncated_zero(row: Mapping[str, Any]) -> bool:
-    """Whether the row scored zero on an answer the model left incomplete (``TRUNCATED_ANSWER``)."""
-    return type(row.get("reward")) in (int, float) and row["reward"] == 0 and _truncated_answer(row)
+# The reasons that say an answer ran into its output cap: a chat ``length`` finish, or a responses-API incomplete
+# reason (also recorded as the call's finish reason).
+CUTOFF_REASONS = frozenset({"length", "max_output_tokens", "max_tokens"})
+
+
+def _cut_off(row: Mapping[str, Any]) -> bool:
+    """Whether the saved answer carries an actual cutoff signal, not just an incomplete status.
+
+    The answer's ``incomplete_details.reason`` is ``max_output_tokens`` or ``max_tokens``; or the captured call that
+    returned it finished for ``length`` or one of those reasons; or its output tokens reached its ``max_output_tokens``.
+    """
+    response = row.get("response")
+    if not isinstance(response, dict):
+        return False
+    details = response.get("incomplete_details")
+    if isinstance(details, dict) and details.get("reason") in CUTOFF_REASONS - {"length"}:
+        return True
+    usage, cap = response.get("usage"), response.get("max_output_tokens")
+    tokens = usage.get("output_tokens") if isinstance(usage, dict) else None
+    if type(cap) is int and cap > 0 and type(tokens) is int and tokens >= cap:
+        return True
+    observed = row.get("ng_trial_observations")
+    calls = observed.get("model_calls") if isinstance(observed, dict) else None
+    return any(
+        isinstance(call, dict)
+        and isinstance(call.get("response_metadata"), dict)
+        and call["response_metadata"].get("response_id") == response.get("id")
+        and call["response_metadata"].get("finish_reason") in CUTOFF_REASONS
+        for call in (calls if isinstance(calls, list) else [])
+    )
+
+
+def _recorded_grade(row: Mapping[str, Any], collected: CollectedEvidence | None) -> bool:
+    """Whether the row's reward came from a recorded grade: completed grading operations, the verifier's own grading
+    record, or a saved grading artifact (``GRADING_ARTIFACTS``). The model's own failed answer is not one."""
+    return (
+        _graded(row)
+        or (collected is not None and _recorded_by_verifier(row, collected))
+        or grading_artifact(row) is not None
+    )
+
+
+def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
+    """The model fault of a scored-zero incomplete answer the benchmark's rule scored without a recorded grade.
+
+    ``TRUNCATED_ANSWER`` when the answer carries a cutoff signal (``_cut_off``), otherwise ``EMPTY_ANSWER`` when it
+    holds no assistant message and ``MALFORMED_ANSWER`` when it does. A row whose reward came from a recorded grade
+    (``_recorded_grade``) has none: its score is its grade.
+    """
+    if type(row.get("reward")) not in (int, float) or row["reward"] != 0 or not _incomplete_answer(row):
+        return None
+    if _recorded_grade(row, collected):
+        return None
+    if _cut_off(row):
+        return TRUNCATED_ANSWER
+    return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
 def _trajectory_kinds(observed: Any) -> list[str]:
@@ -3767,11 +3833,11 @@ def _trajectory_text(evidence: Mapping[str, Any]) -> str:
     )
 
 
-def _observed_cut_off_answer(row: Mapping[str, Any]) -> bool:
-    """Whether a scored-zero cut-off answer (``_truncated_zero``) is the model's own observed answer.
+def _observed_incomplete_answer(row: Mapping[str, Any]) -> bool:
+    """Whether a counted incomplete answer (``_answer_fault``) is the model's own observed answer.
 
-    The trial gate counts such a row as a model failure (``TRUNCATED_ANSWER``) and reports it as a response failure,
-    so its grading is not joined. Its answer must still be observed: the row recorded no failure, its one agent
+    The trial gate counts such a row as a model failure and reports it as a response failure, so its grading is not
+    joined. Its answer must still be observed: the row recorded no failure, its one agent
     invocation ended completed or incomplete (an agent marks a cut-off answer incomplete) without an error, its last
     model call is exactly one captured call that answered in one completed operation, and that call's response is
     the saved answer. A verifier that ran must have completed: a verifier error is never read as the model's fault.
@@ -4014,16 +4080,19 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     """The trial gate's counted failures by kind.
 
     Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
-    (``final_zero_trials``), and scored-zero rows whose saved answer the model left incomplete (``TRUNCATED_ANSWER``).
+    (``final_zero_trials``), and scored-zero incomplete answers the benchmark's rule scored without a recorded grade
+    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed).
     """
     final_zero = final_zero_trials(decision, collected)
     kinds = Counter(e.failure_kind for e in decision.evidence if e.state == IdentityState.MODEL_FINAL)
     kinds.update(final_zero.values())
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
-    kinds[TRUNCATED_ANSWER] += sum(
-        1
+    kinds.update(
+        fault
         for row in (collected.results or [] if collected is not None else [])
-        if _identity(row) in scored and _identity(row) not in final_zero and _truncated_zero(row)
+        if _identity(row) in scored
+        and _identity(row) not in final_zero
+        and (fault := _answer_fault(row, collected)) is not None
     )
     return +kinds
 
@@ -4247,8 +4316,9 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     (``trial_population``): every expected rollout, failed and missing ones included; rows an accepted partial stage
     omitted are no rollout of the run and are reported separately as ``omitted``.
 
-    A response failure is a scored rollout whose saved answer is truncated (left incomplete), empty (no assistant
-    output) or malformed (no response with an output list, or an answer the verifier marked invalid). A trial failure is a rollout in a failed, masked or
+    A response failure is a scored rollout without a recorded grade (``_recorded_grade``) whose saved answer is
+    truncated (incomplete with a cutoff signal, ``_cut_off``), empty (no assistant output) or malformed (no response
+    with an output list, an answer the verifier marked invalid, or one left incomplete without a cutoff signal). A trial failure is a rollout in a failed, masked or
     unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, or an observed
     grading without a valid verdict, by the cause its failure kind names (``trial_failure_cause``).
     """
@@ -4261,15 +4331,18 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     for row in (collected.results or []) if collected is not None else []:
         if _identity(row) not in scored or _identity(row) in final_zero:
             continue
+        # A row whose reward came from a recorded grade is never a response failure: its score is its grade.
+        if _recorded_grade(row, collected):
+            continue
         answer = row.get("response")
         output = answer.get("output") if isinstance(answer, dict) else None
         if not isinstance(output, list):
             responses["malformed"] += 1
-        elif _truncated_answer(row):
+        elif _incomplete_answer(row) and _cut_off(row):
             responses["truncated"] += 1
         elif not any(isinstance(item, dict) and item.get("role") == "assistant" for item in output):
             responses["empty"] += 1
-        elif _grading_facts(row).get("invalid_model_response") is True:
+        elif _grading_facts(row).get("invalid_model_response") is True or _incomplete_answer(row):
             responses["malformed"] += 1
     invalid_grades: list[Identity] = []
     _observed_trial_operations(decision, collected, grading_failures=invalid_grades)

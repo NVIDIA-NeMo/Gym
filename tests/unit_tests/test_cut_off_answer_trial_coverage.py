@@ -65,7 +65,8 @@ def test_a_cut_off_answer_scored_zero_is_a_counted_model_failure_and_the_run_is_
     assert passed is True, reason
     assert evaluation["exact"] is True
     assert evaluation["evaluation"]["count"] == 0
-    assert evaluation["model"]["kinds"] == {"truncated_answer": 1}
+    # No cutoff signal and no assistant message: an empty answer, still the model's fault.
+    assert evaluation["model"]["kinds"] == {"empty_answer": 1}
 
 
 def _verifier_failed(collected):
