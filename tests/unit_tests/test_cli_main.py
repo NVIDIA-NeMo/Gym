@@ -2174,10 +2174,37 @@ def test_eval_status_reads_saved_progress(tmp_path, monkeypatch, capsys, as_job_
     cli_main.main()
     output = capsys.readouterr().out
     if json_output:
-        assert list(json.loads(output).values()) == [status]
+        assert list(json.loads(output).values()) == [{**status, "export": {}}]
     else:
         assert "2 completed, 1 remaining" in output
         assert '"judge_failed": 1' in output
+        assert "export receipt: missing" in output
+
+
+@pytest.mark.parametrize("json_output", [False, True])
+def test_eval_status_reports_each_exporter_receipt_and_live_run_id(tmp_path, monkeypatch, capsys, json_output):
+    artifacts = tmp_path / "artifacts"
+    artifacts.mkdir()
+    status = {
+        "schema_version": "1",
+        "tracking": "enabled",
+        "members": {"a": {"completed_rollout_count": 1, "remaining_rollout_count": 0, "failures_by_class": {}}},
+    }
+    (artifacts / "rollouts_batch_status.json").write_text(json.dumps(status))
+    (artifacts / "rollouts_mlflow_export_done").write_text("")
+    (artifacts / "rollouts_mlflow_run_id").write_text("run-123\n")
+    (artifacts / "rollouts_wandb_run_id").write_text("w-7")
+    # Another output's markers in the same directory belong to that output, not to this status.
+    (artifacts / "other_mlflow_export_done").write_text("")
+    monkeypatch.setattr(sys, "argv", ["gym", "eval", "status", str(artifacts), *(["--json"] if json_output else [])])
+    cli_main.main()
+    output = capsys.readouterr().out
+    expected = {"mlflow": {"receipt": True, "run_id": "run-123"}, "wandb": {"receipt": False, "run_id": "w-7"}}
+    if json_output:
+        [entry] = json.loads(output).values()
+        assert entry["export"] == expected
+    else:
+        assert "export receipt: mlflow present (run id run-123), wandb missing (run id w-7)" in output
 
 
 def test_eval_status_missing_artifact_is_actionable(tmp_path, monkeypatch, capsys):

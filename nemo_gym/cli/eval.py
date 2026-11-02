@@ -2206,13 +2206,28 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
     def status_files(directory: Path) -> list[Path]:
         return sorted({*directory.glob("*_batch_status.json"), *directory.glob(BATCH_STATUS_FNAME)})
 
+    def export_facts(file: Path) -> dict[str, dict[str, Any]]:
+        """Each exporter's receipt (``<stem>_<exporter>_export_done``) and live run id (``<stem>_<exporter>_run_id``)
+        beside the output this status file belongs to. The legacy ``batch_status.json`` names no stem, so every
+        marker in its directory counts."""
+        stem = file.name.removesuffix("_batch_status.json") if file.name.endswith("_batch_status.json") else ""
+        facts: dict[str, dict[str, Any]] = {}
+        for suffix, key in (("_export_done", "receipt"), ("_run_id", "run_id")):
+            for marker in sorted(file.parent.glob(f"{stem}_*{suffix}" if stem else f"*{suffix}")):
+                exporter = marker.name.removesuffix(suffix).rsplit("_", 1)[-1]
+                fact = facts.setdefault(exporter, {"receipt": False})
+                fact[key] = True if key == "receipt" else marker.read_text().strip()
+        return facts
+
     path = Path(target)
     if not path.is_dir() and (path.exists() or "/" in target or "\\" in target):
         raise NotADirectoryError(f"Run directory expected: {target}")
     record_path = path / MANIFEST_NAME if path.is_dir() else local_index_dir() / f"{target}.json"
     files = status_files(path) if path.is_dir() else []
+    exports: dict[str, dict[str, dict[str, Any]]] = {}
     if files:
         statuses = {str(file): json.loads(file.read_text()) for file in files}
+        exports = {str(file): export_facts(file) for file in files}
     elif record_path.is_file():
         record = SubmissionRecord.load(json.loads(record_path.read_text()))
         statuses = {}
@@ -2224,10 +2239,18 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
             for file in files:
                 name = benchmark.benchmark if len(files) == 1 else f"{benchmark.benchmark}/{file.name}"
                 statuses[name] = json.loads(file.read_text())
+                exports[name] = export_facts(file)
     else:
         raise FileNotFoundError(f"No {BATCH_STATUS_FNAME} or Gym job record found for {target}")
     if json_output:
-        print(json.dumps(statuses))
+        print(
+            json.dumps(
+                {
+                    name: ({**status, "export": exports.get(name, {})} if "members" in status else status)
+                    for name, status in statuses.items()
+                }
+            )
+        )
         return
     for name, status in statuses.items():
         print(f"{name}:")
@@ -2235,6 +2258,21 @@ def eval_status(target: str, *, json_output: bool = False) -> None:
             print(f"  Status unavailable: {status['path']}")
             continue
         print(f"  updated_at: {status.get('updated_at', 'unknown')}; tracking: {status.get('tracking', 'enabled')}")
+        facts = exports.get(name, {})
+        # A completed export leaves a receipt; a live exporter leaves the run it logs to. Neither is proof of the
+        # other, so both are reported as read.
+        print(
+            "  export receipt: "
+            + (
+                ", ".join(
+                    f"{exporter} {'present' if fact.get('receipt') else 'missing'}"
+                    + (f" (run id {fact['run_id']})" if fact.get("run_id") else "")
+                    for exporter, fact in facts.items()
+                )
+                if facts
+                else "missing"
+            )
+        )
         if status.get("tracking") == "disabled":
             print(f"  reason: {status.get('reason', 'unknown')}")
             continue

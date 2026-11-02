@@ -1124,7 +1124,10 @@ these counts. Failed rollouts remain in the remaining count because they have no
 Status starts from what the run's Store selected (the current attempt of every rollout), never from raw
 `rollouts.jsonl`, so an older success is not counted after a newer retry.
 
-`--json` prints a mapping from each status-file path or submitted benchmark name to its saved status.
+`--json` prints a mapping from each status-file path or submitted benchmark name to its saved status, plus an
+`export` entry: for each exporter that left a receipt (`<stem>_<exporter>_export_done`) or a live run id
+(`<stem>_<exporter>_run_id`) beside the output, whether the export completed and the run it logged to. The
+human-readable output prints the same as `export receipt: mlflow present (run id ...)`, or `missing`.
 Human-readable output includes the expected count, aggregation status, update time, and tracking state. File targets or path-like
 targets that are not directories produce a run-directory error rather than a job-ID lookup.
 Gym job IDs use the local submission index; submitted artifacts must be mounted or copied to
