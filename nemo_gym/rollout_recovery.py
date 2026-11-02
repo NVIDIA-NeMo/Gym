@@ -40,7 +40,7 @@ from omegaconf.errors import InterpolationResolutionError
 from pydantic import BaseModel, ConfigDict, Field, ValidationError
 
 from nemo_gym.config.config_types import ConfigError
-from nemo_gym.core.failure_kinds import COLLECTION_RESUME_REFUSED
+from nemo_gym.core.failure_kinds import AGENT_TIMEOUT, COLLECTION_RESUME_REFUSED
 from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
 
 
@@ -102,6 +102,25 @@ def has_recorded_grade(row: Mapping[str, Any]) -> bool:
     evaluation is the grade's durable record. Only a row with neither a kept answer nor a recorded grade may run fresh.
     """
     return row.get("evaluation_completed") is True
+
+
+def is_answered_agent_deadline(row: Mapping[str, Any]) -> bool:
+    """Whether the agent ran out of its own deadline and kept its answer: the evaluated model's final result.
+
+    The deadline belongs to the agent, so what it kept is its result, scored by the benchmark's rule (a recorded
+    grade, else a settled zero). Recovery classifies it as final, and no resume or in-process retry runs it again:
+    that would replace the model's answer. The kind is the selected failure event's when the row selects one, else
+    the row's own. A timeout that kept no answer keeps its retry policy.
+    """
+    events, selected_id = row.get("_ng_failure_events"), row.get("_ng_failure_id")
+    selected = events.get(selected_id) if isinstance(events, Mapping) and isinstance(selected_id, str) else None
+    if isinstance(selected, Mapping):
+        kind = selected.get("failure_kind")
+    elif "_ng_failure_id" in row:
+        return False  # The selected event is missing, so the row names no kind.
+    else:
+        kind = row.get("failure_kind") if row.get("failure_kind") is not None else row.get("_ng_failure_class")
+    return kind == AGENT_TIMEOUT and (has_saved_generation(row) or keeps_partial_response(row))
 
 
 def holds_response(row: Mapping[str, Any]) -> bool:

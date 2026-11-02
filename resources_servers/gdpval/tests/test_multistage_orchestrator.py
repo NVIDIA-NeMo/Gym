@@ -76,6 +76,7 @@ from resources_servers.gdpval.multistage_orchestrator import (
     load_latest_attempt_dispositions,
     load_latest_failures,
     load_persisted_rows,
+    load_retryable_failure_stages,
     load_reuse_cached_keys,
     parse_multistage_config,
     read_journal,
@@ -4754,6 +4755,9 @@ class TestRetryableFailure:
         assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout", NG_TERMINAL_KEY: True}) is False
         assert _is_retryable_failure({NG_FAILURE_CLASS_KEY: "agent_timeout", NG_NO_PERSIST_KEY: True}) is False
 
+    def test_an_agent_timeout_that_kept_the_answer_is_the_models_result(self) -> None:
+        assert _is_retryable_failure(_answered_agent_timeout()) is False
+
     @pytest.mark.parametrize(
         ("stage", "retryable"),
         [("agent", False), ("seed", True), ("verification", True), ("admission", True), (None, True)],
@@ -4766,6 +4770,44 @@ class TestRetryableFailure:
             row["_ng_failure_stage"] = stage
 
         assert _is_retryable_failure(row) is retryable
+
+
+def _answered_agent_timeout(**identity: Any) -> Dict[str, Any]:
+    """The failure verify returns for an agent wall-time stop: the agent's response is kept."""
+    return {
+        **identity,
+        NG_FAILURE_CLASS_KEY: "agent_timeout",
+        "failure_kind": "agent_timeout",
+        "mask_sample": True,
+        "reward": 0.0,
+        "response": {
+            "id": "agent-0",
+            "object": "response",
+            "error": None,
+            "metadata": {"stop_reason": "wall_time"},
+            "output": [{"type": "message", "role": "assistant", "content": [{"type": "output_text", "text": "x"}]}],
+        },
+    }
+
+
+def test_a_resume_does_not_dispatch_an_agent_timeout_that_kept_the_answer(tmp_path: Path) -> None:
+    out = tmp_path / "rollouts.jsonl"
+    out.write_bytes(b"")
+    answered = _answered_agent_timeout(stage_index=0, **{TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0})
+    unanswered = {
+        "stage_index": 0,
+        TASK_INDEX_KEY_NAME: 1,
+        ROLLOUT_INDEX_KEY_NAME: 0,
+        NG_FAILURE_CLASS_KEY: "agent_timeout",
+    }
+    failures_path_for(out).write_text(json.dumps(answered) + "\n" + json.dumps(unanswered) + "\n")
+
+    gated = load_gated_keys(out, {})
+    assert gated[0] == {(0, 0)}
+    # Only the timeout that kept no answer reopens its stage.
+    assert load_retryable_failure_stages(out, gated, {}) == {0}
+    failures_path_for(out).write_text(json.dumps(answered) + "\n")
+    assert load_retryable_failure_stages(out, load_gated_keys(out, {}), {}) == set()
 
 
 class TestTolerateUnresolved:
@@ -5056,6 +5098,7 @@ class TestRetryInProcess:
         [
             ({NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS}, 3),
             ({NG_FAILURE_CLASS_KEY: "agent_timeout"}, 3),
+            (_answered_agent_timeout(), 1),
             ({NG_FAILURE_CLASS_KEY: ENVIRONMENT_SERVER_FAILURE_CLASS, "_ng_failure_stage": "agent"}, 1),
             ({NG_FAILURE_CLASS_KEY: "agent_run_error"}, 1),
         ],

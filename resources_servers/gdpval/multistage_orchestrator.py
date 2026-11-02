@@ -122,7 +122,7 @@ from nemo_gym.rollout_records import (
 from nemo_gym.rollout_records import (
     journal_path_for as rollout_attempts_path_for,
 )
-from nemo_gym.rollout_recovery import manifest_path_for
+from nemo_gym.rollout_recovery import is_answered_agent_deadline, manifest_path_for
 from nemo_gym.utils import (
     aggregation_sources_path_for,
     failures_path_for,
@@ -247,12 +247,22 @@ def _is_retryable_failure(row: Mapping[str, Any]) -> bool:
     it, or waiving it without `tolerate_unresolved`, would bias the fit. GDPVal's own failures are not retryable either: nothing repairs a
     deliverable tree within the run.
     """
-    if row.get(NG_TERMINAL_KEY) or row.get(NG_NO_PERSIST_KEY):
+    if row.get(NG_TERMINAL_KEY) or row.get(NG_NO_PERSIST_KEY) or is_answered_agent_deadline(row):
+        # A timeout that kept the agent's answer is the model's result: settled, never run again.
         return False
     failure_class = row.get(NG_FAILURE_CLASS_KEY)
     if failure_class == AGENT_TIMEOUT:
         return True
     return failure_class == ENVIRONMENT_SERVER_FAILURE_CLASS and row.get("_ng_failure_stage") != "agent"
+
+
+def _is_settled_failure(row: Mapping[str, Any]) -> bool:
+    """Whether a failed row is final for its stage: terminal, or an agent timeout that kept the agent's answer.
+
+    The agent's deadline is the model's result, so neither a resume nor an in-process retry runs it again; it stays
+    out of the fit like any other settled failure.
+    """
+    return is_terminal_failure(row) or is_answered_agent_deadline(row)
 
 
 def _is_success_row(row: Mapping[str, Any]) -> bool:
@@ -1620,7 +1630,7 @@ async def run_multistage_stages(
         prior_attempts = resume.budget_by_stage.get(index, {}) if resume is not None else {}
         for result in new_tagged:
             key = (result[TASK_INDEX_KEY_NAME], result[ROLLOUT_INDEX_KEY_NAME])
-            resolved = _is_success_row(result) or is_terminal_failure(result)
+            resolved = _is_success_row(result) or _is_settled_failure(result)
             if (
                 not resolved
                 and result.get(NG_FAILURE_CLASS_KEY) is not None
@@ -2291,8 +2301,9 @@ def load_gated_keys(
     """Per-stage ``(task_index, rollout_index)`` keys that must not be re-dispatched.
 
     Mirrors ``_load_from_cache`` with the stage dimension added: a stage-row is
-    gated if it is a success (main jsonl), a terminal sidecar failure
-    (``_ng_failure_terminal``), or has hit ``get_max_rollout_attempts`` attempts
+    gated if it is a success (main jsonl), a settled sidecar failure
+    (``_ng_failure_terminal``, or an agent timeout that kept the agent's answer),
+    or has hit ``get_max_rollout_attempts`` attempts
     in the sidecar. Everything else is re-dispatched, and so are the terminal
     failures in ``_REVERIFIABLE_FAILURE_CLASSES``.
     """
@@ -2319,7 +2330,7 @@ def load_gated_keys(
                 continue
             key = (int(fr.get("stage_index", 0) or 0), fr[TASK_INDEX_KEY_NAME], fr[ROLLOUT_INDEX_KEY_NAME])
             attempts[key] = attempts.get(key, 0) + (line_index >= resubmit_offset)
-            if is_terminal_failure(fr) and fr.get(NG_FAILURE_CLASS_KEY) not in _REVERIFIABLE_FAILURE_CLASSES:
+            if _is_settled_failure(fr) and fr.get(NG_FAILURE_CLASS_KEY) not in _REVERIFIABLE_FAILURE_CLASSES:
                 terminal.add(key)
 
     for key in attempts:
