@@ -2984,6 +2984,11 @@ def _observed_trial_operations(
         for row in rows:
             if _identity(row) in final_zero:
                 continue
+            if _truncated_zero(row):
+                # A counted model failure (TRUNCATED_ANSWER), like a final zero: only its answer must be observed.
+                if not _observed_cut_off_answer(row):
+                    return False
+                continue
             truncated = _truncated_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
@@ -3567,6 +3572,86 @@ def _truncated_answer(row: Mapping[str, Any]) -> bool:
 def _truncated_zero(row: Mapping[str, Any]) -> bool:
     """Whether the row scored zero on an answer the model left incomplete (``TRUNCATED_ANSWER``)."""
     return type(row.get("reward")) in (int, float) and row["reward"] == 0 and _truncated_answer(row)
+
+
+def _observed_cut_off_answer(row: Mapping[str, Any]) -> bool:
+    """Whether a scored-zero cut-off answer (``_truncated_zero``) is the model's own observed answer.
+
+    The trial gate counts such a row as a model failure (``TRUNCATED_ANSWER``) and reports it as a response failure,
+    so its grading is not joined. Its answer must still be observed: the row recorded no failure, its one agent
+    invocation ended completed or incomplete (an agent marks a cut-off answer incomplete) without an error, its last
+    model call is exactly one captured call that answered in one completed operation, and that call's response is
+    the saved answer. A verifier that ran must have completed: a verifier error is never read as the model's fault.
+    """
+    observed = row.get("ng_trial_observations")
+    if (
+        not isinstance(observed, dict)
+        or row.get(FAILURE_CLASS) is not None
+        or row.get("failure_kind") is not None
+        or row.get(FAILURE_ID) is not None
+    ):
+        return False
+    invocations, verifiers, calls = (
+        observed.get(key) for key in ("invocations", "verifier_invocations", "model_calls")
+    )
+    if (
+        not isinstance(invocations, list)
+        or len(invocations) != 1
+        or not isinstance(invocations[0], dict)
+        or not isinstance(calls, list)
+        or not isinstance(verifiers, list)
+        or len(verifiers) > 1
+    ):
+        return False
+    invocation = invocations[0]
+    refs = invocation.get("model_calls")
+    if (
+        invocation.get("status") not in ("completed", "incomplete")
+        or invocation.get("error_type") is not None
+        or invocation.get("stop_reason") is not None
+        or invocation.get("parent_invocation_id") is not None
+        or not isinstance(refs, list)
+        or not refs
+        or not isinstance(refs[-1], dict)
+    ):
+        return False
+    if verifiers and (
+        not isinstance(verifiers[0], dict)
+        or verifiers[0].get("status") != "completed"
+        or verifiers[0].get("failure_kind") is not None
+    ):
+        return False
+    ref = refs[-1]
+    last = [
+        call
+        for call in calls
+        if isinstance(call, dict)
+        and isinstance(call.get("response_metadata"), dict)
+        and (
+            call.get("model_call_id") == ref["model_call_id"]
+            if ref.get("model_call_id")
+            else ref.get("response_id") is not None
+            and call["response_metadata"].get("response_id") == ref["response_id"]
+            and call["response_metadata"].get("model_ref") == ref.get("model_ref")
+        )
+    ]
+    if len(last) != 1:
+        return False
+    meta = last[0]["response_metadata"]
+    operations = meta.get("model_operations")
+    status = meta.get("status_code")
+    return (
+        type(status) is int
+        and 200 <= status < 300
+        and isinstance(operations, list)
+        and len(operations) == 1
+        and isinstance(operations[0], dict)
+        and operations[0].get("outcome") == "completed"
+        and operations[0].get("failure_id") is None
+        and isinstance(meta.get("response_id"), str)
+        and bool(meta["response_id"])
+        and meta["response_id"] == (row.get("response") or {}).get("id")
+    )
 
 
 def recovered_attempt_joins(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
