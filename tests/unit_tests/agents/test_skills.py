@@ -16,7 +16,7 @@
 import pytest
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.skills import (
+from nemo_gym.agents.skills import (
     _resolve_under_cwd_or_install,
     hash_skill_dir,
     load_skill_directory,

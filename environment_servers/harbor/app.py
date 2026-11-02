@@ -85,15 +85,17 @@ from environment_servers.harbor.verifier import (
     summing_components,
 )
 from nemo_gym import RESULTS_DIR
-from nemo_gym.agent_activation_types import AgentContinuationRequirements
-from nemo_gym.agent_outcome import AgentOutcomePolicyConfig, OutcomeAction, agent_outcome_policy
-from nemo_gym.base_responses_api_agent import (
+from nemo_gym.agents import (
     AGENT_ACTIVATION_HEADER,
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
+    AgentContinuationRequirements,
+    AgentOutcomePolicyConfig,
     AgentSeedSessionRequest,
     AgentSeedSessionResponse,
     AgentSessionCapabilitiesResponse,
+    OutcomeAction,
+    agent_outcome_policy,
 )
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import (

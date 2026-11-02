@@ -6,7 +6,7 @@ from copy import deepcopy
 import pytest
 
 from environment_servers.swe_together.judge_evidence import aggregate_judge_evidence, collect_judge_evidence
-from nemo_gym.base_responses_api_agent import AgentCloseSessionResponse
+from nemo_gym.agents import AgentCloseSessionResponse
 from nemo_gym.harness_capabilities.checker import inspect_record
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.trajectory import AgentObservationBundle, ModelCallRef, TrajectoryRecord

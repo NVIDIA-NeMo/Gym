@@ -28,7 +28,7 @@ from fastapi import Body, Request
 from pydantic import AliasChoices, BaseModel, ConfigDict, Field
 from pydantic.json_schema import SkipJsonSchema
 
-from nemo_gym.base_responses_api_agent import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
+from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
 from nemo_gym.client import get_response_json, raise_for_status
 from nemo_gym.config import ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME, ModelServerRef
 from nemo_gym.core import (
