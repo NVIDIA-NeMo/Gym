@@ -167,6 +167,7 @@ def _queued_reverify_config(script: str) -> RolloutReverificationConfig:
     values: dict = {
         "judge_failed_only": "--judge-failed-only" in words,
         "settle_into_source": "--settle-into-source" in words,
+        "withdraw_unresolved_admissions": "--withdraw-unresolved-admissions" in words,
     }
     for index, word in enumerate(words):
         if word in flags:
@@ -198,6 +199,8 @@ def test_recover_queues_a_judge_only_job_on_the_cpu_partition_for_a_model_served
     assert "#SBATCH --no-requeue" in script and "vllm serve" not in script and "gym eval run" not in script
     assert "afternotok" not in script
     assert "--judge-failed-only" in script and "--settle-into-source" in script and "--settle-receipt" in script
+    # A pass that died left admissions without an outcome: the job withdraws them instead of refusing.
+    assert _queued_reverify_config(script).withdraw_unresolved_admissions is True
     assert "--model-type openai_model" in script
     # The judge-only job is not a segment of the policy chain: no chain entry, no walltime charged, no retry spent.
     assert _accounting(job_dir) == before

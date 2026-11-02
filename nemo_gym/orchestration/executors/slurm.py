@@ -1780,6 +1780,9 @@ class SlurmExecutor(BaseExecutor):
                 "gym eval reverify",
                 "--judge-failed-only",
                 "--settle-into-source",
+                # The judge-only job is queued only when no job of the run is live, so an admission a pass that died
+                # left without an outcome is withdrawn and judged again instead of refusing the job.
+                "--withdraw-unresolved-admissions",
                 "--settle-source-snapshot",
                 shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
                 "--rollouts",
