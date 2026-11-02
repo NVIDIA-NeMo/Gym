@@ -270,12 +270,13 @@ def _walltime_config(
     config: SubmitConfig, cluster: str, benchmark: str, walltime: str, segment: str | None = None
 ) -> SubmitConfig:
     """``config`` with a chain cap of at least ``walltime`` and each Slurm segment requesting ``segment`` (by default
-    ``walltime`` itself); every other field as saved."""
+    ``walltime`` itself); every other field as saved. A chain without a cap takes ``walltime`` as its cap: a raise
+    always bounds the total."""
     bench = config.driver.benchmarks[benchmark]
     resume = bench.resume_config
     update = {}
-    if resume is not None and resume.max_walltime is not None:
-        cap = max(resume.max_walltime, walltime, key=_walltime_to_seconds)
+    if resume is not None:
+        cap = _raised_cap(resume.max_walltime, walltime)
         update["resumable"] = resume.model_copy(update={"max_walltime": cap})
     driver = config.driver.model_copy(
         update={"benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update=update)}}
@@ -285,6 +286,11 @@ def _walltime_config(
         cluster: config.compute[cluster].model_copy(update={"walltime": segment or walltime}),
     }
     return config.model_copy(update={"driver": driver, "compute": compute})
+
+
+def _raised_cap(cap: str | None, walltime: str) -> str:
+    """The chain cap after a raise to ``walltime``: at least the raise, and the raise itself when there was none."""
+    return walltime if cap is None else max(cap, walltime, key=_walltime_to_seconds)
 
 
 def _slurm_time_limit_seconds(text: str) -> int | None:
@@ -340,11 +346,14 @@ def _plan_walltime(
     fits: a run that does not chain segments needs the whole raise in one job, and a chained one at least its
     recorded segment walltime."""
     partition, max_time, max_s = limit["partition"], limit["max_time"], limit["max_time_s"]
+    resume = config.driver.benchmarks[benchmark].resume_config
     plan = {
         "partition": partition,
         "max_time": max_time,
         "requested": max_walltime,
         "segment": max_walltime,
+        "max_walltime_from": resume.max_walltime if resume else None,
+        "max_walltime_to": None,
         "refused": None,
         "note": None,
     }
@@ -352,6 +361,7 @@ def _plan_walltime(
         requested_s = _walltime_to_seconds(max_walltime)
     except ValueError:
         return plan  # The raise itself is refused, with its own message, where it is rendered.
+    plan["max_walltime_to"] = _raised_cap(resume.max_walltime, max_walltime) if resume else None
     if limit["error"] is not None:
         plan["note"] = (
             f"partition {partition or '(default)'} MaxTime unknown ({limit['error']}); each segment requests the "
@@ -1245,10 +1255,11 @@ class SlurmExecutor(BaseExecutor):
                 return stop, None
             cap_s = _walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None
             raised_cap = None
-            if max_walltime is not None and cap_s is not None:
+            if max_walltime is not None:
                 try:
-                    # The raise renders the chain cap as at least the new walltime (see _walltime_config).
-                    if _walltime_to_seconds(max_walltime) > cap_s:
+                    # The raise renders the chain cap as at least the new walltime, or as the raise itself on a chain
+                    # without one (see _walltime_config).
+                    if cap_s is None or _walltime_to_seconds(max_walltime) > cap_s:
                         raised_cap, cap_s = max_walltime, _walltime_to_seconds(max_walltime)
                 except ValueError:
                     pass  # the resubmit refuses the value with its own reason before anything changes
@@ -1370,7 +1381,11 @@ class SlurmExecutor(BaseExecutor):
         ):
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {requeued}"})
         if raised_cap is not None:
-            raised = f"walltime cap raised from {resume.max_walltime} to {raised_cap} for this plan"
+            raised = (
+                f"walltime cap raised from {resume.max_walltime} to {raised_cap} for this plan"
+                if resume.max_walltime is not None
+                else f"walltime cap set to {raised_cap} for this plan (the run had none)"
+            )
             decision = decision.model_copy(update={"reason": f"{decision.reason}; {raised}"})
         if server_spinup_timeout_seconds is not None:
             recorded = _recorded_spinup_timeout_seconds(config, benchmark)
@@ -1769,9 +1784,9 @@ class SlurmExecutor(BaseExecutor):
                     raise ValueError("accounted walltime must be finite and non-negative")
                 resume = config.driver.benchmarks[benchmark].resume_config
                 cap = _walltime_to_seconds(resume.max_walltime) if resume and resume.max_walltime else None
-                if cap is not None and max_walltime is not None:
-                    # The raise renders the chain cap as at least the new walltime (see _walltime_config).
-                    cap = max(cap, _walltime_to_seconds(max_walltime))
+                if resume is not None and max_walltime is not None:
+                    # The raise renders the chain cap the way _walltime_config does.
+                    cap = _walltime_to_seconds(_raised_cap(resume.max_walltime, max_walltime))
                 update = (
                     "import math, os\nfrom pathlib import Path\n"
                     "p=Path('.gym_accumulated_walltime')\n"

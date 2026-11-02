@@ -26,6 +26,7 @@ from nemo_gym.orchestration.executors.slurm import WALLTIME_JOURNAL_NAME, SlurmE
 from nemo_gym.orchestration.executors.slurm_script import build_sbatch_script
 from nemo_gym.orchestration.recovery import RecoveryAction
 from tests.unit_tests.test_eval_resubmit import _handle
+from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_resubmit_walltime import _timed_run
 
@@ -33,7 +34,7 @@ from tests.unit_tests.test_resubmit_walltime import _timed_run
 REFUSAL = "sbatch: error: Batch job submission failed: Requested time limit is invalid (missing or exceeds some limit)"
 
 
-def _run(tmp_path: Path, cap: str = "08:00:00") -> Path:
+def _run(tmp_path: Path, cap: str | None = "08:00:00") -> Path:
     """The 4 h-segment run of test_resubmit_walltime, with its chain cap set to ``cap``."""
     job_dir = _timed_run(tmp_path)
     resolved = job_dir.parent / "resolved-config.yaml"
@@ -67,6 +68,8 @@ def test_a_raise_above_the_partition_max_time_runs_max_time_segments_under_the_r
         "max_time": "4:00:00",
         "requested": "12:00:00",
         "segment": "04:00:00",
+        "max_walltime_from": "08:00:00",
+        "max_walltime_to": "12:00:00",
         "refused": None,
         "note": "--max-walltime 12:00:00 exceeds partition batch MaxTime 4:00:00: each segment requests 04:00:00 "
         "and the chain continues under the 12:00:00 cap",
@@ -80,6 +83,27 @@ def test_a_raise_above_the_partition_max_time_runs_max_time_segments_under_the_r
     [job] = json.loads((run_dir / "gym-job.json").read_text())["benchmarks"]
     assert job["walltime"] == "04:00:00"
     assert (slurm_bin / "sinfo_args").read_text().splitlines() == ["-h -o %P %l"]
+
+
+@pytest.mark.parametrize("max_time,segment", [("4:00:00", "04:00:00"), ("1-00:00:00", "12:00:00")])
+def test_a_raise_on_a_run_without_a_chain_cap_sets_the_cap_to_the_raise(tmp_path, slurm_bin, max_time, segment):
+    from nemo_gym.orchestration.submit import recover
+
+    job_dir = _run(tmp_path, cap=None)
+    run_dir = job_dir.parent
+    _sinfo(slurm_bin, f"batch* {max_time}\\n")
+    out = recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="slow but healthy policy")
+    assert out.ok and out.dispatched == "resubmit", out.decision.reason
+    # A raise always bounds the total: the uncapped chain gets the raise as its cap, and segments fit the partition.
+    assert out.decision.reason.endswith("; walltime cap set to 12:00:00 for this plan (the run had none)")
+    plan = out.walltime_plan
+    assert (plan["segment"], plan["max_walltime_from"], plan["max_walltime_to"]) == (segment, None, "12:00:00")
+    assert f"#SBATCH --time={segment}" in (job_dir / "job.sh").read_text()
+    saved = yaml.safe_load((run_dir / "resolved-config.yaml").read_text())
+    assert saved["driver"]["benchmarks"]["gsm8k"]["resumable"]["max_walltime"] == "12:00:00"
+    assert saved["compute"]["cluster"]["walltime"] == segment
+    [entry] = [json.loads(line) for line in (run_dir / WALLTIME_JOURNAL_NAME).read_text().splitlines()]
+    assert (entry["max_walltime_from"], entry["max_walltime_to"], entry["segment"]) == (None, "12:00:00", segment)
 
 
 def test_a_raise_the_partition_takes_renders_as_before(tmp_path, slurm_bin):
