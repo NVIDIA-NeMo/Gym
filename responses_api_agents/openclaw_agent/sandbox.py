@@ -14,9 +14,9 @@ from nemo_gym.agents import (
     AgentSessionState,
     SandboxCommand,
     SandboxSession,
+    is_harness_termination_failure,
     shell_assignments,
 )
-from nemo_gym.agents.utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import read_text, upload_text
 from nemo_gym.trajectory import AgentObservationBundle
