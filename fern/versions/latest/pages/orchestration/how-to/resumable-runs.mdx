@@ -113,8 +113,8 @@ each user one core, so both readers can run in a Slurm step instead:
 - `NEMO_GYM_REMOTE_READER_MAX` (default 8): when the user already has this many `gym-reader-*` steps running or
   pending, or `squeue` fails, the reader runs on the login host.
 
-The gate task reports `reader_host` and `collector_host` (`login` or `cpu:<job id>`), and `reader_fallback_reason`
-and `collector_fallback_reason` when a reader stayed on the login host.
+When a reader ran on a remote host, the gate task reports `reader_host` and `collector_host` (`login` or `cpu:<job id>`),
+and `reader_fallback_reason` and `collector_fallback_reason` when a reader stayed on the login host.
 
 The optional unhealthy fraction is a **per-rollout** criterion for the existing quality report. It is not a response or trial denominator. Response failures are reported by cause and rate under `failures` and never fail the gate. Evaluation health, the trial gate, rejects at 2% from its known-failure lower bound. Below that threshold, it can pass when source-bound agent, model-attempt, supported client-executed function-tool, and verifier observations join across every expected identity and repeat. The verifier must record an actually executed programmatic grading calculation bound to the saved response and reward. Unjoined recovered failures, unsupported hosted or custom tools, unobserved judge dependencies, sandbox lifecycle gaps, and historical records without grading observations remain unknown; a low failure count alone does not certify them. Missing report-source identity, unsupported multi-source summaries, malformed counters or missing runtime facts remain unknown.
 

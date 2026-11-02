@@ -43,7 +43,9 @@ and for reading health while you build a benchmark or a harness, follow
    says it: `Limiting to N tasks (M rows with their repeats)`; a Gym pinned before that line
    prints `Limiting the number of tasks to N`, and `expected` in
    `artifacts/rollouts_coverage.json` gives the rows. In a submit config, put the limit in the
-   benchmark's `run` (`run: {limit: 5, num_repeats: 1}`).
+   benchmark's `run` (`run: {limit: 5, num_repeats: 1}`). A smoke that must stay in one allocation
+   also caps its chain, `resumable: {max_retries: 0, max_walltime: <the walltime>}` beside
+   `compute.cluster.walltime`; otherwise a segment that times out continues under the config's cap.
 5. Submitting from a machine that is not the login node: set `compute.cluster.hostname` to the
    login node, and list every `runtime:` credential in `compute.cluster.forward_env`; only listed
    names reach the job. Site `#SBATCH` directives go in `compute.cluster.extra_args` without
@@ -56,7 +58,8 @@ and for reading health while you build a benchmark or a harness, follow
    each benchmark's `run`. It waives only the delivery requirement of the acceptance gate (step
    9); health checks still run, and a configured MLflow export still happens. Without it, the
    gate of a complete, healthy run stays `FAILED` on "no MLflow run evidence". A Gym pinned
-   before this skill does not know the key.
+   before this skill does not know the key; a pin that does makes the inspection say `no MLflow
+   export by design`.
 
 ## 2. Submit and let the chain run
 
@@ -64,8 +67,10 @@ and for reading health while you build a benchmark or a harness, follow
 gym eval submit --config submit.yaml            # --select a,b submits only those
 ```
 
-The GYM_JOB_ID is the last part of the `Run directory:` line it prints (`gym-job-<time>-<hex>`);
-the `submitted <benchmark> → Slurm job <id>` line gives the first Slurm job.
+The GYM_JOB_ID is `gym_job_id` in the run directory's `gym-job.json`, or in the record that
+`gym eval submit --json` prints. The `Run directory:` line ends with it (`gym-job-<time>-<hex>`)
+but wraps when stdout is not a terminal; the `submitted <benchmark> → Slurm job <id>` line gives the
+first Slurm job.
 
 A resumable benchmark is a chain of Slurm jobs that continues itself. Before doing work, each job
 queues its successor (`afternotok:<this job>`) and a sentinel (`afterany:<successor>`) that takes
@@ -128,8 +133,9 @@ on that host reuse the cache. Read:
   `FAILED` (stopped, unsupported, or a gate failed: read `errors`), `UNVERIFIED` (complete and
   nothing failed, but acceptance is not proven, such as evaluation health UNVERIFIED: read
   `warnings`), `SUCCESS` (complete and every gate passed). Only `SUCCESS` exits 0.
-- `gate_task.trial_counts`: `observed_healthy`, `unhealthy`, `unobserved`. Unobserved trials are
-  unverified, not healthy.
+- `gate_task.trial_counts`: `observed_healthy`, `unhealthy`, `unobserved`, and `verifier_recorded`,
+  the observed-healthy trials known only through the verifier's own grading record. Unobserved
+  trials are unverified, not healthy.
 
 ## 5. Act on the decision
 
@@ -146,7 +152,7 @@ on that host reuse the cache. Read:
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
 | NOOP, `FAILED`, and the only error starts with `no MLflow run evidence` | The results are complete, but no delivery is on record: no live MLflow run id and no post-run export receipt. The rest of the error says which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, and export the run again so that the receipt `rollouts_mlflow_export_done` exists (`gym eval export` with the `mlflow` exporter writes it once every upload returned); then inspect again. "does not name all of the tracking URI, experiment and run name": the run was never tracked; read `trial_counts`, coverage and the score yourself, and set `mlflow_tracking_required: false` next time (step 1). |
-| `SUCCESS` | Done. Keep the run directory as the record. |
+| `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`): once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
 per-rollout attempt allowance. It is not a substitute for a recovery STOP.
@@ -263,8 +269,12 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
   `applied: false`; `--max-unhealthy-fraction` (per-rollout health) is judged in `warnings`. None
   of them changes the verdict. `gate_task.failures` lists the response failures (truncated, empty,
-  malformed) and the trial failures by cause, with their rates: facts for you to judge, not
-  verdicts. Model failures count in the score and never fail health.
+  malformed) and the trial failures by cause (`request`, `judge`, `sandbox`, `harness`, `timeout`,
+  `other`), with their rates: facts for you to judge, not verdicts. Model failures count in the
+  score and never fail health.
+- `warnings` also carries facts that fail nothing: `no response-health criterion configured` when
+  `--max-unhealthy-fraction` was not given, and `health checks not fully evaluated` with the checks
+  a small run gave too little to judge.
 - Pass `--mlflow-run-id <id> --mlflow-status FINISHED` only after you observed that run and status
   yourself. They do not export anything; acceptance also needs a current export receipt.
 - With MLflow configured, the post-run export logs the same facts as metrics: `health/response/*`,
