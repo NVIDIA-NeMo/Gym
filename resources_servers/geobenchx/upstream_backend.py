@@ -58,19 +58,29 @@ class _WorkerProcess:
         )
         ready = json.loads(await self._proc.stdout.readline() or b"{}")
         if not ready.get("ready"):
+            await self._kill()
             raise RuntimeError("GeoBenchX upstream worker failed to start")
         return self._proc
 
     async def request(self, payload: dict[str, Any], timeout: float) -> dict[str, Any]:
         async with self._lock:
-            proc = await self._ensure_started()
-            proc.stdin.write((json.dumps(payload) + "\n").encode())
-            await proc.stdin.drain()
             try:
-                line = await asyncio.wait_for(proc.stdout.readline(), timeout)
+                async with asyncio.timeout(timeout):
+                    proc = await self._ensure_started()
+                    proc.stdin.write((json.dumps(payload) + "\n").encode())
+                    await proc.stdin.drain()
+                    line = await proc.stdout.readline()
             except asyncio.TimeoutError:
                 await self._kill()
                 return {"ok": False, "result": f"Error: tool timed out after {timeout:.0f}s; session state was lost."}
+            except asyncio.CancelledError:
+                # The worker may still produce a reply. Kill it before another
+                # request may acquire this lock, otherwise that reply is misrouted.
+                await asyncio.shield(self._kill())
+                raise
+            except Exception:
+                await self._kill()
+                return {"ok": False, "result": "Error: tool worker failed to start; session state was lost."}
             if not line:
                 await self._kill()
                 return {"ok": False, "result": "Error: tool worker crashed; session state was lost."}

@@ -41,7 +41,7 @@ from resources_servers.geobenchx.catalog import (
     VECTOR_DATASETS,
 )
 from resources_servers.geobenchx.scoring import parse_calls, score_task
-from resources_servers.geobenchx.task_data import TASKS
+from resources_servers.geobenchx.prepare_data import load_tasks
 from resources_servers.geobenchx.upstream_backend import UpstreamToolPool
 
 
@@ -176,7 +176,7 @@ def execute_tool(name: str, arguments: dict[str, Any], state: dict[str, Any]) ->
 
 class GeoBenchXVerifier:
     async def verify(self, body: GeoBenchXVerifyRequest) -> GeoBenchXVerifyResponse:
-        task = TASKS.get(body.task_id)
+        task = load_tasks().get(body.task_id)
         if task is None:
             return GeoBenchXVerifyResponse(
                 **body.model_dump(),

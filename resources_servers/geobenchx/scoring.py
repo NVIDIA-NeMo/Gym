@@ -65,9 +65,12 @@ NONESSENTIAL_KEYS = {
     "plot_background",
 }
 PARTIAL_KEYS = {"colormap", "nodataval", "spatial_predicates"}
+CATALOG_KEYS = {"dataset", "geodataset", "rasterdataset"}
+MAX_TOOL_CALLS = 25
 
 
-def parse_calls(output: list[Any]) -> list[tuple[str, dict[str, Any]]]:
+def parse_calls(output: list[Any]) -> list[tuple[str, dict[str, Any] | None]]:
+    """Keep malformed calls visible: the agent attempted them, but they cannot match."""
     calls = []
     for item in output:
         payload = item.model_dump() if hasattr(item, "model_dump") else item
@@ -78,9 +81,9 @@ def parse_calls(output: list[Any]) -> list[tuple[str, dict[str, Any]]]:
             try:
                 arguments = json.loads(arguments)
             except json.JSONDecodeError:
-                arguments = {}
-        calls.append((str(payload.get("name", "")), arguments if isinstance(arguments, dict) else {}))
-    return calls[:25]
+                arguments = None
+        calls.append((str(payload.get("name", "")), arguments if isinstance(arguments, dict) else None))
+    return calls
 
 
 def _norm(value: Any) -> Any:
@@ -99,27 +102,92 @@ def _norm(value: Any) -> Any:
     return value
 
 
-def _step_match(candidate: tuple[str, dict[str, Any]], reference: dict[str, Any]) -> tuple[bool, bool]:
+def _step_match(
+    candidate: tuple[str, dict[str, Any] | None],
+    reference: dict[str, Any],
+    bindings: dict[str, str],
+) -> tuple[bool, bool, dict[str, str]]:
     """Return (essential_match, partial_difference)."""
     name, candidate_args = candidate
-    if name != reference["function_name"]:
-        return False, False
+    if name != reference["function_name"] or candidate_args is None:
+        return False, False, bindings
     reference_args = reference.get("arguments") or {}
     partial = False
+    next_bindings = dict(bindings)
     for key, expected in reference_args.items():
-        if key in OUTPUT_KEYS | HANDLE_KEYS | NONESSENTIAL_KEYS:
-            continue
         actual = candidate_args.get(key)
+        if key in OUTPUT_KEYS:
+            if isinstance(expected, str) and isinstance(actual, str):
+                bound = next_bindings.get(expected)
+                if bound is not None and bound != actual:
+                    return False, partial, bindings
+                next_bindings[expected] = actual
+            continue
+        if key in HANDLE_KEYS:
+            if isinstance(expected, str):
+                if expected not in bindings or actual != bindings[expected]:
+                    return False, partial, bindings
+            elif isinstance(expected, list):
+                if not isinstance(actual, list) or len(actual) != len(expected):
+                    return False, partial, bindings
+                if any(
+                    isinstance(value, str) and (value not in bindings or candidate != bindings[value])
+                    for value, candidate in zip(expected, actual)
+                ):
+                    return False, partial, bindings
+            elif _norm(actual) != _norm(expected):
+                return False, partial, bindings
+            continue
+        if key in NONESSENTIAL_KEYS:
+            continue
+        if key in CATALOG_KEYS and actual != expected:
+            return False, partial, bindings
         if _norm(actual) == _norm(expected):
             continue
         if key in PARTIAL_KEYS:
             partial = True
             continue
-        return False, partial
-    return True, partial
+        return False, partial, bindings
+    return True, partial, next_bindings
 
 
-def _score_solution(calls: list[tuple[str, dict[str, Any]]], reference: dict[str, Any]) -> tuple[int, dict[str, Any]]:
+def _match_steps(
+    calls: list[tuple[str, dict[str, Any] | None]], steps: list[dict[str, Any]]
+) -> tuple[int, bool]:
+    """Backtrack over ready reference steps so independent calls may commute."""
+    best = (0, False)
+
+    def visit(remaining: set[int], unused: set[int], bindings: dict[str, str], matched: int, partial: bool) -> None:
+        nonlocal best
+        best = max(best, (matched, not partial))
+        for ref_index in remaining:
+            reference = steps[ref_index]
+            # A consumer cannot be matched until its reference handles are bound.
+            args = reference.get("arguments") or {}
+            if any(isinstance(args.get(key), str) and args[key] not in bindings for key in HANDLE_KEYS):
+                continue
+            options = []
+            for call_index in unused:
+                ok, is_partial, next_bindings = _step_match(calls[call_index], reference, bindings)
+                if ok:
+                    options.append((call_index, is_partial, next_bindings))
+            # Prefer exact candidates, but keep partial candidates as fallbacks.
+            for call_index, is_partial, next_bindings in sorted(options, key=lambda item: item[1]):
+                visit(
+                    remaining - {ref_index},
+                    unused - {call_index},
+                    next_bindings,
+                    matched + 1,
+                    partial or is_partial,
+                )
+
+    visit(set(range(len(steps))), set(range(len(calls))), {}, 0, False)
+    return best[0], not best[1]
+
+
+def _score_solution(
+    calls: list[tuple[str, dict[str, Any] | None]], reference: dict[str, Any]
+) -> tuple[int, dict[str, Any]]:
     steps = reference.get("steps") or []
     reference_names = [step["function_name"] for step in steps]
     candidate_names = [name for name, _ in calls]
@@ -129,30 +197,18 @@ def _score_solution(calls: list[tuple[str, dict[str, Any]]], reference: dict[str
     if reference_names == ["reject_task"]:
         # The paper's judge: a candidate that stops with reject_task fully matches a
         # reject_task reference, whatever it inspected first.
-        score = 2 if candidate_names and candidate_names[-1] == "reject_task" else 0
+        score = 2 if calls and calls[-1] == ("reject_task", {}) else 0
         return score, {"reference_tools": reference_names, "matched_steps": int(score == 2)}
     if "reject_task" in candidate_names:
         return 0, {"reference_tools": reference_names, "matched_steps": 0}
 
-    unmatched = set(range(len(calls)))
-    matched = 0
-    partial = False
-    for step in steps:
-        options = [
-            (index, _step_match(calls[index], step)) for index in unmatched if calls[index][0] == step["function_name"]
-        ]
-        exact = next(((index, result) for index, result in options if result[0]), None)
-        if exact:
-            index, result = exact
-            unmatched.remove(index)
-            matched += 1
-            partial = partial or result[1]
+    matched, exact = _match_steps(calls, steps)
 
     overlap = sum((Counter(reference_names) & Counter(candidate_names)).values())
     coverage = matched / len(steps)
     tool_coverage = overlap / len(steps)
     if coverage == 1:
-        score = 1 if partial else 2
+        score = 2 if exact else 1
     elif max(coverage, tool_coverage) >= 0.6:
         score = 1
     else:
@@ -167,7 +223,18 @@ def _score_solution(calls: list[tuple[str, dict[str, Any]]], reference: dict[str
     }
 
 
-def score_task(calls: list[tuple[str, dict[str, Any]]], task: dict[str, Any]) -> dict[str, Any]:
+def score_task(calls: list[tuple[str, dict[str, Any] | None]], task: dict[str, Any]) -> dict[str, Any]:
+    if len(calls) > MAX_TOOL_CALLS:
+        return {
+            "reward": 0.0,
+            "geobenchx_match": 0,
+            "rejected": any(name == "reject_task" for name, _ in calls),
+            "candidate_steps": len(calls),
+            "reference_steps_mean": 0.0,
+            "relative_length_delta": 0.0,
+            "matched_reference_index": None,
+            "match_detail": {"error": f"tool-call limit exceeded ({len(calls)} > {MAX_TOOL_CALLS})"},
+        }
     scored = [_score_solution(calls, solution) for solution in task["reference_solutions"]]
     best_index = max(range(len(scored)), key=lambda index: scored[index][0])
     match, detail = scored[best_index]

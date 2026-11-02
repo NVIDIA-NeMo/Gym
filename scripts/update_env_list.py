@@ -148,6 +148,27 @@ class ServerInfo:
         return f"<a href='{self.readme_path}'>README</a>"
 
 
+def _read_dataset_entries(agent: AgentDatasetsMetadata, datasets) -> None:  # pragma: no cover
+    if not isinstance(datasets, list):
+        return
+    for entry in datasets:
+        if not isinstance(entry, dict):
+            continue
+        agent.types.append(entry.get("type"))
+        if entry.get("type") != "train":
+            continue
+        agent.license = entry.get("license")
+        source = entry.get("source")
+        if isinstance(source, dict) and source.get("type") == "huggingface":
+            agent.huggingface_repo_id = source.get("repo_id")
+        # Backward compatibility for configs that still use the deprecated
+        # parallel identifier fields.
+        if not agent.huggingface_repo_id:
+            hf_id = entry.get("huggingface_identifier")
+            if isinstance(hf_id, dict):
+                agent.huggingface_repo_id = hf_id.get("repo_id")
+
+
 def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
     agent = AgentDatasetsMetadata()
     if not isinstance(data, dict):
@@ -163,23 +184,26 @@ def visit_agent_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cov
                 continue
             datasets = v3.get("datasets")
             if isinstance(datasets, list):
-                for entry in datasets:
-                    if isinstance(entry, dict):
-                        agent.types.append(entry.get("type"))
-                        if entry.get("type") == "train":
-                            agent.license = entry.get("license")
-                            source = entry.get("source")
-                            if isinstance(source, dict) and source.get("type") == "huggingface":
-                                agent.huggingface_repo_id = source.get("repo_id")
-
-                            # Backward compatibility for configs that still use the
-                            # deprecated parallel identifier fields.
-                            if not agent.huggingface_repo_id:
-                                hf_id = entry.get("huggingface_identifier")
-                                if isinstance(hf_id, dict):
-                                    agent.huggingface_repo_id = hf_id.get("repo_id")
+                _read_dataset_entries(agent, datasets)
             elif v3.get("harbor_datasets") or v3.get("vf_env_id"):
                 agent.types.append("train")
+    return agent
+
+
+def visit_resources_datasets(data: dict) -> AgentDatasetsMetadata:  # pragma: no cover
+    """Datasets declared on the resources server, used when the agent block has none."""
+    agent = AgentDatasetsMetadata()
+    if not isinstance(data, dict):
+        return agent
+    for v1 in data.values():
+        if not isinstance(v1, dict):
+            continue
+        v2 = v1.get("resources_servers")
+        if not isinstance(v2, dict):
+            continue
+        for v3 in v2.values():
+            if isinstance(v3, dict):
+                _read_dataset_entries(agent, v3.get("datasets"))
     return agent
 
 
@@ -229,6 +253,13 @@ def extract_config_metadata(yaml_path: Path, from_agent: bool = False) -> Config
 
     resource_data = visit_agent_server(data) if from_agent else visit_resources_server(data)
     agent_data = visit_agent_datasets(data)
+    # Agent-owned datasets win. A resources server that declares train or
+    # validation datasets fills in only when the agent block declares none, so
+    # helper configs and example-only overlays stay out of the catalog.
+    if not agent_data.types:
+        resources_data = visit_resources_datasets(data)
+        if {"train", "validation"}.intersection(resources_data.types):
+            agent_data = resources_data
 
     return ConfigMetadata.from_yaml_data(resource_data, agent_data)
 

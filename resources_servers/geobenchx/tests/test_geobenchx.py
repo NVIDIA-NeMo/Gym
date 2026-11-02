@@ -20,8 +20,7 @@ from collections import Counter
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
 from resources_servers.geobenchx.catalog import TOOL_DEFINITIONS, response_tools
-from resources_servers.geobenchx.scoring import score_task
-from resources_servers.geobenchx.task_data import (
+from resources_servers.geobenchx.prepare_data import (
     TASKS,
     dataset_row,
     materialize,
@@ -30,6 +29,7 @@ from resources_servers.geobenchx.task_data import (
     task_families,
     task_kind,
 )
+from resources_servers.geobenchx.scoring import score_task
 
 
 def _calls(solution: dict) -> list[tuple[str, dict]]:
@@ -156,3 +156,30 @@ def test_colormap_difference_is_partial() -> None:
         for name, arguments in calls
     ]
     assert score_task(changed, task)["geobenchx_match"] == 1
+
+
+def test_scoring_preserves_dataflow_catalog_case_and_call_limits() -> None:
+    task = {
+        "reference_solutions": [
+            {
+                "steps": [
+                    {"function_name": "load_geodata", "arguments": {"geodataset": "Countries", "output_geodataframe_name": "a"}},
+                    {"function_name": "visualize_geographies", "arguments": {"geodataframe_names": ["a"]}},
+                ]
+            }
+        ]
+    }
+    renamed = [
+        ("load_geodata", {"geodataset": "Countries", "output_geodataframe_name": "renamed"}),
+        ("visualize_geographies", {"geodataframe_names": ["renamed"]}),
+    ]
+    assert score_task(renamed, task)["geobenchx_match"] == 2
+    assert score_task(list(reversed(renamed)), task)["geobenchx_match"] == 0
+    assert score_task([("load_geodata", {"geodataset": "countries", "output_geodataframe_name": "a"})], task)["geobenchx_match"] == 0
+    assert score_task(renamed * 13, task)["geobenchx_match"] == 0
+
+
+def test_scoring_rejects_malformed_rejection_calls() -> None:
+    task = {"reference_solutions": [{"steps": [{"function_name": "reject_task", "arguments": {}}]}]}
+    assert score_task([("reject_task", None)], task)["geobenchx_match"] == 0
+    assert score_task([("reject_task", {})], task)["geobenchx_match"] == 2

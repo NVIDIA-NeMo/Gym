@@ -115,10 +115,10 @@ class Worker:
     def _state(self, session: str) -> dict[str, Any]:
         state = self._sessions.get(session)
         if state is None:
+            if len(self._sessions) >= self._max_sessions:
+                raise RuntimeError("worker session capacity reached; existing session state is retained")
             state = self._sessions[session] = _new_state()
         self._sessions.move_to_end(session)
-        while len(self._sessions) > self._max_sessions:
-            self._sessions.popitem(last=False)
         return state
 
     def reset(self, session: str) -> dict[str, Any]:
