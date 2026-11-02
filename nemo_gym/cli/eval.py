@@ -85,7 +85,7 @@ from nemo_gym.package_info import __version__
 logger = logging.getLogger(__name__)
 
 
-# NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `train_data_utils` are imported lazily inside the run/aggregate/
+# NOTE: `reward_profile`, `rollout_collection`, `rollout_reverification` and `dataset_preparation` are imported lazily inside the run/aggregate/
 # profile commands below: they pull in heavy deps (wandb, mlflow, anthropic) that the fast `list`/`search`
 # commands in this module must not pay for on every invocation.
 
@@ -543,12 +543,12 @@ def _validate_prepared_split_file_exists(input_jsonl_fpath: Path, split: str, ou
 @exit_cleanly_on_config_error
 def e2e_rollout_collection():  # pragma: no cover
     from nemo_gym.artifacts.resolved_config import write_resolved_config
+    from nemo_gym.data.dataset_preparation import TrainDataProcessor
     from nemo_gym.rollout_collection import (
         E2ERolloutCollectionConfig,
         RolloutCollectionConfig,
         RolloutCollectionHelper,
     )
-    from nemo_gym.train_data_utils import TrainDataProcessor
 
     global_config_dict = get_global_config_dict()
 

@@ -11,13 +11,13 @@ from pathlib import Path
 
 import pytest
 
-import nemo_gym.tasks.harbor.prepare_builds as prepare_builds
-from nemo_gym.tasks.harbor.build_plan import DEFAULT_PLATFORM, BuildError, plan_builds
-from nemo_gym.tasks.harbor.build_records import build_inputs_digest, build_inputs_mismatch, settle_entry
-from nemo_gym.tasks.harbor.build_tools import ImageBuilder
-from nemo_gym.tasks.harbor.digest import context_digest, inputs_differences, inputs_digest
-from nemo_gym.tasks.harbor.image_build import build_images
-from nemo_gym.tasks.harbor.records import IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
+import nemo_gym.data.tasks.harbor.prepare_builds as prepare_builds
+from nemo_gym.data.tasks.harbor.build_plan import DEFAULT_PLATFORM, BuildError, plan_builds
+from nemo_gym.data.tasks.harbor.build_records import build_inputs_digest, build_inputs_mismatch, settle_entry
+from nemo_gym.data.tasks.harbor.build_tools import ImageBuilder
+from nemo_gym.data.tasks.harbor.digest import context_digest, inputs_differences, inputs_digest
+from nemo_gym.data.tasks.harbor.image_build import build_images
+from nemo_gym.data.tasks.harbor.records import IMAGE_CONFIGS_FILE, read_built_images, read_image_configs
 from tests.unit_tests.harbor_build_helpers import (
     PULL_DOCKERFILE,
     TOML,
@@ -527,8 +527,8 @@ class TestPrepare:
         """Review (round 15): a and b, identical but for setup.sh's mode, became one build entry from a's folder and
         both received a's image; now b is left out with the reason and the record names a alone, whether the image
         is built by this prepare or reused from a record."""
-        from nemo_gym.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
 
         folder = tmp_path / "ds"
         write_task(folder / "a")
@@ -586,8 +586,8 @@ class TestPrepare:
         """Review (round 15, P3): a's Compose file is refused before any build and b's tests/ has a's hash with
         test.sh 0700 against a's 0644. Refusing b for its conflict with a in the round that refuses a left no task;
         without a, b is first of that tests/ context and prepares alone."""
-        from nemo_gym.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
 
         folder = tmp_path / "ds"
         self.write_separate(folder, "a", compose=self.PRIVILEGED)
@@ -611,8 +611,8 @@ class TestPrepare:
         """Review (round 15, P5): m has its own environment/ and tests/ T; n shares T by hash with test.sh 0700, so
         it conflicts with m, and its environment/ E was still planned, so o, whose E differs from n's only in
         setup.sh's mode, conflicted with a task that was out. n is in no entry now and o is first of E."""
-        from nemo_gym.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
 
         folder = tmp_path / "ds"
         self.write_separate(folder, "m", setup="#!/bin/sh\necho m\n")
@@ -634,8 +634,8 @@ class TestPrepare:
         assert prepared.tasks[1].image == f"hb__{env_digest}"
 
     def test_builds_disabled_leaves_out_a_stale_record_with_the_reason(self, tmp_path, fake_builder, capsys):
-        from nemo_gym.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
 
         folder = tmp_path / "ds"
         image = self._recorded_then_changed(folder)
@@ -651,8 +651,8 @@ class TestPrepare:
         assert read_built_images(folder)[harbor_hash(folder / "a" / "environment")]["image"] == image
 
     def test_builds_enabled_rebuilds_a_stale_record_under_the_same_name(self, tmp_path, fake_builder, capsys):
-        from nemo_gym.tasks.harbor.build_options import BuildOptions
-        from nemo_gym.tasks.harbor.cli import prepare_target
+        from nemo_gym.data.tasks.harbor.build_options import BuildOptions
+        from nemo_gym.data.tasks.harbor.cli import prepare_target
 
         folder = tmp_path / "ds"
         image = self._recorded_then_changed(folder)
