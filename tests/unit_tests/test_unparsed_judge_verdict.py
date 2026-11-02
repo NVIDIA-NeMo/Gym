@@ -151,3 +151,45 @@ def test_the_gate_counts_a_grading_with_an_unknown_outcome_as_judge_unparseable(
     task = gate_summary_from_collected(decision, collected, max_unhealthy_fraction=None)
     assert task["trial_counts"] == expected
     assert task["evaluation_health"]["evaluation"]["kinds"] == {"judge_unparseable": 1}
+
+
+def _game(verdict):
+    """One judge game as the pairwise resources server saves it."""
+    return {
+        "responses_create_params": {"input": "kept on the run host"},
+        "response": {"id": "judge-reply", "status": "completed", "output": []},
+        "verdict": verdict,
+    }
+
+
+def _pairwise_row(*verdicts, reward):
+    return ident(0, reward=reward, response=COMPLETED, games=[_game(verdict) for verdict in verdicts])
+
+
+@pytest.mark.parametrize(
+    "verdicts,reward,cause",
+    [
+        (("A>B", None), 0.5, "judge"),
+        ((None, "A>B"), 0.5, "judge"),
+        ((None, None), 0.5, "judge"),
+        (("A>B", "B>A"), 1.0, None),
+        (("A=B", "A=B"), 0.5, None),
+    ],
+)
+def test_a_pairwise_row_with_a_game_lacking_its_verdict_is_selected_for_rejudging(tmp_path, verdicts, reward, cause):
+    row = _pairwise_row(*verdicts, reward=reward)
+    collected = _collected(tmp_path, row)
+    facts = collected.get("_ng_collected_grading_facts", {})
+    assert facts.get("games_unjudged", False) is (cause is not None)
+    assert reverification_cause(collected) == cause
+    assert reverification_cause(saved_row_evidence(row)) == cause
+
+
+def test_the_gate_counts_a_pairwise_row_with_a_game_lacking_its_verdict_as_judge_unparseable():
+    collected = _run(100)
+    _ungraded(collected.results[0], games_unjudged=True)
+    collected.results[0]["reward"] = 0.5
+    passed, reason, report, task = _observed(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert report["evaluation"]["kinds"] == {"judge_unparseable": 1}
+    assert task["trial_counts"]["unhealthy"] == 1 and task["trial_counts"]["observed_healthy"] == 99

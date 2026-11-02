@@ -1393,6 +1393,10 @@ def judge_unparsed(value):
     return any(isinstance(item, dict) and "verdict_label" in item and (item["verdict_label"] is None or (
         isinstance(item["verdict_label"], str) and item["verdict_label"].strip().casefold() in UNPARSED_VERDICT_LABELS))
         for item in value)
+def games_unjudged(value):
+    # Whether a pairwise judge's saved games include one without a verdict: its reward then averages the other games.
+    return isinstance(value, list) and any(isinstance(item, dict) and "verdict" in item and item["verdict"] is None
+        for item in value)
 def rubric(r):
     # A rubric judge's verdict and scores as scalars only; the judge's text stays local.
     if "rubric_score" not in r and "scoring_threshold" not in r:
@@ -1416,6 +1420,7 @@ def grading_facts(r):
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
         "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
+        "games_unjudged": games_unjudged(r.get("games")),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
         "sentence_metrics": sorted(k for k, v in r.items() if k.startswith("sentence_") and finite(v) is not None),
@@ -4275,9 +4280,11 @@ def _scored_unmasked(row: Mapping[str, Any]) -> bool:
 
 
 def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
-    """Whether a scored row's grading is ``judge_unparseable`` because a saved judge evaluation recorded no verdict
-    (``_unparsed_verdict``). Its reward is no grade."""
-    return _scored_unmasked(row) and _unparsed_verdict(_grading_facts(row))
+    """Whether a scored row's grading is ``judge_unparseable`` for a verdict the judge did not give: a saved judge
+    evaluation recorded no verdict (``_unparsed_verdict``), or a pairwise game has none (``games_unjudged``). Its
+    reward is no grade."""
+    facts = _grading_facts(row)
+    return _scored_unmasked(row) and (_unparsed_verdict(facts) or facts.get("games_unjudged") is True)
 
 
 def _unknown_grading_outcome(row: Mapping[str, Any]) -> bool:
