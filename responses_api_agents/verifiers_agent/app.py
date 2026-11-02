@@ -260,9 +260,27 @@ class VerifiersAgentVerifyResponse(BaseVerifyResponse):
 _RUBRIC_FAILURES: ContextVar[Optional[list[str]]] = ContextVar("verifiers_agent_rubric_failures", default=None)
 
 
+# The bookkeeping rubrics verifiers' own environments add (MultiTurnEnv, ToolEnv): metrics counted from the rollout's
+# state and messages, weight 0, no model asked. A member of exactly one of these classes is left out of the scoring.
+_MONITOR_RUBRICS = {
+    ("verifiers.legacy.envs.multiturn_env", "MultiTurnMonitorRubric"),
+    ("verifiers.legacy.envs.tool_env", "ToolMonitorRubric"),
+}
+
+
+def _monitor_rubric(rubric: Any) -> bool:
+    """Whether ``rubric`` is one of verifiers' own bookkeeping monitors, carrying only weight-0 metrics."""
+    weights = getattr(rubric, "weights", None)
+    return (
+        (type(rubric).__module__, type(rubric).__qualname__) in _MONITOR_RUBRICS
+        and isinstance(weights, list)
+        and all(weight == 0 for weight in weights)
+    )
+
+
 def _plain_rubrics(rubric: Any) -> Optional[list[Any]]:
-    """The plain verifiers ``Rubric`` objects a rubric scores with (itself, or a ``RubricGroup``'s members at any depth),
-    or None when any of them is another class.
+    """The plain verifiers ``Rubric`` objects a rubric scores with (itself, or a ``RubricGroup``'s members at any depth,
+    leaving out verifiers' own monitors), or None when any of them is another class.
 
     A rubric subclass may score without its listed functions (a judge rubric asks a model), so only the two plain
     classes are read.
@@ -270,6 +288,8 @@ def _plain_rubrics(rubric: Any) -> Optional[list[Any]]:
     if type(rubric) is getattr(vf, "RubricGroup", None):
         plain: list[Any] = []
         for member in getattr(rubric, "rubrics", None) or []:
+            if _monitor_rubric(member):
+                continue
             members = _plain_rubrics(member)
             if members is None:
                 return None
@@ -757,12 +777,12 @@ class VerifiersAgent(SimpleResponsesAPIAgent):
 
         # This agent is its own verifier: the rubric graded inside the rollout above. Its result is its grading
         # record when every reward function is synchronous (no model asked), observed like a resources server's.
+        # Any other rubric is not observed at all, as before: an invocation without a record would read as ungraded.
         vf_env_id = body.vf_env_id or self.config.vf_env_id
         return await observe_verifier(
             scored,
-            enabled=self._model_call_capture_enabled(),
+            enabled=self._model_call_capture_enabled() and self.programmatic_rubrics.get(vf_env_id, False),
             verifier_name=self.config.name,
-            uninstrumented_models=not self.programmatic_rubrics.get(vf_env_id, False),
         )()
 
 

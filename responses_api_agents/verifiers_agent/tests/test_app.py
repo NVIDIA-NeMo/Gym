@@ -778,12 +778,15 @@ class TestOwnGradingRecord:
         assert invocation["failure_kind"] == "verifier_error"
         assert invocation["grading_record"]["verdict"] == "masked"
 
-    def test_a_rubric_that_may_ask_a_model_returns_no_grading_record(self) -> None:
+    def test_a_rubric_that_may_ask_a_model_is_not_observed(self) -> None:
+        """No invocation at all, as before: one without a record would read as ungraded and be re-verified."""
+
         async def judge(state, **kwargs) -> float:
             return 1.0
 
-        [invocation] = self._run([judge])["ng_verifier_invocations"]
-        assert invocation.get("grading_record") is None
+        body = self._run([judge])
+        assert not body.get("ng_verifier_invocations")
+        assert body["reward"] == 1.0 and body.get("mask_sample") is False
 
     def test_observability_off_returns_no_verifier_invocation(self) -> None:
         def aa_headline(state, **kwargs) -> float:
@@ -792,3 +795,55 @@ class TestOwnGradingRecord:
         body = self._run([aa_headline], observability=False)
         assert not body.get("ng_verifier_invocations")
         assert body["reward"] == 1.0
+
+
+class TestProgrammaticRubricOfRealEnvironments:
+    """verifiers' own environments wrap the rubric in a RubricGroup with their weight-0 monitor rubrics."""
+
+    @staticmethod
+    def _tool_env(*funcs):
+        import verifiers as vf
+        from datasets import Dataset
+
+        return vf.ToolEnv(
+            dataset=Dataset.from_list([{"question": "q", "answer": "a"}]),
+            rubric=vf.Rubric(funcs=list(funcs)),
+            tools=[],
+            max_turns=2,
+        )
+
+    def test_a_tool_env_with_synchronous_reward_functions_is_programmatic_and_watched(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        def correct(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        env = self._tool_env(correct)
+        assert [type(m).__name__ for m in env.rubric.rubrics] == [
+            "Rubric",
+            "MultiTurnMonitorRubric",
+            "ToolMonitorRubric",
+        ]
+        assert _programmatic_rubric(env) is True
+        [watched] = env.rubric.rubrics[0].funcs
+        assert watched._ng_watched_reward_func is True and watched.__wrapped__ is correct
+        # The monitors' own metrics are left as they are.
+        assert all(not getattr(f, "_ng_watched_reward_func", False) for m in env.rubric.rubrics[1:] for f in m.funcs)
+
+    def test_a_tool_env_whose_reward_function_is_async_is_not_programmatic(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        async def judged(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        assert _programmatic_rubric(self._tool_env(judged)) is False
+
+    def test_a_monitor_that_carries_reward_weight_is_not_left_out(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        def correct(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        env = self._tool_env(correct)
+        env.rubric.rubrics[1].weights[0] = 1.0
+        assert _programmatic_rubric(env) is False
