@@ -164,32 +164,48 @@ gym eval resubmit "$GYM_JOB_ID" <benchmark> --recover \
 `--max-walltime` must be longer than the recorded walltime. The run starts fresh with fresh budgets
 in the same directory; the saved files are kept, and the plan is journaled.
 
-## 7. Who decides what
+## 7. Retriable and final
 
-Which saved failures run again is decided by the run's recovery outcome policy, not by a fixed
-model-versus-infrastructure split. A resubmit never reopens a settled result or a failure marked
-final. For every other saved failure the policy picks one action from the failure's HTTP status,
-else its failure kind, else the default: `retry` (another attempt, within the identity's attempt
-cap and the run's infra-retry cap), `verify` (re-judge the saved answer, never the policy) or
-`fail` (leave it ungraded). The default recovery policy retries, re-judges `judge_failed`, and
-keeps what producers settled as the model's final result (an answered agent deadline, a scored
-zero). `--inspect` lists the identities in each state. When the budget is spent, or the cluster
-was down, run `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the
-same command does not extend an exhausted budget, `--extend-retries` and `--max-walltime` do.
+A saved failure is retriable or final, and the run's recovery outcome policy decides which, one
+action per failure: `retry` (retriable: another attempt, within the identity's attempt cap and the
+run's infra-retry cap), `verify` (re-judge the saved answer without calling the policy) or `fail`
+(final and ungraded: recovery stops for an owner decision). The action comes from the failure's
+HTTP status, else its failure kind, else the default. The defaults: `judge_failed` is re-judged,
+`collection_dispatch_failed` and `harness_termination_unconfirmed` are retried, and every other
+saved failure is retried too (`default_action: retry`), within the caps. Settled results are final
+and never reopened: a scored answer or zero, and a clean agent timeout, which is the model's
+result under the benchmark's time limit. Successes and final failures are never run again.
+`--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
+`source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
+`gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
+does not extend an exhausted budget, `--extend-retries` and `--max-walltime` do.
 
-The CLI extends budgets; it does not change the policy. The Python API takes a partial override
-(the defaults stay for everything it does not name, kinds must be registered, and `count_as_zero`
-is refused here):
+What is retriable is one question; whether the score can be trusted is another. The split between
+model faults and evaluation-side faults belongs to the second only: `gate_task.evaluation_health`
+(step 9) counts the evaluation-side faults against the fixed 2% limit, reports the model faults by
+kind and never fails on them. The outcome policy never changes evaluation health, and evaluation
+health never changes what is retried.
 
-```python
-from nemo_gym.agent_outcome import OutcomeAction
-from nemo_gym.orchestration.recovery import RecoveryOutcomePolicyConfig
-from nemo_gym.orchestration.submit import recover
+A benchmark config changes what is retriable with `recovery_outcome_policy` under the benchmark's
+`resumable`, in its mapping form beside `max_retries` and `max_walltime`:
 
-recover(gym_job_id, benchmark, outcome_policy=RecoveryOutcomePolicyConfig(by_status_code={401: OutcomeAction.FAIL}))
+```yaml
+resumable:
+  max_retries: 3
+  max_walltime: "16:00:00"
+  recovery_outcome_policy:
+    by_failure_kind: {agent_timeout: fail}
+    by_status_code: {429: retry}
+    default_action: retry
 ```
 
-A CLI or config path for the override does not exist yet.
+Entries it does not name keep their defaults. Kinds must be registered (or `unknown`), statuses
+400 to 599, `count_as_zero` is refused and so is an unknown key; a mistake fails at config load
+with `invalid recovery_outcome_policy: <field>: <problem>`. The run saves the policy in its
+`resolved-config.yaml`, the chain's own continuations use it, and a change between the inspection
+and the dispatch refuses the resubmit, because the policy is a semantic setting. The CLI extends
+budgets and has no flag for the policy; a Python caller can pass `outcome_policy` to `recover(...)`,
+which replaces the config's section as a whole.
 
 Resubmit by hand after a cluster outage, a crashed server, an expired credential, or a budget stop.
 The chain's own stop text (in the driver log and `.gym_chain_incomplete`) and the inspection's
@@ -197,8 +213,8 @@ reason say which one it was.
 
 | The product decides | The operator decides |
 | --- | --- |
-| Retrying the failures the outcome policy marks `retry` (by default every infrastructure failure: transport, server start, sandbox start) within the retry budget. | Raising the walltime cap or the retry budget, with a reason. |
-| That model failures and final zeros are final: they are scored under the benchmark's protocol, not retried. | Moving a run to another Gym commit (`--repin`). |
+| Retrying the failures the outcome policy marks retriable, within the retry budget. | Raising the walltime cap or the retry budget, with a reason; what the benchmark config marks retriable (`recovery_outcome_policy`), before the run. |
+| That settled results are final: a scored zero, a saved answer, a clean agent timeout; they are scored under the benchmark's protocol, not retried. | Moving a run to another Gym commit (`--repin`). |
 | Re-judging saved answers whose judge failed, at the end of a run, without calling the policy again. | Accepting a semantic configuration difference (`--allow-unsafe-resume`), or starting a fresh run instead. |
 | Health verdicts, the gate's fixed 2% limit and the gate results. | Whether a result is accepted, on the gate's facts. |
 | Resuming across operational configuration drift, and saying so. | When to stop a chain, and when to start over in a new location. |
@@ -212,8 +228,11 @@ evaluation's identity, and changing them makes a different evaluation. The model
 see [gym-add-model-config](../gym-add-model-config/SKILL.md).
 
 A slow or under-provisioned deployment produces timeouts and truncated answers, and they count as
-model failures under each benchmark's rules. Optimize the deployment; do not raise the evaluation's
-limits.
+model failures by default: a policy-model response timeout is the model's fault unless the
+inspection or recovery call sets `--policy-timeout-counts-as-model false`
+(`policy_timeout_counts_as_model`, for a self-hosted evaluation that owns its serving; it moves the
+timeout to the evaluation side of health and changes nothing else). Optimize the deployment; do not
+raise the evaluation's limits.
 
 ## 9. Health and acceptance
 
@@ -229,10 +248,15 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `--score-agent` and, when an agent has several entries, `--score-environment`), a readable
   health summary, the MLflow delivery when it is required (step 1), and evaluation health.
   Evaluation health is `gate_task.evaluation_health`: `PASS` when evaluation-side trial failures
-  (judge, verifier, sandbox and harness faults) are strictly below 2% of the expected trials and
-  every trial's grading is traceable; `FAIL` at or above 2%; `UNVERIFIED` below 2% when some
-  grading is not traceable, so the known count is a lower bound. The 2% is fixed in Gym; no flag
-  changes it.
+  (judge, verifier, sandbox and harness faults, a server that did not start, transport faults and
+  model-server 5xx replies) are strictly below 2% of the expected trials and every trial's
+  grading is traceable; `FAIL` at or above 2%; `UNVERIFIED` below 2% when some grading is not
+  traceable, so the known count is a lower bound. The 2% is fixed in Gym; no flag changes it.
+  The classes are Gym's shared lists, `MODEL_FAULT_KINDS` and `SERVER_FAULT_KINDS` in
+  `nemo_gym/core/failure_kinds.py`: the policy's own request errors, timeouts, context limit and
+  agent limits, and a cut-off, empty or malformed answer are the model's; another model's 4xx (a
+  judge's) is evaluation-side. `criteria.evaluation` records the limit and
+  `policy_timeout_counts_as_model` beside the verdict.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
   `applied: false`; `--max-unhealthy-fraction` (per-rollout health) is judged in `warnings`. None

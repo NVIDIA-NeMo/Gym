@@ -152,12 +152,22 @@ outcome_policy=RecoveryOutcomePolicyConfig(...))` API accepts partial failure-ki
 `retry` permits another episode only within the saved attempt and chain budgets; `verify` re-verifies a saved
 judge answer, and `fail` leaves it ungraded. Settled results and terminal failures are never reopened.
 Mixed decisions stop when the executor cannot honor them separately. Saved-answer re-verification still
-requires an executor that supports it.
+requires an executor that supports it. A benchmark config sets the same policy under its `resumable` mapping as
+`recovery_outcome_policy` (`by_failure_kind`, `by_status_code`, `default_action`; unnamed entries keep their defaults;
+a mistake fails at config load as `invalid recovery_outcome_policy: <field>: <problem>`). The run saves it in
+`resolved-config.yaml`, its continuations use it, and a change between inspection and dispatch refuses the resubmit.
+An explicit Python `outcome_policy` replaces the config section as a whole; there is no CLI flag. The inspection
+reports the policy in force as `outcome_policy` with its `source` (`default`, `config` or `python`). The policy decides
+what is retriable and never changes evaluation health.
 
 `--max-response-failure-fraction` and `--max-trial-failure-fraction` are validated and reported under `criteria`
 with `applied: false`; they do not change the verdict. The gate's only health verdict is evaluation health, at the
 fixed limit of a strict fraction below `0.02`, before rounding, which `criteria.evaluation` reports; response and
-trial failures are reported by cause under `failures`. None of this changes rewards or retry policy. A positive trial
+trial failures are reported by cause under `failures`. The fault classes are the shared `MODEL_FAULT_KINDS` and
+`SERVER_FAULT_KINDS` of `nemo_gym/core/failure_kinds.py`; a policy-model response timeout is the model's fault by
+default, and `--policy-timeout-counts-as-model false` (`policy_timeout_counts_as_model`, reported under
+`criteria.evaluation`) counts it as a server fault for a self-hosted evaluation. None of this changes rewards or retry
+policy. A positive trial
 result requires observed coverage of every expected identity. Supported paths join invocation, selected response, model operations, client-executed function-tool results,
 and observed programmatic grading bound to the saved result. Unsupported paths, missing grading or runtime
 observations, and unjoined recovered failures remain unknown. Recovery NOOP is separate from acceptance and tracking delivery.
