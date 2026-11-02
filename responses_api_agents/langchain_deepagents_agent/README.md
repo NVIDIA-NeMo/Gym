@@ -56,12 +56,13 @@ Controls and limits:
   Provider context-overflow errors remain model errors; the adapter does not
   translate them to LangChain's more aggressive overflow retry.
 
-### Validation scope (October 30, 2026)
+### Validation scope (November 2, 2026)
 
 The sandbox implementation is experimental. Full TB2.1 and Observability
 qualification remain incomplete. The
-[evaluation record](evaluation-2026-10-30.md) summarizes the retained results and
-source-specific limits. Raw artifacts and the full internal handoff remain with
+[original evaluation record](evaluation-2026-10-30.md) and
+[first missing-grade recovery](evaluation-recovery-2026-11-02.md) preserve separate
+results and source-specific limits. Raw artifacts and the full internal handoff remain with
 the evaluation owner. No sandbox-integration PR has been opened.
 
 Evidence belongs to the exact runtime source tested:
@@ -74,17 +75,31 @@ Evidence belongs to the exact runtime source tested:
 | Repository pre-commit | Passed | Passed |
 | Real TB smoke | `regex-log`: reward 1; health, strict evidence and profile passed | Failed at sandbox seed, before model execution; zero rollouts and captures |
 | Configuration-only second pairing | SWE-bench Pro NodeBB: valid zero; health, strict evidence and profile passed | Not rerun |
-| Full TB2.1 | Both collection segments interrupted; incomplete grade coverage | Not evaluated |
+| Full TB2.1 | Original segments interrupted; first authorized recovery has 709/712 grades; strict evidence and full profiling remain failed | Not evaluated |
 
-The frozen benchmark source produced 306 passes and 246 valid zeros. Of the 712
+The October 30 first-attempt report contains 306 passes and 246 valid zeros. Of the 712
 planned task/repeat identities, 160 have unavailable grades: one OOM, four
 interrupted original episodes, 33 continuation sandbox-seed failures and 122
 missing continuation records with unknown dispatch status. No failed or
-interrupted episode was retried. All identities can be accounted for while both
-controller-finished flags remain false; accounting closure does not make the
+interrupted episode was retried during that first-attempt evaluation. All identities
+can be accounted for while both controller-finished flags remain false; accounting closure does not make the
 89-task, eight-repeat benchmark complete. Missing grades are not verifier zeros.
 
-The 552 graded rows include 467 healthy and 85 unhealthy outcomes; strict evidence
+On November 1, the evaluation owner authorized separate recovery attempts only
+for missing grades. The first recovery retained all 552 grades, including valid
+zeros, and added 157 grades: selected coverage is 709/712, with 399 passes, 310
+valid zeros and three unavailable grades. Recovered repeat 0 is complete at
+51/89 passes (57.30%). The eight-repeat all-grid observed-pass fraction is 56.04%,
+a lower bound with three grades unavailable. A separate recovery of those three
+identities is in progress and is not included in the closed first-recovery report.
+Every prior attempt and both original interruption flags remain unchanged.
+
+The first-recovery aggregate has 603 healthy and 106 unhealthy records; strict
+evidence fulfilled 634 and failed 75. Strict complete-grade profiling also failed.
+These are mixed-attempt recovery results, not best-of-eight or a passed
+Observability qualification. Missing grades are never converted into zeros.
+
+The original 552 graded rows include 467 healthy and 85 unhealthy outcomes; strict evidence
 fulfilled 493 rows and failed 59. Native validation-error observations were fixed
 separately in `6d5e3186d`, but the earlier records remain unchanged. Its fresh
 real-model smoke failed before inference: collector exit 1, evidence exit 2 and
