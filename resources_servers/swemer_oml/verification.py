@@ -34,6 +34,11 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Sequence
 
+from resources_servers.swebench.start_state import (
+    SETUP_PATCH_FAILED_EXIT,
+    SETUP_PATCH_PATH,
+    apply_setup_patch_command,
+)
 from resources_servers.swemer_v1.verification import mirror_files
 from resources_servers.swemer_v2.verification import drop_patch_sections, drop_test_patch_files
 
@@ -85,6 +90,8 @@ class VerificationInputs:
     # Extra flag for the first `patch -p1` attempt; the package's solve.sh passes "--fuzz=5" for
     # the golden patch (its lockfile hunks often drift) and nothing for anything else.
     apply_primary: str = ""
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
 
 
 @dataclass
@@ -137,6 +144,8 @@ def build_eval_script(inputs: VerificationInputs) -> str:
         f"mkdir -p /logs/verifier /workspace/test-results {TESTS_DIR} 2>/dev/null\n"
         f"rm -f {REWARD_FILE}\n"
         f"{_APPLY_PATCH_FN}"
+        # The start state goes in before the snapshot, so tree_changed still measures the agent.
+        f"{apply_setup_patch_command(inputs.setup_patch)}\n"
         f"__before=$(git -C {wd} status --porcelain 2>/dev/null | md5sum)\n"
         "tree_changed=1\n"
         f"{apply_block}"
@@ -164,6 +173,8 @@ def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: 
     # Most packages embed test.patch in test.sh; a few `cp "$SCRIPT_DIR/test.patch"` instead.
     if inputs.test_patch.strip():
         files[f"{TESTS_DIR}/test.patch"] = inputs.test_patch
+    if inputs.setup_patch.strip():
+        files[SETUP_PATCH_PATH] = inputs.setup_patch
     if inputs.patch.strip():
         files[PATCH_FILE] = inputs.patch
     # Maven Central 429s under concurrent load (seen in this dataset's first smoke); the
@@ -200,6 +211,15 @@ def parse_verification_output(output: str, return_code: int, inputs: Verificatio
             test_results=None,
             test_output=output,
             error=f"workdir {inputs.workdir} not present in the image",
+        )
+    if return_code == SETUP_PATCH_FAILED_EXIT:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error="start-state setup patch did not apply",
         )
 
     applied_match = _PATCH_APPLIED_RE.search(output)

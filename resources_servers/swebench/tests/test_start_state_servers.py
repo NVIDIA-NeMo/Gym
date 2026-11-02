@@ -12,7 +12,8 @@
 # WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 # See the License for the specific language governing permissions and
 # limitations under the License.
-"""Start states on the servers that grade the image's tree as shipped (scale_swe, swemer, swe_next)."""
+"""Start states on the servers that grade the image's tree as shipped (scale_swe, swemer, swe_next,
+swemer_oml)."""
 
 import importlib
 import shutil
@@ -54,6 +55,15 @@ SERVERS = {
         request=dict(image_ref="img"),
         inputs=dict(test_patch=""),
         init="_init_git_repo",
+    ),
+    "swemer_oml": dict(
+        server="SwemerOmlResourcesServer",
+        seed="SwemerOmlSeedSessionRequest",
+        request=dict(image_ref="img", test_sh="exit 0", config_json="{}", grade_py=""),
+        inputs=dict(test_sh="exit 0", config_json="{}", grade_py=""),
+        init="_ensure_git_repo",
+        # Blob-stripped delivery images: the tree is re-added before seeding.
+        methods=("_restore_missing_blobs",),
     ),
 }
 
@@ -149,14 +159,15 @@ async def test_seeding_keeps_the_image_tree_and_extracts_only_the_agent_work(nam
         return None
 
     server = SimpleNamespace(
-        config=SimpleNamespace(apply_anti_cheating=False),
+        config=SimpleNamespace(apply_anti_cheating=False, patch_capture_mode="worktree"),
         _session_id_to_sandbox={},
         _session_id_to_pristine_untracked={},
         _session_id_to_base_commit={},
         _create_sandbox=create_sandbox,
         _stop_sandbox=stop_sandbox,
     )
-    setattr(server, spec["init"], lambda sandbox, workdir: getattr(server_cls, spec["init"])(server, sandbox, workdir))
+    for method in (spec["init"], *spec.get("methods", ())):
+        setattr(server, method, lambda sandbox, workdir, m=method: getattr(server_cls, m)(server, sandbox, workdir))
     server._pristine_untracked_files = lambda sandbox, workdir: server_cls._pristine_untracked_files(
         server, sandbox, workdir
     )
@@ -175,6 +186,7 @@ async def test_seeding_keeps_the_image_tree_and_extracts_only_the_agent_work(nam
     (repo / "c.py").write_text("y = 1\n")
     base = server._session_id_to_base_commit.pop("s")
     patch = await server_cls._extract_model_patch(server, "s", str(repo), base)
+    patch = getattr(patch, "patch", patch)  # swemer_oml returns a PatchCapture.
     assert "c.py" in patch and "a.py" not in patch and "b.py" not in patch
 
     # Grading: the image's tree, then the start state, then the agent's patch.

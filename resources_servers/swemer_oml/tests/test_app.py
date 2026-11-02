@@ -296,10 +296,11 @@ class TestServerWiring:
 
     def test_seed_session_scrubs_then_seeds_a_committer_identity(self) -> None:
         source = self._source()
-        assert source.index("await self._ensure_git_repo(") < source.index("apply_anti_cheat_setup(sandbox")
+        assert "apply_anti_cheating=self.config.apply_anti_cheating" in source
+        assert source.index("await self._ensure_git_repo(") < source.index("await seed_start_state(")
         # Blob restore must run before the scrub: its `git reset --hard` deletes files it cannot re-read.
-        assert source.index("await self._restore_missing_blobs(") < source.index("apply_anti_cheat_setup(sandbox")
-        assert source.index("apply_anti_cheat_setup(sandbox") < source.index("await prepare_git_for_commits(")
+        assert source.index("await self._restore_missing_blobs(") < source.index("await seed_start_state(")
+        assert source.index("await seed_start_state(") < source.index("await prepare_git_for_commits(")
 
     def test_config_defaults(self) -> None:
         from resources_servers.swemer_oml.app import SwemerOmlResourcesServerConfig
