@@ -211,7 +211,7 @@ the upstream blocklist, plus the two query refusals, the fail-closed refusal of 
 `POST /web_search` after a seed, the 409 on re-seeding a session with another question, the typed-session
 contract (`nemo_gym.testing.session_conformance.check_resources_session_contract`), wrapper decoding, the cap and marker, the exact two-tool list over a
 real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and exhaustion of the key
-pool, malformed provider bodies (a tool error, not an HTTP 500) and the blocklist digest pin. A table of URL
+pool, malformed provider bodies, including a 200 whose body is not JSON (a tool error, not an HTTP 500) and the blocklist digest pin. A table of URL
 spellings from review (expansion overflow, a fourth decoded form, backslash, whitespace and userinfo,
 canonical-form prefixes, archive.org variants) must be refused before the fetch while ordinary redirect and
 query URLs stay allowed; `site:` operands are parsed to hostnames; long URLs and a 100,000-character heading

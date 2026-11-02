@@ -13,6 +13,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from aiohttp import ContentTypeError
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
@@ -604,11 +605,22 @@ async def test_rejected_key_fails_over_and_provider_bodies_stay_private(server, 
             {"results": [{"url": "https://example.org/a", "title": 5, "content": {"x": 1}, "raw_content": ["x"]}]},
             "[1] \n    URL: https://example.org/a\n    Snippet: ",
         ),
+        # A 200 whose body does not decode: a gateway's HTML page, a cut-off JSON body.
+        (ContentTypeError(MagicMock(), ()), "Search failed: the search provider returned a malformed response."),
+        (
+            json.JSONDecodeError("Expecting value", "{", 1),
+            "Search failed: the search provider returned a malformed response.",
+        ),
     ],
-    ids=["body-not-object", "results-null", "items-not-objects", "fields-not-strings"],
+    ids=["body-not-object", "results-null", "items-not-objects", "fields-not-strings", "body-html", "body-cut-off"],
 )
-async def test_malformed_tavily_payloads_become_tool_errors(server, payload, search_text):
-    server._backend = MagicMock(search=AsyncMock(return_value=payload), extract=AsyncMock(return_value=payload))
+async def test_malformed_tavily_payloads_become_tool_errors(server, monkeypatch, payload, search_text):
+    if isinstance(payload, Exception):  # a 200 whose body does not decode, through the real transport
+        response = http_response(200)
+        response.json = AsyncMock(side_effect=payload)
+        monkeypatch.setattr(module, "request", AsyncMock(return_value=response))
+    else:
+        server._backend = MagicMock(search=AsyncMock(return_value=payload), extract=AsyncMock(return_value=payload))
     found = await search(server, "spin structures")
     assert (found.text, found.refused) == (search_text, False)
     fetched = await fetch(server, "https://example.org/a")

@@ -43,7 +43,7 @@ from typing import Any, Dict, List, Literal, Optional, Set, Tuple
 from urllib.parse import parse_qsl, unquote, urlsplit
 
 import idna
-from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
+from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout, ContentTypeError
 from fastapi import FastAPI, Request
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
@@ -673,7 +673,7 @@ class TavilyBackend(BaseModel):
         # A key listed twice is one key: Tavily rejecting it rejects every copy.
         return list(dict.fromkeys(keys))
 
-    async def search(self, query: str, *, max_results: int, search_depth: str) -> Dict[str, Any]:
+    async def search(self, query: str, *, max_results: int, search_depth: str) -> Any:
         return await self._post(
             "/search",
             {
@@ -687,13 +687,14 @@ class TavilyBackend(BaseModel):
             },
         )
 
-    async def extract(self, url: str, *, extract_depth: str) -> Dict[str, Any]:
+    async def extract(self, url: str, *, extract_depth: str) -> Any:
         return await self._post(
             "/extract",
             {"urls": [url], "extract_depth": extract_depth, "format": "markdown", "include_images": False},
         )
 
-    async def _post(self, endpoint: str, payload: Dict[str, Any]) -> Dict[str, Any]:
+    async def _post(self, endpoint: str, payload: Dict[str, Any]) -> Any:
+        """The decoded body of Tavily's 200 reply, or None when that body is not JSON."""
         keys = self.api_keys[self._next_key :] + self.api_keys[: self._next_key]
         self._next_key = (self._next_key + 1) % len(self.api_keys)
         rejected: Set[int] = set()
@@ -712,7 +713,11 @@ class TavilyBackend(BaseModel):
                     _max_connection_retries=0,
                 )
                 if response.status == 200:
-                    return await response.json()
+                    try:
+                        return await response.json()
+                    except (ContentTypeError, ValueError):
+                        # A proxy or gateway page in a 200: a malformed body, which the tools answer as a tool error.
+                        return None
                 if response.status in TAVILY_KEY_REJECTED_CODES:
                     rejected.add(key_index)
                     next_index = _next_accepted_key(len(keys), key_index, rejected)
