@@ -377,7 +377,10 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   `agentif`, `beam`, `deepsearchqa`, `finance_agent_v2`, `finance_sec_search`, `gdp_pdf`,
   `imo_proofbench`, `longmemeval`, `simpleqa`, `widesearch`, `litmus-bench`, the `abstention`,
   `inverse_if` and `multichallenge` parts of `nemotron_3.5_super`, `frontierscience_olympiad` and
-  `automationbench`. Report it with the reason; do not re-run, and change no flag: none changes it.
+  `automationbench` (the benchmarks graded by the verifiers agent, AutomationBench among them).
+  `UNVERIFIED` means the answers were scored, but the grading evidence was not recorded on this
+  stack version. A resubmit cannot change it, and no flag does: it needs a run on a stack version
+  that records grading. Report it with the reason and do not present the run as verified.
   The fix is that server's grading record, in Gym.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
