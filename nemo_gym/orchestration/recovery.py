@@ -1353,6 +1353,8 @@ def trial_items(value, key, fields):
             for item in value[key]]
 # Parsed sources whose parsed bytes differ from the opening snapshot: like a changed closing snapshot, unstable.
 changed_while_reading = set()
+# Artifacts that exist but cannot be read, relative to the job dir: recorded as unknown, never a crash.
+unreadable = set()
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -1361,7 +1363,12 @@ def rows(name, skip=0):
     # The parse hashes every byte it reads: it must read exactly the opening snapshot's bytes. This catches a rewrite
     # before or during the parse, an ABA one included, without a separate hashing pass.
     read = hashlib.sha256()
-    with open(p, "rb") as fh:
+    try:
+        source = open(p, "rb")
+    except OSError:
+        unreadable.add(os.path.relpath(p, d))
+        return None
+    with source as fh:
         for i, line in enumerate(fh):
             read.update(line)
             if i < skip or not line.strip():
@@ -1547,6 +1554,10 @@ def sha256(path):
         source = open(path, "rb")
     except FileNotFoundError:
         return None
+    except OSError:
+        # Present but unreadable (an owner-only file, for example): a stable marker, so both snapshots agree.
+        unreadable.add(os.path.relpath(path, d))
+        return "unreadable"
     h = hashlib.sha256()
     with source:
         before = os.fstat(source.fileno())
@@ -1581,7 +1592,11 @@ source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 accounting_files = (".gym_infra_retries", ".gym_accumulated_walltime", ".gym_job_chain", ".gym_infra_retry_extension",
                     ".gym_chain_incomplete", "../resolved-config.yaml", "artifacts/rollouts_resubmit_offset")
 accounting_snapshot = {name: sha256(os.path.join(d, name)) for name in accounting_files}
-chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
+try:
+    chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
+except OSError:
+    unreadable.add(".gym_job_chain")
+    chain = []
 unknown_accounting = accounting_unknown()
 mlflow = {"live_run_id": None, "receipt": None}
 try:
@@ -1793,6 +1808,7 @@ def chain_continuation_note():
     )
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
+collected["unreadable_files"] = sorted(unreadable)
 print(json.dumps(collected))
 """
 )
@@ -1824,6 +1840,8 @@ class CollectedEvidence(BaseModel):
     unresolved_rejudgments: list[str] = Field(default_factory=list)
     # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
+    # Artifacts that exist but could not be read, relative to the job dir: what they hold is unknown.
+    unreadable_files: list[str] = Field(default_factory=list)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
     # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
@@ -2170,6 +2188,10 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
 
 
+# The saved rows a decision reads; one that exists but cannot be read stops it.
+SAVED_ROW_FILES = ("rollouts_materialized_inputs.jsonl", "rollouts.jsonl", "rollouts_failures.jsonl")
+
+
 def _decide_from_collected(
     collected: CollectedEvidence,
     *,
@@ -2227,6 +2249,18 @@ def _decide_from_collected(
         live_job_name=live_job_name,
         job_chain=collected.job_chain,
     )
+    unreadable_rows = [name for name in SAVED_ROW_FILES if f"artifacts/{name}" in collected.unreadable_files]
+    if unreadable_rows and live_job is not True:
+        # Saved rows that cannot be read are unknown, not absent: no fresh restart, no resume over them.
+        known = sorted({i for i in map(_identity, collected.materialized or []) if i is not None})
+        return RecoveryDecision(
+            action=RecoveryAction.STOP,
+            reason=f"saved rows are unreadable ({', '.join(unreadable_rows)}), so what they hold is unknown",
+            expected=len(known),
+            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
+            identities={IdentityState.UNKNOWN.value: known} if known else {},
+            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+        )
     if collected.managed_store and collected.managed_selection is None:
         # Selecting from these files here could pick a superseded attempt or lose a reservation, so every known
         # input stays unknown and no saved row is read as its outcome.
@@ -5172,6 +5206,11 @@ def gate_summary_from_collected(
         health_reasons=[] if trial_passed else [trial_reason],
     )
     task["criteria"] = criteria.report()
+    if collected.unreadable_files:
+        # What an unreadable metric, summary or record holds is unknown: never a pass.
+        task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
+        if task["status"] == "SUCCESS":
+            task["status"] = "FAILED"
     task["trial_counts"] = trial_counts(decision, collected)
     task["evaluation_health"] = evaluation
     task["failures"] = failure_facts(decision, collected)
