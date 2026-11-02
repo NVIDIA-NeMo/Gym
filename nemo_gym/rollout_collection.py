@@ -4649,6 +4649,7 @@ class RolloutCollectionHelper(BaseModel):
         completed_count = 0
         sources_dropped = False
         collection_succeeded = False
+        final_status_written = False
         latency_tracker = DispatchLatencyTracker()
         run_timing: Optional[RunTimingReport] = None
         if config.dispatch_start_report_within_s is not None:
@@ -4689,9 +4690,9 @@ class RolloutCollectionHelper(BaseModel):
             output_files.enter_context(store)
 
             def write_final_status() -> None:
-                # A run that stops before its final status write would otherwise leave the results persisted inside
-                # the write throttle out of the status file.
-                if collection_succeeded or batch_tracker is None:
+                # A run that stops before its final status write, during collection or in a step after it, would
+                # otherwise leave the results persisted inside the write throttle out of the status file.
+                if final_status_written or batch_tracker is None:
                     return
                 try:
                     batch_tracker.write_status(batch_completed_rows, batch_failure_rows, force=True)
@@ -5165,6 +5166,7 @@ class RolloutCollectionHelper(BaseModel):
                 aggregation_deferred=config.disable_aggregation,
                 force=True,
             )
+            final_status_written = True
 
         _raise_for_aggregation_errors(aggregate_metrics_fpath)
 

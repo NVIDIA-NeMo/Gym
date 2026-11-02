@@ -14886,6 +14886,43 @@ async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(
     assert member["failures_by_class"] == {}
 
 
+async def test_run_status_ends_current_when_a_step_after_collection_fails(tmp_path, empty_global_config, monkeypatch):
+    """Results persisted inside the write throttle reach the status file even when aggregation fails afterwards."""
+    import nemo_gym.batch_status as batch_status
+
+    monkeypatch.setattr(batch_status, "BATCH_STATUS_WRITE_INTERVAL_SECONDS", 3600.0)
+    source = tmp_path / "input.jsonl"
+    source.write_bytes(
+        b"".join(b'{"agent_ref":{"name":"a"},"responses_create_params":{"input":[]}}\n' for _ in range(2))
+    )
+    output = tmp_path / "rollouts.jsonl"
+    config = RolloutCollectionConfig(
+        input_jsonl_fpath=str(source),
+        output_jsonl_fpath=str(output),
+        upload_rollouts=False,
+        retain_results_in_memory=False,
+    )
+
+    async def aggregation_fails(self, *args, **kwargs):
+        raise RuntimeError("aggregation failed after collection")
+
+    monkeypatch.setattr(RolloutCollectionHelper, "_call_aggregate_metrics", aggregation_fails)
+
+    class Helper(RolloutCollectionHelper):
+        def _run_examples_with_metadata(self, examples, *args, **kwargs):
+            futures = []
+            for row in examples:
+                future = Future()
+                future.set_result(_CompletedRollout(row=row, result={"reward": 1.0}, rollout_latency_ms=None))
+                futures.append(future)
+            return futures
+
+    with pytest.raises(RuntimeError, match="aggregation failed"):
+        await Helper().run_from_config(config)
+    member = orjson.loads((tmp_path / "rollouts_batch_status.json").read_bytes())["members"]["a"]
+    assert (member["completed_rollout_count"], member["remaining_rollout_count"]) == (2, 0)
+
+
 async def test_run_status_errors_do_not_abort_collection(tmp_path, empty_global_config, monkeypatch, caplog):
     """A status that cannot be built is disabled with its reason, while collection goes on and saves its results.
 
