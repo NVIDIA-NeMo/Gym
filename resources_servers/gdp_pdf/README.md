@@ -281,6 +281,13 @@ an older NeMo RL/Gym checkout.
 
 Before optimization, inspect captured multi-tool rollouts: exact generated tokens
 and log probabilities must be present, `mask_sample` must be false, and the
-captured call chain must cover the graded answer, including rendered images.
-Incomplete/unresolved captures are masked by Gym, not re-tokenized or assigned
-zero reward. See the [shared training-capture guide](../../fern/versions/latest/pages/training-tutorials/external-agent-harnesses.mdx).
+captured call chain must cover the graded answer. Incomplete/unresolved captures
+are masked by Gym, not re-tokenized or assigned zero reward. See the
+[shared training-capture guide](../../fern/versions/latest/pages/training-tutorials/external-agent-harnesses.mdx).
+
+Standalone file capture validates tokens, not learner image tensors. For NeMo RL
+vision training, use its worker-owned media capture (`token_capture.enabled: true`)
+and qualify the processed images through the learner. The existing
+[Omni capture example](https://github.com/NVIDIA-NeMo/RL/blob/main/examples/nemo_gym/vlm_grpo_nemotron_omni_clevr_vllm_token_capture_single_controller.yaml)
+and [capture design](https://github.com/NVIDIA-NeMo/RL/blob/main/docs/design-docs/token-capture-ledger.md)
+describe that path. Successful evaluation alone does not qualify an RL optimizer run.
