@@ -666,7 +666,6 @@ class PiAgentConfig(BaseResponsesAPIAgentConfig):
             "grant that also offers one is left out."
         ),
     )
-    session_close_timeout_seconds: float = Field(default=60, gt=0, allow_inf_nan=False)
 
     @property
     def command_parts(self) -> list[str]:
