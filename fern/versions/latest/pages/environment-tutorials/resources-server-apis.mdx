@@ -126,6 +126,8 @@ message; an empty string contributes no message. List inputs keep their items
 and order. Model settings and tools stay as authored, and `/verify` receives the
 original authored request. Omitting `observation`, returning `null`, or returning
 an empty string leaves the agent request unchanged.
+When a server does not set `observation`, serialization omits the field to preserve
+existing seed responses. An explicitly supplied `null` or empty string remains in the response.
 
 The observation is retained with the episode's session handles, so restoring at
 agent invocation still supplies it once without seeding again. This consumption
