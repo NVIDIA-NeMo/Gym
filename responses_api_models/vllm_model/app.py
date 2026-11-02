@@ -414,12 +414,14 @@ class VLLMModelConfig(BaseResponsesAPIModelConfig):
     refit_output_budget_to_window: bool = Field(
         default=True,
         description=(
-            "When the engine refuses a call for length, names its context window, and the prompt leaves room in it, "
-            "send the call once more with the output budget (`max_completion_tokens` or `max_tokens`, whichever the "
-            "call used) lowered to the window minus the prompt minus a small margin. The prompt length is the one "
-            "the refusal states, or else the engine's `/tokenize` count. The model call's capture records "
-            "`requested_max_tokens` and `applied_max_tokens`. A call whose budget fits is sent unchanged, and a "
-            "prompt that does not fit by itself keeps the length refusal. Turn it off to keep every length refusal."
+            "When the engine refuses a call for length because the requested output budget (`max_completion_tokens` "
+            "or `max_tokens`, whichever the call used) alone exceeds the context window the refusal names, send the "
+            "call once more with that budget lowered to the window minus the prompt minus a small margin. The prompt "
+            "length is the one the refusal states, or else the engine's `/tokenize` count. The model call's capture "
+            "records `requested_max_tokens` and `applied_max_tokens`. A budget within the window is never changed: "
+            "when the prompt and that budget together overflow, the call keeps the `context_length_exceeded` refusal "
+            "(or empty completion), so a harness that compacts its history still gets the cue. A prompt that leaves "
+            "no output token keeps the refusal too. Turn it off to keep every length refusal."
         ),
     )
 
@@ -741,10 +743,12 @@ class VLLMModel(SimpleResponsesAPIModel):
     ) -> bool:
         """Lower ``outbound``'s output budget, in place, to what the window the refusal names leaves after the prompt.
 
-        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. Nothing changes
-        when the setting is off, when ``error`` is not a length refusal naming the window, when the call has no
-        budget, or when the window minus the prompt minus the margin leaves no output token or no fewer than the
-        budget already asks for. Calls admitted by an external capture worker are left alone: the worker has
+        Returns whether the budget was lowered, in which case the caller sends ``outbound`` once more. Only a budget
+        that by itself exceeds the window is lowered, the refusal ``_length_refusal_category`` calls
+        ``invalid_output_token_parameter``. Nothing changes when the setting is off, when ``error`` is not a length
+        refusal naming the window, when the call has no budget, when the budget fits the window (prompt and budget
+        together overflowing stays a ``context_length_exceeded`` refusal, the cue for a harness to compact), or when
+        the window minus the prompt minus the margin leaves no output token. Calls admitted by an external capture worker are left alone: the worker has
         settled the refused call, so a second send under the same call id is not this server's to make.
         """
         if not self.config.refit_output_budget_to_window or not _is_context_length_error(error):
@@ -756,7 +760,7 @@ class VLLMModel(SimpleResponsesAPIModel):
         budget = None if key is None else outbound[key]
         message, _, _ = context_overflow_error_fields(error)
         window = _CONTEXT_WINDOW_SIZE.search(message)
-        if type(budget) is not int or window is None:
+        if type(budget) is not int or window is None or budget <= int(window.group(1)):
             return False
         prompt_tokens = _stated_prompt_tokens(message)
         if prompt_tokens is None:
@@ -764,7 +768,7 @@ class VLLMModel(SimpleResponsesAPIModel):
             if prompt_tokens is None:
                 return False
         applied = int(window.group(1)) - prompt_tokens - _REFIT_MARGIN_TOKENS
-        if not 1 <= applied < budget:
+        if applied < 1:
             return False
         outbound[key] = applied
         execution.update(requested_max_tokens=budget, applied_max_tokens=applied)

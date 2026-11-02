@@ -8610,7 +8610,7 @@ def test_request_timeout_reaches_every_engine_client(request_timeout_seconds) ->
 #
 # A run served at a window smaller than the benchmark's output budget gets a length refusal on every call. With
 # ``refit_output_budget_to_window`` (on by default) the server retries such a call once with the budget lowered to
-# what the window leaves after the prompt.
+# what the window leaves after the prompt. Only a budget that alone exceeds the window is lowered.
 # ──────────────────────────────────────────────────────────────────────────────
 
 _REFIT_WINDOW = 8192
@@ -8892,3 +8892,81 @@ def test_the_trajectory_carries_the_refitted_budget() -> None:
     refitted, unchanged = (call.response_metadata for call in trajectory.model_calls)
     assert (refitted.requested_max_tokens, refitted.applied_max_tokens) == (131072, _REFIT_APPLIED)
     assert (unchanged.requested_max_tokens, unchanged.applied_max_tokens) == (None, None)
+
+
+@mark.parametrize("propagate", [False, True], ids=["finish-reason-length", "propagate-error"])
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    "message",
+    [
+        "This model's maximum context length is 8192 tokens. However, you requested 9048 tokens "
+        "(7000 in the messages, 2048 in the completion). Please reduce the length of the messages or completion.",
+        "This model's maximum context length is 8192 tokens. However, you requested 2048 output tokens and your "
+        "prompt contains 7000 input tokens, for a total of 9048 tokens. Please reduce the length of the input prompt "
+        "or the number of requested output tokens.",
+        # States no prompt length, so a refit would have to count it: a budget within the window is not counted for.
+        "This model's maximum context length is 8192 tokens. Please reduce the length of the messages or completion.",
+    ],
+    ids=["vllm-0.10", "vllm-0.29", "no-prompt-count"],
+)
+async def test_a_budget_within_the_window_keeps_the_overflow_refusal(
+    monkeypatch: MonkeyPatch, propagate: bool, use_completions_api: bool, message: str
+) -> None:
+    """A 2048 budget fits an 8192 window; the 7000-token prompt and the budget together do not. That refusal is the
+    harness's cue to compact its history, so the budget is not lowered to slip the call under the window."""
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.propagate_context_overflow_errors = propagate
+    refusal = _engine_bad_request_error(message)
+    client = _refit_engine(refusal, _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    if propagate:
+        with raises(ClientResponseError) as raised:
+            await model.chat_completions(request, _refit_body({"max_tokens": 2048}))
+        assert raised.value is refusal
+    else:
+        assert (await model.chat_completions(request, _refit_body({"max_tokens": 2048}))).choices[
+            0
+        ].finish_reason == "length"
+
+    [call] = _generation_calls(client, use_completions_api)
+    assert call["max_tokens"] == 2048
+    client.create_tokenize.assert_not_awaited()
+    execution = request.state.nemo_gym_model_execution
+    assert execution["error_category"] == "context_length_exceeded"
+    assert execution["local_response_reason"] == (None if propagate else "context_length_exceeded")
+    assert "requested_max_tokens" not in execution
+    assert "applied_max_tokens" not in execution
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("budget", "refitted"), [(131072, True), (8193, True), (8192, False)], ids=["131072", "8193", "8192"]
+)
+async def test_only_a_budget_over_the_window_is_refitted(
+    monkeypatch: MonkeyPatch, use_completions_api: bool, budget: int, refitted: bool
+) -> None:
+    """The boundary is the one ``invalid_output_token_parameter`` uses: a budget larger than the whole window."""
+    model = _refit_model(monkeypatch, use_completions_api)
+    message = (
+        f"This model's maximum context length is 8192 tokens. However, you requested {budget + 100} tokens "
+        f"(100 in the messages, {budget} in the completion). Please reduce the length of the messages or completion."
+    )
+    client = _refit_engine(_engine_bad_request_error(message), _refit_served(use_completions_api))
+    model._clients = [client]
+    request = _refit_request()
+
+    result = await model.chat_completions(request, _refit_body({"max_tokens": budget}))
+
+    calls = _generation_calls(client, use_completions_api)
+    execution = request.state.nemo_gym_model_execution
+    if refitted:
+        assert [call["max_tokens"] for call in calls] == [budget, _REFIT_APPLIED]
+        assert result.choices[0].finish_reason == "stop"
+        assert (execution["requested_max_tokens"], execution["applied_max_tokens"]) == (budget, _REFIT_APPLIED)
+    else:
+        assert [call["max_tokens"] for call in calls] == [budget]
+        assert result.choices[0].finish_reason == "length"
+        assert execution["error_category"] == "context_length_exceeded"
+        assert "applied_max_tokens" not in execution
