@@ -156,6 +156,19 @@ jobs:
       # PR mirrors retain the full branch diff against the PR's base branch.
       base-ref: ${{ github.event.merge_group.base_sha || (github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}
 
+  # Compliance is published separately as an optional check.
+  environment_server_compliance:
+    name: Environment Server compliance (non-blocking)
+    needs: [pre-flight, classify_changes]
+    uses: ./.github/workflows/environment-server-compliance.yml
+    permissions:
+      contents: read
+      actions: read
+      checks: write
+    with:
+      checkout-ref: ${{ needs.classify_changes.outputs.sha }}
+      base-ref: ${{ github.event.merge_group.base_sha || (github.ref == 'refs/heads/main' && github.event.before) || needs.pre-flight.outputs.base_ref }}
+
   container_build:
     name: Build Gym container
     needs: [pre-flight, classify_changes, unit_tests]
