@@ -270,6 +270,51 @@ async def test_only_framework_capture_persists_selection_and_validation_evidence
         await store.close()
 
 
+@HANDLER_CLASSES
+async def test_record_last_output_item_persists_only_the_last_item_in_fingerprint_mode(handler_cls, tmp_path):
+    store = FileLineageStore(tmp_path)
+    context = _root_context(store)
+    context.record_last_output_item = True
+    handler = handler_cls()
+    token = set_token_sink(context)
+    try:
+        handler.prepare_response({"ng_commit_coords": _staged_coords()})
+        await handler.finalize_response(
+            {
+                "id": "response-1",
+                "status": "completed",
+                "output": [
+                    {
+                        "type": "reasoning",
+                        "id": "rs-1",
+                        "summary": [{"type": "summary_text", "text": "private reasoning"}],
+                    },
+                    {
+                        "type": "message",
+                        "role": "assistant",
+                        "id": "item-1",
+                        "content": [{"type": "output_text", "text": "answer </think>"}],
+                    },
+                ],
+            }
+        )
+        assert context.committed
+        await store.close()
+        reopened = FileLineageStore(tmp_path)
+        row = (await reopened.manifest(context.rollout_id))["records"][0]
+        assert row["last_output_item"] == {"type": "message", "content": [{"text": "answer </think>"}]}
+        # The other source_history evidence stays off.
+        assert row["output_items"] is None
+        assert row["response_status"] is None
+        assert row["replay"] is None
+        raw = b"".join(path.read_bytes() for path in tmp_path.glob("*.lineage.jsonl"))
+        assert b"private reasoning" not in raw
+        await reopened.close()
+    finally:
+        reset_token_sink(token)
+        await store.close()
+
+
 @dataclass(frozen=True)
 class _FinalizeCase:
     """One worker-acknowledgement scenario, run against every handler backend.

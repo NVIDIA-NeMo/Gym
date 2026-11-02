@@ -300,6 +300,10 @@ class _BaseExternalCaptureHandler(ABC):
         ]
         response_items, _ = strip_token_fields(response_to_output_items(served_payload))
         evidence_items = completion_items(served_payload) if context.parent_resolution_mode == "source_history" else []
+        # A framework that runs its own output detectors asks for the last item in every mode.
+        validation_items = evidence_items or (
+            completion_items(served_payload) if context.record_last_output_item else []
+        )
         # Content-witness keys, hashed while the response is still
         # server-side: this call's own output, and request + output (the
         # cumulative reading). Unfingerprintable content abstains (None)
@@ -342,7 +346,7 @@ class _BaseExternalCaptureHandler(ABC):
             if context.parent_resolution_mode == "source_history"
             else None,
             finish_reason=response_finish_reason(served_payload),
-            last_output_item=output_validation_item(evidence_items[-1]) if evidence_items else None,
+            last_output_item=output_validation_item(validation_items[-1]) if validation_items else None,
             output_fingerprint=output_fingerprint,
             continuation_fingerprint=continuation_fingerprint,
             fingerprint_version=FINGERPRINT_VERSION,

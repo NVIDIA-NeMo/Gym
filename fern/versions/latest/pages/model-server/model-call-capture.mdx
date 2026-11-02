@@ -111,7 +111,10 @@ persisted data with the new schema.
 
 Source-history capture rows include output fingerprints, a bounded completion status and minimal original
 text for output validation. Ordinary capture keeps its existing fingerprints and finish reason without
-these additional selection/validation fields. The status is `completed`, `incomplete`, `failed` or
+these additional selection/validation fields. A framework that runs output detectors on ordinary capture
+(for example NeMo RL's message-level advantage penalties) sets `token_id_capture.record_last_output_item: true`
+with `external_staging: true`; each row then also records `last_output_item`, the minimal text of the
+call's last output item, and nothing else from this list. The status is `completed`, `incomplete`, `failed` or
 `unknown`; cancellation and abort mean `failed`, while missing or unrecognized completion information
 means `unknown`. NeMo RL masks a rollout containing a selected failed or unknown completion.
 
