@@ -3987,18 +3987,19 @@ def _recorded_grade(row: Mapping[str, Any], collected: CollectedEvidence | None)
 
 
 def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
-    """The model fault of a scored-zero incomplete answer the benchmark's rule scored without a recorded grade.
+    """The model fault of a scored-zero incomplete answer.
 
-    ``TRUNCATED_ANSWER`` when the answer carries a cutoff signal (``_cut_off``), otherwise ``EMPTY_ANSWER`` when it
-    holds no assistant message and ``MALFORMED_ANSWER`` when it does. A row whose reward came from a recorded grade
-    (``_recorded_grade``) has none: its score is its grade.
+    ``TRUNCATED_ANSWER`` when the answer carries a cutoff signal (``_cut_off``), whether the benchmark's rule or a
+    recorded grade scored it zero: the cutoff is why it scored zero. Without a cutoff signal, a row whose reward came
+    from a recorded grade (``_recorded_grade``) has none, as its score is its grade; otherwise ``EMPTY_ANSWER`` when it
+    holds no assistant message and ``MALFORMED_ANSWER`` when it does.
     """
     if type(row.get("reward")) not in (int, float) or row["reward"] != 0 or not _incomplete_answer(row):
         return None
-    if _recorded_grade(row, collected):
-        return None
     if _cut_off(row):
         return TRUNCATED_ANSWER
+    if _recorded_grade(row, collected):
+        return None
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
 
 
@@ -4589,7 +4590,11 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     for row in (collected.results or []) if collected is not None else []:
         if _identity(row) not in scored or _identity(row) in final_zero:
             continue
-        # A row whose reward came from a recorded grade is never a response failure: its score is its grade.
+        # A cut-off answer scored zero is truncated, also when a recorded grade scored it.
+        if _answer_fault(row, collected) == TRUNCATED_ANSWER:
+            responses["truncated"] += 1
+            continue
+        # Otherwise a row whose reward came from a recorded grade is no response failure: its score is its grade.
         if _recorded_grade(row, collected):
             continue
         answer = row.get("response")
