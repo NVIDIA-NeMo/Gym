@@ -180,6 +180,10 @@ carry the E2B sandbox ID for reconnection through another configured provider in
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
 
+`status()` reads the sandbox record from E2B's control plane (`GET /sandboxes/{id}`): `RUNNING`
+means the service reports the sandbox as running, not that the guest passed a health check.
+An E2B-compatible gateway must serve that endpoint, or status cannot report the real state.
+
 ## Pause and Resume
 
 The E2B provider supports the public async and sync sandbox lifecycle methods:
@@ -196,8 +200,9 @@ result = await sandbox.exec("cat /tmp/checkpoint.txt")
 For the synchronous `Sandbox`, call the same methods without `await`. Pause uses
 E2B's default memory-preserving snapshot. Resume connects to the same sandbox ID
 and refreshes the SDK handle so subsequent commands and file operations use the
-resumed connection. E2B's default connect timeout applies on resume (300 seconds
-in E2B 2.36), rather than the original creation TTL.
+resumed connection. Resume restarts the sandbox lifetime at `create.timeout_s`, the
+provider default; a per-sandbox `SandboxSpec.ttl_s` is not reapplied. Pause raises when E2B
+reports the sandbox in a state other than paused.
 
 Status reads the control plane without waking the guest. The provider does not
 retry failed pause/resume calls; a timeout or transport failure can leave the

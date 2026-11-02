@@ -222,6 +222,7 @@ class FakeSandbox:
         self.connect_error = None
         self.commands = FakeCommands(self)
         self.files = FakeFiles(self)
+        self.connection_config = types.SimpleNamespace(request_timeout=create_kwargs.get("request_timeout"))
         FakeSandbox.instances.append(self)
 
     @classmethod
@@ -453,8 +454,11 @@ async def test_real_sdk_user_agent_and_call_shapes(monkeypatch: pytest.MonkeyPat
     )
     # AsyncSandbox.kill(sandbox_id, ...) called on the class dispatches here.
     inspect.signature(e2b.AsyncSandbox._cls_kill).bind("sbx-id", **dict.fromkeys(_API_PARAM_KEYS), request_timeout=30)
+    # get_info/pause take **ApiParams, so signature().bind() accepts any keyword; check the key itself.
+    assert "request_timeout" in e2b.ApiParams.__annotations__
+    assert inspect.signature(e2b.AsyncSandbox.pause).parameters["keep_memory"].default is True
+    assert e2b.ConnectionConfig(request_timeout=7).request_timeout == 7
     inspect.signature(e2b.AsyncSandbox.get_info).bind(object(), request_timeout=30)
-    inspect.signature(e2b.AsyncSandbox.pause).bind(object(), request_timeout=30)
     inspect.signature(e2b.AsyncTemplate.exists).bind("base")
     inspect.signature(e2b.AsyncTemplate.build).bind(
         object(),
@@ -1254,7 +1258,11 @@ async def test_public_pause_resume_refreshes_e2b_handle(monkeypatch: pytest.Monk
         monkeypatch.setattr(FakeSandbox, "connect", connect)
         await sandbox.resume()
         connect.assert_awaited_once_with(
-            original.sandbox_id, api_key="test-key", api_url="https://gateway.example", request_timeout=12
+            original.sandbox_id,
+            timeout=3600,
+            api_key="test-key",
+            api_url="https://gateway.example",
+            request_timeout=12,
         )
         assert await sandbox.status() is SandboxStatus.RUNNING
         assert (await sandbox.exec("echo resumed")).stdout == "resumed"
@@ -1305,6 +1313,25 @@ async def test_lifecycle_rejects_closed_handle(operation: str) -> None:
     with pytest.raises(RuntimeError, match="carries no e2b sandbox object"):
         await getattr(provider, operation)(handle)
     assert len(FakeSandbox.instances) == 1
+
+
+async def test_pause_raises_when_the_sandbox_did_not_pause(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = E2BProvider(create={"template": "base"})
+    handle = await provider.create(_spec())
+    # The SDK returns False for every 409, including states that cannot be paused.
+    monkeypatch.setattr(handle.raw, "pause", AsyncMock(return_value=False))
+    with pytest.raises(RuntimeError, match="was not paused"):
+        await provider.pause(handle)
+
+
+async def test_resume_keeps_the_create_lifetime_and_request_timeout(monkeypatch: pytest.MonkeyPatch) -> None:
+    provider = E2BProvider(create={"template": "base", "timeout_s": 1800})
+    handle = await provider.create(_spec(ttl_s=60, ready_timeout_s=90))
+    connect = AsyncMock(return_value=FakeSandbox(sandbox_id=handle.sandbox_id))
+    monkeypatch.setattr(FakeSandbox, "connect", connect)
+    await provider.resume(handle)
+    # The provider lifetime applies: the handle does not keep the spec's ttl_s.
+    connect.assert_awaited_once_with(handle.sandbox_id, timeout=1800, request_timeout=90.0)
 
 
 async def test_create_kills_at_timeout_by_default() -> None:

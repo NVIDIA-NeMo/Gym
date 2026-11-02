@@ -609,13 +609,27 @@ class E2BProvider:
 
     async def pause(self, handle: SandboxHandle) -> None:
         """Pause the sandbox through the E2B SDK without replaying failed requests."""
-        await self._sandbox(handle).pause(**self._request_params())
+        sandbox = self._sandbox(handle)
+        if await sandbox.pause(**self._request_params()) is False:
+            # The SDK maps every 409 to False; only an already-paused sandbox is a no-op.
+            info = await sandbox.get_info(**self._request_params())
+            if info.state != "paused":
+                raise RuntimeError(f"e2b sandbox {handle.sandbox_id!r} was not paused (state: {info.state})")
 
     async def resume(self, handle: SandboxHandle) -> None:
         """Resume the sandbox and replace its SDK handle only after success."""
-        self._sandbox(handle)
+        sandbox = self._sandbox(handle)
         e2b = _require_e2b_sdk()
-        handle.raw = await e2b.AsyncSandbox.connect(handle.sandbox_id, **self._api_params())
+        params = self._api_params()
+        # Keep the request timeout the SDK retained from create (ready_timeout_s).
+        params.setdefault("request_timeout", sandbox.connection_config.request_timeout)
+        # Resume restarts the sandbox lifetime, which is the SDK's 300 s default without a timeout.
+        timeout_s = self._create.timeout_s
+        handle.raw = await e2b.AsyncSandbox.connect(
+            handle.sandbox_id,
+            timeout=max(1, math.ceil(timeout_s)) if timeout_s is not None else None,
+            **params,
+        )
 
     async def status(self, handle: SandboxHandle) -> SandboxStatus:
         e2b = _require_e2b_sdk()
