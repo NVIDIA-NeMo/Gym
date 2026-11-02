@@ -78,6 +78,7 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+      new_sandbox_grace_s: 15.0
 ```
 
 Pass the provider config beside the agent and model configs:
@@ -174,6 +175,14 @@ already closed, and clears the local handle only after confirmed cleanup. Serial
 carry the E2B sandbox ID for reconnection through another configured provider instance. E2B's
 public connect operation may extend a near-expiry sandbox to its SDK-default connection lifetime
 (300 seconds in E2B 2.36).
+
+For `operations.new_sandbox_grace_s` seconds after create, the provider retries calls that a
+sandbox answers as if it were gone. An AgentEnv gateway can briefly answer 404 "sandbox
+assignment not found" for a running sandbox, and a new VM can briefly refuse connections (502)
+during a create wave. File reads, file writes and close retry both errors. Command starts retry
+only the 404, because a 502 can come after the sandbox received the command. During the grace
+period, `status()` reports a sandbox that does not answer as `UNKNOWN`, not `STOPPED`. Set it to
+`0` to turn this off.
 
 ## Security and Isolation
 

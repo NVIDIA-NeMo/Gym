@@ -85,6 +85,23 @@ _API_PARAM_KEYS = (
 # ``create.network`` keys -> REST API field names.
 _NETWORK_API_KEYS = {"allow_out": "allowOut", "deny_out": "denyOut"}
 
+_NEW_SANDBOX_RETRY_INTERVAL_S = 0.5
+
+
+def _is_new_sandbox_error(exc: BaseException, *, include_unreachable: bool) -> bool:
+    """Whether ``exc`` is a hiccup a sandbox can show in its first seconds.
+
+    An AgentEnv gateway answers 404 "sandbox assignment not found" while a
+    node heartbeat briefly drops a running sandbox's route; the request never
+    reached the sandbox. A new VM can also refuse connections for a few
+    seconds under a create wave, which the SDK reports as an envd 502 (e2b
+    2.46: "likely due to sandbox timeout"; later: "could not be reached").
+    """
+    message = str(exc)
+    if "sandbox assignment not found" in message:
+        return True
+    return include_unreachable and ("likely due to sandbox timeout" in message or "could not be reached" in message)
+
 
 class E2BCreateError(SandboxCreateError):
     """Raised when a sandbox cannot be created."""
@@ -262,11 +279,16 @@ class E2BOperationConfig:
     retries: int = 2
     retry_delay_s: float = 0.5
     retry_max_delay_s: float = 8.0
+    # For this long after create, a sandbox that answers "not found" or
+    # "unreachable" is treated as still settling in and the call is retried
+    # (see ``_is_new_sandbox_error``). 0 disables it.
+    new_sandbox_grace_s: float = 15.0
 
     def __post_init__(self) -> None:
         _validate_nonnegative_int("operations.retries", self.retries)
         _validate_nonnegative_number("operations.retry_delay_s", self.retry_delay_s)
         _validate_nonnegative_number("operations.retry_max_delay_s", self.retry_max_delay_s)
+        _validate_nonnegative_number("operations.new_sandbox_grace_s", self.new_sandbox_grace_s)
 
 
 class E2BProvider:
@@ -287,6 +309,8 @@ class E2BProvider:
         self._exec = _config_from_mapping(E2BExecConfig, exec)
         self._operations = _config_from_mapping(E2BOperationConfig, operations)
         self._warned_resource_specs: set[str] = set()
+        # sandbox_id -> monotonic end of its new-sandbox grace period.
+        self._new_until: dict[str, float] = {}
 
     # ---------------------------------------------------------------- helpers
 
@@ -428,6 +452,33 @@ class E2BProvider:
         assert last_exc is not None
         raise last_exc
 
+    def _is_new(self, sandbox_id: str) -> bool:
+        return monotonic() < self._new_until.get(sandbox_id, 0.0)
+
+    async def _retry_while_new(
+        self,
+        sandbox_id: str,
+        factory: Callable[[], Awaitable[T]],
+        *,
+        operation: str,
+        include_unreachable: bool,
+    ) -> T:
+        """Retry ``factory`` while a sandbox this provider just created is settling in.
+
+        Pass ``include_unreachable=False`` for calls that are unsafe to repeat
+        once delivered: a 502 can come after the sandbox received the request.
+        """
+        while True:
+            try:
+                return await factory()
+            except Exception as exc:
+                if not self._is_new(sandbox_id) or not _is_new_sandbox_error(
+                    exc, include_unreachable=include_unreachable
+                ):
+                    raise
+                LOGGER.info("e2b %s on new sandbox %s failed (%s); retrying", operation, sandbox_id, exc)
+                await asyncio.sleep(_NEW_SANDBOX_RETRY_INTERVAL_S)
+
     @staticmethod
     def _sandbox(handle: SandboxHandle) -> Any:
         sandbox = handle.raw
@@ -483,6 +534,9 @@ class E2BProvider:
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
+        now = monotonic()
+        self._new_until = {sandbox_id: until for sandbox_id, until in self._new_until.items() if until > now}
+        self._new_until[sandbox.sandbox_id] = now + self._operations.new_sandbox_grace_s
         return SandboxHandle(sandbox_id=sandbox.sandbox_id, provider_name=self.name, raw=sandbox)
 
     async def _create_with_extension_params(self, e2b: Any, kwargs: dict[str, Any]) -> Any:
@@ -610,10 +664,13 @@ class E2BProvider:
         try:
             running = await sandbox.is_running(**self._request_params())
         except not_found:
-            return SandboxStatus.STOPPED
+            running = False
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
             return SandboxStatus.UNKNOWN
-        return SandboxStatus.RUNNING if running else SandboxStatus.STOPPED
+        if running:
+            return SandboxStatus.RUNNING
+        # A sandbox that create just returned is not gone; it may be briefly unroutable.
+        return SandboxStatus.UNKNOWN if self._is_new(handle.sandbox_id) else SandboxStatus.STOPPED
 
     async def close(self, handle: SandboxHandle) -> None:
         e2b = _require_e2b_sdk()
@@ -625,18 +682,25 @@ class E2BProvider:
             for exc in (getattr(e2b, "SandboxNotFoundException", None), getattr(e2b, "NotFoundException", None))
             if isinstance(exc, type)
         )
-        try:
-            killed = await self._with_retries(
-                lambda: sandbox.kill(**self._api_params()),
-                operation="kill",
-                retry_timeouts=True,
-            )
-        except not_found:
-            # Already gone (expired TTL or killed elsewhere) - closing is idempotent.
+        while True:
+            try:
+                killed = await self._with_retries(
+                    lambda: sandbox.kill(**self._api_params()),
+                    operation="kill",
+                    retry_timeouts=True,
+                )
+            except not_found:
+                killed = False
+            # Not found means already gone (expired TTL or killed elsewhere), so
+            # closing is idempotent -- unless the sandbox is new and only
+            # briefly unroutable, where giving up would leak it until its TTL.
+            if killed is not False or not self._is_new(handle.sandbox_id):
+                break
+            LOGGER.info("e2b sandbox %s not found on close right after create; retrying", handle.sandbox_id)
+            await asyncio.sleep(_NEW_SANDBOX_RETRY_INTERVAL_S)
+        if killed is False:
             LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
-        else:
-            if killed is False:
-                LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
+        self._new_until.pop(handle.sandbox_id, None)
         handle.raw = None
 
     async def aclose(self) -> None:
@@ -671,7 +735,12 @@ class E2BProvider:
             if command_timeout is not None and float(command_timeout) > 0
             else None
         )
-        handle = await sandbox.commands.run(**kwargs, background=True)
+        handle = await self._retry_while_new(
+            sandbox.sandbox_id,
+            lambda: sandbox.commands.run(**kwargs, background=True),
+            operation="exec",
+            include_unreachable=False,
+        )
         pid = getattr(handle, "pid", None)
         stdout = ""
         stderr = ""
@@ -770,7 +839,12 @@ class E2BProvider:
             if self._exec.background:
                 result = await self._run_background(sandbox, kwargs)
             else:
-                result = await sandbox.commands.run(**kwargs)
+                result = await self._retry_while_new(
+                    handle.sandbox_id,
+                    lambda: sandbox.commands.run(**kwargs),
+                    operation="exec",
+                    include_unreachable=False,
+                )
         except Exception as exc:
             # A non-zero exit is a normal outcome, not a provider failure.
             if isinstance(exit_exc, type) and isinstance(exc, exit_exc):
@@ -799,16 +873,26 @@ class E2BProvider:
 
     async def write_file(self, handle: SandboxHandle, target_path: str, data: str | bytes) -> None:
         sandbox = self._sandbox(handle)
-        await self._with_retries(
-            lambda: sandbox.files.write(target_path, data, **self._request_params()),
+        await self._retry_while_new(
+            handle.sandbox_id,
+            lambda: self._with_retries(
+                lambda: sandbox.files.write(target_path, data, **self._request_params()),
+                operation="write_file",
+            ),
             operation="write_file",
+            include_unreachable=True,
         )
 
     async def read_file(self, handle: SandboxHandle, source_path: str) -> bytes:
         sandbox = self._sandbox(handle)
-        data = await self._with_retries(
-            lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
+        data = await self._retry_while_new(
+            handle.sandbox_id,
+            lambda: self._with_retries(
+                lambda: sandbox.files.read(source_path, format="bytes", **self._request_params()),
+                operation="read_file",
+            ),
             operation="read_file",
+            include_unreachable=True,
         )
         return data if isinstance(data, bytes) else bytes(data)
 

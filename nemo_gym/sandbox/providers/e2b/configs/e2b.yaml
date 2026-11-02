@@ -113,3 +113,6 @@ sandbox:
       retries: 2
       retry_delay_s: 0.5
       retry_max_delay_s: 8.0
+      # Seconds after create during which "not found" and "unreachable"
+      # answers from a just-created sandbox are retried. 0 disables it.
+      new_sandbox_grace_s: 15.0
