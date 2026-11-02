@@ -3059,7 +3059,7 @@ class TestFailureRouting:
         failures_path_for(out).write_bytes(b"".join(json.dumps(capped).encode() + b"\n" for _ in range(3)))
         assert (2, 0) in load_gated_keys(out, {})[1]
 
-        # `gym eval resubmit` records the sidecar length; the three earlier attempts no longer count to the cap.
+        # `gym job resubmit` records the sidecar length; the three earlier attempts no longer count to the cap.
         (tmp_path / "rollouts_resubmit_offset").write_text("3\n")
         assert (2, 0) not in load_gated_keys(out, {}).get(1, set())
         assert load_failure_attempts(out, since_resubmit=True) == {}

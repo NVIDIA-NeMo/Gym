@@ -1,6 +1,6 @@
 ---
 title: "Job Management"
-description: "List submitted runs, see what is happening to them, find where their parts are, stop them, and read their logs."
+description: "List submitted runs, see what is happening to them, find where their parts are, stop them, read their logs, and queue them again."
 position: 6
 ---
 
@@ -13,6 +13,7 @@ position: 6
 | `gym job info ID [BENCHMARK]` | Yes, for job ids | Describes one submission and where its parts are. |
 | `gym job cancel ID BENCHMARK` | Yes | Stops a benchmark of a submission, or every benchmark with `--all`. |
 | `gym job logs ID BENCHMARK` | Yes, for the current job id | Prints one of a benchmark's logs. |
+| `gym job resubmit ID BENCHMARK` | Yes | Queues a benchmark of a submission again, in place. |
 
 `gym job status` is the only command that reports live state. `gym job list` never touches the network, so it is instant and works offline. `gym job --help` lists every command, and `gym eval submit` ends by printing the submission's id and the command to check on it.
 
@@ -135,3 +136,15 @@ gym job logs ID BENCHMARK [--source NAME] [--instance ID] [--tail N]
 - A planned log that has no file means the job has not reached the step that writes it.
 - A submission made before log sources were recorded says so and points at the job's `logs/` directory on the cluster.
 - Bytes in a log that are not UTF-8 are replaced, not an error. There is no `--follow` yet.
+
+## Queue a benchmark again
+
+```bash
+gym job resubmit ID BENCHMARK
+```
+
+`resubmit` queues the benchmark's `job.sh` again from its job directory and prints the new job id. It refuses while a job of that benchmark is still queued or running in that directory, so two jobs never write one run. The job it queues resets the run's retry and attempt state when it starts, so a run that stopped at its walltime cap or its retry limit gets a fresh budget and resumes from the rollouts already on disk. The record is updated with the new job id.
+
+<Note>
+`gym eval resubmit` is the old name of this command. It still works, prints a deprecation warning to stderr, and is removed on 2026-11-23. Use `gym job resubmit`.
+</Note>

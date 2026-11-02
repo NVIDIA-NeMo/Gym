@@ -19,13 +19,14 @@ import os
 import re
 import subprocess
 from concurrent.futures import FIRST_COMPLETED, ThreadPoolExecutor, wait
+from datetime import date, timedelta
 from pathlib import Path
 
 import pytest
 import yaml
 from omegaconf import OmegaConf
 
-from nemo_gym.cli.main import COMMANDS, _eval_resubmit
+from nemo_gym.cli.main import COMMANDS, EVAL_RESUBMIT_REMOVAL_DATE, _eval_resubmit, _job_resubmit
 from nemo_gym.orchestration.api import SAVED_CONFIG, ResumeConfig, SubmitConfig
 from nemo_gym.orchestration.executors.base import BaseExecutor, UnsupportedOperationError
 from nemo_gym.orchestration.executors.capabilities import Resubmittable
@@ -188,15 +189,78 @@ def test_the_record_is_found_by_its_id_and_benchmark_through_the_local_index(tmp
     assert not (slurm_bin / "cwd").exists()
 
 
-def test_the_cli_takes_a_gym_job_id_and_a_benchmark(
+def _cli_args(job_dir: Path) -> argparse.Namespace:
+    return argparse.Namespace(gym_job_id=job_dir.parent.name, benchmark="gsm8k")
+
+
+def test_gym_job_resubmit_takes_an_id_and_a_benchmark_and_prints_the_new_job_id(
     tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
 ) -> None:
     job_dir = _staged_run(tmp_path)
 
-    _eval_resubmit(argparse.Namespace(gym_job_id=job_dir.parent.name, benchmark="gsm8k"), [])
+    _job_resubmit(_cli_args(job_dir), [])
 
+    captured = capsys.readouterr()
+    assert captured.out == "4242\n"
+    assert "deprecated" not in captured.err
+    assert "Slurm" not in COMMANDS["job resubmit"].summary
+
+
+def test_the_deprecated_gym_eval_resubmit_still_works_and_names_its_replacement_and_its_end(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    _eval_resubmit(_cli_args(job_dir), [])
+
+    captured = capsys.readouterr()
+    assert captured.out == "4242\n"
+    assert f"use `gym job resubmit {job_dir.parent.name} gsm8k`" in captured.err
+    assert f"goes away on {EVAL_RESUBMIT_REMOVAL_DATE}" in captured.err
+    assert COMMANDS["eval resubmit"].summary.startswith("Deprecated, use `gym job resubmit`")
+
+
+@pytest.mark.parametrize("command", [_job_resubmit, _eval_resubmit])
+def test_both_resubmit_commands_refuse_a_stray_override_and_let_the_verbose_one_through(
+    tmp_path: Path, slurm_bin: Path, capsys: pytest.CaptureFixture, command
+) -> None:
+    job_dir = _staged_run(tmp_path)
+
+    command(_cli_args(job_dir), ["+verbose=true"])
     assert capsys.readouterr().out == "4242\n"
-    assert "Slurm" not in COMMANDS["eval resubmit"].summary
+
+    parser = argparse.ArgumentParser()
+    args = _cli_args(job_dir)
+    args._parser = parser
+    with pytest.raises(SystemExit):
+        command(args, ["foo=bar"])
+    assert "resubmit does not accept Hydra overrides" in capsys.readouterr().err
+
+
+def _removal_reminder(today: date) -> str | None:
+    """What to say once `gym eval resubmit` is due for removal, and nothing before then."""
+    if today < EVAL_RESUBMIT_REMOVAL_DATE:
+        return None
+    return (
+        f"`gym eval resubmit` was deprecated in favour of `gym job resubmit` and was due for removal on "
+        f"{EVAL_RESUBMIT_REMOVAL_DATE}. Remove the `eval resubmit` command, `_eval_resubmit` and "
+        "EVAL_RESUBMIT_REMOVAL_DATE from nemo_gym/cli/main.py, the tests of the alias in this file, and this guard."
+    )
+
+
+def test_the_reminder_stays_quiet_until_the_removal_date_and_then_says_what_to_remove() -> None:
+    assert _removal_reminder(EVAL_RESUBMIT_REMOVAL_DATE - timedelta(days=1)) is None
+
+    on_the_day = _removal_reminder(EVAL_RESUBMIT_REMOVAL_DATE)
+    assert str(EVAL_RESUBMIT_REMOVAL_DATE) in on_the_day
+    assert "Remove the `eval resubmit` command" in on_the_day
+    assert _removal_reminder(EVAL_RESUBMIT_REMOVAL_DATE + timedelta(days=30)) == on_the_day
+
+
+def test_gym_eval_resubmit_is_removed_on_schedule() -> None:
+    reminder = _removal_reminder(date.today())
+
+    assert reminder is None, reminder
 
 
 @pytest.mark.parametrize(("executor", "supported"), [(SlurmExecutor, True), (KubernetesExecutor, False)])
@@ -562,7 +626,7 @@ def _policy_config(tmp_path: Path, env: dict[str, str]) -> dict:
 
 
 def _saved_config(job_dir: Path) -> SubmitConfig:
-    """Load the run's saved config the way `gym eval resubmit` does."""
+    """Load the run's saved config the way `gym job resubmit` does."""
     return SlurmExecutor._saved_config(LocalConnection(), job_dir.parent)
 
 
