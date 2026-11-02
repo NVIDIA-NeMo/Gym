@@ -32,7 +32,7 @@ import hashlib
 import json
 import logging
 import re
-from asyncio import sleep
+from asyncio import sleep, to_thread
 from collections import OrderedDict
 from dataclasses import dataclass
 from pathlib import Path
@@ -103,6 +103,8 @@ QUESTION_SPAN_FAMILY = "question_span"
 MALFORMED_URL_FAMILY = "malformed_url"
 # This server's own fail-closed rule: a search from a session with no seeded question cannot be span-checked.
 UNSEEDED_SESSION_FAMILY = "unseeded_session"
+# This server's bound on the whole-page check: a fetched page longer than ``max_page_chars`` is refused unread.
+OVERSIZED_PAGE_FAMILY = "oversized_page"
 
 # Keys Tavily rejects outright; the pool moves on to the next key for the same call.
 TAVILY_KEY_REJECTED_CODES = frozenset({401, 432, 433})
@@ -132,9 +134,17 @@ _SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re
 _WAYBACK_PATH_RE = re.compile(r"^/web/[^/]*/(.+)$", re.IGNORECASE | re.DOTALL)
 _GOOGLE_CACHE_RE = re.compile(r"cache:(?:[A-Za-z0-9_-]+:)?(.+)$", re.DOTALL)
 _WORD_RE = re.compile(r"\w+")
-_DATA_URI_RE = re.compile(r"data:[a-z]+/[a-z0-9.+-]+;base64,[A-Za-z0-9+/=\s]+", re.IGNORECASE)
+# A data URI with or without media-type parameters, base64 or percent-encoded, up to the end of its Markdown
+# destination: the payload stops at whitespace, ``)``, a quote or ``>``, so following prose is kept. Every
+# repetition is bounded, so the scan stays linear on adversarial pages.
+_DATA_URI_RE = re.compile(
+    r"\bdata:[\w.+-]{1,127}/[\w.+-]{1,127}(?:;[\w.+-]{1,127}=[^;,\s)]{0,256}){0,16}(?:;base64)?,[^\s)\"'>]*",
+    re.IGNORECASE,
+)
 _TITLE_SEPARATOR_RE = re.compile(r"\s+(?:\||-|–|—|·|•|»|::)\s+")
-_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}\s+(.+?)\s*$", re.MULTILINE)
+# Linear on every line: the capture starts at a non-blank character and runs to the end of the line, and the
+# closing ``#`` sequence and trailing blanks are stripped afterwards, outside the regex.
+_MARKDOWN_HEADING_RE = re.compile(r"^#{1,6}[ \t]+(\S.*)$", re.MULTILINE)
 # Hosts whose job is to serve another page: their path remainder is treated as the wrapped URL. Every host
 # under ``WRAPPER_DOMAINS`` counts (``web.archive.org``, ``wayback.archive.org``, ...). Hosts the blocklist
 # names outright (archive.ph and friends, r.jina.ai, translate.goog, translate.google.com, 12ft.io,
@@ -247,6 +257,7 @@ class Block:
             if self.where == "site: operator"
             else "the URL is not a valid http(s) URL the policy can check",
             UNSEEDED_SESSION_FAMILY: "search is served only to a rollout session seeded with its question",
+            OVERSIZED_PAGE_FAMILY: "the page is larger than the policy can check",
         }[self.family]
         return f"Refused by the HLE web-tool policy: {reason}."
 
@@ -489,6 +500,18 @@ def url_candidates(url: str) -> List[str]:
     raise URLExpansionLimitError(f"URL nested or encoded at most {MAX_URL_DECODE_ROUNDS} levels deep")
 
 
+def markdown_heading_title(markdown: str) -> str:
+    """The text of the first non-empty ATX heading (``# Title``, closing ``#`` sequence removed), else ``""``."""
+    for match in _MARKDOWN_HEADING_RE.finditer(markdown):
+        title = match.group(1).rstrip()
+        body = title.rstrip("#")
+        if body != title and (not body or body[-1] in " \t"):
+            title = body.rstrip()
+        if title:
+            return title
+    return ""
+
+
 def question_words(text: str) -> Tuple[str, ...]:
     """Case-folded maximal runs of word characters: the unit of the verbatim-span rule."""
     return tuple(_WORD_RE.findall(text.casefold()))
@@ -674,7 +697,11 @@ class HLEWebToolsResourcesServerConfig(BaseResourcesServerConfig):
     max_query_chars: int = Field(default=TAVILY_MAX_QUERY_CHARS, ge=1)
     search_depth: Literal["basic", "advanced"] = "advanced"
     extract_depth: Literal["basic", "advanced"] = "basic"
+    # A fetched page (the provider's Markdown, before anything is removed or cut) longer than this is refused
+    # unread as ``oversized_page``: the content families are checked on the whole page, and this bounds that scan.
+    max_page_chars: int = Field(default=1_000_000, ge=1)
     max_cached_pages: int = Field(default=128, ge=0)
+    # A page whose sanitized Markdown is longer than this is checked and served but not cached.
     max_cached_page_chars: int = Field(default=500_000, ge=1)
     max_http_attempts: int = Field(default=3, ge=1)
     http_timeout_s: float = Field(default=60, gt=0)
@@ -717,6 +744,14 @@ class CachedPage:
     final_url: str
     title: str
     markdown: str
+
+
+def build_page(raw: str, title: Any, final_url: str) -> CachedPage:
+    """The page as served and cached: data URIs removed, the provider's title or else the first heading."""
+    markdown = _DATA_URI_RE.sub("[data URI removed]", raw)
+    if not isinstance(title, str) or not title.strip():
+        title = markdown_heading_title(markdown)
+    return CachedPage(final_url=final_url, title=title.strip(), markdown=markdown)
 
 
 class HLEWebToolsResourcesServer(SimpleResourcesServer):
@@ -889,6 +924,7 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             return WebFetchResponse(text=block.refusal(), truncated=False, refused=True)
 
         page = self._page_cache.get(url)
+        raw: Optional[str] = None
         if page is not None:
             self._page_cache.move_to_end(url)
         else:
@@ -901,29 +937,38 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
                 detail = f": {str(error)[:200]}" if error else ""
                 return WebFetchResponse(text=f"Fetch failed for {url}{detail}", truncated=False, refused=False)
             result = results[0]
-            markdown = _DATA_URI_RE.sub("[data URI removed]", result["raw_content"])
-            markdown = markdown[: self.config.max_cached_page_chars]
-            title = result.get("title")
-            if not isinstance(title, str) or not title.strip():
-                heading = _MARKDOWN_HEADING_RE.search(markdown)
-                title = heading.group(1) if heading else ""
+            raw = result["raw_content"]
+            if len(raw) > self.config.max_page_chars:
+                block = Block(
+                    OVERSIZED_PAGE_FAMILY,
+                    f"max_page_chars={self.config.max_page_chars}",
+                    f"{len(raw)} characters",
+                    "fetched content",
+                )
+                self._log_block("web_fetch", session_id, block)
+                return WebFetchResponse(text=block.refusal(), truncated=False, refused=True)
             final_url = result.get("url") if isinstance(result.get("url"), str) else url
-            page = CachedPage(final_url=final_url, title=title.strip(), markdown=markdown)
-            if self.config.max_cached_pages:
-                self._page_cache[url] = page
-                while len(self._page_cache) > self.config.max_cached_pages:
-                    self._page_cache.popitem(last=False)
+            page = await to_thread(build_page, raw, result.get("title"), final_url)
 
-        # Cached or fresh, every response is checked: the reported final URL, then the title and the Markdown.
+        # Cached or fresh, every response is checked: the reported final URL, then the title and the content.
+        # A fresh page's content is the provider's whole page before any data URI is removed or anything is cut;
+        # a cached page's is its sanitized Markdown. The regex scans run off the event loop.
         block = None
         if page.final_url != url:
             block = self._blocklist.url_block(page.final_url, "fetched URL")
-        block = block or self._blocklist.text_block(page.title, "fetched title")
-        block = block or self._blocklist.text_block(page.markdown, "fetched content")
+        block = block or await to_thread(self._content_block, page, raw)
         if block is not None:
             self._page_cache.pop(url, None)
             self._log_block("web_fetch", session_id, block)
             return WebFetchResponse(text=block.refusal(), truncated=False, refused=True)
+        if (
+            raw is not None
+            and self.config.max_cached_pages
+            and len(page.markdown) <= self.config.max_cached_page_chars
+        ):
+            self._page_cache[url] = page
+            while len(self._page_cache) > self.config.max_cached_pages:
+                self._page_cache.popitem(last=False)
 
         content = page.markdown
         truncated = len(content) > self.config.max_fetch_chars
@@ -946,6 +991,16 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         )
 
     # ---- policy helpers ----
+
+    def _content_block(self, page: CachedPage, raw: Optional[str]) -> Optional[Block]:
+        """The text families against the fetched title, the provider's raw page (fresh fetches) and the
+        sanitized Markdown (unless it is the raw page unchanged)."""
+        block = self._blocklist.text_block(page.title, "fetched title")
+        if block is None and raw is not None:
+            block = self._blocklist.text_block(raw, "fetched content")
+        if block is None and page.markdown != raw:
+            block = self._blocklist.text_block(page.markdown, "fetched content")
+        return block
 
     def _result_block(self, url: str, title: str, snippet: str) -> Optional[Block]:
         block = self._blocklist.url_block(url, "result URL")

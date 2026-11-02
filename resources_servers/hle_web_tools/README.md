@@ -31,7 +31,7 @@ Diamond README lists it as a residual under Reference preset.
 | Tool | Protocol | Here |
 | --- | --- | --- |
 | `web_search(query)` | URLs, titles and snippets; at most 20 results per call before filtering | Tavily `/search` with `max_results: 20`, `search_depth: advanced`, no generated answer, no page bodies, no images; every result is filtered by URL, title and snippet; the survivors (at most 20) are rendered as `[n] title / URL / Snippet` |
-| `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDFs come back as text); `data:` URIs are removed; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]` |
+| `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDFs come back as text); `data:` URIs (base64 or percent-encoded, with or without media-type parameters) are replaced by `[data URI removed]`; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]` |
 
 Tavily is the backend for both, which is the one residual difference from upstream's wrapper: the
 protocol does not name a search or extraction provider, so which pages a query surfaces, how they are
@@ -101,10 +101,17 @@ Beyond the families, the protocol's own refusals:
   `12ft.io`, `corsproxy.io`, `allorigins.win`, `codetabs.com`, `thingproxy.freeboard.io`,
   `whateverorigin.org`) are blocked outright by the `domains` family.
 - **Fetched responses** are checked after the fetch: the final URL the backend reports (a redirect to a
-  blocked host is refused), then the title and the full Markdown against `url_patterns` and
-  `patterns_case_sensitive`. A page that fails is refused whole and evicted from the cache. The page
-  cache (`max_cached_pages`, keyed by requested URL) runs exactly the same checks on a hit, so a policy
-  that changes after a page was cached still applies.
+  blocked host is refused), then the title and the content against `url_patterns` and
+  `patterns_case_sensitive`. On a fresh fetch the content checked is the provider's whole page, before
+  any data URI is removed and before any cut, and then the sanitized Markdown as well; a match anywhere,
+  even past the 60,000 characters the model would read, refuses the page whole. That scan is bounded: a
+  page longer than `max_page_chars` (1,000,000) is refused unread with the family `oversized_page`, and
+  the regex work (sanitizing, the heading fallback for the title, the content checks) runs in a worker
+  thread rather than on the event loop. A refused page is never cached. The page cache
+  (`max_cached_pages`, keyed by requested URL) keeps the sanitized Markdown whole and runs the same
+  final-URL, title and content checks on a hit, so a policy that changes after a page was cached still
+  applies; those cache-hit rechecks see the sanitized cached Markdown, not the provider's raw page. A
+  page whose sanitized Markdown is longer than `max_cached_page_chars` is served but not cached.
 
 Every refused call is logged at WARNING with the tool, the session, the family, the rule, where it
 matched and the first 200 characters of the matched subject; every search result dropped by the filter
@@ -143,7 +150,8 @@ hle_tools:
 | `max_fetch_chars` | 60,000 | the Markdown cap |
 | `max_query_chars` | 400 | Tavily rejects longer queries |
 | `search_depth`, `extract_depth` | `advanced`, `basic` | Tavily depths |
-| `max_cached_pages`, `max_cached_page_chars` | 128, 500,000 | the fetched-page cache |
+| `max_page_chars` | 1,000,000 | a fetched page longer than this (the provider's Markdown, before anything is removed or cut) is refused unread as `oversized_page` |
+| `max_cached_pages`, `max_cached_page_chars` | 128, 500,000 | the fetched-page cache: at most this many pages, and a page longer than this is served but not cached |
 | `max_http_attempts`, `http_timeout_s` | 3, 60 | the retry budget per call and the timeout per attempt |
 
 Run the server single-worker (leave `num_workers` unset): seeded questions and the page cache live in the
@@ -184,4 +192,6 @@ real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check
 pool, malformed provider bodies (a tool error, not an HTTP 500) and the blocklist digest pin. A table of URL
 spellings from review (expansion overflow, a fourth decoded form, backslash, whitespace and userinfo,
 canonical-form prefixes, archive.org variants) must be refused before the fetch while ordinary redirect and
-query URLs stay allowed; `site:` operands are parsed to hostnames; and long URLs are decided within a second.
+query URLs stay allowed; `site:` operands are parsed to hostnames; long URLs and a 100,000-character heading
+are handled within a second; data URIs are stripped on fresh and cached fetches without eating the prose
+after them; and a blocked span past every cut still refuses the page.

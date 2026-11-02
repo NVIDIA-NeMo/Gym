@@ -355,21 +355,24 @@ async def test_site_operands_are_read_as_hostnames(server, caplog, query, family
 
 
 @pytest.mark.parametrize(
-    "url",
+    "url, page",
     [
         # 3,898 characters: under the cap, 190 distinct embedded URLs, more candidates than are checked
-        "https://a.example/" + "".join(f"https://e{i}.example/" for i in range(190)),
-        "https://a.example/" + "https://" * 1_250,  # 10,018 characters: over the cap
+        ("https://a.example/" + "".join(f"https://e{i}.example/" for i in range(190)), None),
+        ("https://a.example/" + "https://" * 1_250, None),  # 10,018 characters: over the cap
+        ("https://example.com/heading", "# a" + " " * 100_000 + "b\n\nbody"),  # no provider title: heading parsed
     ],
-    ids=["url-under-cap", "url-over-cap"],
+    ids=["url-under-cap", "url-over-cap", "heading-100k"],
 )
-async def test_long_urls_are_decided_in_linear_time(server, url):
-    backend = stub_backend(server, page="A page body")
+async def test_long_urls_and_headings_are_handled_in_linear_time(server, url, page):
+    backend = stub_backend(server, page=page)
     started = time.perf_counter()
     response = await fetch(server, url)
     assert time.perf_counter() - started < 1.0
-    assert response.refused
-    backend.extract.assert_not_awaited()
+    assert response.refused is (page is None)
+    assert backend.extract.await_count == (0 if page is None else 1)
+    if page is not None:
+        assert response.text.startswith("Title: a ")
 
 
 async def test_fetched_markdown_is_capped_at_60000_characters_with_a_marker(server):
@@ -384,11 +387,38 @@ async def test_fetched_markdown_is_capped_at_60000_characters_with_a_marker(serv
 
 
 async def test_fetch_renders_title_and_final_url_and_strips_data_uris(server):
-    page = "# Spin structures\n\nIntro ![figure](data:image/png;base64,iVBORw0KGgo=) end"
-    stub_backend(server, page=page, final_url="https://example.com/final")
-    response = await fetch(server, "https://example.com/start")
-    assert response.text.startswith("Title: Spin structures\nURL: https://example.com/final\n\n")
-    assert "base64" not in response.text and "[data URI removed]" in response.text
+    page = (
+        "# Spin structures #\n\nIntro ![figure](data:image/png;base64,iVBORw0KGgo=) end "
+        "![svg](data:image/svg+xml,%3Csvg%3E%3C/svg%3E) "
+        "![param](data:image/png;charset=utf-8;base64,AAAA) "
+        "bare data:image/png;base64,AAAA followed by prose ![link](https://example.com/a.png)"
+    )
+    backend = stub_backend(server, page=page, final_url="https://example.com/final")
+    fresh = await fetch(server, "https://example.com/start")
+    cached = await fetch(server, "https://example.com/start")
+    assert backend.extract.await_count == 1 and cached.text == fresh.text
+    assert fresh.text == (
+        "Title: Spin structures\nURL: https://example.com/final\n\n# Spin structures #\n\n"
+        "Intro ![figure]([data URI removed]) end ![svg]([data URI removed]) ![param]([data URI removed]) "
+        "bare [data URI removed] followed by prose ![link](https://example.com/a.png)"
+    )
+
+
+async def test_fetched_content_is_checked_whole_before_it_is_cut():
+    """The content families see the provider's whole page: a blocked span past every cut still refuses it.
+    A page above max_page_chars is refused unread, and one above max_cached_page_chars is served whole."""
+    server = make_server(max_page_chars=600_000, max_cached_page_chars=100)
+    stub_backend(server, page="x" * 500_001 + " HLE answers")
+    refused = await fetch(server, "https://example.com/tail")
+    assert refused.refused and "blocked pattern" in refused.text and not server._page_cache
+    stub_backend(server, page="x" * 600_001)
+    oversized = await fetch(server, "https://example.com/huge")
+    assert oversized.refused and "larger than the policy can check" in oversized.text
+    backend = stub_backend(server, page="y" * 200)
+    for _ in range(2):
+        served = await fetch(server, "https://example.com/clean")
+        assert not served.truncated and "y" * 200 in served.text
+    assert backend.extract.await_count == 2 and not server._page_cache  # served whole, not cached
 
 
 async def test_redirect_to_a_blocked_host_is_refused_after_the_fetch(server, caplog):
