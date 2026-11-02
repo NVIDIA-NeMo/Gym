@@ -95,6 +95,67 @@ def atomic_json(path, value):
     temporary.replace(path)
 
 
+# Where each episode with a Gym identity is indexed by it: <artifacts_dir>/<dir>/<run id>/<task>-<rollout>-<attempt>
+# holds the episode's identity, so a resumed run finds its graded attempts without reading the whole shared directory.
+_GYM_ROLLOUTS_DIR = "gym-rollouts"
+_GYM_RUN_ID = re.compile(r"[0-9a-f]{32}")
+
+
+def gym_identity(request) -> dict | None:
+    """The Gym rollout this request is an attempt of: the run id and indices Gym sends with every row, or None."""
+    extra = getattr(request, "model_extra", None) or {}
+    run_id = extra.get("_ng_run_id")
+    task, rollout, attempt = (extra.get(key) for key in ("_ng_task_index", "_ng_rollout_index", "_ng_attempt_index"))
+    attempt = 0 if attempt is None else attempt
+    if not (isinstance(run_id, str) and _GYM_RUN_ID.fullmatch(run_id)):
+        return None
+    if not all(type(value) is int and value >= 0 for value in (task, rollout, attempt)):
+        return None
+    return {"run_id": run_id, "task_index": task, "rollout_index": rollout, "attempt_index": attempt}
+
+
+def _timestamp(timings: dict, phase: str, key: str) -> datetime | None:
+    try:
+        value = datetime.fromisoformat(timings[phase][key])
+    except (KeyError, TypeError, ValueError):
+        return None
+    return value if value.tzinfo is not None else None
+
+
+def graded_record(state, body, gym: dict) -> SandboxedVerifyResponse | None:
+    """The verified response of a recorded episode that a resumed Gym rollout may take as its graded attempt, or None.
+
+    Only an episode of the same Gym run, task and rollout whose agent finished normally and whose verifier ran after
+    that: a completed termination, the verifier started after the agent's execution finished, no exception and no
+    interrupted mark (a killed agent, a resources shutdown), and a completed, unmasked evaluation.
+    """
+    if not isinstance(state, dict) or state.get("record_version") != 3 or state.get("phase") != "closed":
+        return None
+    recorded = state.get("gym_identity") or {}
+    if any(recorded.get(key) != gym[key] for key in ("run_id", "task_index", "rollout_index")):
+        return None
+    request = state.get("request") or {}
+    if any(request.get(key) != getattr(body, key) for key in ("task_name", "task_ref", "dataset_ref")):
+        return None
+    if (state.get("termination") or {}).get("reason") != "completed":
+        return None
+    result = state.get("result") or {}
+    if "interrupted" in result or "exception_info" in result:
+        return None
+    agent_finished = _timestamp(result, "agent_execution", "finished_at")
+    verifier_started = _timestamp(result, "verifier", "started_at")
+    if agent_finished is None or verifier_started is None or verifier_started < agent_finished:
+        return None
+    try:
+        response = SandboxedVerifyResponse.model_validate(state["verified_response"])
+    except (KeyError, ValidationError):
+        return None
+    fields = response.model_dump()
+    if not response.evaluation_completed or fields.get("mask_sample") or fields.get("_ng_failure_class"):
+        return None
+    return response
+
+
 # Verifier outcomes that Terminal-Bench never retries and counts as a 0: Harbor excludes them from retries and counts a
 # trial without a reward as 0. They are scored zeros here too, so the task stays in the pass-rate denominator.
 _ZERO_SCORED_VERIFIER_FAILURES = frozenset(
@@ -180,6 +241,54 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
     def _state_path(self, identity):
         return self.config.artifacts_dir / f"{identity}.json"
 
+    def _gym_index(self, gym: dict) -> Path:
+        return self.config.artifacts_dir / _GYM_ROLLOUTS_DIR / gym["run_id"]
+
+    def _graded_replay(self, body: TerminalBench4RunRequest) -> SeedSessionResponse | None:
+        """A graded attempt this server recorded for the same Gym rollout, answered instead of running it again.
+
+        A resumed run sends a rollout whose earlier attempt was graded here but never reached the run's saved rows
+        (the segment ended between the verdict and the save). Each request has a new client session, so the episode
+        identity differs; the Gym identity in the request finds the recorded attempt. The earliest attempt that
+        qualifies (see ``graded_record``) is answered, marked with where it came from; a record that is partial,
+        unreadable, of another run or task, or not graded normally is ignored, and the rollout runs as usual.
+        """
+        gym = gym_identity(body)
+        if gym is None:
+            return None
+        prefix = f"{gym['task_index']}-{gym['rollout_index']}-"
+        try:
+            names = [path.name for path in self._gym_index(gym).iterdir() if path.name.startswith(prefix)]
+        except OSError:
+            return None
+        attempts = sorted(int(name[len(prefix) :]) for name in names if name[len(prefix) :].isdecimal())
+        for attempt in attempts:
+            try:
+                identity = (self._gym_index(gym) / f"{prefix}{attempt}").read_text().strip()
+                if not re.fullmatch(r"[a-f0-9]{64}", identity):
+                    continue
+                state = json.loads(self._state_path(identity).read_text())
+            except (OSError, ValueError):
+                continue
+            response = graded_record(state, body, gym)
+            if response is None:
+                continue
+            logger.info(
+                "Answering Gym run %s task %s rollout %s with attempt %s, graded in episode %s",
+                gym["run_id"],
+                gym["task_index"],
+                gym["rollout_index"],
+                attempt,
+                state["session_id"],
+            )
+            replayed = response.model_dump(mode="json") | {
+                "replayed_from": {"session_id": state["session_id"], "attempt_index": attempt}
+            }
+            return SeedSessionResponse(
+                session_id=state["session_id"], verified_response=SandboxedVerifyResponse.model_validate(replayed)
+            )
+        return None
+
     def _persist(self, session):
         resources = []
         for env in (session.environment, session.verifier_environment, session.shared_logs):
@@ -216,12 +325,21 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                 "resources_session_id": session.resources_request.resources_session_id
                 if session.resources_request is not None
                 else None,
+                "gym_identity": gym_identity(session.request),
             },
         )
         lookup = self.config.artifacts_dir / f"{session.session_id}.state"
         temporary = lookup.with_suffix(".tmp")
         temporary.write_text(session.identity)
         temporary.replace(lookup)
+        gym = gym_identity(session.request)
+        if gym is not None:
+            index = self._gym_index(gym) / f"{gym['task_index']}-{gym['rollout_index']}-{gym['attempt_index']}"
+            if not index.exists():
+                index.parent.mkdir(parents=True, exist_ok=True)
+                temporary = index.with_name(index.name + ".tmp")
+                temporary.write_text(session.identity)
+                temporary.replace(index)
         if session.directory.exists():
             atomic_json(session.directory / "result.json", session.result)
 
@@ -255,6 +373,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
             if self._state_path(identity).exists():
                 state = json.loads(self._state_path(identity).read_text())
                 session = self._session(request, state["session_id"])
+            elif (replay := self._graded_replay(body)) is not None:
+                return replay
             else:
                 session_id = "tb4-" + uuid4().hex
                 session = self._new_session(identity, owner, body.model_copy(deep=True), session_id)
@@ -314,6 +434,8 @@ class TerminalBench4ResourcesServer(SimpleResourcesServer):
                     failure_kind=rejected.failure_kind if rejected is not None else None,
                 )
                 lifecycle.exception(session, exc)
+                if isinstance(exc, asyncio.CancelledError):
+                    lifecycle.interrupted(session, "resources_shutdown")
                 await lifecycle.cleanup(session)
                 session.seed_response = SeedSessionResponse(
                     session_id=session.session_id, termination=session.termination

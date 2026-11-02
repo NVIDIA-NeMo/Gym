@@ -8990,3 +8990,78 @@ async def test_only_a_budget_over_the_window_is_refitted(
         assert execution["error_category"] == "context_length_exceeded"
         assert "applied_max_tokens" not in execution
         assert "output_budget_refit" not in execution
+
+
+# The body a baseline received for every policy call when its reasoning effort was not one the deployment serves.
+_REASONING_EFFORT_REFUSAL = "Unexpected reasoning effort high. Supported types are xhigh (default), medium, and low."
+
+
+@mark.parametrize("use_completions_api", [False, True], ids=["chat-completions", "completions"])
+@mark.parametrize(
+    ("error_content", "category"),
+    [
+        (
+            json.dumps(
+                {
+                    "object": "error",
+                    "message": _REASONING_EFFORT_REFUSAL,
+                    "type": "BadRequestError",
+                    "param": None,
+                    "code": 400,
+                }
+            ),
+            "invalid_request_parameter",
+        ),
+        (
+            json.dumps(
+                {
+                    "error": {
+                        "message": "Unsupported value: 'reasoning_effort' does not support 'high' with this model. "
+                        "Supported values are: 'medium'.",
+                        "type": "invalid_request_error",
+                        "param": "reasoning_effort",
+                        "code": "unsupported_value",
+                    }
+                }
+            ),
+            "invalid_request_parameter",
+        ),
+        (
+            json.dumps({"error": {"message": "effort not served", "code": "unsupported_value"}}),
+            "invalid_request_parameter",
+        ),
+        ('{"message": "This model\'s maximum context length is 262144 tokens."}', "context_length_exceeded"),
+        ('{"message": "max_tokens must be at least 1, got -6677."}', "context_length_exceeded"),
+        ('{"error": {"message": "Unknown model"}}', None),
+        ("Unsupported parameter: 'logprobs' is not supported with this model.", None),
+    ],
+    ids=[
+        "reasoning-effort",
+        "openai-unsupported-value",
+        "unsupported-value-code",
+        "context-window",
+        "output-budget",
+        "unknown-model",
+        "unsupported-parameter",
+    ],
+)
+async def test_a_400_for_an_unsupported_parameter_value_records_invalid_request_parameter(
+    monkeypatch: MonkeyPatch, use_completions_api: bool, error_content: str, category: str | None
+) -> None:
+    """The refusal still reaches the caller unchanged; only the recorded error category names it. A length refusal
+    keeps its own category, decided first."""
+    model = _refit_model(monkeypatch, use_completions_api)
+    model.config.propagate_context_overflow_errors = True
+    model.config.refit_output_budget_to_window = False
+    error = ClientResponseError(MagicMock(), (), status=400, message="Bad Request")
+    error.response_content = error_content.encode()
+    model._clients = [_refit_engine(error)]
+    request = _refit_request()
+
+    with raises(ClientResponseError) as raised:
+        await model.chat_completions(request, _refit_body({}))
+    assert raised.value is error and raised.value.response_content == error_content.encode()
+
+    execution = request.state.nemo_gym_model_execution
+    assert execution["upstream_status_code"] == 400
+    assert execution.get("error_category") == category

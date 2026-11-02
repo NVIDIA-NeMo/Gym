@@ -95,6 +95,7 @@ def recover(
     repin: str | None = None,
     repin_reason: str | None = None,
     extend_retries: int = 0,
+    extend_attempts: int = 0,
     max_walltime: str | None = None,
     walltime_reason: str | None = None,
     unsafe_resume_reason: str | None = None,
@@ -109,6 +110,8 @@ def recover(
     ``judge_partition`` names the CPU partition of the judge-only job that grades a model-served run's saved answers
     again, when its saved config declares no CPU node pool and the launcher's reader placement names none.
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
+    ``extend_attempts`` records that many more attempts for every rollout the Store would run again (not a model
+    failure); explicit, journaled with the infra extension, and named in the decision.
     ``max_walltime`` (with ``walltime_reason``) raises the run's Slurm walltime, never below the recorded one.
     ``unsafe_resume_reason`` resumes the job with ``allow_unsafe_resume``, past a refused run identity check; the
     reason and the user are journaled.
@@ -135,6 +138,7 @@ def recover(
         repin=repin,
         repin_reason=repin_reason,
         extend_retries=extend_retries,
+        extend_attempts=extend_attempts,
         max_walltime=max_walltime,
         walltime_reason=walltime_reason,
         unsafe_resume_reason=unsafe_resume_reason,
@@ -161,6 +165,7 @@ def inspect_recovery(
     mlflow_status: str | None = None,
     mlflow_run_id: str | None = None,
     extend_retries: int = 0,
+    extend_attempts: int = 0,
 ) -> RecoveryOutcome:
     """Inspect the same saved evidence and acceptance gate as recovery, without dispatching any action."""
     outcome = _recover(
@@ -169,6 +174,7 @@ def inspect_recovery(
         inspect_only=True,
         original_record=original_record,
         extend_retries=extend_retries,
+        extend_attempts=extend_attempts,
         score_key=score_key,
         score_agent=score_agent,
         score_environment=score_environment,
@@ -209,6 +215,7 @@ def _recover(
     repin: str | None = None,
     repin_reason: str | None = None,
     extend_retries: int = 0,
+    extend_attempts: int = 0,
     max_walltime: str | None = None,
     walltime_reason: str | None = None,
     unsafe_resume_reason: str | None = None,
@@ -306,6 +313,7 @@ def _recover(
             # A repinned run resumes on the target's Store: its reader decides what that Store would run.
             **({"reader_ref": repin} if repin is not None else {}),
             **({"extend_retries": extend_retries} if extend_retries else {}),
+            **({"extend_attempts": extend_attempts} if extend_attempts else {}),
             # A walltime raise renders a larger chain cap: the plan checks the cap the resubmit will render.
             **({"max_walltime": max_walltime} if max_walltime is not None else {}),
             **({"operator_budget": operator_budget} if operator_budget is not None else {}),
@@ -427,6 +435,7 @@ def _recover(
                 **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
                 # Under an operator continuation, N is the allowance its record fills, not a recorded extension.
                 **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
+                **({"extend_attempts": extend_attempts} if extend_attempts else {}),
                 **(
                     {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
                     if max_walltime is not None
@@ -452,7 +461,7 @@ def _recover(
             reverify=_reverify_first_note(decision, job.job_id),
         )
     if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is not None:
-        if repin is not None or extend_retries:
+        if repin is not None or extend_retries or extend_attempts:
             raise ValueError("a fresh restart takes only --max-walltime and --walltime-reason")
         try:
             job = executor.resubmit(

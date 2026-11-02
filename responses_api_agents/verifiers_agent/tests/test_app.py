@@ -704,3 +704,146 @@ class TestSharedClientTraceContext:
         assert str(per_run.client.base_url).rstrip("/") == f"http://policy:8000/ng-rollout/2-0{self.SEGMENT}/v1"
         cached = agent.client_cache["policy_model"]
         assert str(cached.client.base_url).rstrip("/") == "http://policy:8000/v1"
+
+
+class TestOwnGradingRecord:
+    """The agent runs its rubric itself, so with observability on it returns its own verifier invocation."""
+
+    @staticmethod
+    def _run(funcs, *, observability: bool = True) -> dict:
+        import types
+
+        import verifiers as vf
+
+        rubric = vf.Rubric(funcs=funcs)
+
+        async def fake_run_group(*, group_inputs, client, model, sampling_args, state_columns):
+            # Score as verifiers does: each reward function through the rubric, an error scored 0.0.
+            state = {"prompt": [], "completion": [], "answer": "", "info": {}, "input": {}}
+            rewards = [await rubric._call_individual_reward_func(func, state) for func in rubric.funcs]
+            return [{"reward": sum(rewards), "metrics": {}, "completion": [], "trajectory": []}]
+
+        config = VerifiersAgentConfig(
+            host="0.0.0.0",
+            port=8080,
+            entrypoint="",
+            name="automationbench",
+            model_server=ModelServerRef(type="responses_api_models", name="policy_model"),
+            vf_env_id="stub_env",
+        )
+        server_client = MagicMock(spec=ServerClient)
+        server_client.global_config_dict = {OBSERVABILITY_ENABLED_KEY_NAME: observability}
+        agent = VerifiersAgent(config=config, server_client=server_client)
+        env = types.SimpleNamespace(rubric=rubric, run_group=fake_run_group)
+        with (
+            patch.object(VerifiersAgent, "resolve_model_base_url", return_value=POLICY_URL),
+            patch("responses_api_agents.verifiers_agent.app.vf.load_environment", return_value=env),
+        ):
+            response = TestClient(agent.setup_webserver()).post(
+                "/run",
+                json={
+                    "task_idx": 0,
+                    "_ng_task_index": 0,
+                    "_ng_rollout_index": 0,
+                    "responses_create_params": {"input": [{"role": "user", "content": "hi"}]},
+                },
+            )
+        assert response.status_code == 200, response.text
+        return response.json()
+
+    def test_a_synchronous_rubric_returns_the_agents_own_scored_grading_record(self) -> None:
+        def aa_headline(state, **kwargs) -> float:
+            return 1.0
+
+        body = self._run([aa_headline])
+        [invocation] = body["ng_verifier_invocations"]
+        assert invocation["status"] == "completed" and invocation["failure_kind"] is None
+        assert invocation["model_calls"] == [] and invocation.get("grading_operations") is None
+        record = invocation["grading_record"]
+        assert (record["verifier"], record["score"], record["verdict"]) == ("automationbench", 1.0, "scored")
+        # Bound to the row as collection saves it: the response and reward of this /run reply.
+        from nemo_gym.trajectory.trajectory_record import grading_result_binding
+
+        assert record["result_binding_sha256"] == grading_result_binding(body)
+        assert body["reward"] == 1.0 and body.get("mask_sample") is False
+
+    def test_a_reward_function_that_raises_is_a_grading_fault_not_a_zero_score(self) -> None:
+        def partial_credit(state, **kwargs) -> float:
+            raise KeyError("world_state")
+
+        body = self._run([partial_credit])
+        assert body["mask_sample"] is True and body["failure_kind"] == "verifier_error"
+        assert "partial_credit" in body["failure_reason"]
+        [invocation] = body["ng_verifier_invocations"]
+        assert invocation["failure_kind"] == "verifier_error"
+        assert invocation["grading_record"]["verdict"] == "masked"
+
+    def test_a_rubric_that_may_ask_a_model_is_not_observed(self) -> None:
+        """No invocation at all, as before: one without a record would read as ungraded and be re-verified."""
+
+        async def judge(state, **kwargs) -> float:
+            return 1.0
+
+        body = self._run([judge])
+        assert not body.get("ng_verifier_invocations")
+        assert body["reward"] == 1.0 and body.get("mask_sample") is False
+
+    def test_observability_off_returns_no_verifier_invocation(self) -> None:
+        def aa_headline(state, **kwargs) -> float:
+            return 1.0
+
+        body = self._run([aa_headline], observability=False)
+        assert not body.get("ng_verifier_invocations")
+        assert body["reward"] == 1.0
+
+
+class TestProgrammaticRubricOfRealEnvironments:
+    """verifiers' own environments wrap the rubric in a RubricGroup with their weight-0 monitor rubrics."""
+
+    @staticmethod
+    def _tool_env(*funcs):
+        import verifiers as vf
+        from datasets import Dataset
+
+        return vf.ToolEnv(
+            dataset=Dataset.from_list([{"question": "q", "answer": "a"}]),
+            rubric=vf.Rubric(funcs=list(funcs)),
+            tools=[],
+            max_turns=2,
+        )
+
+    def test_a_tool_env_with_synchronous_reward_functions_is_programmatic_and_watched(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        def correct(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        env = self._tool_env(correct)
+        assert [type(m).__name__ for m in env.rubric.rubrics] == [
+            "Rubric",
+            "MultiTurnMonitorRubric",
+            "ToolMonitorRubric",
+        ]
+        assert _programmatic_rubric(env) is True
+        [watched] = env.rubric.rubrics[0].funcs
+        assert watched._ng_watched_reward_func is True and watched.__wrapped__ is correct
+        # The monitors' own metrics are left as they are.
+        assert all(not getattr(f, "_ng_watched_reward_func", False) for m in env.rubric.rubrics[1:] for f in m.funcs)
+
+    def test_a_tool_env_whose_reward_function_is_async_is_not_programmatic(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        async def judged(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        assert _programmatic_rubric(self._tool_env(judged)) is False
+
+    def test_a_monitor_that_carries_reward_weight_is_not_left_out(self) -> None:
+        from responses_api_agents.verifiers_agent.app import _programmatic_rubric
+
+        def correct(completion, answer, **kwargs) -> float:
+            return 1.0
+
+        env = self._tool_env(correct)
+        env.rubric.rubrics[1].weights[0] = 1.0
+        assert _programmatic_rubric(env) is False

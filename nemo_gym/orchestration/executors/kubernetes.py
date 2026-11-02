@@ -88,6 +88,7 @@ class KubernetesExecutor(BaseExecutor):
         repin: str | None = None,
         repin_reason: str | None = None,
         extend_retries: int = 0,
+        extend_attempts: int = 0,
         max_walltime: str | None = None,
         walltime_reason: str | None = None,
         fresh_restart: bool = False,
