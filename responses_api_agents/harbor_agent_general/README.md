@@ -44,6 +44,13 @@ harbor_agent_general:
 options such as retry policy, artifacts, extra instructions, and environment settings do not need individual Gym
 forwarding fields. See [configs](./configs) for specific examples.
 
+To configure OpenSandbox with TLS verification disabled, use
+[configs/opensandbox_opencode.yaml](./configs/opensandbox_opencode.yaml). It selects the custom
+`responses_api_agents.harbor_agent_general.envs.opensandbox:OpenSandboxEnvironment` through
+`job.environment.import_path` and sets `job.environment.kwargs.tls_verify: false`. Set
+`OPENSANDBOX_DOMAIN` and `OPENSANDBOX_API_KEY` in the Harbor worker environment. Only disable verification
+for clusters whose certificates you trust; otherwise leave `tls_verify: true` (the class default).
+
 Gym runs one Harbor trial for each input row. These constraints are checked when the configuration loads:
 
 - Exactly one entry in `datasets` and one in `agents`.
