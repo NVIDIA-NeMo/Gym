@@ -31,6 +31,9 @@ from responses_api_agents.kilocode_agent.observability import read_kilo_snapshot
 LOG = logging.getLogger(__name__)
 LOG_TAIL_BYTES = 4096
 TASK_ENVIRONMENT_PLUGIN = "task_environment.mjs"
+# Kilo shares OpenCode's correlation hook; keep this cross-agent dependency explicit.
+ASSISTANT_MESSAGE_PLUGIN_SOURCE = Path(__file__).parents[1] / "opencode_agent" / "assistant_message_header.js"
+ASSISTANT_MESSAGE_PLUGIN_FILE = "assistant_message_header.mjs"
 # Per-run files the runner and plugin write next to the runtime; a rearmed activation must not read the preflight's.
 RUN_OUTPUTS = ("stdout.jsonl", "stderr.log", "runtime.json", "task-environment.ready", "required-mcp.ready")
 
@@ -188,8 +191,8 @@ class KiloSandboxSession(AgentSessionState):
             )
         await sandbox.upload(HARNESS_RUNNER_SCRIPT, f"{directory}/{HARNESS_RUNNER_FILE}")
         await sandbox.upload(
-            Path(__file__).parents[1] / "opencode_agent" / "assistant_message_header.js",
-            f"{directory}/assistant_message_header.mjs",
+            ASSISTANT_MESSAGE_PLUGIN_SOURCE,
+            f"{directory}/{ASSISTANT_MESSAGE_PLUGIN_FILE}",
         )
         await sandbox.upload(
             Path(__file__).with_name(TASK_ENVIRONMENT_PLUGIN), f"{directory}/{TASK_ENVIRONMENT_PLUGIN}"
