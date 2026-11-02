@@ -22,9 +22,9 @@ from uuid import uuid4
 import pytest
 from omegaconf import OmegaConf
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.global_config import GlobalConfigDictParser
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import GlobalConfigDictParser, ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymChatCompletionCreateParamsNonStreaming,
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
@@ -32,14 +32,13 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseFunctionToolCall,
     NeMoGymResponseOutputMessage,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.trajectory import (
     AgentInvocation,
     AgentObservationBundle,
     ContextCompactionObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.server_utils import ServerClient
 from responses_api_agents.opencode_agent.app import (
     OpenCodeAgent,
     OpenCodeAgentConfig,
@@ -414,6 +413,73 @@ class TestParseOpencodeSession:
         assert root.status == "unknown"
         assert root.conversation[0].content[0].text == "kept"
         assert any(gap.code == "agent_artifact_record_unowned" and gap.detail == "m0" for gap in bundle.gaps)
+
+    @pytest.mark.parametrize(
+        "message_data",
+        ["not json", json.dumps({"time": {"created": 0, "completed": 1}}), "owner-missing"],
+        ids=["unreadable-message", "message-without-role", "no-session"],
+    )
+    def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(self, tmp_path, message_data) -> None:
+        """Its tool is known but cannot be placed, so the tool history read is not complete."""
+        import sqlite3
+
+        part = {
+            "type": "tool",
+            "callID": "c1",
+            "tool": "bash",
+            "state": {"status": "completed", "time": {"start": 1000040000, "end": 1000050000}},
+        }
+        db = _session_db(tmp_path, [("assistant", [part])])
+        con = sqlite3.connect(db)
+        if message_data == "owner-missing":
+            con.execute("update message set session_id = NULL where id = 'm0'")
+            con.execute("update part set session_id = NULL where id = 'p0'")
+        else:
+            con.execute("update message set data = ? where id = 'm0'", (message_data,))
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _tool_calls(bundle) == []
+        assert ("tool_timing_unavailable", "p0") in [(gap.code, gap.detail) for gap in bundle.gaps]
+
+    @pytest.mark.parametrize("call_id", ["absent", None, ""], ids=["absent", "null", "empty"])
+    def test_a_tool_part_without_a_call_id_leaves_tool_timing_unknown(self, tmp_path, call_id) -> None:
+        """The tool ran but has no observation to time, so the tool history read is not complete."""
+        part = {
+            "type": "tool",
+            "tool": "bash",
+            "state": {"status": "completed", "time": {"start": 1000040000, "end": 1000050000}},
+        }
+        if call_id != "absent":
+            part["callID"] = call_id
+        db = _session_db(tmp_path, [("assistant", [part])])
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _tool_calls(bundle) == []
+        gaps = [(gap.code, gap.detail) for gap in bundle.gaps]
+        assert ("tool_call_identity_unavailable", "p0") in gaps
+        assert ("tool_timing_unavailable", "p0") in gaps
+
+    def test_an_unreadable_part_leaves_tool_timing_unknown(self, tmp_path) -> None:
+        """The part may have been a tool call, so the tool history read is not complete."""
+        import sqlite3
+
+        db = _session_db(tmp_path, [("assistant", [{"type": "text", "text": "kept"}, {"type": "text", "text": "x"}])])
+        con = sqlite3.connect(db)
+        con.execute("update part set data = 'not json' where id = 'p1'")
+        con.commit()
+        con.close()
+
+        bundle = _parse_opencode_session(db, "fallback")
+
+        assert _invocations(bundle)[0].conversation[0].content[0].text == "kept"
+        assert [(gap.code, gap.detail) for gap in bundle.gaps if gap.code != "tool_outcome_unavailable"] == [
+            ("agent_artifact_record_unparseable", None),
+            ("tool_timing_unavailable", "p1"),
+        ]
 
     def test_reports_invalid_timing_and_unresolved_tree_edges(self, tmp_path) -> None:
         db = _session_db(
@@ -791,6 +857,169 @@ def test_bash_exit_code_is_execution_outcome(
     assert tool.status == status
     assert tool.error_type == ("tool_error" if status == "failed" else None)
     assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+
+
+_SHELL_TIMEOUT = (
+    "\n\n<shell_metadata>\nshell tool terminated command after exceeding timeout 120000 ms. If this command is "
+    "expected to take longer and is not waiting for interactive input, retry with a larger timeout value in "
+    "milliseconds.\n</shell_metadata>"
+)
+_SHELL_ABORT = "\n\n<shell_metadata>\nUser aborted the command\n</shell_metadata>"
+
+
+@pytest.mark.parametrize(
+    "output,compacted,status,error_type",
+    [
+        ("partial" + _SHELL_TIMEOUT, False, "timeout", "tool_timeout"),
+        ("partial" + _SHELL_TIMEOUT, True, "timeout", "tool_timeout"),
+        ("partial" + _SHELL_ABORT, False, "cancelled", "tool_aborted"),
+        (_SHELL_TIMEOUT + "\nlater output", False, "unknown", None),
+        ("echo shell tool terminated command after exceeding timeout 5 ms.", False, "unknown", None),
+    ],
+)
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_bash_null_exit_takes_opencode_termination_report(
+    tmp_path: Path, output: str, compacted: bool, status: str, error_type: str | None, sandboxed: bool
+) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    state = {"status": "completed", "input": {"command": "sleep 999"}, "output": output, "metadata": {"exit": None}}
+    if compacted:
+        state["time"] = {"start": 1, "end": 2, "compacted": 3}
+    db = _session_db(tmp_path, [("assistant", [{"type": "tool", "callID": "shell", "tool": "bash", "state": state}])])
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    tool = _tool_calls(bundle)[0]
+    assert (tool.status, tool.error_type) == (status, error_type)
+    assert any(gap.code == "tool_outcome_unavailable" for gap in bundle.gaps) == (status == "unknown")
+    outputs = [item.output for item in _invocations(bundle)[0].conversation if item.type == "function_call_output"]
+    assert outputs == ["[Old tool result content cleared]" if compacted else output]
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+def test_interrupted_tools_keep_only_the_output_opencode_recorded(tmp_path: Path, sandboxed: bool) -> None:
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    def tool(call_id: str, name: str, state: dict) -> dict:
+        return {"type": "tool", "callID": call_id, "tool": name, "state": {"input": {}, **state}}
+
+    db = _session_db(
+        tmp_path,
+        [
+            (
+                "assistant",
+                [
+                    tool("running", "bash", {"status": "running", "metadata": {"output": "line 1\n"}}),
+                    tool("pending", "task", {"status": "pending", "metadata": {"model": "policy"}}),
+                    tool(
+                        "aborted",
+                        "bash",
+                        {
+                            "status": "error",
+                            "error": "Tool execution aborted",
+                            "metadata": {"interrupted": True, "output": "streamed"},
+                        },
+                    ),
+                    tool("failed", "read", {"status": "error", "error": "ENOENT"}),
+                ],
+            )
+        ],
+    )
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    outcomes = {tool.tool_call_id: (tool.status, tool.error_type) for tool in _tool_calls(bundle)}
+    assert outcomes == {
+        "running": ("incomplete", None),
+        "pending": ("incomplete", None),
+        "aborted": ("cancelled", "tool_aborted"),
+        "failed": ("failed", "tool_error"),
+    }
+    outputs = {
+        item.call_id: item.output
+        for item in _invocations(bundle)[0].conversation
+        if item.type == "function_call_output"
+    }
+    assert outputs == {"running": "line 1\n", "aborted": "streamed", "failed": "ENOENT"}
+    gaps = {(gap.code, gap.detail) for gap in bundle.gaps if gap.code.startswith("tool_output")}
+    assert gaps == {("tool_output_partial", "running"), ("tool_output_unavailable", "pending")}
+
+
+@pytest.mark.parametrize("sandboxed", [False, True])
+@pytest.mark.parametrize("child_completed", [False, True])
+@pytest.mark.parametrize(
+    "name,state,tool_status,error_type,child_status,output",
+    [
+        (
+            "task",
+            {
+                "status": "error",
+                "error": "Tool execution aborted",
+                "metadata": {"interrupted": True, "output": "partial"},
+            },
+            "cancelled",
+            "tool_aborted",
+            "incomplete",
+            "partial",
+        ),
+        (
+            "bash",
+            {"status": "completed", "output": "partial" + _SHELL_TIMEOUT, "metadata": {"exit": None}},
+            "timeout",
+            "tool_timeout",
+            "incomplete",
+            "partial" + _SHELL_TIMEOUT,
+        ),
+        ("task", {"status": "error", "error": "failed"}, "failed", "tool_error", "failed", "failed"),
+        ("task", {"status": "completed", "output": "done"}, "completed", None, "completed", "done"),
+        (
+            "task",
+            {"status": "running", "metadata": {"output": "partial"}},
+            "incomplete",
+            None,
+            "incomplete",
+            "partial",
+        ),
+        (
+            "task",
+            {"status": "pending", "metadata": {"output": "partial"}},
+            "incomplete",
+            None,
+            "incomplete",
+            "partial",
+        ),
+        (
+            "bash",
+            {"status": "completed", "output": "partial", "metadata": {"exit": None}},
+            "unknown",
+            None,
+            "unknown",
+            "partial",
+        ),
+    ],
+)
+def test_child_invocation_fallback_preserves_tool_outcome(
+    tmp_path, sandboxed, child_completed, name, state, tool_status, error_type, child_status, output
+):
+    from responses_api_agents.opencode_sandboxed_agent.app import parse_opencode_observations
+
+    state = {**state, "input": {}, "metadata": {**state.get("metadata", {}), "sessionId": "child"}}
+    messages = [
+        ("root", "assistant", [{"type": "tool", "callID": "spawn", "tool": name, "state": state}]),
+        ("child", "user", [{"type": "text", "text": "work"}]),
+    ]
+    if child_completed:
+        messages.append(("child", "assistant", [{"type": "text", "text": "done"}]))
+    db = _session_db(tmp_path, messages, sessions=[("root", None), ("child", "root")])
+    parser = parse_opencode_observations if sandboxed else _parse_opencode_session
+    bundle = parser(db, "fallback")
+    invocations = {item.invocation_id: item for item in _invocations(bundle)}
+    assert invocations["child"].status == ("completed" if child_completed else child_status)
+    assert invocations["child"].spawned_by_tool_call_id == "spawn"
+    tool = _tool_calls(bundle)[0]
+    assert (tool.status, tool.error_type) == (tool_status, error_type)
+    assert [item.output for item in invocations["root"].conversation if item.type == "function_call_output"] == [
+        output
+    ]
 
 
 @pytest.mark.parametrize("override,expected", [({}, {"field": "reasoning_content"}), ({"interleaved": True}, True)])

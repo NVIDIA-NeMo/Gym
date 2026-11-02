@@ -6,18 +6,22 @@ import asyncio
 import json
 import logging
 import shlex
+import time
 from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, JsonValue, ValidationError
 
-from nemo_gym.agent_utils.sandbox_session import SandboxCommand, SandboxSession
+from nemo_gym.agent_utils.sandbox_session import RUNNER_FILE, SandboxCommand, SandboxSession
 from nemo_gym.base_responses_api_agent import AgentSessionState
-from nemo_gym.openai_utils import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.rollout_observability import AgentObservationBundle
-from nemo_gym.sandbox.utils import read_text, upload_text
+from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.sandbox import read_text, upload_text
+from nemo_gym.trajectory import AgentObservationBundle
 
 
 LOG = logging.getLogger(__name__)
+# The longest the optional session-rollout copy may take, and the part of the capture budget kept free after it.
+_ARCHIVE_TIMEOUT_S = 120.0
+_ARCHIVE_RESERVE_S = 1.0
 
 
 class HarnessProcessInfo(BaseModel):
@@ -44,12 +48,15 @@ class CodexSandboxSession(AgentSessionState):
 
     session: SandboxSession[str]
     runtime: str
+    logs_dir: str | None = None
     task: asyncio.Task[NeMoGymResponse] | None = None
     runtime_info: HarnessProcessInfo | None = None
     observations: AgentObservationBundle | None = None
     native_transcript: str | None = None
     model_attempts: list[dict[str, JsonValue]] | None = None
     activation_request: NeMoGymResponseCreateParamsNonStreaming | None = None
+    # The time SandboxSession allows artifact capture (its close timeout), so the optional copy fits inside it.
+    capture_budget_s: float | None = None
 
     async def upload_json(self, name: str, payload: JsonValue) -> None:
         """Stage adapter input using the shared text-transfer utility."""
@@ -65,6 +72,8 @@ class CodexSandboxSession(AgentSessionState):
 
     async def close(self, timeout: float) -> None:
         """Capture and release before cancelling the HTTP activation."""
+        if self.capture_budget_s is None:
+            self.capture_budget_s = timeout
         await self.session.close(timeout=timeout)
         if self.task is not None and not self.task.done() and not self.task.cancelling():
             self.task.cancel()
@@ -81,6 +90,7 @@ class CodexSandboxSession(AgentSessionState):
 
     async def execute(self, payload: dict[str, JsonValue], *, timeout: float, close_timeout: float) -> str:
         """Run through the common lifecycle; the adapter validates terminal events."""
+        self.capture_budget_s = close_timeout
         return await self.session.execute(
             stage_activation=lambda: self.stage_activation(payload),
             collect=self.collect_artifacts,
@@ -92,20 +102,50 @@ class CodexSandboxSession(AgentSessionState):
         """Stage the invocation and return the Codex worker command."""
         await self.upload_json("input.json", payload)
         return SandboxCommand(
-            python="python3",
             argv=[
                 "python3",
                 "-I",
-                f"{self.session.session_dir}/sandbox_runner.py",
+                f"{self.session.session_dir}/{RUNNER_FILE}",
                 f"{self.session.session_dir}/input.json",
             ],
+            stdlib_runner=True,
         )
+
+    async def copy_session_rollouts(self, deadline: float | None = None) -> None:
+        """Copy Codex's session rollouts (CODEX_HOME/sessions) to logs_dir/sessions by ``deadline``
+        (``time.monotonic()``); never fails collection."""
+        if not self.logs_dir:
+            return
+        budget = _ARCHIVE_TIMEOUT_S if deadline is None else min(_ARCHIVE_TIMEOUT_S, deadline - time.monotonic())
+        if budget <= 0:
+            LOG.warning("Codex session rollouts not copied: no capture time left")
+            return
+        sessions = f"{self.session.session_dir}/home/.codex/sessions"
+        target = f"{self.logs_dir}/sessions"
+        command = (
+            f"if [ -d {shlex.quote(sessions)} ]; then mkdir -p {shlex.quote(target)} && "
+            f"cp -R {shlex.quote(sessions)}/. {shlex.quote(target)}/; fi"
+        )
+        try:
+            async with asyncio.timeout(budget):
+                result = await self.session.sandbox.exec(command, cwd="/", timeout_s=budget)
+            if result.return_code != 0 or result.error_type:
+                LOG.warning("Codex session rollouts not copied: %s", result.stderr or result.stdout)
+        except Exception:
+            LOG.exception("Codex session rollouts not copied")
 
     async def collect_artifacts(self) -> str:
         """Keep partial events even when worker metadata is unavailable."""
+        if self.session.expired_before_launch:
+            return ""  # A rollout stop arrived before launch, so Codex never ran.
+        started = time.monotonic()
         try:
             events = await self.read_text("events.jsonl")
         except Exception as error:
+            if self.session.expired and await self._events_absent():
+                # A rollout stop can end the worker after launch but before it opens its transcript.
+                LOG.warning("Codex wrote no events before a rollout stop ended it; keeping an empty transcript")
+                return ""
             logs = await self.session.read_output_log()
             raise RuntimeError(f"Codex sandbox runner returned no valid result: {logs}") from error
         try:
@@ -119,7 +159,7 @@ class CodexSandboxSession(AgentSessionState):
         self.runtime_info = parse_runtime_info(runtime_payload)
         try:
             snapshot = await self.session.sandbox.exec(
-                f"python3 -I {shlex.quote(self.session.session_dir + '/sandbox_runner.py')} "
+                f"python3 -I {shlex.quote(f'{self.session.session_dir}/{RUNNER_FILE}')} "
                 f"--snapshot {shlex.quote(self.session.session_dir)}",
                 timeout_s=10,
             )
@@ -133,4 +173,22 @@ class CodexSandboxSession(AgentSessionState):
             self.model_attempts = [json.loads(line) for line in attempts.splitlines()]
         except Exception:
             LOG.warning("Codex model attempt statuses unavailable", exc_info=True)
+        # The optional copy goes last and ends before the capture budget does, so a slow copy cannot cost the events.
+        if self.capture_budget_s is not None:
+            await self.copy_session_rollouts(deadline=started + self.capture_budget_s - _ARCHIVE_RESERVE_S)
+        else:
+            await self.copy_session_rollouts()
         return events
+
+    async def _events_absent(self) -> bool:
+        """Whether the session directory exists without events.jsonl; an unclear answer counts as present."""
+        directory = shlex.quote(self.session.session_dir)
+        events = shlex.quote(f"{self.session.session_dir}/events.jsonl")
+        try:
+            probe = await self.session.sandbox.exec(
+                f"if [ -e {events} ]; then echo present; elif [ -d {directory} ]; then echo absent; fi", timeout_s=10
+            )
+        except Exception:
+            LOG.warning("Could not check for Codex events after a rollout stop", exc_info=True)
+            return False
+        return probe.return_code == 0 and not probe.error_type and probe.stdout.strip() == "absent"

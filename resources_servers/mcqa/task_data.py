@@ -29,6 +29,11 @@ class TaskData(BaseModel):
         description="Stable task identifier; echoed through, never graded on.",
         json_schema_extra={"consumed_by": ["provenance"]},
     )
+    task_id: Optional[str] = Field(
+        default=None,
+        description="Stable upstream task identifier, when the benchmark provides one.",
+        json_schema_extra={"consumed_by": ["provenance"]},
+    )
     options: Optional[List[Dict[str, Optional[str]]]] = Field(
         default=None,
         description=(

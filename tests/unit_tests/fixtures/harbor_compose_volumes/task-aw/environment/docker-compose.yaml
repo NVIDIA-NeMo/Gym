@@ -1,0 +1,13 @@
+# Modelled on the Harbor hub task abhishek203/task-aw: the sidecar seeds its API from a file of the task
+# folder, bind-mounted read-only. Nothing else is needed from the deployment.
+services:
+  main:
+    image: ${MAIN_IMAGE_NAME}
+    depends_on:
+      - api
+  api:
+    image: ghcr.io/example/aw-api:1.0
+    volumes:
+      - ./seed.json:/app/seed.json:ro
+    expose:
+      - "8080"

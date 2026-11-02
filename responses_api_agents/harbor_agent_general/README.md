@@ -167,7 +167,7 @@ A few notable details make it more general than the [older implementation](../ha
   - New Harbor datasets can be directly used by using appropriate keys in `job.datasets`, which maps directly to the `harbor.models.job.config:DatasetConfig` specification.
 - All parsing of the Harbor trajectory into a Gym rollout trajectory now uses Harbor APIs instead of custom dictionary parsing.
 - Reasoning text is correctly handled via `NeMoGymResponseReasoningItem` objects.
-- A minimum harbor version sets to `0.20.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
+- The minimum Harbor version is `0.24.0` in [pyproject.toml](./pyproject.toml) with a supporting lockfile.
 
 > [!caution]
 > Using this agent for training is currently not supported because underlying Harbor agents may not return
@@ -219,3 +219,13 @@ Example rollout metadata:
   }
 }
 ```
+
+### SkillsBench
+
+`benchmarks/skillsbench/harbor.yaml` and `harbor_opensandbox.yaml` use
+`skillsbench_app.py`, a thin subclass of this bridge. It supplies the Gym model
+server URL to the worker-side OpenHands harness and passes the named sandbox
+provider through `harbor_worker_env`, keeping credentials out of Harbor's
+retained configuration. Scheduling, job execution, scoring, and ATIF conversion
+use this general adapter. See [SkillsBench](../../benchmarks/skillsbench/README.md)
+for preparation and execution.

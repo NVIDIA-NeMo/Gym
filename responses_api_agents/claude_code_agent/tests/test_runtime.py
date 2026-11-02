@@ -110,6 +110,7 @@ async def test_upload_uses_sandbox_architecture_and_skips_healthy_remote_cache(t
     else:
         assert gzip.decompress(transfer.await_args.args[1].read_bytes()) == artifact.read_bytes()
         command = sandbox.exec.await_args.args[0]
+        assert command.startswith("bash /session/install_claude_runtime.sh ")
         assert (
             "--source /session/claude-upload.gz" in command
             and "--gzip" in command
@@ -143,10 +144,8 @@ async def test_host_local_binary_requires_no_network(tmp_path, monkeypatch):
 
 
 def test_worker_installer_has_no_download_dependency():
-    from responses_api_agents.claude_code_agent import install_claude_runtime
-
-    text = Path(install_claude_runtime.__file__).read_text()
-    assert "urllib" not in text and "https://" not in text
+    text = Path(runtime.__file__).with_name("install_claude_runtime.sh").read_text()
+    assert not any(tool in text for tool in ("curl", "wget", "https://", "python"))
 
 
 @pytest.mark.asyncio

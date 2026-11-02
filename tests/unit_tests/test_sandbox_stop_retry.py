@@ -7,7 +7,8 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.sandbox import AsyncSandbox, SandboxHandle, SandboxSpec
+from nemo_gym.sandbox.api import AsyncSandbox
+from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxSpec
 from tests.unit_tests.test_sandbox import FakeSandboxProvider
 
 
