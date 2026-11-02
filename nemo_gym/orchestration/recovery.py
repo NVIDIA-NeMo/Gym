@@ -1270,6 +1270,26 @@ def boolean(value):
     return value if type(value) is bool else None
 def count(value):
     return value if type(value) is int else None
+def message_text(item):
+    # Whether a message holds non-whitespace text (an output text or a refusal); None when it saved no content.
+    content = item.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return None
+    def text(part):
+        value = (part.get("refusal") if part.get("type") == "refusal" else part.get("text")) if isinstance(part, dict) else None
+        return value if isinstance(value, str) else ""
+    return any(text(part).strip() for part in content)
+def answer_item(item):
+    # An answer's output item: its type, role and status; an assistant message also says whether it has text
+    # (``has_text``). The text stays local.
+    if not isinstance(item, dict):
+        return None
+    projected = {k: item[k] for k in ("type", "role", "status") if k in item}
+    if item.get("role") == "assistant" and (has_text := message_text(item)) is not None:
+        projected["has_text"] = has_text
+    return projected
 def test_run(r):
     # A saved repository test run: its outcome flags only; the patch, test names and output stay local.
     if type(r.get("resolved")) is not bool:
@@ -1499,9 +1519,7 @@ def rows(name, skip=0):
                     if answer.get("error") is not None:
                         selected[key]["error"] = {}  # Presence only; diagnostic messages stay on the run host.
                     if isinstance(output, list):
-                        selected[key]["output"] = [
-                            {k: item[k] for k in ("type", "role", "status") if k in item}
-                            if isinstance(item, dict) else None for item in output]
+                        selected[key]["output"] = [answer_item(item) for item in output]
 
             if name == "rollouts_materialized_inputs.jsonl":
                 identity = r.get("trajectory_identity")
@@ -4122,10 +4140,13 @@ def grading_artifact(row: Mapping[str, Any]) -> str | None:
 
 
 def _empty_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the saved answer holds no assistant message with text: none at all, or only ones the collector saw
+    without non-whitespace text (``has_text`` false). A message whose content was not saved counts as an answer."""
     answer = row.get("response")
     output = answer.get("output") if isinstance(answer, dict) else None
     return isinstance(output, list) and not any(
-        isinstance(item, dict) and item.get("role") == "assistant" for item in output
+        isinstance(item, dict) and item.get("role") == "assistant" and item.get("has_text") is not False
+        for item in output
     )
 
 
@@ -4418,7 +4439,7 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     ``TRUNCATED_ANSWER`` when the answer carries a cutoff signal (``_cut_off``), whether the benchmark's rule or a
     recorded grade scored it zero: the cutoff is why it scored zero. Without a cutoff signal, a row whose reward came
     from a recorded grade (``_recorded_grade``) has none, as its score is its grade; otherwise ``EMPTY_ANSWER`` when it
-    holds no assistant message and ``MALFORMED_ANSWER`` when it does.
+    holds no assistant message with text (``_empty_answer``) and ``MALFORMED_ANSWER`` when it does.
     """
     if type(row.get("reward")) not in (int, float) or row["reward"] != 0 or not _incomplete_answer(row):
         return None
@@ -5024,7 +5045,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     omitted are no rollout of the run and are reported separately as ``omitted``.
 
     A response failure is a scored rollout without a recorded grade (``_recorded_grade``) whose saved answer is
-    truncated (incomplete with a cutoff signal, ``_cut_off``), empty (no assistant output) or malformed (no response
+    truncated (incomplete with a cutoff signal, ``_cut_off``), empty (no assistant text, ``_empty_answer``) or malformed (no response
     with an output list, an answer the verifier marked invalid, or one left incomplete without a cutoff signal). A trial failure is a rollout in a failed, masked or
     unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, a scored
     rollout that records its own failure kind or whose judge recorded no verdict, or an observed grading without a
@@ -5053,7 +5074,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
             responses["malformed"] += 1
         elif _incomplete_answer(row) and _cut_off(row):
             responses["truncated"] += 1
-        elif not any(isinstance(item, dict) and item.get("role") == "assistant" for item in output):
+        elif _empty_answer(row):
             responses["empty"] += 1
         elif _grading_facts(row).get("invalid_model_response") is True or _incomplete_answer(row):
             responses["malformed"] += 1
@@ -5419,23 +5440,34 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
 _COLLECTOR_FUNCTIONS: dict[str, Any] = {}
 
 
-def _collector_grading_facts():
-    """``COLLECT_SCRIPT``'s own ``grading_facts``, so an in-process reader projects a saved row as the collector does."""
+def _collector_function(name: str):
+    """``COLLECT_SCRIPT``'s own projection ``name``, so an in-process reader projects a saved row as the collector does."""
     if not _COLLECTOR_FUNCTIONS:
         start, end = COLLECT_SCRIPT.index("\ndef finite("), COLLECT_SCRIPT.index("\ndef grading_result_binding(")
         namespace: dict[str, Any] = {"math": math}
         exec(COLLECT_SCRIPT[start:end], namespace)  # noqa: S102 - this module's own constant source
         _COLLECTOR_FUNCTIONS.update(namespace)
-    return _COLLECTOR_FUNCTIONS["grading_facts"]
+    return _COLLECTOR_FUNCTIONS[name]
 
 
 def saved_row_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     """A full saved row with the evidence fields ``COLLECT_SCRIPT`` projects for the grading predicates: its scalar
-    grading facts and its verifier invocations."""
+    grading facts, whether each assistant message of its answer has text, and its verifier invocations."""
     evidence = dict(row)
-    facts = _collector_grading_facts()(row)
+    facts = _collector_function("grading_facts")(row)
     if any(value is not None and value is not False and value != [] for value in facts.values()):
         evidence["_ng_collected_grading_facts"] = facts
+    answer = row.get("response")
+    if isinstance(answer, Mapping) and isinstance(answer.get("output"), list):
+        evidence["response"] = dict(answer) | {
+            "output": [
+                item | {"has_text": has_text}
+                if isinstance(item, dict)
+                and (has_text := _collector_function("answer_item")(item).get("has_text")) is not None
+                else item
+                for item in answer["output"]
+            ]
+        }
     trajectory = row.get("ng_trajectory")
     if isinstance(trajectory, Mapping):
         evidence["ng_trial_observations"] = {"verifier_invocations": trajectory.get("verifier_invocations")}
