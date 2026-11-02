@@ -34,7 +34,7 @@ from loguru import logger
 from openai.types.completion_usage import CompletionUsage
 from pydantic import ConfigDict, Field, ValidationError
 
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
@@ -457,6 +457,8 @@ class Tau2Agent(SimpleResponsesAPIAgent):
             created_at=0.0,
             model=body.responses_create_params.model or "tau2",
             object="response",
+            # No generation happened: recovery must not keep this placeholder as the model's answer.
+            metadata=dict(NG_NO_GENERATION_METADATA),
             output=[
                 {
                     "type": "message",

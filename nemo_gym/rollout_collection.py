@@ -2157,6 +2157,17 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     def materialized_jsonl_fpath(self) -> Path:
         return materialized_path_for(Path(self.output_jsonl_fpath))
 
+    dispatch_connect_grace_s: float = Field(
+        default=60.0,
+        ge=0,
+        description=(
+            "Seconds during which collection keeps resending a /run whose every connection attempt was "
+            "refused. Such a request was never delivered, so resending it cannot start a second episode; "
+            "it covers an Environment Server that is restarting or not yet listening. A connection that "
+            "was made and then dropped may have delivered the request and keeps the strict two-attempt "
+            "limit. 0 disables the grace period."
+        ),
+    )
     dispatch_budget_s: Optional[float] = Field(
         default=None,
         ge=0,
@@ -4160,10 +4171,11 @@ class RolloutCollectionHelper(BaseModel):
                 semaphore=semaphore,
                 route_failures_to_sidecar=config.route_failures_to_sidecar,
                 record_unrouted_failures=True,
-                # One bounded resend of a /run whose connection dropped or was refused before any reply, as before
-                # this change: nothing was saved for it. Other failures belong to the persisted attempt and the
-                # recovery selector.
+                # A /run whose connection dropped before any reply may have been delivered: it gets one bounded
+                # resend. One whose every connection was refused was never delivered, and is resent within the
+                # connect grace period. Other failures belong to the persisted attempt and the recovery selector.
                 _max_num_tries=2,
+                _connect_grace_s=config.dispatch_connect_grace_s,
                 typed_outcomes=config.route_failures_to_sidecar,
                 validate_results=True,
                 on_dispatch_batch=store.record_dispatches,
@@ -5173,6 +5185,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         _max_num_tries: Optional[int] = None,
         run_timing: Optional[RunTimingReport] = None,
         record_unrouted_failures: bool = False,
+        _connect_grace_s: Optional[float] = None,
     ) -> Iterator[Future]:  # pragma: no cover
         """
         Internal dispatch shared by ``run_examples`` and Gym's own collection paths.
@@ -5309,21 +5322,35 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                         else nullcontext()
                     )
                     with dispatch_span as dispatch_span_context:
-                        res = await server_client.post(
-                            server_name=server_name,
-                            url_path="/run",
-                            json=request_body,
-                            **({"_resend_after_disconnect": False} if not retry_requests else {}),
-                            **(
-                                {
-                                    "_max_num_tries": _max_num_tries,
-                                    "_retry_other_errors": False,
-                                    "_on_transport_failure": lambda error, _: attempt_errors.append(error),
-                                }
-                                if _max_num_tries is not None
-                                else {}
-                            ),
-                        )
+                        connect_deadline = time.monotonic() + (_connect_grace_s or 0.0)
+                        while True:
+                            try:
+                                res = await server_client.post(
+                                    server_name=server_name,
+                                    url_path="/run",
+                                    json=request_body,
+                                    **({"_resend_after_disconnect": False} if not retry_requests else {}),
+                                    **(
+                                        {
+                                            "_max_num_tries": _max_num_tries,
+                                            "_retry_other_errors": False,
+                                            "_on_transport_failure": lambda error, _: attempt_errors.append(error),
+                                        }
+                                        if _max_num_tries is not None
+                                        else {}
+                                    ),
+                                )
+                                break
+                            except ClientConnectorError:
+                                # Every attempt so far was refused, so /run was never delivered and resending it
+                                # cannot start a second episode. A connection that was made keeps the strict limit.
+                                if _max_num_tries is None or time.monotonic() >= connect_deadline:
+                                    raise
+                                if not attempt_errors or not all(
+                                    isinstance(error, ClientConnectorError) for error in attempt_errors
+                                ):
+                                    raise
+                                await asyncio.sleep(0.5)
                     await raise_for_status(res)
                     stage = "response"
                     result = await get_response_json(res)
