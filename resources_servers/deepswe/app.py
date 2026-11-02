@@ -10,6 +10,7 @@ import hashlib
 import json
 import sys
 import tempfile
+import uuid
 from copy import deepcopy
 from dataclasses import dataclass
 from math import ceil
@@ -551,6 +552,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         verification_attempts = 0
         inconclusive_attempts: list[str] = []
         result = VerifierResult(evaluation_completed=False, reward=0.0, verifier_error=patch_error)
+        # One verification operation, however many attempts it takes; outside a verifier invocation it gets its own id.
+        operation_id = current_verifier_invocation_id() or uuid.uuid4().hex
         if patch_error is None:
             # The same collected patch is verified on a fresh sandbox each time; an attempt without a verdict is run
             # again within the bound (``_inconclusive_reason``), and the last attempt's result stands.
@@ -583,6 +586,26 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     failure_cause = attempt_error
                     break
                 inconclusive_attempts.append(bounded_text(reason, _MAX_FAILURE_REASON_CHARS))
+                # An attempt that is run again is observed as its own failure, as swebench_pro observes its
+                # verification attempts, so every infrastructure retry is visible in the run's facts. Only an
+                # exception before a sandbox was assigned names allocation as the failing operation.
+                allocation_failed = attempt_error is not None and sandbox is None
+                observed = NgFailureEvent(
+                    boundary=FailureBoundary.RESOURCES_SERVER,
+                    failure_kind=VERIFIER_ERROR,
+                    failure_reason=(
+                        "Verifier sandbox allocation failed"
+                        if allocation_failed
+                        else "Verification produced no conclusive verdict"
+                    ),
+                    operation="verify.sandbox.allocate" if allocation_failed else "verify",
+                    operation_id=operation_id,
+                    attempt_id=f"{operation_id}:{attempt}",
+                    stage="verification",
+                    exception_type=type(attempt_error).__name__ if attempt_error is not None else None,
+                )
+                observed.__cause__ = attempt_error
+                observe_failure(observed)
                 print(
                     f"Retrying DeepSWE verification for {current_task_id} on a fresh sandbox "
                     f"(attempt {attempt}/{attempts} was inconclusive: {reason})",
@@ -604,7 +627,9 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                     result.verifier_error or "DeepSWE verification did not complete", _MAX_FAILURE_REASON_CHARS
                 ),
                 operation="collect_model_patch" if patch_error is not None else "verify",
-                operation_id=current_verifier_invocation_id(),
+                operation_id=operation_id,
+                # The last of the attempts that ran; the earlier ones were observed as they were run again.
+                attempt_id=f"{operation_id}:{verification_attempts}" if verification_attempts else None,
                 stage="verification",
             )
             failure.__cause__ = failure_cause

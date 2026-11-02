@@ -401,7 +401,10 @@ async def test_long_verifier_diagnostic_is_bounded_and_keeps_the_patch(
     assert response.mask_sample is True
     assert response.model_patch == "golden patch\n"
     assert response.verifier_error == f"RuntimeError: {long_error}"
-    [event] = log.report.events.values()
+    # The verifier raised on every attempt: the two attempts run again were observed, the last one is the failure.
+    *attempts, event = sorted(log.report.events.values(), key=lambda e: e.attempt_id)
+    assert [e.operation for e in attempts] == ["verify", "verify"]
+    assert all(e.exception_type == "RuntimeError" for e in attempts)
     assert len(event.failure_reason) <= 2000
     assert event.failure_reason.startswith("RuntimeError: provider said: xxx")
     assert event.failure_reason.endswith("[truncated]")
@@ -551,7 +554,15 @@ async def test_a_verifier_run_without_a_verdict_is_run_again_on_a_fresh_sandbox_
     for sandbox in created:
         sandbox.stop.assert_awaited_once()
     assert response.model_patch == "agent patch\n"
-    assert log.report.events == {}  # a verdict was reached: nothing failed
+    # The attempt run again is observed as its own failure; the verdict stands and the row reports no failure.
+    [attempt] = log.report.events.values()
+    assert (attempt.failure_kind, attempt.operation, attempt.failure_reason, attempt.stage) == (
+        VERIFIER_ERROR,
+        "verify",
+        "Verification produced no conclusive verdict",
+        "verification",
+    )
+    assert attempt.attempt_id == f"{attempt.operation_id}:1"
 
 
 async def test_a_verifier_that_never_produces_a_verdict_keeps_the_masked_outcome_after_the_bound(
@@ -566,8 +577,11 @@ async def test_a_verifier_that_never_produces_a_verdict_keeps_the_masked_outcome
     assert response.failure_kind == VERIFIER_ERROR and response.failure_reason == NO_VERDICT
     assert response.verification_attempts == 3 and response.inconclusive_attempts == [NO_VERDICT, NO_VERDICT]
     assert response.model_patch == "agent patch\n"
-    [event] = log.report.events.values()
-    assert (event.failure_kind, event.operation, event.failure_reason) == (VERIFIER_ERROR, "verify", NO_VERDICT)
+    # Two attempts were run again and observed as such; the last one is the row's failure, with its attempt id.
+    first, second, final = sorted(log.report.events.values(), key=lambda e: e.attempt_id)
+    assert [e.failure_reason for e in (first, second)] == ["Verification produced no conclusive verdict"] * 2
+    assert (final.failure_kind, final.operation, final.failure_reason) == (VERIFIER_ERROR, "verify", NO_VERDICT)
+    assert [e.attempt_id for e in (first, second, final)] == [f"{final.operation_id}:{n}" for n in (1, 2, 3)]
     for sandbox in created:
         sandbox.stop.assert_awaited_once()
 
@@ -585,22 +599,28 @@ async def test_a_conclusive_failing_verdict_is_not_run_again(task_assets: Path, 
 async def test_a_verifier_sandbox_that_fails_to_start_or_run_is_tried_again(
     task_assets: Path, monkeypatch: MonkeyPatch
 ) -> None:
-    sandbox = AsyncMock()
+    # The first verifier sandbox is refused by the provider before it exists; the second runs the verifier.
+    verifier_sandbox = AsyncMock()
     server, _ = _rollout_server(
         task_assets,
         monkeypatch,
-        verifier_results=[
-            RuntimeError("provider refused the sandbox"),
-            VerifierResult(evaluation_completed=True, reward=1.0),
-        ],
-        sandboxes=[sandbox, AsyncMock()],
+        verifier_results=[VerifierResult(evaluation_completed=True, reward=1.0)],
+        sandboxes=[RuntimeError("provider refused the sandbox"), verifier_sandbox],
     )
     response, log = await _verify(server)
     assert response.reward == 1.0 and response.evaluation_completed is True
     assert response.verification_attempts == 2
     assert response.inconclusive_attempts == ["RuntimeError: provider refused the sandbox"]
-    sandbox.stop.assert_awaited_once()
-    assert log.report.events == {}
+    verifier_sandbox.stop.assert_awaited_once()
+    # Only an exception before a sandbox was assigned names allocation as the failing operation.
+    [attempt] = log.report.events.values()
+    assert (attempt.failure_kind, attempt.operation, attempt.failure_reason, attempt.exception_type) == (
+        VERIFIER_ERROR,
+        "verify.sandbox.allocate",
+        "Verifier sandbox allocation failed",
+        "RuntimeError",
+    )
+    assert attempt.attempt_id == f"{attempt.operation_id}:1"
 
 
 @pytest.mark.parametrize(
