@@ -885,6 +885,8 @@ class TestCreateAndLifecycle:
             "envVars": {"FOO": "bar"},
             "metadata": {"run": "1"},
             "customExtensionParams": {"sandbank": "all"},
+            "autoPause": False,
+            "autoResume": {"enabled": False},
         }
         # Attached with connect (keeping the create timeout), not created twice.
         assert [sandbox.sandbox_id for sandbox in FakeSandbox.instances] == ["sbx-rest"]
@@ -1241,7 +1243,10 @@ def test_create_auto_resume_rejects_non_boolean(invalid: object) -> None:
 
 
 @pytest.mark.parametrize("auto_resume", [True, False])
-async def test_real_sdk_serializes_lifecycle_policy(monkeypatch: pytest.MonkeyPatch, auto_resume: bool) -> None:
+@pytest.mark.parametrize("custom_extension_params", [None, {"sandbank": "all"}])
+async def test_real_sdk_serializes_lifecycle_policy(
+    monkeypatch: pytest.MonkeyPatch, auto_resume: bool, custom_extension_params: dict | None
+) -> None:
     pytest.importorskip("e2b")
     import json
 
@@ -1259,8 +1264,9 @@ async def test_real_sdk_serializes_lifecycle_policy(monkeypatch: pytest.MonkeyPa
     monkeypatch.setattr(GymAiohttpTransport, "handle_async_request", capture_request)
     provider = E2BProvider(
         connection={"api_key": "test-key", "validate_api_key": False},
-        create={"template": "base", "auto_resume": auto_resume},
+        create={"template": "base", "auto_resume": auto_resume, "custom_extension_params": custom_extension_params},
     )
+    # The SDK create and the REST create (custom_extension_params) send the same lifecycle.
     with pytest.raises(E2BCreateError, match="captured before network"):
         await provider.create(_spec(ttl_s=7))
     assert len(bodies) == 1

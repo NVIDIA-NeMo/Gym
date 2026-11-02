@@ -43,6 +43,7 @@ uses the operator's authentication settings. Set `E2B_API_URL` and
 Gateway-specific create parameters go in `create.custom_extension_params` and are sent as the
 API's `customExtensionParams`. The E2B SDK cannot send that field, so setting it makes the
 provider create each sandbox with one `POST {api_url}/sandboxes` and then attach with `connect`.
+That request sends the same timeout lifecycle (`create.auto_resume`) as the SDK create.
 
 ## Provider Config
 

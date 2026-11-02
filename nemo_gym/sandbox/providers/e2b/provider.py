@@ -509,6 +509,10 @@ class E2BProvider:
         }
         if "network" in kwargs:
             body["network"] = {_NETWORK_API_KEYS[key]: rules for key, rules in kwargs["network"].items()}
+        if "lifecycle" in kwargs:
+            # The SDK's wire form of the lifecycle, so both create paths time out alike.
+            body["autoPause"] = kwargs["lifecycle"]["auto_resume"]
+            body["autoResume"] = {"enabled": kwargs["lifecycle"]["auto_resume"]}
         client = e2b.api.client_async.get_api_client(config).get_async_httpx_client()
         response = await client.post("/sandboxes", json=body)
         if response.status_code >= 300:
