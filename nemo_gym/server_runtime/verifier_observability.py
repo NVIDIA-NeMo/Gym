@@ -197,12 +197,18 @@ def _finish(
 
 
 def observe_verifier(
-    verify_fn: Callable[P, Awaitable[T]], *, enabled: bool, verifier_name: str | None = None
+    verify_fn: Callable[P, Awaitable[T]],
+    *,
+    enabled: bool,
+    verifier_name: str | None = None,
+    uninstrumented_models: bool = False,
 ) -> Callable[P, Awaitable[T | Response]]:
     """Return verification evidence with its result, leaving persistence to collection.
 
     A verify execution named by ``verifier_name`` that completes without sending any model request also returns
-    its grading record: the verifier, the score and its verdict, bound to the graded response.
+    its grading record: the verifier, the score and its verdict, bound to the graded response. A verifier that may
+    ask a model through a client that notes no request (``uninstrumented_models``) never returns one: missing notes
+    do not show that its grading was model-free.
 
     HTTP failures keep their status and carry evidence in the error body. Cancellation
     still propagates; a cancelled or lost response cannot deliver in-memory evidence.
@@ -251,7 +257,10 @@ def observe_verifier(
                 result.headers.update(FailureHeader.encode(report))
             else:
                 _finish(
-                    invocation, result, verifier_name=verifier_name, graded_in_process=not verifier_model_requests()
+                    invocation,
+                    result,
+                    verifier_name=verifier_name,
+                    graded_in_process=not uninstrumented_models and not verifier_model_requests(),
                 )
             finally:
                 _active_verifier.reset(token)

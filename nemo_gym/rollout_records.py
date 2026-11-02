@@ -36,6 +36,7 @@ from pydantic import ValidationError
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.config.global_config import ATTEMPT_INDEX_KEY_NAME, ROLLOUT_INDEX_KEY_NAME, TASK_INDEX_KEY_NAME
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
+from nemo_gym.core.failure_kinds import AGENT_TIMEOUT_INFRASTRUCTURE, ROLLOUT_ALLOCATION_ENDED
 from nemo_gym.rollout_outcomes import RolloutFailureRecord
 from nemo_gym.rollout_recovery import (
     RunManifest,
@@ -45,10 +46,12 @@ from nemo_gym.rollout_recovery import (
     has_saved_generation,
     has_unclassified_execution_failure,
     is_answered_agent_deadline,
+    is_infrastructure_agent_timeout,
     is_terminal_failure,
     keeps_partial_response,
     load_resubmit_offset,
     manifest_path_for,
+    masked_infrastructure_kind,
     matches_failure_class,
     observed_elapsed,
 )
@@ -200,6 +203,8 @@ class _Outcome:
     interruption_cause_unknown: bool = False
     saved_answer: bool = False
     unclassified_execution_failure: bool = False
+    # A result masked by an infrastructure failure (``masked_infrastructure_kind``): a failed attempt that is retried.
+    masked_infrastructure: bool = False
 
 
 # A read-only selection parses a row above this size without the values of its skipped keys, in chunks.
@@ -619,10 +624,16 @@ class RolloutRecords:
             self.attempt_counts[key[0]] += 1
         self.latest[key[0]] = max(key[1], self.latest.get(key[0], -1))
         interruption = is_interruption_failure(row)
+        infrastructure = is_infrastructure_agent_timeout(row)
+        failure_class = row.get("_ng_failure_class")
+        if failure_class is None and infrastructure:
+            # A graded result of an agent timeout whose window held a server-side fault (Harbor's graded zero) is not
+            # the model's result: it is selected as a failure, spends an attempt and runs again under the cap.
+            failure_class = AGENT_TIMEOUT_INFRASTRUCTURE
         if (
             count_failure
             and key not in self.payloads
-            and row.get("_ng_failure_class") is not None
+            and failure_class is not None
             and not interruption
             and not row.get("_ng_failure_terminal")
         ):
@@ -630,17 +641,22 @@ class RolloutRecords:
         if (
             count_failure
             and key not in self.payloads
-            and row.get("_ng_failure_class") is not None
+            and failure_class is not None
             and not interruption
             and row.get("_ng_failure_terminal")
             and not is_terminal_failure(row, retry_terminal_timeouts=True)
         ):
             self.overridden_terminal_counts[key[0]] += 1
+        masked_infrastructure = masked_infrastructure_kind(row) is not None
+        if masked_infrastructure and key not in self.payloads:
+            # The results file keeps no resubmit offset, so a masked attempt counts whenever it was saved: a resubmit
+            # still gives the process it starts a fresh budget, as for every failure.
+            self.attempt_counts[key[0]] += 1
         if row.get("_ng_omitted"):
             self.omitted.add(key)
         self.payloads[key] = _Outcome(
             record=replace(record, expected_identity=(row.get(RUN_ID_KEY), key[0], key[1])),
-            failure_class=row.get("_ng_failure_class"),
+            failure_class=failure_class,
             legacy_failure_class=row.get("_ng_failure_legacy_class"),
             terminal=bool(row.get("_ng_failure_terminal")),
             masked=bool(row.get("mask_sample")),
@@ -653,9 +669,11 @@ class RolloutRecords:
             interruption_cause_unknown=interruption and not _has_eligible_interruption_cause(row),
             unclassified_execution_failure=has_unclassified_execution_failure(row),
             # A recorded grade or a partial native response is retained like a kept answer: a fresh run would
-            # replace it.
-            saved_answer=row.get("_ng_failure_class") is not None
+            # replace it. Not when a server-side fault cut the agent's window short: that answer is not its result.
+            saved_answer=failure_class is not None
+            and not infrastructure
             and (_holds_saved_answer(row) or has_recorded_grade(row) or keeps_partial_response(row)),
+            masked_infrastructure=masked_infrastructure,
         )
         outcome = self.payloads[key]
         if (
@@ -811,6 +829,9 @@ class RolloutRecords:
                 },
                 retry_terminal_timeouts=True,
             )
+        if payload and payload.masked_infrastructure and self.disposition(identity) == "success":
+            # Infrastructure masked this result, so it is retried and a later attempt supersedes it.
+            return True
         return self.disposition(identity) not in {"success", "omitted"} and not terminal
 
     def failure_count(self, identity: str) -> int:
@@ -838,6 +859,44 @@ class RolloutRecords:
             ) >= max_attempts
         return exhausted
 
+    def allocation_end_charges(self) -> list[dict]:
+        """The failure rows that charge a rollout for each later end of an allocation it was in flight in.
+
+        A reserved attempt with no saved outcome was in flight when the allocation that made it ended: the writer that
+        loads the Store holds run_lock, so no other allocation of the run is alive. The first such end of an identity
+        re-runs for free, and every later one spends an attempt of its cap: the earliest reservation without an
+        outcome stays as it is and each later one gets a non-terminal ``rollout_allocation_ended`` failure. Only an
+        identity a resume would run again is charged; a finished, settled or blocked one is never touched. The count
+        is derived from the manifest's reservations each time, so a saved charge is never charged again.
+        """
+        if self.manifest.legacy_import:
+            return []
+        charges = []
+        for identity, original in self.expected.items():
+            if not self._retryable(identity):
+                continue
+            ended = [
+                index
+                for index in range(self.manifest.next_attempt.get(identity, 0))
+                if (identity, index) not in self.payloads
+            ]
+            for index in ended[1:]:
+                charges.append(
+                    dict(original)
+                    | {
+                        ATTEMPT_INDEX_KEY_NAME: index,
+                        RUN_ID_KEY: self.manifest.run_id,
+                        "_ng_failure_class": ROLLOUT_ALLOCATION_ENDED,
+                        "_ng_failure_terminal": False,
+                        "failure_kind": ROLLOUT_ALLOCATION_ENDED,
+                        "_ng_failure_message": (
+                            f"attempt {index} was in flight when its allocation ended; this rollout's first such end "
+                            "re-ran for free and each later one spends an attempt"
+                        ),
+                    }
+                )
+        return charges
+
     def pending(self, max_attempts: int) -> list[dict]:
         pending = []
         for identity, original in self.expected.items():
@@ -854,8 +913,8 @@ class RolloutRecords:
         max_attempts = self.manifest.max_rollout_attempts or _get_max_rollout_attempts()
         not_started = expected - len(self.latest)
         missing = counts["unknown"] - not_started
-        # A producer-masked result completed execution, so recovery still reuses
-        # it. Report its measurement status separately, after selecting attempts.
+        # A producer-masked result completed execution, so recovery reuses it unless infrastructure masked it
+        # (``masked_infrastructure``). Report its measurement status separately, after selecting attempts.
         masked = sum(
             self.payloads[(identity, self.latest[identity])].masked
             and self.payloads[(identity, self.latest[identity])].has_reward
@@ -873,6 +932,15 @@ class RolloutRecords:
         failed_final = sum(
             not self._retryable(identity) or self.failure_count(identity) >= max_attempts for identity, _ in failures
         )
+        # Masked by infrastructure and still within its attempt cap: a resume runs it again, so it is not complete.
+        masked_retryable = sum(
+            self.payloads[(identity, self.latest[identity])].masked_infrastructure
+            and self._retryable(identity)
+            and self.failure_count(identity) < max_attempts
+            for identity in self.expected
+            if self.disposition(identity) == "success"
+        )
+        settled = counts["success"] - masked_retryable + final_zeros
         return {
             "schema_version": 2,
             "selection_policy": self.manifest.selection_policy,
@@ -881,6 +949,7 @@ class RolloutRecords:
             "successful": counts["success"],
             "measured": counts["success"] - masked - unscored,
             "masked": masked,
+            "masked_retryable": masked_retryable,
             "unscored": unscored,
             "failed": counts["failure"],
             "failed_final": failed_final,
@@ -900,8 +969,8 @@ class RolloutRecords:
             ),
             "max_rollout_attempts": max_attempts,
             "retry_terminal_timeouts": self.retry_terminal_timeouts,
-            "completion_fraction": (counts["success"] + final_zeros) / expected if expected else 1.0,
-            "complete": counts["success"] + final_zeros == expected,
+            "completion_fraction": settled / expected if expected else 1.0,
+            "complete": settled == expected,
             "reconciled": missing == 0,
             "identity_verified": not (self.manifest.legacy_import or self.manifest.identity_overridden),
         }

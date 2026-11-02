@@ -26,6 +26,10 @@ from tests.unit_tests.test_eval_resubmit import _handle, _sbatch_env, _start_que
 from tests.unit_tests.test_eval_resubmit import _local_index as _local_index
 from tests.unit_tests.test_eval_resubmit import slurm_bin as slurm_bin
 from tests.unit_tests.test_eval_resubmit_decision import run_cli
+from tests.unit_tests.test_resubmit_repin import launcher_at as launcher_at
+from tests.unit_tests.test_resubmit_walltime import (
+    _launcher_at_the_pinned_revision as _launcher_at_the_pinned_revision,
+)
 from tests.unit_tests.test_resubmit_walltime import _timed_run
 
 
@@ -175,6 +179,22 @@ def test_a_fresh_restart_is_refused_before_anything_changes(tmp_path, slurm_bin,
     files = {path: path.read_bytes() for path in (job_dir / "job.sh", job_dir.parent / "resolved-config.yaml")}
     with pytest.raises(ValueError, match=error):
         recover(*_handle(job_dir), walltime_reason="startup takes longer than 4 h", **flags)
+    assert {path: path.read_bytes() for path in files} == files
+    assert not (slurm_bin / "env").exists() and not (job_dir.parent / WALLTIME_JOURNAL_NAME).exists()
+    assert not (job_dir / ".gym_chain_incomplete").exists()
+
+
+def test_a_fresh_restart_from_a_launcher_of_another_revision_is_refused(tmp_path, slurm_bin, monkeypatch):
+    import nemo_gym.orchestration.executors.slurm as slurm_executor
+    from nemo_gym.orchestration.executors.slurm import IncompatibleRerenderError
+    from nemo_gym.orchestration.submit import recover
+    from tests.unit_tests.test_resubmit_repin import NEW, OLD
+
+    monkeypatch.setattr(slurm_executor, "installed_gym_commit", lambda: NEW)
+    job_dir = _cut_before_inventory(tmp_path, slurm_bin)
+    files = {path: path.read_bytes() for path in (job_dir / "job.sh", job_dir.parent / "resolved-config.yaml")}
+    with pytest.raises(IncompatibleRerenderError, match=f"pinned to Gym {OLD}"):
+        recover(*_handle(job_dir), max_walltime="08:00:00", walltime_reason="startup takes longer than 4 h")
     assert {path: path.read_bytes() for path in files} == files
     assert not (slurm_bin / "env").exists() and not (job_dir.parent / WALLTIME_JOURNAL_NAME).exists()
     assert not (job_dir / ".gym_chain_incomplete").exists()

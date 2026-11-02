@@ -37,6 +37,7 @@ from nemo_gym.config.global_config import DEFAULT_SERVER_SPINUP_TIMEOUT_SECONDS,
 from nemo_gym.orchestration.api import (
     HOST_ENV_REFS,
     SAVED_CONFIG,
+    NodePool,
     SlurmComputeConfig,
     SubmitConfig,
     VllmPDServiceConfig,
@@ -44,6 +45,14 @@ from nemo_gym.orchestration.api import (
 from nemo_gym.orchestration.executors.base import BaseExecutor, SchedulerRefusedError
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
+from nemo_gym.orchestration.executors.judge_profile import (
+    JUDGE_POOL_NAME,
+    JudgeProfileUnsupported,
+    choose_judge_partition,
+    is_cpu_only_submission,
+    judge_execution_profile,
+    judge_job_config,
+)
 from nemo_gym.orchestration.executors.otel import (
     COLLECTOR_CONFIG_NAME,
     COLLECTOR_DIR,
@@ -58,6 +67,7 @@ from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
     ALLOCATION_ACCOUNTING_MARKER,
     BOUNDED_BUDGET_MARKER,
+    CHAIN_ACCOUNTING_FORMAT,
     INCOMPLETE_MARKER_NAME,
     KEEP_BUDGET_ENV,
     PROLOGUE_MARKER,
@@ -83,16 +93,19 @@ from nemo_gym.orchestration.jobs import (
 )
 from nemo_gym.orchestration.recovery import (
     ACCUMULATED_WALLTIME_FILE,
-    CHAIN_ACCOUNTING_FORMAT,
     COLLECT_SCRIPT,
     FOLLOWUP_ACCOUNTING_FORMAT,
     INFRA_RETRIES_FILE,
     INFRA_RETRY_EXTENSION_FILE,
+    JUDGE_JOB_FAILURE_BOUND,
+    JUDGE_JOB_JOURNAL_NAME,
+    LIVE_JOB_STATES,
     NO_INVENTORY,
     OPERATOR_CONTINUATION_JOURNAL_NAME,
     OPERATOR_CONTINUATION_NOTE,
     READER_PLACEMENT_FIELDS,
     CollectedEvidence,
+    IdentityState,
     OperatorBudget,
     RecoveryAction,
     RecoveryDecision,
@@ -100,11 +113,12 @@ from nemo_gym.orchestration.recovery import (
     RecoveryOutcomePolicyConfig,
     _managed_trial_metadata,
     accounted_chain_walltime,
-    accounted_requeued_chain_walltime,
     allocation_cut_from_accounting,
     chain_accounting,
     decide_from_collected,
+    effective_outcome_policy,
     live_chain_job,
+    reconcile_requeued_chain,
     requeue_note,
     select_managed_evidence,
     stopped_followup,
@@ -199,6 +213,23 @@ WALLTIME_JOURNAL_NAME = "walltime-extension-journal.jsonl"
 UNSAFE_RESUME_JOURNAL_NAME = "unsafe-resume-journal.jsonl"
 # Appended in the job dir when `gym eval resubmit --recover --server-spinup-timeout-seconds` raises the limit.
 SPINUP_TIMEOUT_JOURNAL_NAME = "spinup-timeout-journal.jsonl"
+
+
+class IncompatibleRerenderError(RuntimeError):
+    """A job script would be rendered again by a launcher of another Gym revision than the one the job runs.
+
+    The launcher's job.sh templates may need modules the pinned revision does not have, and the capability checks
+    run later inspect only the newly rendered script, so the mismatch is refused before anything changes.
+    """
+
+    def __init__(self, pinned: str, launcher: str | None) -> None:
+        super().__init__(
+            f"the run is pinned to Gym {pinned}, but this launcher is Gym {launcher}: rendering job.sh again here "
+            "would install this launcher's job templates into a job that runs the pinned revision; recover from a "
+            "launcher installed at the pinned revision, or move the run here with --repin"
+        )
+        self.pinned = pinned
+        self.launcher = launcher
 
 
 def _repinned_config(config: SubmitConfig, benchmark: str, ref: str) -> SubmitConfig:
@@ -405,36 +436,6 @@ def _plan_walltime(
     return plan
 
 
-def _reconcile_requeued_chain(
-    collected: CollectedEvidence, rows: list[tuple[str, str, int, int]]
-) -> CollectedEvidence:
-    """Know a requeued chain's budget again once every incarnation has a terminal scheduler record.
-
-    Only the requeue marker is reconciled: the counters themselves stayed readable and the missing fact is the elapsed
-    time of the requeued incarnations, which complete terminal records give. Any other unknown reason stays unknown.
-    """
-    states = collected.counter_states or {}
-    if (
-        collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON
-        or states.get("infra_retries") not in ("absent", "ok")
-        or states.get("walltime") not in ("absent", "ok")
-    ):
-        return collected
-    total = accounted_requeued_chain_walltime(
-        collected.job_chain, rows, stored_walltime_s=collected.walltime_used_s or 0
-    )
-    if total is None:
-        return collected
-    return collected.model_copy(
-        update={
-            "infra_retries_state": states["infra_retries"],
-            "walltime_state": states["walltime"],
-            "accounted_walltime_s": total,
-            "accounting_reconciled": True,
-        }
-    )
-
-
 # The size-aware reader bound: bootstrap plus a floor, then time per GB of saved rollout files, up to a ceiling.
 _READER_FLOOR_S = 900
 _READER_S_PER_GB = 100
@@ -476,6 +477,11 @@ def _remote_reader_bound_s() -> int | None:
 READER_SRUN_ENV = "NEMO_GYM_REMOTE_READER_SRUN"
 READER_SRUN_WAIT_ENV = "NEMO_GYM_REMOTE_READER_SRUN_WAIT_S"
 READER_MAX_ENV = "NEMO_GYM_REMOTE_READER_MAX"
+# With a reader step, whether a reader that cannot run in its step may read on the login host instead: "forbid" (the
+# default) or "allow". Forbidden, such a read is unavailable: nothing is read on the login host or decided from it.
+READER_LOGIN_FALLBACK_ENV = "NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK"
+# The host a reader reports when its step did not run and the login-host fallback is forbidden.
+READER_NOT_RUN_HOST = "none"
 # After cancelling a reader step that did not start, how long to wait for it to leave the queue.
 _READER_CANCEL_WAIT_S = 60
 _READER_HOST_PREFIX = "__GYM_READER_HOST:"
@@ -485,11 +491,13 @@ _READER_FALLBACK_PREFIX = "__GYM_READER_FALLBACK:"
 @dataclass(frozen=True)
 class ReaderStep:
     """How a heavy reader runs in a Slurm step: the caller's srun arguments (each quoted), how long the step may take
-    to start, and how many reader steps the user may have running or pending before readers stay on the login host."""
+    to start, how many reader steps the user may have running or pending before readers stay on the login host, and
+    whether a reader that cannot run in its step may run on the login host instead."""
 
     args: str
     wait_s: int
     max_readers: int
+    login_fallback: bool = False
 
 
 def _env_count(name: str, default: int) -> int:
@@ -501,10 +509,18 @@ def _env_count(name: str, default: int) -> int:
     return value if value >= 1 else default
 
 
+# The decision of a recovery whose evidence collector could not run in its step, with the fallback forbidden.
+COLLECTOR_NOT_RUN = (
+    "the evidence collector could not run in its Slurm step and the login-host fallback is forbidden, so nothing was "
+    "read or decided"
+)
+
+
 def reader_step() -> ReaderStep | None:
     """The reader step from ``NEMO_GYM_REMOTE_READER_SRUN`` (extra srun arguments, for example ``-p cpu -c 4``),
-    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120) and ``NEMO_GYM_REMOTE_READER_MAX`` (default 8); None when
-    the arguments are unset or empty."""
+    ``NEMO_GYM_REMOTE_READER_SRUN_WAIT_S`` (default 120), ``NEMO_GYM_REMOTE_READER_MAX`` (default 8) and
+    ``NEMO_GYM_REMOTE_READER_LOGIN_FALLBACK`` (``allow``; anything else forbids it); None when the arguments are unset
+    or empty."""
     raw = os.environ.get(READER_SRUN_ENV, "").strip()
     if not raw:
         return None
@@ -512,6 +528,7 @@ def reader_step() -> ReaderStep | None:
         args=" ".join(shlex.quote(arg) for arg in shlex.split(raw)),
         wait_s=_env_count(READER_SRUN_WAIT_ENV, 120),
         max_readers=_env_count(READER_MAX_ENV, 8),
+        login_fallback=os.environ.get(READER_LOGIN_FALLBACK_ENV, "").strip().lower() == "allow",
     )
 
 
@@ -524,7 +541,8 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
     and ``script`` reads the reader bound as ``$1``. The step is named gym-reader-<token>, and its time limit is the
     reader bound plus 60 s, so Slurm ends an orphan. A step that has not started after the wait is cancelled by name,
     and the reader runs on the login host. With ``watchdog`` (FD 4 is the shell's stdin), srun runs under the EOF
-    watcher (``_watch_lines``), which also cancels the step by name.
+    watcher (``_watch_lines``), which also cancels the step by name. Without ``step.login_fallback``, a reader that
+    would fall back runs nowhere: ``_gym_host`` is ``none``, ``_gym_rc`` 1, and ``_gym_fallback`` says why.
     """
     name = shlex.quote(f"gym-reader-{token}")
     inside = shlex.quote(f'echo "{_READER_HOST_PREFIX}cpu:$SLURM_JOB_ID"; exec 3<&0 </dev/null; {script}')
@@ -577,6 +595,19 @@ def _reader_step_lines(step: ReaderStep, token: str, *, script: str, stdin: str,
         "        fi",
         "    fi",
         "fi",
+        *(
+            []
+            if step.login_fallback
+            else [
+                "if [[ $_gym_host == login ]]; then",
+                f"    _gym_host={READER_NOT_RUN_HOST}",
+                "    _gym_rc=1",
+                f'    _gym_fallback="$_gym_fallback; the login-host fallback is forbidden ({READER_LOGIN_FALLBACK_ENV}='
+                'forbid), so nothing was read"',
+                '    echo "gym: the reader did not run: $_gym_fallback" >>"$_gym_err"',
+                "fi",
+            ]
+        ),
     ]
 
 
@@ -646,6 +677,9 @@ def collector_command(collect: str, job_dir: Path, step: ReaderStep, token: str)
         *_reader_step_lines(step, token, script=f"exec {collect}", stdin="</dev/null"),
         *_report_placement_lines(),
         'if [[ $_gym_host == login ]]; then rm -f -- "$_gym_err" "$_gym_step_out"; exec ' + collect + "; fi",
+        # A collector that ran nowhere reports only its placement: the caller decides nothing from it.
+        f'if [[ $_gym_host == {READER_NOT_RUN_HOST} ]]; then cat "$_gym_err" >&2; rm -f -- "$_gym_err" "$_gym_step_out"; '
+        "exit 0; fi",
         f'grep -v "^{_READER_HOST_PREFIX}" "$_gym_step_out"',
         '[[ $_gym_rc == 0 ]] || cat "$_gym_err" >&2',
         'rm -f -- "$_gym_err" "$_gym_step_out"',
@@ -975,9 +1009,11 @@ def _remote_managed_evidence(
                 break
             if not timed_out or attempt == 2:
                 retried = " (after one retry with twice the bound)" if attempt == 2 else ""
-                return collected.model_copy(
-                    update={"managed_selection": None, "managed_reader_error": failure + retried} | placement
-                )
+                failed = {"managed_selection": None, "managed_reader_error": failure + retried}
+                # The wrapper reports the exit code of a reader that crashed, timed out or was killed; output
+                # without one is a malformed answer, refused like any other.
+                crashed = any(line.startswith("__GYM_READER_RC:") for line in output.splitlines())
+                return collected.model_copy(update=failed | {"managed_reader_unavailable": crashed} | placement)
         lines = [
             line.removeprefix("__GYM_MANAGED:") for line in output.splitlines() if line.startswith("__GYM_MANAGED:")
         ]
@@ -997,6 +1033,7 @@ def _remote_managed_evidence(
             "failures",
             "managed_selection",
             "managed_reader_error",
+            "managed_reader_unavailable",
             "source_job_identity",
             "checkpoint_enabled",
         }
@@ -1023,6 +1060,9 @@ def _remote_managed_evidence(
             update={
                 "managed_selection": None,
                 "managed_reader_error": _remote_reader_error_text(error),
+                # A transport or host failure read nothing; a ValueError is a projection the reader returned and
+                # this host refused.
+                "managed_reader_unavailable": not isinstance(error, ValueError),
             }
             | placement
         )
@@ -1153,6 +1193,21 @@ def _submission_exports(config: SubmitConfig) -> list[str]:
     return exports
 
 
+# Settings of the run's own collection that a judge-only job's `gym eval reverify` replaces with its own.
+_COLLECTION_ONLY_RUN_KEYS = (
+    "output_jsonl_fpath",
+    "materialized_inputs_jsonl_fpath",
+    "resume_from_cache",
+    "resubmit",
+    "require_complete",
+)
+# Appends one judge-job journal entry (argv: the journal, the entry as JSON, the job id or empty, an optional error).
+_JOURNAL_JUDGE_JOB = (
+    "import json,sys; entry=json.loads(sys.argv[2]); entry['job_id']=sys.argv[3] or None; "
+    "error=sys.argv[4] if len(sys.argv) > 4 else ''; entry.update({'error': error} if error else {}); "
+    "f=open(sys.argv[1],'a'); f.write(json.dumps(entry, sort_keys=True)+chr(10)); f.close()"
+)
+
 # Sets the job ID of the last operator journal entry from sbatch's reply (its last word), replacing the file atomically.
 _NAME_OPERATOR_JOB = (
     "import json,os,sys; p=sys.argv[1]; lines=open(p).read().splitlines(); entry=json.loads(lines[-1]); "
@@ -1261,6 +1316,9 @@ class SlurmExecutor(BaseExecutor):
                     evidence=[],
                 )
                 return stop, None
+            # The policy is read from the run's saved config, so every recovery and resubmit applies the one the run
+            # was started with. An explicit Python argument wins over that section, which wins over the defaults.
+            outcome_policy, policy_source = effective_outcome_policy(outcome_policy, resume.recovery_outcome_policy)
             cap_s = _walltime_to_seconds(resume.max_walltime) if resume.max_walltime is not None else None
             raised_cap = None
             if max_walltime is not None:
@@ -1282,6 +1340,17 @@ class SlurmExecutor(BaseExecutor):
             else:
                 output = conn.run(collector_command(collect, job_dir, step, reader_token()))
                 host, reason = reader_placement(output)
+                if host == READER_NOT_RUN_HOST:
+                    unread = RecoveryDecision(
+                        action=RecoveryAction.UNKNOWN,
+                        reason=f"{COLLECTOR_NOT_RUN}: {reason or 'no cause reported'}; "
+                        "inspect again once the reader step can start",
+                        expected=0,
+                        counts={},
+                        identities={},
+                        evidence=[],
+                    )
+                    return unread, None
                 collected = CollectedEvidence.model_validate_json(without_placement(output)).model_copy(
                     update={"collector_host": host, "collector_fallback_reason": reason}
                 )
@@ -1303,15 +1372,18 @@ class SlurmExecutor(BaseExecutor):
                             update={
                                 "managed_selection": None,
                                 "managed_reader_error": "saved submission config changed or could not be rechecked",
+                                "managed_reader_unavailable": False,
                             }
                         )
-                    if collected.managed_selection is None:
+                    # A reader that could not run decides nothing, so the scheduler is asked whether the run is live.
+                    if collected.managed_selection is None and not collected.managed_reader_unavailable:
                         return decide_from_collected(
                             collected,
                             max_infra_retries=resume.max_retries,
                             max_walltime_s=cap_s,
                             live_job=None,
                             outcome_policy=outcome_policy,
+                            outcome_policy_source=policy_source,
                             extend_retries=extend_retries,
                         ), collected
             try:
@@ -1323,20 +1395,30 @@ class SlurmExecutor(BaseExecutor):
             allocation_cut = False
             rows = None
             stopped = None
-            if collected.job_chain:
+            # A queued follow-up and its sentinel are jobs of the run before they append themselves to the chain.
+            followups = [*collected.followup_sentinels.values(), *collected.followup_claims.values()]
+            watched = list(dict.fromkeys([*collected.job_chain, *followups]))
+            scheduled = None
+            if watched:
                 try:
-                    chain = ",".join(collected.job_chain)
-                    rows = chain_accounting(
-                        conn.run([f"sacct -D -n -P -X -j {shlex.quote(chain)} --format={CHAIN_ACCOUNTING_FORMAT}"])
+                    ids = shlex.quote(",".join(watched))
+                    scheduled = chain_accounting(
+                        conn.run([f"sacct -D -n -P -X -j {ids} --format={CHAIN_ACCOUNTING_FORMAT}"])
                     )
                 except (RuntimeError, OSError):
-                    rows = None
-            # A continuation of the chain that still waits or runs is live, wherever the scheduler runs it from.
-            live_job_name = live_chain_job(rows, collected.job_chain)
+                    pass
+            if collected.job_chain and scheduled is not None:
+                rows = [row for row in scheduled if row[0] in collected.job_chain]
+            # A job of the run that still waits or runs is live, wherever the scheduler runs it from.
+            live_job_name = live_chain_job(scheduled, [*followups, *collected.job_chain])
+            # So is a judge-only job of the run that has no receipt yet; one that ended is reported as it ended.
+            judge_live = self._judge_job_states(conn, collected)
+            if live_job_name is None:
+                live_job_name = judge_live
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
                     allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
-                    collected = _reconcile_requeued_chain(collected, rows)
+                    collected = reconcile_requeued_chain(collected, rows)
                 if resume.max_walltime is not None and not collected.accounting_reconciled:
                     # Unavailable accounting cannot grant fresh walltime; a requeued id has two rows and stays unknown.
                     collected.accounted_walltime_s = (
@@ -1375,6 +1457,7 @@ class SlurmExecutor(BaseExecutor):
             max_walltime_s=cap_s,
             live_job=True if live_job_name is not None else None if workdirs is None else str(job_dir) in workdirs,
             outcome_policy=outcome_policy,
+            outcome_policy_source=policy_source,
             allocation_cut=allocation_cut,
             extend_retries=extend_retries,
             live_job_name=live_job_name,
@@ -1406,13 +1489,24 @@ class SlurmExecutor(BaseExecutor):
         return self.recovery_evidence(record, benchmark)[0]
 
     def reverify_judge_failures(
-        self, record: SubmissionRecord, benchmark: str, decision: RecoveryDecision
+        self,
+        record: SubmissionRecord,
+        benchmark: str,
+        decision: RecoveryDecision,
+        *,
+        judge_partition: str | None = None,
+        repin: str | None = None,
+        repin_reason: str | None = None,
     ) -> RecoveryOutcome:
-        """Admit a saved-answer CPU rejudge using the original chain's remaining allowance.
+        """Queue a judge-only job that grades the run's selected saved answers again, never the policy.
 
-        Only an already CPU-only submission with no deployed model services is supported. This never
-        invents a new compute profile, starts a policy service, or turns an unavailable judge into a model run.
-        Other deployments remain explicitly unsupported until they supply a judge-only execution capability.
+        A CPU-only submission (no service, no policy model, CPU node pools only) runs it on its own compute with the
+        chain's remaining walltime allowance, as before. Any other submission, one that served its policy on GPUs,
+        runs it on a CPU-only judge execution profile derived from its saved config (``_queue_judge_job``): the run's
+        own judge and verifier servers on one node of a CPU partition (``judge_partition``, a saved CPU pool or the
+        launcher's reader placement), for the run's segment walltime bounded by the partition's MaxTime, at the run's
+        pinned Gym commit or ``repin``. Either way the job settles through ``gym eval reverify --judge-failed-only
+        --settle-into-source``. This never starts a policy service or turns an unavailable judge into a model run.
         """
         from nemo_gym.orchestration.executors.utils import flatten_run_args
 
@@ -1424,7 +1518,9 @@ class SlurmExecutor(BaseExecutor):
                 unsupported=reason,
             )
 
-        current, evidence = self.recovery_evidence(record, benchmark)
+        current, evidence = self.recovery_evidence(
+            record, benchmark, **({"reader_ref": repin} if repin is not None else {})
+        )
         if current.action != RecoveryAction.REVERIFY or evidence is None:
             return stopped("saved-answer rejudge admission changed; collect the current evidence")
         job = record.benchmark_job(benchmark)
@@ -1436,14 +1532,18 @@ class SlurmExecutor(BaseExecutor):
             compute = config.compute[record.cluster]
             if not isinstance(compute, SlurmComputeConfig):
                 return stopped("saved rejudge compute is not Slurm")
-            if (
-                config.services
-                or config.driver.policy_model
-                or not compute.node_pools
-                or any(pool.gpus_per_node != 0 for pool in compute.node_pools.values())
-            ):
-                return stopped(
-                    "this submission has no existing CPU-only judge execution profile; policy services are not restarted"
+            if not is_cpu_only_submission(config):
+                # A run that served its policy on GPUs: a judge-only job on a derived CPU-only profile instead.
+                return self._queue_judge_job(
+                    conn,
+                    record,
+                    benchmark,
+                    current,
+                    evidence,
+                    config,
+                    judge_partition=judge_partition,
+                    repin=repin,
+                    repin_reason=repin_reason,
                 )
             install = config.driver.gym_install
             if (
@@ -1495,6 +1595,8 @@ class SlurmExecutor(BaseExecutor):
                     "gym eval reverify",
                     "--judge-failed-only",
                     "--settle-into-source",
+                    # The dispatch below runs only when no allocation of the run is live.
+                    "--withdraw-unresolved-admissions",
                     "--settle-source-snapshot",
                     shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
                     "--rollouts",
@@ -1571,6 +1673,239 @@ class SlurmExecutor(BaseExecutor):
             updated = job.model_copy(update={"job_id": job_id, "error": None})
             self.persist_record(record.with_benchmark(updated), conn.write_text)
         return RecoveryOutcome(decision=current, ok=True, dispatched="reverify", job_id=job_id)
+
+    @staticmethod
+    def _judge_job_states(conn: Connection, collected: CollectedEvidence) -> str | None:
+        """Ask the scheduler about the run's judge-only jobs that have no receipt (``CollectedEvidence.judge_jobs``,
+        state ``queued``), set each one's ``state`` and ``scheduler_state`` from its record, and name the newest live
+        one as ``judge-only job <id> (STATE)``; None when none is live, or when the query failed or knows none."""
+        pending = [job for job in collected.judge_jobs if job.get("state") == "queued" and job.get("job_id")]
+        if not pending:
+            return None
+        ids = ",".join(str(job["job_id"]) for job in pending)
+        try:
+            output = conn.run([f"sacct -D -n -P -X -j {shlex.quote(ids)} --format={FOLLOWUP_ACCOUNTING_FORMAT}"])
+        except (RuntimeError, OSError):
+            return None
+        records: dict[str, tuple[str, str]] = {}
+        for line in output.splitlines():
+            parts = line.strip().split("|")
+            if len(parts) != 4 or not parts[0]:
+                continue
+            state = parts[1].split()[0].rstrip("+") if parts[1].split() else ""
+            records[parts[0]] = (state, parts[3])
+        live = None
+        for job in pending:
+            record = records.get(str(job["job_id"]))
+            if record is None:
+                continue
+            state, exit_code = record
+            if state in LIVE_JOB_STATES:
+                job["state"] = "running" if state == "RUNNING" else "pending"
+                job["scheduler_state"] = state
+                live = f"judge-only job {job['job_id']} ({state})"
+            elif state:
+                # It ended and wrote no receipt: a failure of the job, with the scheduler's word on it.
+                job["state"] = "failed"
+                job["scheduler_state"] = f"{state} (exit {exit_code})"
+        return live
+
+    def _queue_judge_job(
+        self,
+        conn: Connection,
+        record: SubmissionRecord,
+        benchmark: str,
+        decision: RecoveryDecision,
+        evidence: CollectedEvidence,
+        config: SubmitConfig,
+        *,
+        judge_partition: str | None,
+        repin: str | None,
+        repin_reason: str | None,
+    ) -> RecoveryOutcome:
+        """Queue the judge-only job of a run that is not CPU-only, on the CPU-only judge execution profile derived from
+        its saved config (``judge_profile``), and journal it.
+
+        The job's command is the same ``gym eval reverify --judge-failed-only --settle-into-source`` as a CPU-only
+        run's, with the run's saved settings, the policy's ``--model-type`` so the run's config composes as it did
+        (the policy server it names is never called) and a receipt the job writes when it ends. Under the resubmit
+        lock, no job of the run may wait or run in its job dir, no allocation of the chain may be live, and the saved
+        sources, resolved config and chain accounting must be as the evidence saw them; then the script is staged
+        beside the run's and queued with ``--no-requeue``, and its id, partition, walltime, rows and receipt path are
+        appended to the job dir's judge-job journal. The job is not a segment of the policy chain: nothing is added
+        to ``.gym_job_chain`` and no retry or walltime budget is spent or needed. When the last
+        ``JUDGE_JOB_FAILURE_BOUND`` judge-only jobs ended without settling a saved answer, nothing is queued and the
+        stop names them.
+        """
+        from nemo_gym.orchestration.executors.utils import flatten_run_args
+
+        def stopped(reason: str) -> RecoveryOutcome:
+            return RecoveryOutcome(
+                decision=decision.model_copy(update={"action": RecoveryAction.STOP, "reason": reason}),
+                ok=False,
+                dispatched=None,
+                unsupported=reason,
+            )
+
+        job = record.benchmark_job(benchmark)
+        job_dir = Path(job.job_dir)
+        original = config.driver.benchmarks[benchmark]
+        recent = evidence.judge_jobs[-JUDGE_JOB_FAILURE_BOUND:]
+        if len(recent) == JUDGE_JOB_FAILURE_BOUND and all(
+            entry.get("state") == "failed" or (entry.get("state") == "completed" and not entry.get("settled"))
+            for entry in recent
+        ):
+            named = ", ".join(str(entry.get("job_id") or "(id unknown)") for entry in recent)
+            return stopped(
+                f"the last {JUDGE_JOB_FAILURE_BOUND} judge-only job(s) ({named}) ended without settling a saved "
+                f"answer; read their receipts and logs under {job_dir / 'reverification'} before another is queued"
+            )
+        try:
+            partition, source = choose_judge_partition(
+                config, record.cluster, partition=judge_partition, reader_srun=os.environ.get(READER_SRUN_ENV)
+            )
+        except JudgeProfileUnsupported as error:
+            return stopped(str(error))
+        install = config.driver.gym_install
+        ref = repin if repin is not None else (install.ref if install is not None else None)
+        if install is None or ref is None or ref != installed_gym_commit() or not re.fullmatch(r"[0-9a-f]{40}", ref):
+            return stopped(
+                "saved judge driver and installed recovery source must be the same immutable revision"
+                + (
+                    ""
+                    if repin is not None
+                    else "; --repin <this launcher's full commit> --repin-reason TEXT runs the judge-only job at it"
+                )
+            )
+        if repin is not None and not (repin_reason or "").strip():
+            raise ValueError("--repin needs a nonempty --repin-reason")
+        compute = config.compute[record.cluster]
+        probe = compute.model_copy(update={"node_pools": {JUDGE_POOL_NAME: NodePool(partition=partition)}})
+        profile = judge_execution_profile(
+            config, record.cluster, partition, source, _partition_time_limit(conn, probe)
+        )
+        if evidence.source_digests is None or evidence.accounting_snapshot is None:
+            return stopped("saved source or accounting snapshot is unavailable; collect the evidence again")
+        queued_snapshot = {k: v for k, v in evidence.source_digests.items() if Path(k).name == k}
+        run = {k: v for k, v in original.run.items() if k not in _COLLECTION_ONLY_RUN_KEYS}
+        nonce = new_gym_job_id(utc_now())
+        folder = job_dir / "reverification" / nonce
+        output, receipt = folder / "rollouts.jsonl", folder / "receipt.json"
+        policy_type = config.driver.policy_model_type
+        command = " ".join(
+            [
+                "gym eval reverify",
+                "--judge-failed-only",
+                "--settle-into-source",
+                # The judge-only job is queued only when no job of the run is live, so an admission a pass that died
+                # left without an outcome is withdrawn and judged again instead of refusing the job.
+                "--withdraw-unresolved-admissions",
+                "--settle-source-snapshot",
+                shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
+                "--rollouts",
+                shlex.quote(str(job_dir / "artifacts/rollouts.jsonl")),
+                "--inputs",
+                shlex.quote(str(job_dir / "artifacts/rollouts_materialized_inputs.jsonl")),
+                "--output",
+                shlex.quote(str(output)),
+                "--settle-receipt",
+                shlex.quote(str(receipt)),
+                *([f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []),
+                # A judge failure whose saved attempts are spent keeps its masked row; the rest are judged.
+                "+skip_spent_judge_failures=True",
+                *flatten_run_args(run),
+            ]
+        )
+        bound = judge_job_config(config, record.cluster, benchmark, profile, command, gym_ref=repin)
+        if repin is not None:
+            validate_gym_install_ref(bound)
+        bench = bound.driver.benchmarks[benchmark]
+        script = build_sbatch_script(bound, benchmark, bench, bound.compute[record.cluster], job_dir)
+        script = script.replace("#!/bin/bash", "#!/bin/bash\n#SBATCH --no-requeue", 1)
+        script_path = job_dir / f"reverify-{nonce}.sh"
+        config_path = Path(record.run_dir) / RESOLVED_CONFIG_NAME
+        config_digest = conn.run([f"sha256sum {shlex.quote(str(config_path))}"]).split()[0]
+        if not re.fullmatch(r"[0-9a-f]{64}", config_digest):
+            return stopped("saved submission configuration digest is unknown")
+        expected = {k: v for k, v in evidence.accounting_snapshot.items() if k != "resume_config"}
+        check = (
+            "import hashlib,json,os,sys; from pathlib import Path\n"
+            "expected=json.loads(sys.argv[1])\n"
+            "def digest(n):\n"
+            " p=Path(n)\n"
+            " if not p.exists(): return None\n"
+            " h=hashlib.sha256()\n"
+            " with p.open('rb') as f:\n"
+            "  for chunk in iter(lambda: f.read(1024 * 1024), b''): h.update(chunk)\n"
+            " return h.hexdigest()\n"
+            "names=set(expected)|{n for n in os.listdir('.') if n.startswith('.gym_followup_queued.')}\n"
+            f"source=json.loads({json.dumps(json.dumps(evidence.source_digests))})\n"
+            "if {n:digest('artifacts/'+n) for n in source} != source: raise ValueError('saved source changed')\n"
+            f"if digest({str(config_path)!r}) != {config_digest!r}: raise ValueError('saved configuration changed')\n"
+            "if {n:digest(n) for n in names} != expected: raise ValueError('stale accounting')\n"
+        )
+        entry = {
+            "at": utc_timestamp(utc_now()),
+            "job_id": None,
+            "nonce": nonce,
+            "partition": profile.partition,
+            "partition_source": profile.partition_source,
+            "walltime": profile.walltime,
+            "walltime_bounds": list(profile.walltime_bounds),
+            "rows": decision.counts.get(IdentityState.JUDGE_RECOVERABLE.value, 0),
+            "output": str(output),
+            "receipt": str(receipt),
+            "gym_commit": ref,
+            "actor": getpass.getuser(),
+            **({"repin_reason": repin_reason} if repin is not None else {}),
+        }
+        journal = (
+            f"python3 -c {shlex.quote(_JOURNAL_JUDGE_JOB)} {shlex.quote(JUDGE_JOB_JOURNAL_NAME)} "
+            f"{shlex.quote(json.dumps(entry, sort_keys=True))}"
+        )
+        commands = _submission_exports(config) + [
+            'fail() { echo "Error: $*" >&2; exit 1; }',
+            f"cd {shlex.quote(str(job_dir))} || fail 'job directory unavailable'",
+            f"(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail 'another recovery holds the lock'",
+            f"trap 'rm -f {_RESUBMIT_LOCK}' EXIT",
+            # No job of this run, a chain segment or an earlier judge-only job, may wait or run in its job dir.
+            "workdirs=$(squeue --me --all --noheader --format=%Z) || fail 'scheduler unknown'",
+            'for d in $workdirs; do [ "$d" != "$PWD" ] || '
+            'fail "a job of this run is still pending or running in $PWD"; done',
+            *(
+                [
+                    f"live=$(squeue --all --noheader -j {shlex.quote(','.join(evidence.job_chain))} --format=%A) "
+                    "|| fail 'scheduler unknown'",
+                    '[ -z "$live" ] || fail "an original allocation is still live"',
+                ]
+                if evidence.job_chain
+                else []
+            ),
+            f"python3 -c {shlex.quote(check)} {shlex.quote(json.dumps(expected))} "
+            "|| fail 'saved sources or accounting changed since the evidence was collected; collect it again'",
+            "umask 077",
+            f"printf %s {shlex.quote(script)} > {shlex.quote(str(script_path))} || fail 'cannot stage the judge driver'",
+            _sbatch_command(benchmark, script_path).replace("sbatch --parsable", "sbatch --no-requeue --parsable"),
+            'if [ "$rc" != 0 ]; then fail "judge allocation not admitted"; fi',
+            "jid=$(printf '%s' \"$out\" | awk '{print $NF}' | cut -d';' -f1)",
+            # The queued job is journaled by id; an acknowledgement without one is journaled as such, so inspect
+            # reports it and the next recovery's scheduler check finds the job by its working directory.
+            f'if [[ $jid =~ ^[0-9]+$ ]]; then {journal} "$jid" || fail "cannot journal the judge-only job"; '
+            f'else {journal} "" "acknowledgement unknown: $out"; fail "unknown job identity"; fi',
+        ]
+        try:
+            results = _parse_sbatch_results(conn.run(commands))
+        except (RuntimeError, OSError) as error:
+            text = str(error).strip()
+            return stopped(f"judge-only job was not queued: {text.splitlines()[-1] if text else type(error).__name__}")
+        job_id, error = results.get(benchmark, (None, "no scheduler acknowledgement"))
+        if job_id is None:
+            return stopped(f"judge-only job was not admitted: {error}")
+        updated = job.model_copy(update={"job_id": job_id, "error": None})
+        self.persist_record(record.with_benchmark(updated), conn.write_text)
+        return RecoveryOutcome(
+            decision=decision, ok=True, dispatched="reverify", job_id=job_id, judge_job={**entry, "job_id": job_id}
+        )
 
     def export_tracking(
         self, record: SubmissionRecord, benchmark: str, evidence: CollectedEvidence | None
@@ -1769,6 +2104,8 @@ class SlurmExecutor(BaseExecutor):
                 if accounting_snapshot is None:
                     raise RuntimeError(f"Resubmit of {benchmark} refused: no collected accounting snapshot")
                 resume = config.driver.benchmarks[benchmark].resume_config
+                # resume_config includes recovery_outcome_policy. A policy that changed since the evidence was
+                # collected changes which rows run again, so like semantic drift it is refused, never resumed across.
                 files = {name: digest for name, digest in accounting_snapshot.items() if name != "resume_config"}
                 if accounting_snapshot.get("resume_config") != (resume.model_dump_json() if resume else None):
                     raise RuntimeError(f"Resubmit of {benchmark} refused: {stale}")
@@ -2179,6 +2516,11 @@ class SlurmExecutor(BaseExecutor):
                 },
                 sort_keys=True,
             )
+        # This full render writes this launcher's job templates, so the launcher must be the revision the job runs,
+        # whatever setting is raised. A repin has already made its target that revision.
+        pinned = target.driver.gym_install.ref if target.driver.gym_install is not None else None
+        if pinned is not None and installed_gym_commit() != pinned:
+            raise IncompatibleRerenderError(pinned, installed_gym_commit())
         run_dir = Path(record.run_dir)
         script = build_sbatch_script(
             target, benchmark, target.driver.benchmarks[benchmark], target.compute[record.cluster], job_dir

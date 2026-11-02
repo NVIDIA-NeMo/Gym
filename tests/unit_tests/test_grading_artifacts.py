@@ -28,6 +28,7 @@ NO_FACTS = {
     "judge_evaluations": False,
     "judge_verdicts": None,
     "judge_error": False,
+    "judge_unparsed": False,
     "rubric": None,
     "library_reward": None,
     "sentence_metrics": [],
@@ -37,6 +38,7 @@ NO_FACTS = {
     "invalid_model_response": False,
     "test_run": None,
     "substep_tests": None,
+    "unit_tests": None,
 }
 
 

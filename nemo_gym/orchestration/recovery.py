@@ -62,11 +62,14 @@ from nemo_gym.agent_outcome import (
 from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION, accepted_stage_omission
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.core.failure_kinds import (
+    AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
+    EPISODE_FAILED,
     HARBOR_FAILED,
     HARNESS_TERMINATION_UNCONFIRMED,
     INFRASTRUCTURE_ERROR,
+    INVALID_OUTPUT_BUDGET,
     JUDGE_FAILED,
     JUDGE_UNPARSEABLE,
     MALFORMED_ANSWER,
@@ -78,19 +81,25 @@ from nemo_gym.core.failure_kinds import (
     MODEL_TRANSPORT_ERROR,
     NON_POLICY_MODEL_REJECTION,
     PROVIDER_CREDENTIALS_REJECTED,
+    ROLLOUT_ALLOCATION_ENDED,
     SERVER_FAULT_KINDS,
     SERVER_START_FAILED,
     TRUNCATED_ANSWER,
     VERIFIER_ERROR,
     is_namespaced,
     is_registered,
+    is_server_status,
 )
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.executors.resume_script import (
+    ACCOUNTED_WALLTIME_PREFIX,
     ACCOUNTING_UNKNOWN_PREFIX,
     CANCELLED_FOLLOWUP_MARKER,
+    CHAIN_ACCOUNTING_ENV,
     CONTINUATION_REASON_PREFIX,
     PROVISIONAL_MARKER_PREFIX,
+    REQUEUE_RECONCILE_STATE,
+    REQUEUE_UNKNOWN_REASON,
 )
 from nemo_gym.server_runtime.episode_types import FailureBoundary
 from nemo_gym.task_materialization import TASK_ID_FIELDS
@@ -104,6 +113,10 @@ COUNTS_AS_ZERO = "_ng_failure_counts_as_zero"
 MAX_ATTEMPTS = "_ng_failure_max_attempts"
 FAILURE_EVENTS = "_ng_failure_events"
 FAILURE_ID = "_ng_failure_id"
+# Facts of a failure's recorded cause that the collector reads on the run host (see ``_cause_kind``).
+COLLECTED_CAUSE = "_ng_collected_cause"
+# The reason an environment server records when its own episode deadline ends an episode; no kind goes with it.
+EPISODE_DEADLINE_REASON = "Episode timed out"
 
 Identity = tuple[int, int]
 
@@ -168,6 +181,8 @@ class RecoveryAction(StrEnum):
     # The run has no task inventory, so nothing to recover: it is queued again as a fresh run with a longer walltime.
     FRESH_RESTART = "fresh-restart"
     STOP = "stop"
+    # Nothing was decided: the evidence could not be read (its Store reader could not run), so ask again.
+    UNKNOWN = "unknown"
 
 
 # Gym writes the task inventory before any rollout runs: a run that ended before it saved nothing a resume keeps.
@@ -205,6 +220,12 @@ OPERATOR_CONTINUATION = "OPERATOR-CONTINUATION"
 OPERATOR_CONTINUATION_JOURNAL_NAME = "operator-continuation-journal.jsonl"
 # Written over the unknown-accounting marker just before the continuation is queued; it has no unknown prefix.
 OPERATOR_CONTINUATION_NOTE = f"Operator continuation: an explicit budget filled the unknown accounting; see {OPERATOR_CONTINUATION_JOURNAL_NAME}."
+# Appended in the job dir when a judge-only job is queued to grade the run's saved answers again (see
+# ``SlurmExecutor.reverify_judge_failures``): its id, partition, walltime, the rows it re-judges and its receipt path.
+# Such a job is not a segment of the policy chain: it is not recorded in the chain and spends none of its budget.
+JUDGE_JOB_JOURNAL_NAME = "judge-job-journal.jsonl"
+# How many judge-only jobs in a row may end without settling a saved answer before recovery stops and names them.
+JUDGE_JOB_FAILURE_BOUND = 2
 
 
 class OperatorBudget(BaseModel):
@@ -264,6 +285,9 @@ class RecoveryOutcome(BaseModel):
     mlflow: dict[str, Any] | None = None
     # The re-verification part of a RESUBMIT that names ``reverify_first``: what runs it and when.
     reverify: str | None = None
+    # The judge-only job a REVERIFY of a model-served run queued: its id, partition and its source, walltime and its
+    # bounds, the rows it re-judges, the Gym commit it runs and its receipt path (the job dir's judge-job journal entry).
+    judge_job: dict[str, Any] | None = None
     # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
     reader_token: str | None = None
     # A --max-walltime raise checked against the partition before any evidence is read: the partition, its MaxTime
@@ -287,6 +311,9 @@ class IdentityEvidence(BaseModel):
     events: list[tuple[str | None, str | None, str | None, str | None, str | None]] = Field(default_factory=list)
     # Why an unknown identity has no supported action, when a specific rule refused it.
     reason: str | None = None
+    # A settled final outcome the metric does not score: an answered agent deadline that its producer did not mark
+    # as a counted zero. It is never run again, but it is no scored sample.
+    unscored: bool = False
 
 
 class RecoveryDecision(BaseModel):
@@ -304,6 +331,8 @@ class RecoveryDecision(BaseModel):
     # A RESUBMIT of a run that also has saved answers to grade again names them: the resumed run re-verifies them
     # from their saved answers first, while its servers are up, and then runs the policy work.
     reverify_first: list[Identity] = Field(default_factory=list)
+    # The outcome policy this decision applied: its ``source`` (default, config or python) and its entries.
+    outcome_policy: dict[str, Any] | None = None
 
     @property
     def complete(self) -> bool:
@@ -363,6 +392,46 @@ class RecoveryOutcomePolicyConfig(OutcomePolicyConfig):
         }:
             raise ValueError("recovery outcome policy does not support count_as_zero")
         return self
+
+
+class OutcomePolicySource(StrEnum):
+    """Where the recovery outcome policy in effect came from."""
+
+    DEFAULT = "default"
+    CONFIG = "config"
+    PYTHON = "python"
+
+
+def configured_outcome_policy(overrides: Mapping[str, Any] | None) -> RecoveryOutcomePolicyConfig | None:
+    """A benchmark's ``resumable.recovery_outcome_policy`` section as a policy, or None when it is not set.
+
+    It is a partial override: ``RecoveryOutcomePolicyConfig`` merges the entries it names into its defaults, and
+    validates them exactly as the Python API does. A bad section raises, naming each problem.
+    """
+    if overrides is None:
+        return None
+    try:
+        return RecoveryOutcomePolicyConfig.model_validate(overrides)
+    except ValidationError as error:
+        problems = "; ".join(
+            f"{'.'.join(map(str, e['loc'])) or 'policy'}: {e['msg'].removeprefix('Value error, ')}"
+            for e in error.errors()
+        )
+        raise ValueError(f"invalid recovery_outcome_policy: {problems}") from None
+
+
+def effective_outcome_policy(
+    explicit: RecoveryOutcomePolicyConfig | None, overrides: Mapping[str, Any] | None
+) -> tuple[RecoveryOutcomePolicyConfig, OutcomePolicySource]:
+    """The policy recovery applies and its source. Precedence: an explicit Python ``outcome_policy`` argument
+    replaces the run's saved config section (it is not merged with it); the section overrides the defaults. The
+    budget options (``extend_retries``, ``max_walltime``) are separate and never change the policy."""
+    if explicit is not None:
+        return explicit, OutcomePolicySource.PYTHON
+    configured = configured_outcome_policy(overrides)
+    if configured is not None:
+        return configured, OutcomePolicySource.CONFIG
+    return RecoveryOutcomePolicyConfig(), OutcomePolicySource.DEFAULT
 
 
 def _legacy_agent_outcome(row: Mapping[str, Any]) -> tuple[str | None, int | None]:
@@ -445,7 +514,10 @@ def _saved_answer(row: Mapping[str, Any]) -> bool:
     # Match the saved input used by _rollout_response: diagnostic response bodies are not verifier inputs.
     # A present response takes precedence over the native judge-failure partial response, even if unusable.
     answer = row.get("response") if "response" in row else row.get("_ng_failure_partial_response")
-    return has_saved_generation({"response": answer})
+    # The failure's stage stays with it, so this is the Store's predicate: an agent-stage response the outcome policy
+    # rejected as failed is diagnostic output (an earlier tool turn, say), not an answer a rerun would replace.
+    stage = {key: row[key] for key in ("_ng_failure_record", "_ng_failure_stage") if key in row}
+    return has_saved_generation({"response": answer, **stage})
 
 
 def _judge_state(row: Mapping[str, Any], policy: "RecoveryOutcomePolicyConfig") -> "IdentityState":
@@ -494,12 +566,15 @@ def _replay_refusal(row: Mapping[str, Any]) -> str | None:
         has_recorded_grade,
         has_saved_generation,
         has_unclassified_execution_failure,
+        is_infrastructure_agent_timeout,
         keeps_partial_response,
     )
 
-    if has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row):
+    # An agent timeout whose window held a server-side fault kept no answer or grade of the model's: it runs again.
+    infrastructure = is_infrastructure_agent_timeout(row)
+    if not infrastructure and (has_saved_generation(row) or _saved_answer(row) or keeps_partial_response(row)):
         return "the row kept an answer that a rerun would replace"
-    if has_recorded_grade(row):
+    if not infrastructure and has_recorded_grade(row):
         return "the verifier recorded a grade that a rerun would replace"
     if has_unclassified_execution_failure(row):
         return "its recorded cause does not permit another agent run"
@@ -549,6 +624,64 @@ def _retry_kind(row: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _cause_kind(row: Mapping[str, Any]) -> tuple[str | None, bool, str | None]:
+    """The kind of a failure whose producer recorded none, or an unregistered one, from its recorded cause.
+
+    Returns ``(kind, model_final, reason)``; the kind is None when the cause cannot be determined, with the reason.
+    The cause is the event the row selects, else every event it saved, with the collector's facts of the model call
+    that recorded each one (``COLLECTED_CAUSE``):
+
+    - a model request that failed with HTTP 5xx or in transport is infrastructure: its own kind, retried under the cap;
+    - an HTTP 4xx of the policy's own call is the model's final result: ``model_context_limit`` when the call recorded
+      the context limit, else ``model_request_error``;
+    - an HTTP 4xx of a harness call (a user simulator, a judge, any model that is not the policy) is evaluation-side:
+      ``environment_episode_failed``, retried under the cap;
+    - with no event, the environment's own episode deadline is evaluation-side too: ``environment_episode_failed``.
+
+    As for a kind (``_retry_kind``), the unselected events of a row that keeps a response are attempts, not its cause,
+    and a cause chain that is broken or omitted names no cause.
+    """
+    from nemo_gym.rollout_recovery import holds_response
+
+    facts = row.get(COLLECTED_CAUSE)
+    facts = facts if isinstance(facts, Mapping) else {}
+    events, selected = row.get(FAILURE_EVENTS), row.get(FAILURE_ID)
+    if isinstance(events, Mapping) and events:
+        if row.get("_ng_failure_events_omitted") or isinstance(selected, str) and _cause_chain(row) is None:
+            return None, False, "its recorded cause is incomplete"
+        if not isinstance(selected, str) and holds_response(row):
+            return None, False, "it kept a response, so its saved model failures are attempts, not its cause"
+        ids = [selected] if isinstance(selected, str) else [key for key in events if isinstance(key, str)]
+        chosen = [events.get(key) for key in ids]
+        if not chosen or not all(
+            isinstance(e, Mapping)
+            and e.get("boundary") == FailureBoundary.MODEL
+            and e.get("operation") == "model_request"
+            for e in chosen
+        ):
+            return None, False, "its recorded cause is not a failed model request"
+        statuses = [e.get("http_status") for e in chosen]
+        if any(e.get("failure_kind") == MODEL_TRANSPORT_ERROR for e in chosen):
+            return MODEL_TRANSPORT_ERROR, False, None
+        if any(type(s) is int and 500 <= s <= 599 for s in statuses):
+            return MODEL_REQUEST_ERROR, False, None
+        if not all(type(s) is int and 400 <= s <= 499 for s in statuses):
+            return None, False, "its failed model request has no HTTP status"
+        calls = facts.get("event_calls") if isinstance(facts.get("event_calls"), Mapping) else {}
+        owners = [calls.get(key) if isinstance(calls.get(key), Mapping) else {} for key in ids]
+        if any(owner.get("policy") not in (True, False) for owner in owners):
+            return None, False, "the model call that failed is not recorded, so whose call it was is unknown"
+        if all(owner["policy"] is False for owner in owners):
+            return EPISODE_FAILED, False, None
+        if all(owner["policy"] is True for owner in owners):
+            context = any(owner.get("context_limit") is True for owner in owners)
+            return (MODEL_CONTEXT_LIMIT if context else MODEL_REQUEST_ERROR), True, None
+        return None, False, "the failed model calls belong to both the policy and the harness"
+    if facts.get("episode_deadline") is True:
+        return EPISODE_FAILED, False, None
+    return None, False, None
+
+
 def decide_recovery(
     *,
     materialized: Iterable[Mapping[str, Any]],
@@ -579,7 +712,11 @@ def decide_recovery(
         is_omitted_rollout_row,
         is_terminal_failure,
     )
-    from nemo_gym.rollout_recovery import is_answered_agent_deadline
+    from nemo_gym.rollout_recovery import (
+        is_answered_agent_deadline,
+        is_infrastructure_agent_timeout,
+        masked_infrastructure_kind,
+    )
 
     policy = outcome_policy or RecoveryOutcomePolicyConfig()
     managed = {fact.identity: fact for fact in managed_selection or []}
@@ -634,6 +771,24 @@ def decide_recovery(
                 )
                 continue
             judge = row.get(FAILURE_CLASS) == JUDGE_FAILED
+            if not judge and identity in managed and is_infrastructure_agent_timeout(row):
+                # A graded agent timeout whose window held a server-side fault (Harbor's graded zero): the Store
+                # selects it as a failure and runs it again under the attempt cap. A run without a Store cannot
+                # reopen a saved result, so there it stays scored and the gate counts its fault evaluation-side.
+                fact = managed[identity]
+                evidence.append(
+                    IdentityEvidence(
+                        identity=identity,
+                        state=IdentityState.RETRYABLE
+                        if fact.attempts < fact.max_attempts
+                        else IdentityState.EXHAUSTED,
+                        failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE,
+                        attempts=fact.attempts,
+                        max_attempts=fact.max_attempts,
+                        events=_events(row),
+                    )
+                )
+                continue
             reward = row.get("reward")
             graded = isinstance(reward, (int, float)) and not isinstance(reward, bool) and math.isfinite(reward)
             if not judge and (row.get("mask_sample") is True or row.get("evaluation_completed") is False):
@@ -646,6 +801,37 @@ def decide_recovery(
                             state=IdentityState.JUDGE_RECOVERABLE,
                             failure_kind=row.get("failure_kind"),
                             events=_events(row),
+                        )
+                    )
+                    continue
+                infrastructure = masked_infrastructure_kind(row)
+                fact = managed.get(identity)
+                if infrastructure is not None and fact is not None:
+                    # Infrastructure masked it: the Store counts it as a failed attempt and runs it again, and the new
+                    # attempt supersedes it. The policy decides it as it decides a failure of that kind.
+                    action = choose_action(failure_kind=infrastructure, http_status=None, config=policy)
+                    if action == OutcomeAction.FAIL:
+                        # The Store would still run it again, so a policy that fails it stops the run.
+                        policy_stopped = True
+                        state = IdentityState.TERMINAL
+                    elif action == OutcomeAction.RETRY:
+                        state = (
+                            IdentityState.RETRYABLE if fact.attempts < fact.max_attempts else IdentityState.EXHAUSTED
+                        )
+                    else:
+                        state = IdentityState.UNKNOWN
+                    evidence.append(
+                        IdentityEvidence(
+                            identity=identity,
+                            state=state,
+                            failure_kind=infrastructure,
+                            attempts=fact.attempts,
+                            max_attempts=fact.max_attempts,
+                            reason=(
+                                "the policy verifies a masked result that has no saved judge answer"
+                                if state == IdentityState.UNKNOWN
+                                else None
+                            ),
                         )
                     )
                     continue
@@ -732,6 +918,11 @@ def decide_recovery(
         ]
         kind = _retry_kind(last)
         reason = None
+        unscored = False
+        # A kind the producer did not record, or did not register, is read from the recorded cause instead.
+        derived = None if _known_kind(kind) else _cause_kind(last)
+        if derived is not None and derived[0] is not None:
+            kind = derived[0]
         if is_omitted_rollout_row(last):
             # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
             interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
@@ -759,7 +950,9 @@ def decide_recovery(
             policy_stopped |= state == IdentityState.TERMINAL
         elif is_answered_agent_deadline(last):
             # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
+            # Collection's metrics score it only when its producer marked it a counted zero.
             state = IdentityState.MODEL_FINAL
+            unscored = last.get(COUNTS_AS_ZERO) is not True
         elif last.get(COUNTS_AS_ZERO) is True:
             # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
             model_cause, _ = _policy_evidence(last)
@@ -783,12 +976,25 @@ def decide_recovery(
                 if model_kind and is_terminal_failure(last) and not contradictory
                 else IdentityState.UNKNOWN
             )
-        elif not _known_kind(_retry_kind(last)):
+        elif not _known_kind(kind):
             state = IdentityState.UNKNOWN
             reason = f"unregistered kind {_retry_kind(last)}" if _retry_kind(last) else "no failure kind"
+            if derived is not None and derived[2]:
+                reason = f"{reason}: {derived[2]}"
+        elif derived is not None and derived[1]:
+            # The policy's own request failed: the model's final result, unless a resume would run it again.
+            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last):
+                state = IdentityState.MODEL_FINAL
+            else:
+                state = IdentityState.UNKNOWN
+                reason = f"the policy's request failed ({kind}), a final model result, but a resume would run it again"
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
-        elif (action := _sidecar_action(last, policy)) == OutcomeAction.FAIL:
+        elif (
+            action := choose_action(
+                failure_kind=kind or "unknown", http_status=_policy_evidence(last)[1], config=policy
+            )
+        ) == OutcomeAction.FAIL:
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
@@ -806,13 +1012,15 @@ def decide_recovery(
             IdentityEvidence(
                 identity=identity,
                 state=state,
-                failure_kind=kind,
+                # The kind its retry selects on stays agent_timeout; the counted kind names the server-side fault.
+                failure_kind=AGENT_TIMEOUT_INFRASTRUCTURE if is_infrastructure_agent_timeout(last) else kind,
                 http_status=_policy_evidence(last)[1],
                 failure_id=last.get(FAILURE_ID) if isinstance(last.get(FAILURE_ID), str) else None,
                 attempts=spent,
                 max_attempts=cap,
                 events=_events(last),
                 reason=reason if state == IdentityState.UNKNOWN else None,
+                unscored=unscored,
             )
         )
 
@@ -1039,8 +1247,10 @@ COLLECT_SCRIPT = (
     + repr(TASK_ID_FIELDS)
     + "\n"
     + f"UNOBSERVED_CLAIM_REASON = {UNOBSERVED_CLAIM_REASON!r}\n"
+    + f"EPISODE_DEADLINE_REASON = {EPISODE_DEADLINE_REASON!r}\n"
     + f"UNREADABLE_CLAIM_REASON = {UNREADABLE_CLAIM_REASON!r}\n"
     + f"OPERATOR_CONTINUATION_JOURNAL_NAME = {OPERATOR_CONTINUATION_JOURNAL_NAME!r}\n"
+    + f"JUDGE_JOB_JOURNAL_NAME = {JUDGE_JOB_JOURNAL_NAME!r}\n"
     + r"""
 import hashlib, json, math, os, sys
 d = sys.argv[1]
@@ -1053,9 +1263,9 @@ def job_identity():
 initial_job_identity = job_identity()
 a = os.path.join(d, "artifacts")
 KEEP = ("_ng_task_index", "_ng_rollout_index", "_ng_rollout_id", "_ng_attempt_index", "_ng_failure_class", "failure_kind",
-        "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id",
+        "_ng_failure_terminal", "_ng_failure_counts_as_zero", "_ng_failure_max_attempts", "_ng_failure_id", "_ng_failure_stage",
         "_ng_failure_events", "_ng_failure_events_omitted", "_ng_omitted_rollout", "_ng_unrouted_run_error", "_ng_dispatch_drained", "_line", "reward",
-        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission",
+        "mask_sample", "evaluation_completed", "_ng_failure_http_status", "accepted_stage_omission", "_ng_elapsed_s",
         "ng_policy_model_server", "_ng_rejudge_operation_id")
 # Only structural response facts leave the run host; response contents stay local.
 # A rollout store's attempt manifest, its attempt journal, or a run-tagged row: only the store can select those
@@ -1067,13 +1277,40 @@ def trial_refs(items):
     return [{"model_call_id": item.get("model_call_id"), "response_id": item.get("response_id"),
              "model_ref": {k: item["model_ref"].get(k) for k in ("type", "name")} if isinstance(item.get("model_ref"), dict) else None}
             if isinstance(item, dict) else None for item in items]
+def model_call_facts(r):
+    # Each captured model call's server-fault facts and timing only, in rollout_recovery.captured_model_calls's shape.
+    capture = r.get("ng_model_call_capture")
+    raw = capture.get("calls") if isinstance(capture, dict) else None
+    if not isinstance(raw, list):
+        trajectory = r.get("ng_trajectory")
+        raw = trajectory.get("model_calls") if isinstance(trajectory, dict) else None
+    if not isinstance(raw, list):
+        return None
+    out = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        meta = item.get("response_metadata") if isinstance(item.get("response_metadata"), dict) else item
+        report = meta.get("failure_report")
+        events = report.get("events") if isinstance(report, dict) else None
+        category = meta.get("error_category")
+        out.append({"status_code": count(meta.get("status_code")), "upstream_status_code": count(meta.get("upstream_status_code")),
+                    "error_category": category[:64] if isinstance(category, str) else None,
+                    "failure_events": [{"failure_kind": event.get("failure_kind") if isinstance(event.get("failure_kind"), str) else None,
+                                        "http_status": count(event.get("http_status"))}
+                                       for event in (events.values() if isinstance(events, dict) else ()) if isinstance(event, dict)],
+                    "started_at": finite(item.get("started_at")), "duration_ms": finite(item.get("latency_total_ms", item.get("duration_ms")))})
+    return out
 def trial_metadata(value):
     if not isinstance(value, dict):
         return None
-    result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category")}
+    result = {k: value.get(k) for k in ("response_id", "status_code", "response_status", "error_category",
+                                        "upstream_status_code", "local_response_reason")}
     result["dialect"] = value.get("dialect") if value.get("dialect") in ("chat", "responses") else None
     result["finish_reason"] = value.get("finish_reason") if value.get("finish_reason") in ("stop", "length", "tool_calls", "content_filter", "function_call", "max_output_tokens", "max_tokens") else None
     result["model_ref"] = {k: value["model_ref"].get(k) for k in ("type", "name")} if isinstance(value.get("model_ref"), dict) else None
+    refit = value.get("output_budget_refit")
+    result["output_budget_refit"] = {k: refit.get(k) for k in ("requested_max_tokens", "window", "applied_max_tokens")} if isinstance(refit, dict) else None
     operations = value.get("model_operations")
     result["model_operations_recorded"] = "model_operations" in value
     result["model_operations"] = [{k: operation.get(k) for k in ("operation_id", "outcome", "final_attempt_id", "failure_id", "http_attempts", "transport_failures", "retry_wait_s", "request_elapsed_ms")}
@@ -1092,6 +1329,26 @@ def boolean(value):
     return value if type(value) is bool else None
 def count(value):
     return value if type(value) is int else None
+def message_text(item):
+    # Whether a message holds non-whitespace text (an output text or a refusal); None when it saved no content.
+    content = item.get("content")
+    if isinstance(content, str):
+        return bool(content.strip())
+    if not isinstance(content, list):
+        return None
+    def text(part):
+        value = (part.get("refusal") if part.get("type") == "refusal" else part.get("text")) if isinstance(part, dict) else None
+        return value if isinstance(value, str) else ""
+    return any(text(part).strip() for part in content)
+def answer_item(item):
+    # An answer's output item: its type, role and status; an assistant message also says whether it has text
+    # (``has_text``). The text stays local.
+    if not isinstance(item, dict):
+        return None
+    projected = {k: item[k] for k in ("type", "role", "status") if k in item}
+    if item.get("role") == "assistant" and (has_text := message_text(item)) is not None:
+        projected["has_text"] = has_text
+    return projected
 def test_run(r):
     # A saved repository test run: its outcome flags only; the patch, test names and output stay local.
     if type(r.get("resolved")) is not bool:
@@ -1110,6 +1367,15 @@ def substep_tests(r):
             "environment_results": len(environments) if isinstance(environments, list) else None}
 import re
 JUDGE_VERDICT = re.compile(r"^(?:\[\[(A=B|A!=B)\]\]|judgement:\s*(yes|no))$", re.IGNORECASE)
+def unit_tests(r):
+    # Saved per-test unit test results of the answer's extracted code (True passes; False or an error code does
+    # not): counts only, with the reasoning-format violation rate. Code, tests and their output stay local.
+    tests = r.get("result")
+    if not isinstance(tests, list) or not all(type(test) in (bool, int) for test in tests):
+        return None
+    return {"tests": len(tests), "passed": sum(test is True for test in tests),
+            "all_passed": all(test is True for test in tests), "code": isinstance(r.get("extracted_model_code"), str),
+            "reasoning_format_violation_rate": finite(r.get("reasoning_format_violation_rate"))}
 def judge_verdicts(value):
     # One boolean per saved judge evaluation (equal/yes is True, not equal/no is False), None where its label does
     # not parse; the label text stays local.
@@ -1119,6 +1385,14 @@ def judge_verdicts(value):
         match = JUDGE_VERDICT.match(label.strip()) if isinstance(label, str) else None
         out.append(None if match is None else (match.group(1) or match.group(2)).lower() in ("a=b", "yes"))
     return out
+# Labels a judge evaluation saves when it recorded no verdict; a null label is none either.
+UNPARSED_VERDICT_LABELS = ("judge_parsing_error", "judge_error")
+def judge_unparsed(value):
+    # Whether a saved judge evaluation recorded no verdict. An evaluation without a verdict_label field (its verdict
+    # is in the judge reply) and a label in another judge's vocabulary are not unparsed here.
+    return any(isinstance(item, dict) and "verdict_label" in item and (item["verdict_label"] is None or (
+        isinstance(item["verdict_label"], str) and item["verdict_label"].strip().casefold() in UNPARSED_VERDICT_LABELS))
+        for item in value)
 def rubric(r):
     # A rubric judge's verdict and scores as scalars only; the judge's text stays local.
     if "rubric_score" not in r and "scoring_threshold" not in r:
@@ -1141,6 +1415,7 @@ def grading_facts(r):
         "judge_verdicts": judge_verdicts(r["judge_evaluations"]) if isinstance(r.get("judge_evaluations"), list) and r["judge_evaluations"] else None,
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
+        "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
         "sentence_metrics": sorted(k for k, v in r.items() if k.startswith("sentence_") and finite(v) is not None),
@@ -1150,6 +1425,7 @@ def grading_facts(r):
         "invalid_model_response": r.get("invalid_model_response") is True,
         "test_run": test_run(r),
         "substep_tests": substep_tests(r),
+        "unit_tests": unit_tests(r),
     }
 def grading_result_binding(result):
     # Bind saved grading input before metadata projection.
@@ -1203,6 +1479,8 @@ def trial_items(value, key, fields):
             for item in value[key]]
 # Parsed sources whose parsed bytes differ from the opening snapshot: like a changed closing snapshot, unstable.
 changed_while_reading = set()
+# Artifacts that exist but cannot be read, relative to the job dir: recorded as unknown, never a crash.
+unreadable = set()
 def rows(name, skip=0):
     p = os.path.join(a, name)
     if not os.path.exists(p):
@@ -1211,7 +1489,12 @@ def rows(name, skip=0):
     # The parse hashes every byte it reads: it must read exactly the opening snapshot's bytes. This catches a rewrite
     # before or during the parse, an ABA one included, without a separate hashing pass.
     read = hashlib.sha256()
-    with open(p, "rb") as fh:
+    try:
+        source = open(p, "rb")
+    except OSError:
+        unreadable.add(os.path.relpath(p, d))
+        return None
+    with source as fh:
         for i, line in enumerate(fh):
             read.update(line)
             if i < skip or not line.strip():
@@ -1230,6 +1513,10 @@ def rows(name, skip=0):
             if name == "rollouts.jsonl" and any(managed_store):
                 r["_line"] = i
             selected = {k: r[k] for k in KEEP if k in r}
+            if name in ("rollouts.jsonl", "rollouts_failures.jsonl"):
+                calls = model_call_facts(r)
+                if calls is not None:
+                    selected["_ng_collected_model_calls"] = calls
             if name == "rollouts.jsonl":
                 binding = grading_result_binding(r)
                 if binding is not None:
@@ -1243,6 +1530,33 @@ def rows(name, skip=0):
                 failure = record.get("failure")
                 selected["_ng_failure_record"] = {"source": record.get("source"), "delivery": record.get("delivery"),
                     "failure": {"stage": failure.get("stage"), "failure_kind": failure.get("failure_kind")} if isinstance(failure, dict) else None}
+            if name == "rollouts_failures.jsonl":
+                # A failure's recorded cause as facts: whether the environment's own episode deadline ended it, and for
+                # each failed model call's events, whether the call was the policy's and whether it hit the context limit.
+                policy = r.get("ng_policy_model_server")
+                policy = policy if isinstance(policy, str) and policy else "policy_model"
+                failure = record.get("failure") if isinstance(record, dict) else None
+                capture = r.get("ng_model_call_capture")
+                calls = capture.get("calls") if isinstance(capture, dict) else None
+                event_calls = {}
+                for call in calls if isinstance(calls, list) else []:
+                    report = call.get("failure_report") if isinstance(call, dict) else None
+                    events = report.get("events") if isinstance(report, dict) else None
+                    if not isinstance(events, dict) or not events:
+                        continue
+                    model_ref = call.get("model_ref")
+                    # Captures made before model_ref existed held only policy calls.
+                    owner = True if model_ref is None else model_ref.get("name") == policy if isinstance(model_ref, dict) else None
+                    limit = "context_length_exceeded" in (call.get("local_response_reason"), call.get("error_category"))
+                    for event_id in events:
+                        if isinstance(event_id, str) and len(event_calls) < 256:
+                            event_calls[event_id[:64]] = {"policy": owner, "context_limit": limit}
+                selected["_ng_collected_cause"] = {
+                    "episode_deadline": isinstance(record, dict) and record.get("source") == "environment"
+                    and isinstance(failure, dict) and failure.get("failure_reason") == EPISODE_DEADLINE_REASON
+                    and not failure.get("failure_kind"),
+                    "event_calls": event_calls,
+                }
             for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
                 answer = r.get(key)
                 if key in r and not isinstance(answer, dict):
@@ -1274,9 +1588,7 @@ def rows(name, skip=0):
                     if answer.get("error") is not None:
                         selected[key]["error"] = {}  # Presence only; diagnostic messages stay on the run host.
                     if isinstance(output, list):
-                        selected[key]["output"] = [
-                            {k: item[k] for k in ("type", "role", "status") if k in item}
-                            if isinstance(item, dict) else None for item in output]
+                        selected[key]["output"] = [answer_item(item) for item in output]
 
             if name == "rollouts_materialized_inputs.jsonl":
                 identity = r.get("trajectory_identity")
@@ -1345,18 +1657,21 @@ def accounting_unknown_reason():
     return None
 def accounting_unknown():
     return accounting_unknown_reason() is not None
-def followup_claims():
-    # The follow-up job id each allocation claimed, keyed by that allocation; only decimal ids leave the run host.
-    claims = {}
+def job_ids(prefix):
+    # The job id each allocation recorded in its <prefix><allocation> file; only decimal ids leave the run host.
+    ids = {}
     try:
         for name in os.listdir(d):
-            if name.startswith(".gym_followup_queued."):
+            if name.startswith(prefix):
                 value = open(os.path.join(d, name)).read().strip()
                 if value.isascii() and value.isdecimal():
-                    claims[name[len(".gym_followup_queued."):]] = value
+                    ids[name[len(prefix):]] = value
     except (OSError, ValueError):
         return {}
-    return claims
+    return ids
+def followup_claims():
+    # The follow-up job id each allocation claimed, keyed by that allocation.
+    return job_ids(".gym_followup_queued.")
 def sha256(path):
     # One bounded pass with stable stat identity. A same-size in-place rewrite within one timestamp tick keeps the
     # identity: the opening and closing snapshots compare bytes, and rows() checks the bytes it parses against the
@@ -1366,6 +1681,10 @@ def sha256(path):
         source = open(path, "rb")
     except FileNotFoundError:
         return None
+    except OSError:
+        # Present but unreadable (an owner-only file, for example): a stable marker, so both snapshots agree.
+        unreadable.add(os.path.relpath(path, d))
+        return "unreadable"
     h = hashlib.sha256()
     with source:
         before = os.fstat(source.fileno())
@@ -1400,7 +1719,11 @@ source_snapshot = {name: sha256(os.path.join(a, name)) for name in source_files}
 accounting_files = (".gym_infra_retries", ".gym_accumulated_walltime", ".gym_job_chain", ".gym_infra_retry_extension",
                     ".gym_chain_incomplete", "../resolved-config.yaml", "artifacts/rollouts_resubmit_offset")
 accounting_snapshot = {name: sha256(os.path.join(d, name)) for name in accounting_files}
-chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
+try:
+    chain = open(os.path.join(d, ".gym_job_chain")).read().split() if os.path.exists(os.path.join(d, ".gym_job_chain")) else []
+except OSError:
+    unreadable.add(".gym_job_chain")
+    chain = []
 unknown_accounting = accounting_unknown()
 mlflow = {"live_run_id": None, "receipt": None}
 try:
@@ -1572,6 +1895,8 @@ collected["counter_states"] = {"infra_retries": num(".gym_infra_retries")[1],
                                "walltime": num(".gym_accumulated_walltime")[1]} if stable_sources else None
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 collected["followup_claims"] = followup_claims()
+# The sentinel each allocation queued behind its follow-up, keyed by that allocation.
+collected["followup_sentinels"] = job_ids(".gym_followup_sentinel.")
 def operator_epoch():
     # The last operator continuation's epoch; None when no continuation was journaled or its entry is unreadable.
     try:
@@ -1612,6 +1937,53 @@ def chain_continuation_note():
     )
     return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
+collected["unreadable_files"] = sorted(unreadable)
+def judge_jobs():
+    # The judge-only jobs queued for this run's saved answers (JUDGE_JOB_JOURNAL_NAME, oldest first), each with its
+    # receipt's outcome when the job wrote one. Only bounded ids, names, counts and states leave the run host: never a
+    # saved answer, and only a receipt inside this job dir is read.
+    def text(value, limit):
+        return value[:limit] if isinstance(value, str) else None
+    def count(value):
+        return value if type(value) is int and value >= 0 else None
+    jobs = []
+    try:
+        lines = open(os.path.join(d, JUDGE_JOB_JOURNAL_NAME)).read().splitlines()
+    except OSError:
+        return jobs
+    for line in lines[-50:]:
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            continue
+        if not isinstance(entry, dict):
+            continue
+        job = {"job_id": text(entry.get("job_id"), 64), "at": text(entry.get("at"), 40),
+               "nonce": text(entry.get("nonce"), 120), "partition": text(entry.get("partition"), 120),
+               "walltime": text(entry.get("walltime"), 40), "rows": count(entry.get("rows")),
+               "gym_commit": text(entry.get("gym_commit"), 64), "receipt": text(entry.get("receipt"), 1000),
+               "error": text(entry.get("error"), 500), "state": "queued"}
+        path = entry.get("receipt")
+        receipt = None
+        inside = isinstance(path, str) and os.path.isabs(path) and os.path.realpath(path).startswith(os.path.realpath(d) + os.sep)
+        if inside and os.path.exists(path):
+            try:
+                receipt = json.load(open(path))
+            except (OSError, ValueError):
+                receipt = "malformed"
+        if isinstance(receipt, dict) and receipt.get("version") == 1 and receipt.get("state") in ("completed", "failed"):
+            job["state"] = receipt["state"]
+            for name in ("selected", "judged", "settled", "withdrawn", "unsupported", "due_after"):
+                job[name] = count(receipt.get(name))
+            job["error"] = text(receipt.get("error"), 500)
+            job["ended_at"] = text(receipt.get("ended_at"), 40)
+            job["metrics_recomputed"] = receipt.get("metrics_recomputed") is True
+            job["health_summary_recomputed"] = receipt.get("health_summary_recomputed") is True
+        elif receipt is not None:
+            job["state"] = "unknown"  # a receipt that is not one this reader knows
+        jobs.append(job)
+    return jobs
+collected["judge_jobs"] = judge_jobs()
 print(json.dumps(collected))
 """
 )
@@ -1639,8 +2011,15 @@ class CollectedEvidence(BaseModel):
     source_job_identity: tuple[str, int, int] | None = None
     managed_selection: list[ManagedRecoveryFact] | None = None
     managed_reader_error: str | None = None
+    # Rollouts with an admitted re-judgment and no saved outcome: its row is still the selected judge failure.
+    unresolved_rejudgments: list[str] = Field(default_factory=list)
+    # True when the Store reader could not run (install failure, crash, timeout, lost transport): nothing was read,
+    # unlike a reader that ran and could not verify the artifacts.
+    managed_reader_unavailable: bool = False
     # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
+    # Artifacts that exist but could not be read, relative to the job dir: what they hold is unknown.
+    unreadable_files: list[str] = Field(default_factory=list)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
     coverage_allocation_id: str | None = None
     # rollouts_coverage.json's (scored, expected): the rollouts collection scored into the metrics, of those expected.
@@ -1659,6 +2038,8 @@ class CollectedEvidence(BaseModel):
     infra_retry_extension_state: str = "absent"
     # The follow-up job id each allocation of the chain claimed (.gym_followup_queued.<allocation>).
     followup_claims: dict[str, str] = Field(default_factory=dict)
+    # The sentinel job id each allocation queued behind its follow-up (.gym_followup_sentinel.<allocation>).
+    followup_sentinels: dict[str, str] = Field(default_factory=dict)
     # The last operator continuation's epoch (OPERATOR_CONTINUATION_JOURNAL_NAME): the chain is accounted after it.
     operator_epoch: OperatorEpoch | None = None
     # Where the heavy readers ran: "login" or "cpu:<job id>" with a reader step (NEMO_GYM_REMOTE_READER_SRUN), and why
@@ -1671,6 +2052,10 @@ class CollectedEvidence(BaseModel):
     resume_drift_keys: list[str] | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
+    # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
+    # walltime, rows, receipt path and ``state`` ("queued" without a receipt, else the receipt's "completed" or
+    # "failed" with its counts); the executor adds the scheduler's state of a job without a receipt.
+    judge_jobs: list[dict[str, Any]] = Field(default_factory=list)
 
 
 # The host sets the reader placement; a reader neither receives it nor replaces it.
@@ -1756,8 +2141,9 @@ def _managed_trial_metadata(
         return results, None
 
 
-# Row values the Store selection never reads, and the largest ones in agent runs.
-STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_model_call_capture", "ng_agent_observations"})
+# Row values the Store selection never reads, and the largest ones in agent runs. The model-call capture is read: an
+# agent timeout's captured calls decide whether its window held a server-side fault (is_infrastructure_agent_timeout).
+STORE_SKIP_KEYS = frozenset({"ng_trajectory", "ng_agent_observations"})
 
 
 def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> CollectedEvidence:
@@ -1803,8 +2189,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             raise ValueError("managed source has no readable manifest or inventory")
         if store.manifest.max_rollout_attempts is None:
             raise ValueError("managed manifest does not preserve its rollout attempt cap")
-        if store.unresolved_rejudgments():
-            raise ValueError(f"admitted re-judgment outcome unknown for {store.unresolved_rejudgments()}")
+        unresolved_rejudgments = store.unresolved_rejudgments()
         coverage = store.coverage()
         if len(collected.materialized) != coverage["expected"] or not coverage["identity_verified"]:
             raise ValueError("managed inventory is ambiguous or its identity is not verified")
@@ -1853,13 +2238,26 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 "failures": failures,
                 "managed_selection": facts,
                 "checkpoint_enabled": checkpoint_enabled,
+                "unresolved_rejudgments": unresolved_rejudgments,
             }
         )
-    except (ImportError, OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
+    except ImportError as error:
+        update = {"managed_selection": None, "managed_reader_error": str(error), "managed_reader_unavailable": True}
+        return collected.model_copy(update=update)
+    except (OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
         return collected.model_copy(update={"managed_selection": None, "managed_reader_error": str(error)})
 
 
+# A Store reader that could not run read nothing; the decision says so instead of stopping the run.
+STORE_READER_UNAVAILABLE = (
+    "the run was written by a rollout store and its Store reader could not run, so nothing was decided and the "
+    "saved artifacts were not judged"
+)
+
+
 def _live_reason(live_job_name: str | None) -> str:
+    if live_job_name and live_job_name.startswith("judge-only job"):
+        return f"{live_job_name} live: it grades the run's saved answers again; nothing to decide"
     if live_job_name:
         return f"continuation {live_job_name} live; nothing to decide"
     return "a job of this run is still pending or running; nothing to decide, it is not queued twice"
@@ -1978,12 +2376,23 @@ def decide_from_collected(collected: CollectedEvidence, **options: Any) -> Recov
     """``_decide_from_collected``, with the reason naming any operational drift the run's latest resume crossed (see
     ``resume_drift_note``) and a continuation that ended before it queued its follow-up, so an inspection, a recovery
     and a chain continuation all say it."""
-    decision = _decide_from_collected(collected, **options)
+    explicit = options.get("outcome_policy")
+    source = options.pop("outcome_policy_source", None) or (
+        OutcomePolicySource.PYTHON if explicit is not None else OutcomePolicySource.DEFAULT
+    )
+    policy = explicit or RecoveryOutcomePolicyConfig()
+    decision = _decide_from_collected(collected, **options).model_copy(
+        update={"outcome_policy": {"source": OutcomePolicySource(source).value, **policy.model_dump(mode="json")}}
+    )
     notes = [resume_drift_note(collected.resume_drift_keys)]
     if collected.chain_continuation_note:
         notes.append(f"the chain recorded: {collected.chain_continuation_note}")
     notes = [note for note in notes if note]
     return decision if not notes else decision.model_copy(update={"reason": "; ".join([decision.reason, *notes])})
+
+
+# The saved rows a decision reads; one that exists but cannot be read stops it.
+SAVED_ROW_FILES = ("rollouts_materialized_inputs.jsonl", "rollouts.jsonl", "rollouts_failures.jsonl")
 
 
 def _decide_from_collected(
@@ -2043,10 +2452,41 @@ def _decide_from_collected(
         live_job_name=live_job_name,
         job_chain=collected.job_chain,
     )
+    unreadable_rows = [name for name in SAVED_ROW_FILES if f"artifacts/{name}" in collected.unreadable_files]
+    if unreadable_rows and live_job is not True:
+        # Saved rows that cannot be read are unknown, not absent: no fresh restart, no resume over them.
+        known = sorted({i for i in map(_identity, collected.materialized or []) if i is not None})
+        return RecoveryDecision(
+            action=RecoveryAction.STOP,
+            reason=f"saved rows are unreadable ({', '.join(unreadable_rows)}), so what they hold is unknown",
+            expected=len(known),
+            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
+            identities={IdentityState.UNKNOWN.value: known} if known else {},
+            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+        )
     if collected.managed_store and collected.managed_selection is None:
         # Selecting from these files here could pick a superseded attempt or lose a reservation, so every known
         # input stays unknown and no saved row is read as its outcome.
         known = sorted({i for i in map(_identity, collected.materialized or []) if i is not None})
+        unread = dict(
+            expected=len(known),
+            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
+            identities={IdentityState.UNKNOWN.value: known} if known else {},
+            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+        )
+        if collected.managed_reader_unavailable:
+            # The reader read nothing, so this is no verdict on the artifacts: a live job keeps the run live, and
+            # otherwise nothing is decided until the reader runs.
+            if live_job:
+                return RecoveryDecision(
+                    action=RecoveryAction.NOOP, reason=_live_reason(live_job_name), scheduler_live=True, **unread
+                )
+            return RecoveryDecision(
+                action=RecoveryAction.UNKNOWN,
+                reason=f"{STORE_READER_UNAVAILABLE}: {collected.managed_reader_error or 'no cause reported'}; "
+                "inspect again once the reader can run",
+                **unread,
+            )
         return RecoveryDecision(
             action=RecoveryAction.STOP,
             reason=(
@@ -2054,10 +2494,7 @@ def _decide_from_collected(
                 "an authoritative Store reader is unavailable or could not verify these artifacts; recovery stops"
                 + (f": {collected.managed_reader_error}" if collected.managed_reader_error else "")
             ),
-            expected=len(known),
-            counts={IdentityState.UNKNOWN.value: len(known)} if known else {},
-            identities={IdentityState.UNKNOWN.value: known} if known else {},
-            evidence=[IdentityEvidence(identity=i, state=IdentityState.UNKNOWN) for i in known],
+            **unread,
         )
     if collected.materialized is None:
         if live_job is False and not collected.results and not collected.failures:
@@ -2090,6 +2527,19 @@ def _decide_from_collected(
         allocation_cut=allocation_cut and live_job is False,
     )
     decision = decide_recovery(**inputs, budget=budget)
+    if collected.unresolved_rejudgments and live_job is None:
+        # With no job of the run live, the pass that admitted them died: its rows are still the selected judge
+        # failures, re-verified like any other, and the recovery pass withdraws the admissions first. A live job may
+        # still be in that pass (NOOP above); an unknown scheduler rules out neither.
+        return decision.model_copy(
+            update={
+                "action": RecoveryAction.STOP,
+                "reason": (
+                    f"admitted re-judgment outcome unknown for {collected.unresolved_rejudgments}: "
+                    "the scheduler query failed, so the pass that admitted them may still run"
+                ),
+            }
+        )
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(
             update={
@@ -2161,17 +2611,22 @@ def continuation_admission(
     exit_code: str,
     previous_job_id: str,
     previous_state: str = "FAILED",
+    outcome_policy: str | None = None,
 ) -> str:
     """Read saved state in the driver's installed runtime before a terminal allocation continues.
 
     The shell has already validated and persisted terminal elapsed accounting. This reader never changes
     artifacts, starts servers, resets budgets, or treats an exit code as sufficient retry evidence.
+    ``outcome_policy`` is the run's ``recovery_outcome_policy`` section as JSON, rendered from its saved config, so
+    an automatic continuation decides with the policy a recovery would apply.
     """
     import json
     import subprocess
     import sys
 
     job = Path(job_dir)
+    if previous_state == REQUEUE_RECONCILE_STATE:
+        return _requeue_continuation(job, max_retries, max_walltime_s)
     if exit_code == "76:0":
         print(
             f"{CONTINUATION_REASON_PREFIX}the previous driver exited 76: none of its saved failures is eligible for "
@@ -2228,17 +2683,27 @@ def continuation_admission(
                     and all(report.get(key) == value for key, value in store.coverage().items())
                 )
         # The selection above verified the snapshot and read the Store once; a second read only hashes it again.
+        if collected.managed_selection is None and collected.managed_reader_unavailable:
+            print(
+                f"{CONTINUATION_REASON_PREFIX}the Store reader could not run, so nothing was decided: "
+                f"{collected.managed_reader_error or 'no cause reported'}; the saved artifacts were not judged: "
+                "`gym eval resubmit --recover --inspect` reads them again"
+            )
+            return "unknown"
         if collected.managed_selection is None:
             print(
                 f"{CONTINUATION_REASON_PREFIX}the Store could not verify the saved artifacts: "
                 f"{collected.managed_reader_error or 'no authoritative selection'}"
             )
             return "stop"
+        policy, source = effective_outcome_policy(None, json.loads(outcome_policy) if outcome_policy else None)
         decision = decide_from_collected(
             collected,
             max_infra_retries=max_retries,
             max_walltime_s=max_walltime_s,
             live_job=False,
+            outcome_policy=policy,
+            outcome_policy_source=source,
             planned_missing_continuation=segment,
             allocation_cut=_store_writer_ended(collected, previous_job_id),
         )
@@ -2251,8 +2716,57 @@ def continuation_admission(
         return "stop"
 
 
-# What the executor reads for a chain: every incarnation of every allocation, a requeued one included.
-CHAIN_ACCOUNTING_FORMAT = "JobIDRaw,State,ElapsedRaw,Restarts"
+def _requeue_continuation(job: Path, max_retries: int, max_walltime_s: float | None) -> str:
+    """In a sentinel: reconcile a requeued chain from the terminal records in ``CHAIN_ACCOUNTING_ENV`` and decide.
+
+    The same reconcile and decision as ``gym eval resubmit --recover``: nothing else of the chain runs or waits (the
+    sentinel checks the queue), and every allocation ended. Prints the reconciled walltime when the run continues.
+    """
+    import subprocess
+    import sys
+
+    try:
+        rows = chain_accounting(os.environ.get(CHAIN_ACCOUNTING_ENV, ""))
+        raw = subprocess.run(
+            [sys.executable, "-I", "-S", "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True
+        )
+        collected = CollectedEvidence.model_validate_json(raw.stdout)
+        if collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON:
+            print(f"{CONTINUATION_REASON_PREFIX}the chain's accounting is not the requeue marker")
+            return "stop"
+        if not rows:
+            print(f"{CONTINUATION_REASON_PREFIX}the requeued chain's scheduler records are malformed")
+            return "stop"
+        if not collected.managed_store:
+            print(f"{CONTINUATION_REASON_PREFIX}the saved artifacts have no rollout store manifest to continue from")
+            return "stop"
+        collected = select_managed_evidence(collected, job)
+        if collected.managed_selection is None:
+            print(
+                f"{CONTINUATION_REASON_PREFIX}the Store could not verify the saved artifacts: "
+                f"{collected.managed_reader_error or 'no authoritative selection'}"
+            )
+            return "stop"
+        collected = reconcile_requeued_chain(collected, rows)
+        if not collected.accounting_reconciled or collected.accounted_walltime_s is None:
+            print(f"{CONTINUATION_REASON_PREFIX}the terminal scheduler records do not account for the requeued chain")
+            return "stop"
+        decision = decide_from_collected(
+            collected,
+            max_infra_retries=max_retries,
+            max_walltime_s=max_walltime_s,
+            live_job=False,
+            allocation_cut=allocation_cut_from_accounting(rows, collected.coverage_allocation_id),
+        )
+        requeued = requeue_note(collected.job_chain, rows)
+        print(CONTINUATION_REASON_PREFIX + decision.reason + (f"; {requeued}" if requeued else ""))
+        if decision.action != RecoveryAction.RESUBMIT:
+            return "stop"
+        print(f"{ACCOUNTED_WALLTIME_PREFIX}{int(collected.accounted_walltime_s)}")
+        return "retry"
+    except (OSError, ValueError, TypeError, RuntimeError, subprocess.SubprocessError) as error:
+        print(f"{CONTINUATION_REASON_PREFIX}saved recovery evidence is unreadable: {type(error).__name__}: {error}")
+        return "stop"
 
 
 def chain_accounting(accounting: str) -> list[tuple[str, str, int, int]] | None:
@@ -2366,6 +2880,34 @@ def accounted_requeued_chain_walltime(
     return float(sum(elapsed for _, _, elapsed, _ in rows))
 
 
+def reconcile_requeued_chain(collected: CollectedEvidence, rows: list[tuple[str, str, int, int]]) -> CollectedEvidence:
+    """Know a requeued chain's budget again once every incarnation has a terminal scheduler record.
+
+    Only the requeue marker is reconciled: the counters themselves stayed readable and the missing fact is the elapsed
+    time of the requeued incarnations, which complete terminal records give. Any other unknown reason stays unknown.
+    """
+    states = collected.counter_states or {}
+    if (
+        collected.accounting_unknown_reason != REQUEUE_UNKNOWN_REASON
+        or states.get("infra_retries") not in ("absent", "ok")
+        or states.get("walltime") not in ("absent", "ok")
+    ):
+        return collected
+    total = accounted_requeued_chain_walltime(
+        collected.job_chain, rows, stored_walltime_s=collected.walltime_used_s or 0
+    )
+    if total is None:
+        return collected
+    return collected.model_copy(
+        update={
+            "infra_retries_state": states["infra_retries"],
+            "walltime_state": states["walltime"],
+            "accounted_walltime_s": total,
+            "accounting_reconciled": True,
+        }
+    )
+
+
 def requeue_note(job_chain: list[str], rows: list[tuple[str, str, int, int]]) -> str | None:
     """The last requeued job of a chain and what its allocations account for, as a decision states it."""
     requeued = [job_id for job_id in job_chain if sum(row[0] == job_id for row in rows) > 1]
@@ -2445,7 +2987,8 @@ def gate_task_summary(
     """One task entry of the acceptance gate's run summary, filled from the decision and the existing validators.
 
     ``expected_samples`` is always the full materialized inventory; ``scored_samples`` counts only scored and
-    final-model identities, so a judge, infra, terminal or missing identity can never make them equal. Summary validity
+    final-model identities, so a judge, infra, terminal or missing identity can never make them equal. A settled
+    final outcome the metric does not score (``IdentityEvidence.unscored``) is stated, not counted as scored. Summary validity
     and response/trial health stay separate. ``False`` is a failure and an error; ``None`` (unknown or missing) is no
     failure but never a pass: its reason is a warning and it withholds SUCCESS.
 
@@ -2474,6 +3017,8 @@ def gate_task_summary(
         errors.append(f"duplicate result rows: {decision.duplicate_results[:5]}")
     if decision.action == RecoveryAction.STOP:
         errors.append(f"recovery stopped: {decision.reason}")
+    if decision.action == RecoveryAction.UNKNOWN:
+        errors.append(f"recovery undecided: {decision.reason}")
     if summary_valid is not True:
         (errors if summary_valid is False else warnings).append(
             "summary validity "
@@ -2486,10 +3031,14 @@ def gate_task_summary(
             + ("unknown" if health_passed is None else "failed")
             + (f": {health_reasons}" if health_reasons else "")
         )
-    if states.get(IdentityState.MODEL_FINAL):
+    unscored = [e.identity for e in decision.evidence if e.state == IdentityState.MODEL_FINAL and e.unscored]
+    if states.get(IdentityState.MODEL_FINAL, 0) > len(unscored):
+        final = [e.identity for e in decision.evidence if e.state == IdentityState.MODEL_FINAL and not e.unscored]
+        warnings.append(f"{len(final)} final evaluated-model failures scored zero: {final[:5]}")
+    if unscored:
         warnings.append(
-            f"{states[IdentityState.MODEL_FINAL]} final evaluated-model failures scored zero: "
-            f"{decision.identities[IdentityState.MODEL_FINAL.value][:5]}"
+            f"{len(unscored)} answered agent deadlines settled with their kept answer, not scored by the metric: "
+            f"{unscored[:5]}"
         )
     if states.get(IdentityState.OMITTED):
         # Complete by the stage's own policy: stated, never folded into the scored or failed counts.
@@ -2506,7 +3055,9 @@ def gate_task_summary(
     return {
         "status": status,
         "expected_samples": decision.expected,
-        "scored_samples": states.get(IdentityState.SCORED, 0) + states.get(IdentityState.MODEL_FINAL, 0),
+        "scored_samples": states.get(IdentityState.SCORED, 0)
+        + states.get(IdentityState.MODEL_FINAL, 0)
+        - len(unscored),
         "omitted_samples": states.get(IdentityState.OMITTED, 0),
         "score": score,
         "errors": errors,
@@ -2913,13 +3464,14 @@ def _observed_trial_operations(
     from nemo_gym.core.episode import maybe_rollout_id_from_run_body
 
     # A settled model failure (MODEL_FINAL) or a rollout that ended on a failed policy request is a counted trial
-    # failure with its recorded kind; only the other trials need their operations and grading observed.
+    # failure with its recorded kind; only the other trials need their operations and grading observed. A row an
+    # accepted partial stage omitted is no trial (``trial_population``), so it needs no observation.
     if (
         collected is None
         or not collected.quality
         or collected.quality.get("source_matches") is not True
         or decision.counts.get(IdentityState.SCORED, 0) + decision.counts.get(IdentityState.MODEL_FINAL, 0)
-        != decision.expected
+        != trial_population(decision)
     ):
         return False
     rows = collected.results
@@ -3292,11 +3844,15 @@ def _observed_trial_operations(
         for row in rows:
             if _identity(row) in final_zero:
                 continue
+            if _scored_kind(row) is not None:
+                continue  # A counted failure with its own recorded kind (``_scored_fault``), like a final zero.
             if _answer_fault(row, collected):
                 # A counted model failure (``_answer_fault``), like a final zero: only its answer must be observed.
                 if not _observed_incomplete_answer(row):
                     return False
                 continue
+            if _unparsed_judge_verdict(row):
+                continue  # A counted grading fault (``_scored_fault``): its reward is no grade to observe.
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
@@ -3363,7 +3919,7 @@ def _observed_trial_operations(
             if verifier is not None and (
                 verifier["status"] != "completed"
                 or verifier["failure_kind"] is not None
-                or verifier.get("sandbox_observations") not in (None, [])
+                or _grading_sandbox_failed(verifier.get("sandbox_observations"))
                 or (judge_calls is None and verifier["model_calls"] != [])
                 or not nonempty(verifier["invocation_id"])
                 or verifier["invocation_id"] in populations[3]
@@ -3374,6 +3930,9 @@ def _observed_trial_operations(
                 # A saved grading artifact must be bound to the saved answer and score; the model's own failed
                 # answer is a counted model failure instead.
                 if artifact != "model_failure" and not _bound_answer(row):
+                    return False
+                # The verifier's own judge replies are part of that grading: each completed once.
+                if judge_calls and not all(completed_once(call, judge=True) for call in judge_calls):
                     return False
                 grade = None
                 artifact_trials.append(_identity(row))
@@ -3466,6 +4025,32 @@ def _observed_trial_operations(
     return True
 
 
+# A sandbox outcome that reports the sandbox did not finish its work; "unknown" means the provider did not report one.
+_SANDBOX_FAILURES = frozenset({"failed", "timeout", "oom", "sandbox_error", "cancelled"})
+
+
+def _grading_sandbox_failed(observations: Any) -> bool:
+    """Whether a verifier's sandbox observations report that a grading sandbox failed, or are malformed.
+
+    They are lifecycle evidence of the sandboxes the verification used, not a grading record: a completed or
+    unreported outcome, an unconfirmed teardown, a failing test command's exit code and the agent's own sandbox
+    outcome do not leave a bound grading unobserved. A verifier sandbox whose outcome is a failure, or that records
+    an error, does.
+    """
+    if observations is None:
+        return False
+    if not isinstance(observations, list):
+        return True
+    return any(
+        not isinstance(item, Mapping)
+        or (
+            item.get("role") == "verifier"
+            and (item.get("outcome") in _SANDBOX_FAILURES or item.get("error_type") is not None)
+        )
+        for item in observations
+    )
+
+
 def _failed_request(call: Any) -> tuple[str, Any] | None:
     """The failure kind and HTTP status of a captured call whose final model operation failed with its own recorded
     request event, or None."""
@@ -3489,6 +4074,56 @@ def _failed_request(call: Any) -> tuple[str, Any] | None:
     return None
 
 
+# The kind of a request the model server rejected on length, by the reason it recorded: the conversation outgrew the
+# context window (the model's own limit), or the request's output budget alone exceeds it (a setup the deployment
+# cannot serve, evaluation-side).
+LENGTH_REFUSAL_KINDS = {
+    "context_length_exceeded": MODEL_CONTEXT_LIMIT,
+    "invalid_output_token_parameter": INVALID_OUTPUT_BUDGET,
+}
+
+
+def _length_refusal_kind(meta: Any) -> str | None:
+    """The kind of a captured call rejected with HTTP 4xx on length (``LENGTH_REFUSAL_KINDS``), or None.
+
+    The reason is the call's ``error_category`` or its ``local_response_reason``; the status is the call's own, its
+    upstream's, or that of a failure event it reported. A 5xx among them is the server's fault, and an event of another
+    kind than a rejected request (a transport failure) is its own cause, never the length's.
+    """
+    if not isinstance(meta, dict):
+        return None
+    kinds = {
+        LENGTH_REFUSAL_KINDS[reason]
+        for reason in (meta.get("error_category"), meta.get("local_response_reason"))
+        if isinstance(reason, str) and reason in LENGTH_REFUSAL_KINDS
+    }
+    if len(kinds) != 1:
+        return None
+    report = meta.get("failure_report")
+    events = report.get("events") if isinstance(report, dict) else None
+    events = [event for event in events.values() if isinstance(event, dict)] if isinstance(events, dict) else []
+    if any(event.get("failure_kind") not in (None, MODEL_REQUEST_ERROR) for event in events):
+        return None
+    statuses = [
+        status
+        for status in [
+            meta.get("status_code"),
+            meta.get("upstream_status_code"),
+            *(event.get("http_status") for event in events),
+        ]
+        if type(status) is int and status >= 400
+    ]
+    return kinds.pop() if statuses and all(status <= 499 for status in statuses) else None
+
+
+def _policy_call(row: Mapping[str, Any], call: Any) -> bool:
+    """Whether a captured call is the evaluated policy's: its model is the row's policy server, or none is named."""
+    policy = row.get("ng_policy_model_server")
+    meta = call.get("response_metadata") if isinstance(call, dict) else None
+    model = meta.get("model_ref") if isinstance(meta, dict) else None
+    return not isinstance(policy, str) or (isinstance(model, dict) and model.get("name") == policy)
+
+
 def _last_captured_call(calls: list) -> Any:
     """The call a rollout ended on, for an agent whose invocations reference none of its calls.
 
@@ -3504,6 +4139,22 @@ def _last_captured_call(calls: list) -> Any:
     return last
 
 
+def infrastructure_timeouts(decision: RecoveryDecision, collected: CollectedEvidence | None) -> set[Identity]:
+    """Scored identities whose graded result is an agent timeout with a server-side fault in its window.
+
+    A Harbor graded zero a run without a Store cannot reopen (``is_infrastructure_agent_timeout``): it stays in the
+    results, and the trial gate counts it once, as ``AGENT_TIMEOUT_INFRASTRUCTURE``, an evaluation-side fault.
+    """
+    from nemo_gym.rollout_recovery import is_infrastructure_agent_timeout
+
+    scored = set(decision.identities.get(IdentityState.SCORED.value, []))
+    return {
+        _identity(row)
+        for row in ((collected.results or []) if collected is not None else [])
+        if _identity(row) in scored and is_infrastructure_agent_timeout(row)
+    }
+
+
 def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
     """Scored identities whose rollout ended on a failed policy request and was scored zero, with the failure kind.
 
@@ -3513,15 +4164,21 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
     (its invocations reference none) ended on a failed request when its last captured call (``_last_captured_call``)
     failed that way; an earlier failed call is no end and stays unaccounted. The kind is keyed on the failure's HTTP
     status (``status_fault_kind``): a 5xx reply is the server's fault, and another model's 4xx rejection is
-    evaluation-side.
+    evaluation-side. A policy whose own last call was rejected on length (``_length_refusal_kind``) ended there,
+    whatever its event's kind: ``model_context_limit`` for the context window, ``invalid_output_budget`` for an output
+    budget the window cannot hold. The policy's last call is its last captured one when its invocations reference
+    none, since another model's capture may follow.
     """
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
+    infrastructure = infrastructure_timeouts(decision, collected)
     for row in (collected.results or []) if collected is not None else []:
         observed = row.get("ng_trial_observations")
         reward = row.get("reward")
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
             continue
+        if _identity(row) in infrastructure:
+            continue  # Counted once, as its agent timeout's server-side fault.
         invocations = observed.get("invocations") if isinstance(observed, dict) else None
         unreferenced = (
             isinstance(invocations, list)
@@ -3529,14 +4186,14 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
             and all(isinstance(item, dict) and item.get("model_calls") == [] for item in invocations)
         )
         if unreferenced and isinstance(observed.get("model_calls"), list):
+            own = _last_captured_call([call for call in observed["model_calls"] if _policy_call(row, call)])
+            if own is not None and (refused := _length_refusal_kind(own.get("response_metadata"))):
+                found[_identity(row)] = refused
+                continue
             last = _last_captured_call(observed["model_calls"])
             failed = _failed_request(last)
             if failed is not None:
-                policy = row.get("ng_policy_model_server")
-                model = ((last.get("response_metadata") or {}).get("model_ref") or {}).get("name")
-                found[_identity(row)] = status_fault_kind(
-                    failed[0], failed[1], policy=not isinstance(policy, str) or model == policy
-                )
+                found[_identity(row)] = status_fault_kind(failed[0], failed[1], policy=_policy_call(row, last))
             continue
         if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
             continue
@@ -3558,6 +4215,9 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
             )
         ]
         meta = last[0]["response_metadata"] if len(last) == 1 else None
+        if meta is not None and _policy_call(row, last[0]) and (refused := _length_refusal_kind(meta)):
+            found[_identity(row)] = refused
+            continue
         operations = meta.get("model_operations") if isinstance(meta, dict) else None
         report = meta.get("failure_report") if isinstance(meta, dict) else None
         if not isinstance(operations, list) or not operations or not isinstance(operations[-1], dict):
@@ -3587,11 +4247,30 @@ def _reward(row: Mapping[str, Any]) -> float | None:
     return reward if type(reward) in (int, float) and math.isfinite(reward) else None
 
 
+def _unparsed_verdict(facts: Mapping[str, Any]) -> bool:
+    """Saved judge evaluations of which one recorded no verdict: a null label, or a judge or parse error label."""
+    return facts.get("judge_evaluations") is True and (
+        facts.get("judge_unparsed") is True or facts.get("judge_error") is True
+    )
+
+
+def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row's grading is ``judge_unparseable``: unmasked, with a reward and no failure kind, while a
+    saved judge evaluation recorded no verdict (``_unparsed_verdict``). Its reward is no grade."""
+    return (
+        row.get(FAILURE_CLASS) is None
+        and row.get("failure_kind") is None
+        and row.get("mask_sample") is not True
+        and _reward(row) is not None
+        and _unparsed_verdict(_grading_facts(row))
+    )
+
+
 def _judge_evaluations(facts: Mapping[str, Any], reward: float | None) -> bool:
     """A non-empty ``judge_evaluations`` list without a judge error; when every evaluation's verdict label parses
     (``[[A=B]]``/``[[A!=B]]`` or ``Judgement: yes/no``), the reward is 1.0 exactly when every verdict is equal/yes."""
     verdicts = facts.get("judge_verdicts")
-    if facts.get("judge_evaluations") is not True or facts.get("judge_error") is True:
+    if facts.get("judge_evaluations") is not True or facts.get("judge_error") is True or _unparsed_verdict(facts):
         return False
     if isinstance(verdicts, list) and verdicts and all(type(verdict) is bool for verdict in verdicts):
         return reward == (1.0 if all(verdicts) else 0.0)
@@ -3692,6 +4371,27 @@ def _substep_tests(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _unit_test_results(row: Mapping[str, Any]) -> bool:
+    """Saved unit test results of the answer's extracted code: at least one test, and the row's reward 1.0 exactly
+    when every test passed (0.0 otherwise), or 0.0, the default penalty, for an answer whose reasoning format
+    violated the rule (``reasoning_format_violation_rate`` 1.0). A configured non-zero penalty is not saved on the row,
+    so such a row stays unobserved. The saved answer and score are bound."""
+    tests = _grading_facts(row).get("unit_tests")
+    if not (
+        isinstance(tests, dict)
+        and type(tests.get("tests")) is int
+        and tests["tests"] >= 1
+        and type(tests.get("all_passed")) is bool
+        and tests.get("code") is True
+    ):
+        return False
+    violation = tests.get("reasoning_format_violation_rate")
+    if violation not in (None, 0.0, 1.0):
+        return False
+    expected = 0.0 if violation == 1.0 else float(tests["all_passed"])
+    return _reward(row) == expected and _bound_answer(row)
+
+
 def _environment_reward(row: Mapping[str, Any]) -> bool:
     """The environment's own reward record: ``result.reward_info.reward`` equal to the row's reward."""
     recorded = _grading_facts(row).get("environment_reward")
@@ -3710,6 +4410,7 @@ GRADING_ARTIFACTS = (
     ("environment_reward", _environment_reward),
     ("repository_test_run", _repository_test_run),
     ("substep_tests", _substep_tests),
+    ("unit_test_results", _unit_test_results),
 )
 
 
@@ -3719,10 +4420,13 @@ def grading_artifact(row: Mapping[str, Any]) -> str | None:
 
 
 def _empty_answer(row: Mapping[str, Any]) -> bool:
+    """Whether the saved answer holds no assistant message with text: none at all, or only ones the collector saw
+    without non-whitespace text (``has_text`` false). A message whose content was not saved counts as an answer."""
     answer = row.get("response")
     output = answer.get("output") if isinstance(answer, dict) else None
     return isinstance(output, list) and not any(
-        isinstance(item, dict) and item.get("role") == "assistant" for item in output
+        isinstance(item, dict) and item.get("role") == "assistant" and item.get("has_text") is not False
+        for item in output
     )
 
 
@@ -3751,6 +4455,29 @@ def _graded(row: Mapping[str, Any]) -> bool:
         and bool(operations)
         and all(isinstance(item, dict) and item.get("outcome") == "completed" for item in operations)
     )
+
+
+def _bound_grading(row: Mapping[str, Any]) -> bool:
+    """Whether the row is ``_graded`` and every grading operation binds its saved answer and score, as the gate
+    requires (``_ng_collected_grading_binding``)."""
+    observed = row.get("ng_trial_observations")
+    binding = row.get("_ng_collected_grading_binding")
+    return (
+        _graded(row)
+        and _bound_answer(row)
+        and all(
+            item.get("result_binding_sha256") == binding
+            for item in observed["verifier_invocations"][0]["grading_operations"]
+        )
+    )
+
+
+def _bound_artifact(row: Mapping[str, Any]) -> bool:
+    """Whether a saved grading artifact or the model's own failed answer resolves the row, as the gate requires: an
+    artifact other than the model's failed answer must bind the saved answer and score."""
+    if grading_artifact(row) is not None and _bound_answer(row):
+        return True
+    return grading_artifact(row) is None and _model_failure(row)
 
 
 def _verifier_recorded(verifier: Any, row: Mapping[str, Any], resources_server: Any) -> bool:
@@ -3847,17 +4574,17 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     rows = [
         row
         for row in collected.results or []
-        if _identity(row) in scored and _identity(row) not in final_zero and not _answer_fault(row, collected)
+        if _identity(row) in scored and _identity(row) not in final_zero and not _scored_fault(row, collected)
     ]
-    recorded = sum(1 for row in rows if not _graded(row) and _recorded_by_verifier(row, collected))
+    # The same per-trial evidence the gate validates: a grading bound to the saved row, the verifier's own record, or
+    # a bound grading artifact. A mismatched or missing binding stays unobserved, never healthy.
+    recorded = sum(1 for row in rows if not _bound_grading(row) and _recorded_by_verifier(row, collected))
     artifacts = sum(
         1
         for row in rows
-        if not _graded(row)
-        and not _recorded_by_verifier(row, collected)
-        and (grading_artifact(row) or _model_failure(row))
+        if not _bound_grading(row) and not _recorded_by_verifier(row, collected) and _bound_artifact(row)
     )
-    unobserved = sum(1 for row in rows if not _graded(row)) - recorded - artifacts
+    unobserved = sum(1 for row in rows if not _bound_grading(row)) - recorded - artifacts
     counts: dict[str, Any] = {
         "observed_healthy": trials - unhealthy - unobserved,
         "unhealthy": unhealthy,
@@ -3912,7 +4639,7 @@ def status_fault_kind(kind: Any, http_status: Any, *, policy: bool = True) -> An
     """
     if type(http_status) is not int:
         return kind
-    if 500 <= http_status <= 599:
+    if is_server_status(http_status):
         return MODEL_SERVER_ERROR
     if 400 <= http_status <= 499 and not policy:
         return NON_POLICY_MODEL_REJECTION
@@ -3992,7 +4719,7 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     ``TRUNCATED_ANSWER`` when the answer carries a cutoff signal (``_cut_off``), whether the benchmark's rule or a
     recorded grade scored it zero: the cutoff is why it scored zero. Without a cutoff signal, a row whose reward came
     from a recorded grade (``_recorded_grade``) has none, as its score is its grade; otherwise ``EMPTY_ANSWER`` when it
-    holds no assistant message and ``MALFORMED_ANSWER`` when it does.
+    holds no assistant message with text (``_empty_answer``) and ``MALFORMED_ANSWER`` when it does.
     """
     if type(row.get("reward")) not in (int, float) or row["reward"] != 0 or not _incomplete_answer(row):
         return None
@@ -4001,6 +4728,23 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     if _recorded_grade(row, collected):
         return None
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
+
+
+def _scored_kind(row: Mapping[str, Any]) -> str | None:
+    """The registered failure kind a scored result row records as its own outcome, keyed on its recorded HTTP status
+    (``status_fault_kind``), or None. For example Harbor's graded ``agent_timeout`` is a scored main result."""
+    kind, status = _policy_evidence(row)
+    return status_fault_kind(kind, status) if _known_kind(kind) else None
+
+
+def _scored_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
+    """A scored row's one counted fault: its own recorded kind (``_scored_kind``), else its answer's
+    (``_answer_fault``), else ``judge_unparseable`` when its saved judge evaluation recorded no verdict
+    (``_unparsed_judge_verdict``)."""
+    fault = _scored_kind(row) or _answer_fault(row, collected)
+    if fault is None and _unparsed_judge_verdict(row):
+        return JUDGE_UNPARSEABLE
+    return fault
 
 
 def _trajectory_kinds(observed: Any) -> list[str]:
@@ -4302,23 +5046,28 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     """The trial gate's counted failures by kind.
 
     Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
-    (``final_zero_trials``), and scored-zero incomplete answers the benchmark's rule scored without a recorded grade
-    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed).
+    (``final_zero_trials``), scored-zero incomplete answers the benchmark's rule scored without a recorded grade
+    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed), and scored rows whose saved
+    judge evaluation recorded no verdict (``judge_unparseable``) or that record their own failure kind, each counted
+    once (``_scored_fault``).
     """
     final_zero = final_zero_trials(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected)
     kinds = Counter(
         status_fault_kind(e.failure_kind, e.http_status)
         for e in decision.evidence
         if e.state == IdentityState.MODEL_FINAL
     )
     kinds.update(final_zero.values())
+    kinds[AGENT_TIMEOUT_INFRASTRUCTURE] += len(infrastructure)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     kinds.update(
         fault
         for row in (collected.results or [] if collected is not None else [])
         if _identity(row) in scored
         and _identity(row) not in final_zero
-        and (fault := _answer_fault(row, collected)) is not None
+        and _identity(row) not in infrastructure
+        and (fault := _scored_fault(row, collected)) is not None
     )
     return +kinds
 
@@ -4544,13 +5293,18 @@ _TRIAL_FAILURE_STATES = (
     IdentityState.UNKNOWN,
 )
 RESPONSE_FAILURE_CAUSES = ("truncated", "empty", "malformed")
-TRIAL_FAILURE_CAUSES = ("request", "judge", "sandbox", "harness", "timeout", "other")
+TRIAL_FAILURE_CAUSES = ("request", "judge", "sandbox", "harness", "timeout", "allocation", "other")
 
 
 def trial_failure_cause(kind: Any) -> str:
-    """A trial failure's cause from its failure kind: request, judge, sandbox, harness, timeout, or other."""
+    """A trial failure's cause from its failure kind: request, judge, sandbox, harness, timeout, allocation, or other.
+
+    ``allocation``: the rollout was in flight at repeated ends of its allocation (``ROLLOUT_ALLOCATION_ENDED``).
+    """
     if not isinstance(kind, str):
         return "other"
+    if kind == ROLLOUT_ALLOCATION_ENDED:
+        return "allocation"
     if "timeout" in kind:
         return "timeout"
     if kind in (JUDGE_FAILED, JUDGE_UNPARSEABLE, VERIFIER_ERROR, GRADING_WITHOUT_VERDICT):
@@ -4576,19 +5330,21 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
     omitted are no rollout of the run and are reported separately as ``omitted``.
 
     A response failure is a scored rollout without a recorded grade (``_recorded_grade``) whose saved answer is
-    truncated (incomplete with a cutoff signal, ``_cut_off``), empty (no assistant output) or malformed (no response
+    truncated (incomplete with a cutoff signal, ``_cut_off``), empty (no assistant text, ``_empty_answer``) or malformed (no response
     with an output list, an answer the verifier marked invalid, or one left incomplete without a cutoff signal). A trial failure is a rollout in a failed, masked or
-    unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, or an observed
-    grading without a valid verdict, by the cause its failure kind names (``trial_failure_cause``).
+    unowned state (``_TRIAL_FAILURE_STATES``), a scored rollout that ended on a failed policy request, a scored
+    rollout that records its own failure kind or whose judge recorded no verdict, or an observed grading without a
+    valid verdict, by the cause its failure kind names (``trial_failure_cause``).
     """
     population = trial_population(decision)
     if population <= 0:
         return None
     final_zero = final_zero_trials(decision, collected)
+    infrastructure = infrastructure_timeouts(decision, collected)
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     responses: Counter = Counter()
     for row in (collected.results or []) if collected is not None else []:
-        if _identity(row) not in scored or _identity(row) in final_zero:
+        if _identity(row) not in scored or _identity(row) in final_zero or _identity(row) in infrastructure:
             continue
         # A cut-off answer scored zero is truncated, also when a recorded grade scored it.
         if _answer_fault(row, collected) == TRUNCATED_ANSWER:
@@ -4603,7 +5359,7 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
             responses["malformed"] += 1
         elif _incomplete_answer(row) and _cut_off(row):
             responses["truncated"] += 1
-        elif not any(isinstance(item, dict) and item.get("role") == "assistant" for item in output):
+        elif _empty_answer(row):
             responses["empty"] += 1
         elif _grading_facts(row).get("invalid_model_response") is True or _incomplete_answer(row):
             responses["malformed"] += 1
@@ -4615,6 +5371,18 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         if e.state in _TRIAL_FAILURE_STATES
     )
     causes.update(trial_failure_cause(kind) for kind in final_zero.values())
+    # A scored row's own failure kind or an unparsed judge verdict (``_scored_fault``); answer faults are response
+    # failures above.
+    causes.update(
+        trial_failure_cause(fault)
+        for row in ((collected.results or []) if collected is not None else [])
+        if _identity(row) in scored
+        and _identity(row) not in final_zero
+        and _identity(row) not in infrastructure
+        and (fault := _scored_fault(row, collected)) is not None
+        and fault != _answer_fault(row, collected)
+    )
+    causes[trial_failure_cause(AGENT_TIMEOUT_INFRASTRUCTURE)] += len(infrastructure)
     causes["judge"] += len(invalid_grades)
 
     def family(found: Counter, names: tuple[str, ...]) -> dict[str, Any]:
@@ -4631,7 +5399,30 @@ def failure_facts(decision: RecoveryDecision, collected: CollectedEvidence | Non
         "response_failures": family(responses, RESPONSE_FAILURE_CAUSES),
         "trial_failures": family(causes, TRIAL_FAILURE_CAUSES),
         "metric_coverage": metric_coverage(decision, collected),
+        "output_budget_refits": output_budget_refits(collected),
     }
+
+
+def output_budget_refits(collected: CollectedEvidence | None) -> dict[str, int]:
+    """How many model calls in the saved results were sent again with an output budget lowered to fit the context
+    window (``output_budget_refit`` in a call's response metadata), and in how many result rows.
+
+    A count, never a failure: the call generated within the window it was served at. A reader flags a cell whose
+    requests were budget-capped from it.
+    """
+    count = rows = 0
+    for row in (collected.results or []) if collected is not None else []:
+        observed = row.get("ng_trial_observations")
+        calls = observed.get("model_calls") if isinstance(observed, dict) else None
+        refits = sum(
+            isinstance(call, dict)
+            and isinstance(call.get("response_metadata"), dict)
+            and isinstance(call["response_metadata"].get("output_budget_refit"), dict)
+            for call in calls or []
+        )
+        count += refits
+        rows += refits > 0
+    return {"count": count, "rows": rows}
 
 
 def metric_coverage(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, Any]:
@@ -4781,6 +5572,11 @@ def gate_summary_from_collected(
         health_reasons=[] if trial_passed else [trial_reason],
     )
     task["criteria"] = criteria.report()
+    if collected.unreadable_files:
+        # What an unreadable metric, summary or record holds is unknown: never a pass.
+        task["errors"].append(f"unreadable artifacts, read as unknown: {collected.unreadable_files[:20]}")
+        if task["status"] == "SUCCESS":
+            task["status"] = "FAILED"
     task["trial_counts"] = trial_counts(decision, collected)
     task["evaluation_health"] = evaluation
     task["failures"] = failure_facts(decision, collected)
@@ -4799,6 +5595,9 @@ def gate_summary_from_collected(
         + ([f"health gate within the bounded failure policy: {trial_reason}"] if trial_passed else [])
         + [task["health_verdict"]]
     )
+    # The judge-only jobs queued for the run's saved answers, each with its outcome: facts, never a verdict.
+    task["judge_jobs"] = [dict(job) for job in collected.judge_jobs] or None
+    task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []
     if collected.chain_incomplete and not decision.complete:
         extra.append("the job chain stopped with rollouts missing (.gym_chain_incomplete)")
@@ -4825,11 +5624,47 @@ def gate_summary_from_collected(
     return task
 
 
+def judge_job_note(job: Mapping[str, Any]) -> str:
+    """One line on a judge-only job of the run (``CollectedEvidence.judge_jobs``): queued, live, ended without a
+    receipt, or what its receipt says it settled."""
+    name = f"judge-only job {job.get('job_id') or '(id unknown)'}"
+    where = f" on {job['partition']}" if job.get("partition") else ""
+    state = job.get("state")
+    if state == "completed":
+        note = (
+            f"{name}{where} completed: settled {job.get('settled') or 0} of {job.get('selected') or 0} selected saved "
+            "answer(s)"
+        )
+        if job.get("withdrawn"):
+            note += f", {job['withdrawn']} re-verified without a grade and left as they were"
+        if job.get("unsupported"):
+            note += f", {job['unsupported']} not re-verified (verifier not stateless)"
+        if job.get("due_after"):
+            note += f"; {job['due_after']} still due"
+        return note
+    if state == "failed":
+        if job.get("ended_at"):
+            return (
+                f"{name}{where} failed: {job.get('error') or 'no error recorded'}; the saved answers it was to grade "
+                "again stay as they were"
+            )
+        return (
+            f"{name}{where} ended {job.get('scheduler_state') or 'in an unknown state'} with no receipt; the saved "
+            "answers it was to grade again stay as they were"
+        )
+    if state in ("running", "pending"):
+        return (
+            f"{name}{where} is {state} ({job.get('scheduler_state')}): it grades {job.get('rows')} saved answer(s) "
+            "again"
+        )
+    return f"{name}{where} queued at {job.get('at')} for {job.get('rows')} saved answer(s): no receipt yet"
+
+
 # --- Saved-answer re-verification --------------------------------------------------------------------------------- #
 # A saved result whose grading failed for a judge or transport cause, or whose grading was never recorded, is graded
 # again from its saved answer: never by running the policy again. Collection settles it into the run at completion
-# (``rollout_reverification.bind_judge_failures``) and ``--recover`` decides REVERIFY for it. A masked result whose
-# verifier deterministically could not measure it (any other cause) is a model fact and is never re-verified.
+# (``rollout_reverification.bind_judge_failures``) and ``--recover`` decides REVERIFY for it. No other masked
+# result is re-verified: one that infrastructure left unmeasured runs again (``masked_infrastructure_kind``).
 REVERIFY_JUDGE = "judge"
 REVERIFY_VERIFY_TRANSPORT = "verify_transport"
 REVERIFY_UNGRADED = "ungraded"
@@ -4900,7 +5735,8 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
 def reverification_cause(row: Mapping[str, Any]) -> str | None:
     """Why a saved result row is re-verified from its saved answer, or None when it is not.
 
-    ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``).
+    ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``), or scored while
+    its saved judge evaluation recorded no verdict (``_unparsed_judge_verdict``).
     ``REVERIFY_VERIFY_TRANSPORT``: masked because its verify call was lost in transport (``_verify_transport_failure``).
     ``REVERIFY_UNGRADED``: scored, but no grading was recorded for it (``_grading_unrecorded``).
     Only a result with a saved answer qualifies; a failures-sidecar row, a result a re-verification already settled
@@ -4920,29 +5756,42 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
         return REVERIFY_VERIFY_TRANSPORT if _verify_transport_failure(row) else None
     if row.get("evaluation_completed") is False or _reward(row) is None:
         return None
+    if _unparsed_judge_verdict(row):
+        return REVERIFY_JUDGE
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 
 
 _COLLECTOR_FUNCTIONS: dict[str, Any] = {}
 
 
-def _collector_grading_facts():
-    """``COLLECT_SCRIPT``'s own ``grading_facts``, so an in-process reader projects a saved row as the collector does."""
+def _collector_function(name: str):
+    """``COLLECT_SCRIPT``'s own projection ``name``, so an in-process reader projects a saved row as the collector does."""
     if not _COLLECTOR_FUNCTIONS:
         start, end = COLLECT_SCRIPT.index("\ndef finite("), COLLECT_SCRIPT.index("\ndef grading_result_binding(")
         namespace: dict[str, Any] = {"math": math}
         exec(COLLECT_SCRIPT[start:end], namespace)  # noqa: S102 - this module's own constant source
         _COLLECTOR_FUNCTIONS.update(namespace)
-    return _COLLECTOR_FUNCTIONS["grading_facts"]
+    return _COLLECTOR_FUNCTIONS[name]
 
 
 def saved_row_evidence(row: Mapping[str, Any]) -> dict[str, Any]:
     """A full saved row with the evidence fields ``COLLECT_SCRIPT`` projects for the grading predicates: its scalar
-    grading facts and its verifier invocations."""
+    grading facts, whether each assistant message of its answer has text, and its verifier invocations."""
     evidence = dict(row)
-    facts = _collector_grading_facts()(row)
+    facts = _collector_function("grading_facts")(row)
     if any(value is not None and value is not False and value != [] for value in facts.values()):
         evidence["_ng_collected_grading_facts"] = facts
+    answer = row.get("response")
+    if isinstance(answer, Mapping) and isinstance(answer.get("output"), list):
+        evidence["response"] = dict(answer) | {
+            "output": [
+                item | {"has_text": has_text}
+                if isinstance(item, dict)
+                and (has_text := _collector_function("answer_item")(item).get("has_text")) is not None
+                else item
+                for item in answer["output"]
+            ]
+        }
     trajectory = row.get("ng_trajectory")
     if isinstance(trajectory, Mapping):
         evidence["ng_trial_observations"] = {"verifier_invocations": trajectory.get("verifier_invocations")}

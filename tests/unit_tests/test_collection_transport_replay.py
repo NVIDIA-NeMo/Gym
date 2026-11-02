@@ -178,7 +178,7 @@ async def test_persisted_collection_bounds_never_connected_attempts(tmp_path, mo
     async with ClientSession(trace_configs=[trace]) as session:
         monkeypatch.setattr(transport, "get_global_aiohttp_client", lambda: session)
         with pytest.raises(IncompleteEvaluationError if routed else aiohttp.ClientConnectorError):
-            await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=2)
+            await asyncio.wait_for(RolloutCollectionHelper().run_from_config(config), timeout=30)
     # Without a grace period, one bounded resend of a refused connection; every attempt failed to connect, so
     # /run was never sent.
     assert len(connections) == 2

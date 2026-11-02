@@ -282,3 +282,76 @@ def test_an_operational_setting_stays_operational(key):
     from nemo_gym.rollout_recovery import _is_semantic
 
     assert not _is_semantic(key)
+
+
+def judge_with_template(template: str) -> dict:
+    return {
+        "policy_model": BASE["policy_model"],
+        "equivalence_llm_judge": {
+            "resources_servers": {
+                "equivalence_llm_judge": {
+                    "judge_model_server": {"type": "responses_api_models", "name": "policy_model"},
+                    "judge_prompt_template_fpath": template,
+                    "judge_endpoint_max_concurrency": 32,
+                }
+            }
+        },
+    }
+
+
+def test_a_different_grading_prompt_template_refuses_the_resume(tmp_path: Path) -> None:
+    # Both are shipped templates: the verifier reads different grading instructions, not a moved copy.
+    path, materialized = saved_run(tmp_path, judge_with_template("prompt_templates/equivalence_llm_judge.txt"))
+    current = current_manifest(tmp_path, judge_with_template("prompt_templates/lc_judge.txt"))
+
+    with pytest.raises(ConfigError, match=r"semantic settings differ: .*judge_prompt_template_fpath"):
+        validate_resume(path, current, materialized)
+    assert not resume_drift_path_for(path).exists()
+
+
+@pytest.mark.parametrize(
+    ("key", "semantic"),
+    [
+        ("servers.j.resources_servers.g.judge_prompt_template_fpath", True),
+        ("servers.j.resources_servers.g.rubric_judge_prompt_template_fpath", True),
+        ("servers.a.responses_api_agents.r.retrieval_system_prompt_fpath", True),
+        ("servers.j.resources_servers.g.policy_verifier_templates_path", True),
+        ("servers.j.resources_servers.g.prompt_dir", True),
+        ("servers.j.resources_servers.g.judge_prompt_timeout_s", False),
+        ("servers.j.resources_servers.g.judge_telemetry_output_dir", False),
+        ("servers.j.resources_servers.g.cache_dir", False),
+    ],
+)
+def test_a_prompt_or_template_path_is_semantic_and_other_paths_stay_operational(key: str, semantic: bool) -> None:
+    assert _is_semantic(key) is semantic
+
+
+def claude_code_agent(**settings) -> dict:
+    agent = {"model_server": {"type": "responses_api_models", "name": "policy_model"}, **settings}
+    return {
+        "policy_model": BASE["policy_model"],
+        "claude_code": {"responses_api_agents": {"claude_code_agent": agent}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("saved", "current"),
+    [({}, {"max_turns": None}), ({"max_turns": None}, {})],
+    ids=["default-to-unlimited", "unlimited-to-default"],
+)
+def test_an_explicit_null_turn_budget_is_not_the_default_one(tmp_path: Path, saved: dict, current: dict) -> None:
+    # claude_code_agent: max_turns omitted is 30 turns, max_turns null is unlimited.
+    path, materialized = saved_run(tmp_path, claude_code_agent(**saved))
+    resumed = current_manifest(tmp_path, claude_code_agent(**current))
+
+    assert resumed.config_digest != json.loads(path.read_text())["config_digest"]
+    with pytest.raises(ConfigError, match=r"semantic settings differ: .*claude_code_agent\.max_turns"):
+        validate_resume(path, resumed, materialized)
+
+
+def test_a_null_that_is_the_setting_default_is_still_the_same_as_absent(tmp_path: Path) -> None:
+    path, materialized = saved_run(tmp_path, BASE)  # vllm_model extra_body etc. default to null
+    current = current_manifest(tmp_path, merged(BASE, {f"{VLLM}.extra_body": _DROP}))
+
+    assert current.config_digest == json.loads(path.read_text())["config_digest"]
+    assert validate_resume(path, current, materialized) is not None

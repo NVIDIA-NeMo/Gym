@@ -187,12 +187,13 @@ def test_unverified_coverage_withholds_a_pass_without_a_health_failure():
 
 def test_records_that_do_not_cover_every_trial_keep_the_lower_bound_wording():
     collected = _run(99, settled={"model_transport_error": 1})
-    # A completed grading operation that is not bound to the saved answer.
+    # A completed grading operation that is not bound to the saved answer: that trial is unobserved, never healthy.
     grade = collected.results[0]["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"][0]
     grade["result_binding_sha256"] = "0" * 64
     _, (passed, reason, report), _ = _gate(collected)
     assert passed is None and report["exact"] is False
-    assert reason.startswith("trial: UNVERIFIED, known failures are a lower bound: evaluation-side faults: 1 of 100")
+    assert reason.startswith("trial: UNOBSERVED 1 of 100 expected trials")
+    assert "observed healthy 98, unhealthy 1; known so far: evaluation-side faults: 1 of 100" in reason
 
 
 def test_a_policy_capture_that_does_not_join_the_bound_answer_is_reported_not_a_coverage_condition():
@@ -242,3 +243,58 @@ def test_trial_counts_follow_the_gates_classification_of_a_grading_without_a_ver
     assert passed is None
     assert trial_counts(decision, collected) == task["trial_counts"]
     assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
+
+
+def test_an_accepted_omission_leaves_a_fully_observed_run_exact():
+    from nemo_gym.artifacts.run_artifacts import ACCEPTED_STAGE_OMISSION
+
+    run = _run(1).model_dump()
+    omitted = {"_ng_task_index": 1, "_ng_rollout_index": 0, "_ng_collected_task_id": "1"}
+    omitted[ACCEPTED_STAGE_OMISSION] = {"stage_index": 1, "tolerate_unresolved": True}
+    run["materialized"].append(omitted)
+    run["managed_selection"].append(
+        {"identity": [1, 0], "attempts": 0, "max_attempts": 3, "pending": False, "reserved": True}
+    )
+    run["quality"]["artifacts"]["expected"] = 2
+    collected = CollectedEvidence.model_validate(run)
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.complete and decision.counts == {"scored": 1, "omitted": 1}, decision.reason
+    # The omission is no trial: the one observed healthy trial is the whole population, so health passes exactly.
+    assert passed is True and report["status"] == "PASS" and report["exact"] is True, reason
+    assert task["trial_counts"] == {"observed_healthy": 1, "unhealthy": 0, "unobserved": 0, "verifier_recorded": 0}
+
+
+def test_trial_counts_leave_a_grading_bound_to_another_answer_unobserved():
+    collected = _run(1)
+    # The completed grading operation no longer binds the saved answer and score.
+    collected.results[0]["_ng_collected_grading_binding"] = "0" * 64
+    decision, (passed, _, _), task = _gate(collected)
+    assert passed is None
+    assert task["trial_counts"] == trial_counts(decision, collected)
+    assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
+
+
+def test_trial_counts_leave_an_unbound_grading_artifact_unobserved():
+    from tests.unit_tests.test_grading_artifacts import _ungraded
+
+    collected = _run(1)
+    _ungraded(collected.results[0], sentence_metrics=["sentence_chrf"])
+    # A saved grading artifact counts only with the collector's binding of the saved answer and score.
+    del collected.results[0]["_ng_collected_grading_binding"]
+    decision, (passed, _, _), task = _gate(collected)
+    assert passed is None
+    assert task["trial_counts"]["observed_healthy"] == 0 and task["trial_counts"]["unobserved"] == 1
+
+
+def test_a_scored_harbor_agent_timeout_counts_its_own_failure_kind_once():
+    collected = _run(100)
+    # Harbor's terminal graded timeout: a main result with its own failure kind, graded and not masked.
+    for row in collected.results[:30]:
+        row |= {"failure_kind": "agent_timeout", "evaluation_completed": True, "mask_sample": False}
+    decision, (passed, reason, report), task = _gate(collected)
+    assert decision.counts == {"scored": 100}
+    assert report["model"]["kinds"] == {"agent_timeout": 30} and report["evaluation"]["count"] == 0, reason
+    # A model fault never fails health; every other trial is observed, so the count is exact.
+    assert passed is True and report["exact"] is True, reason
+    assert task["failures"]["trial_failures"]["by_cause"]["timeout"]["count"] == 30
+    assert task["trial_counts"] == {"observed_healthy": 70, "unhealthy": 30, "unobserved": 0, "verifier_recorded": 0}

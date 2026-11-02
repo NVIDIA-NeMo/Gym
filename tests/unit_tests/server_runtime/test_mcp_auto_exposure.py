@@ -251,11 +251,11 @@ def test_refuses_server_that_already_mounts_mcp():
         install_auto_exposure(server, app)
 
 
-def test_server_utils_imports_mcp_auto_exposure_lazily():
-    # Agents and models import server_utils; the MCP SDK must not come along for the ride.
+def test_base_server_imports_mcp_auto_exposure_lazily():
+    # Agents and models import the base server module; the MCP SDK must not come along for the ride.
     code = (
         "import sys\n"
-        "import nemo_gym.server_utils\n"
+        "import nemo_gym.server_runtime.base_server\n"
         "assert 'nemo_gym.server_runtime.mcp_auto_exposure' not in sys.modules, 'mcp_auto_exposure imported eagerly'\n"
     )
     subprocess.run([sys.executable, "-c", code], check=True)

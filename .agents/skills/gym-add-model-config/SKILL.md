@@ -208,7 +208,12 @@ Then follow the [gym-eval](../gym-eval/SKILL.md) skill: `gym eval resubmit "$GYM
 <benchmark> --recover --inspect` and `gym eval health-check` (gym-eval, step 9). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser
 or `uses_reasoning_parser` is wrong), and tool calls that arrive as plain text (the tool-call
-parser is wrong).
+parser is wrong). In the inspection's output, `gate_task.evaluation_health.model.kinds` and
+`gate_task.failures.response_failures.by_cause` (`truncated`, `empty`, `malformed`) are the model's
+own faults: they count in the score, never fail health, and point at the deployment (output
+budget, `--max-model-len`, parsers). `UNVERIFIED` with `trial_counts.unobserved_reason` naming the
+benchmark's server is about that server's grading record, not about your deployment: report it and
+change nothing for it.
 
 ## 6. Read the resolved config
 
