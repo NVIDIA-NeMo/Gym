@@ -5,14 +5,22 @@
 import hashlib
 from contextlib import ExitStack
 from copy import deepcopy
-from unittest.mock import Mock
+from pathlib import Path
+from tempfile import TemporaryDirectory
+from unittest.mock import AsyncMock, Mock
 
 import pytest
 from fastapi import FastAPI, Request, Response
 from fastapi.testclient import TestClient
 from openai import ConflictError
 
-from nemo_gym.models.model_call_capture import _CaptureMiddleware
+from nemo_gym.models._checkpoint import PolicyAdmissionMiddleware, PolicyModelParticipant
+from nemo_gym.models.model_call_capture import (
+    ModelCallCaptureConfig,
+    _RolloutRoutingMiddleware,
+    install_model_call_capture,
+    install_model_rollout_routing,
+)
 from nemo_gym.models.history_delta import (
     HistoryBuffer,
     HistoryResync,
@@ -59,11 +67,18 @@ def received_headers():
 
 
 @pytest.fixture
-def make_client(read_events, received_headers):
+def worker_socket_dir():
+    # Unix socket paths must stay short, including on filesystems with long workspace paths.
+    with TemporaryDirectory(prefix="ng-rollout-", dir="/tmp") as directory:
+        yield Path(directory)
+
+
+@pytest.fixture
+def make_client(read_events, received_headers, worker_socket_dir):
     """Echo requests through the real middleware; record when the body is consumed."""
     with ExitStack() as stack:
 
-        def make(*, enabled=True, protocol=None, rollout_claims=None):
+        def make(*, enabled=True, protocol=None, num_workers=1, model_name="model", gate=None):
             app = FastAPI()
 
             @app.post("/v1/chat/completions")
@@ -71,16 +86,25 @@ def make_client(read_events, received_headers):
             async def echo(request: Request):
                 read_events.append("dispatch")
                 received_headers.append(dict(request.headers))
-                return Response(await request.body(), media_type="application/json")
+                return Response(
+                    await request.body(),
+                    media_type="application/json",
+                    headers={"x-test-worker": model_name, "x-test-query": request.url.query},
+                )
 
-            app.add_middleware(
-                _CaptureMiddleware,
-                store=None,
-                model_server_name="model",
-                history_delta_enabled=enabled,
+            install_model_call_capture(
+                app,
+                ModelCallCaptureConfig(),
+                model_server_name=model_name,
+                global_config_dict={"history_delta_enabled": enabled},
+                num_workers=num_workers,
                 history_transport_protocol=protocol,
-                rollout_claims=rollout_claims,
             )
+            if gate is not None:
+                app.add_middleware(PolicyAdmissionMiddleware, gate=gate)
+            if enabled and num_workers > 1:
+                # Match run_webserver: routing is installed outside admission and capture.
+                install_model_rollout_routing(app, socket_dir=str(worker_socket_dir))
 
             async def record_reads(scope, receive, send):
                 async def read():
@@ -94,11 +118,10 @@ def make_client(read_events, received_headers):
         yield make
 
 
-def test_first_model_request_claims_rollout_and_later_requests_keep_its_owner(tmp_path, make_client, read_events):
-    worker_a = SessionOwners(str(tmp_path), "a" * 32, holds=lambda _: True)
-    worker_b = SessionOwners(str(tmp_path), "b" * 32, holds=lambda _: True)
-    client_a = make_client(rollout_claims=worker_a)
-    client_b = make_client(rollout_claims=worker_b)
+def test_reconnected_requests_are_forwarded_to_the_rollout_owner(make_client, worker_socket_dir, received_headers):
+    client_a = make_client(num_workers=2, model_name="worker-a")
+    client_b = make_client(num_workers=2, model_name="worker-b")
+    claims = SessionOwners(str(worker_socket_dir), "0" * 32, holds=lambda _: True)
     first_request = {"messages": [{"role": "user", "content": "task"}]}
     next_request = {
         "messages": [
@@ -107,44 +130,130 @@ def test_first_model_request_claims_rollout_and_later_requests_keep_its_owner(tm
         ]
     }
 
-    # The first request assigns worker A; worker B sees the same owner.
-    assert worker_a.owner("rollout-1") is None
+    # The first request assigns worker A; subsequent requests use its private socket.
+    assert claims.owner("rollout-1") is None
     first_response = client_a.post("/ng-rollout/rollout-1/v1/chat/completions", json=first_request)
     assert first_response.status_code == 200
     assert first_response.json() == first_request
-    assert worker_b.owner("rollout-1") == worker_a.routing_id
+    owner = claims.owner("rollout-1")
+    assert owner is not None
+    assert first_response.headers["x-test-worker"] == "worker-a"
 
-    # The owner accepts later requests, including paths requesting token capture.
-    next_response = client_a.post(
-        "/ng-rollout/rollout-1/training-token-capture/v1/chat/completions", json=next_request
+    # Reconnecting to worker B still serves the request on A, preserving the capture prefix and headers.
+    next_response = client_b.post(
+        "/ng-rollout/rollout-1/training-token-capture/v1/chat/completions?trace=kept",
+        json=next_request,
+        headers={"x-session-id": "preserved"},
     )
     assert next_response.status_code == 200
     assert next_response.json() == next_request
-
-    # Worker B rejects this rollout before reading the body or dispatching inference.
-    read_events.clear()
-    wrong_worker_response = client_b.post("/ng-rollout/rollout-1/v1/chat/completions", json=next_request)
-    assert wrong_worker_response.status_code == 409
-    assert wrong_worker_response.json() == {"error": {"code": "gym_rollout_wrong_worker"}}
-    assert read_events == []
-    assert worker_b.owner("rollout-1") == worker_a.routing_id
+    assert next_response.headers["x-test-worker"] == "worker-a"
+    assert next_response.headers["x-test-query"] == "trace=kept"
+    assert received_headers[-1]["x-session-id"] == "preserved"
+    assert claims.owner("rollout-1") == owner
 
     # A different rollout can independently belong to worker B.
     other_response = client_b.post("/ng-rollout/rollout-2/v1/responses", json={"input": "other task"})
     assert other_response.status_code == 200
-    assert worker_a.owner("rollout-2") == worker_b.routing_id
+    assert other_response.headers["x-test-worker"] == "worker-b"
+    assert claims.owner("rollout-2") != owner
 
 
-def test_unprefixed_model_request_does_not_claim_a_rollout(tmp_path, make_client):
-    claims = SessionOwners(str(tmp_path), "a" * 32, holds=lambda _: True)
-    client = make_client(rollout_claims=claims)
+def test_unprefixed_model_request_does_not_claim_a_rollout(make_client, worker_socket_dir):
+    client = make_client(num_workers=2)
 
     response = client.post("/v1/responses", json={"input": "ordinary request"})
 
     # Requests without a rollout prefix pass through without creating an ownership claim.
     assert response.status_code == 200
     assert response.json() == {"input": "ordinary request"}
-    assert list((tmp_path / "session-owners").iterdir()) == []
+    assert list((worker_socket_dir / "session-owners").iterdir()) == []
+
+
+def test_forwarded_request_enters_only_the_owners_admission_gate(make_client):
+    gate_a = PolicyModelParticipant(None, server_name="worker-a").gate
+    gate_b = PolicyModelParticipant(None, server_name="worker-b").gate
+    gate_a.admit = AsyncMock(wraps=gate_a.admit)
+    gate_b.admit = AsyncMock(side_effect=AssertionError("Worker B must forward before admission"))
+    client_a = make_client(num_workers=2, model_name="worker-a", gate=gate_a)
+    client_b = make_client(num_workers=2, model_name="worker-b", gate=gate_b)
+    url = "/ng-rollout/rollout-1/v1/responses"
+
+    # The first request establishes A as the owner and enters A's real admission gate.
+    first_response = client_a.post(url, json={"input": "first call"})
+    assert first_response.status_code == 200
+    gate_a.admit.assert_awaited_once_with("rollout-1")
+    gate_a.admit.reset_mock()
+
+    # A reconnect to B enters A's gate exactly once and never enters B's gate.
+    next_response = client_b.post(url, json={"input": "next call"})
+    assert next_response.status_code == 200
+    assert next_response.headers["x-test-worker"] == "worker-a"
+    gate_a.admit.assert_awaited_once_with("rollout-1")
+    gate_b.admit.assert_not_awaited()
+
+
+async def test_routing_leaves_requests_without_rollout_ids_unread():
+    router = Mock()
+    router.route = AsyncMock(side_effect=AssertionError("No rollout to route"))
+    downstream = AsyncMock()
+    receive = AsyncMock(side_effect=AssertionError("Routing must not read the body"))
+    send = AsyncMock()
+    scope = {"type": "http", "method": "POST", "path": "/v1/responses"}
+    middleware = _RolloutRoutingMiddleware(downstream, router=router)
+
+    await middleware(scope, receive, send)
+
+    # Routing passes the original request through without inspecting its body.
+    downstream.assert_awaited_once_with(scope, receive, send)
+    receive.assert_not_awaited()
+    router.route.assert_not_awaited()
+
+
+@pytest.mark.parametrize("endpoint,field", [("chat/completions", "messages"), ("responses", "input")])
+def test_forwarded_delta_uses_the_owners_history(make_client, endpoint, field):
+    client_a = make_client(num_workers=2, model_name="worker-a")
+    client_b = make_client(num_workers=2, model_name="worker-b")
+    url = f"/ng-rollout/rollout-1/training-token-capture/v1/{endpoint}"
+    headers = {"x-gym-history-transport": "v1"}
+    user = {"role": "user", "content": "task"}
+    assistant = {"role": "assistant", "content": "answer"}
+    first_request = {
+        field: [user],
+        "_gym_history": {
+            "conversation_id": "root",
+            "request_id": "first",
+            "base_version": None,
+            "mode": "full",
+            "messages_sha256": hashlib.sha256(_encoded([user])).hexdigest(),
+        },
+    }
+    delta_request = {
+        field: [assistant],
+        "_gym_history": {
+            "conversation_id": "root",
+            "request_id": "next",
+            "base_version": "first",
+            "mode": "append",
+            "messages_sha256": hashlib.sha256(_encoded([user, assistant])).hexdigest(),
+        },
+    }
+
+    # Only worker A has the full history on which this delta depends.
+    first_response = client_a.post(url, json=first_request, headers=headers)
+    assert first_response.status_code == 200
+    assert first_response.json() == {field: [user]}
+
+    # Worker B forwards the delta without reconstructing it against its empty buffer.
+    delta_response = client_b.post(url, json=delta_request, headers=headers)
+    assert delta_response.status_code == 200
+    assert delta_response.headers["x-test-worker"] == "worker-a"
+    assert delta_response.json() == {field: [user, assistant]}
+
+    # Repeated delivery through B retains A's accepted history without appending twice.
+    retry_response = client_b.post(url, json=delta_request, headers=headers)
+    assert retry_response.status_code == 200
+    assert retry_response.json() == {field: [user, assistant]}
 
 
 @pytest.fixture

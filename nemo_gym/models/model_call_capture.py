@@ -36,10 +36,10 @@ from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
 import orjson
-from fastapi import Request, Response
+from fastapi import FastAPI, Request, Response
 from pydantic import BaseModel, model_validator
 
-from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.config.config_types import DEFAULT_UVICORN_BACKLOG, ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
 from nemo_gym.core.episode_context import VERIFIER_INVOCATION_HEADER, rollout_context
 from nemo_gym.core.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.core.responses_api_types import SSE_KEEPALIVE
@@ -47,7 +47,7 @@ from nemo_gym.models._checkpoint import (
     attach_capture_context,
     ledger_removal_refusal,
 )
-from nemo_gym.server_runtime.request_handling.session_routing import SessionOwners
+from nemo_gym.server_runtime.request_handling.session_routing import RolloutRouter, install_rollout_routing
 from nemo_gym.models.history_delta import HistoryBuffer, HistoryTransportProtocol
 from nemo_gym.models.responses_streaming import (
     is_responses_lifecycle_chunk,
@@ -370,6 +370,43 @@ _ROLLOUT_PATH_RE = re.compile(
     rf"(?:/(?P<token_capture>{re.escape(TOKEN_CAPTURE_PATH_SEGMENT)}))?"
     rf"(?P<rest>/.*)$"
 )
+
+
+class _RolloutRoutingMiddleware:
+    """Route model calls to their rollout's owner before admission and capture."""
+
+    def __init__(
+        self,
+        app: Any,
+        *,
+        router: RolloutRouter,
+        non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+    ) -> None:
+        self._app = app
+        self._router = router
+        self._non_generating_requests = non_generating_requests
+
+    async def __call__(self, scope: dict[str, Any], receive: Any, send: Any) -> None:
+        if scope.get("type") == "http" and scope.get("method") == "POST":
+            match = _ROLLOUT_PATH_RE.match(scope.get("path", ""))
+            if match is not None:
+                path = match.group("rest")
+                if path in _OBSERVED_PATHS and ("POST", path) not in self._non_generating_requests:
+                    if await self._router.route(match.group("rollout_id"), scope, receive, send):
+                        return
+        await self._app(scope, receive, send)
+
+
+def install_model_rollout_routing(
+    app: FastAPI,
+    *,
+    socket_dir: str,
+    backlog: int = DEFAULT_UVICORN_BACKLOG,
+    non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
+) -> None:
+    """Install delta rollout routing after admission/capture so it executes before them."""
+    router = install_rollout_routing(app, socket_dir=socket_dir, backlog=backlog)
+    app.add_middleware(_RolloutRoutingMiddleware, router=router, non_generating_requests=non_generating_requests)
 
 
 def make_capture_store(config: ModelCallCaptureConfig) -> Optional[CaptureStore]:
@@ -777,7 +814,6 @@ class _CaptureMiddleware:
         parent_resolution_mode: ParentResolutionMode = "fingerprint",
         history_delta_enabled: bool = False,
         history_transport_protocol: HistoryTransportProtocol | None = None,
-        rollout_claims: SessionOwners | None = None,
         token_capture_enabled: bool = False,
         assistant_message_header: bytes | None = None,
         non_generating_requests: frozenset[tuple[str, str]] = frozenset(),
@@ -797,7 +833,6 @@ class _CaptureMiddleware:
         # A framework inference worker owns record staging; the lineage store
         # doubles as the per-rollout capture ledger.
         self._history_buffer = HistoryBuffer() if history_delta_enabled else None
-        self._rollout_claims = rollout_claims
         self._history_transport_protocol = (
             history_transport_protocol if history_transport_protocol is not None else HistoryTransportProtocol()
         )
@@ -832,16 +867,6 @@ class _CaptureMiddleware:
         method = str(scope.get("method") or "").upper()
         dialect = _OBSERVED_PATHS.get(path)
         known_non_generating = (method, path) in self._non_generating_requests
-
-        if rollout_from_path and method == "POST" and dialect is not None and not known_non_generating:
-            claims = self._rollout_claims
-            if claims is not None and claims.acquire(rollout_from_path) != claims.routing_id:
-                # Until owner forwarding is installed, never reconstruct or dispatch
-                # a rollout on a worker that does not own it.
-                await JSONResponse({"error": {"code": "gym_rollout_wrong_worker"}}, status_code=409)(
-                    scope, receive, send
-                )
-                return
 
         if (
             rollout_from_path
@@ -1285,8 +1310,6 @@ def install_model_call_capture(
     history_delta_enabled = bool(
         global_config_dict is not None and global_config_dict.get("history_delta_enabled", False)
     )
-    if history_delta_enabled and (num_workers or 1) != 1:
-        raise ValueError("Experimental history_delta_enabled requires exactly one model-proxy worker")
     app.add_middleware(
         _CaptureMiddleware,
         store=make_capture_store(config),

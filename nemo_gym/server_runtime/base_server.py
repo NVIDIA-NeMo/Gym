@@ -277,6 +277,8 @@ class SimpleServer(BaseServer):
     # so that with several uvicorn workers a session's requests must reach the worker that created it.
     # See nemo_gym.server_runtime.request_handling.session_routing.
     routes_sessions_to_owner: ClassVar[bool] = False
+    # Model servers with history deltas keep each rollout's history on its owning worker.
+    routes_rollouts_to_owner: ClassVar[bool] = False
 
     def owned_session_routing(self) -> dict[str, Any]:
         """Arguments to ``install_session_routing``: where requests name their session, and how long ownership lasts.
@@ -284,6 +286,10 @@ class SimpleServer(BaseServer):
         A server that sets ``routes_sessions_to_owner`` implements it.
         """
         raise NotImplementedError(f"{type(self).__name__} routes sessions but does not say how they are named")
+
+    def setup_rollout_routing(self, app: FastAPI, *, socket_dir: str, backlog: int) -> None:
+        """Install worker ownership routing outside model admission and capture."""
+        raise NotImplementedError(f"{type(self).__name__} does not implement rollout routing")
 
     @abstractmethod
     def setup_webserver(self) -> FastAPI:
@@ -578,6 +584,16 @@ repr(e): {repr(e)}"""
                 **mcp_token_routing,
                 **server.owned_session_routing(),
             )
+        if (
+            server.routes_rollouts_to_owner
+            and global_config_dict.get("history_delta_enabled", False)
+            and (server.config.num_workers or 1) > 1
+            and not is_multi_worker_main_proc
+        ):
+            if session_socket_dir is None:
+                raise ValueError("Multi-worker history transport requires a shared worker socket directory")
+            # Outside checkpoint admission and capture: only the owner executes either.
+            server.setup_rollout_routing(app, socket_dir=session_socket_dir, backlog=backlog)
         # Register last so cancellation wraps the complete request stack.
         server.setup_cancellation_middleware(app)
         # Must precede uvicorn.run: Starlette refuses add_middleware once the app has
@@ -645,7 +661,10 @@ repr(e): {repr(e)}"""
             set_is_nemo_gym_fastapi_worker()
             set_is_nemo_gym_fastapi_entrypoint(str(relative_fpath))
             set_nemo_gym_fastapi_num_workers(server.config.num_workers)
-            if is_main_fastapi_proc and server.routes_sessions_to_owner:
+            if is_main_fastapi_proc and (
+                server.routes_sessions_to_owner
+                or (server.routes_rollouts_to_owner and global_config_dict.get("history_delta_enabled", False))
+            ):
                 # The workers uvicorn spawns inherit this, and each serves a private socket in it.
                 environ[SESSION_SOCKET_DIR_ENV] = create_session_socket_dir()
 

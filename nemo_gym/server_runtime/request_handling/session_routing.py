@@ -588,183 +588,12 @@ class _AgentSessionLifetimes:
         return []
 
 
-class SessionRoutingMiddleware:
-    """Find a request's session ID, and forward the request to the worker that owns the session.
+class WorkerForwarder:
+    """Relay a request to a worker's private socket and stream its response unchanged."""
 
-    It sits outside SessionMiddleware and reads the cookie by decoding it with the same secret.
-    A forwarded request therefore never reaches this worker's SessionMiddleware,
-    so the reply carries only the owner's Set-Cookie, built from the session as the owner left it.
-    Sitting inside SessionMiddleware instead would add this worker's stale copy of the session as a second Set-Cookie.
-
-    With one worker there is no ownership, and it only reads the session ID of seeds and closes:
-    it refuses a request whose cookie and body name different sessions,
-    and gives an episode's resources session its ID in the cookie.
-    """
-
-    def __init__(
-        self,
-        app: ASGIApp,
-        *,
-        kind: SessionKind,
-        session_cookie: str,
-        secret_key: str,
-        routing_id: Optional[str] = None,
-        socket_dir: Optional[str] = None,
-        clients: Optional[dict[str, ClientSession]] = None,
-        owners: Optional[SessionOwners] = None,
-        lifetimes: Optional[SessionLifetimes] = None,
-        mcp_token_header: Optional[str] = None,
-        mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
-        mcp_path: str = "/mcp",
-    ) -> None:
-        self.app = app
-        self.kind = kind
-        self.body_paths = kind.body_paths
-        self.session_cookie = session_cookie
-        self.signer = itsdangerous.TimestampSigner(secret_key)
-        self.routing_id = routing_id
+    def __init__(self, socket_dir: Optional[str], *, clients: Optional[dict[str, ClientSession]] = None) -> None:
         self.socket_dir = socket_dir
-        # One connection pool per owner socket, kept for the life of this worker and closed at its shutdown.
-        # Not Gym's shared aiohttp client: each pool needs a UnixConnector bound to its owner's socket.
         self.clients = clients if clients is not None else {}
-        self.owners = owners
-        self.lifetimes = lifetimes
-        self.mcp_token_header = mcp_token_header
-        self.mcp_token_serializer = mcp_token_serializer
-        self.mcp_path = mcp_path
-
-    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
-        if scope["type"] != "http":
-            await self.app(scope, receive, send)
-            return
-        owners = self.owners
-        names_by_body = scope["method"] == "POST" and self.body_paths.fullmatch(scope["path"]) is not None
-        if owners is None and not names_by_body:
-            await self.app(scope, receive, send)
-            return
-
-        # 1. Find the session ID: from the cookie or MCP token, else from the body of a seed or close.
-        session_id = self._session_id_from_headers(HTTPConnection(scope))
-        body = None
-        if names_by_body:
-            # The whole body is read, whatever its size, since the app would read all of it too.
-            # A seed with large task data still has to reach the worker that holds its session.
-            body = await _read_body(receive)
-            if body is None:
-                return
-            receive = _replay_body(body, receive)
-            body_session_id = _session_id(body, self.kind.id_field)
-            if body_session_id is not None:
-                if session_id is not None and session_id != body_session_id:
-                    await _conflict(
-                        f"This request's session cookie names another session than its {self.kind.id_field}. "
-                        "Do not send another session's cookie with it.",
-                        scope,
-                        receive,
-                        send,
-                    )
-                    return
-                if session_id is None and self.kind.cookie_session:
-                    scope[SESSION_ID_SCOPE_KEY] = body_session_id
-                session_id = body_session_id
-        if owners is None:
-            await self.app(scope, receive, send)
-            return
-
-        # 2. Look up the session's owner. A seed, a close or another session start takes ownership if nobody has it.
-        forwarded = bool(scope.get(_FORWARDED_SCOPE_KEY))
-        starts = self.lifetimes is not None and self.lifetimes.starts(scope["path"])
-        path_key = self.kind.path_key.fullmatch(scope["path"]) if self.kind.path_key is not None else None
-        if session_id is None and path_key is not None:
-            # Looked up, never acquired: a request for a key nobody owns is handled here and leaves no owner file.
-            key_owner = None if forwarded else owners.owner(path_key.group("key"))
-            if key_owner is None or key_owner == self.routing_id:
-                await self.app(scope, receive, send)
-            else:
-                await self._forward(key_owner, scope, receive, send, body=body)
-            return
-        if session_id is None:
-            owner = _valid_routing_id(HTTPConnection(scope).headers.get(SESSION_OWNER_HEADER))
-            if owner is not None and owner != self.routing_id and not forwarded:
-                # A request that belongs to one worker without a session, such as an agent's call to itself.
-                await self._forward(owner, scope, receive, send, body=body)
-                return
-            if not self.kind.cookie_session:
-                await self.app(scope, receive, send)
-                return
-            new_session_id = scope[SESSION_ID_SCOPE_KEY] = str(uuid4())
-            if starts:
-                # A session start's reply names the new session, whether or not its handler reads it.
-                if owners.acquire(new_session_id) != self.routing_id:
-                    await _conflict(
-                        "This new session's ID is already owned by another worker. Retry it.", scope, receive, send
-                    )
-                    return
-            else:
-                # Owned through the session middleware only if the handler uses it; otherwise no cookie names it.
-                scope[SESSION_ACQUIRE_SCOPE_KEY] = lambda: owners.acquire(new_session_id) == self.routing_id
-            await self._serve_owned(owners, new_session_id, scope, receive, send)
-            return
-        elif names_by_body or starts:
-            owner = owners.acquire(session_id)
-        elif forwarded:
-            # Never forwarded again; served here as a session of this worker only if it still owns it.
-            owner = self.routing_id if owners.mine(session_id) else None
-        else:
-            owner = owners.owner(session_id)
-
-        # 3. Forward it to the owner, or handle it here.
-        if owner == self.routing_id:
-            await self._serve_owned(owners, session_id, scope, receive, send)
-        elif owner is None and self.kind.cookie_session and not forwarded:
-            # A cookie or token whose ownership ended, or never began:
-            # this worker takes ownership if the handler uses it,
-            # so its later requests reach this worker.
-            scope[SESSION_ID_SCOPE_KEY] = session_id
-            scope[SESSION_ACQUIRE_SCOPE_KEY] = lambda: owners.acquire(session_id) == self.routing_id
-            await self._serve_owned(owners, session_id, scope, receive, send)
-        elif owner is None:
-            await self.app(scope, receive, send)
-        elif forwarded:
-            # The owner released the ID while the request was forwarded here, and another worker took ownership since.
-            await _conflict(
-                f"This {self.kind.id_field} moved to another server worker while the request was forwarded. Retry it.",
-                scope,
-                receive,
-                send,
-            )
-        else:
-            await self._forward(owner, scope, receive, send, body=body)
-
-    async def _serve_owned(
-        self, owners: SessionOwners, session_id: str, scope: Scope, receive: Receive, send: Send
-    ) -> None:
-        """Serve a request for a session this worker owns, or may take, and record it for the ownership's lifetime."""
-        status: list[int] = []
-
-        async def send_and_record(message: Message) -> None:
-            if message["type"] == "http.response.start":
-                status.append(message["status"])
-            await send(message)
-
-        with owners.serving(session_id):
-            try:
-                await self.app(scope, receive, send_and_record)
-            finally:
-                if self.lifetimes is not None and owners.mine(session_id):
-                    self.lifetimes.served(session_id, scope, status[0] if status else None)
-
-    def _session_id_from_headers(self, connection: HTTPConnection) -> Optional[str]:
-        cookie = connection.cookies.get(self.session_cookie)
-        token = connection.headers.get(self.mcp_token_header) if self.mcp_token_serializer is not None else None
-        path = connection.scope["path"]
-        is_mcp = path == self.mcp_path or path.startswith(self.mcp_path + "/")
-        # MCP tool calls name their session by the token, never by a cookie.
-        if token is not None and (is_mcp or cookie is None):
-            return mcp_token_session_id(token, serializer=self.mcp_token_serializer)
-        session = cookie_session(cookie, signer=self.signer) if cookie is not None else None
-        session_id = session.get(self.kind.cookie_key) if session is not None else None
-        return session_id if isinstance(session_id, str) else None
 
     def _client(self, owner: str) -> ClientSession:
         client = self.clients.get(owner)
@@ -781,7 +610,7 @@ class SessionRoutingMiddleware:
             )
         return client
 
-    async def _forward(
+    async def forward(
         self, owner: str, scope: Scope, receive: Receive, send: Send, *, body: Optional[bytes] = None
     ) -> None:
         if body is None:
@@ -849,6 +678,226 @@ class SessionRoutingMiddleware:
         client = self.clients.pop(owner, None)
         if client is not None:
             await client.close()
+
+
+class RolloutRouter(WorkerForwarder):
+    """Claim a rollout on its first model call and forward later calls to that worker."""
+
+    def __init__(self, socket_dir: str) -> None:
+        super().__init__(socket_dir)
+        self.claims = SessionOwners(socket_dir, uuid4().hex, holds=lambda _: True)
+
+    async def route(self, rollout_id: str, scope: Scope, receive: Receive, send: Send) -> bool:
+        """Return True if the request was forwarded or refused; False if it belongs here."""
+        owner = self.claims.acquire(rollout_id)
+        if owner == self.claims.routing_id:
+            return False
+        if owner is None or scope.get(_FORWARDED_SCOPE_KEY):
+            # A forwarded request must never bounce between workers.
+            await _conflict("The rollout's worker ownership changed while routing the request.", scope, receive, send)
+        else:
+            await self.forward(owner, scope, receive, send)
+        return True
+
+
+def install_rollout_routing(app: FastAPI, *, socket_dir: str, backlog: int = DEFAULT_UVICORN_BACKLOG) -> RolloutRouter:
+    """Serve forwarded model requests on this worker's private socket for the app's lifetime."""
+    router = RolloutRouter(socket_dir)
+    original_lifespan = app.router.lifespan_context
+
+    @asynccontextmanager
+    async def lifespan_with_private_socket(application: FastAPI) -> AsyncIterator[Any]:
+        try:
+            async with original_lifespan(application) as state:
+                async with serve_private_socket(
+                    application, worker_socket_path(socket_dir, router.claims.routing_id), backlog=backlog
+                ):
+                    yield state
+        finally:
+            await asyncio.gather(*(client.close() for client in router.clients.values()))
+            router.clients.clear()
+
+    app.router.lifespan_context = lifespan_with_private_socket
+    return router
+
+
+class SessionRoutingMiddleware(WorkerForwarder):
+    """Find a request's session ID, and forward the request to the worker that owns the session.
+
+    It sits outside SessionMiddleware and reads the cookie by decoding it with the same secret.
+    A forwarded request therefore never reaches this worker's SessionMiddleware,
+    so the reply carries only the owner's Set-Cookie, built from the session as the owner left it.
+    Sitting inside SessionMiddleware instead would add this worker's stale copy of the session as a second Set-Cookie.
+
+    With one worker there is no ownership, and it only reads the session ID of seeds and closes:
+    it refuses a request whose cookie and body name different sessions,
+    and gives an episode's resources session its ID in the cookie.
+    """
+
+    def __init__(
+        self,
+        app: ASGIApp,
+        *,
+        kind: SessionKind,
+        session_cookie: str,
+        secret_key: str,
+        routing_id: Optional[str] = None,
+        socket_dir: Optional[str] = None,
+        clients: Optional[dict[str, ClientSession]] = None,
+        owners: Optional[SessionOwners] = None,
+        lifetimes: Optional[SessionLifetimes] = None,
+        mcp_token_header: Optional[str] = None,
+        mcp_token_serializer: Optional[itsdangerous.URLSafeSerializer] = None,
+        mcp_path: str = "/mcp",
+    ) -> None:
+        super().__init__(socket_dir, clients=clients)
+        self.app = app
+        self.kind = kind
+        self.body_paths = kind.body_paths
+        self.session_cookie = session_cookie
+        self.signer = itsdangerous.TimestampSigner(secret_key)
+        self.routing_id = routing_id
+        self.owners = owners
+        self.lifetimes = lifetimes
+        self.mcp_token_header = mcp_token_header
+        self.mcp_token_serializer = mcp_token_serializer
+        self.mcp_path = mcp_path
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http":
+            await self.app(scope, receive, send)
+            return
+        owners = self.owners
+        names_by_body = scope["method"] == "POST" and self.body_paths.fullmatch(scope["path"]) is not None
+        if owners is None and not names_by_body:
+            await self.app(scope, receive, send)
+            return
+
+        # 1. Find the session ID: from the cookie or MCP token, else from the body of a seed or close.
+        session_id = self._session_id_from_headers(HTTPConnection(scope))
+        body = None
+        if names_by_body:
+            # The whole body is read, whatever its size, since the app would read all of it too.
+            # A seed with large task data still has to reach the worker that holds its session.
+            body = await _read_body(receive)
+            if body is None:
+                return
+            receive = _replay_body(body, receive)
+            body_session_id = _session_id(body, self.kind.id_field)
+            if body_session_id is not None:
+                if session_id is not None and session_id != body_session_id:
+                    await _conflict(
+                        f"This request's session cookie names another session than its {self.kind.id_field}. "
+                        "Do not send another session's cookie with it.",
+                        scope,
+                        receive,
+                        send,
+                    )
+                    return
+                if session_id is None and self.kind.cookie_session:
+                    scope[SESSION_ID_SCOPE_KEY] = body_session_id
+                session_id = body_session_id
+        if owners is None:
+            await self.app(scope, receive, send)
+            return
+
+        # 2. Look up the session's owner. A seed, a close or another session start takes ownership if nobody has it.
+        forwarded = bool(scope.get(_FORWARDED_SCOPE_KEY))
+        starts = self.lifetimes is not None and self.lifetimes.starts(scope["path"])
+        path_key = self.kind.path_key.fullmatch(scope["path"]) if self.kind.path_key is not None else None
+        if session_id is None and path_key is not None:
+            # Looked up, never acquired: a request for a key nobody owns is handled here and leaves no owner file.
+            key_owner = None if forwarded else owners.owner(path_key.group("key"))
+            if key_owner is None or key_owner == self.routing_id:
+                await self.app(scope, receive, send)
+            else:
+                await self.forward(key_owner, scope, receive, send, body=body)
+            return
+        if session_id is None:
+            owner = _valid_routing_id(HTTPConnection(scope).headers.get(SESSION_OWNER_HEADER))
+            if owner is not None and owner != self.routing_id and not forwarded:
+                # A request that belongs to one worker without a session, such as an agent's call to itself.
+                await self.forward(owner, scope, receive, send, body=body)
+                return
+            if not self.kind.cookie_session:
+                await self.app(scope, receive, send)
+                return
+            new_session_id = scope[SESSION_ID_SCOPE_KEY] = str(uuid4())
+            if starts:
+                # A session start's reply names the new session, whether or not its handler reads it.
+                if owners.acquire(new_session_id) != self.routing_id:
+                    await _conflict(
+                        "This new session's ID is already owned by another worker. Retry it.", scope, receive, send
+                    )
+                    return
+            else:
+                # Owned through the session middleware only if the handler uses it; otherwise no cookie names it.
+                scope[SESSION_ACQUIRE_SCOPE_KEY] = lambda: owners.acquire(new_session_id) == self.routing_id
+            await self._serve_owned(owners, new_session_id, scope, receive, send)
+            return
+        elif names_by_body or starts:
+            owner = owners.acquire(session_id)
+        elif forwarded:
+            # Never forwarded again; served here as a session of this worker only if it still owns it.
+            owner = self.routing_id if owners.mine(session_id) else None
+        else:
+            owner = owners.owner(session_id)
+
+        # 3. Forward it to the owner, or handle it here.
+        if owner == self.routing_id:
+            await self._serve_owned(owners, session_id, scope, receive, send)
+        elif owner is None and self.kind.cookie_session and not forwarded:
+            # A cookie or token whose ownership ended, or never began:
+            # this worker takes ownership if the handler uses it,
+            # so its later requests reach this worker.
+            scope[SESSION_ID_SCOPE_KEY] = session_id
+            scope[SESSION_ACQUIRE_SCOPE_KEY] = lambda: owners.acquire(session_id) == self.routing_id
+            await self._serve_owned(owners, session_id, scope, receive, send)
+        elif owner is None:
+            await self.app(scope, receive, send)
+        elif forwarded:
+            # The owner released the ID while the request was forwarded here, and another worker took ownership since.
+            await _conflict(
+                f"This {self.kind.id_field} moved to another server worker while the request was forwarded. Retry it.",
+                scope,
+                receive,
+                send,
+            )
+        else:
+            await self.forward(owner, scope, receive, send, body=body)
+
+    async def _serve_owned(
+        self, owners: SessionOwners, session_id: str, scope: Scope, receive: Receive, send: Send
+    ) -> None:
+        """Serve a request for a session this worker owns, or may take, and record it for the ownership's lifetime."""
+        status: list[int] = []
+
+        async def send_and_record(message: Message) -> None:
+            if message["type"] == "http.response.start":
+                status.append(message["status"])
+            await send(message)
+
+        with owners.serving(session_id):
+            try:
+                await self.app(scope, receive, send_and_record)
+            finally:
+                if self.lifetimes is not None and owners.mine(session_id):
+                    self.lifetimes.served(session_id, scope, status[0] if status else None)
+
+    def _session_id_from_headers(self, connection: HTTPConnection) -> Optional[str]:
+        cookie = connection.cookies.get(self.session_cookie)
+        token = connection.headers.get(self.mcp_token_header) if self.mcp_token_serializer is not None else None
+        path = connection.scope["path"]
+        is_mcp = path == self.mcp_path or path.startswith(self.mcp_path + "/")
+        # MCP tool calls name their session by the token, never by a cookie.
+        if token is not None and (is_mcp or cookie is None):
+            return mcp_token_session_id(token, serializer=self.mcp_token_serializer)
+        session = cookie_session(cookie, signer=self.signer) if cookie is not None else None
+        session_id = session.get(self.kind.cookie_key) if session is not None else None
+        return session_id if isinstance(session_id, str) else None
+
+
+
 
 
 async def _conflict(detail: str, scope: Scope, receive: Receive, send: Send) -> None:
