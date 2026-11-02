@@ -127,6 +127,11 @@ The agent name is the rows' `agent_ref.name`, the agent entry in
 `artifacts/rollouts_aggregate_metrics.json`. Without the score flags the score gate reports
 "score unavailable: no requested metric was read".
 
+On a machine that did not submit the run, the inspect fails with `No submission '<id>' in this
+machine's job index`. Add `--record <run dir>/gym-job.json` (inspect only; copy the file where the
+run directory is not mounted): it reads the run's own submission record without writing the local
+index. A resubmit that dispatches needs the index entry, so run it where the run was submitted.
+
 `--inspect` reads the saved evidence and evaluates the gates without dispatching anything. The
 read runs on the run's host; the first time, it installs the run's pinned Gym for its reader with
 a private copy of uv and Python, which takes minutes and replaces nothing in your home. Later reads
