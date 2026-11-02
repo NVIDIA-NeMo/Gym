@@ -1119,6 +1119,14 @@ def judge_verdicts(value):
         match = JUDGE_VERDICT.match(label.strip()) if isinstance(label, str) else None
         out.append(None if match is None else (match.group(1) or match.group(2)).lower() in ("a=b", "yes"))
     return out
+# Labels a judge evaluation saves when it recorded no verdict; a null label is none either.
+UNPARSED_VERDICT_LABELS = ("judge_parsing_error", "judge_error")
+def judge_unparsed(value):
+    # Whether a saved judge evaluation recorded no verdict. An evaluation without a verdict_label field (its verdict
+    # is in the judge reply) and a label in another judge's vocabulary are not unparsed here.
+    return any(isinstance(item, dict) and "verdict_label" in item and (item["verdict_label"] is None or (
+        isinstance(item["verdict_label"], str) and item["verdict_label"].strip().casefold() in UNPARSED_VERDICT_LABELS))
+        for item in value)
 def rubric(r):
     # A rubric judge's verdict and scores as scalars only; the judge's text stays local.
     if "rubric_score" not in r and "scoring_threshold" not in r:
@@ -1141,6 +1149,7 @@ def grading_facts(r):
         "judge_verdicts": judge_verdicts(r["judge_evaluations"]) if isinstance(r.get("judge_evaluations"), list) and r["judge_evaluations"] else None,
         "judge_error": isinstance(r.get("judge_evaluations"), list) and any(
             isinstance(item, dict) and item.get("verdict_label") == "JUDGE_ERROR" for item in r["judge_evaluations"]),
+        "judge_unparsed": isinstance(r.get("judge_evaluations"), list) and judge_unparsed(r["judge_evaluations"]),
         "rubric": rubric(r),
         "library_reward": finite(r.get("library_reward")),
         "sentence_metrics": sorted(k for k, v in r.items() if k.startswith("sentence_") and finite(v) is not None),
@@ -3298,6 +3307,8 @@ def _observed_trial_operations(
                 if not _observed_incomplete_answer(row):
                     return False
                 continue
+            if _unparsed_judge_verdict(row):
+                continue  # A counted grading fault (``_grading_fault``): its reward is no grade to observe.
             truncated = _incomplete_answer(row)
             prior_recovered_events = set(recovered_events)
             agent = servers[row["agent_ref"]["name"]]
@@ -3375,6 +3386,9 @@ def _observed_trial_operations(
                 # A saved grading artifact must be bound to the saved answer and score; the model's own failed
                 # answer is a counted model failure instead.
                 if artifact != "model_failure" and not _bound_answer(row):
+                    return False
+                # The verifier's own judge replies are part of that grading: each completed once.
+                if judge_calls and not all(completed_once(call, judge=True) for call in judge_calls):
                     return False
                 grade = None
                 artifact_trials.append(_identity(row))
@@ -3588,11 +3602,30 @@ def _reward(row: Mapping[str, Any]) -> float | None:
     return reward if type(reward) in (int, float) and math.isfinite(reward) else None
 
 
+def _unparsed_verdict(facts: Mapping[str, Any]) -> bool:
+    """Saved judge evaluations of which one recorded no verdict: a null label, or a judge or parse error label."""
+    return facts.get("judge_evaluations") is True and (
+        facts.get("judge_unparsed") is True or facts.get("judge_error") is True
+    )
+
+
+def _unparsed_judge_verdict(row: Mapping[str, Any]) -> bool:
+    """Whether a scored row's grading is ``judge_unparseable``: unmasked, with a reward and no failure kind, while a
+    saved judge evaluation recorded no verdict (``_unparsed_verdict``). Its reward is no grade."""
+    return (
+        row.get(FAILURE_CLASS) is None
+        and row.get("failure_kind") is None
+        and row.get("mask_sample") is not True
+        and _reward(row) is not None
+        and _unparsed_verdict(_grading_facts(row))
+    )
+
+
 def _judge_evaluations(facts: Mapping[str, Any], reward: float | None) -> bool:
     """A non-empty ``judge_evaluations`` list without a judge error; when every evaluation's verdict label parses
     (``[[A=B]]``/``[[A!=B]]`` or ``Judgement: yes/no``), the reward is 1.0 exactly when every verdict is equal/yes."""
     verdicts = facts.get("judge_verdicts")
-    if facts.get("judge_evaluations") is not True or facts.get("judge_error") is True:
+    if facts.get("judge_evaluations") is not True or facts.get("judge_error") is True or _unparsed_verdict(facts):
         return False
     if isinstance(verdicts, list) and verdicts and all(type(verdict) is bool for verdict in verdicts):
         return reward == (1.0 if all(verdicts) else 0.0)
@@ -3848,7 +3881,7 @@ def trial_counts(decision: RecoveryDecision, collected: CollectedEvidence | None
     rows = [
         row
         for row in collected.results or []
-        if _identity(row) in scored and _identity(row) not in final_zero and not _answer_fault(row, collected)
+        if _identity(row) in scored and _identity(row) not in final_zero and not _grading_fault(row, collected)
     ]
     recorded = sum(1 for row in rows if not _graded(row) and _recorded_by_verifier(row, collected))
     artifacts = sum(
@@ -4002,6 +4035,15 @@ def _answer_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -
     if _recorded_grade(row, collected):
         return None
     return EMPTY_ANSWER if _empty_answer(row) else MALFORMED_ANSWER
+
+
+def _grading_fault(row: Mapping[str, Any], collected: CollectedEvidence | None) -> str | None:
+    """A scored row's counted fault: its answer's (``_answer_fault``), else ``judge_unparseable`` when its saved
+    judge evaluation recorded no verdict (``_unparsed_judge_verdict``)."""
+    fault = _answer_fault(row, collected)
+    if fault is None and _unparsed_judge_verdict(row):
+        return JUDGE_UNPARSEABLE
+    return fault
 
 
 def _trajectory_kinds(observed: Any) -> list[str]:
@@ -4303,8 +4345,9 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
     """The trial gate's counted failures by kind.
 
     Settled model failures (MODEL_FINAL), scored rows whose rollout ended on a failed policy request
-    (``final_zero_trials``), and scored-zero incomplete answers the benchmark's rule scored without a recorded grade
-    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed).
+    (``final_zero_trials``), scored-zero incomplete answers the benchmark's rule scored without a recorded grade
+    (``_answer_fault``: truncated with a cutoff signal, otherwise empty or malformed), and scored rows whose saved
+    judge evaluation recorded no verdict (``judge_unparseable``, ``_grading_fault``).
     """
     final_zero = final_zero_trials(decision, collected)
     kinds = Counter(
@@ -4319,7 +4362,7 @@ def trial_faults(decision: RecoveryDecision, collected: CollectedEvidence | None
         for row in (collected.results or [] if collected is not None else [])
         if _identity(row) in scored
         and _identity(row) not in final_zero
-        and (fault := _answer_fault(row, collected)) is not None
+        and (fault := _grading_fault(row, collected)) is not None
     )
     return +kinds
 
@@ -4901,7 +4944,8 @@ def _grading_unrecorded(row: Mapping[str, Any]) -> bool:
 def reverification_cause(row: Mapping[str, Any]) -> str | None:
     """Why a saved result row is re-verified from its saved answer, or None when it is not.
 
-    ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``).
+    ``REVERIFY_JUDGE``: masked because its judge failed (``judge_failed``, ``judge_unparseable``), or scored while
+    its saved judge evaluation recorded no verdict (``_unparsed_judge_verdict``).
     ``REVERIFY_VERIFY_TRANSPORT``: masked because its verify call was lost in transport (``_verify_transport_failure``).
     ``REVERIFY_UNGRADED``: scored, but no grading was recorded for it (``_grading_unrecorded``).
     Only a result with a saved answer qualifies; a failures-sidecar row, a result a re-verification already settled
@@ -4921,6 +4965,8 @@ def reverification_cause(row: Mapping[str, Any]) -> str | None:
         return REVERIFY_VERIFY_TRANSPORT if _verify_transport_failure(row) else None
     if row.get("evaluation_completed") is False or _reward(row) is None:
         return None
+    if _unparsed_judge_verdict(row):
+        return REVERIFY_JUDGE
     return REVERIFY_UNGRADED if _grading_unrecorded(row) else None
 
 
