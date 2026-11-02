@@ -1604,18 +1604,21 @@ def accounting_unknown_reason():
     return None
 def accounting_unknown():
     return accounting_unknown_reason() is not None
-def followup_claims():
-    # The follow-up job id each allocation claimed, keyed by that allocation; only decimal ids leave the run host.
-    claims = {}
+def job_ids(prefix):
+    # The job id each allocation recorded in its <prefix><allocation> file; only decimal ids leave the run host.
+    ids = {}
     try:
         for name in os.listdir(d):
-            if name.startswith(".gym_followup_queued."):
+            if name.startswith(prefix):
                 value = open(os.path.join(d, name)).read().strip()
                 if value.isascii() and value.isdecimal():
-                    claims[name[len(".gym_followup_queued."):]] = value
+                    ids[name[len(prefix):]] = value
     except (OSError, ValueError):
         return {}
-    return claims
+    return ids
+def followup_claims():
+    # The follow-up job id each allocation claimed, keyed by that allocation.
+    return job_ids(".gym_followup_queued.")
 def sha256(path):
     # One bounded pass with stable stat identity. A same-size in-place rewrite within one timestamp tick keeps the
     # identity: the opening and closing snapshots compare bytes, and rows() checks the bytes it parses against the
@@ -1839,6 +1842,8 @@ collected["counter_states"] = {"infra_retries": num(".gym_infra_retries")[1],
                                "walltime": num(".gym_accumulated_walltime")[1]} if stable_sources else None
 collected["source_job_identity"] = initial_job_identity if initial_job_identity == job_identity() else None
 collected["followup_claims"] = followup_claims()
+# The sentinel each allocation queued behind its follow-up, keyed by that allocation.
+collected["followup_sentinels"] = job_ids(".gym_followup_sentinel.")
 def operator_epoch():
     # The last operator continuation's epoch; None when no continuation was journaled or its entry is unreadable.
     try:
@@ -1934,6 +1939,8 @@ class CollectedEvidence(BaseModel):
     infra_retry_extension_state: str = "absent"
     # The follow-up job id each allocation of the chain claimed (.gym_followup_queued.<allocation>).
     followup_claims: dict[str, str] = Field(default_factory=dict)
+    # The sentinel job id each allocation queued behind its follow-up (.gym_followup_sentinel.<allocation>).
+    followup_sentinels: dict[str, str] = Field(default_factory=dict)
     # The last operator continuation's epoch (OPERATOR_CONTINUATION_JOURNAL_NAME): the chain is accounted after it.
     operator_epoch: OperatorEpoch | None = None
     # Where the heavy readers ran: "login" or "cpu:<job id>" with a reader step (NEMO_GYM_REMOTE_READER_SRUN), and why

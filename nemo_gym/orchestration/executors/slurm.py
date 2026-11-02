@@ -1301,16 +1301,22 @@ class SlurmExecutor(BaseExecutor):
             allocation_cut = False
             rows = None
             stopped = None
-            if collected.job_chain:
+            # A queued follow-up and its sentinel are jobs of the run before they append themselves to the chain.
+            followups = [*collected.followup_sentinels.values(), *collected.followup_claims.values()]
+            watched = list(dict.fromkeys([*collected.job_chain, *followups]))
+            scheduled = None
+            if watched:
                 try:
-                    chain = ",".join(collected.job_chain)
-                    rows = chain_accounting(
-                        conn.run([f"sacct -D -n -P -X -j {shlex.quote(chain)} --format={CHAIN_ACCOUNTING_FORMAT}"])
+                    ids = shlex.quote(",".join(watched))
+                    scheduled = chain_accounting(
+                        conn.run([f"sacct -D -n -P -X -j {ids} --format={CHAIN_ACCOUNTING_FORMAT}"])
                     )
                 except (RuntimeError, OSError):
-                    rows = None
-            # A continuation of the chain that still waits or runs is live, wherever the scheduler runs it from.
-            live_job_name = live_chain_job(rows, collected.job_chain)
+                    pass
+            if collected.job_chain and scheduled is not None:
+                rows = [row for row in scheduled if row[0] in collected.job_chain]
+            # A job of the run that still waits or runs is live, wherever the scheduler runs it from.
+            live_job_name = live_chain_job(scheduled, [*followups, *collected.job_chain])
             if collected.job_chain and workdirs is not None and str(job_dir) not in workdirs and live_job_name is None:
                 if rows is not None:
                     allocation_cut = allocation_cut_from_accounting(rows, collected.coverage_allocation_id)
