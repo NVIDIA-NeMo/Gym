@@ -37,21 +37,33 @@ the model reasons (and which vLLM reasoning parser its family uses), its tool-ca
 vLLM tool-call parser), whether its chat template has a reasoning switch and what it is called, and
 whether its repository ships a `generation_config.json`.
 
+Without a model card, read the checkpoint itself: `chat_template.jinja` (or `chat_template` in
+`tokenizer_config.json`) for the reasoning switch and the tool-call format, `generation_config.json`
+for sampling, and `config.json` or `tokenizer_config.json` for the context length. The parser names
+come from the serving image: `vllm serve --help=all` lists the choices of `--tool-call-parser` and
+`--reasoning-parser`. Pick the tool-call parser whose format the template emits, and say in your
+notes which parser you chose and why.
+
 ## 2. Write the policy service
 
-Use placeholders for everything site-specific: image, paths, account and hosts.
+Write everything site-specific (images, paths, account, partition, hosts) as `${oc.env:VAR}` and
+export the variables before you submit; an angle-bracket placeholder does not validate. This is the
+smallest config that resolves and runs:
 
 ```yaml
 services:
   policy:
     type: vllm
-    container: <vllm image>
-    model: <org>/<model> # or an absolute checkpoint path, mounted below
+    container: ${oc.env:SERVING_IMAGE}
+    model: /checkpoint # or <org>/<model> from the Hub
     served_model_name: <model name>
     tensor_parallel_size: 4
     pipeline_parallel_size: 1
-    number_of_instances: 2 # data-parallel replicas
+    number_of_instances: 1 # data-parallel replicas
     trust_remote_code: false
+    node_pool: gpu
+    health_check:
+      timeout_seconds: 1800 # the default 60 s is shorter than most models take to load
     extra_args: >-
       --max-model-len 65536
       --max-num-seqs 256
@@ -59,23 +71,49 @@ services:
       --reasoning-parser <parser>
       --generation-config auto
     env:
-      HF_HOME: lit:/path/to/model/cache
+      HF_HOME: lit:/cache/huggingface
+      HF_TOKEN: runtime:HF_TOKEN
     mounts:
-      - /path/to/checkpoints:/path/to/checkpoints:ro
+      - ${oc.env:CHECKPOINT_DIR}:/checkpoint:ro
+      - ${oc.env:CACHE_DIR}:/cache
 
 driver:
+  container: ${oc.env:GYM_DRIVER_IMAGE} # Python 3.13.14 or newer; the default python:3.12 is older
   policy_model: policy
   policy_model_type: vllm_model
   gym_install:
+    repo: https://github.com/NVIDIA-NeMo/gym
     ref: <full Gym commit>
+  benchmarks:
+    <benchmark>:
+      run:
+        config_paths: [benchmarks/<benchmark>/config.yaml]
+
+job:
+  output_path: ${oc.env:OUTPUT_DIR}
 
 compute:
   cluster:
     type: slurm
-    account: <account>
-    hostname: <login host>
+    account: ${oc.env:SLURM_ACCOUNT}
+    hostname: ${oc.env:SLURM_LOGIN_HOST} # null when you submit on the login node itself
+    forward_env: [HF_TOKEN] # runtime: credentials, forwarded when submitting over SSH
     walltime: "04:00:00"
+    node_pools:
+      gpu:
+        partition: ${oc.env:SLURM_PARTITION}
+        nodes: 1
+        gpus_per_node: 4
+
+otel:
+  enabled: false # on by default; it needs the collector in the job's environment
 ```
+
+`driver.gym_install.ref` is the Gym the job installs and scores the run with: a full commit of
+public Gym that has your benchmark. Recovery (`gym eval resubmit --recover`) needs a commit at or
+after the one that ships this skill. The CLI you submit with may be newer than the pinned commit;
+the job still installs the pinned one. Site `#SBATCH` directives (a QoS, a node to avoid) go in
+`compute.cluster.extra_args`, without leading dashes: `{qos: <qos>, exclude: <node>}`.
 
 | What | Where |
 | --- | --- |
@@ -140,7 +178,10 @@ gym env validate --server-types responses_api_models,responses_api_agents \
 
 `--allow-job-time-values` stands in for values that only exist at job time, such as the policy URL
 that submit injects. `gym env validate` exits 0 with no invalid finding, 1 with one, and 2 when the
-config does not compose.
+config does not compose; success prints nothing. It checks the benchmark's and the model type's own
+server configs, not your submit config: the `run` overrides of sections 2 and 3 appear only in the
+`--dry-run` job script, as `+key=value` tokens. Read them there. A key rendered twice (a dotted key
+beside a nested block at the same path) fails the job on the cluster, after the GPUs are allocated.
 
 ## 5. Smoke it
 
@@ -155,9 +196,11 @@ driver:
         num_repeats: 1
 ```
 
-`limit` counts tasks; the run log prints the tasks and the rows they become. Then follow the
-[gym-eval](../gym-eval/SKILL.md) skill: `gym eval resubmit <id> <benchmark> --recover --inspect`
-and `gym eval health-check <run dir>`. Look for answers that end mid-thought (the output token
+`limit` counts tasks; the run log prints the tasks and the rows they become. Bound the smoke to
+one allocation with the walltime and `resumable: {max_retries: 0, max_walltime: <the walltime>}`,
+and when it completes, cancel the chain's pending follow-up and sentinel (see gym-eval, step 10).
+Then follow the [gym-eval](../gym-eval/SKILL.md) skill: `gym eval resubmit "$GYM_JOB_ID"
+<benchmark> --recover --inspect` and `gym eval health-check` (gym-eval, step 9). Look for answers that end mid-thought (the output token
 budget or `--max-model-len` is too small), reasoning that lands in the answer (the reasoning parser
 or `uses_reasoning_parser` is wrong), and tool calls that arrive as plain text (the tool-call
 parser is wrong).
@@ -184,12 +227,14 @@ limits.
 
 A model's own chat template, parsers and generation-config defaults are part of the model config,
 not the deployment: record them with the results, because they change the outputs. Gym's resume
-check treats the same split: changing a semantic setting refuses a resume, while operational
-settings resume with a warning.
+check treats the same split: a setting named as operational (timeouts, retries, ports,
+concurrency, paths, tracking) resumes with a warning, and any other changed setting refuses the
+resume and is named.
 
 ## Exit checks
 
-- [ ] `--resolve-only` and `gym env validate --server-types` pass.
+- [ ] `--resolve-only` and `gym env validate --server-types` pass, and the `--dry-run` job script
+  shows each `run` override once, the partition and `--gpus-per-node`.
 - [ ] The smoke run completes, and its health and answers look right.
 - [ ] The resolved config shows the intended served name, parallelism, parsers and reasoning switch.
 - [ ] Nothing in the "keep identical" column differs from the run you compare against.

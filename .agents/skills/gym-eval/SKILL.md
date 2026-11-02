@@ -40,17 +40,34 @@ and for reading health while you build a benchmark or a harness, follow
 
 4. Smoke the benchmark small first. `--limit` counts **tasks**, not rows: each kept task brings
    every copy saved in the data and its `--num-repeats`, so rows = tasks × repeats. The run log
-   says it: `Limiting to N tasks (M rows with their repeats)`. In a submit config, put the limit
-   in the benchmark's `run` (`run: {limit: 5, num_repeats: 1}`).
+   says it: `Limiting to N tasks (M rows with their repeats)`; a Gym pinned before that line
+   prints `Limiting the number of tasks to N`, and `expected` in
+   `artifacts/rollouts_coverage.json` gives the rows. In a submit config, put the limit in the
+   benchmark's `run` (`run: {limit: 5, num_repeats: 1}`).
+5. Submitting from a machine that is not the login node: set `compute.cluster.hostname` to the
+   login node, and list every `runtime:` credential in `compute.cluster.forward_env`; only listed
+   names reach the job. Site `#SBATCH` directives go in `compute.cluster.extra_args` without
+   leading dashes (`{qos: <qos>, exclude: <node>}`).
+7. `gym eval submit` also takes Hydra overrides after its flags, though its `--help` does not
+   list them: `++key=value` sets or replaces a key, `+key=value` only adds a new one. For example
+   `gym eval submit --config submit.yaml --dry-run ++compute.cluster.walltime=00:40:00
+   ++driver.benchmarks.<name>.run.limit=2`. Check the result with `--resolve-only` or `--dry-run`.
+6. Without an MLflow server, set `mlflow_tracking_required: false` in each benchmark's `run`.
+   Otherwise the acceptance gate of a complete, healthy run stays `FAILED` on "no MLflow run
+   evidence" (step 9). A Gym pinned before this skill does not know the key.
 
 ## 2. Submit and let the chain run
 
 ```bash
-gym eval submit --config submit.yaml            # prints the GYM_JOB_ID; --select a,b submits only those
+gym eval submit --config submit.yaml            # --select a,b submits only those
 ```
 
+The GYM_JOB_ID is the last part of the `Run directory:` line it prints (`gym-job-<time>-<hex>`);
+the `submitted <benchmark> → Slurm job <id>` line gives the first Slurm job.
+
 A resumable benchmark is a chain of Slurm jobs that continues itself. Before doing work, each job
-queues its successor, then reads its predecessor's final state:
+queues its successor (`afternotok:<this job>`) and a sentinel (`afterany:<successor>`) that takes
+over only if the successor dies before its own prologue, then reads its predecessor's final state:
 
 | Predecessor ended | The chain |
 | --- | --- |
@@ -86,6 +103,10 @@ gym eval resubmit "$GYM_JOB_ID" <benchmark> --recover --inspect \
   --score-key '["agent_metrics", "mean/reward"]'
 ```
 
+The agent name is the rows' `agent_ref.name`, the agent entry in
+`artifacts/rollouts_aggregate_metrics.json`. Without the score flags the score gate reports
+"score unavailable: no requested metric was read".
+
 `--inspect` reads the saved evidence and evaluates the gates without dispatching anything. Read:
 
 - the decision's action and `reason`. When the run's latest resume crossed operational
@@ -107,6 +128,7 @@ gym eval resubmit "$GYM_JOB_ID" <benchmark> --recover --inspect \
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
+| NOOP, `FAILED`, and the only error is `no MLflow run evidence` | The results are complete and tracking was not configured. Read `trial_counts`, coverage and the score yourself. Next time, set `mlflow_tracking_required: false` (step 1). |
 | `SUCCESS` | Done. Keep the run directory as the record. |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
@@ -162,8 +184,10 @@ The health summary and the gates are the contract you read after a run: the resp
 trial-failure rates, coverage, and the unhealthy rollouts. A run can be healthy and still score
 low. That is the model or its deployment: fix the deployment and run again, not the evaluation.
 
-- Health is written to `quality_summary.json` after the run. `gym eval health-check <run dir>`
-  re-runs the checks; it reports, it does not fail the run for you.
+- Health is written to `quality_summary.json` after the run.
+  `gym eval health-check <run dir>/<benchmark>/artifacts` re-runs the checks on a local path; it
+  reports, it does not fail the run for you. It rewrites `quality_summary.json` in that directory,
+  so run it on a copy, never on the run's own `artifacts/` (step 3).
 - Gates are flags on `--recover`: `--score-key` (a JSON path) with `--score-agent` and, when an
   agent has several entries, `--score-environment`; `--max-unhealthy-fraction` (per-rollout
   health); `--max-response-failure-fraction` and `--max-trial-failure-fraction` (default 0.02;
@@ -175,8 +199,11 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 
 ## 10. Stopping a chain
 
-1. Cancel only the running job of the chain (`scancel <slurm job id>`). Its queued successor sees
-   `CANCELLED` and stops without doing work.
+1. Cancel the running job of the chain and the jobs it queued (`scancel <ids>`): its successor
+   (in `.gym_followup_queued.<job id>`) and the successor's sentinel (in
+   `.gym_followup_sentinel.<job id>`). A successor that is left to start sees `CANCELLED` and stops
+   without doing work, but only after it got an allocation. Cancel a pending sentinel after a
+   completed run too: once Slurm cancels the successor, the sentinel's dependency is met.
 2. Then inspect (step 4) before deciding anything else.
 3. Keep the run directory. To evaluate something different, submit a new run to a new location
    rather than reusing this one; a fresh `gym eval run` at an existing output path replaces it.

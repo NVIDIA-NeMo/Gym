@@ -32,7 +32,9 @@ Recovered grading attempts are reported separately and do not count toward the t
 
 The job script begins with a prologue that runs before any service starts. Each job in the chain receives its predecessor's Slurm job ID, looks at that job's final state with `sacct`, and decides whether to carry on. **Before doing any real work**, it queues its own successor with `sbatch --dependency=afternotok:<this job> --kill-on-invalid-dep=yes`, so the chain continues even if this job is killed mid-run.
 
-If a job finishes successfully, its queued successor has a dependency that can never be satisfied, and Slurm cancels it. The chain needs no explicit cleanup step on success.
+It then queues a sentinel for that successor, `sbatch --dependency=afterany:<successor>`. The sentinel continues the chain only if the successor dies after it started and before its own prologue recorded it; otherwise it exits without doing work.
+
+If a job finishes successfully, its queued successor has a dependency that can never be satisfied, and Slurm cancels it. That cancellation satisfies the sentinel's dependency, so a sentinel left in the queue starts and exits at once; cancel it to save the allocation (its ID is in `.gym_followup_sentinel.<job ID>`).
 
 What the next job does with the previous job's state:
 
@@ -61,6 +63,7 @@ The prologue keeps its state in dot-files in the benchmark directory:
 | `.gym_accumulated_walltime` | Seconds of walltime consumed by finished jobs. Compared with `max_walltime`. |
 | `.gym_infra_retries` | Count of infrastructure retries so far. |
 | `.gym_followup_queued.<job ID>` | The observed successor job ID, or an unresolved submission claim. An unresolved claim cannot authorize another submission. |
+| `.gym_followup_sentinel.<job ID>` | The job ID of the sentinel queued for that job's successor. |
 | `.gym_driver_failure.<job ID>` | The failure kind that job's driver left when it failed in a way the next job would repeat. |
 
 ## Recover from saved evidence
@@ -139,7 +142,7 @@ Without `--recover`, ordinary `gym eval resubmit` keeps its existing explicit-re
 
 - `max_walltime` applies to all continuation paths, including `--recover`. A capped job needs permission to read and decrease its own Slurm time limit with `scontrol`; failure stops before services or another successor start. Existing job scripts are not silently rewritten: stage the new generated prologue to obtain these guards.
 - If queueing a successor fails, the job prints a warning (`Failed to submit auto-resume follow-up`) and carries on. `sbatch` can fail after it created the job, so check with `squeue --me --all`. A missing queue entry does not prove that a successor never ran. Automatic continuation remains stopped until the complete queue and terminal accounting are reconciled, including guard-stopped allocations. Requeueing does not repair unknown accounting or reset its stop state.
-- A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue --me --all` and cancel any job still pending, using `.gym_job_chain` for the IDs of the jobs that have run.
+- A job that finds its predecessor `CANCELLED` stops the chain. Because each job queues its successor before doing work, a successor may already be waiting in the queue when you cancel; check `squeue --me --all` and cancel any job still pending: the IDs of a job's successor and its sentinel are in `.gym_followup_queued.<job ID>` and `.gym_followup_sentinel.<job ID>`, and `.gym_job_chain` lists the jobs that have run.
 - `resumable` does not work with a benchmark `command`, because resuming relies on `gym eval run`'s cache.
 - The `gym-job.json` record contains the first job's ID only.
 
