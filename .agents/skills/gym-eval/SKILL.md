@@ -299,10 +299,13 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   model-server 5xx replies) are strictly below 2% of the expected trials and every trial's
   grading is traceable; `FAIL` at or above 2%; `UNVERIFIED` below 2% when some grading is not
   traceable, so the known count is a lower bound. The 2% is fixed in Gym; no flag changes it.
-  The classes are Gym's shared lists, `MODEL_FAULT_KINDS` and `SERVER_FAULT_KINDS` in
-  `nemo_gym/core/failure_kinds.py`: the policy's own request errors, timeouts, context limit and
-  agent limits, and a cut-off, empty or malformed answer are the model's; another model's 4xx (a
-  judge's) is evaluation-side. `criteria.evaluation` records the limit and
+  The classes are Gym's shared lists in `nemo_gym/core/failure_kinds.py`: `MODEL_FAULT_KINDS`
+  (`model_request_error`, the policy's own 4xx; `model_policy_response_timeout`;
+  `model_context_limit`; `agent_timeout`; `agent_command_not_allowed`; `agent_limit`;
+  `agent_invalid_output`; `truncated_answer`; `empty_answer`; `malformed_answer`) and
+  `SERVER_FAULT_KINDS` (`server_start_failed`, `model_transport_error`, `model_server_error`),
+  with every `provider_*` kind, any 5xx and another model's 4xx (`non_policy_model_rejection`)
+  on the evaluation side. `criteria.evaluation` records the limit and
   `policy_timeout_counts_as_model` beside the verdict.
 - Whether a trial counts as observed depends on the benchmark: its server recorded the grading
   operation, or saved a grading artifact bound to the answer (`judge_record`, `rubric_verdict`,
