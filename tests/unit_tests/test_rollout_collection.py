@@ -14431,7 +14431,7 @@ class TestEnrichRunResult:
 
 
 class TestRunRecordWriter:
-    """``RunRecordWriter`` lays out a shard the way ``ng_collect_rollouts`` lays out a run."""
+    """``_RunRecordWriter`` lays out a shard the way ``ng_collect_rollouts`` lays out a run."""
 
     @staticmethod
     def _lines(fpath: Path) -> list[dict]:
@@ -14441,10 +14441,10 @@ class TestRunRecordWriter:
     def test_each_outcome_goes_where_collection_puts_it(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, record_omitted: bool
     ) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
         monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
-        writer = RunRecordWriter(tmp_path, "step_000007-w0", record_omitted_rollouts=record_omitted)
+        writer = _RunRecordWriter(tmp_path, "step_000007-w0", record_omitted_rollouts=record_omitted)
         scored = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
         failed = {TASK_INDEX_KEY_NAME: 1, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"}
         interrupted = {
@@ -14466,20 +14466,20 @@ class TestRunRecordWriter:
             assert failures[1][TASK_INDEX_KEY_NAME] == 2 and failures[1][NG_OMITTED_ROLLOUT_KEY] is True
 
     def test_reopening_a_shard_replaces_it(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
-        RunRecordWriter(tmp_path, "step_1").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
-        replayed = RunRecordWriter(tmp_path, "step_1")
+        _RunRecordWriter(tmp_path, "step_1").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 0.0})
+        replayed = _RunRecordWriter(tmp_path, "step_1")
         replayed.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
 
         assert [row["reward"] for row in self._lines(replayed.rollouts_fpath)] == [1.0]
 
     @pytest.mark.parametrize("label", ["", "../escape", "step 1", "-step", "one_failures", "x_materialized_inputs"])
     def test_a_shard_label_that_is_not_a_plain_name_is_refused(self, tmp_path: Path, label: str) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
         with pytest.raises(ValueError, match="shard label"):
-            RunRecordWriter(tmp_path, label)
+            _RunRecordWriter(tmp_path, label)
 
     async def test_run_examples_writes_each_enriched_record_to_its_shard(self, tmp_path: Path) -> None:
         capture_dir = tmp_path / "capture"
@@ -14523,19 +14523,19 @@ class TestRunRecordWriter:
         assert self._lines(run_dir / "rollouts-step_3.jsonl") == [written]
 
     def test_a_shard_whose_every_rollout_failed_still_has_its_rollouts_file(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
-        writer = RunRecordWriter(tmp_path, "step_9")
+        writer = _RunRecordWriter(tmp_path, "step_9")
         writer.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, NG_FAILURE_CLASS_KEY: "agent_run_error"})
 
         assert writer.rollouts_fpath.exists() and writer.rollouts_fpath.read_bytes() == b""
         assert len(self._lines(writer.failures_fpath)) == 1
 
     def test_a_writer_whose_shard_was_reopened_by_another_refuses_to_write(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
-        first = RunRecordWriter(tmp_path, "step_4")
-        second = RunRecordWriter(tmp_path, "step_4")
+        first = _RunRecordWriter(tmp_path, "step_4")
+        second = _RunRecordWriter(tmp_path, "step_4")
         second.write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
 
         with pytest.raises(RuntimeError, match="replaced by another writer"):
@@ -14569,9 +14569,9 @@ class TestRunRecordWriter:
         assert [call["model_call_id"] for call in written["ng_model_call_capture"]["calls"]] == ["mine"]
 
     def test_a_call_refused_by_dispatch_validation_keeps_the_existing_shard(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
-        RunRecordWriter(tmp_path, "s").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
+        _RunRecordWriter(tmp_path, "s").write({TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0})
 
         class Helper(RolloutCollectionHelper):
             def setup_server_client(self, head_server_config=None):
@@ -14661,11 +14661,11 @@ class TestRunRecordWriter:
         assert [row[TASK_INDEX_KEY_NAME] for row in store.pending()] == [4]
 
     def test_every_reopening_invalidates_earlier_writers_even_when_inodes_recur(self, tmp_path: Path) -> None:
-        from nemo_gym.rollout_collection import RunRecordWriter
+        from nemo_gym.rollout_collection import _RunRecordWriter
 
-        first = RunRecordWriter(tmp_path, "step_1")
-        second = RunRecordWriter(tmp_path, "step_1")
-        third = RunRecordWriter(tmp_path, "step_1")
+        first = _RunRecordWriter(tmp_path, "step_1")
+        second = _RunRecordWriter(tmp_path, "step_1")
+        third = _RunRecordWriter(tmp_path, "step_1")
         # The filesystem may hand the third shard file the number the first writer remembers for its own.
         first._generation = third.rollouts_fpath.stat().st_ino
         scored = {TASK_INDEX_KEY_NAME: 0, ROLLOUT_INDEX_KEY_NAME: 0, "reward": 1.0}
@@ -14677,7 +14677,7 @@ class TestRunRecordWriter:
         third.write(scored)
         assert self._lines(third.rollouts_fpath) == [scored]
         # Another label is another shard, written independently.
-        RunRecordWriter(tmp_path, "step_2").write(scored)
+        _RunRecordWriter(tmp_path, "step_2").write(scored)
         assert self._lines(tmp_path / "rollouts-step_2.jsonl") == [scored]
 
     @pytest.mark.parametrize(

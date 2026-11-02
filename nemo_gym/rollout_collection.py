@@ -1546,7 +1546,7 @@ def _collected_outcome(
     ``result`` is ``completed.result`` after the caller's episode translation and legacy sanitizing. A failure, typed
     or marked, becomes the failures-sidecar row: the typed record's compatibility fields beside the producer's
     diagnostics and the judge reply it kept, then the identity and routing stamps and the causal failure report.
-    ``RunRecordWriter`` builds its rows here as well, so an RL shard reads like an eval run.
+    ``_RunRecordWriter`` builds its rows here as well, so an RL shard reads like an eval run.
     """
     row = completed.row
     verification_response = completed.verification_response
@@ -1646,8 +1646,11 @@ _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
 _RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs")
 
 
-class RunRecordWriter:
+class _RunRecordWriter:
     """Writes finished rollouts into a run folder the way ``ng_collect_rollouts`` lays it out, one shard at a time.
+
+    Private: ``run_examples(record_output_dir=..., record_shard=...)`` is the entry point, and it hands this writer
+    the records the collector's own builder produced. A caller writing rows of its own would bypass that builder.
 
     A shard is ``<record_output_dir>/rollouts-<shard>.jsonl`` with its failures sidecar and, when the rows are
     given, its materialized inputs and run manifest beside it, so a folder of shards is what ``gym eval aggregate``, the run health
@@ -6005,7 +6008,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         is merged, and needs the payloads kept. With ``enrich_results`` off, results are exactly what `/run` returned.
 
         ``record_output_dir`` with ``record_shard`` also writes each rollout to that run folder through
-        :class:`RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
+        :class:`_RunRecordWriter`, as ``ng_collect_rollouts`` would: ``rollouts-<shard>.jsonl``, its failures sidecar
         with the typed failure rows collection writes, and the rows as the shard's materialized inputs (omitted-rollout
         rows with ``record_omitted_rollouts``). It implies ``enrich_results``, dispatches as collection does (typed
         failure records under ``route_failures_to_sidecar``, validated results) on copies of the rows that name the
@@ -6079,7 +6082,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
         )
         # Opened last, once the options, the config and the rows are known good, because opening replaces the shard.
         writer = (
-            RunRecordWriter(
+            _RunRecordWriter(
                 record_output_dir,
                 record_shard,
                 record_omitted_rollouts=record_omitted_rollouts,
