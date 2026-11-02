@@ -17,6 +17,9 @@ from fastapi.testclient import TestClient
 from pydantic import ValidationError
 
 from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.core import EpisodeId, TaskId
+from nemo_gym.server_runtime import ResourcesSeedSessionRequest
+from nemo_gym.testing.session_conformance import check_resources_session_contract
 from resources_servers.hle_web_tools import app as module
 from resources_servers.hle_web_tools.app import (
     UPSTREAM_BLOCKLIST_SHA256,
@@ -268,6 +271,23 @@ async def test_search_from_a_session_without_a_seeded_question_is_refused(caplog
     stub_backend(lenient, results=[result("https://example.com/ok")])
     served = await lenient.web_search(tool_request("never-seeded"), WebSearchRequest(query=eight))
     assert not served.refused
+
+
+def test_typed_sessions_follow_the_resources_session_contract():
+    """An Environment Server's typed seed binds the session to its episode and task, and a close fences the ID
+    against a delayed seed of the same session for the retry window."""
+    server = make_server()
+    check_resources_session_contract(
+        server.setup_webserver(),
+        ResourcesSeedSessionRequest(
+            resources_session_id="typed-session",
+            episode_id=EpisodeId(rollout_id="rollout", attempt=0),
+            task_id=TaskId(taskset="hle_diamond", task_id="0"),
+            task_data={"question": QUESTION},
+        ),
+        keeps_state=True,
+        holds_state=lambda resources_session_id: resources_session_id in server._session_spans,
+    )
 
 
 @pytest.mark.parametrize(

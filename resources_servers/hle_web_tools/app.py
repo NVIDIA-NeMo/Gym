@@ -45,6 +45,7 @@ from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, field_validator
 
 from nemo_gym import _resolve_under_cwd_or_install
 from nemo_gym.client import SESSION_ID_KEY, request
+from nemo_gym.core import EpisodeId, TaskId
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseSeedSessionRequest,
@@ -53,8 +54,11 @@ from nemo_gym.server_runtime import (
     BaseVerifyResponse,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
+    ResourcesSeedRejectedError,
+    ResourcesSeedSessionRequest,
     ResourcesSeedSessionResponse,
     ResourcesSessionConflictError,
+    ResourcesSessionFence,
     SimpleResourcesServer,
 )
 
@@ -760,9 +764,13 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     _backend: Optional[TavilyBackend] = PrivateAttr(default=None)
     _blocklist: Optional[Blocklist] = PrivateAttr(default=None)
     _session_spans: "OrderedDict[str, QuestionSpans]" = PrivateAttr(default_factory=OrderedDict)
+    # The episode and task each typed (Environment Server) session is bound to, under the same cap as the questions.
+    _session_identity: "OrderedDict[str, Tuple[EpisodeId, TaskId]]" = PrivateAttr(default_factory=OrderedDict)
+    _fence: ResourcesSessionFence = PrivateAttr()
     _page_cache: "OrderedDict[str, CachedPage]" = PrivateAttr(default_factory=OrderedDict)
 
     def model_post_init(self, __context) -> None:
+        self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
         keys = self.config.tavily_api_key
         if isinstance(keys, str):
             keys = [keys]
@@ -814,8 +822,33 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
     async def seed_session(
         self, request: Request, body: HLEWebToolsSeedSessionRequest
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
-        session_id = request.session[SESSION_ID_KEY]
-        question = extract_question(body.model_dump(), self.config.question_field)
+        raw = body.model_dump()
+        question = extract_question(raw, self.config.question_field)
+        if body.resources_session_id is None:
+            # An Agent's run body: the session is the cookie's, and carries no episode identity.
+            self._install_question(request.session[SESSION_ID_KEY], question)
+            return BaseSeedSessionResponse()
+        try:
+            typed = ResourcesSeedSessionRequest.model_validate(raw)
+        except ValueError as error:
+            raise ResourcesSeedRejectedError(f"invalid typed seed: {error}") from error
+        resources_session_id = typed.resources_session_id
+        identity = (typed.episode_id, typed.task_id)
+        async with self._fence.locked(resources_session_id):
+            # A seed that arrives after its session closed (a retry, or a reply that raced the close) must not
+            # recreate it.
+            self._fence.raise_if_closed(resources_session_id)
+            bound = self._session_identity.get(resources_session_id)
+            if bound is not None and bound != identity:
+                raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
+            # Session routing makes the cookie's session ID equal resources_session_id for a typed seed.
+            self._install_question(resources_session_id, question)
+            self._session_identity[resources_session_id] = identity
+            self._session_identity.move_to_end(resources_session_id)
+            self._forget_sessions_over_cap()
+        return ResourcesSeedSessionResponse(resources_session_id=resources_session_id)
+
+    def _install_question(self, session_id: str, question: Optional[str]) -> None:
         current = self._session_spans.get(session_id)
         if current is not None:
             # A session carries one question for its whole life. A retried seed with the same question is served
@@ -845,18 +878,34 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         else:
             self._session_spans[session_id] = QuestionSpans(question, self.config.verbatim_span_words)
             self._session_spans.move_to_end(session_id)
-            while len(self._session_spans) > MAX_SESSION_QUESTIONS:
-                self._session_spans.popitem(last=False)
-        if body.resources_session_id is not None:
-            return ResourcesSeedSessionResponse(resources_session_id=body.resources_session_id)
-        return BaseSeedSessionResponse()
+            self._forget_sessions_over_cap()
+
+    def _forget_sessions_over_cap(self) -> None:
+        """Forget the least recently seeded sessions, question and identity together, beyond the cap."""
+        for table in (self._session_spans, self._session_identity):
+            while len(table) > MAX_SESSION_QUESTIONS:
+                session_id = next(iter(table))
+                self._session_identity.pop(session_id, None)
+                self._session_spans.pop(session_id, None)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        self._session_spans.pop(body.resources_session_id, None)
-        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+        # Released by resources_session_id: a close after a lost seed reply carries no cookie.
+        resources_session_id = body.resources_session_id
+        async with self._fence.locked(resources_session_id):
+            closed_episode = self._fence.closed_episode(resources_session_id)
+            if closed_episode is not None and closed_episode != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
+            bound = self._session_identity.get(resources_session_id)
+            if bound is not None and bound[0] != body.episode_id:
+                raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
+            self._session_spans.pop(resources_session_id, None)
+            self._session_identity.pop(resources_session_id, None)
+            self._fence.mark_closed(resources_session_id, body.episode_id)
+        return ResourcesCloseSessionResponse(resources_session_id=resources_session_id)
 
     async def retire_session_state(self, session_id: str) -> None:
         self._session_spans.pop(session_id, None)
+        self._session_identity.pop(session_id, None)
 
     # ---- tools ----
 

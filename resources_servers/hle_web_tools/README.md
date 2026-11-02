@@ -79,7 +79,13 @@ Beyond the families, the protocol's own refusals:
   family `unseeded_session`, and a seed without a question is logged at WARNING; set
   `require_seeded_question: false` to serve such sessions without the span rule instead. A seeded
   session cannot be re-seeded with another question (HTTP 409; a retry with the same question is
-  served). The words of a blocked span are never logged, only their count.
+  served). An Environment Server's typed seed (`resources_session_id`, `episode_id`, `task_id`,
+  `task_data`) also binds the session to its episode and task: a seed of the same ID for another episode
+  or task, or a close naming another episode, gets HTTP 409, and after a close the ID is fenced for
+  `session_close_retry_window_seconds`, so a delayed seed cannot recreate it. At most 10,000 seeded
+  sessions are held; past that the least recently seeded one is forgotten, question and episode binding
+  together, and its searches are refused as `unseeded_session`. The words of a blocked span are never
+  logged, only their count.
 - **Fetch URLs** must be `http(s)` URLs with a host, at most 4,096 characters long, with no userinfo
   (no `@` anywhere in the authority, even an empty `https://@host`) and no backslash, whitespace or
   control character anywhere: those are the characters on which WHATWG fetchers and Python's
@@ -187,7 +193,8 @@ pytest resources_servers/hle_web_tools/tests/test_app.py
 
 Model-free; the Tavily transport is stubbed. Each rule family has one test built on rules taken from
 the upstream blocklist, plus the two query refusals, the fail-closed refusal of a cookie-less
-`POST /web_search` after a seed, the 409 on re-seeding a session with another question, wrapper decoding, the cap and marker, the exact two-tool list over a
+`POST /web_search` after a seed, the 409 on re-seeding a session with another question, the typed-session
+contract (`nemo_gym.testing.session_conformance.check_resources_session_contract`), wrapper decoding, the cap and marker, the exact two-tool list over a
 real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and exhaustion of the key
 pool, malformed provider bodies (a tool error, not an HTTP 500) and the blocklist digest pin. A table of URL
 spellings from review (expansion overflow, a fourth decoded form, backslash, whitespace and userinfo,
