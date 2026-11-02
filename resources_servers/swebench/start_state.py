@@ -79,7 +79,7 @@ def wants_start_state(setup_patch: str, squash_history: bool) -> bool:
 
 
 def setup_files(setup_patch: str) -> dict[str, str]:
-    """Create-time sandbox files for ``prepare_start_state``."""
+    """Create-time sandbox files for ``commit_start_state``."""
     return {SETUP_PATCH_PATH: setup_patch} if setup_patch.strip() else {}
 
 
