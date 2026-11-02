@@ -113,7 +113,7 @@ Do not resubmit while a job of the run is live; recovery answers NOOP then anywa
 | Location | What |
 | --- | --- |
 | Run directory | `gym-job.json` (the submission record), `resolved-config.yaml` (the config as submitted), and the journals `walltime-extension-journal.jsonl`, `repin-journal.jsonl`, `unsafe-resume-journal.jsonl`. |
-| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl`, `spinup-timeout-journal.jsonl`, `operator-continuation-journal.jsonl` and `chain-end-journal.jsonl`. |
+| Benchmark directory | `job.sh`, `logs/driver-<job id>.log` and `logs/<service>-<job id>.log`, the chain files `.gym_job_chain`, `.gym_accumulated_walltime`, `.gym_infra_retries`, `.gym_infra_retry_extension`, `.gym_followup_queued.<job id>`, `.gym_followup_sentinel.<job id>` and `.gym_chain_incomplete` (why the chain stopped, when it records a reason), and the journals `retry-extension-journal.jsonl` (one line per `--extend-retries` or `--extend-attempts`, with its `kind`), `spinup-timeout-journal.jsonl`, `operator-continuation-journal.jsonl` and `chain-end-journal.jsonl`. |
 | `artifacts/` | `rollouts.jsonl` (results), `rollouts_failures.jsonl` (failed attempts), `rollouts_materialized_inputs.jsonl` (the task inventory), `rollouts_manifest.json` with its identity and resume-drift journal, `rollouts_coverage.json`, `rollouts_aggregate_metrics.json`, `quality_summary.json` (health), and `rollouts_mlflow_export_done` (the post-run export receipt). |
 | Your machine | A copy of each submission record under the Gym jobs cache (see Job Records). |
 
@@ -185,6 +185,7 @@ keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
 | The chain's walltime cap is spent | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. Never below the recorded walltime; journaled. |
 | The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. It raises infra retries only: it does not raise the per-identity attempt cap, so a STOP that says identities used every attempt is not a lost extension (see "When a run stops"). |
+| Identities used every attempt (`exhausted`, `max_rollout_attempts`) | `--recover --extend-attempts N` gives each of them N more attempts. Only rollouts the Store would run again are reopened (infrastructure failures, allocation cuts); a model failure or a saved result never is. The spent attempts are kept; recorded in `artifacts/rollouts_attempt_extension` and journaled with the infra extension. A run pinned to a Gym without it needs `--repin` in the same resubmit. |
 | The run's chain accounting is unknown (a segment the scheduler requeued ends this way: the requeued allocation's elapsed time is unknown) | An explicit budget continues it: `--max-walltime` with `--walltime-reason`, optionally `--extend-retries`. Without it, the STOP names these options. |
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
@@ -270,7 +271,7 @@ reproduces the old main behaviour, for comparison only, so its cells differ from
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
-does not extend an exhausted budget, `--extend-retries` and `--max-walltime` do.
+does not extend an exhausted budget, `--extend-retries`, `--extend-attempts` and `--max-walltime` do.
 
 Retries happen in three layers before a failure reaches you. In a call: the policy client retries
 HTTP 429, 502, 503, 504, 520, 404, 408 and 500, the judge client 408 and 429, and the sandbox

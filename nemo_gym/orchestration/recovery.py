@@ -199,6 +199,81 @@ class ManagedRecoveryFact(BaseModel):
     max_attempts: int = Field(ge=1, strict=True)
     pending: bool
     reserved: bool
+    # Whether the Store would run it again under some attempt cap (its replay rule without the cap). None from a
+    # Store reader that predates attempt extensions (`--extend-attempts`), which then cannot be applied to the run.
+    replayable: bool | None = None
+
+
+# What an exhausted-attempts stop says an operator can do; the extension is explicit and journaled.
+EXTEND_ATTEMPTS_HINT = (
+    "to give each exhausted identity N more attempts, gym eval resubmit --recover --extend-attempts N "
+    "(explicit and journaled; a rollout that ended with a model failure is never run again)"
+)
+# The most attempts one recovery may add to every rollout's cap.
+MAX_EXTEND_ATTEMPTS = 100
+
+
+def _with_attempt_extension(
+    facts: list[ManagedRecoveryFact] | None, extend_attempts: int
+) -> list[ManagedRecoveryFact] | None:
+    """The Store's facts as they read once ``extend_attempts`` more attempts are recorded for every rollout.
+
+    The cap rises by that many, and a rollout the Store would run again under some cap (``replayable``) is pending
+    while it has attempts left. Nothing else changes: a rollout that ended with a model failure, or any other outcome
+    the Store does not run again, stays as it was.
+    """
+    if not extend_attempts or facts is None:
+        return facts
+    return [
+        fact.model_copy(
+            update={
+                "max_attempts": fact.max_attempts + extend_attempts,
+                "pending": fact.pending
+                or bool(fact.replayable and fact.attempts < fact.max_attempts + extend_attempts),
+            }
+        )
+        for fact in facts
+    ]
+
+
+def retry_budget(collected: "CollectedEvidence") -> dict[str, dict[str, int | None]]:
+    """The run's two retry budgets as the gate reports them, each its configured cap and its recorded extension.
+
+    ``infra`` is the chain's infra-retry cap (``--extend-retries``); ``attempts`` is every rollout's attempt cap
+    (``--extend-attempts``). A value that could not be read is None.
+    """
+    recorded = {"absent": 0, "ok": collected.infra_retry_extension}.get(collected.infra_retry_extension_state)
+    attempts = {"absent": 0, "ok": collected.attempt_extension}.get(collected.attempt_extension_state)
+    applied = collected.attempt_extension_applied
+    facts = collected.managed_selection or []
+    return {
+        "infra": {
+            "configured": collected.infra_retries_configured,
+            "extension": None if recorded is None else int(recorded),
+        },
+        "attempts": {
+            "configured": facts[0].max_attempts - applied if facts and applied is not None else None,
+            "extension": attempts,
+        },
+    }
+
+
+def _extend_attempts_refusal(collected: "CollectedEvidence") -> str | None:
+    """Why this run cannot take an attempt extension, or None when it can."""
+    if collected.attempt_extension_state == "malformed":
+        return "the recorded attempt extension (artifacts/rollouts_attempt_extension) is unreadable"
+    if not collected.managed_store or not collected.managed_selection:
+        return "only a run written by a rollout store, whose saved selection was read, keeps a per-rollout attempt cap"
+    if collected.attempt_extension_applied is None or any(
+        fact.replayable is None for fact in collected.managed_selection
+    ):
+        return (
+            "the run's pinned Gym predates attempt extensions, so its Store would not run the extra attempts; repin the "
+            "run to a Gym that has them (--repin COMMIT --repin-reason TEXT) in the same resubmit"
+        )
+    if collected.attempt_extension_applied != (collected.attempt_extension or 0):
+        return "the recorded attempt extension changed while it was read; inspect again"
+    return None
 
 
 # The chain's accounting counters in the job dir (see resume_script); an operator continuation fills unknown ones.
@@ -1157,7 +1232,8 @@ def decide_recovery(
                             {item.max_attempts for item in evidence if item.state == IdentityState.EXHAUSTED} - {None}
                         )
                     )
-                ),
+                )
+                + f"; {EXTEND_ATTEMPTS_HINT}",
             )
         if counts.get(IdentityState.MASKED):
             return decision(
@@ -1934,6 +2010,17 @@ def operator_epoch():
         return None
     return {"chain_length": length, "walltime_s": walltime} if walltime >= 0 else None
 collected["operator_epoch"] = operator_epoch()
+def attempt_extension():
+    # Attempts an explicit recovery added to every rollout's cap (see --extend-attempts), and the file's state.
+    path = os.path.join(a, "rollouts_attempt_extension")
+    if not os.path.exists(path):
+        return None, "absent"
+    try:
+        text = open(path).read(64).strip()
+    except OSError:
+        return None, "malformed"
+    return (int(text), "ok") if text.isascii() and text.isdecimal() else (None, "malformed")
+collected["attempt_extension"], collected["attempt_extension_state"] = attempt_extension()
 def resume_drift_keys():
     # The operational settings the latest resume crossed (the drift journal's last line), keys only and bounded.
     try:
@@ -2076,6 +2163,14 @@ class CollectedEvidence(BaseModel):
     reader_fallback_reason: str | None = None
     # The operational settings the run's latest resume crossed (its resume-drift journal), None when it crossed none.
     resume_drift_keys: list[str] | None = None
+    # Attempts an explicit recovery added to every rollout's cap (artifacts/rollouts_attempt_extension) and its state
+    # (absent, ok, malformed), as the plain collector read them; and the extension the run's Store reader applied,
+    # None from a reader that predates attempt extensions.
+    attempt_extension: int | None = None
+    attempt_extension_state: str = "absent"
+    attempt_extension_applied: int | None = None
+    # The run's configured infra-retry cap (its saved resume_config), set by the executor that read it.
+    infra_retries_configured: int | None = None
     # The marker line of a continuation that ended before it queued its follow-up, None when there is none.
     chain_continuation_note: str | None = None
     # The judge-only jobs queued for the run's saved answers (JUDGE_JOB_JOURNAL_NAME), oldest first: id, partition,
@@ -2221,6 +2316,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             raise ValueError("managed inventory is ambiguous or its identity is not verified")
         with redirect_stdout(StringIO()):
             pending = {logical_rollout_id(row) for row in store.pending()}
+        replayable = store.replayable_identities()
         facts = []
         for row in collected.materialized:
             identity = _identity(row)
@@ -2234,6 +2330,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                     max_attempts=coverage["max_rollout_attempts"],
                     pending=logical in pending,
                     reserved=logical in store.manifest.next_attempt,
+                    replayable=logical in replayable,
                 )
             )
         selected = {"rollouts.jsonl": set(), "rollouts_failures.jsonl": set()}
@@ -2265,6 +2362,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 "managed_selection": facts,
                 "checkpoint_enabled": checkpoint_enabled,
                 "unresolved_rejudgments": unresolved_rejudgments,
+                "attempt_extension_applied": store.attempt_extension,
             }
         )
     except ImportError as error:
@@ -2433,8 +2531,12 @@ def _decide_from_collected(
     extend_retries: int = 0,
     live_job_name: str | None = None,
     operator_budget: OperatorBudget | None = None,
+    extend_attempts: int = 0,
 ) -> RecoveryDecision:
     """Decide from what ``COLLECT_SCRIPT`` read; a missing result file stops the decision.
+
+    ``extend_attempts`` is the attempts this recovery asks to add to every rollout's cap (``--extend-attempts``):
+    the Store's facts are read as they would be once it is recorded (see ``_with_attempt_extension``).
 
     When the chain accounting is unknown, ``operator_budget`` may continue the run instead (see
     ``_operator_continuation``); without it, the stop names the options that allow that.
@@ -2542,17 +2644,37 @@ def _decide_from_collected(
             evidence=[],
             scheduler_live=live,
         )
+    attempts_refused = _extend_attempts_refusal(collected) if extend_attempts else None
     inputs = dict(
         materialized=collected.materialized,
         results=collected.results or [],
         failures=collected.failures,
         resubmit_offset=collected.resubmit_offset,
         outcome_policy=outcome_policy,
-        managed_selection=collected.managed_selection,
+        managed_selection=collected.managed_selection
+        if attempts_refused
+        else _with_attempt_extension(collected.managed_selection, extend_attempts),
         planned_missing_continuation=planned_missing_continuation,
         allocation_cut=allocation_cut and live_job is False,
     )
     decision = decide_recovery(**inputs, budget=budget)
+    if attempts_refused:
+        return decision.model_copy(
+            update={
+                "action": RecoveryAction.STOP,
+                "reason": f"--extend-attempts {extend_attempts} is refused: {attempts_refused}",
+            }
+        )
+    if extend_attempts and decision.action == RecoveryAction.RESUBMIT and collected.managed_selection:
+        # Every fact carries the Store's one cap: the saved cap plus the recorded extension.
+        cap = collected.managed_selection[0].max_attempts
+        applied = collected.attempt_extension_applied or 0
+        decision = decision.model_copy(
+            update={
+                "reason": f"{decision.reason} (attempt cap {cap + extend_attempts}: {cap - applied} configured + "
+                f"{applied} recorded extension + {extend_attempts} requested now)"
+            }
+        )
     if collected.unresolved_rejudgments and live_job is None:
         # With no job of the run live, the pass that admitted them died: its rows are still the selected judge
         # failures, re-verified like any other, and the recovery pass withdraws the admissions first. A live job may
@@ -5699,6 +5821,7 @@ def gate_summary_from_collected(
         + [task["health_verdict"]]
     )
     # The judge-only jobs queued for the run's saved answers, each with its outcome: facts, never a verdict.
+    task["retry_budget"] = retry_budget(collected)
     task["judge_jobs"] = [dict(job) for job in collected.judge_jobs] or None
     task["warnings"] = task["warnings"] + [judge_job_note(job) for job in collected.judge_jobs]
     extra: list[str] = []

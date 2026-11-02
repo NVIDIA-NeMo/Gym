@@ -630,7 +630,8 @@ class RolloutStore:
         saved_cap = self.manifest.max_rollout_attempts
         if max_attempts is not None and saved_cap is not None and max_attempts != saved_cap:
             raise ConfigError(f"This run's saved retry cap is {saved_cap}, not {max_attempts}.")
-        max_attempts = saved_cap or max_attempts or _get_max_rollout_attempts()
+        # An explicit recovery may record more attempts for every rollout (`--extend-attempts`), never fewer.
+        max_attempts = (saved_cap or max_attempts or _get_max_rollout_attempts()) + self._state.attempt_extension
         if retry_terminal_timeouts is not None:
             if not self._read_only and retry_terminal_timeouts != self.manifest.retry_terminal_timeouts:
                 manifest = self.manifest.model_copy(update={"retry_terminal_timeouts": retry_terminal_timeouts})
@@ -706,6 +707,23 @@ class RolloutStore:
 
     def coverage(self) -> dict:
         return self._state.coverage()
+
+    @property
+    def attempt_extension(self) -> int:
+        """Attempts an explicit recovery added to every rollout's saved cap (`--extend-attempts`)."""
+        return self._state.attempt_extension
+
+    @property
+    def attempt_cap(self) -> int:
+        """Every rollout's attempt cap: the saved ``max_rollout_attempts`` plus the recorded extension."""
+        return self._state.attempt_cap
+
+    def replayable_identities(self) -> set[str]:
+        """The logical rollouts this Store would run again under some attempt cap: its replay rule without the cap.
+
+        A recovery that asks for more attempts reads which exhausted rollouts the extension would make pending.
+        """
+        return {logical_rollout_id(row) for row in self._state.pending(1 << 62)}
 
     def write_coverage(self, **reporting: int) -> None:
         atomic_write_json(

@@ -740,6 +740,11 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
         args._parser.error("--repin and --repin-reason go together")
     if getattr(args, "extend_retries", None) is not None and not getattr(args, "recover", False):
         args._parser.error("--extend-retries needs --recover")
+    extend_attempts = getattr(args, "extend_attempts", None)
+    if extend_attempts is not None and not getattr(args, "recover", False):
+        args._parser.error("--extend-attempts needs --recover")
+    if extend_attempts is not None and not 0 < extend_attempts <= 100:
+        args._parser.error("--extend-attempts needs a whole number from 1 to 100")
     max_walltime, walltime_reason = getattr(args, "max_walltime", None), getattr(args, "walltime_reason", None)
     if (max_walltime is not None or walltime_reason is not None) and (
         not getattr(args, "recover", False) or inspect_only
@@ -805,6 +810,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
             extra = {} if repin is None else {"repin": repin, "repin_reason": repin_reason}
             if getattr(args, "extend_retries", None) is not None:
                 extra["extend_retries"] = args.extend_retries
+            if getattr(args, "extend_attempts", None) is not None:
+                extra["extend_attempts"] = args.extend_attempts
             if max_walltime is not None:
                 extra |= {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
             if allow_unsafe:
@@ -1933,6 +1940,17 @@ COMMANDS = {
                     metavar="N",
                     help="With --recover: record N more infra retries for this run on top of its configured cap; "
                     "the spent count is kept, the extension is journaled in the job dir and named in the decision.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--extend-attempts",
+                    type=int,
+                    metavar="N",
+                    help="With --recover: record N more attempts for every rollout on top of the run's saved "
+                    "max_rollout_attempts (1 to 100), so rollouts that used every attempt on infrastructure failures "
+                    "or allocation cuts run again; a rollout that ended with a model failure never does. The spent "
+                    "attempts are kept, and the extension is journaled in the job dir and named in the decision.",
                 ),
             ),
             Flag(

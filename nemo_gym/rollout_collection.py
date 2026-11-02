@@ -4382,7 +4382,7 @@ class RolloutCollectionHelper(BaseModel):
                             )
 
                 if failure_class is not None:
-                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.manifest.max_rollout_attempts
+                    result[NG_FAILURE_MAX_ATTEMPTS_KEY] = store.attempt_cap
                 completed_count += 1
                 if config.retain_results_in_memory:
                     rows.append(row)

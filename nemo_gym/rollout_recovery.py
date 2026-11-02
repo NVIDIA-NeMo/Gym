@@ -58,7 +58,7 @@ from nemo_gym.core.failure_kinds import (
     is_evaluation_side,
     is_server_status,
 )
-from nemo_gym.utils.path_utils import failures_path_for, resubmit_offset_path_for
+from nemo_gym.utils.path_utils import attempt_extension_path_for, failures_path_for, resubmit_offset_path_for
 
 
 def has_saved_generation(row: Mapping[str, Any]) -> bool:
@@ -550,6 +550,24 @@ def load_resubmit_offset(output_fpath: str | Path) -> int:
     except (ValueError, OSError) as error:
         raise ConfigError(f"Cannot read resubmit budget offset {path}: {error}") from error
     return offset
+
+
+def load_attempt_extension(output_fpath: str | Path) -> int:
+    """Attempts an explicit recovery added to every rollout's saved attempt cap (`--extend-attempts`); 0 when none.
+
+    A rollout's cap is the run's saved ``max_rollout_attempts`` plus this. An unreadable record stops the run rather
+    than guess its cap.
+    """
+    path = attempt_extension_path_for(Path(output_fpath))
+    if not path.exists():
+        return 0
+    try:
+        text = path.read_text().strip()
+        if not (text.isascii() and text.isdecimal()):
+            raise ValueError(f"not a whole number: {text[:40]!r}")
+        return int(text)
+    except (ValueError, OSError) as error:
+        raise ConfigError(f"Cannot read the recorded attempt extension {path}: {error}") from error
 
 
 def record_resubmit_offset(output_fpath: str | Path) -> int:
