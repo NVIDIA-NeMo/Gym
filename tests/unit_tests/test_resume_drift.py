@@ -253,3 +253,32 @@ def test_a_saved_identity_names_a_changed_value_on_the_other_server(tmp_path: Pa
     with pytest.raises(ConfigError, match=r"semantic settings differ: servers\.policy_b\.") as raised:
         validate_resume(path, current, materialized)
     assert "policy_a" not in str(raised.value)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "servers.agent.responses_api_agents.simple_agent.max_steps",
+        "servers.agent.responses_api_agents.simple_agent.execute_tools",
+        "servers.agent.responses_api_agents.simple_agent.some_new_setting",
+    ],
+)
+def test_an_agent_behaviour_or_unknown_setting_is_semantic(key):
+    from nemo_gym.rollout_recovery import _is_semantic
+
+    assert _is_semantic(key)
+
+
+@pytest.mark.parametrize(
+    "key",
+    [
+        "servers.agent.responses_api_agents.simple_agent.concurrency",
+        "servers.judge.responses_api_models.openai_model.max_concurrent_requests",
+        "servers.judge.responses_api_models.openai_model.request_timeout_s",
+        "servers.agent.responses_api_agents.simple_agent.max_retries",
+    ],
+)
+def test_an_operational_setting_stays_operational(key):
+    from nemo_gym.rollout_recovery import _is_semantic
+
+    assert not _is_semantic(key)

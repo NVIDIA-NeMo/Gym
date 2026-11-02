@@ -606,10 +606,12 @@ _SEMANTIC_KEYS = frozenset(
     }
 )
 # A setting named like this is operational (timeouts, retries, transport, ports, concurrency, health, paths, tracking),
-# unless a segment above already made its key semantic.
+# unless a segment above already made its key semantic. Every other setting is semantic: an unknown name could change
+# what the run produces (an agent's step budget, which tools it executes), so a resume across it is refused by name.
 _OPERATIONAL_SETTING = re.compile(
     r"(^|_)(timeout|timeouts|deadline|retry|retries|attempts|backoff|wait|interval|port|ports|host|hostname|url|urls"
-    r"|endpoint|concurrency|parallel|parallelism|workers|semaphore|pool|transport|version|log|logging|verbose|debug"
+    r"|endpoint|concurrency|concurrent|parallel|parallelism|workers|semaphore|pool|transport|version|log|logging"
+    r"|verbose|debug"
     r"|dir|path|fpath|cache|health|heartbeat|keepalive|tracking|mlflow|wandb|otel|telemetry|canary)(_|$)|_(s|ms)$"
 )
 # Any other key under a segment naming grading or the model is semantic: a judge, grader, verifier, reward, rubric,
@@ -636,9 +638,10 @@ def _is_semantic(key: str) -> bool:
     # Task data (task_parameters and the like) is part of the experiment whatever its keys are called.
     if any(segment in _SEMANTIC_KEYS or segment.startswith("task") for segment in segments):
         return True
-    if _OPERATIONAL_SETTING.search(segments[-1]):
-        return False
-    return any(part in segment for segment in segments for part in _SEMANTIC_PARTS)
+    if any(part in segment for segment in segments[:-1] for part in _SEMANTIC_PARTS):
+        # Under a grading or model segment only operational-named leaves (a judge's timeout) stay operational.
+        return not _OPERATIONAL_SETTING.search(segments[-1])
+    return not _OPERATIONAL_SETTING.search(segments[-1])
 
 
 def _differing_keys(saved: Any, current: Any, prefix: str = "") -> list[str]:
