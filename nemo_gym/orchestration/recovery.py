@@ -82,6 +82,7 @@ from nemo_gym.core.failure_kinds import (
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.orchestration.executors.resume_script import (
     ACCOUNTING_UNKNOWN_PREFIX,
+    CANCELLED_FOLLOWUP_MARKER,
     CONTINUATION_REASON_PREFIX,
     PROVISIONAL_MARKER_PREFIX,
 )
@@ -956,6 +957,9 @@ COLLECT_SCRIPT = (
     + "PROVISIONAL_MARKER_PREFIX = "
     + repr(PROVISIONAL_MARKER_PREFIX)
     + "\n"
+    + "CANCELLED_FOLLOWUP_MARKER = "
+    + repr(CANCELLED_FOLLOWUP_MARKER)
+    + "\n"
     + "TASK_ID_FIELDS = "
     + repr(TASK_ID_FIELDS)
     + "\n"
@@ -1440,13 +1444,15 @@ def resume_drift_keys():
     return [key[:200] for key in keys if isinstance(key, str)][:200] or None
 collected["resume_drift_keys"] = resume_drift_keys()
 def chain_continuation_note():
-    # A continuation's provisional line, left when it ended before queuing its follow-up (see resume_script).
+    # A continuation's provisional line, left when it ended before queuing its follow-up, or a sentinel's line for a
+    # follow-up cancelled before it started (see resume_script).
     try:
         text = open(os.path.join(d, ".gym_chain_incomplete")).read(2000)
     except OSError:
         return None
     line = text.strip().splitlines()[0] if text.strip() else ""
-    return line[:500] if line.startswith(PROVISIONAL_MARKER_PREFIX) else None
+    named = line.startswith(PROVISIONAL_MARKER_PREFIX) or CANCELLED_FOLLOWUP_MARKER in line
+    return line[:500] if named else None
 collected["chain_continuation_note"] = chain_continuation_note()
 print(json.dumps(collected))
 """

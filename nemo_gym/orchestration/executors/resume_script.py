@@ -77,6 +77,9 @@ RUNTIME_ADMISSION_MARKER = "# --- Installed-runtime continuation admission v1 --
 # The first words of the line a continuation writes to the incomplete marker as soon as it records itself, before
 # it has queued its own follow-up. It stays only when the job ended in between, before its guard.
 PROVISIONAL_MARKER_PREFIX = "Continuation "
+# The words of the line a sentinel writes when its follow-up was cancelled before it started and the parent did
+# not finish the run: the chain stopped there, and the line says why.
+CANCELLED_FOLLOWUP_MARKER = "was cancelled before it started"
 # Why the chain ends after a segment that timed out before Gym wrote the task inventory.
 PRE_INVENTORY_REASON = "the segment ended before the task inventory was written; nothing can be resumed"
 # Where a resumed segment records how many progress rows the Store held when it started (one file per job id).
@@ -151,7 +154,21 @@ if [[ -n "$_gym_sentinel_for" ]]; then
     [[ "$_gym_sentinel_elapsed" =~ ^[0-9]{{1,15}}$ ]] || \
         _gym_stop_accounting_unknown "Follow-up $_gym_sentinel_for accounting is unknown; its sentinel cannot tell whether it ran."
     if [[ -z "$_gym_sentinel_recorded" ]] && (( 10#$_gym_sentinel_elapsed == 0 )); then
+        # Slurm cancels the afternotok follow-up of a segment that COMPLETED: the run finished, and nothing is recorded.
+        _gym_parent_state=$(sacct -X -P -n -j "$_prev_slurm_job_id" --format=State 2>/dev/null | head -n 1)
+        _gym_parent_state=${{_gym_parent_state%% *}}
+        _gym_parent_state=${{_gym_parent_state%+}}
+        if [[ "$_gym_parent_state" == COMPLETED ]]; then
+            echo "Follow-up $_gym_sentinel_for never started: job $_prev_slurm_job_id completed, so Slurm cancelled it; sentinel ${{SLURM_JOB_ID:-}} leaves the chain as it is."
+            exit 0
+        fi
+        _gym_cancel_note="Follow-up $_gym_sentinel_for {cancelled_followup_marker} (job $_prev_slurm_job_id ended ${{_gym_parent_state:-in an unknown state}}); the chain stopped. Continue with gym eval resubmit --recover."
+        # A deliberate stop already says why the chain ended: only a missing marker or a provisional line is replaced.
+        if [[ ! -s "$_incomplete_file" ]] || grep -q '^{provisional_marker_prefix}' "$_incomplete_file" 2>/dev/null; then
+            echo "$_gym_cancel_note" > "$_incomplete_file"
+        fi
         echo "Follow-up $_gym_sentinel_for never started (it was cancelled); sentinel ${{SLURM_JOB_ID:-}} leaves the chain as it is."
+        echo "$_gym_cancel_note"
         exit 0
     fi
     if [[ -n "$_gym_sentinel_recorded" ]]; then
@@ -587,6 +604,7 @@ def render_resume_prologue(resume: ResumeConfig, *, admission_command: str = "fa
         resubmit_lock_name=RESUBMIT_LOCK_NAME,
         accounting_unknown_prefix=ACCOUNTING_UNKNOWN_PREFIX,
         provisional_marker_prefix=PROVISIONAL_MARKER_PREFIX,
+        cancelled_followup_marker=CANCELLED_FOLLOWUP_MARKER,
         allocation_accounting_marker=ALLOCATION_ACCOUNTING_MARKER,
         runtime_admission_marker=(
             RUNTIME_ADMISSION_MARKER if admission_command != "false" else "# No installed-runtime continuation reader"

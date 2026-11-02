@@ -1151,3 +1151,63 @@ def test_a_cut_before_the_inventory_still_takes_the_fresh_restart_path(tmp_path)
     assert result.returncode == 1
     marker = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
     assert "before the task inventory was written" in marker and "saved no rollout" not in marker
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_sentinel_records_why_the_chain_stopped_when_its_follow_up_was_cancelled_before_it_started(tmp_path):
+    # The parent timed out, so its follow-up should have run; someone cancelled it before it started.
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "TIMEOUT", extra_env=_sentinel_of("0"))
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    record = (tmp_path / INCOMPLETE_MARKER_NAME).read_text()
+    assert record.startswith("Follow-up 777 was cancelled before it started")
+    assert "job 100 ended TIMEOUT" in record and "gym eval resubmit" in record and "--recover" in record
+    assert record.strip() in result.stdout
+    assert (tmp_path / ".gym_job_chain").read_text() == "100\n"
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+def test_a_sentinel_records_nothing_when_its_parent_completed_and_slurm_cancelled_the_follow_up(tmp_path):
+    # A completed segment finished the run: Slurm cancels its afternotok follow-up, and the chain is done.
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "COMPLETED", extra_env=_sentinel_of("0"))
+
+    assert result.returncode == 0 and "REACHED_WORK" not in result.stdout, result.stdout + result.stderr
+    assert not (tmp_path / INCOMPLETE_MARKER_NAME).exists()
+    assert "job 100 completed" in result.stdout
+    assert _sbatch_calls(tmp_path) == []
+
+
+@pytest.mark.skipif(shutil.which("bash") is None, reason="bash not installed")
+@pytest.mark.parametrize(
+    "existing",
+    ["Accumulated walltime reached the cap; continue with gym eval resubmit --recover.", None],
+    ids=["deliberate-stop-kept", "provisional-line-replaced"],
+)
+def test_a_cancelled_follow_up_keeps_a_deliberate_stop_and_replaces_a_provisional_line(tmp_path, existing):
+    (tmp_path / ".gym_job_chain").write_text("100\n")
+    marker = tmp_path / INCOMPLETE_MARKER_NAME
+    marker.write_text((existing or f"{PROVISIONAL_MARKER_PREFIX}100 started and had not queued its follow-up") + "\n")
+    result = _run_prologue(tmp_path, ResumeConfig(), "FAILED", extra_env=_sentinel_of("0"))
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    if existing:
+        assert marker.read_text() == existing + "\n"
+    else:
+        assert marker.read_text().startswith("Follow-up 777 was cancelled before it started")
+
+
+def test_inspection_names_a_follow_up_cancelled_before_it_started(tmp_path):
+    from nemo_gym.orchestration.recovery import decide_from_collected
+    from tests.unit_tests.test_eval_resubmit_decision import collect, ident, write_job_dir
+
+    job = write_job_dir(tmp_path / "job", n=2, results=[ident(0, reward=1.0)], failures=[])
+    line = "Follow-up 777 was cancelled before it started (job 100 ended TIMEOUT); the chain stopped."
+    (job / INCOMPLETE_MARKER_NAME).write_text(line + "\n")
+    collected = collect(job)
+    decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
+
+    assert collected.chain_continuation_note == line
+    assert f"the chain recorded: {line}" in decision.reason
