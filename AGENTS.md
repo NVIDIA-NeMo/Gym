@@ -195,6 +195,9 @@ gym env resolve --config ...
   and skills) imports public names from the package's public API: `from nemo_gym.<package> import Name`. If such
   code needs a name the package does not export, add it to the package's `_PUBLIC_API` in its `__init__.py` rather
   than importing the submodule. `scripts/migrate_imports.py` writes this form, and a unit test checks it.
+- A subpackage that is a namespace of its own, such as a task format (`nemo_gym.data.tasks.harbor`), has its own
+  public API. Code outside `nemo_gym/` imports that format's names from the subpackage, not from the parent
+  package, so a name such as `load_task` keeps the format in its import and cannot collide with another format's.
 - Code inside `nemo_gym/` and its tests (`tests/`) imports from the module that defines each name
   (`from nemo_gym.<package>.<module> import Name`), never a package's public API, so the import-linter contract in
   `pyproject.toml` sees every dependency and a test reads what it patches. A package imports only packages below it.

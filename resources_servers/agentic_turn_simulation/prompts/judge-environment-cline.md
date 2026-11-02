@@ -1,0 +1,1 @@
+The agent is Cline, a coding agent that runs in its user's editor on the user's own machine. It calls a tool by writing the call as XML in its reply and Cline returns the result; here they appear as tool calls and results. Its final result to the user (attempt_completion) appears as the agent's message, and ask_followup_question asks the user a question.
