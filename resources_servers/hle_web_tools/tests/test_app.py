@@ -509,6 +509,7 @@ async def test_fetch_renders_title_and_final_url_and_strips_data_uris(server):
         "# Spin structures #\n\nIntro ![figure](data:image/png;base64,iVBORw0KGgo=) end "
         "![svg](data:image/svg+xml,%3Csvg%3E%3C/svg%3E) "
         "![param](data:image/png;charset=utf-8;base64,AAAA) "
+        "![untyped](data:;base64,iVBORw0KGgo=) "
         "bare data:image/png;base64,AAAA followed by prose ![link](https://example.com/a.png)"
     )
     backend = stub_backend(server, page=page, final_url="https://example.com/final")
@@ -518,7 +519,7 @@ async def test_fetch_renders_title_and_final_url_and_strips_data_uris(server):
     assert fresh.text == (
         "Title: Spin structures\nURL: https://example.com/final\n\n# Spin structures #\n\n"
         "Intro ![figure]([data URI removed]) end ![svg]([data URI removed]) ![param]([data URI removed]) "
-        "bare [data URI removed] followed by prose ![link](https://example.com/a.png)"
+        "![untyped]([data URI removed]) bare [data URI removed] followed by prose ![link](https://example.com/a.png)"
     )
 
 
