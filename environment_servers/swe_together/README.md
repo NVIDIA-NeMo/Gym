@@ -70,6 +70,28 @@ The task manifest, simulator, prompts, and scoring mechanics are adapted from
 old second model-call fallback is deliberately omitted: one consultation produces
 one non-agentic model response, with local parsing of that response.
 
+## Model-call evidence and ownership limitation
+
+With model-call capture enabled, simulator requests and responses remain in the
+episode's capture scope and can be correlated with the generated user messages.
+They have no standardized invocation owner in the shared trajectory contract.
+Consequently, `ownership.call_owner` and `steps.attempt_accounting` conformance
+checks can fail on simulator calls even when capture and message correlation are
+complete. This accepted limitation is separate from missing candidate steps or
+failed model requests, which still require investigation.
+
+SWE-Together's interactive simulator does not justify a shared environment-owner
+contract solely for this benchmark: that additional surface offers limited value
+over the existing captured and correlated evidence. Simulator calls remain visible
+without being relabeled as candidate or verifier calls or excluded from checking.
+
+Interaction-scoring calls use the existing verifier ownership context. Each
+physical judge session has its own capture key; its captured exchanges are merged
+into the parent trajectory using the judge's close-receipt references. Raw captures
+and ownership provenance are retained, and missing or ambiguous evidence remains
+an explicit gap. Recognized Claude session-title housekeeping is excluded from
+canonical judge calls with its reason recorded in provenance.
+
 ## Ownership, reuse, and restart behavior
 
 Shared HTTP servers with per-episode sessions follow

@@ -1,8 +1,20 @@
 # Sandboxed mini-SWE
 
+> [!WARNING]
+> **The legacy `/run` path is deprecated.** With `resources_server` set, as in the benchmark presets
+> (for example [`benchmarks/terminal_bench_4/miniswe.yaml`](../../benchmarks/terminal_bench_4/miniswe.yaml)),
+> this agent runs each episode through its own `/run` behind a `legacy_agent` environment server.
+> That path will be removed after the environment-server migration, and the agent logs a deprecation
+> warning when it starts with a `resources_server`. Do not build new benchmarks, agents or configs on it.
+>
+> Episode sessions under an environment server are not deprecated: see [Harbor episodes](#harbor-episodes).
+> Terminal Bench 4 runs that way from its Harbor task folders (`gym eval run terminal_bench_4 --agent
+> miniswe_sandboxed_agent`; see [`environments/harbor/terminal_bench_4`](../../environments/harbor/terminal_bench_4/README.md)).
+> Terminal-Bench-Science has no session path yet and stays on `/run` until it does.
+
 Run pinned mini-SWE 2.4.6 directly in a resource-owned Linux sandbox, using its
 native CLI, `DefaultAgent`, `LocalEnvironment`, and `litellm_response` model.
-Use [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
+The legacy `/run` path uses [the TB4 profile](../../benchmarks/terminal_bench_4/miniswe.yaml) with
 [TB4 resources](../../resources_servers/terminal_bench_4/README.md).
 
 `harness.py` supplies execution and trajectory conversion; it imports no benchmark
@@ -106,7 +118,10 @@ Removing the custom wrapper has these limits:
   retain that evidence. The observability test asserts this gap until it is fixed.
 - Native trajectories are saved after each step. A forced kill during a model
   request or command can lose the active step, or leave a partially written
-  trajectory. Gym model-server capture remains independent of that file.
+  trajectory. Gym model-server capture remains independent of that file. A run
+  that exits abnormally with a saved trajectory but no exit status was killed
+  mid-run and is reported as `killed`; without a saved trajectory it stays an
+  infrastructure error.
 - Wrapper-specific runtime metadata and `OutputTokenLimitExceeded` normalization
   are removed. Native termination names and CLI logs are retained.
 - MCP tools remain available through a persistent task-local CLI session, but

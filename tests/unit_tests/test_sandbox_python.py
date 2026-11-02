@@ -54,6 +54,52 @@ async def test_the_probe_reads_the_architecture_and_c_library(libc: str, expecte
 
 
 @pytest.mark.parametrize(
+    "getconf, ldd, musl_loader, expected",
+    [
+        ("glibc 2.36", None, False, SandboxPlatform("x86_64", "gnu", 36)),
+        ("glibc 2.36", None, True, SandboxPlatform("x86_64", "gnu", 36)),
+        (None, "ldd (Debian GLIBC 2.36-9) 2.36", False, SandboxPlatform("x86_64", "gnu", 36)),
+        (None, "ldd (Debian GLIBC 2.36-9) 2.36", True, SandboxPlatform("x86_64", "gnu", 36)),
+        (None, "ldd (GNU libc) 2.35", True, SandboxPlatform("x86_64", "gnu", 35)),
+        (None, "musl libc (x86_64)", True, SandboxPlatform("x86_64", "musl")),
+        (None, None, True, SandboxPlatform("x86_64", "musl")),
+        (None, None, False, SandboxPlatform("x86_64", "gnu", None)),
+    ],
+)
+async def test_probe_prefers_glibc_over_an_optional_musl_loader(getconf, ldd, musl_loader, expected) -> None:
+    # Execute the actual POSIX-shell probe, modeling installed utilities rather than supplying its final output.
+    utilities = (
+        'uname() { if [ "$1" = -s ]; then echo Linux; else echo x86_64; fi; }; '
+        f"getconf() {{ printf '%s\\n' {shlex.quote(getconf or '')}; return {0 if getconf else 1}; }}; "
+        f"ldd() {{ printf '%s\\n' {shlex.quote(ldd or 'ldd: not found')} >&2; "
+        f"return {1 if not ldd or ldd.startswith('musl') else 0}; }}; "
+        f"ls() {{ return {0 if musl_loader else 1}; }}; "
+    )
+
+    class ShellSandbox:
+        async def exec(self, command: str, *, cwd: str, timeout_s: float) -> SandboxExecResult:
+            process = await asyncio.create_subprocess_exec(
+                "/bin/sh",
+                "-c",
+                utilities + command,
+                cwd=cwd,
+                stdout=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            stdout, stderr = await asyncio.wait_for(process.communicate(), timeout_s)
+            return SandboxExecResult(
+                stdout=stdout.decode(errors="replace"),
+                stderr=stderr.decode(errors="replace"),
+                return_code=process.returncode,
+            )
+
+    platform = await probe_sandbox_platform(ShellSandbox())
+
+    assert platform == expected
+    assert platform.wheel_platform == expected.wheel_platform
+
+
+@pytest.mark.parametrize(
     "stdout, return_code, match",
     [
         ("Darwin\narm64\nglibc 2.35\n", 0, "Darwin on arm64"),

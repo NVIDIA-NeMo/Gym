@@ -9,7 +9,7 @@ from typing import Any, Dict, List, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
 
-from nemo_gym.base_resources_server import BaseResourcesServerConfig
+from nemo_gym.server_runtime import BaseResourcesServerConfig
 
 
 class RemoteDockerWorkerConfig(BaseModel):

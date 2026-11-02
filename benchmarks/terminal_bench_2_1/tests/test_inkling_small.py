@@ -10,7 +10,7 @@ import pytest
 from omegaconf import OmegaConf
 
 from benchmarks.terminal_bench_2_1 import prepare_inkling_small as preparation
-from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
+from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.task_materialization import materialize_task
 
 

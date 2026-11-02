@@ -16,7 +16,7 @@ from fastapi.testclient import TestClient
 
 from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from nemo_gym.base_responses_api_agent import AGENT_ACTIVATION_HEADER, AgentCloseSessionRequest
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 from responses_api_agents.opencode_agent.continuation import classify_opencode_run
 from responses_api_agents.opencode_agent.snapshot import snapshot
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
@@ -628,15 +628,11 @@ def test_reported_error_retains_continuation_evidence(
 
 
 def test_collector_and_existing_conformance_keep_two_activation_owners(setup, tmp_path):
-    from nemo_gym.base_responses_api_model import ModelCallRecord
     from nemo_gym.harness_capabilities.checker import EvidenceScope, inspect_record
+    from nemo_gym.observability.model_calls import ModelCallRecord
     from nemo_gym.rollout_collection import _build_trajectory_record
-    from nemo_gym.rollout_observability import (
-        AgentObservationBundle,
-        TrajectoryRecord,
-        join_agent_model_calls,
-        join_assistant_message_calls,
-    )
+    from nemo_gym.trajectory import AgentObservationBundle, TrajectoryRecord
+    from nemo_gym.trajectory.trajectory_record import join_agent_model_calls, join_assistant_message_calls
 
     agent, sandbox = setup
     install_artifact_runner(sandbox, tmp_path)
@@ -951,3 +947,31 @@ def test_snapshot_scopes_delta_and_keeps_cumulative_store(tmp_path):
         assert con.execute("select count(*) from message").fetchone()[0] == 2
     with pytest.raises(RuntimeError, match="unexpected session"):
         snapshot(database, activation, harness_session_id="wrong", previous_message_ids=[])
+
+
+def test_missing_native_step_diagnostics_survive_http_close(setup, tmp_path):
+    agent, sandbox = setup
+    install_artifact_runner(sandbox, tmp_path)
+    launch = sandbox.launch.side_effect
+
+    async def launch_without_step(**kwargs):
+        result = await launch(**kwargs)
+        with sqlite3.connect(tmp_path / "session.db") as con:
+            con.execute("delete from part where id like 'step-%'")
+        return result
+
+    sandbox.launch.side_effect = launch_without_step
+    with TestClient(agent.setup_webserver()) as client:
+        request = start(client)
+        assert activate(client, 1).status_code == 200
+        receipt = close(client, request)
+        assert receipt["trajectory"]["turns"] == []
+        gap = next(gap for gap in receipt["trajectory"]["gaps"] if gap["code"] == "turns_unavailable")
+        native, lifecycle = gap["detail"].split("; capture_lifecycle=")
+        metadata = json.loads(native.split("; native_capture_diagnostics=")[1])
+        assert [part["type"] for part in metadata["parts"]] == ["text"]
+        capture = json.loads(lifecycle)
+        assert capture["capture_started_at"] <= capture["parse_completed_at"]
+        assert capture["cleanup"] == {"cleanup_confirmed": True, "timed_out": False, "return_code": 0}
+        assert "Answer 0" not in gap["detail"]
+        assert close(client, request) == receipt
