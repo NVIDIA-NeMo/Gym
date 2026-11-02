@@ -14,10 +14,14 @@
 # limitations under the License.
 
 import asyncio
+import errno
+import importlib.util
 import json
 import os
+import re
 import shlex
 import sys
+from functools import cache
 from glob import glob
 from pathlib import Path
 from shutil import rmtree
@@ -33,7 +37,8 @@ import rich
 import uvicorn
 from devtools import pprint
 from omegaconf import DictConfig, ListConfig, OmegaConf
-from pydantic import Field
+from pydantic import BaseModel, Field, ValidationError
+from rich.markup import escape
 from rich.table import Table
 from tqdm.auto import tqdm
 
@@ -47,7 +52,29 @@ from nemo_gym.cli.utils import (
     print_rich_table,
     render_component_inspection,
 )
-from nemo_gym.config_types import BaseNeMoGymCLIConfig, ConfigError
+from nemo_gym.client.server_client import ServerClient, ServerStatus
+from nemo_gym.config.config_types import BaseNeMoGymCLIConfig, ConfigError, EnvironmentServerConfigError
+from nemo_gym.config.global_config import (
+    COMPONENT_NAME_KEY_NAME,
+    DRY_RUN_KEY_NAME,
+    ENVIRONMENT_SERVER_TYPE_KEY_NAME,
+    HEAD_SERVER_KEY_NAME,
+    JSON_OUTPUT_KEY_NAME,
+    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
+    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
+    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
+    NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
+    PORT_RANGE_HIGH_KEY_NAME,
+    PORT_RANGE_LOW_KEY_NAME,
+    QUERY_KEY_NAME,
+    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
+    SERVER_TYPE_KEYS,
+    GlobalConfigDictParser,
+    GlobalConfigDictParserConfig,
+    _find_open_port_using_range,
+    get_global_config_dict,
+)
+from nemo_gym.core.failure_kinds import SERVER_START_FAILED
 from nemo_gym.environment.manifest import EnvironmentKind, IntegrationProfile
 from nemo_gym.environment.onboarding import (
     EnvironmentOnboardingError,
@@ -57,21 +84,6 @@ from nemo_gym.environment.onboarding import (
 from nemo_gym.environment.publication import finalize_publication
 from nemo_gym.environment.scaffold import scaffold_environment, scaffold_resources_server
 from nemo_gym.environment.validation import EnvironmentValidationReport, validate_environment
-from nemo_gym.global_config import (
-    COMPONENT_NAME_KEY_NAME,
-    DRY_RUN_KEY_NAME,
-    JSON_OUTPUT_KEY_NAME,
-    MODEL_ENDPOINT_READINESS_TIMEOUT_KEY_NAME,
-    NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
-    NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
-    NEMO_GYM_RESERVED_TOP_LEVEL_KEYS,
-    QUERY_KEY_NAME,
-    SERVER_SPINUP_TIMEOUT_SECONDS_KEY_NAME,
-    SERVER_TYPE_KEYS,
-    GlobalConfigDictParser,
-    GlobalConfigDictParserConfig,
-    get_global_config_dict,
-)
 from nemo_gym.h2_ping_sidecar.launcher import H2PingSidecarManager, start_h2_ping_sidecar
 from nemo_gym.registry import (
     EnvironmentCatalogEntry,
@@ -80,14 +92,12 @@ from nemo_gym.registry import (
     read_environment_details,
     resolve_catalog_entry,
 )
-from nemo_gym.server_status import StatusCommand
+from nemo_gym.server_runtime.server_status import StatusCommand
 from nemo_gym.server_utils import (
-    HEAD_SERVER_KEY_NAME,
     HeadServer,
-    ServerClient,
     ServerInstanceDisplayConfig,
-    ServerStatus,
     entrypoint_ray_enabled,
+    entrypoint_server_class_names,
     initialize_ray,
     ray_is_installed,
 )
@@ -374,15 +384,18 @@ def _configured_servers(global_config_dict: DictConfig) -> Iterator[_ConfiguredS
     """Yield each server instance in the config that has an entrypoint to launch."""
     top_level_paths = [k for k in global_config_dict.keys() if k not in NEMO_GYM_RESERVED_TOP_LEVEL_KEYS]
 
-    # TODO there is a better way to resolve this that uses nemo_gym/global_config.py::ServerInstanceConfig
+    # TODO there is a better way to resolve this that uses nemo_gym/config/global_config.py::ServerInstanceConfig
     for top_level_path in top_level_paths:
         server_config_dict = global_config_dict[top_level_path]
         if not isinstance(server_config_dict, DictConfig):
             continue
 
-        first_key = list(server_config_dict)[0]
+        # Top-level mappings may be interpolation inputs rather than server instances.
+        first_key = next((key for key in server_config_dict if key in SERVER_TYPE_KEYS), None)
+        if first_key is None:
+            continue
         server_config_dict = server_config_dict[first_key]
-        if not isinstance(server_config_dict, DictConfig):
+        if not isinstance(server_config_dict, DictConfig) or not server_config_dict:
             continue
         second_key = list(server_config_dict)[0]
         server_config_dict = server_config_dict[second_key]
@@ -507,6 +520,31 @@ class ServerSpinupTimeoutError(RuntimeError):
     """Gym servers did not become ready within `server_spinup_timeout_seconds`."""
 
 
+class ServerStartFailedError(RuntimeError):
+    """A Gym server process (or the head server) exited before it was ready.
+
+    ``failure_kind`` is ``server_start_failed``. ``errno`` is the errno of the bind error the server printed, when it
+    printed one: ``errno.EADDRINUSE`` means another process took its port between the port check and the bind.
+    """
+
+    failure_kind = SERVER_START_FAILED
+
+    def __init__(self, message: str, *, server_name: str, errno: int | None) -> None:
+        super().__init__(message)
+        self.server_name = server_name
+        self.errno = errno
+
+
+# uvicorn's report of a failed bind: "[Errno 98] error while attempting to bind on address (...)".
+_BIND_ERRNO_PATTERN = re.compile(r"\[Errno (\d+)\] error while attempting to bind")
+
+
+def _bind_errno(stderr: str | None) -> int | None:
+    """The errno of the bind error a server printed on stderr, or None when it printed none."""
+    match = _BIND_ERRNO_PATTERN.search(stderr or "")
+    return int(match.group(1)) if match else None
+
+
 def _startup_outcome(error: BaseException) -> str:
     """How a startup that raised `error` ended, as the startup telemetry reports it."""
     if isinstance(error, ServerSpinupTimeoutError):
@@ -538,19 +576,55 @@ class RunHelper:  # pragma: no cover
         Callers reach their own `shutdown()` only after this returns.
         The spawned servers have no process group or atexit handler, so nothing else would stop them.
         """
-        self._processes = dict()
-        self._head_server = None
-        self._h2_ping_sidecar = None
-        try:
-            self._start(global_config_dict_parser_config)
-        except BaseException as error:
-            # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
-            if self._startup is not None:
-                self._startup.abort(_startup_outcome(error), error)
-            self.shutdown()
-            raise
+        for attempt in (1, 2):
+            self._processes = dict()
+            self._head_server = None
+            self._h2_ping_sidecar = None
+            # Until every server is ready, a server that exits is a failed start (see poll()).
+            self._servers_ready = False
+            try:
+                self._start(global_config_dict_parser_config)
+                return
+            except BaseException as error:
+                # Before shutdown, which flushes telemetry, so the failed startup's spans are exported.
+                if self._startup is not None:
+                    self._startup.abort(_startup_outcome(error), error)
+                # The sidecar rewrote the model URLs in the config; a second start would point them at a stopped one.
+                sidecar_started = self._h2_ping_sidecar is not None
+                self.shutdown()
+                if attempt == 2 or sidecar_started or not self._move_to_a_fresh_port(error):
+                    raise
+
+    def _move_to_a_fresh_port(self, error: BaseException) -> bool:
+        """After a server found its port in use, give it a fresh one in the config every server is started from.
+
+        Each server learns every other server's port from that config when it starts, so the caller starts them all
+        again. Only a bind that failed with EADDRINUSE qualifies; the head server keeps its configured port.
+        """
+        if not isinstance(error, ServerStartFailedError) or error.errno != errno.EADDRINUSE:
+            return False
+        server_config = getattr(self, "_server_configs", {}).get(error.server_name)
+        if server_config is None:
+            return False
+        global_config_dict = get_global_config_dict()
+        taken = [config.get("port") for config in self._server_configs.values()]
+        taken.append(global_config_dict.get(HEAD_SERVER_KEY_NAME, {}).get("port"))
+        port = _find_open_port_using_range(
+            disallowed_ports=[port for port in taken if isinstance(port, int)],
+            port_range_low=global_config_dict[PORT_RANGE_LOW_KEY_NAME],
+            port_range_high=global_config_dict[PORT_RANGE_HIGH_KEY_NAME],
+        )
+        print(
+            f"`{error.server_name}` could not bind port {server_config.get('port')}: address already in use. "
+            f"Starting every server again once, with `{error.server_name}` on port {port}."
+        )
+        # The key exists (config resolution set it), so a struct-mode config accepts the new value.
+        server_config["port"] = port
+        return True
 
     def _start(self, global_config_dict_parser_config: GlobalConfigDictParserConfig) -> None:
+        # Each started server's node in the config it is started from, for a retry on a fresh port.
+        self._server_configs: Dict[str, DictConfig] = {}
         self._startup = SupervisorStartup()
         global_config_dict = get_global_config_dict(global_config_dict_parser_config=global_config_dict_parser_config)
 
@@ -611,6 +685,7 @@ class RunHelper:  # pragma: no cover
             entrypoint_fpath,
             dir_path,
         ) in configured_servers:
+            self._server_configs[top_level_path] = server_config_dict
             # Name the venv in the logs: the server runs that venv's interpreter (see _server_launch_command).
             print(f"Starting `{top_level_path}` from venv {get_venv_path(dir_path, global_config_dict)}")
             command = _server_launch_command(dir_path, global_config_dict, top_level_path, entrypoint_fpath)
@@ -680,18 +755,7 @@ class RunHelper:  # pragma: no cover
             global_config_dict=global_config_dict,
         )
 
-        print("Waiting for head server to spin up")
-        poll_count = 0
-        while True:
-            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
-            if status == "success":
-                break
-
-            if poll_count % 10 == 0:  # Print every 30s
-                print(f"Head server is not up yet (status `{status}`). Sleeping...")
-
-            poll_count += 1
-            sleep(3)
+        self._wait_for_head_server()
         self._startup.mark("wait_for_head_server")
 
         print("Waiting for servers to spin up")
@@ -699,6 +763,28 @@ class RunHelper:  # pragma: no cover
             self.wait_for_dry_run_spinup()
         else:
             self.wait_for_server_readiness(global_config_dict)
+
+    def _wait_for_head_server(self) -> None:
+        """Wait until the head server answers; a head server thread that ended (a failed bind) never will."""
+        print("Waiting for head server to spin up")
+        poll_count = 0
+        while True:
+            status = self._server_client.poll_for_status(HEAD_SERVER_KEY_NAME)
+            if status == "success":
+                return
+            if not self._head_server_thread.is_alive():
+                raise ServerStartFailedError(
+                    "server_start_failed: the head server exited before it was ready; its error is in the log "
+                    f"above. Is its port already in use? Set it with `++{HEAD_SERVER_KEY_NAME}.port=<port>`.",
+                    server_name=HEAD_SERVER_KEY_NAME,
+                    errno=None,
+                )
+
+            if poll_count % 10 == 0:  # Print every 30s
+                print(f"Head server is not up yet (status `{status}`). Sleeping...")
+
+            poll_count += 1
+            sleep(3)
 
     def wait_for_server_readiness(self, global_config_dict: DictConfig) -> None:
         """Mark the head ready only after every managed server and model endpoint is reachable."""
@@ -710,6 +796,7 @@ class RunHelper:  # pragma: no cover
         if self._startup is not None:
             self._startup.mark("wait_for_model_endpoints")
         self._head_server_instance.mark_ready()
+        self._servers_ready = True
         if self._startup is not None:
             self._startup.finish()
 
@@ -755,6 +842,12 @@ Process `{process_name}` stdout:
 Process `{process_name}` stderr:
 {proc_err}"""
 
+                if not getattr(self, "_servers_ready", True):
+                    raise ServerStartFailedError(
+                        f"server_start_failed: {print_str}",
+                        server_name=process_name,
+                        errno=_bind_errno(proc_err if isinstance(proc_err, str) else None),
+                    )
                 raise RuntimeError(print_str)
 
     def wait_for_dry_run_spinup(self) -> None:
@@ -1512,6 +1605,75 @@ def init_resources_server():  # pragma: no cover
     scaffold_resources_server(directory=dirpath, checkout_root=checkout_root)
 
 
+@cache
+def _entrypoint_config_class(entrypoint_fpath: Path, module_name: str) -> type[BaseModel]:
+    """The config class of the server an entrypoint runs, the one its launch validates its block against."""
+    spec = importlib.util.spec_from_file_location(module_name, entrypoint_fpath)
+    if spec is None or spec.loader is None:  # pragma: no cover - importlib internals
+        raise ImportError(f"no import spec for {entrypoint_fpath}")
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec, so annotations that pydantic resolves through sys.modules are found.
+    sys.modules[module_name] = module
+    try:
+        spec.loader.exec_module(module)
+    except BaseException:
+        sys.modules.pop(module_name, None)
+        raise
+    config_classes = {
+        server_class.model_fields["config"].annotation
+        for class_name in entrypoint_server_class_names(entrypoint_fpath)
+        if isinstance(server_class := getattr(module, class_name, None), type)
+        and issubclass(server_class, BaseModel)
+        and "config" in server_class.model_fields
+    }
+    if len(config_classes) != 1:
+        raise LookupError("it does not call run_webserver() on exactly one server class with a config")
+    return config_classes.pop()
+
+
+def _check_environment_server_configs(global_config_dict: DictConfig) -> List[str]:
+    """Validate each Environment Server block against its server's config class without starting it.
+
+    `gym env start` applies that class only when the server launches, after the other servers are up. Environment
+    Servers ship with Gym and need few packages of their own, so this process imports their entrypoints. A server
+    whose entrypoint does not import here is left to its launch: the returned warnings name each one.
+
+    Raises EnvironmentServerConfigError listing every invalid field, by its path in the merged config.
+    """
+    errors: List[str] = []
+    unchecked: List[str] = []
+    for server in _configured_servers(global_config_dict):
+        if server.server_type != ENVIRONMENT_SERVER_TYPE_KEY_NAME:
+            continue
+        source = f"{server.server_type}/{server.name}/{server.entrypoint_fpath}"
+        module_name = ".".join(
+            ["nemo_gym_environment_server_entrypoint", server.name, *server.entrypoint_fpath.with_suffix("").parts]
+        )
+        try:
+            config_class = _entrypoint_config_class(server.dir_path / server.entrypoint_fpath, module_name)
+        except Exception as error:  # Its own venv may have what this one lacks.
+            unchecked.append(
+                f"Could not check Environment Server '{server.top_level_path}' before launch, so `gym env start` "
+                f"checks its config when it launches. Loading {source} here failed: {type(error).__name__}: {error}"
+            )
+            continue
+        server_config = OmegaConf.to_container(server.config, resolve=True) | {"name": server.top_level_path}
+        try:
+            config_class.model_validate(server_config)
+        except ValidationError as error:
+            block_path = f"{server.top_level_path}.{server.server_type}.{server.name}"
+            errors.append(f"'{server.top_level_path}' ({source}) does not match {config_class.__name__}:")
+            errors.extend(
+                f"  {'.'.join([block_path, *map(str, detail['loc'])])}: {detail['msg']}" for detail in error.errors()
+            )
+    if errors:
+        raise EnvironmentServerConfigError(
+            "Environment Server config is invalid, so `gym env start` would fail when the server launches.\n"
+            + "\n".join(errors)
+        )
+    return unchecked
+
+
 @exit_cleanly_on_config_error
 def dump_config():  # pragma: no cover
     """
@@ -1533,6 +1695,14 @@ def dump_config():  # pragma: no cover
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
 
     print(OmegaConf.to_yaml(global_config_dict, resolve=True))
+
+    # The config prints either way, since it is what you debug a failing config with.
+    try:
+        unchecked = _check_environment_server_configs(global_config_dict)
+    except EnvironmentServerConfigError as error:
+        unchecked = [str(error)]
+    for warning in unchecked:
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
 
 
 class ManifestCommandConfig(BaseNeMoGymCLIConfig):
@@ -1627,6 +1797,8 @@ def validate() -> None:
         )
 
     BaseNeMoGymCLIConfig.model_validate(global_config_dict)
+    for warning in _check_environment_server_configs(global_config_dict):
+        rich.print(f"[yellow]Warning:[/yellow] {escape(warning)}", file=sys.stderr)
     if incomplete_config_error is not None:
         rich.print(
             "[yellow]Warning:[/yellow] this config does not define model server configuration "

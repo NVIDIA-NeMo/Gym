@@ -17,7 +17,10 @@ from unittest.mock import MagicMock
 
 from pytest import MonkeyPatch
 
-from nemo_gym.config_types import UploadJsonlDatasetHuggingFaceConfig, UploadJsonlDatasetHuggingFaceMaybeDeleteConfig
+from nemo_gym.config.config_types import (
+    UploadJsonlDatasetHuggingFaceConfig,
+    UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
+)
 from nemo_gym.dataset_orchestrator import delete_jsonl_dataset_from_gitlab, upload_jsonl_dataset_to_hf_maybe_delete
 
 

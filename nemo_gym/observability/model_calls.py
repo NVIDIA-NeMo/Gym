@@ -13,15 +13,20 @@ from typing import Any, Literal, Mapping, Optional
 from pydantic import BaseModel, Field
 
 from nemo_gym.base_responses_api_model import CaptureStore, ModelCallCaptureConfig
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.rollout_correlation import maybe_rollout_id_from_run_body
-from nemo_gym.rollout_observability import (
+from nemo_gym.config.config_types import ModelServerRef
+from nemo_gym.core.episode import maybe_rollout_id_from_run_body
+from nemo_gym.failure_transport import FailureReportRow, ModelOperationObservation, StreamFailureReportReader
+from nemo_gym.server_runtime.episode_types import FailureReport
+from nemo_gym.server_runtime.verifier_observability import merge_verifier_call_observation
+from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     AgentObservationBundle,
     ObservationGap,
     TrajectoryRecord,
+    VerifierInvocation,
+    exclude_verifier_model_calls,
+    join_agent_model_calls,
     join_assistant_message_calls,
-    join_model_call_observations,
 )
 
 
@@ -137,6 +142,15 @@ def _tool_calls_and_reasoning(response: dict[str, Any]) -> tuple[list[dict[str, 
                         "arguments": _as_arguments(item.get("arguments")),
                     }
                 )
+            elif item.get("type") == "custom_tool_call":
+                # A free-form tool takes one raw string; record it the way a function stand-in takes it.
+                tool_calls.append(
+                    {
+                        "call_id": item.get("call_id") or item.get("id"),
+                        "name": item.get("name"),
+                        "arguments": {"input": item.get("input")},
+                    }
+                )
             elif item.get("type") == "reasoning":
                 for summary in item.get("summary") or []:
                     text = summary.get("text") if isinstance(summary, dict) else None
@@ -209,6 +223,8 @@ class ModelCallRecord(BaseModel):
     response_source: Optional[Literal["upstream", "local"]] = None
     upstream_status_code: Optional[int] = None
     local_response_reason: Optional[str] = None
+    failure_report: FailureReport | None = None
+    model_operations: list[ModelOperationObservation] | None = None
 
     # Wall-clock bounds around the downstream ASGI invocation, as UTC Unix timestamps. These are
     # for external trace correlation; durations use the monotonic latency fields below.
@@ -296,6 +312,8 @@ def build_model_call_record(exchange: dict[str, Any], *, call_index: int) -> Mod
         response_source=exchange.get("response_source"),
         upstream_status_code=exchange.get("upstream_status_code"),
         local_response_reason=exchange.get("local_response_reason"),
+        failure_report=exchange.get("failure_report"),
+        model_operations=exchange.get("model_operations"),
         started_at=exchange.get("started_at"),
         completed_at=exchange.get("completed_at"),
         request=raw_request if isinstance(raw_request, dict) else None,
@@ -322,14 +340,24 @@ def read_model_call_records(store: CaptureStore, rollout_id: str) -> list[ModelC
 
 def read_available_model_call_records(store: CaptureStore, rollout_id: str) -> tuple[list[ModelCallRecord], int]:
     """Read valid call records and count damaged records."""
+    calls, _, invalid_count = _read_capture_records(store, rollout_id)
+    return calls, invalid_count
+
+
+def _read_capture_records(
+    store: CaptureStore, rollout_id: str
+) -> tuple[list[ModelCallRecord], dict[str, "VerifierInvocation"], int]:
     exchanges, invalid_count = store.read_available(rollout_id)
     calls = []
+    verifier_invocations: dict[str, "VerifierInvocation"] = {}
     for index, exchange in exchanges:
         try:
-            calls.append(build_model_call_record(exchange, call_index=index))
+            call = build_model_call_record(exchange, call_index=index)
+            calls.append(call)
+            merge_verifier_call_observation(verifier_invocations, exchange, model_call_id=call.model_call_id)
         except Exception:
             invalid_count += 1
-    return calls, invalid_count
+    return calls, verifier_invocations, invalid_count
 
 
 def aggregate_model_call_records(calls: list[ModelCallRecord]) -> dict[str, Any]:
@@ -458,13 +486,14 @@ def merge_model_call_capture_into_record(
     if rollout_id is None:
         return record
     gaps: list[ObservationGap] = []
+    verifier_invocations: dict[str, "VerifierInvocation"] = {}
     store = _store_for_rollout(rollout_id, capture_dirs)
     if store is None:
         calls = []
         gaps.append(ObservationGap(code="model_call_capture_no_records"))
     else:
         try:
-            calls, invalid_count = read_available_model_call_records(store, rollout_id)
+            calls, verifier_invocations, invalid_count = _read_capture_records(store, rollout_id)
             if invalid_count:
                 gaps.append(
                     ObservationGap(
@@ -482,6 +511,21 @@ def merge_model_call_capture_into_record(
             logger.warning("Could not read model-call capture for rollout %s.", rollout_id, exc_info=True)
             calls = []
             gaps.append(ObservationGap(code="model_call_capture_unreadable"))
+    # Captured SSE preserves the terminal report even when an external client ignores the extension.
+    # A model call's selected failure is only an observation of the enclosing episode.
+    for call in calls:
+        if isinstance(call.response_raw, str) and call.dialect in {"responses", "chat"}:
+            reader = StreamFailureReportReader()
+            reader.feed_text(call.response_raw)
+            reader.finish()
+            if reader.report is not None:
+                observed = reader.report.model_copy(update={"failure_id": None})
+                existing = FailureReportRow.report(record)
+                if any(
+                    key in existing.events and existing.events[key] != event for key, event in observed.events.items()
+                ):
+                    observed = observed.model_copy(update={"omitted": True})
+                record.update(FailureReportRow.merged_into(record, observed))
     observations = record.get(NG_AGENT_OBSERVATIONS_KEY)
     if observations is not None:
         try:
@@ -500,7 +544,8 @@ def merge_model_call_capture_into_record(
                         exc_info=True,
                     )
                     bundle.gaps.append(ObservationGap(code="compaction_model_call_join_failed"))
-            bundle = join_model_call_observations(bundle, calls)
+            agent_calls = exclude_verifier_model_calls(calls, verifier_invocations.values())
+            bundle = join_agent_model_calls(bundle, agent_calls)
             if any(call.client_assistant_message_id for call in calls):
                 try:
                     raw_trajectory = record.get("ng_trajectory")
@@ -510,7 +555,7 @@ def merge_model_call_capture_into_record(
                     if trajectory is not None and trajectory.rollout_id != rollout_id:
                         bundle.gaps.append(ObservationGap(code="assistant_message_call_rollout_mismatch"))
                     else:
-                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, calls)
+                        bundle, trajectory = join_assistant_message_calls(bundle, trajectory, agent_calls)
                         if trajectory is not None:
                             record["ng_trajectory"] = trajectory.model_dump(mode="json")
                 except Exception:
@@ -528,6 +573,8 @@ def merge_model_call_capture_into_record(
         "metrics": aggregate_model_call_records(calls),
         "calls": [call.model_dump(exclude=exclude) for call in calls],
     }
+    if verifier_invocations:
+        capture["verifier_invocations"] = [inv.model_dump(mode="json") for inv in verifier_invocations.values()]
     if gaps:
         capture["gaps"] = [gap.model_dump(mode="json", exclude_none=True) for gap in gaps]
     record["ng_model_call_capture"] = capture

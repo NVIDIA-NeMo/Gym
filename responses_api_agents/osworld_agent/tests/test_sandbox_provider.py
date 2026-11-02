@@ -5,7 +5,9 @@ from __future__ import annotations
 
 import http.server
 import threading
+from types import SimpleNamespace
 from typing import Any
+from urllib.parse import urlsplit
 
 import pytest
 import requests
@@ -13,6 +15,7 @@ import requests
 from nemo_gym.sandbox import SandboxEndpoint, SandboxStatus
 from responses_api_agents.osworld_agent import sandbox_provider as osworld_sandbox
 from responses_api_agents.osworld_agent.local_forwarder import start_forwarder
+from responses_api_agents.osworld_agent.runtime_errors import OSWorldGuestStartTimeoutError
 
 
 class FakeSandbox:
@@ -571,3 +574,104 @@ def test_start_failure_cleans_up_sandbox(tmp_path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="forwarder failed"):
         provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
     assert BadEndpointSandbox.instances[-1].stopped == 1
+
+
+@pytest.mark.parametrize(
+    ("reply", "http_status", "infrastructure"),
+    [(502, 502, True), (429, 429, True), (200, 200, True), (404, 404, False), (None, None, True)],
+)
+def test_a_guest_that_never_becomes_ready_raises_a_typed_start_timeout(
+    monkeypatch, reply, http_status, infrastructure
+) -> None:
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            if reply is None:
+                raise osworld_sandbox.requests.ConnectionError("connection refused")
+            return SimpleNamespace(status_code=reply, content=b"" if reply == 200 else b"bad gateway " * 60)
+
+    monkeypatch.setattr(osworld_sandbox.requests, "Session", Session)
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"docker": {}}, {"image": "osworld:fixed"})
+    provider._ready_timeout_s = 0.05
+    provider._ready_poll_s = 0.01
+    sandbox = SimpleNamespace(status=lambda: SandboxStatus.RUNNING, sandbox_id="sbx-1")
+
+    with pytest.raises(OSWorldGuestStartTimeoutError) as caught:
+        provider._wait_for_vm_ready(sandbox, "guest.example.invalid", 5000)
+
+    error = caught.value
+    assert isinstance(error, TimeoutError)  # callers that catch TimeoutError still do
+    assert str(error).startswith("OSWorld guest did not become ready within 0.05s: ")
+    assert (error.provider, error.http_status, error.is_infrastructure_failure) == (
+        "docker",
+        http_status,
+        infrastructure,
+    )
+    assert (error.sandbox_id, error.url) == ("sbx-1", "http://guest.example.invalid:5000/screenshot")
+    # The first 512 bytes of the last reply; no body when the last probe got no reply or an empty 200.
+    assert error.body_head == ("" if reply in (None, 200) else ("bad gateway " * 60)[:512])
+
+
+def test_a_502_readiness_reply_logs_one_line_with_the_sandbox_the_url_and_the_body(
+    tmp_path, monkeypatch, caplog
+) -> None:
+    body = b"<html><body>502 Bad Gateway</body></html>" + b"x" * 600
+
+    class SandboxWithId(FakeSandbox):
+        sandbox_id = "sbx-1"
+
+        def endpoint(self, port: int) -> SandboxEndpoint:
+            mapped_port = urlsplit(super().endpoint(port).endpoint).port
+            return SandboxEndpoint(endpoint=f"http://guest.example.invalid:{mapped_port}")
+
+    class Session:
+        trust_env = True
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_exc):
+            return False
+
+        def get(self, *_args, **_kwargs):
+            return SimpleNamespace(status_code=502, content=body)
+
+    FakeSandbox.instances.clear()
+    monkeypatch.setattr(osworld_sandbox, "Sandbox", SandboxWithId)
+    monkeypatch.setattr(osworld_sandbox.requests, "Session", Session)
+    vm_path = tmp_path / "Ubuntu.qcow2"
+    vm_path.write_bytes(b"qcow2")
+    provider = osworld_sandbox.GymSandboxDesktopProvider({"docker": {}}, {"image": "osworld:fixed"})
+    provider._ready_timeout_s = 0.05
+    provider._ready_poll_s = 0.01
+
+    with (
+        caplog.at_level("WARNING", logger=osworld_sandbox.LOG.name),
+        pytest.raises(OSWorldGuestStartTimeoutError) as caught,
+    ):
+        provider.start_emulator(str(vm_path), headless=True, os_type="Ubuntu")
+
+    (line,) = [r.getMessage() for r in caplog.records if "OSWorld sandbox start failed" in r.getMessage()]
+    assert line == (
+        "OSWorld sandbox start failed on provider=docker: OSWorldGuestStartTimeoutError: OSWorld guest did not "
+        f"become ready within 0.05s: HTTP 502, bytes={len(body)} (sandbox_id=sbx-1 "
+        f"url=http://guest.example.invalid:30050/screenshot body={body[:512].decode()!r})"
+    )
+    # The typed failure carries the sandbox id that item 24's row event reports as its operation_id.
+    assert (caught.value.sandbox_id, caught.value.http_status) == ("sbx-1", 502)
+    assert FakeSandbox.instances[0].stopped == 1
+
+
+def test_a_logged_readiness_url_carries_no_credentials() -> None:
+    url = "http://name:password@guest.example.invalid:5000/screenshot?token=abc#frag"  # pragma: allowlist secret
+    assert osworld_sandbox._url_without_credentials(url) == "http://guest.example.invalid:5000/screenshot"
+    assert osworld_sandbox._url_without_credentials("http://[2001:db8::1]:5000/screenshot") == (
+        "http://[2001:db8::1]:5000/screenshot"
+    )

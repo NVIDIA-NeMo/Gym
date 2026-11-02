@@ -637,7 +637,7 @@ class TestProviderHistoryMatchesStrictIngress:
         assert set(final) == {"role", "content"}
 
     def test_validates_against_strict_chat_schema_and_round_trips(self) -> None:
-        from nemo_gym.openai_utils import NeMoGymChatCompletionCreateParamsNonStreaming
+        from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 
         serialized = to_provider_openai_messages(self._history())
         validated = NeMoGymChatCompletionCreateParamsNonStreaming.model_validate({"messages": serialized})
@@ -684,7 +684,7 @@ class TestProviderHistoryMatchesStrictIngress:
         canonical output would 422 and this fails first."""
         from typing import get_type_hints
 
-        from nemo_gym.openai_utils import (
+        from nemo_gym.core.responses_api_types import (
             NeMoGymChatCompletionAssistantMessageParam,
             NeMoGymChatCompletionMessageToolCallParam,
             NeMoGymChatCompletionToolMessageParam,

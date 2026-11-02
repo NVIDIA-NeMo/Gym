@@ -14,6 +14,7 @@
 # limitations under the License.
 import asyncio
 import json
+import logging
 import os
 import shlex
 import shutil
@@ -28,10 +29,11 @@ from unittest.mock import AsyncMock, MagicMock, call
 import anyio
 from fastapi import Request
 from pydantic import ValidationError
-from pytest import MonkeyPatch, fixture, mark, raises
+from pytest import LogCaptureFixture, MonkeyPatch, fixture, mark, raises
 
-from nemo_gym.config_types import ModelServerRef, ResourcesServerRef
-from nemo_gym.openai_utils import (
+from nemo_gym.client import SESSION_ID_KEY, ServerClient
+from nemo_gym.config import ModelServerRef, ResourcesServerRef
+from nemo_gym.core import (
     NeMoGymEasyInputMessage,
     NeMoGymFunctionCallOutput,
     NeMoGymResponse,
@@ -45,15 +47,15 @@ from nemo_gym.openai_utils import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
 )
-from nemo_gym.rollout_observability import (
+from nemo_gym.sandbox import SandboxHandle
+from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
+from nemo_gym.trajectory import (
     AgentInvocation,
     SandboxObservation,
     ToolCallObservation,
     TrajectoryRecord,
 )
-from nemo_gym.sandbox import SandboxHandle
-from nemo_gym.sandbox.utils import CPU_CAP_ENV_VARS
-from nemo_gym.server_utils import SESSION_ID_KEY, ServerClient
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.opencode_sandboxed_agent import app as app_module
 from responses_api_agents.opencode_sandboxed_agent.app import (
     OpenCodeSandboxedAgent,
@@ -89,6 +91,28 @@ class TestOpenCodeSandboxedAgent:
             opencode_max_context_window=0,
             token_id_capture=True,
         )
+
+    @mark.parametrize("worker", [False, True])
+    def test_only_the_main_process_logs_the_deprecation_once(
+        self, caplog: LogCaptureFixture, monkeypatch: MonkeyPatch, worker: bool
+    ) -> None:
+        """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+        app_module._warn_deprecated_once.cache_clear()
+        monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+        with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+            for _ in range(2):
+                OpenCodeSandboxedAgent(config=self._create_config(), server_client=MagicMock(spec=ServerClient))
+
+        warnings = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
+        assert warnings == ([] if worker else [app_module.DEPRECATION_WARNING])
+        for phrase in (
+            "legacy /run",
+            "allowed_agents",
+            "sandbox_handle",
+            "vibench_agent",
+            "opencode_agent/README.md",
+        ):
+            assert phrase in app_module.DEPRECATION_WARNING
 
     async def test_start_sandbox_derives_cpu_cap_env_from_cpu_limit(self, monkeypatch: MonkeyPatch) -> None:
         sandbox = MagicMock()
@@ -668,6 +692,7 @@ class TestOpenCodeSandboxedAgent:
         ],
     )
     @mark.parametrize("collect_observations", [True, False])
+    @mark.parametrize("multiple_verifier_observations", [True, False])
     async def test_run_builds_observations_from_live_wal_snapshot(
         self,
         tmp_path: Path,
@@ -676,6 +701,7 @@ class TestOpenCodeSandboxedAgent:
         database_name: str,
         snapshot_failure: str | None,
         collect_observations: bool,
+        multiple_verifier_observations: bool,
     ) -> None:
         class Response:
             ok = True
@@ -846,6 +872,23 @@ class TestOpenCodeSandboxedAgent:
                     "reward": 1.0,
                     "verifier_sandbox_observation": verifier_sandbox.model_dump(mode="json"),
                 }
+                | (
+                    {
+                        "verifier_sandbox_observations": [
+                            verifier_sandbox.model_copy(
+                                update={
+                                    "sandbox_id": "earlier-verifier",
+                                    "outcome": "sandbox_error",
+                                    "teardown_confirmed": False,
+                                    "cleanup_errors": ["close:TimeoutError"],
+                                }
+                            ).model_dump(mode="json"),
+                            verifier_sandbox.model_dump(mode="json"),
+                        ]
+                    }
+                    if multiple_verifier_observations
+                    else {}
+                )
             )
 
         server_client.post = AsyncMock(side_effect=post)
@@ -908,8 +951,11 @@ class TestOpenCodeSandboxedAgent:
         ]
         assert [(record.role, record.sandbox_id) for record in sandbox_records] == [
             ("agent", "connected-sandbox"),
+            *([("verifier", "earlier-verifier")] if multiple_verifier_observations else []),
             ("verifier", "verify-sandbox"),
         ]
+        if multiple_verifier_observations:
+            assert sandbox_records[1].cleanup_errors == ["close:TimeoutError"]
         assert sandbox_records[0].provider == "opensandbox"
         assert sandbox_records[0].outcome == "completed"
         assert sandbox_records[0].wall_time_s is None
@@ -1260,7 +1306,7 @@ async def test_terminal_length_stop_scores_zero_and_preserves_output(
 ):
     from fastapi import Request
 
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)
@@ -1437,3 +1483,57 @@ def test_a_tool_part_left_out_for_its_message_leaves_tool_timing_unknown(tmp_pat
     bundle = parse_opencode_observations(db_path, "fallback")
 
     assert ("tool_timing_unavailable", "p1") in [(gap.code, gap.detail) for gap in bundle.gaps]
+
+
+@mark.parametrize("error", [TimeoutError("status read timed out"), OSError("provider unavailable")])
+async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(tmp_path, error):
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=error), download=AsyncMock())
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(type(error)) as caught:
+        await server.responses(request, body)
+    assert caught.value is error
+    sandbox.exec.assert_awaited_once()
+    sandbox.download.assert_not_awaited()
+    assert "session" not in server._sandbox_id_to_run_result
+    server.server_client.post.assert_not_called()
+
+
+@mark.parametrize("error_type", ["UnknownError", None])
+async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
+    from nemo_gym.sandbox import SandboxExecResult
+    from nemo_gym.typed_exceptions import NgFailureEvent
+
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(
+        exec=AsyncMock(
+            return_value=SandboxExecResult(
+                stdout="", stderr="unknown completion", return_code=-1, error_type=error_type
+            )
+        ),
+        download=AsyncMock(),
+    )
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request, body)
+    assert caught.value.failure_kind == "agent_route_failed"
+    assert caught.value.operation == "agent.sandbox_exec"
+    sandbox.exec.assert_awaited_once()
+    sandbox.download.assert_not_awaited()
+    server.server_client.post.assert_not_called()

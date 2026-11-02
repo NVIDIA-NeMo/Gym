@@ -64,8 +64,9 @@ swe_together_candidate:
       sandbox_path_prefix: [/opt/gym-runtime]
       sandbox_executable_path: /opt/gym-runtime/opencode
       sandbox_executable_sha256: 8e97f83175c84daeb51e96b34baf9ee9839ae54e5e848a3cce1e0e32dcf41a6c  # pragma: allowlist secret (public runtime digest)
-      context_window: 262144
-      max_output_tokens: 32000
+      # Match the serving context window when overriding these budgets.
+      context_window: 1048576
+      max_output_tokens: 128000
       timeout: 1800
       session_close_timeout_seconds: 300
       opencode_config:

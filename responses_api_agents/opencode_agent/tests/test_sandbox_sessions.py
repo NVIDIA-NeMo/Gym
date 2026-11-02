@@ -17,13 +17,14 @@ from fastapi.testclient import TestClient
 from omegaconf import OmegaConf
 from pydantic import ValidationError
 
-from nemo_gym.agent_utils.supervisor_client import parse_cleanup_receipt
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure, parse_cleanup_receipt
 from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest, AgentSeedSessionRequest
-from nemo_gym.episode_types import EpisodeId, TaskId
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.client import ServerClient
+from nemo_gym.core import EpisodeId, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.tasks.harbor.materialize import materialize_task
 from nemo_gym.tasks.harbor.task import load_task
+from nemo_gym.testing.failure_assertions import raises_agent_failure
+from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.app import OpenCodeAgent, OpenCodeAgentConfig, _sandbox_prepare_command
 
 
@@ -455,12 +456,57 @@ async def test_close_cancels_active_opencode_before_detaching(setup, tmp_path):
     assert invocation.conversation[-1].content[0].text == "Fixed"
 
 
+async def test_close_reports_the_cancel_on_the_sandbox_and_running_tools(setup, tmp_path):
+    agent, sandbox = setup
+    sandbox.blocked = True
+    export = json.loads(sandbox.events)
+    export["messages"][-1]["parts"].append(
+        {
+            "type": "tool",
+            "callID": "running-shell",
+            "tool": "bash",
+            "state": {"status": "running", "input": {"command": "sleep 60"}, "metadata": {"output": "started"}},
+        }
+    )
+    sandbox.events = json.dumps(export)
+    capture_observations(sandbox, tmp_path)
+
+    async def stop_requested():
+        # The process supervisor reports a requested stop as a forced exit, not as a timeout.
+        sandbox.result["return_code"] = 241
+        sandbox.exited.set()
+        await asyncio.sleep(0)
+
+    sandbox.request_stop.side_effect = stop_requested
+    request, session_id, task = await activate(agent, sandbox)
+    closed = await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    records = closed.agent_observations.records
+    agent_sandbox = next(record for record in records if record.kind == "sandbox")
+    assert (agent_sandbox.outcome, agent_sandbox.error_type, agent_sandbox.exit_code) == (
+        "cancelled",
+        "cancelled",
+        241,
+    )
+    tools = {record.tool_call_id: record for record in records if record.kind == "tool_call"}
+    assert (tools["running-shell"].status, tools["running-shell"].error_type) == ("cancelled", "invocation_cancelled")
+    assert tools["tool-1"].status != "cancelled"
+    invocation = next(record for record in records if record.kind == "agent_invocation")
+    assert {"type": "function_call_output", "call_id": "running-shell", "output": "started"}.items() <= next(
+        item.model_dump()
+        for item in invocation.conversation
+        if getattr(item, "call_id", None) == "running-shell" and item.type == "function_call_output"
+    ).items()
+
+
 async def test_terminal_termination_failure_releases_borrowed_session(setup):
     agent, sandbox = setup
     sandbox.result["cleanup_confirmed"] = False
     request, session_id, task = await activate(agent, sandbox)
-    with pytest.raises(RuntimeError, match="harness termination was not confirmed"):
+    with pytest.raises(NgFailureEvent, match="harness termination was not confirmed") as failure:
         await task
+    assert is_harness_termination_failure(failure.value)
     await agent.close_agent_session(request, AgentCloseSessionRequest(**close_body(session_id)))
     assert session_id not in active_sessions(agent)
     sandbox.disconnect.assert_awaited_once()
@@ -1057,7 +1103,7 @@ async def test_file_cleanup_failure_keeps_connection_and_can_retry(setup):
 
 
 def test_malformed_later_artifact_keeps_partial_output(setup):
-    from nemo_gym.rollout_observability import AgentObservationBundle
+    from nemo_gym.trajectory import AgentObservationBundle
 
     agent, _ = setup
     export = json.loads(events())
@@ -1394,7 +1440,7 @@ def test_owned_setup_failure_preserves_error_and_retryable_cleanup(setup, stage)
         patch("responses_api_agents.opencode_agent.app.AsyncSandbox", return_value=sandbox),
         TestClient(agent.setup_webserver()) as client,
     ):
-        with pytest.raises(RuntimeError) as error:
+        with raises_agent_failure(RuntimeError) as error:
             client.post("/v1/agent_sessions", json=body.model_dump(mode="json"))
         assert error.value is original
         assert client.post("/v1/agent_sessions", json=body.model_dump(mode="json")).status_code == 409
@@ -1420,7 +1466,7 @@ def test_failed_connection_closes_provider_without_publishing_session(setup):
         TestClient(agent.setup_webserver()) as client,
     ):
         factory.connect = AsyncMock(side_effect=RuntimeError("borrow failed"))
-        with pytest.raises(RuntimeError, match="borrow failed"):
+        with raises_agent_failure(RuntimeError, match="borrow failed"):
             client.post("/v1/agent_sessions", json=seed().model_dump(mode="json"))
         factory.assert_not_called()
         sandbox.stop.assert_not_awaited()

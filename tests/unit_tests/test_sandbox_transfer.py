@@ -204,17 +204,9 @@ async def test_upload_dir_with_the_digest_rule_ships_what_the_digest_covers(tmp_
     assert sorted(path.name for path in target.iterdir()) == ["test.sh"]
 
 
-@pytest.mark.asyncio
-@pytest.mark.skipif(shutil.which("busybox") is None, reason="BusyBox is required")
-async def test_transfer_works_with_busybox_tar_which_has_no_no_overwrite_dir_option(tmp_path):
-    source, target, bin_dir = tmp_path / "source", tmp_path / "target", tmp_path / "bin"
-    source.mkdir()
-    script = source / "test.sh"
-    script.write_text("#!/bin/sh\nprintf works")
-    script.chmod(0o751)
-    target.mkdir()
-    target.chmod(0o777)
-    # `tar` resolves to the BusyBox applet, as in an Alpine image.
+async def busybox_sandbox(bin_dir):
+    """A sandbox whose shell and ``tar`` are BusyBox's, as in an Alpine image: ``tar`` in ``bin_dir`` resolves to
+    the applet and every command runs under ``busybox sh`` with that directory first on the PATH."""
     bin_dir.mkdir()
     (bin_dir / "tar").symlink_to(shutil.which("busybox"))
     env = {**os.environ, "PATH": f"{bin_dir}:{os.environ.get('PATH', '')}"}
@@ -239,12 +231,85 @@ async def test_transfer_works_with_busybox_tar_which_has_no_no_overwrite_dir_opt
 
     probe = await busybox_sh("tar --no-overwrite-dir --help >/dev/null 2>&1 && echo gnu || echo busybox")
     assert probe.stdout.strip() == "busybox", "the symlinked tar must be BusyBox's for this test to mean anything"
+    return BusyBoxSandbox()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("busybox") is None, reason="BusyBox is required")
+async def test_transfer_works_with_busybox_tar_which_has_no_no_overwrite_dir_option(tmp_path):
+    source, target = tmp_path / "source", tmp_path / "target"
+    source.mkdir()
+    script = source / "test.sh"
+    script.write_text("#!/bin/sh\nprintf works")
+    script.chmod(0o751)
+    target.mkdir()
+    target.chmod(0o777)
+    sandbox = await busybox_sandbox(tmp_path / "bin")
     assert "--no-overwrite-dir" in tar_extract_command("/tmp/x.tar.gz", str(target))
 
-    await upload_dir(BusyBoxSandbox(), source, str(target))
+    await upload_dir(sandbox, source, str(target))
     assert (target / "test.sh").read_text() == "#!/bin/sh\nprintf works"
     assert stat.S_IMODE((target / "test.sh").stat().st_mode) == 0o751
     assert stat.S_IMODE(target.stat().st_mode) == 0o777
+
+
+def _plant_links(target, elsewhere):
+    """What a sandbox user who owns ``target`` can leave at the names a later upload ships: a link at a top-level
+    directory name, one at a nested directory name and one at a file name, all pointing into ``elsewhere``."""
+    for path in (target / "fixtures", target / "sub" / "deep", target / "setup.sh"):
+        if path.exists() or path.is_symlink():
+            shutil.rmtree(path) if path.is_dir() and not path.is_symlink() else path.unlink()
+    (target / "sub").mkdir(exist_ok=True)
+    (target / "fixtures").symlink_to(elsewhere)
+    (target / "sub" / "deep").symlink_to(elsewhere)
+    (target / "setup.sh").symlink_to(elsewhere / "setup.sh")
+    for leftover in elsewhere.iterdir():
+        leftover.unlink()
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(shutil.which("busybox") is None, reason="BusyBox is required")
+async def test_a_merge_lands_where_its_names_say_over_links_planted_at_member_paths_on_either_tar(tmp_path):
+    """A `workdir/` merged into a directory the agent owns meets whatever the agent planted at the shipped names. GNU
+    tar replaces a link at a directory member's path with the directory; BusyBox tar keeps the link and writes the
+    member's children through it, so the files would land, as root, wherever the agent pointed the link. With
+    `replace_links` the extraction removes a link at every member's path first, and both tars land the merge at its
+    own names with nothing written through; without it BusyBox tar is diverted (what the option is for)."""
+    source, target, elsewhere = tmp_path / "workdir", tmp_path / "app", tmp_path / "elsewhere"
+    for relative, text in (("fixtures/input.txt", "data\n"), ("sub/deep/x.txt", "x\n"), ("setup.sh", "true\n")):
+        (source / relative).parent.mkdir(parents=True, exist_ok=True)
+        (source / relative).write_text(text)
+    target.mkdir()
+    elsewhere.mkdir()
+    busybox = await busybox_sandbox(tmp_path / "bin")
+
+    def landed():
+        return (
+            sorted(str(p.relative_to(target)) for p in target.rglob("*") if p.is_file() or p.is_symlink()),
+            sorted(p.name for p in elsewhere.iterdir()),
+            [str(p.relative_to(target)) for p in target.rglob("*") if p.is_symlink()],
+        )
+
+    # The hazard, on BusyBox tar: the directory links stay and the shipped files are written through them (the file
+    # link is replaced, as a regular file member unlinks what is at its path).
+    _plant_links(target, elsewhere)
+    await upload_dir(busybox, source, str(target))
+    files, diverted, links = landed()
+    assert diverted == ["input.txt", "x.txt"] and links == ["fixtures", "sub/deep"]
+    assert "setup.sh" in files and not (target / "setup.sh").is_symlink()
+
+    # With replace_links, on BusyBox tar and on GNU tar alike: the links are gone, the merge is at its own names.
+    for sandbox in (busybox, LocalSandbox()):
+        _plant_links(target, elsewhere)
+        await upload_dir(sandbox, source, str(target), replace_links=True)
+        files, diverted, links = landed()
+        assert (files, diverted, links) == (["fixtures/input.txt", "setup.sh", "sub/deep/x.txt"], [], [])
+        assert (target / "fixtures" / "input.txt").read_text() == "data\n"
+    # The plain extraction is unchanged: no listing pass, the shell line as before.
+    plain = tar_extract_command("/tmp/x.tar.gz", str(target))
+    assert "tar -tzf" not in plain and plain.endswith(f"-C {target}")
+    clearing = tar_extract_command("/tmp/x.tar.gz", str(target), replace_links=True)
+    assert clearing.index("tar -tzf /tmp/x.tar.gz | while IFS= read -r m") < clearing.index("tar -xzf")
 
 
 def _archive(path, members):

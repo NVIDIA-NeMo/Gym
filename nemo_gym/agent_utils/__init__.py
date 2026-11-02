@@ -16,3 +16,8 @@ that had left the harness before the stop, and detached processes after a natura
 remain for the sandbox owner to stop. Core sandbox APIs and providers live in
 :mod:`nemo_gym.sandbox`.
 """
+
+from nemo_gym.agent_utils.sandbox_observation import lifecycle_observation
+
+
+__all__ = ["lifecycle_observation"]

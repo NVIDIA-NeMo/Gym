@@ -6,14 +6,14 @@ import re
 from pathlib import Path
 from typing import ClassVar
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseVerifyRequest,
     BaseVerifyResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
-from nemo_gym.verifier_fixture import VerifierFixture
+from nemo_gym.verification import VerifierFixture
 from resources_servers.chembench.task_data import TaskData
 
 

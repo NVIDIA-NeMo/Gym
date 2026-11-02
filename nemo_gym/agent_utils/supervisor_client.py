@@ -15,6 +15,7 @@ bin/gym-runner        Launch shell         Interpreter link for a standard-libra
 launch.claim          Launch or stop shell Atomically claims launch or fences it
 supervisor.pid        Launch shell         After claiming launch, before exec (see below)
 stop.request          Stop shell           Polled by the supervisor to stop the harness
+expire.request        Session              Polled by the supervisor to time out the harness
 cleanup.json          Supervisor or stop   After cleanup, or when stop fences launch
 output.log            Launch shell         Captures supervisor and harness diagnostics
 ===================== ==================== ===========================================
@@ -42,8 +43,11 @@ from uuid import uuid4
 
 from pydantic import TypeAdapter, ValidationError
 
-from nemo_gym.sandbox import AsyncSandbox
+from nemo_gym.core.failure_kinds import HARNESS_TERMINATION_UNCONFIRMED
+from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.utils import read_text
+from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 SUPERVISOR_FILE = "process_supervisor.sh"
@@ -52,6 +56,7 @@ RUNNER_INTERPRETER = "bin/gym-runner"
 LAUNCH_CLAIM_FILE = "launch.claim"
 SUPERVISOR_PID_FILE = "supervisor.pid"
 STOP_REQUEST_FILE = "stop.request"
+EXPIRE_REQUEST_FILE = "expire.request"
 CLEANUP_RECEIPT_FILE = "cleanup.json"
 OUTPUT_LOG_FILE = "output.log"
 
@@ -94,16 +99,30 @@ _RESOLVE_INTERPRETER = 'import os; print(os.readlink("/proc/self/exe"))'
 LOG = logging.getLogger(__name__)
 
 
-class HarnessTerminationError(RuntimeError):
-    """A final supervisor receipt could not confirm the harness stopped.
+def harness_termination_failure(*, harness: str, receipt: CleanupReceipt) -> NgFailureEvent:
+    """The harness boundary's failure for a negative cleanup receipt.
 
-    The sandbox owner must tear down the sandbox. Re-reading this terminal
-    receipt cannot recover execution, but a borrowed client can release it.
+    Its event names the harness but not the receipt's text, which stays in ``str()`` and on ``receipt``
+    (runtime evidence for teardown, not part of the serialized event).
     """
+    failure = NgFailureEvent(
+        boundary=FailureBoundary.HARNESS,
+        failure_kind=HARNESS_TERMINATION_UNCONFIRMED,
+        failure_reason=f"{harness} harness termination was not confirmed",
+        operation="harness.terminate",
+        message_args=(f"{harness} harness termination was not confirmed: {receipt['error']}",),
+    )
+    failure.receipt = receipt
+    return failure
 
-    def __init__(self, *, harness: str, receipt: CleanupReceipt) -> None:
-        self.receipt: CleanupReceipt = receipt
-        super().__init__(f"{harness} harness termination was not confirmed: {receipt['error']}")
+
+def is_harness_termination_failure(error: BaseException) -> bool:
+    """Whether ``error`` reports that a harness's termination was not confirmed."""
+    return (
+        isinstance(error, NgFailureEvent)
+        and error.boundary == FailureBoundary.HARNESS
+        and error.failure_kind == HARNESS_TERMINATION_UNCONFIRMED
+    )
 
 
 def _raise_terminal_failure(payload: object, *, harness: str) -> None:
@@ -113,7 +132,7 @@ def _raise_terminal_failure(payload: object, *, harness: str) -> None:
         receipt = _CLEANUP_RECEIPT.validate_python(payload, strict=True, extra="forbid")
     except ValidationError:
         return  # Malformed evidence remains unknown and retryable.
-    raise HarnessTerminationError(harness=harness, receipt=receipt)
+    raise harness_termination_failure(harness=harness, receipt=receipt)
 
 
 def parse_cleanup_receipt(payload: object) -> CleanupReceipt:
@@ -201,6 +220,7 @@ def supervised_launch_command(
         f"exec bash {supervisor} "
         f"--timeout {_seconds(timeout)} --cleanup-timeout {_seconds(cleanup_timeout)} "
         f"--stop-file {quote(f'{session_dir}/{STOP_REQUEST_FILE}')} "
+        f"--expire-file {quote(f'{session_dir}/{EXPIRE_REQUEST_FILE}')} "
         f"--receipt {quote(f'{session_dir}/{CLEANUP_RECEIPT_FILE}')} -- {harness} "
         f">{quote(f'{session_dir}/{OUTPUT_LOG_FILE}')} 2>&1"
     )

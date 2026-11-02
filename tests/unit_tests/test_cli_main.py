@@ -21,13 +21,14 @@ from pathlib import Path
 
 import pytest
 from hydra.core.override_parser.overrides_parser import OverridesParser
+from omegaconf import DictConfig
 from pytest import MonkeyPatch
 
 import nemo_gym.cli.main as cli_main
-import nemo_gym.global_config as gc
+import nemo_gym.config.global_config as gc
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, WORKING_DIR
 from nemo_gym.cli.main import main
-from nemo_gym.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
+from nemo_gym.config.global_config import NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME
 
 
 @pytest.fixture(autouse=True)
@@ -292,14 +293,64 @@ class TestEvalExportFlags:
             ],
         )
 
-        assert target == "nemo_gym.cli.eval:export_rollouts_as_atif"
+        assert target == "nemo_gym.cli.eval:export_run"
         assert set(overrides) == {
-            "+format=atif",
+            "+exporter=atif",
             "+rollouts_jsonl_fpath='rollouts.jsonl'",
             "+output_dirpath='atif'",
             "+session_id='evaluation-42'",
             "+agent_version='2.3.1'",
         }
+
+
+class TestEvalExportExporterArgument:
+    def test_defaults_to_atif_and_passes_overrides_through_unchanged(self, monkeypatch: MonkeyPatch) -> None:
+        target, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "+rollouts_jsonl_fpath=r.jsonl", "+meta.k=v", "++a=1", "hydra.run.dir=/tmp/log", "~b"],
+        )
+
+        assert target == "nemo_gym.cli.eval:export_run"
+        assert overrides == [
+            "+exporter=atif",
+            "+rollouts_jsonl_fpath=r.jsonl",
+            "+meta.k=v",
+            "++a=1",
+            "hydra.run.dir=/tmp/log",
+            "~b",
+        ]
+
+    def test_a_captured_override_follows_the_translated_flags_for_the_default_exporter(
+        self, monkeypatch: MonkeyPatch
+    ) -> None:
+        _, overrides = _dispatch_for(
+            monkeypatch,
+            ["eval", "export", "++session_id=override", "--session-id", "original", "--rollouts", "r.jsonl"],
+        )
+
+        assert overrides.index("+session_id='original'") < overrides.index("++session_id=override")
+        assert overrides[0] == "+exporter=atif"
+
+    def test_positional_exporter_is_passed_as_an_override(self, monkeypatch: MonkeyPatch) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "atif", "+rollouts_jsonl_fpath=r.jsonl"])
+
+        assert overrides == ["+exporter=atif", "+rollouts_jsonl_fpath=r.jsonl"]
+
+    def test_deprecated_format_flag_still_selects_the_exporter(
+        self, monkeypatch: MonkeyPatch, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _, overrides = _dispatch_for(monkeypatch, ["eval", "export", "--format", "atif"])
+
+        assert overrides == ["+exporter=atif"]
+        assert "`--format` is deprecated" in caplog.text
+
+    def test_unknown_exporter_is_rejected_with_the_choices(
+        self, monkeypatch: MonkeyPatch, capsys: pytest.CaptureFixture
+    ) -> None:
+        with pytest.raises(SystemExit):
+            _dispatch_for(monkeypatch, ["eval", "export", "nope", "+rollouts_jsonl_fpath=r.jsonl"])
+
+        assert "unknown exporter 'nope'; choose from: atif" in capsys.readouterr().err
 
 
 class TestEnvTestResourceServerFlag:
@@ -568,7 +619,7 @@ class TestFriendlyValidationError:
         from pydantic import ValidationError
 
         from nemo_gym.cli.main import _handle_pydantic_validation_error
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (so it passes the scoping check) with one missing and one invalid field.
         class _Model(BaseNeMoGymCLIConfig):
@@ -592,7 +643,7 @@ class TestFriendlyValidationError:
         assert "invalid configuration: count" in recorder.message
 
     def test_validation_error_from_dispatch_is_rendered_cleanly(self, monkeypatch: MonkeyPatch, capsys) -> None:
-        from nemo_gym.config_types import BaseNeMoGymCLIConfig
+        from nemo_gym.config.config_types import BaseNeMoGymCLIConfig
 
         # A CLI config (BaseNeMoGymCLIConfig subclass) failing validation is the user's mistake -> friendly.
         class _Config(BaseNeMoGymCLIConfig):
@@ -1627,22 +1678,22 @@ class TestDidYouMean:
     """difflib-backed "did you mean?" hints for mistyped commands, flags, and component names (proposal UX 4)."""
 
     def test_helper_suggests_close_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("evl", ["list", "eval", "env"]) == " Did you mean `eval`?"
 
     def test_helper_silent_when_nothing_close(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("zzzzzz", ["list", "eval", "env"]) == ""
 
     def test_helper_does_not_suggest_exact_match(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["list", "eval", "env"]) == ""
 
     def test_helper_suggests_next_close_match_after_excluding_exact(self) -> None:
-        from nemo_gym.cli.utils import did_you_mean
+        from nemo_gym.utils.text import did_you_mean
 
         assert did_you_mean("eval", ["eval", "eval2"]) == " Did you mean `eval2`?"
 
@@ -2043,3 +2094,52 @@ def test_eval_run_task_selection_flags_need_a_target(monkeypatch, capsys, serve,
         main()
     assert exc.value.code == 2
     assert "--only-tasks and --exclude-tasks apply to a task TARGET" in capsys.readouterr().err
+
+
+def _resolve_eval_run(monkeypatch: MonkeyPatch, selectors: list[str]) -> DictConfig:
+    """Resolve the config `gym eval run <selectors>` would run: the CLI's config_paths, in its order, then the parser."""
+    _, overrides = _dispatch_for(monkeypatch, ["eval", "run", *selectors])
+    (token,) = [o for o in overrides if o.startswith("+config_paths=[")]
+    config_paths = token[len("+config_paths=[") : -1].split(",")
+    initial = DictConfig(
+        {
+            "config_paths": config_paths,
+            "policy_base_url": "https://example.test/v1",
+            "policy_api_key": "test-key",  # pragma: allowlist secret
+            "policy_model_name": "test-model",
+        }
+    )
+    return gc.GlobalConfigDictParser().parse(
+        gc.GlobalConfigDictParserConfig(
+            initial_global_config_dict=initial, skip_load_from_cli=True, skip_load_from_dotenv=True, offline=True
+        )
+    )
+
+
+class TestModelTypeKeepsBenchmarkPolicySettings:
+    """`--model-type vllm_model` merges after the benchmark config, so it must not reset what the benchmark set."""
+
+    POLICY_SETTINGS = {
+        "extra_body": {"thinking_token_budget": 17408},
+        "chat_template_kwargs": {"enable_thinking": True},
+        "sampling_overrides": {"temperature": 0.6},
+    }
+
+    def test_benchmark_policy_settings_survive_the_model_type_config(
+        self, monkeypatch: MonkeyPatch, tmp_path: Path
+    ) -> None:
+        bench_dir = tmp_path / "benchmarks" / "budget_probe"
+        bench_dir.mkdir(parents=True)
+        (bench_dir / "config.yaml").write_text(
+            json.dumps({"policy_model": {"responses_api_models": {"vllm_model": self.POLICY_SETTINGS}}})
+        )
+        selectors = ["--search-dir", str(tmp_path), "--benchmark", "budget_probe", "--model-type", "vllm_model"]
+
+        resolved = _resolve_eval_run(monkeypatch, selectors)
+
+        # The model-type config is the later sibling, i.e. the one whose values would win.
+        assert resolved["config_paths"][-1].endswith("responses_api_models/vllm_model/configs/vllm_model.yaml")
+        vllm_model = resolved["policy_model"]["responses_api_models"]["vllm_model"]
+        for key, value in self.POLICY_SETTINGS.items():
+            assert vllm_model[key] == value, key
+        assert vllm_model["entrypoint"] == "app.py"  # the model-type config still applied

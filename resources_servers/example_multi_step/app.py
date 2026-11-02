@@ -18,12 +18,13 @@ from typing import List
 from fastapi import FastAPI
 from pydantic import BaseModel
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,
     BaseVerifyResponse,
     SimpleResourcesServer,
+    observe_programmatic_grading,
 )
 
 
@@ -85,6 +86,9 @@ class ExampleMultiStepResourcesServer(SimpleResourcesServer):
         return ExtractSynonymValuesResponse(success=True)
 
     async def verify(self, body: ExampleMultiStepVerifyRequest) -> ExampleMultiStepVerifyResponse:
+        return observe_programmatic_grading(lambda: self._programmatic_score(body))
+
+    def _programmatic_score(self, body: ExampleMultiStepVerifyRequest) -> ExampleMultiStepVerifyResponse:
         expected = body.expected_synonym_values
 
         actual = []

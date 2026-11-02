@@ -35,7 +35,7 @@ import os
 import re
 import time
 from abc import abstractmethod
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable
 from contextlib import asynccontextmanager
 from pathlib import Path
 from typing import Any, ClassVar, Iterable, Literal, NotRequired, Optional, TypedDict
@@ -49,8 +49,18 @@ from fastapi.exceptions import RequestValidationError
 from fastapi.responses import StreamingResponse
 from pydantic import BaseModel, ConfigDict, Field, PrivateAttr, ValidationError, model_validator
 
-from nemo_gym._checkpoint.control import install_control_routes, install_participant
-from nemo_gym._checkpoint.model import (
+from nemo_gym.anthropic_converter import AnthropicConverter
+from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
+from nemo_gym.config.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
+from nemo_gym.core.episode import VERIFIER_INVOCATION_HEADER, rollout_context
+from nemo_gym.core.responses_api_types import (
+    NeMoGymChatCompletion,
+    NeMoGymChatCompletionCreateParamsNonStreaming,
+    NeMoGymResponse,
+    NeMoGymResponseCreateParamsNonStreaming,
+)
+from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.models._checkpoint import (
     CheckpointableLedger,
     PolicyAdmissionMiddleware,
     PolicyModelParticipant,
@@ -60,38 +70,27 @@ from nemo_gym._checkpoint.model import (
     reject_ungated_ledger_writers,
     worker_control_root,
 )
-from nemo_gym._checkpoint.model_workers import (
+from nemo_gym.models._checkpoint_workers import (
     COORDINATOR_SOCKET_ENV,
     PolicyCoordinator,
     PolicyWorkerLink,
     coordinator_socket_path,
 )
-from nemo_gym._checkpoint.settings import checkpoint_settings
-from nemo_gym.anthropic_converter import AnthropicConverter
-from nemo_gym.chat_streaming import SSE_KEEPALIVE, sanitize_streaming_chat_body, synthesize_chat_completion_sse
-from nemo_gym.config_types import ROLLOUT_PATH_PREFIX, TOKEN_CAPTURE_PATH_SEGMENT
-from nemo_gym.openai_utils import (
-    NeMoGymChatCompletion,
-    NeMoGymChatCompletionCreateParamsNonStreaming,
-    NeMoGymResponse,
-    NeMoGymResponseCreateParamsNonStreaming,
-)
 from nemo_gym.responses_converter import CustomToolStrategy
 from nemo_gym.responses_streaming import (
     NamespaceMap,
+    is_responses_lifecycle_chunk,
     restore_namespace_tool_calls,
     sanitize_streaming_responses_body,
     synthesize_responses_failure_sse,
+    synthesize_responses_keepalive_sse,
     synthesize_responses_sse,
     validate_streaming_responses_params,
 )
-from nemo_gym.rollout_correlation import rollout_context, scope_with_routed_path
-from nemo_gym.server_utils import (
-    BaseRunServerInstanceConfig,
-    BaseServer,
-    SimpleServer,
-    is_nemo_gym_fastapi_worker,
-)
+from nemo_gym.server_runtime._checkpoint.control import install_control_routes, install_participant
+from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
+from nemo_gym.server_runtime.request_handling.rollout_context import scope_with_routed_path
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_endpoint
 from nemo_gym.telemetry.span_groups import GymSpanGroup
 from nemo_gym.token_id_capture import (
@@ -120,13 +119,14 @@ from nemo_gym.token_id_capture.protocols import (
 )
 from nemo_gym.token_id_capture.records import CONTEXT_LENGTH_EXCEEDED_ERROR_CODE, UNCOMMITTED_CALL_REASON
 from nemo_gym.token_id_capture.store import make_token_store
+from nemo_gym.typed_exceptions import failure_report_for
+from nemo_gym.utils.server_process import is_nemo_gym_fastapi_worker
 
 
 logger = logging.getLogger(__name__)
 
 _CHAT_KEEPALIVE_SECONDS = 15.0
 _SSE_KEEPALIVE = SSE_KEEPALIVE
-
 # A model server sets this attribute on an engine refusal it propagates on purpose (a length
 # refusal under its propagation setting). Its value is the envelope's string code:
 # ``CONTEXT_LENGTH_EXCEEDED_ERROR_CODE`` when the engine's message names the context window,
@@ -147,7 +147,7 @@ def context_overflow_error_fields(error: BaseException) -> tuple[str, str | None
     """Return ``(message, code, param)`` for a marked engine refusal.
 
     The engine's error body travels on the exception as ``response_content`` (attached by
-    ``nemo_gym.server_utils.raise_for_status``). vLLM 0.10.1 and later format it as
+    ``nemo_gym.client.http_client.raise_for_status``). vLLM 0.10.1 and later format it as
     ``{"error": {"message": ..., "type": ..., "param": ..., "code": 400}}``; older engines used a
     flat object with a top-level ``message``. The message is the engine's own sentence from
     either shape, verbatim; any other body is returned as raw text so no information is lost.
@@ -310,6 +310,23 @@ class BaseResponsesAPIModelConfig(BaseRunServerInstanceConfig):
             "so a backend with free-form tool support keeps them."
         ),
     )
+    stream_keepalive_s: Optional[float] = Field(
+        default=None,
+        gt=0,
+        description=(
+            "Hold streaming /v1/responses requests open with keepalive events while the backend computes. "
+            "Responses streaming is buffered, so a client sees no event until the whole generation returns, "
+            "and a client that bounds the silence between events (the Codex CLI's stream_idle_timeout_ms, "
+            "300 s by default) abandons a long turn and re-sends it. SSE comments do not help: such a client's "
+            "event parser drops them. When set, a call still running after this many seconds opens the stream "
+            "with response.created and then sends response.in_progress every this many seconds; the item and "
+            "terminal events that follow are unchanged. These events name the response before it exists, so "
+            "the response the stream serves (and capture records) takes the id they announced; servers whose "
+            "response ids come from an upstream Responses API refuse the setting at startup. A call that fails "
+            "after the stream opened ends with response.failed instead of an HTTP error status. Off (null) by "
+            "default, which sends nothing until the response is complete."
+        ),
+    )
     custom_tool_strategy: CustomToolStrategy = Field(
         default="passthrough",
         description=(
@@ -372,7 +389,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         """Allow adapters to retain an explicit upstream-status compatibility policy."""
         return True
 
+    def _mints_response_ids(self) -> bool:
+        """Whether the ids of the responses ``responses()`` returns are this server's own.
+
+        A keepalive stream (``stream_keepalive_s``) names its response before ``responses()`` returns,
+        so that response takes the announced id. An id an upstream Responses API issued must reach the
+        client unchanged, so a server that serves those cannot keep a stream alive.
+        """
+        return False
+
     def setup_webserver(self) -> FastAPI:
+        if self.config.stream_keepalive_s is not None and not self._mints_response_ids():
+            raise ValueError(
+                f"stream_keepalive_s is not supported on {type(self).__name__}: its responses carry the ids "
+                "an upstream Responses API issued, which a keepalive stream cannot announce before they exist"
+            )
         app = FastAPI()
 
         @app.exception_handler(ClientResponseError)
@@ -385,6 +416,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 content=getattr(error, "response_content", error.message),
                 status_code=error.status,
                 media_type=(error.headers or {}).get("Content-Type", "application/json"),
+                # The handled error ends the request: its own failure chain is the reply's final failure.
+                headers=FailureHeader.encode(failure_report_for(error)),
             )
 
         self.setup_session_middleware(app)
@@ -549,7 +582,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         delegated to the same ``responses()``, and the complete response is re-emitted as a
         synthesized Responses SSE event stream. Upstream HTTP errors and ``HTTPException``
         retain their status before the stream starts. Other ``responses()`` failures become terminal
-        ``response.failed`` events; bad-request validation still fails eagerly.
+        ``response.failed`` events; bad-request validation still fails eagerly. With
+        ``stream_keepalive_s`` set, a call that outlasts it opens the stream early and keeps it alive
+        with ``response.in_progress`` events, and any later failure becomes ``response.failed``.
         """
         context = current_capture_context()
         if context is not None and context.parent_resolution_mode == "source_history":
@@ -573,7 +608,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         try:
             params = validate_streaming_responses_params(cleaned)
         except ValidationError as exc:
-            raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+            raise RequestValidationError(
+                [{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]
+            ) from exc
 
         return await self._stream_responses(request, params, ns_map)
 
@@ -581,17 +618,39 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, ns_map: NamespaceMap
     ) -> StreamingResponse:
         """Serve the same converted response to capture and Responses SSE clients."""
+        keepalive_s = self.config.stream_keepalive_s
+        if keepalive_s is None:
+            return await self._stream_buffered_responses(request, self._invoke_responses(request, params), ns_map)
+
+        # Keepalive events name the response before it exists, so the response takes this id.
+        response_id = f"resp_{uuid4().hex}"
+        # The middleware resets the request's log before the body streams; keep this request's log object.
+        failure_log = RequestFailureLog.current()
+        pending = asyncio.create_task(self._invoke_responses(request, params, response_id=response_id))
         try:
-            response = await self._invoke_responses(request, params)
-            response_json = (
-                response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
-            )
-            response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
-            streamed = await self._stream_served_response(response_json, synthesize_responses_sse(response_json))
-            if "usage" in response_json:
-                # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
-                request.state.nemo_gym_internal_usage = response_json["usage"]
-            return streamed
+            # StreamingResponse commits HTTP headers before iterating its body. Wait one interval
+            # first, so a call that finishes sooner keeps the buffered events and HTTP error statuses.
+            done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+        except BaseException:
+            pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+            raise
+        if done:
+            return await self._stream_buffered_responses(request, pending, ns_map)
+        return StreamingResponse(
+            self._responses_keepalive_events(
+                request, pending, ns_map, keepalive_s, response_id, failure_log=failure_log
+            ),
+            media_type="text/event-stream",
+            headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
+        )
+
+    async def _stream_buffered_responses(
+        self, request: Request, invocation: Awaitable[Any], ns_map: NamespaceMap
+    ) -> StreamingResponse:
+        """Stream a completed response; until it completes nothing is sent to the client."""
+        try:
+            return await self._serve_responses_sse(request, await invocation, ns_map)
         except (ClientResponseError, HTTPException):
             # Generation is buffered: no headers or SSE bytes have been sent yet.
             # Let the shared HTTP handler retain the upstream error code and body.
@@ -603,7 +662,90 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             return StreamingResponse(
                 synthesize_responses_failure_sse(str(exc)),
                 media_type="text/event-stream",
+                # No header is sent yet, so the selected failure travels with the reply as for an HTTP error.
+                headers=FailureHeader.encode(failure_report_for(exc)),
             )
+
+    async def _responses_keepalive_events(
+        self,
+        request: Request,
+        pending: "asyncio.Task[Any]",
+        ns_map: NamespaceMap,
+        keepalive_s: float,
+        response_id: str,
+        *,
+        failure_log: Optional[RequestFailureLog] = None,
+    ) -> AsyncIterator[str | bytes]:
+        """Keep an opened Responses stream alive until ``pending``, which serves ``response_id``, completes.
+
+        The headers went out before ``pending`` finished, so the terminal event carries the request's failure report.
+        """
+        try:
+            for event in synthesize_responses_keepalive_sse(response_id, include_created=True):
+                yield event
+            while True:
+                done, _ = await asyncio.wait({pending}, timeout=keepalive_s)
+                if done:
+                    break
+                for event in synthesize_responses_keepalive_sse(response_id, include_created=False):
+                    yield event
+            try:
+                served = await self._serve_responses_sse(request, pending.result(), ns_map, include_created=False)
+            except Exception as exc:
+                # The stream is already open, so only a terminal event can report the failure.
+                code, message = self._streamed_responses_failure(exc)
+                report = _stream_report(failure_log, exc)
+                for event in synthesize_responses_failure_sse(
+                    message, code=code, response_id=response_id, include_created=False
+                ):
+                    yield _with_stream_report(event, report)
+                return
+            report = _stream_report(failure_log, None)
+            async for event in served.body_iterator:
+                yield _with_stream_report(event, report)
+        finally:
+            if not pending.done():
+                pending.cancel()
+            await asyncio.gather(pending, return_exceptions=True)
+
+    def _streamed_responses_failure(self, exc: Exception) -> tuple[Optional[str], str]:
+        """The ``(code, message)`` of the ``response.failed`` event that reports a failure after keepalives.
+
+        Mirrors what the client would have seen before the stream opened: a refusal the server
+        propagates keeps its OpenAI error code (``context_length_exceeded`` tells a harness to compact
+        and retry), and an upstream HTTP error follows the server's propagation policy. Upstream
+        errors never report their request URL.
+        """
+        if is_propagated_refusal(exc):
+            message, code, _ = context_overflow_error_fields(exc)
+            logger.warning("responses() refused a streaming request after keepalive events with %s: %s", code, message)
+            return code, message
+        logger.exception("responses() failed after streaming keepalive events were sent")
+        if isinstance(exc, ClientResponseError):
+            if not self._should_propagate_upstream_http_error(exc):
+                return "server_error", "HTTP 500: Model request failed"
+            detail = getattr(exc, "response_content", None) or exc.message
+            if isinstance(detail, bytes):
+                detail = detail.decode(errors="replace")
+            return "server_error", f"Upstream HTTP {exc.status}: {detail}"
+        if isinstance(exc, HTTPException):
+            return "server_error", f"HTTP {exc.status_code}: {exc.detail}"
+        return "server_error", str(exc)
+
+    async def _serve_responses_sse(
+        self, request: Request, response: Any, ns_map: NamespaceMap, *, include_created: bool = True
+    ) -> StreamingResponse:
+        response_json = (
+            response.model_dump(mode="json", by_alias=True) if isinstance(response, BaseModel) else dict(response)
+        )
+        response_json["output"] = restore_namespace_tool_calls(response_json.get("output") or [], ns_map)
+        streamed = await self._stream_served_response(
+            response_json, synthesize_responses_sse(response_json, include_created=include_created)
+        )
+        if "usage" in response_json:
+            # The SSE usage reports an unknown detail count as 0; capture records Gym's own usage instead.
+            request.state.nemo_gym_internal_usage = response_json["usage"]
+        return streamed
 
     async def chat_completions_dispatch(self, request: Request, body: dict = Body()):
         """Default ``/v1/chat/completions`` entrypoint shared by every Gym model server.
@@ -649,6 +791,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                 synthesize_chat_completion_sse(completion_json, include_usage=include_usage),
             )
 
+        # The middleware resets the request's log before the body streams; keep this request's log object.
+        failure_log = RequestFailureLog.current()
         pending = asyncio.create_task(self._invoke_chat_completions(request, params))
         try:
             # StreamingResponse commits HTTP headers before iterating its body.
@@ -686,7 +830,8 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                             message,
                         )
                         error = {"message": message, "type": "invalid_request_error", "param": param, "code": code}
-                        yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                        payload = _with_report_field({"error": error}, _stream_report(failure_log, exc))
+                        yield f"event: error\ndata: {json.dumps(payload)}\n\n"
                         return
                     logger.exception("chat_completions() failed after streaming headers were sent")
                     status = getattr(exc, "status_code", None) or getattr(exc, "status", None) or 500
@@ -704,13 +849,21 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
                         "type": "server_error" if status >= 500 else "invalid_request_error",
                         "code": status,
                     }
-                    yield f"event: error\ndata: {json.dumps({'error': error})}\n\n"
+                    payload = _with_report_field({"error": error}, _stream_report(failure_log, exc))
+                    yield f"event: error\ndata: {json.dumps(payload)}\n\n"
                     return
                 # Capture finalization and serialization failures must propagate:
                 # treating them as backend SSE errors would hide an invalid capture.
                 response = await completed_stream(completion)
+                report = _stream_report(failure_log, None)
+                last: str | bytes | None = None
                 async for event in response.body_iterator:
-                    yield event
+                    if last is not None:
+                        # The chunk before [DONE] is the last one a client parses: it carries the report.
+                        yield _with_stream_report(last, report) if _is_chat_done(event) else last
+                    last = event
+                if last is not None:
+                    yield last
             finally:
                 if not pending.done():
                     pending.cancel()
@@ -787,7 +940,7 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         return dispatched
 
     async def _invoke_responses(
-        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming
+        self, request: Request, params: NeMoGymResponseCreateParamsNonStreaming, *, response_id: Optional[str] = None
     ) -> NeMoGymResponse:
         # responses() signatures vary across servers: some take a leading `request`, some only
         # `body`. Dispatch on whichever this server declares so the default messages() works for
@@ -811,6 +964,13 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
             response = await self.responses(request=request, body=params)
         else:
             response = await self.responses(body=params)
+        if response_id is not None:
+            # A keepalive stream announced this id; capture records it and the client keeps it.
+            response = (
+                response.model_copy(update={"id": response_id})
+                if isinstance(response, BaseModel)
+                else {**response, "id": response_id}
+            )
         # Capture before streaming dispatch wraps the response.
         # Anthropic mapping drops the token fields.
         # The assembled response still carries them here for every dialect.
@@ -826,7 +986,7 @@ def _validate_responses_params(body: dict) -> NeMoGymResponseCreateParamsNonStre
     try:
         return NeMoGymResponseCreateParamsNonStreaming.model_validate(body)
     except ValidationError as exc:
-        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()])
+        raise RequestValidationError([{**error, "loc": ("body", *error["loc"])} for error in exc.errors()]) from exc
 
 
 def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStreaming:
@@ -841,7 +1001,7 @@ def _validate_chat_params(body: dict) -> NeMoGymChatCompletionCreateParamsNonStr
     except ValidationError as exc:
         raise RequestValidationError(
             [{**error, "loc": ("body", *error["loc"])} for error in exc.errors(include_url=False)]
-        )
+        ) from exc
 
 
 # --- Capture configuration + rollout-keyed storage ---
@@ -1307,6 +1467,41 @@ def _reconstruct_chat_sse(events: list[dict[str, Any]]) -> Optional[dict[str, An
     return result
 
 
+def _stream_report(failure_log: Optional[RequestFailureLog], error: BaseException | None) -> Optional[dict]:
+    """The bounded ``FailureHeader.STREAM_FIELD`` value for a stream's request log; ``None`` with nothing to report."""
+    return FailureHeader.stream_value(failure_log.reply_report(error)) if failure_log is not None else None
+
+
+def _with_report_field(payload: dict[str, Any], report: Optional[dict]) -> dict[str, Any]:
+    return payload if report is None else {**payload, FailureHeader.STREAM_FIELD: report}
+
+
+_RESPONSES_TERMINAL_EVENTS = frozenset({"response.completed", "response.incomplete", "response.failed"})
+
+
+def _is_chat_done(event: str | bytes) -> bool:
+    text = event.decode("utf-8", errors="replace") if isinstance(event, bytes) else event
+    return text.strip() == "data: [DONE]"
+
+
+def _with_stream_report(event: str | bytes, report: Optional[dict]) -> str | bytes:
+    """``event`` with the report added to its data object when it is a terminal Responses event or a Chat chunk."""
+    if report is None:
+        return event
+    text = event.decode("utf-8") if isinstance(event, bytes) else event
+    lines = text.split("\n")
+    for index, line in enumerate(lines):
+        if not line.startswith("data: ") or line == "data: [DONE]":
+            continue
+        payload = json.loads(line[len("data: ") :])
+        if payload.get("type", "chat.completion.chunk") not in _RESPONSES_TERMINAL_EVENTS and "choices" not in payload:
+            return event
+        lines[index] = "data: " + json.dumps(_with_report_field(payload, report))
+        joined = "\n".join(lines)
+        return joined.encode("utf-8") if isinstance(event, bytes) else joined
+    return event
+
+
 def _reconstruct_responses_sse(events: list[dict[str, Any]]) -> Optional[dict[str, Any]]:
     """Rebuild a Responses API response: the terminal envelope carries the full response object."""
     for event in reversed(events):
@@ -1338,6 +1533,7 @@ def _record(
     model_server_name: Optional[str],
     request_bytes: bytes,
     *,
+    verifier_invocation_id: Optional[str] = None,
     client_session_id: Optional[str] = None,
     client_assistant_message_id: Optional[str] = None,
     rollout_id: str,
@@ -1351,6 +1547,7 @@ def _record(
     ttft_ms: Optional[float] = None,
     response_raw: Optional[str] = None,
     execution: Optional[ModelExecutionOutcome] = None,
+    failure: BaseException | None = None,
 ) -> None:
     """Append one exchange (success or failure). Best-effort: never raises."""
     request_body = None
@@ -1379,6 +1576,8 @@ def _record(
             "request": request_body,
             "response": response_body,
         }
+        if verifier_invocation_id is not None:
+            exchange["verifier_invocation_id"] = verifier_invocation_id
         if client_session_id is not None:
             exchange["client_session_id"] = client_session_id
         if execution is not None:
@@ -1391,6 +1590,10 @@ def _record(
             exchange["request_raw"] = request_raw
         if response_raw is not None:
             exchange["response_raw"] = response_raw
+        observations = RequestFailureLog.current()
+        if observations is not None:
+            exchange["failure_report"] = observations.reply_report(failure).model_dump(mode="json")
+            exchange["model_operations"] = [o.model_dump(mode="json") for o in observations.model_operations.values()]
         store.record(rollout_id, exchange)
     except Exception:
         logger.warning("Model-call capture failed for one %s call.", dialect, exc_info=True)
@@ -1600,6 +1803,9 @@ class _CaptureMiddleware:
 
         rollout_id = rollout_from_path
         model_call_id = uuid4().hex
+        verifier_invocation_id = _unique_request_header(
+            scope.get("headers") or [], VERIFIER_INVOCATION_HEADER.encode("ascii")
+        )
         client_session_id = _unique_request_header(scope.get("headers") or [], _CLIENT_SESSION_HEADER)
         client_assistant_message_id = (
             _unique_request_header(scope.get("headers") or [], self._assistant_message_header)
@@ -1686,7 +1892,13 @@ class _CaptureMiddleware:
                 state["streaming"] = content_type.startswith(b"text/event-stream")
             elif message_type == "http.response.body":
                 chunk = message.get("body", b"") or b""
-                if chunk and chunk != _SSE_KEEPALIVE and state["ttft_ms"] is None:
+                if (
+                    chunk
+                    and chunk != _SSE_KEEPALIVE
+                    # Lifecycle events open a `stream_keepalive_s` stream long before the first output item.
+                    and not is_responses_lifecycle_chunk(chunk)
+                    and state["ttft_ms"] is None
+                ):
                     state["ttft_ms"] = (time.perf_counter() - start) * 1000.0
                 state["body"].extend(chunk)  # buffered for both shapes; SSE is reassembled below
                 if state["streaming"] and chunk and not defer_response:
@@ -1726,6 +1938,7 @@ class _CaptureMiddleware:
                     dialect,
                     self._model_server_name,
                     bytes(request_body),
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -1739,6 +1952,7 @@ class _CaptureMiddleware:
                     ttft_ms=state["ttft_ms"],
                     response_raw=upstream_body.decode("utf-8", errors="replace") if upstream_body else None,
                     execution=request_state.get("nemo_gym_model_execution"),
+                    failure=exc,
                 )
             except Exception:
                 logger.warning("Model-call capture finalization failed.", exc_info=True)
@@ -1802,6 +2016,7 @@ class _CaptureMiddleware:
                     dialect,
                     model_server_name,
                     request_bytes,
+                    verifier_invocation_id=verifier_invocation_id,
                     client_session_id=client_session_id,
                     client_assistant_message_id=client_assistant_message_id,
                     rollout_id=rollout_id,
@@ -1941,7 +2156,7 @@ def install_model_call_capture(
 
 
 # Preserve old reader imports during deprecation without eagerly importing the reader back here.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(
@@ -1972,6 +2187,6 @@ __getattr__ = moved_attr_getter(
             ),
             "nemo_gym.observability.model_calls",
         ),
-        "maybe_rollout_id_from_run_body": "nemo_gym.rollout_correlation",
+        "maybe_rollout_id_from_run_body": "nemo_gym.core.episode",
     },
 )

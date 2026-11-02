@@ -267,7 +267,8 @@ class TestGroup:
         the adapter creates main's sandbox in ``/app`` and runs its command, entrypoint included, and its recorded
         healthcheck there (it gives neither a ``cwd`` of its own) as the sandbox's default user (``task.user``,
         ``app``), as the single sandbox runs both; the seed then prepares ``/other`` for the agent, as it does in a
-        single sandbox, and the server names that directory per exec, as Harbor does (review, round 32)."""
+        single sandbox, and gives the task healthcheck that directory explicitly (``_wait_healthy(workdir=...)``),
+        as every exec of the seed, the turns and the verifier names its ``cwd`` (review, round 32)."""
         toml = TASK_TOML.replace("[environment]\n", '[environment]\nworkdir = "/other"\n')
         toml += (
             '\n[environment.healthcheck]\ncommand = "test -f ready"\ninterval_sec = 0.01\nstart_interval_sec = 0.01\n'
@@ -317,10 +318,15 @@ class TestGroup:
             assert image_check["ran_as"] == "app" and image_check["cwd"] == "/app"
             assert not [r for r in main_sandbox.execs if r["command"] == "test -f ready"]
             # The seed's side, on the group's main: the task workdir is prepared for the agent (made and handed to
-            # app), as in a single sandbox, while main keeps the WORKDIR as its own directory.
-            prepared = await server._prepare_workdir(compose.services["main"], task, task.workdir)
+            # app), as in a single sandbox, while main keeps the WORKDIR as its own directory, and the task
+            # healthcheck runs in the prepared directory, named explicitly, as the image's user.
+            main_service = compose.services["main"]
+            prepared = await server._prepare_workdir(main_service, task, task.workdir)
             assert prepared == "/other" and main_sandbox.dirs["/other"] == "app"
             assert main_spec_of(provider, task).workdir == "/app"
+            await server._wait_healthy(main_service, task, user="app", workdir=prepared, compose_managed=True)
+            (task_check,) = [r for r in main_sandbox.execs if r["command"] == "test -f ready"]
+            assert task_check["ran_as"] == "app" and task_check["cwd"] == "/other"
         finally:
             await compose.stop()
 

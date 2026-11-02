@@ -21,11 +21,19 @@ collection writes nothing for them, so their absence is the only evidence. With
 ``_ng_omitted_rollout``. No reader counts that row as a failure or an attempt, so scoring and the
 resume attempt count are unchanged and resume still runs the rollout. When readers pick a rollout's
 latest attempt, an interrupted one counts and hides older failures; one never started is skipped.
+
+A failed agent ``/run`` that ends the run because ``route_failures_to_sidecar`` is off gets the same row, whatever
+``record_omitted_rollouts`` says: its reply was lost, so the rollout produced no result. That row also carries
+``_ng_unrouted_run_error``: it is evidence, not a new execution, so readers skip it before they pick the latest
+attempt. An older failure of the rollout still stands, and a later attempt still replaces it.
+
+Rollout collection with a run manifest writes this row only for a row never started: it saves an interrupted
+attempt as a ``kill_shaped`` failure in the run history, so a second row would record the interruption twice.
 """
 
 from typing import Any, Dict, Mapping
 
-from nemo_gym.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
 
 
 _FAILURE_MESSAGE_KEY = "_ng_failure_message"
@@ -40,7 +48,8 @@ def omitted_rollout_record(result: Mapping[str, Any]) -> Dict[str, Any]:
     ``_ng_failure_message`` keeps the reason the result gave, else says that no result was produced.
     """
     # Lazy: rollout_collection imports this module.
-    from nemo_gym.rollout_collection import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY, NG_OMITTED_ROLLOUT_KEY
+    from nemo_gym.artifacts.rollout_rows import NG_DISPATCH_DRAINED_KEY, NG_FAILURE_CLASS_KEY
+    from nemo_gym.rollout_collection import NG_OMITTED_ROLLOUT_KEY
 
     record = dict(result)
     failure_class = record.get(NG_FAILURE_CLASS_KEY) or (

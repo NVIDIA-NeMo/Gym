@@ -31,7 +31,7 @@ from tenacity import (
     wait_exponential,
 )
 
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 _RoutedExperts = list[list[list[int]]] | str
