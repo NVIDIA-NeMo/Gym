@@ -93,6 +93,7 @@ if TYPE_CHECKING:
         current_model_sampling_segment,
         encode_model_sampling,
         model_call_sampling_config,
+        model_sampling_context,
         model_sampling_from_run_body,
         model_sampling_path_segment,
     )
