@@ -78,7 +78,7 @@ over only if the successor dies before its own prologue, then reads its predeces
 
 | Predecessor ended | The chain |
 | --- | --- |
-| `TIMEOUT` | Continues from the saved rows, within `max_walltime`. |
+| `TIMEOUT` | Continues from the saved rows, within `max_walltime`. A rollout cut in flight is rerun from the start and is charged no attempt. |
 | `PREEMPTED`, `NODE_FAIL`, `BOOT_FAIL` | Retries, spending one of `max_retries`. |
 | `COMPLETED` | Ends. |
 | `CANCELLED`, `FAILED`, `OUT_OF_MEMORY`, `DEADLINE`, unknown accounting | Stops. |
@@ -95,6 +95,11 @@ ends the chain and writes the kind and the way out to `.gym_chain_incomplete`:
 | `provider_credentials_rejected` | The sandbox provider answered 401 or 403. | Fix the credentials, then `--recover`. |
 | `collection_resume_refused` | The saved rollouts do not verify against this run's inputs and configuration. | A fresh run (step 10), or, only when the operator accepts the difference, `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`. |
 | A resumed segment saved no rollout | Its walltime was shorter than the setup (Gym install, server start) plus one rollout, so the next segment would repeat it. | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. |
+
+The driver's own exit code tells the chain what happened: 75, unfinished work, the chain continues;
+1, no progress in the segment, one infra retry is spent; 76, nothing eligible, a typed stop. Only
+`PREEMPTED`, `NODE_FAIL` and `BOOT_FAIL` spend an infra retry. A segment the scheduler requeued
+leaves its elapsed time unknown, and the chain stops with unknown accounting (step 5).
 
 Do not resubmit while a job of the run is live; recovery answers NOOP then anyway.
 
@@ -125,33 +130,56 @@ The agent name is the rows' `agent_ref.name`, the agent entry in
 `--inspect` reads the saved evidence and evaluates the gates without dispatching anything. The
 read runs on the run's host; the first time, it installs the run's pinned Gym for its reader with
 a private copy of uv and Python, which takes minutes and replaces nothing in your home. Later reads
-on that host reuse the cache. Read:
+on that host reuse the cache. An inspection and a recovery decide the same from the same evidence,
+and the read hashes its sources when it opens, parses and closes them: a file that changes under
+it makes the decision stop ("unstable sources"), so never edit a run while you read it.
 
-- the decision's action and `reason`. When the run's latest resume crossed operational
-  configuration drift, the reason ends with `resumed across operational drift: <settings>`.
-- `gate_task.status`: `RUNNING` (a job is live), `PLANNED` (eligible work, nothing dispatched),
-  `FAILED` (stopped, unsupported, or a gate failed: read `errors`), `UNVERIFIED` (complete and
-  nothing failed, but acceptance is not proven, such as evaluation health UNVERIFIED: read
-  `warnings`), `SUCCESS` (complete and every gate passed). Only `SUCCESS` exits 0.
-- `gate_task.trial_counts`: `observed_healthy`, `unhealthy`, `unobserved`, and `verifier_recorded`,
-  the observed-healthy trials known only through the verifier's own grading record. Unobserved
-  trials are unverified, not healthy.
+The output is one JSON line, the recovery outcome, and nothing is written; the exit code is 0 only
+when `gate_task.status` is `SUCCESS`. Keep that line: it is your record of the read. Its top-level
+keys are `decision` (`action`, `reason`), `gate_task`, `ok`, `dispatched`, `job_id`, `unsupported`,
+`mlflow` (`receipt`: `run_id`, `current`, `uploaded_rollouts`, `rollout_projection_version`),
+`reverify`, `walltime_plan` and `scheduler_refusal`. Read:
+
+- the decision's `action` (`noop`, `reverify`, `resubmit`, `fresh-restart`, `stop`) and `reason`.
+  When the run's latest resume crossed operational configuration drift, the reason ends with
+  `resumed across operational drift: <settings>`.
+- `gate_task.status`: `RUNNING` (a job is live), `PLANNED` (eligible work, nothing dispatched; a
+  dispatching call reports `RESUMING`), `FAILED` (stopped, unsupported, or something failed: read
+  `errors`), `UNVERIFIED` (complete, nothing failed, acceptance not proven: read `warnings`),
+  `SUCCESS` (complete and every gate passed). A chain or MLflow error turns `SUCCESS` or
+  `UNVERIFIED` into `FAILED`.
+- `gate_task.evaluation_health` (null until the run is complete): `status` (`PASS`, `FAIL`,
+  `UNVERIFIED`), `evaluation_failure_rate`, `exact`, `trials`, `evaluation` (`count`, `fraction`,
+  `kinds`, `server`), `model` (`count`, `fraction`, `kinds`), `policy_timeout_counts_as_model`
+  (present only when false) and `trajectory_evidence`.
+- `gate_task.failures`: `expected`, `omitted`, `response_failures` and `trial_failures` (each with
+  `count`, `rate` and `by_cause`, a `count` and `rate` per cause: `truncated`, `empty`, `malformed`
+  for responses; `request`, `judge`, `sandbox`, `harness`, `timeout`, `other` for trials) and
+  `metric_coverage` (`trials`, `expected`, `source`). Facts; no limit is applied to them.
+- `gate_task.trial_counts` (null until complete): `observed_healthy`, `unhealthy`, `unobserved`,
+  `verifier_recorded` (the observed-healthy trials known only through the verifier's own grading
+  record) and `unobserved_reason` when `unobserved` is not 0. Unobserved trials are unverified,
+  not healthy.
+- `gate_task.health_verdict` (one line), `criteria`, `mlflow_tracking_required`,
+  `expected_samples`, `scored_samples`, `omitted_samples`, `score`, `errors`, `warnings`, and where
+  the read ran (`reader_host`, `collector_host`, each with a `*_fallback_reason` when a reader
+  stayed on the login host).
 
 ## 5. Act on the decision
 
 | The inspection says | Do |
 | --- | --- |
 | Eligible work, `PLANNED` | Run the same command without `--inspect`. |
-| `reverify`, `PLANNED` (only judge failures remain) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. The executor runs this today only for a submission that deploys no model service; otherwise the outcome says so (`no existing CPU-only judge execution profile`) and the judge failures stay as they are. |
+| `reverify`, `PLANNED` (only judge failures remain) | Run the same command without `--inspect`: the saved answers are judged again and the policy is not called. A run that served its own model gets a judge-only job on a CPU partition (the saved config's CPU pool, or `--judge-partition <partition>`); without a CPU partition the refusal names the option. A mixed run re-judges its saved answers first, then resubmits the policy work. |
 | NOOP, `RUNNING` (`continuation <job> live; nothing to decide`) | A job of the run is live. Wait for it to end, then inspect again. |
 | STOP typed `server_spinup_timeout` | `--recover --server-spinup-timeout-seconds N --spinup-timeout-reason "<why>"` (the table in step 2). |
 | The chain's walltime cap is spent | `--recover --max-walltime HH:MM:SS --walltime-reason "<why>"`. Never below the recorded walltime; journaled. |
 | The infra-retry budget is spent | `--recover --extend-retries N`. The spent count is kept; journaled. |
-| The run's chain accounting is unknown | An explicit budget continues it: `--max-walltime` with `--walltime-reason`, optionally `--extend-retries`. Without it, the STOP names these options. |
+| The run's chain accounting is unknown (a segment the scheduler requeued ends this way: the requeued allocation's elapsed time is unknown) | An explicit budget continues it: `--max-walltime` with `--walltime-reason`, optionally `--extend-retries`. Without it, the STOP names these options. |
 | A Gym fix is needed to continue | Install that commit as the launcher, then `--recover --repin <full sha> --repin-reason "<why>"`. Saved rows and budgets stay. |
 | The resume check refuses a configuration difference | Operational differences (timeouts, retries, ports, concurrency, paths, tracking) already resume by themselves, with a warning and a line in the resume-drift journal. A **semantic** difference (data, limits, repeats, model, sampling, judge or grading) is refused, naming the settings. Usually the right answer is a fresh run (step 7). Only when the operator accepts that exact difference: `--recover --allow-unsafe-resume --unsafe-resume-reason "<why>"`, which records the reason and the user. It never bypasses corrupt or conflicting history. |
 | `fresh-restart` (no task inventory) | Step 6. |
-| NOOP, `FAILED`, and the only error starts with `no MLflow run evidence` | The results are complete, but no delivery is on record: no live MLflow run id and no post-run export receipt. The rest of the error says which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, and export the run again so that the receipt `rollouts_mlflow_export_done` exists (`gym eval export` with the `mlflow` exporter writes it once every upload returned); then inspect again. "does not name all of the tracking URI, experiment and run name": the run was never tracked; read `trial_counts`, coverage and the score yourself, and set `mlflow_tracking_required: false` next time (step 1). |
+| NOOP, `FAILED`, and the only error starts with `no MLflow run evidence` | The results are complete, but no delivery is on record: no live MLflow run id and no post-run export receipt. The rest of the error says which case it is. "although the saved config snapshot names a tracking URI, experiment and run name": tracking was configured and required, and the export did not finish. Read the exporter's failure in the driver log, repair the delivery, then run the same command without `--inspect`: on a complete run that requires tracking and has no receipt, `--recover` runs the post-run export itself and reads the run again. Then inspect with `--mlflow-run-id <the receipt's run_id> --mlflow-status FINISHED` once you observed that status. "does not name all of the tracking URI, experiment and run name": the run was never tracked; read `trial_counts`, coverage and the score yourself, and set `mlflow_tracking_required: false` next time (step 1). |
 | `SUCCESS` | Done. Keep the run directory as the record. Cancel the last segment's pending sentinel (`scancel` the id in `.gym_followup_sentinel.<job id>`): once Slurm cancels the successor, the sentinel starts only to exit, on a full allocation (step 10). |
 
 Plain `gym eval resubmit` without `--recover` resets the retry and walltime budgets and the
@@ -187,6 +215,16 @@ decides, retried by default. Successes and final failures are never run again.
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
 does not extend an exhausted budget, `--extend-retries` and `--max-walltime` do.
+
+Retries happen in three layers before a failure reaches you. In a call: the policy client retries
+HTTP 429, 502, 503, 504, 520, 404, 408 and 500, the judge client 408 and 429, and the sandbox
+client 408, 409, 425, 429 and the 5xx codes. In a run: a resumed segment dispatches again every
+identity that is not settled, within the attempt cap (`NEMO_GYM_MAX_ROLLOUT_ATTEMPTS`, default 3);
+a judge failure is re-judged from its saved answer, never regenerated, and is never the model's
+zero: masked, out of the score, counted on the evaluation side. In the chain: only `PREEMPTED`,
+`NODE_FAIL` and `BOOT_FAIL` spend an infra retry, `TIMEOUT` continues, and `FAILED`,
+`OUT_OF_MEMORY`, `DEADLINE` and `CANCELLED` stop the chain; `--recover` is the way on, and it
+dispatches only the missing and retriable identities.
 
 What is retriable is one question; whether the score can be trusted is another. The split between
 model faults and evaluation-side faults belongs to the second only: `gate_task.evaluation_health`
@@ -248,10 +286,11 @@ The health summary and the gates are the contract you read after a run: the resp
 trial-failure rates, coverage, and the unhealthy rollouts. A run can be healthy and still score
 low. That is the model or its deployment: fix the deployment and run again, not the evaluation.
 
-- Health is written to `quality_summary.json` after the run.
-  `gym eval health-check <run dir>/<benchmark>/artifacts` re-runs the checks on a local path; it
-  reports, it does not fail the run for you. It rewrites `quality_summary.json` in that directory,
-  so run it on a copy, never on the run's own `artifacts/` (step 3).
+- The verdict is not a file: it is the inspection's output line (step 4). The one persisted health
+  record is `_ng_run_health_metrics` in the first entry of `artifacts/rollouts_aggregate_metrics.json`,
+  the same facts the export sends to MLflow. `quality_summary.json` is the per-rollout health
+  summary and one of the gate's hashed sources; `gym eval health-check <copy>/artifacts` re-runs
+  its checks and rewrites it, so run it on a copy, never on the run's own `artifacts/` (step 3).
 - What decides acceptance: complete results, the score gate (`--score-key`, a JSON path, with
   `--score-agent` and, when an agent has several entries, `--score-environment`), a readable
   health summary, the MLflow delivery when it is required (step 1), and evaluation health.
@@ -265,6 +304,13 @@ low. That is the model or its deployment: fix the deployment and run again, not 
   agent limits, and a cut-off, empty or malformed answer are the model's; another model's 4xx (a
   judge's) is evaluation-side. `criteria.evaluation` records the limit and
   `policy_timeout_counts_as_model` beside the verdict.
+- Whether a trial counts as observed depends on the benchmark: its server recorded the grading
+  operation, or saved a grading artifact bound to the answer (`judge_record`, `rubric_verdict`,
+  `symbolic_match`, `metric_record`, `test_execution`, `environment_reward`, `repository_test_run`,
+  `substep_tests`), or the model's own failed answer settles it. A benchmark whose server records
+  neither reads `UNVERIFIED` with `trial_counts.unobserved_reason` naming the server, and so does a
+  run whose saved config does not name its resources server. Report it with the reason; do not
+  re-run, and change no flag: none changes it. The fix is that server's grading record, in Gym.
 - What is reported and not applied: `--max-response-failure-fraction` and
   `--max-trial-failure-fraction` are validated and echoed under `gate_task.criteria` with
   `applied: false`; `--max-unhealthy-fraction` (per-rollout health) is judged in `warnings`. None
@@ -275,12 +321,18 @@ low. That is the model or its deployment: fix the deployment and run again, not 
 - `warnings` also carries facts that fail nothing: `no response-health criterion configured` when
   `--max-unhealthy-fraction` was not given, and `health checks not fully evaluated` with the checks
   a small run gave too little to judge.
-- Pass `--mlflow-run-id <id> --mlflow-status FINISHED` only after you observed that run and status
-  yourself. They do not export anything; acceptance also needs a current export receipt.
+- The MLflow part passes only with a current export receipt (`mlflow.receipt.current`, with
+  `uploaded_rollouts` true and `rollout_projection_version` 1) and `--mlflow-status FINISHED`
+  observed by you for `--mlflow-run-id` equal to the receipt's `run_id`. A live run id alone is
+  never accepted, and the two flags export nothing. The receipt, `artifacts/rollouts_mlflow_export_done`,
+  binds the sha256 of five run files; a file that changes after the export makes it stale.
 - With MLflow configured, the post-run export logs the same facts as metrics: `health/response/*`,
   `health/trial/*` (`known`, `passed`, `counts_known`, `expected`, `failed` or
-  `failed_lower_bound`, the rates), `health/upstream_recovery/*` and `health/grading_recovery/*`.
-  Read `known` before a `passed` value: `known=0` means unknown, not failed.
+  `failed_lower_bound`, the rates), `health/response_failures/*` and `health/trial_failures/*` (a
+  rate and a count per cause), `health/metric_coverage/*`, `health/upstream_recovery/*` and
+  `health/grading_recovery/*`. Read `known` before a `passed` value: `known=0` means unknown, not
+  failed. The MLflow trial metrics always count a policy timeout as the model's, whatever
+  `--policy-timeout-counts-as-model` the inspection used.
 - `SUCCESS` needs complete results and every gate. A NOOP, a finished job, or a full score alone is
   not acceptance.
 
