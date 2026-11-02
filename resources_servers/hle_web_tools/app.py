@@ -140,6 +140,10 @@ _BARE_URL_RE = re.compile(r"^(?:https?:)?(?://)?(?:[a-z0-9-]+\.)+[a-z]{2,}\.?(?:
 # ``site:b.org,`` yield the bare hosts; one leading dot (``site:.b.org``) is dropped.
 _SITE_OPERATOR_RE = re.compile(r"\bsite:\s*[\"'(\[]?\.?([^\s\"'()\[\],;|]+)", re.IGNORECASE)
 _SLASH_RUN_RE = re.compile(r"/{2,}")
+# A ``site:`` operand after ``normalize_hostname`` and with trailing punctuation dropped: labels of letters, digits,
+# ``-`` and ``_``, optionally after ``*.``.
+_SITE_HOST_RE = re.compile(r"^(?:\*\.)?[a-z0-9_-]+(?:\.[a-z0-9_-]+)*$")
+_TRAILING_NON_HOST_RE = re.compile(r"[^a-z0-9]+$")
 _WAYBACK_PATH_RE = re.compile(r"^/web/[^/]*/(.+)$", re.IGNORECASE | re.DOTALL)
 _GOOGLE_CACHE_RE = re.compile(r"cache:(?:[A-Za-z0-9_-]+:)?(.+)$", re.DOTALL)
 # Word characters without the underscore: ``odd_spin_structures`` is three words, as search engines read it.
@@ -433,8 +437,11 @@ class Blocklist:
         for match in (match for form in forms for match in _SITE_OPERATOR_RE.finditer(form)):
             host = schemeless(match.group(1)).split("/", 1)[0].split(":", 1)[0]
             try:
-                host = normalize_hostname(_WWW_RE.sub("", host, count=1))
+                # Trailing punctuation (``site:huggingface.co!``) is dropped, as search engines drop it.
+                host = _TRAILING_NON_HOST_RE.sub("", normalize_hostname(_WWW_RE.sub("", host, count=1)))
             except UnicodeError:
+                host = ""
+            if not _SITE_HOST_RE.match(host):
                 # An operand that is no hostname cannot be checked against ``domains``: refuse, do not skip it.
                 return Block(
                     MALFORMED_URL_FAMILY, "site: operand that is a hostname", match.group(0), "site: operator"

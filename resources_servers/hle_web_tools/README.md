@@ -72,8 +72,9 @@ Beyond the families, the protocol's own refusals:
   `patterns_case_sensitive`, when a `site:`
   operand names a blocked domain (the operand is read as host characters only, so `(site:a.org OR
   site:b.org)`, `site:a.org|site:b.org` and `site:b.org,` each yield the bare host; one leading dot, the
-  scheme, `www.` and any path are stripped before the check; an operand that is not a valid hostname is
-  refused as `malformed_url` rather than skipped), or when they
+  scheme, `www.`, any path and trailing punctuation (`site:huggingface.co!`) are stripped before the
+  check; an operand that is then not a hostname of letters, digits, `-` and `_` labels, optionally after
+  `*.`, is refused as `malformed_url` rather than skipped), or when they
   repeat a long verbatim span of the question. Upstream states no span length; this server refuses a
   query that contains **8 consecutive words of the question** (`verbatim_span_words`, default 8), where
   words are case-folded maximal runs of letters and digits after that folding and with combining marks

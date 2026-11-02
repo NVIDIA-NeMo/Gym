@@ -446,6 +446,8 @@ async def test_url_spellings_of_a_blocked_page_are_refused_before_the_fetch(serv
         ("site:scale.com, leaderboard", "domains"),
         ("site:.huggingface.co puzzles", "domains"),
         ("site:example..org puzzles", "malformed_url"),  # no hostname: refused, not skipped
+        ("site:huggingface.co! puzzles", "domains"),  # trailing punctuation dropped
+        ("site:exa_mple!.org puzzles", "malformed_url"),  # a character no hostname has
     ],
 )
 async def test_site_operands_are_read_as_hostnames(server, caplog, query, family):
