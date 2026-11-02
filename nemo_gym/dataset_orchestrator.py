@@ -14,7 +14,7 @@
 # limitations under the License.
 from typing import Union
 
-from nemo_gym.config_types import (
+from nemo_gym.config.config_types import (
     UploadJsonlDatasetHuggingFaceConfig,
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
@@ -57,7 +57,7 @@ def upload_jsonl_dataset_to_hf_maybe_delete(
 
 # Backward-compatibility shims (CLI refactor): these CLI entry points moved to `nemo_gym.cli.dataset`.
 # Re-exported lazily to avoid a circular import; accessing them emits a DeprecationWarning.
-from nemo_gym.cli._compat import moved_attr_getter  # noqa: E402
+from nemo_gym.utils.compat import moved_attr_getter  # noqa: E402
 
 
 __getattr__ = moved_attr_getter(

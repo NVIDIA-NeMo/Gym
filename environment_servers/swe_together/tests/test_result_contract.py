@@ -13,7 +13,7 @@ from pydantic import ValidationError
 from environment_servers.swe_together import app
 from environment_servers.swe_together.schemas import SWETResult
 from environment_servers.swe_together.tests.test_environment import activation, server, state
-from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.core import NeMoGymResponseCreateParamsNonStreaming
 
 
 LONG_PATCH = "diff --git a/x b/x\n" + "+line\n" * 40

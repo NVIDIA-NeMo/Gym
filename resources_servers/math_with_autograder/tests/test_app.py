@@ -26,15 +26,15 @@ from unittest.mock import AsyncMock, MagicMock
 
 from pytest import approx, fixture, raises
 
-from nemo_gym.config_types import ModelServerRef
-from nemo_gym.judge import JudgeError
-from nemo_gym.openai_utils import (
+from nemo_gym.client import ServerClient
+from nemo_gym.config import ModelServerRef
+from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
 )
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.verification import JudgeError
 from resources_servers.math_with_autograder.app import (
     MathWithAutograderResourcesServer,
     MathWithAutograderResourcesServerConfig,
@@ -198,7 +198,7 @@ class TestGenerateJudgeEvaluation:
         assert "2" in rendered
 
     async def test_non_text_content_yields_false(self, server: MathWithAutograderResourcesServer) -> None:
-        from nemo_gym.openai_utils import NeMoGymResponseOutputRefusal
+        from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 
         refusal_response = NeMoGymResponse(
             id="r",

@@ -9,7 +9,7 @@ from unittest.mock import AsyncMock
 import pytest
 
 from nemo_gym.agent_utils.sandbox_session import SandboxSession
-from nemo_gym.sandbox.providers.base import SandboxExecResult
+from nemo_gym.sandbox import SandboxExecResult
 from responses_api_agents.kilocode_agent.sandbox import KiloSandboxSession
 from responses_api_agents.kilocode_agent.tests.test_sandbox import seed
 

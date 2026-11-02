@@ -337,7 +337,7 @@ Other servers apply the same pattern with domain-specific variations. For exampl
 A judge that fails to answer is not a model that answered wrongly. Make judge calls with `call_judge`, which posts, checks the HTTP status, and parses the reply:
 
 ```python
-from nemo_gym.judge import call_judge
+from nemo_gym.verification import call_judge
 
 judge_response = await call_judge(
     self.server_client,

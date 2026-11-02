@@ -15,6 +15,7 @@
 
 import asyncio
 import json
+import logging
 import subprocess
 import sys
 from pathlib import Path
@@ -23,9 +24,10 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from nemo_gym.rollout_observability import AgentInvocation, SandboxObservation, ToolCallObservation
+from nemo_gym.client import ServerClient
 from nemo_gym.sandbox.agent_tools import restricted_network_policy
-from nemo_gym.server_utils import ServerClient
+from nemo_gym.trajectory import AgentInvocation, SandboxObservation, ToolCallObservation
+from nemo_gym.utils.server_process import IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME
 from responses_api_agents.pi_agent.app import PiAgentRunRequest, PiMCPServerConfig
 from responses_api_agents.pi_sandboxed_agent import app
 from responses_api_agents.pi_sandboxed_agent.app import _RUN, PiSandboxedAgent, PiSandboxedAgentConfig
@@ -123,6 +125,22 @@ def agent(tmp_path, monkeypatch):
     sandbox.download = AsyncMock(side_effect=download)
     server._start_sandbox = AsyncMock(return_value=sandbox)
     return server, sandbox
+
+
+@pytest.mark.parametrize("worker", [False, True])
+def test_only_the_main_process_logs_the_deprecation_once(agent, caplog, monkeypatch, worker):
+    """Workers of a multi-worker server rebuild it after the main process has logged the warning."""
+    server, _ = agent
+    app._warn_deprecated_once.cache_clear()
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1" if worker else "")
+    with caplog.at_level(logging.WARNING, logger=app.__name__):
+        for _ in range(2):
+            PiSandboxedAgent(config=server.config, server_client=MagicMock(spec=ServerClient))
+
+    warnings = [r.getMessage() for r in caplog.records if r.name == app.__name__]
+    assert warnings == ([] if worker else [app.DEPRECATION_WARNING])
+    for phrase in ("pi_sandboxed_agent", "legacy /run", "Use pi_agent", "tool_servers", "pi_agent/README.md"):
+        assert phrase in app.DEPRECATION_WARNING
 
 
 def request_body():

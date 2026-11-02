@@ -10,7 +10,7 @@ from dataclasses import dataclass
 
 from jsonschema import Draft202012Validator
 
-from nemo_gym.rollout_observability import NG_AGENT_OBSERVATIONS_KEY
+from nemo_gym.trajectory.trajectory_record import NG_AGENT_OBSERVATIONS_KEY
 
 from .checks import SchemaCheck, SemanticCheck
 from .results import Results, gate_passes

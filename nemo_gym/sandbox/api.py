@@ -41,6 +41,7 @@ from nemo_gym.sandbox.providers import (
     SandboxStatus,
     SupportsSandboxBackgroundServices,
     SupportsSandboxEndpoint,
+    SupportsSandboxIndependentUploads,
     SupportsSandboxPauseResume,
     SupportsSandboxPty,
     SupportsSandboxPtyAttach,
@@ -436,6 +437,13 @@ class AsyncSandbox:
     def provider_name(self) -> str:
         """The name of this sandbox's runtime provider."""
         return self._provider.name
+
+    @property
+    def uploads_independent_of_execs(self) -> bool:
+        """Whether an upload can run while commands hold the provider's capacity (``SupportsSandboxIndependentUploads``)."""
+        return isinstance(self._provider, SupportsSandboxIndependentUploads) and bool(
+            self._provider.uploads_independent_of_execs()
+        )
 
     def _telemetry_provider_name(self) -> str:
         """Provider name for span attributes (`docker`, `daytona`, `opensandbox`, ...)."""
