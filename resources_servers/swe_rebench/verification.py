@@ -28,6 +28,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Callable, Iterable, Sequence
 
+from resources_servers.swebench.start_state import SETUP_PATCH_PATH
+
 
 # The marker delimits the graded test output from the install noise that precedes it. Parsers
 # are line-oriented and several will happily interpret dependency-resolver chatter as test
@@ -35,6 +37,7 @@ from typing import Any, Callable, Iterable, Sequence
 TEST_OUTPUT_BEGIN = "___NEMO_GYM_SWE_REBENCH_TEST_BEGIN___"
 TEST_OUTPUT_END = "___NEMO_GYM_SWE_REBENCH_TEST_END___"
 TEST_PATCH_FAILED = "___NEMO_GYM_SWE_REBENCH_TEST_PATCH_FAILED___"
+SETUP_PATCH_FAILED_EXIT = 96
 
 PASSED = "PASSED"
 
@@ -124,6 +127,8 @@ class VerificationInputs:
     base_commit: str
     patch: str
     test_patch: str = ""
+    # A curriculum start state: applied exactly, before ``patch`` (relative to it).
+    setup_patch: str = ""
     install: Sequence[str] = field(default_factory=tuple)
     test_cmd: Sequence[str] = field(default_factory=tuple)
     log_parser: str = ""
@@ -154,6 +159,11 @@ def build_eval_script(inputs: VerificationInputs) -> str:
     install_block = "\n".join(as_command_list(inputs.install))
     test_block = "\n".join(as_command_list(inputs.test_cmd))
 
+    # Unlike the agent's patch, the start state is the task itself: if it does not apply
+    # exactly, the run says nothing about the agent and must not be graded.
+    apply_setup_patch = ""
+    if inputs.setup_patch.strip():
+        apply_setup_patch = f"git apply {SETUP_PATCH_PATH} || exit {SETUP_PATCH_FAILED_EXIT}"
     apply_patch = ""
     if inputs.patch.strip():
         apply_patch = (
@@ -172,6 +182,7 @@ cd {shlex.quote(work_dir)} || exit 97
 git reset --hard HEAD >/dev/null 2>&1 || true
 git checkout {shlex.quote(inputs.base_commit)} >/dev/null 2>&1 || true
 
+{apply_setup_patch}
 {apply_patch}
 {apply_test_patch}
 
@@ -264,6 +275,8 @@ def verification_files(inputs: VerificationInputs, *, overwrite_maven_settings: 
     files = {"/tmp/nemo_gym_eval.sh": build_eval_script(inputs)}
     # Harmless for non-JVM rows, which never read them.
     files.update(_mirror_files(maven_settings=overwrite_maven_settings))
+    if inputs.setup_patch.strip():
+        files[SETUP_PATCH_PATH] = inputs.setup_patch
     if inputs.patch.strip():
         files["/tmp/nemo_gym_patch.diff"] = inputs.patch
     if inputs.test_patch.strip():
@@ -294,6 +307,15 @@ async def run_verification(
 
         await asyncio.to_thread(_persist_log)
 
+    if result.return_code == SETUP_PATCH_FAILED_EXIT:
+        return VerificationResult(
+            completed=False,
+            resolved=False,
+            patch_applied=False,
+            test_results=None,
+            test_output=output,
+            error="start-state setup patch did not apply",
+        )
     if result.return_code == 97:
         return VerificationResult(
             completed=False,
