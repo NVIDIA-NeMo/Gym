@@ -12,14 +12,12 @@ from resources_servers.gymnasium import GymnasiumServer
 from resources_servers.gymnasium import GymnasiumServer
 from nemo_gym.core import NeMoGymResponse
 
-
 class MyEnv(GymnasiumServer):
     async def reset(self, metadata: dict, session_id=None) -> tuple[str | None, dict]:
         return None, {}  # (observation, info); observation (if set) is appended to input
 
-    async def step(
-        self, action: NeMoGymResponse, metadata: dict, session_id=None
-    ) -> tuple[str | None, float, bool, bool, dict]: ...  # (observation, reward, terminated, truncated, info)
+    async def step(self, action: NeMoGymResponse, metadata: dict, session_id=None) -> tuple[str | None, float, bool, bool, dict]:
+        ...  # (observation, reward, terminated, truncated, info)
 ```
 
 `reset()` runs once per episode. `step()` runs after each model response and returns the 5-tuple:
@@ -57,7 +55,6 @@ Multiple model calls per episode without native tool calling. The model uses `<a
 ```python
 import re
 
-
 class BlackjackEnv(GymnasiumServer):
     async def reset(self, metadata, session_id=None):
         hand = deal_hand()
@@ -86,7 +83,6 @@ For tool-calling environments, `step()` inspects `action.output` for items with 
 
 ```python
 import json
-
 
 class MyToolEnv(GymnasiumServer):
     async def reset(self, metadata, session_id=None):

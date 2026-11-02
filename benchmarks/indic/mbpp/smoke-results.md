@@ -95,8 +95,8 @@ def remove_Occ(s, char):
         return s
     last = s.rfind(char)
     if first == last:
-        return s[:first] + s[first + 1 :]
-    return s[:first] + s[first + 1 : last] + s[last + 1 :]
+        return s[:first] + s[first+1:]
+    return s[:first] + s[first+1:last] + s[last+1:]
 ```
 
 ### Hindi, task 11: reward 1
@@ -117,10 +117,10 @@ def remove_Occ(s, char):
         return s
     if first == last:
         # Only one occurrence exists
-        return s[:first] + s[first + 1 :]
+        return s[:first] + s[first + 1:]
 
     # Remove first and last occurrences
-    return s[:first] + s[first + 1 : last] + s[last + 1 :]
+    return s[:first] + s[first + 1:last] + s[last + 1:]
 ```
 
 ### Kannada, task 367: reward 1
@@ -139,7 +139,6 @@ class Node:
         self.data = data
         self.left = None
         self.right = None
-
 
 def is_tree_balanced(root):
     def check_height(node):

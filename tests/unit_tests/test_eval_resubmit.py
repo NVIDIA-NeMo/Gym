@@ -136,11 +136,9 @@ def ssh_like_shell(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         LocalConnection,
         "run",
-        lambda self, commands: (
-            subprocess.run(
-                ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
-            ).stdout
-        ),
+        lambda self, commands: subprocess.run(
+            ["bash", "-s"], input="\n".join(commands), env=clean_env, text=True, capture_output=True, check=True
+        ).stdout,
     )
 
 

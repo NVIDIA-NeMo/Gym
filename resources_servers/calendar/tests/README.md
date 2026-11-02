@@ -131,7 +131,7 @@ The `exp_cal_state` parameter defines the expected calendar configuration:
         "duration": 60,  # in minutes
         "constraint": "between 2pm and 4pm",  # or "before", "after", "at", None
         "min_time": "10:00",  # earliest allowed start time
-        "max_time": "16:00",  # latest allowed end time
+        "max_time": "16:00"   # latest allowed end time
     }
 }
 ```

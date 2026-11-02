@@ -34,7 +34,7 @@ from nemo_gym.sandbox.api import Sandbox
 from nemo_gym.sandbox.providers import SandboxSpec
 
 spec = SandboxSpec(
-    image="docker://ubuntu:22.04",  # or "/path/to/image.sif"
+    image="docker://ubuntu:22.04",   # or "/path/to/image.sif"
     workdir="/sandbox",
     env={"GREETING": "hello"},
     files={"/sandbox/input.txt": "some seed content"},
@@ -57,7 +57,6 @@ with Sandbox({"apptainer": {}}, spec) as sandbox:
 ```python
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers import SandboxSpec
-
 
 async def run():
     spec = SandboxSpec(image="docker://ubuntu:22.04", workdir="/sandbox")
@@ -314,7 +313,6 @@ binaries (`echo`, `cat`, `sleep`), each guarded so they skip where the binary is
 
 ```python
 import shutil, pytest
-
 
 @pytest.mark.skipif(shutil.which("apptainer") is None, reason="apptainer not installed")
 def test_real_apptainer(): ...

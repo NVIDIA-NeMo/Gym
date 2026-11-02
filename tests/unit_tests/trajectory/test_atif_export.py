@@ -1937,10 +1937,8 @@ def _bad_arguments_call(call_id: str, arguments: str) -> dict[str, Any]:
         (
             [_assistant_message("m1", "ls"), _reasoning("rs", "half a thought")],
             ["trailing_reasoning"],
-            lambda t: (
-                (t.steps[-1].message, t.steps[-1].reasoning_content, t.steps[-1].extra)
-                == ("", "half a thought", {"nemo_gym": {"incomplete": "max_output_tokens"}})
-            ),
+            lambda t: (t.steps[-1].message, t.steps[-1].reasoning_content, t.steps[-1].extra)
+            == ("", "half a thought", {"nemo_gym": {"incomplete": "max_output_tokens"}}),
         ),
         # Terminus keeps that output and goes on after compaction: the next user turn is its observation.
         (
@@ -1954,27 +1952,22 @@ def _bad_arguments_call(call_id: str, arguments: str) -> dict[str, Any]:
                 _assistant_message("m2", "```bash\nls\n```"),
             ],
             ["trailing_reasoning"],
-            lambda t: (
-                [(s.source, s.message, s.reasoning_content) for s in t.steps]
-                == [
-                    ("user", "go", None),
-                    ("agent", "```bash\nmake\n```", "plan"),
-                    ("agent", "", "cut off"),
-                    ("agent", "```bash\nls\n```", "retry"),
-                ]
-                and t.steps[2].observation.results[0].content == "(terminal unchanged)"
-                and t.steps[2].extra["nemo_gym"]
-                == {"incomplete": "max_output_tokens", "observation_source": "user_turn"}
-            ),
+            lambda t: [(s.source, s.message, s.reasoning_content) for s in t.steps]
+            == [
+                ("user", "go", None),
+                ("agent", "```bash\nmake\n```", "plan"),
+                ("agent", "", "cut off"),
+                ("agent", "```bash\nls\n```", "retry"),
+            ]
+            and t.steps[2].observation.results[0].content == "(terminal unchanged)"
+            and t.steps[2].extra["nemo_gym"] == {"incomplete": "max_output_tokens", "observation_source": "user_turn"},
         ),
         # Reasoning between a call and its result (the harness returned the result after the cut-off turn).
         (
             [_function_call("c1", "t", {}), _reasoning("rs", "x"), _function_output("c1", "out")],
             ["trailing_reasoning"],
-            lambda t: (
-                [s.reasoning_content for s in t.steps[1:]] == [None, "x"]
-                and t.steps[1].observation.results[0].content == "out"
-            ),
+            lambda t: [s.reasoning_content for s in t.steps[1:]] == [None, "x"]
+            and t.steps[1].observation.results[0].content == "out",
         ),
         # Two <think> blocks in one completion: one reasoning item per block, or one item with two parts.
         (
@@ -2008,10 +2001,8 @@ def _bad_arguments_call(call_id: str, arguments: str) -> dict[str, Any]:
         (
             [_bad_arguments_call("c1", ""), _function_output("c1", "error"), _assistant_message("m", "ok")],
             ["unparsable_arguments"],
-            lambda t: (
-                t.steps[1].tool_calls[0].arguments == {}
-                and t.steps[1].tool_calls[0].extra["nemo_gym"] == {"source_item_id": "item-c1", "raw_arguments": ""}
-            ),
+            lambda t: t.steps[1].tool_calls[0].arguments == {}
+            and t.steps[1].tool_calls[0].extra["nemo_gym"] == {"source_item_id": "item-c1", "raw_arguments": ""},
         ),
         (
             [_bad_arguments_call("c1", '{"cmd": "ls" '), _function_output("c1", "error")],
@@ -2032,14 +2023,12 @@ def _bad_arguments_call(call_id: str, arguments: str) -> dict[str, Any]:
                 _assistant_message("m2", "```bash\nls\n```"),
             ],
             ["refusal"],
-            lambda t: (
-                t.steps[1].message == "I can't help with that."
-                and t.steps[1].extra["nemo_gym"]
-                == {"source_item_id": "m1", "refusal": True, "observation_source": "user_turn"}
-                and t.steps[1].observation.results[0].content == "(terminal unchanged)"
-                and t.steps[2].message == "```bash\nls\n```"
-                and t.steps[2].extra == {"nemo_gym": {"source_item_id": "m2"}}
-            ),
+            lambda t: t.steps[1].message == "I can't help with that."
+            and t.steps[1].extra["nemo_gym"]
+            == {"source_item_id": "m1", "refusal": True, "observation_source": "user_turn"}
+            and t.steps[1].observation.results[0].content == "(terminal unchanged)"
+            and t.steps[2].message == "```bash\nls\n```"
+            and t.steps[2].extra == {"nemo_gym": {"source_item_id": "m2"}},
         ),
         # An empty refusal is exactly Harbor's own shape for a refused turn: an agent step with an empty message.
         (

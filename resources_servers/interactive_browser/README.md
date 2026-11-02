@@ -44,9 +44,8 @@ browser, and how do I give it back?*
 ```python
 class BrowserSessionProvider(Protocol):
     name: str
-
-    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle: ...  # returns a live cdp_url
-    async def release(self, handle: BrowserSessionHandle) -> None: ...  # idempotent
+    async def acquire(self, spec: BrowserSessionSpec) -> BrowserSessionHandle: ...   # returns a live cdp_url
+    async def release(self, handle: BrowserSessionHandle) -> None: ...               # idempotent
 ```
 
 | Provider | What it does |
