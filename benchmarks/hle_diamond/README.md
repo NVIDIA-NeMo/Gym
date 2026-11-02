@@ -812,8 +812,8 @@ that implements section 3 of upstream's `docs/evaluation-with-tools.md` (commit
 - The environment note tells the model that external information is available only through
   `web_search` and `web_fetch`.
 
-Two residual differences from upstream's wrapper remain, and a with-tools number from this preset
-should state both:
+Three residual differences from upstream's wrapper remain, and a with-tools number from this preset
+should state all three:
 
 - Backend: the protocol names no search or extraction provider, and this server uses Tavily (`/search`
   at `max_results: 20`, `search_depth: advanced`; `/extract` in Markdown). Which pages a query
@@ -825,6 +825,11 @@ should state both:
   new one, and the session and MCP-token signing key derives from public config. Closing it needs an
   authenticated seed channel; tracking issue: TRACKING_ISSUE_TBD. Until then the span rule binds a
   cooperative harness, not the sandboxed model.
+- Oversized pages: the protocol caps `web_fetch` output at 60,000 characters with a truncation
+  indicator, so upstream would serve the start of any page. This server checks the provider's whole
+  page before cutting it and refuses a page longer than `max_page_chars` (1,000,000 characters of
+  provider Markdown) unread, as `oversized_page`, rather than serve its first 60,000 characters. Long
+  PDFs (theses, books) can exceed that bound.
 
 Everything else that departs from upstream in this section (harness, sandbox image and Python version,
 text rows only, effort transmission, and on the Docker provider the open egress) still applies.

@@ -28,8 +28,9 @@ with a key derived from public config (`get_session_middleware_key`: the server 
 instance name), so they are not a secret that could tell the agent server's seed from the sandbox's.
 Closing this needs an authenticated seed channel, a secret the agent server holds and the sandbox never
 sees; until then the span rule is a check on a cooperative harness, not on the sandboxed model. Tracking
-issue: TRACKING_ISSUE_TBD. The Diamond README lists this next to the backend under Sandboxed agents (with
-tools) > Upstream web tools, and both belong next to any with-tools number from that preset.
+issue: TRACKING_ISSUE_TBD. The Diamond README lists this next to the backend and the oversized-page refusal
+under Sandboxed agents (with tools) > Upstream web tools, and all three belong next to any with-tools number
+from that preset.
 
 ## Tools
 
@@ -39,9 +40,10 @@ tools) > Upstream web tools, and both belong next to any with-tools number from 
 | `web_fetch(url)` | main content of a page or PDF as Markdown, capped at 60,000 characters with a truncation indicator; no image, audio or video payloads | Tavily `/extract` with `format: markdown` (PDFs come back as text); `data:` URIs (base64 or percent-encoded, with or without a media type and up to 16 media-type parameters) are replaced by `[data URI removed]` up to the first whitespace, quote, `)` or `>`, so a payload wrapped over several lines keeps its later lines; the Markdown is cut at `max_fetch_chars` (60,000) with `[Content truncated at 60,000 characters; N characters omitted]`; the `Title:` line above it (the provider's title, else the first heading) is cut at 1,000 characters with `…` |
 
 Tavily is the backend for both, a difference from upstream's wrapper next to the sandbox-seeded session
-residual above: the protocol does not name a search or extraction provider, so which pages a query
-surfaces, how they are ranked and how a page is turned into Markdown are Tavily's. The protocol's filtering, caps and refusals
-are all applied here, after Tavily returns. The provider is reached through Gym's shared aiohttp client
+residual above and the oversized-page refusal below (a page longer than `max_page_chars` is refused rather
+than served cut at 60,000 characters): the protocol does not name a search or extraction provider, so which
+pages a query surfaces, how they are ranked and how a page is turned into Markdown are Tavily's. The
+protocol's filtering, caps and refusals are all applied here, after Tavily returns. The provider is reached through Gym's shared aiohttp client
 (`nemo_gym.client.http_client.request`) rather than the `tavily-python` SDK: two JSON endpoints need no SDK,
 and the server keeps the key pool, retry budget and body redaction that `resources_servers/tavily_search`
 also implements over its own transport.
@@ -122,8 +124,10 @@ Beyond the families, the protocol's own refusals:
   `archive.li`, `archive.vn`, `archive.fo`, `translate.goog`, `translate.google.com`, `r.jina.ai`,
   `12ft.io`, `corsproxy.io`, `allorigins.win`, `codetabs.com`, `thingproxy.freeboard.io`,
   `whateverorigin.org`) are blocked outright by the `domains` family.
-- **Fetched responses** are checked after the fetch: the final URL the backend reports (a redirect to a
-  blocked host is refused), then the title and the content against `url_patterns` and
+- **Fetched responses** are checked after the fetch: the final URL the backend reports in
+  `results[].url` (a redirect to a blocked host is refused when Tavily reports the post-redirect URL
+  there, which has not been verified against the live API), then the title and the content against
+  `url_patterns` and
   `patterns_case_sensitive`. On a fresh fetch the content checked is the provider's whole page, before
   any data URI is removed and before any cut, and then the sanitized Markdown as well; a match anywhere,
   even past the 60,000 characters the model would read, refuses the page whole. That scan is bounded: a
