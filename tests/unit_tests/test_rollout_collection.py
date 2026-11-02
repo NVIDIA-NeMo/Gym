@@ -14645,9 +14645,12 @@ class TestRunRecordWriter:
         assert written_failure[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
         assert written_failure[NG_FAILURE_MAX_ATTEMPTS_KEY] == 3
         assert (written_failure[TASK_INDEX_KEY_NAME], written_failure[ROLLOUT_INDEX_KEY_NAME]) == (4, 0)
-        assert RUN_ID_KEY not in written_failure
+        # Records and inputs name the shard's run, as collection stamps its own.
+        run_id = written_failure["_ng_failure_record"]["run_id"]
+        assert written_failure[RUN_ID_KEY] == run_id
         materialized = self._lines(run_dir / "rollouts-step_1_materialized_inputs.jsonl")
-        assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4] and RUN_ID_KEY not in materialized[0]
+        assert [row[TASK_INDEX_KEY_NAME] for row in materialized] == [3, 4]
+        assert {row[RUN_ID_KEY] for row in materialized} == {run_id}
         assert (run_dir / "rollouts-step_1_manifest.json").is_file()
         # The shard's saved progress, as gym eval status and aggregation read it for any run.
         status = orjson.loads((run_dir / "rollouts-step_1_batch_status.json").read_bytes())
@@ -14661,7 +14664,17 @@ class TestRunRecordWriter:
         # and the rollouts it would run again.
         store = RolloutStore.read(run_dir / "rollouts-step_1.jsonl")
         assert store is not None
-        assert store.manifest.run_id == written_failure["_ng_failure_record"]["run_id"]
+        assert store.manifest.run_id == run_id
+        # A verified manifest with every attempt reserved, so resume and recovery accept the shard like a run.
+        assert store.manifest.legacy_import is False
+        assert store.manifest.next_attempt == {"g1_g0_a0": 1, "g2_g0_a0": 1}
+        from nemo_gym.rollout_recovery import RunManifest, manifest_path_for, validate_resume
+
+        shard = run_dir / "rollouts-step_1.jsonl"
+        saved = RunManifest.model_validate_json(manifest_path_for(shard).read_bytes())
+        assert validate_resume(manifest_path_for(shard), saved, run_dir / "rollouts-step_1_materialized_inputs.jsonl")
+        resumed = RolloutStore.start_or_resume(shard, lambda: (materialized, saved), resume=True)
+        assert [row[TASK_INDEX_KEY_NAME] for row in resumed.pending()] == [4]
         assert [record.read()["reward"] for record in store.selected_records("success").values()] == [1.0]
         [failed] = store.failures()
         assert failed[NG_FAILURE_CLASS_KEY] == "agent_request_failed"
