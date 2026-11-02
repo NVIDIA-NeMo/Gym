@@ -17,7 +17,7 @@
 ## Benchmark records
 
 The task records are **not committed** until the Release Process is complete.
-`task_data.py` downloads them from the pinned upstream commit on first use and checks
+`prepare_data.py` downloads them from the pinned upstream commit on first use and checks
 the file's SHA-256 before writing it to `upstream/` (gitignored).
 
 - Source: `https://github.com/Solirinai/GeoBenchX`
@@ -50,7 +50,7 @@ of the 202 official task records into NemoGym Responses API rows. They add the p
 system rules, a fixed benchmark date, and tool JSON schemas; they do not add synthetic task
 or answer content. `train.jsonl` and
 `validation.jsonl` partition the 202 tasks (149 / 53) with the fixed split in
-`task_data.split_of`.
+`prepare_data.split_of`.
 
 Rollout files written by local runs (for example `data/*rollouts*.jsonl`) contain model
 outputs and, in real-tools mode, data derived from the snapshot. Keep them out of the

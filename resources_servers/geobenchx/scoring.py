@@ -44,8 +44,10 @@ HANDLE_KEYS = {
     "reference_geodataframe_name",
     "points_geodataframe_name",
     "geodataframe_names",
-    "raster_path",
 }
+# Reference raster paths are the upstream author's local files; the raster itself
+# is identified by the preceding get_raster_path step's `rasterdataset`.
+RASTER_PATH_KEYS = {"raster_path", "raster1_path", "raster2_path"}
 NONESSENTIAL_KEYS = {
     "legendtext",
     "title",
@@ -67,6 +69,9 @@ NONESSENTIAL_KEYS = {
 PARTIAL_KEYS = {"colormap", "nodataval", "spatial_predicates"}
 CATALOG_KEYS = {"dataset", "geodataset", "rasterdataset"}
 MAX_TOOL_CALLS = 25
+# Bounds scoring time for adversarial trajectories with many interchangeable calls.
+# The search order is deterministic, so a truncated search still scores reproducibly.
+MAX_SEARCH_NODES = 20_000
 
 
 def parse_calls(output: list[Any]) -> list[tuple[str, dict[str, Any] | None]]:
@@ -102,46 +107,81 @@ def _norm(value: Any) -> Any:
     return value
 
 
+Bindings = dict[str, tuple[str, int]]
+
+
+def _consumed_handles(arguments: dict[str, Any]) -> list[str]:
+    handles = []
+    for key in HANDLE_KEYS:
+        value = arguments.get(key)
+        handles.extend(item for item in (value if isinstance(value, list) else [value]) if isinstance(item, str))
+    return handles
+
+
+def is_well_formed(steps: list[dict[str, Any]]) -> bool:
+    """Every handle a reference step consumes must be produced by an earlier step."""
+    produced: set[str] = set()
+    for step in steps:
+        arguments = step.get("arguments")
+        if not isinstance(arguments, dict) or not isinstance(step.get("function_name"), str):
+            return False
+        if any(handle not in produced for handle in _consumed_handles(arguments)):
+            return False
+        produced.update(arguments[key] for key in OUTPUT_KEYS if isinstance(arguments.get(key), str))
+    return True
+
+
 def _step_match(
     candidate: tuple[str, dict[str, Any] | None],
+    call_index: int,
     reference: dict[str, Any],
-    bindings: dict[str, str],
-) -> tuple[bool, bool, dict[str, str]]:
-    """Return (essential_match, partial_difference)."""
+    bindings: Bindings,
+) -> tuple[bool, bool, Bindings]:
+    """Return (essential_match, partial_difference, bindings after this step).
+
+    `bindings` maps a reference handle to the candidate handle and the index of the
+    candidate call that produced it; a consumer must come after its producers.
+    """
     name, candidate_args = candidate
     if name != reference["function_name"] or candidate_args is None:
         return False, False, bindings
     reference_args = reference.get("arguments") or {}
+    if not isinstance(reference_args, dict):
+        return False, False, bindings
     partial = False
     next_bindings = dict(bindings)
+
+    def consumes(expected: Any, actual: Any) -> bool:
+        bound = bindings.get(expected)
+        return bound is not None and bound[0] == actual and bound[1] < call_index
+
     for key, expected in reference_args.items():
         actual = candidate_args.get(key)
         if key in OUTPUT_KEYS:
             if isinstance(expected, str) and isinstance(actual, str):
-                bound = next_bindings.get(expected)
-                if bound is not None and bound != actual:
-                    return False, partial, bindings
-                next_bindings[expected] = actual
+                next_bindings[expected] = (actual, call_index)
             continue
         if key in HANDLE_KEYS:
             if isinstance(expected, str):
-                if expected not in bindings or actual != bindings[expected]:
+                if not consumes(expected, actual):
                     return False, partial, bindings
             elif isinstance(expected, list):
                 if not isinstance(actual, list) or len(actual) != len(expected):
                     return False, partial, bindings
                 if any(
-                    isinstance(value, str) and (value not in bindings or candidate != bindings[value])
-                    for value, candidate in zip(expected, actual)
+                    not consumes(value, item) if isinstance(value, str) else _norm(value) != _norm(item)
+                    for value, item in zip(expected, actual)
                 ):
                     return False, partial, bindings
             elif _norm(actual) != _norm(expected):
                 return False, partial, bindings
             continue
-        if key in NONESSENTIAL_KEYS:
+        if key in NONESSENTIAL_KEYS or key in RASTER_PATH_KEYS:
             continue
-        if key in CATALOG_KEYS and actual != expected:
-            return False, partial, bindings
+        if key in CATALOG_KEYS:
+            if actual != expected:
+                return False, partial, bindings
+            continue
         if _norm(actual) == _norm(expected):
             continue
         if key in PARTIAL_KEYS:
@@ -153,36 +193,52 @@ def _step_match(
 
 def _match_steps(
     calls: list[tuple[str, dict[str, Any] | None]], steps: list[dict[str, Any]]
-) -> tuple[int, bool]:
-    """Backtrack over ready reference steps so independent calls may commute."""
+) -> tuple[int, bool, bool]:
+    """Return (matched step count, all matched steps exact, search exhausted).
+
+    Reference steps are visited in reference order, which puts producers before
+    consumers; candidate calls may be matched in any order that keeps each consumer
+    after its producers, so independent calls commute.
+    """
     best = (0, False)
+    perfect = (len(steps), True)
+    names = {name for name, arguments in calls if arguments is not None}
+    # Upper bound on how many of steps[index:] could still match.
+    possible = [0] * (len(steps) + 1)
+    # Reference handles consumed by steps[index:]; other bindings no longer matter.
+    consumed_later: list[frozenset[str]] = [frozenset()] * (len(steps) + 1)
+    for index in reversed(range(len(steps))):
+        step = steps[index]
+        arguments = step.get("arguments") if isinstance(step.get("arguments"), dict) else {}
+        possible[index] = possible[index + 1] + (step.get("function_name") in names)
+        consumed_later[index] = consumed_later[index + 1] | frozenset(_consumed_handles(arguments))
+    seen: set[tuple] = set()
+    budget = MAX_SEARCH_NODES
 
-    def visit(remaining: set[int], unused: set[int], bindings: dict[str, str], matched: int, partial: bool) -> None:
-        nonlocal best
-        best = max(best, (matched, not partial))
-        for ref_index in remaining:
-            reference = steps[ref_index]
-            # A consumer cannot be matched until its reference handles are bound.
-            args = reference.get("arguments") or {}
-            if any(isinstance(args.get(key), str) and args[key] not in bindings for key in HANDLE_KEYS):
-                continue
-            options = []
-            for call_index in unused:
-                ok, is_partial, next_bindings = _step_match(calls[call_index], reference, bindings)
-                if ok:
-                    options.append((call_index, is_partial, next_bindings))
-            # Prefer exact candidates, but keep partial candidates as fallbacks.
-            for call_index, is_partial, next_bindings in sorted(options, key=lambda item: item[1]):
-                visit(
-                    remaining - {ref_index},
-                    unused - {call_index},
-                    next_bindings,
-                    matched + 1,
-                    partial or is_partial,
-                )
+    def visit(index: int, unused: frozenset[int], bindings: Bindings, matched: int, exact: bool) -> None:
+        nonlocal best, budget
+        best = max(best, (matched, exact))
+        if best == perfect or budget <= 0 or (matched + possible[index], exact) <= best:
+            return
+        relevant = tuple(sorted(item for item in bindings.items() if item[0] in consumed_later[index]))
+        state = (index, unused, relevant, exact)
+        if state in seen:
+            return
+        seen.add(state)
+        budget -= 1
+        reference = steps[index]
+        options = []
+        for call_index in sorted(unused):
+            ok, is_partial, next_bindings = _step_match(calls[call_index], call_index, reference, bindings)
+            if ok:
+                options.append((is_partial, call_index, next_bindings))
+        # Exact candidates first, but keep partial candidates as fallbacks.
+        for is_partial, call_index, next_bindings in sorted(options, key=lambda item: item[:2]):
+            visit(index + 1, unused - {call_index}, next_bindings, matched + 1, exact and not is_partial)
+        visit(index + 1, unused, bindings, matched, exact)
 
-    visit(set(range(len(steps))), set(range(len(calls))), {}, 0, False)
-    return best[0], not best[1]
+    visit(0, frozenset(range(len(calls))), {}, 0, True)
+    return best[0], best[1], budget > 0
 
 
 def _score_solution(
@@ -197,17 +253,18 @@ def _score_solution(
     if reference_names == ["reject_task"]:
         # The paper's judge: a candidate that stops with reject_task fully matches a
         # reject_task reference, whatever it inspected first.
-        score = 2 if calls and calls[-1] == ("reject_task", {}) else 0
+        score = 2 if calls and calls[-1][0] == "reject_task" and calls[-1][1] is not None else 0
         return score, {"reference_tools": reference_names, "matched_steps": int(score == 2)}
     if "reject_task" in candidate_names:
         return 0, {"reference_tools": reference_names, "matched_steps": 0}
 
-    matched, exact = _match_steps(calls, steps)
+    well_formed = is_well_formed(steps)
+    matched, exact, exhaustive = _match_steps(calls, steps)
 
     overlap = sum((Counter(reference_names) & Counter(candidate_names)).values())
     coverage = matched / len(steps)
     tool_coverage = overlap / len(steps)
-    if coverage == 1:
+    if coverage == 1 and well_formed:
         score = 2 if exact else 1
     elif max(coverage, tool_coverage) >= 0.6:
         score = 1
@@ -217,6 +274,8 @@ def _score_solution(
         "reference_tools": reference_names,
         "matched_steps": matched,
         "reference_steps": len(steps),
+        "reference_well_formed": well_formed,
+        "search_exhaustive": exhaustive,
         "semantic_coverage": round(coverage, 6),
         "tool_coverage": round(tool_coverage, 6),
         "extra_steps": max(0, len(calls) - len(steps)),

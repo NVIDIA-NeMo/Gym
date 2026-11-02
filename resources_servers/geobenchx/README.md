@@ -18,19 +18,26 @@ NemoGym implementation of
 - Solution-length metrics for regression and efficiency analysis.
 
 The paper used a panel of three LLM judges. This Gym defaults to a deterministic
-reference matcher so repeated release-regression runs are reproducible. It ignores
-temporary dataframe handle names, tolerates extra steps after a complete solution,
-and treats colormap, NoData, and spatial-predicate differences as partial matches.
+reference matcher so repeated release-regression runs are reproducible. It follows
+dataflow rather than handle names: a step must consume the outputs of the calls
+that matched its reference producers, made earlier, under one consistent renaming.
+Independent calls may come in any order. Catalog dataset names must match exactly;
+reference raster paths, which are upstream local files, are not compared (the
+raster is identified by its `get_raster_path` call). It tolerates extra steps, treats
+colormap, NoData, and spatial-predicate differences as partial matches, gives no
+credit to malformed calls, and scores 0 past 25 calls. Five tasks' only reference
+consumes a handle no earlier step produced; those references can give at most a
+partial match (`match_detail.reference_well_formed` is false).
 The official references remain vendored, so a panel-judge verifier can be added
 without changing the dataset.
 
 ## Build the datasets
 
 ```bash
-.venv/bin/python -m resources_servers.geobenchx.task_data
+.venv/bin/python -m resources_servers.geobenchx.prepare_data
 ```
 
-The task records are not committed. On first use, `task_data` downloads
+The task records are not committed. On first use, `prepare_data` downloads
 `tasks_and_reference_solutions.json` from the upstream commit pinned in
 `upstream/COMMIT`, checks its SHA-256, and saves it to `upstream/`. This needs network
 access once; later runs, the server and the tests reuse the saved file.
@@ -44,9 +51,9 @@ This writes four files to `data/`:
 | `validation.jsonl` | 53 | Held-out evaluation before and after training |
 | `example.jsonl` | 5 | First five training rows, for smoke tests |
 
-The split is fixed (`task_data.split_of`) and keeps near-duplicates on one side.
+The split is fixed (`prepare_data.split_of`) and keeps near-duplicates on one side.
 Many tasks are templates of each other, and many unsolvable tasks are edits of
-solvable ones, so `task_data.task_families` first groups tasks into families:
+solvable ones, so `prepare_data.task_families` first groups tasks into families:
 prompts that are nearly the same, reference solutions that load the same
 datasets with the same tool sequence, or an unsolvable task close to a solvable
 one. Whole families then go to validation, stratified by group and task kind,
@@ -108,6 +115,14 @@ in the same form as upstream's langgraph agent.
    .venv/bin/gym env start \
      "+config_paths=[<model config>,resources_servers/geobenchx/configs/geobenchx.yaml,resources_servers/geobenchx/configs/geobenchx_real_tools.yaml]"
    ```
+
+Workers start when the server boots (bounded by `tool_startup_timeout_s`). A
+session is created by `/seed_session` and released at `/verify` or
+`/close_session`; sessions idle longer than `session_idle_ttl_s` are reclaimed.
+A worker at `max_sessions_per_worker` refuses new seeds rather than evicting live
+sessions. A tool call that exceeds `tool_timeout_s` restarts its worker, and
+later calls of the sessions on that worker report lost state instead of running
+against empty state.
 
 Differences from calling the upstream tools directly:
 

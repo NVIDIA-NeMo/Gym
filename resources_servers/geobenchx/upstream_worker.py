@@ -20,9 +20,13 @@ geopandas, rasterio, matplotlib). One JSON request per stdin line, one JSON
 response per stdout line. Each process owns the dataframe state of the sessions
 routed to it.
 
-Requests:
-    {"op": "reset", "session": str}
-    {"op": "call", "session": str, "tool": str, "arguments": dict}
+Requests carry an "id" that the response echoes:
+    {"id": int, "op": "reset", "session": str}    start (or restart) a session
+    {"id": int, "op": "call", "session": str, "tool": str, "arguments": dict}
+    {"id": int, "op": "release", "session": str}  free a finished session
+
+Only reset creates a session, so a call after this process restarted, or after the
+session idled out, reports lost state instead of running against empty state.
 """
 
 from __future__ import annotations
@@ -33,7 +37,7 @@ import json
 import os
 import re
 import sys
-from collections import OrderedDict
+import time
 from typing import Any
 
 
@@ -91,8 +95,11 @@ PRECALL_FIXES = {
 }
 
 
+LOST_STATE = "Error: this task's tool session state was lost (tool worker restarted or session expired)."
+
+
 class Worker:
-    def __init__(self, upstream_src: str, max_sessions: int) -> None:
+    def __init__(self, upstream_src: str, max_sessions: int, idle_ttl_s: float) -> None:
         os.environ.setdefault("MPLBACKEND", "Agg")
         # Upstream writes intermediates under fixed names (e.g. temp_filtered.tif)
         # in SCRATCHPATH, which it reads at import time; workers must not share it.
@@ -110,27 +117,35 @@ class Worker:
             plotly_figure.show = lambda self, *args, **kwargs: None
         self._tools = tools
         self._max_sessions = max_sessions
-        self._sessions: OrderedDict[str, dict[str, Any]] = OrderedDict()
-
-    def _state(self, session: str) -> dict[str, Any]:
-        state = self._sessions.get(session)
-        if state is None:
-            if len(self._sessions) >= self._max_sessions:
-                raise RuntimeError("worker session capacity reached; existing session state is retained")
-            state = self._sessions[session] = _new_state()
-        self._sessions.move_to_end(session)
-        return state
+        self._idle_ttl_s = idle_ttl_s
+        # session -> (state, last use on the monotonic clock)
+        self._sessions: dict[str, tuple[dict[str, Any], float]] = {}
 
     def reset(self, session: str) -> dict[str, Any]:
         self._sessions.pop(session, None)
-        self._state(session)
+        now = time.monotonic()
+        # Only sessions nobody has used for idle_ttl_s are reclaimed: rollouts that
+        # ended without a release. Live sessions are never evicted.
+        for stale in [s for s, (_, used) in self._sessions.items() if now - used > self._idle_ttl_s]:
+            del self._sessions[stale]
+        if len(self._sessions) >= self._max_sessions:
+            return {"ok": False, "result": "Error: tool worker is at its session capacity.", "capacity": True}
+        self._sessions[session] = (_new_state(), now)
+        return {"ok": True}
+
+    def release(self, session: str) -> dict[str, Any]:
+        self._sessions.pop(session, None)
         return {"ok": True}
 
     def call(self, session: str, tool: str, arguments: dict[str, Any]) -> dict[str, Any]:
         fn = getattr(self._tools, tool, None)
         if fn is None or not callable(fn):
             return {"ok": False, "result": f"Error: unknown tool {tool!r}"}
-        state = self._state(session)
+        entry = self._sessions.get(session)
+        if entry is None:
+            return {"ok": False, "result": LOST_STATE, "lost_state": True}
+        state = entry[0]
+        self._sessions[session] = (state, time.monotonic())
         # Upstream exposes these as langchain StructuredTools, whose schemas drop
         # unknown keyword arguments rather than failing the call.
         params = inspect.signature(fn).parameters
@@ -162,24 +177,33 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--upstream-src", required=True)
     parser.add_argument("--max-sessions", type=int, default=64)
+    parser.add_argument("--idle-ttl-s", type=float, default=3600.0)
     args = parser.parse_args()
 
     # Tools print diagnostics; keep the protocol channel clean.
     protocol = os.fdopen(os.dup(sys.stdout.fileno()), "w", buffering=1)
     os.dup2(sys.stderr.fileno(), sys.stdout.fileno())
 
-    worker = Worker(args.upstream_src, args.max_sessions)
+    worker = Worker(args.upstream_src, args.max_sessions, args.idle_ttl_s)
     protocol.write(json.dumps({"ready": True}) + "\n")
     for line in sys.stdin:
         if not line.strip():
             continue
-        req = json.loads(line)
-        if req["op"] == "reset":
-            resp = worker.reset(req["session"])
-        elif req["op"] == "call":
-            resp = worker.call(req["session"], req["tool"], req.get("arguments") or {})
-        else:
-            resp = {"ok": False, "result": f"Error: unknown op {req['op']!r}"}
+        req: dict[str, Any] = {}
+        try:
+            req = json.loads(line)
+            if req["op"] == "reset":
+                resp = worker.reset(req["session"])
+            elif req["op"] == "release":
+                resp = worker.release(req["session"])
+            elif req["op"] == "call":
+                resp = worker.call(req["session"], req["tool"], req.get("arguments") or {})
+            else:
+                resp = {"ok": False, "result": f"Error: unknown op {req['op']!r}"}
+        except Exception as exc:
+            # A bad request must not take down the other sessions this process holds.
+            resp = {"ok": False, "result": f"Error: tool worker rejected the request: {exc!r}"}
+        resp["id"] = req.get("id") if isinstance(req, dict) else None
         protocol.write(json.dumps(resp) + "\n")
 
 

@@ -21,7 +21,7 @@ import hashlib
 from pathlib import Path
 from typing import Any, ClassVar, Literal
 
-from fastapi import FastAPI, Request
+from fastapi import FastAPI, HTTPException, Request
 from pydantic import BaseModel, ConfigDict, PrivateAttr
 
 from nemo_gym.base_resources_server import (
@@ -29,6 +29,8 @@ from nemo_gym.base_resources_server import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ResourcesCloseSessionRequest,
+    ResourcesCloseSessionResponse,
     ReverifyMode,
     SimpleResourcesServer,
 )
@@ -40,8 +42,8 @@ from resources_servers.geobenchx.catalog import (
     TOOL_DEFINITIONS,
     VECTOR_DATASETS,
 )
+from resources_servers.geobenchx.prepare_data import TASKS
 from resources_servers.geobenchx.scoring import parse_calls, score_task
-from resources_servers.geobenchx.prepare_data import load_tasks
 from resources_servers.geobenchx.upstream_backend import UpstreamToolPool
 
 
@@ -58,7 +60,11 @@ class GeoBenchXResourcesServerConfig(BaseResourcesServerConfig):
     scratch_path: str | None = None
     num_tool_workers: int = 8
     tool_timeout_s: float = 300.0
+    tool_startup_timeout_s: float = 300.0
     max_sessions_per_worker: int = 64
+    # Sessions are released at /verify and /close_session; this reclaims sessions
+    # of rollouts that ended without either.
+    session_idle_ttl_s: float = 3600.0
 
 
 class GeoBenchXVerifyRequest(BaseVerifyRequest):
@@ -176,7 +182,7 @@ def execute_tool(name: str, arguments: dict[str, Any], state: dict[str, Any]) ->
 
 class GeoBenchXVerifier:
     async def verify(self, body: GeoBenchXVerifyRequest) -> GeoBenchXVerifyResponse:
-        task = load_tasks().get(body.task_id)
+        task = TASKS.get(body.task_id)
         if task is None:
             return GeoBenchXVerifyResponse(
                 **body.model_dump(),
@@ -198,6 +204,7 @@ class GeoBenchXResourcesServer(GeoBenchXVerifier, SimpleResourcesServer):
     ray_enabled = False
     config: GeoBenchXResourcesServerConfig
     _sessions: dict[str, dict[str, Any]] = PrivateAttr(default_factory=dict)
+    _closed_sessions: set[str] = PrivateAttr(default_factory=set)
     _upstream: UpstreamToolPool | None = PrivateAttr(default=None)
 
     def model_post_init(self, context: Any) -> None:
@@ -210,8 +217,38 @@ class GeoBenchXResourcesServer(GeoBenchXVerifier, SimpleResourcesServer):
         for name in TOOL_DEFINITIONS:
             app.post(f"/{name}")(self._handler(name))
         if self._upstream is not None:
+            app.router.add_event_handler("startup", self._upstream.start)
             app.router.add_event_handler("shutdown", self._upstream.close)
         return app
+
+    async def _release(self, session_id: str | None) -> dict[str, Any]:
+        if not session_id:
+            return {"ok": True}
+        self._sessions.pop(session_id, None)
+        if self._upstream is None:
+            return {"ok": True}
+        return await self._upstream.release(session_id)
+
+    async def verify(self, request: Request, body: GeoBenchXVerifyRequest) -> GeoBenchXVerifyResponse:
+        # Scoring reads only the trajectory, so the rollout's tool state can go.
+        try:
+            return await GeoBenchXVerifier.verify(self, body)
+        finally:
+            await self._release(request.session.get(SESSION_ID_KEY))
+
+    async def close_resources_session(
+        self, request: Request, body: ResourcesCloseSessionRequest
+    ) -> ResourcesCloseSessionResponse:
+        session_id = request.session.get(SESSION_ID_KEY)
+        released = await self._release(session_id)
+        if not released.get("ok"):
+            raise HTTPException(status_code=503, detail=released.get("result"))
+        if session_id:
+            self._closed_sessions.add(session_id)
+        return ResourcesCloseSessionResponse(resources_session_id=body.resources_session_id)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        await self._release(session_id)
 
     def _handler(self, tool_name: str):
         async def handler(request: Request, body: ToolBody) -> dict[str, Any]:
@@ -230,8 +267,12 @@ class GeoBenchXResourcesServer(GeoBenchXVerifier, SimpleResourcesServer):
 
     async def seed_session(self, request: Request, body: SeedBody) -> BaseSeedSessionResponse:
         session_id = request.session.get(SESSION_ID_KEY)
+        if session_id in self._closed_sessions:
+            raise HTTPException(status_code=409, detail="GeoBenchX session is already closed")
         if session_id and self._upstream is not None:
-            await self._upstream.reset(session_id)
+            reset = await self._upstream.reset(session_id)
+            if not reset.get("ok"):
+                raise HTTPException(status_code=503, detail=reset.get("result"))
         elif session_id:
             self._sessions[session_id] = {
                 "task_id": body.task_id,
@@ -262,6 +303,8 @@ def _build_upstream_pool(config: GeoBenchXResourcesServerConfig) -> UpstreamTool
         num_workers=config.num_tool_workers,
         tool_timeout_s=config.tool_timeout_s,
         max_sessions_per_worker=config.max_sessions_per_worker,
+        startup_timeout_s=config.tool_startup_timeout_s,
+        session_idle_ttl_s=config.session_idle_ttl_s,
     )
 
 

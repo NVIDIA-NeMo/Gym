@@ -16,6 +16,7 @@
 from __future__ import annotations
 
 import json
+import time
 from collections import Counter
 
 from nemo_gym.openai_utils import NeMoGymResponseCreateParamsNonStreaming
@@ -29,7 +30,14 @@ from resources_servers.geobenchx.prepare_data import (
     task_families,
     task_kind,
 )
-from resources_servers.geobenchx.scoring import score_task
+from resources_servers.geobenchx.scoring import (
+    HANDLE_KEYS,
+    MAX_TOOL_CALLS,
+    OUTPUT_KEYS,
+    is_well_formed,
+    parse_calls,
+    score_task,
+)
 
 
 def _calls(solution: dict) -> list[tuple[str, dict]]:
@@ -99,9 +107,18 @@ def test_split_covers_every_group_and_kind_in_validation() -> None:
 
 
 def test_reference_solutions_score_full_match() -> None:
+    malformed = 0
     for task in TASKS.values():
-        solution = task["reference_solutions"][0]
-        assert score_task(_calls(solution), task)["geobenchx_match"] == 2
+        for solution in task["reference_solutions"]:
+            score = score_task(_calls(solution), task)
+            if is_well_formed(solution["steps"]):
+                assert score["geobenchx_match"] == 2
+            else:
+                # Upstream references that consume a handle no earlier step produced.
+                malformed += 1
+                assert score["geobenchx_match"] == 1
+                assert score["match_detail"]["reference_well_formed"] is False
+    assert malformed == 5
 
 
 def test_output_handle_renames_do_not_change_match() -> None:
@@ -111,16 +128,23 @@ def test_output_handle_renames_do_not_change_match() -> None:
         if any(len(solution.get("steps") or []) >= 4 for solution in task["reference_solutions"])
     )
     solution = next(solution for solution in task["reference_solutions"] if len(solution.get("steps") or []) >= 4)
-    calls = _calls(solution)
-    renamed = []
-    for name, arguments in calls:
-        renamed.append(
-            (
-                name,
-                {key: ("renamed_handle" if key.startswith("output_") else value) for key, value in arguments.items()},
-            )
-        )
+
+    def rename(value):
+        if isinstance(value, list):
+            return [rename(item) for item in value]
+        return f"renamed_{value}" if isinstance(value, str) else value
+
+    renamed = [
+        (name, {key: rename(value) if key in OUTPUT_KEYS | HANDLE_KEYS else value for key, value in arguments.items()})
+        for name, arguments in _calls(solution)
+    ]
     assert score_task(renamed, task)["geobenchx_match"] == 2
+    # Renaming outputs without updating their consumers breaks the dataflow.
+    unlinked = [
+        (name, {key: rename(value) if key in OUTPUT_KEYS else value for key, value in arguments.items()})
+        for name, arguments in _calls(solution)
+    ]
+    assert score_task(unlinked, task)["geobenchx_match"] < 2
 
 
 def test_reject_and_control_tasks_require_correct_behavior() -> None:
@@ -158,28 +182,103 @@ def test_colormap_difference_is_partial() -> None:
     assert score_task(changed, task)["geobenchx_match"] == 1
 
 
-def test_scoring_preserves_dataflow_catalog_case_and_call_limits() -> None:
-    task = {
-        "reference_solutions": [
-            {
-                "steps": [
-                    {"function_name": "load_geodata", "arguments": {"geodataset": "Countries", "output_geodataframe_name": "a"}},
-                    {"function_name": "visualize_geographies", "arguments": {"geodataframe_names": ["a"]}},
-                ]
-            }
-        ]
-    }
-    renamed = [
-        ("load_geodata", {"geodataset": "Countries", "output_geodataframe_name": "renamed"}),
-        ("visualize_geographies", {"geodataframe_names": ["renamed"]}),
+def _load(dataset: str, handle: str) -> tuple[str, dict]:
+    return "load_geodata", {"geodataset": dataset, "output_geodataframe_name": handle}
+
+
+def _show(*handles: str) -> tuple[str, dict]:
+    return "visualize_geographies", {"geodataframe_names": list(handles)}
+
+
+def _task(*steps: tuple[str, dict]) -> dict:
+    return {"reference_solutions": [{"steps": [{"function_name": name, "arguments": args} for name, args in steps]}]}
+
+
+TWO_LAYERS = _task(_load("Countries", "a"), _load("Rivers", "b"), _show("a", "b"))
+
+
+def test_scoring_follows_dataflow_not_handle_names() -> None:
+    assert (
+        score_task([_load("Countries", "x"), _load("Rivers", "y"), _show("x", "y")], TWO_LAYERS)["geobenchx_match"]
+        == 2
+    )
+    # Independent producers commute.
+    assert (
+        score_task([_load("Rivers", "y"), _load("Countries", "x"), _show("x", "y")], TWO_LAYERS)["geobenchx_match"]
+        == 2
+    )
+    # A consumer before its producers, a swapped binding, or a handle nothing produced cannot fully match.
+    for calls in (
+        [_show("x", "y"), _load("Countries", "x"), _load("Rivers", "y")],
+        [_load("Countries", "x"), _load("Rivers", "y"), _show("y", "x")],
+        [_load("Countries", "x"), _load("Rivers", "y"), _show("x", "missing")],
+    ):
+        assert score_task(calls, TWO_LAYERS)["geobenchx_match"] < 2
+
+
+def test_scoring_compares_catalog_names_exactly() -> None:
+    calls = [_load("countries", "x"), _load("Rivers", "y"), _show("x", "y")]
+    assert score_task(calls, TWO_LAYERS)["geobenchx_match"] < 2
+
+
+def test_scoring_skips_raster_paths_but_checks_the_raster_dataset() -> None:
+    task = _task(
+        ("get_raster_path", {"rasterdataset": "Snow 2024"}),
+        ("get_raster_description", {"raster_path": "G:/My Drive/upstream/snow.tif"}),
+    )
+    calls = [
+        ("get_raster_path", {"rasterdataset": "Snow 2024"}),
+        ("get_raster_description", {"raster_path": "snapshot://rasters/x.tif"}),
     ]
-    assert score_task(renamed, task)["geobenchx_match"] == 2
-    assert score_task(list(reversed(renamed)), task)["geobenchx_match"] == 0
-    assert score_task([("load_geodata", {"geodataset": "countries", "output_geodataframe_name": "a"})], task)["geobenchx_match"] == 0
-    assert score_task(renamed * 13, task)["geobenchx_match"] == 0
+    assert score_task(calls, task)["geobenchx_match"] == 2
+    calls[0] = ("get_raster_path", {"rasterdataset": "Snow 2023"})
+    assert score_task(calls, task)["geobenchx_match"] < 2
 
 
-def test_scoring_rejects_malformed_rejection_calls() -> None:
-    task = {"reference_solutions": [{"steps": [{"function_name": "reject_task", "arguments": {}}]}]}
-    assert score_task([("reject_task", None)], task)["geobenchx_match"] == 0
-    assert score_task([("reject_task", {})], task)["geobenchx_match"] == 2
+def test_scoring_prefers_a_late_exact_correction() -> None:
+    task = _task(("make_choropleth_map", {"dataframe_name": "a", "colormap": "Reds"}))
+    task["reference_solutions"][0]["steps"].insert(
+        0, {"function_name": "load_data", "arguments": {"dataset": "GDP", "output_dataframe_name": "a"}}
+    )
+    load = ("load_data", {"dataset": "GDP", "output_dataframe_name": "a"})
+    wrong = ("make_choropleth_map", {"dataframe_name": "a", "colormap": "Blues"})
+    right = ("make_choropleth_map", {"dataframe_name": "a", "colormap": "Reds"})
+    assert score_task([load, wrong], task)["geobenchx_match"] == 1
+    assert score_task([load, wrong, right], task)["geobenchx_match"] == 2
+
+
+def test_malformed_reference_caps_at_partial_but_alternatives_still_score() -> None:
+    malformed = _task(_load("Countries", "a"), _show("never_produced"))["reference_solutions"][0]
+    well_formed = TWO_LAYERS["reference_solutions"][0]
+    calls = [_load("Countries", "a"), _show("never_produced")]
+    assert score_task(calls, {"reference_solutions": [malformed]})["geobenchx_match"] == 1
+    good = [_load("Countries", "x"), _load("Rivers", "y"), _show("x", "y")]
+    assert score_task(good, {"reference_solutions": [malformed, well_formed]})["geobenchx_match"] == 2
+
+
+def test_scoring_rejects_malformed_and_over_limit_calls() -> None:
+    assert (
+        score_task([_load("Countries", "x"), _load("Rivers", "y"), ("visualize_geographies", None)], TWO_LAYERS)[
+            "geobenchx_match"
+        ]
+        < 2
+    )
+    good = [_load("Countries", "x"), _load("Rivers", "y"), _show("x", "y")]
+    padding = [("get_unique_values", {"dataframe_name": "x", "column": "NAME_EN"})] * (MAX_TOOL_CALLS - len(good) + 1)
+    assert score_task(good + padding, TWO_LAYERS)["geobenchx_match"] == 0
+    assert score_task(good + padding[1:], TWO_LAYERS)["geobenchx_match"] == 2
+    assert parse_calls([{"type": "function_call", "name": "reject_task", "arguments": "{not json"}]) == [
+        ("reject_task", None)
+    ]
+    reject = _task(("reject_task", {}))
+    assert score_task([("reject_task", None)], reject)["geobenchx_match"] == 0
+    assert score_task([("reject_task", {"reason": "no data for Mars"})], reject)["geobenchx_match"] == 2
+
+
+def test_scoring_time_is_bounded_for_interchangeable_calls() -> None:
+    task = _task(*[_load("Countries", f"g{i}") for i in range(8)], _show(*[f"g{i}" for i in range(8)]))
+    calls = [_load("Countries", f"c{i}") for i in range(MAX_TOOL_CALLS - 1)] + [_show(*["c0"] * 8)]
+    started = time.monotonic()
+    result = score_task(calls, task)
+    assert time.monotonic() - started < 5
+    assert result["geobenchx_match"] == 1
