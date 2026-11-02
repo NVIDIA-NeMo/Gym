@@ -22,9 +22,10 @@ SCRIPTS = (
 
 @pytest.mark.parametrize("script,agent,package,variable", SCRIPTS)
 @pytest.mark.parametrize("override", [False, True])
+@pytest.mark.parametrize("separator", ["@", " @ ", "\t@\t", " @", "@ "])
 @pytest.mark.parametrize("ambient_python", ["supported", "unavailable", "no_tomllib"])
 def test_portable_pin_uses_project_or_explicit_override(
-    tmp_path, script, agent, package, variable, override, ambient_python
+    tmp_path, script, agent, package, variable, override, ambient_python, separator
 ):
     source = ROOT / "responses_api_agents" / script
     run_dir = tmp_path / "script"
@@ -44,11 +45,15 @@ def test_portable_pin_uses_project_or_explicit_override(
     project = tmp_path / "root/responses_api_agents" / agent
     project.mkdir(parents=True)
     metadata = (ROOT / "responses_api_agents" / agent / "pyproject.toml").read_bytes()
-    expected = next(
-        value.removeprefix(f"{package} @ ")
+    requirement = next(
+        value
         for value in tomllib.loads(metadata.decode())["project"]["dependencies"]
-        if value.startswith(f"{package} @ ")
+        if value.partition("@")[0].strip() == package
     )
+    expected = requirement.partition("@")[2].strip()
+    # PEP 508 allows whitespace on either side of @, including none. Exercise
+    # every script before a portable interpreter or tomllib is available.
+    metadata = metadata.replace(requirement.encode(), f"{package}{separator}{expected}".encode())
     env = os.environ.copy()
     for name in ("HERMES_SPEC", "HARBOR_SPEC"):
         env.pop(name, None)

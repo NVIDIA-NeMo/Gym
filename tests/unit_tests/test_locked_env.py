@@ -1,8 +1,10 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import configparser
 import importlib.metadata
 import json
+import os
 import shutil
 import subprocess
 import sys
@@ -34,8 +36,43 @@ def _distribution(
     )
 
 
+@pytest.fixture
+def component_subprocess_coverage(tmp_path, monkeypatch):
+    """Keep the core coverage policy when uv starts build workers in a component directory."""
+    sources = os.environ.get("COV_CORE_SOURCE")
+    if sources is None:
+        return
+    root = Path(__file__).resolve().parents[2]
+    # pytest-cov passes relative --cov entries and a config-search sentinel to children.
+    # A build worker changes cwd, so both sources and omit patterns need the parent's root.
+    if sources != os.pathsep:
+        monkeypatch.setenv(
+            "COV_CORE_SOURCE",
+            os.pathsep.join(
+                str(Path(value).resolve()) if Path(value).is_dir() else value for value in sources.split(os.pathsep)
+            ),
+        )
+    settings = tomllib.loads((root / "pyproject.toml").read_text())["tool"]["coverage"]
+    run = settings["run"]
+    for option in ("omit", "include"):
+        if option in run:
+            run[option] = [str(root / value) if not value.startswith(("*", "?")) else value for value in run[option]]
+    config = configparser.ConfigParser(interpolation=None)
+    for section, options in settings.items():
+        config[section] = {
+            key: "\n".join(map(str, value)) if isinstance(value, list) else str(value)
+            for key, value in options.items()
+        }
+    path = tmp_path / "subprocess.coveragerc"
+    with path.open("w") as stream:
+        config.write(stream)
+    monkeypatch.setenv("COV_CORE_CONFIG", str(path))
+
+
 @pytest.mark.parametrize("mirror", [False, True])
-def test_real_component_parent_resolution_preserves_lock_and_manual_packages(tmp_path, monkeypatch, capsys, mirror):
+def test_real_component_parent_resolution_preserves_lock_and_manual_packages(
+    tmp_path, monkeypatch, capsys, mirror, component_subprocess_coverage
+):
     """Exercise actual compatibility installs and mirror URLs against Simple Agent."""
     project = Path(__file__).resolve().parents[2] / "responses_api_agents/simple_agent"
     original = (project / "uv.lock").read_bytes()
@@ -46,11 +83,14 @@ def test_real_component_parent_resolution_preserves_lock_and_manual_packages(tmp
         archive.writestr(metadata + "METADATA", "Metadata-Version: 2.1\nName: nemo-gym-lock-provider\nVersion: 1.0\n")
         archive.writestr(metadata + "WHEEL", "Wheel-Version: 1.0\nRoot-Is-Purelib: true\nTag: py3-none-any\n")
         archive.writestr(metadata + "RECORD", "")
-    server = ThreadingHTTPServer(("127.0.0.1", 0), partial(SimpleHTTPRequestHandler, directory=str(tmp_path)))
+    server = ThreadingHTTPServer(("localhost", 0), partial(SimpleHTTPRequestHandler, directory=str(tmp_path)))
     thread = Thread(target=server.serve_forever, daemon=True)
     thread.start()
     if mirror:
-        monkeypatch.setenv("UV_INDEX_URL", f"http://127.0.0.1:{server.server_port}/")
+        # Use the endpoint the fixture actually bound, never a fixed port or a
+        # second host declaration that could drift from the listening server.
+        host, port = server.server_address
+        monkeypatch.setenv("UV_INDEX_URL", f"http://{host}:{port}/")
         monkeypatch.setenv("UV_EXTRA_INDEX_URL", "https://pypi.org/simple/")
     venv = tmp_path / "component-venv"
     requirements = [f"nemo-gym-lock-provider @ {wheel.as_uri()}"]

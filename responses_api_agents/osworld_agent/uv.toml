@@ -7,6 +7,8 @@ constraint-dependencies = [
     "grpcio>=1.84.1,!=1.85.0rc1",
     "certifi>=2026.10.19",
     "msgpack>=1.2.1",
+    "pyarrow>=25.0.1",
+    "transformers>=5.17.0",
 ]
 
 # Mirror Gym's public resolver policy because an explicit config file does not
@@ -31,6 +33,7 @@ override-dependencies = [
     "pillow==12.3.0",
     "opencv-python; sys_platform == 'never'",
     "opencv-contrib-python; sys_platform == 'never'",
+    "transformers>=5.17.0,<6",
 ]
 exclude-dependencies = [
     "agp-client",

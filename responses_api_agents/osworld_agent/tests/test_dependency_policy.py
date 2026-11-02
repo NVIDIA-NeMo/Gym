@@ -59,9 +59,12 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
         packages = tomllib.load(f)["package"]
     with (ROOT / "uv.lock").open("rb") as f:
         parent_packages = tomllib.load(f)["package"]
+    # Locks record the default parent's Ray, but arbitrary parents are propagated
+    # at setup time. Do not freeze that version into this independent policy.
     ray_version = next(package["version"] for package in parent_packages if package["name"] == "ray")
-    assert f"ray=={ray_version}" in server_config["constraint-dependencies"]
+    assert not any(Requirement(value).name == "ray" for value in server_config["constraint-dependencies"])
     assert next(package["version"] for package in packages if package["name"] == "ray") == ray_version
+    assert set(server_config["override-dependencies"]) == set(public_project["tool"]["uv"]["override-dependencies"])
     project_overrides = set(project_config["override-dependencies"])
     server_overrides = set(server_config["override-dependencies"])
     assert project_overrides <= server_overrides
@@ -80,8 +83,9 @@ def test_osworld_agent_uv_config_mirrors_project_resolver_policy() -> None:
     # excluded from this runtime alongside unsupported cloud VM providers.
     assert server_exclusions - project_exclusions == OSWORLD_UNSUPPORTED_VM_PROVIDER_DEPENDENCIES | {"agp-client"}
     required_version = SpecifierSet(server_config["required-version"])
-    assert Version("0.11.24") not in required_version
-    assert Version("0.11.25") in required_version
+    assert Version("0.13.3") not in required_version
+    assert Version("0.13.4") in required_version
+    assert server_config["required-version"] == public_project["tool"]["uv"]["required-version"]
     assert "managed" not in server_config
     assert "python-preference" not in server_config
     assert server_config["pip"]["torch-backend"] == "cpu"
@@ -102,12 +106,24 @@ def test_osworld_runtime_consumers_share_one_pinned_revision() -> None:
     assert f"git checkout {revision}" in benchmark_readme
 
 
-def test_osworld_resources_server_avoids_unsatisfiable_torchvision_resolution() -> None:
+def test_osworld_resources_server_locks_a_compatible_cpu_torchvision_pair() -> None:
     with OSWORLD_RESOURCES_PROJECT.open("rb") as f:
         resources_project = tomllib.load(f)
     resource_uv = resources_project["tool"]["uv"]
-
-    assert "torchvision; sys_platform == 'never'" in resource_uv["override-dependencies"]
+    overrides = {Requirement(value).name: Requirement(value) for value in resource_uv["override-dependencies"]}
+    assert str(overrides["torchvision"].specifier) == "==0.26.0"
+    assert overrides["torchvision"].marker is None
+    assert resource_uv["sources"]["torch"] == resource_uv["sources"]["torchvision"] == {"index": "pytorch-cpu"}
+    assert {"name": "pytorch-cpu", "url": "https://download.pytorch.org/whl/cpu", "explicit": True} in resource_uv[
+        "index"
+    ]
+    with OSWORLD_RESOURCES_PROJECT.with_name("uv.lock").open("rb") as f:
+        packages = tomllib.load(f)["package"]
+    for name, version in (("torch", "2.11.0"), ("torchvision", "0.26.0")):
+        locked = [package for package in packages if package["name"] == name]
+        assert locked
+        assert all(Version(package["version"]).base_version == version for package in locked)
+        assert all(package["source"] == {"registry": "https://download.pytorch.org/whl/cpu"} for package in locked)
 
 
 def test_osworld_resources_server_owns_a_python_313_wheel_compatible_runtime() -> None:

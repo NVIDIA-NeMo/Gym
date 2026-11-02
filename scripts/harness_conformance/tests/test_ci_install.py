@@ -20,7 +20,7 @@ def test_install_uses_locked_adapter_project(monkeypatch, harness):
 
     command, kwargs = calls[0]
     adapter = ROOT / "responses_api_agents" / f"{harness}_agent"
-    assert command == ["uv", "sync", "--locked", "--project", str(adapter)]
+    assert command == ["uv", "sync", "--locked", "--inexact", "--no-dev", "--project", str(adapter)]
     assert kwargs["cwd"] == adapter
     assert kwargs["check"] is True
     assert kwargs["env"]["UV_PROJECT_ENVIRONMENT"] == sys.prefix

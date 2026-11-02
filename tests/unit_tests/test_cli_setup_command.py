@@ -544,12 +544,12 @@ class TestCLISetupCommandRunCommand:
 
 
 class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
-    def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch) -> None:
+    def test_tee_logs_with_server_name(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
 
         get_global_config_dict_mock.return_value = {
             "uv_cache_dir": "default uv cache dir",
-            "nemo_gym_log_dir": "/tmp/gym_logs",
+            "nemo_gym_log_dir": str(tmp_path / "gym_logs"),
         }
 
         run_command(
@@ -559,7 +559,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
 
         expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_resources_my_server.log",
+            f"set -o pipefail; (my command) 2>&1 | tee -a {tmp_path}/gym_logs/my_resources_my_server.log",
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},
@@ -569,12 +569,12 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         actual_args = Popen_mock.call_args
         assert expected_args == actual_args
 
-    def test_tee_logs_falls_back_to_dir_name(self, monkeypatch: MonkeyPatch) -> None:
+    def test_tee_logs_falls_back_to_dir_name(self, monkeypatch: MonkeyPatch, tmp_path: Path) -> None:
         Popen_mock, get_global_config_dict_mock = self._setup(monkeypatch)
 
         get_global_config_dict_mock.return_value = {
             "uv_cache_dir": "default uv cache dir",
-            "nemo_gym_log_dir": "/tmp/gym_logs",
+            "nemo_gym_log_dir": str(tmp_path / "gym_logs"),
         }
 
         run_command(
@@ -583,7 +583,7 @@ class TestCLISetupCommandRunCommandTeeLog(TestCLISetupCommandRunCommand):
         )
 
         expected_args = call(
-            "set -o pipefail; (my command) 2>&1 | tee -a /tmp/gym_logs/my_server.log",
+            f"set -o pipefail; (my command) 2>&1 | tee -a {tmp_path}/gym_logs/my_server.log",
             executable="/bin/bash",
             shell=True,
             env={"PYTHONPATH": "/root/resources_servers/my_server", "UV_CACHE_DIR": "default uv cache dir"},

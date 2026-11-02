@@ -14,7 +14,7 @@ HERMES_PROJECT="$NEMO_GYM_ROOT/responses_api_agents/hermes_agent/pyproject.toml"
 if [ -z "${HERMES_SPEC:-}" ]; then
     # Read this canonical single-line TOML dependency before Python is provisioned.
     HERMES_SPEC="$(sed -n '/^[[]project[]]$/,/^[[]/ {
-        s/^[[:space:]]*"hermes-agent @ \([^"]*\)"[,[:space:]]*$/\1/p
+        s/^[[:space:]]*"hermes-agent[[:space:]]*@[[:space:]]*\([^"]*\)"[,[:space:]]*$/\1/p
     }' "$HERMES_PROJECT")"
 fi
 : "${HERMES_SPEC:?could not read hermes-agent pin from $HERMES_PROJECT}"
