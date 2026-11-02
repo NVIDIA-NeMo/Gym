@@ -60,51 +60,14 @@ def _reachable_host(url: str) -> str:
     return target
 
 
-# OpenShell matches each connection's binary against a rule's ``binaries`` globs; "/**" matches every absolute path.
-OPENSHELL_ANY_BINARY = "/**"
-_DEFAULT_PORTS = {"http": 80, "https": 443}
-
-
 def restricted_network_policy(provider_name: str, urls: list[str]) -> dict[str, object]:
-    """Build the provider's allow-only-these-endpoints policy; fail closed when it cannot be expressed."""
-    if provider_name not in {"opensandbox", "openshell"}:
-        raise ValueError("Restricted network access requires the OpenSandbox or OpenShell network-policy provider")
-    if provider_name == "openshell":
-        return _openshell_network_policy(urls)
+    """Fail closed when a provider or endpoint cannot support network isolation."""
+    if provider_name != "opensandbox":
+        raise ValueError("Restricted network access requires the OpenSandbox network-policy provider")
     targets = set()
     for url in urls:
         targets.add(_reachable_host(url))
     return {"defaultAction": "deny", "egress": [{"action": "allow", "target": t} for t in sorted(targets)]}
-
-
-def _openshell_network_policy(urls: list[str]) -> dict[str, object]:
-    """Map endpoint URLs to an OpenShell ``SandboxPolicy`` with one allow rule for host:port pairs.
-
-    OpenShell decides on (binary, host, port) and denies everything a rule does not name. An exact
-    (non-wildcard) hostname may resolve to a private address. A private IP-literal endpoint gets ``allowed_ips``
-    for its own address so the rule states the destination explicitly.
-    """
-    endpoints: dict[tuple[str, int], dict[str, object]] = {}
-    for url in urls:
-        parts = urlsplit(url)
-        host = _reachable_host(url)
-        port = parts.port or _DEFAULT_PORTS.get(parts.scheme)
-        if port is None:
-            raise ValueError(f"Cannot derive a port for endpoint {url!r}; include one in the URL")
-        endpoint: dict[str, object] = {"host": host, "port": port}
-        try:
-            address = ipaddress.ip_address(host)
-        except ValueError:
-            address = None
-        if address is not None and not address.is_global:
-            endpoint["allowed_ips"] = [f"{address}/{address.max_prefixlen}"]
-        endpoints[(host, port)] = endpoint
-    rule = {
-        "name": "nemo_gym_endpoints",
-        "endpoints": [endpoints[key] for key in sorted(endpoints)],
-        "binaries": [{"path": OPENSHELL_ANY_BINARY}],
-    }
-    return {"version": 1, "network_policies": {"nemo_gym_endpoints": rule}}
 
 
 async def seed_mcp_servers(

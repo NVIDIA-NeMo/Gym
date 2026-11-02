@@ -315,7 +315,7 @@ def test_network_policy_rejects_unreachable_hosts(host):
 
 
 def test_network_policy_fails_closed_for_other_providers():
-    with pytest.raises(ValueError, match="OpenSandbox or OpenShell"):
+    with pytest.raises(ValueError, match="OpenSandbox"):
         restricted_network_policy("docker", ["http://model.example"])
     assert restricted_network_policy("opensandbox", ["http://model.example", "http://tools.example"]) == {
         "defaultAction": "deny",

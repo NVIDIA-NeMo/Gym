@@ -334,7 +334,6 @@ class OpenShellProviderOptions:
 
     providers: list[str] = field(default_factory=list)
     policy: Any | None = None
-    network_policy: Mapping[str, Any] | None = None
     template_resources: dict[str, Any] = field(default_factory=dict)
     driver_config: dict[str, Any] = field(default_factory=dict)
 
@@ -356,16 +355,6 @@ class OpenShellProviderOptions:
             raise TypeError(
                 f"provider_options['policy'] must be a policy YAML path or a mapping, got {type(policy).__name__}"
             )
-        network_policy = options.get("network_policy")
-        if network_policy is not None:
-            if not isinstance(network_policy, Mapping):
-                raise TypeError(
-                    f"provider_options['network_policy'] must be a SandboxPolicy mapping, got {type(network_policy).__name__}"
-                )
-            if policy is not None:
-                raise ValueError(
-                    "Set either provider_options['policy'] or provider_options['network_policy'], not both"
-                )
         template_resources = options.get("template_resources") or {}
         if not isinstance(template_resources, Mapping):
             raise TypeError(
@@ -377,7 +366,6 @@ class OpenShellProviderOptions:
         return cls(
             providers=[str(p) for p in providers],
             policy=policy,
-            network_policy=network_policy,
             template_resources=dict(template_resources),
             driver_config=dict(driver_config),
         )
@@ -630,9 +618,8 @@ class OpenShellProvider:
             if options.driver_config:
                 template.driver_config.update(options.driver_config)
             kwargs["template"] = template
-        policy = options.policy if options.policy is not None else options.network_policy
-        if policy is not None:
-            kwargs["policy"] = self._build_policy(policy)
+        if options.policy is not None:
+            kwargs["policy"] = self._build_policy(options.policy)
         if options.providers:
             kwargs["providers"] = options.providers
         resources = spec.resources

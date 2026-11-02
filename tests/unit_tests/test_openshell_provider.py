@@ -527,26 +527,30 @@ async def test_create_policy_from_mapping_and_path(make_provider, fake_client: F
     assert isinstance(sandbox_pb2.SandboxPolicy(), object)  # policy parses against the real proto
 
 
-async def test_create_network_policy_builds_a_valid_sandbox_policy(make_provider, fake_client: FakeClient) -> None:
-    from nemo_gym.sandbox.agent_tools import restricted_network_policy
+async def test_create_network_policies_mapping_builds_a_valid_sandbox_policy(
+    make_provider, fake_client: FakeClient
+) -> None:
+    policy_mapping = {
+        "version": 1,
+        "network_policies": {
+            "egress": {
+                "name": "egress",
+                "endpoints": [
+                    {"host": "10.1.2.3", "port": 8000, "allowed_ips": ["10.1.2.3/32"]},
+                    {"host": "model.example", "port": 443},
+                ],
+                "binaries": [{"path": "/**"}],
+            }
+        },
+    }
+    await make_provider().create(SandboxSpec(provider_options={"policy": policy_mapping}))
 
-    network_policy = restricted_network_policy("openshell", ["http://10.1.2.3:8000", "https://model.example"])
-    await make_provider().create(SandboxSpec(provider_options={"network_policy": network_policy}))
-
-    policy = fake_client.create_calls[0]["spec"].policy
-    rule = policy.network_policies["nemo_gym_endpoints"]
+    rule = fake_client.create_calls[0]["spec"].policy.network_policies["egress"]
     assert [(e.host, e.port, list(e.allowed_ips)) for e in rule.endpoints] == [
         ("10.1.2.3", 8000, ["10.1.2.3/32"]),
         ("model.example", 443, []),
     ]
     assert [b.path for b in rule.binaries] == ["/**"]
-
-
-def test_network_policy_and_policy_are_mutually_exclusive() -> None:
-    with pytest.raises(ValueError, match="not both"):
-        OpenShellProviderOptions.from_mapping({"policy": {}, "network_policy": {}})
-    with pytest.raises(TypeError, match="network_policy"):
-        OpenShellProviderOptions.from_mapping({"network_policy": 42})
 
 
 async def test_create_unknown_provider_option_raises(make_provider, fake_client: FakeClient) -> None:

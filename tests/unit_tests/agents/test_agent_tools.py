@@ -57,36 +57,3 @@ async def test_failure_zero_rejects_incompatible_verifier(reward, masked):
             {},
             force_zero_reward=True,
         )
-
-
-def test_openshell_network_policy_allows_only_named_endpoints():
-    policy = agent_tools.restricted_network_policy(
-        "openshell",
-        ["http://10.1.2.3:8000/v1", "https://model.example", "http://tools.example:9000", "http://10.1.2.3:8000"],
-    )
-    rule = policy["network_policies"]["nemo_gym_endpoints"]
-    assert policy["version"] == 1
-    assert rule["binaries"] == [{"path": "/**"}]
-    assert rule["endpoints"] == [
-        {"host": "10.1.2.3", "port": 8000, "allowed_ips": ["10.1.2.3/32"]},
-        {"host": "model.example", "port": 443},
-        {"host": "tools.example", "port": 9000},
-    ]
-
-
-def test_openshell_network_policy_public_ip_needs_no_allowed_ips():
-    rule = agent_tools.restricted_network_policy("openshell", ["http://8.8.8.8:80"])["network_policies"][
-        "nemo_gym_endpoints"
-    ]
-    assert rule["endpoints"] == [{"host": "8.8.8.8", "port": 80}]
-
-
-@pytest.mark.parametrize("url", ["http://localhost:8000", "http://127.0.0.1:8000", "http://0.0.0.0:8000"])
-def test_openshell_network_policy_rejects_unreachable_hosts(url):
-    with pytest.raises(ValueError, match="reachable"):
-        agent_tools.restricted_network_policy("openshell", [url])
-
-
-def test_openshell_network_policy_requires_a_derivable_port():
-    with pytest.raises(ValueError, match="port"):
-        agent_tools.restricted_network_policy("openshell", ["ftp://model.example"])
