@@ -1645,7 +1645,7 @@ def _reflect_enrichment(result: Any, record: Dict[str, Any]) -> None:
 
 
 _SHARD_LABEL = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]*")
-_RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs")
+_RESERVED_SHARD_ENDINGS = ("_failures", "_materialized_inputs", "_attempts")
 
 
 class _RunRecordWriter:
@@ -1679,7 +1679,7 @@ class _RunRecordWriter:
         if not _SHARD_LABEL.fullmatch(shard):
             raise ValueError(f"shard label {shard!r} must be letters, digits, '_', '.' or '-', starting alnum")
         if shard.endswith(_RESERVED_SHARD_ENDINGS):
-            # `rollouts-x_failures.jsonl` is shard `x`'s failures sidecar, and readers skip both endings.
+            # `rollouts-x_failures.jsonl` is shard `x`'s failures sidecar, and readers skip all three endings.
             raise ValueError(f"shard label {shard!r} must not end with {' or '.join(_RESERVED_SHARD_ENDINGS)}")
         self.rollouts_fpath = Path(record_output_dir) / f"rollouts-{shard}.jsonl"
         self.failures_fpath = failures_path_for(self.rollouts_fpath)

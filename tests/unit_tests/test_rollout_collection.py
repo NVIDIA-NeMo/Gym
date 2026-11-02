@@ -14474,7 +14474,9 @@ class TestRunRecordWriter:
 
         assert [row["reward"] for row in self._lines(replayed.rollouts_fpath)] == [1.0]
 
-    @pytest.mark.parametrize("label", ["", "../escape", "step 1", "-step", "one_failures", "x_materialized_inputs"])
+    @pytest.mark.parametrize(
+        "label", ["", "../escape", "step 1", "-step", "one_failures", "x_materialized_inputs", "step_1_attempts"]
+    )
     def test_a_shard_label_that_is_not_a_plain_name_is_refused(self, tmp_path: Path, label: str) -> None:
         from nemo_gym.rollout_collection import _RunRecordWriter
 
