@@ -558,7 +558,8 @@ def _permanent_judge_failure(
     )
 
 
-# The agent ran out of wall time. The row is retried like any other timeout and left out of the fit if it is waived.
+# The agent ran out of wall time. With the agent's answer kept, this is the model's result: never run again and left
+# out of the fit (`is_answered_agent_deadline`). Without one it is retried like any other timeout.
 _AGENT_TIMEOUT = {NG_FAILURE_CLASS_KEY: AGENT_TIMEOUT, "failure_kind": AGENT_TIMEOUT, "mask_sample": True}
 
 

@@ -18,7 +18,8 @@ Every expected identity (``_ng_task_index``, ``_ng_rollout_index``) of the mater
 
 - ``scored``: a result row that is not a judge failure. Kept as saved; never re-run.
 - ``model_final``: a failures-sidecar row marked ``_ng_failure_counts_as_zero``: the evaluated model's terminal failure,
-  a scored zero that no infra retry may replace.
+  a scored zero that no infra retry may replace; or an ``agent_timeout`` row that kept the agent's answer
+  (``is_answered_agent_deadline``), the model's result under its own deadline, which no resume runs again.
 - ``judge_recoverable``: a result row of class ``judge_failed``. Its saved answer is re-judged by
   ``gym eval reverify --judge-failed-only``; queueing the policy again is never needed for it.
 - ``retryable``: the last sidecar row is non-terminal and under its recorded attempt cap: a Gym resume retries it.
@@ -545,6 +546,7 @@ def decide_recovery(
         is_omitted_rollout_row,
         is_terminal_failure,
     )
+    from nemo_gym.rollout_recovery import is_answered_agent_deadline
 
     policy = outcome_policy or RecoveryOutcomePolicyConfig()
     managed = {fact.identity: fact for fact in managed_selection or []}
@@ -706,6 +708,9 @@ def decide_recovery(
             # A judge that failed is re-judged from the saved answer, never by running the policy again.
             state = _judge_state(last, policy)
             policy_stopped |= state == IdentityState.TERMINAL
+        elif is_answered_agent_deadline(last):
+            # The agent's own deadline ended it with an answer kept: the model's result, which no resume runs again.
+            state = IdentityState.MODEL_FINAL
         elif last.get(COUNTS_AS_ZERO) is True:
             # Explicit scoring is required, but cannot make an unowned or infrastructure failure a model zero.
             model_cause, _ = _policy_evidence(last)
