@@ -208,8 +208,12 @@ class Deployment:
         """Every live worker has finished startup: its private session socket accepts connections."""
         if len([worker for worker in self.resources_workers() if worker.pid != exclude]) < WORKERS:
             return False
+        return len(self.resources_sockets()) >= WORKERS
+
+    def resources_sockets(self) -> list[str]:
+        """Private session sockets of resources workers that are accepting requests."""
         pattern = os.path.join(RUNTIME_ROOT, f"ng-{self.procs['resources'].pid}-*", "*.sock")
-        accepting = 0
+        accepting = []
         for path in glob.glob(pattern):
             # Only the workers' session sockets, which are named by routing ID.
             if not re.fullmatch(r"[0-9a-f]{32}\.sock", os.path.basename(path)):
@@ -220,8 +224,8 @@ class Deployment:
                     probe.connect(path)
                 except OSError:
                     continue  # A killed worker's socket file.
-            accepting += 1
-        return accepting >= WORKERS
+            accepting.append(path)
+        return sorted(accepting)
 
     def resources_workers(self) -> list[psutil.Process]:
         # uvicorn's workers, not the multiprocessing helper it may also start.
@@ -426,8 +430,19 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
     url = deployment.url("resources")
 
     async def seed_all() -> list[dict[str, str]]:
-        async with aiohttp.ClientSession(cookie_jar=aiohttp.DummyCookieJar()) as client:
-            return await asyncio.gather(*(_seed(client, url, index) for index in range(EPISODES)))
+        # A shared TCP listener may send every connection to one worker. Seed through each worker's
+        # private socket so the exit test has both lost and surviving sessions, then verify over TCP.
+        async with contextlib.AsyncExitStack() as stack:
+            clients = [
+                await stack.enter_async_context(
+                    aiohttp.ClientSession(connector=aiohttp.UnixConnector(path), cookie_jar=aiohttp.DummyCookieJar())
+                )
+                for path in deployment.resources_sockets()
+            ]
+            assert len(clients) == WORKERS
+            return await asyncio.gather(
+                *(_seed(clients[index % len(clients)], url, index) for index in range(EPISODES))
+            )
 
     async def verify_all(sessions: list[dict[str, str]]) -> tuple[list[aiohttp.ClientResponse], list[float]]:
         # A new client, so no pooled connection to the killed worker is reused.
@@ -438,8 +453,7 @@ def test_session_of_an_exited_worker_gets_an_explicit_error(deployment: Deployme
             return responses, [(await r.json())["reward"] for r in responses if r.status == 200]
 
     sessions = asyncio.run(seed_all())
-    # The kernel spreads connections over the workers, but not necessarily over all of them,
-    # so kill a worker that holds sessions while another worker holds the rest.
+    # Kill a worker with seeded sessions while the other workers retain theirs.
     owner_of = {_session_id(cookies): deployment.claimant(_session_id(cookies)) for cookies in sessions}
     owners = Counter(owner_of.values())
     assert len(owners) > 1, owners
