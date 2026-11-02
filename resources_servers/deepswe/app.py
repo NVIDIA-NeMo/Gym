@@ -73,6 +73,8 @@ def _resolve_repo_path(path: Path) -> Path:
 
 # The longest failure_reason a failure event accepts.
 _MAX_FAILURE_REASON_CHARS = 2000
+# What the verifier reports when it ran but left no verdict file: a fresh sandbox may still produce one.
+_NO_VERDICT_FILE = "Verifier did not produce /logs/verifier/reward.json"
 
 
 class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
@@ -92,6 +94,11 @@ class DeepSWEResourcesServerConfig(BaseResourcesServerConfig):
     logs_dir: Path = Path("resources_servers/deepswe/logs")
     clear_verifier_logs: bool = False
     include_model_patch_in_response: bool = True
+    # A verifier attempt that produced no verdict (no reward.json, or a sandbox that could not be created or run) is
+    # run again on a fresh sandbox with the same collected patch, at most this many more times. A malformed verdict,
+    # a timeout and a conclusive result are the verifier's answer and are not run again; a patch that breaks the
+    # test script leaves no verdict every time, so after the bound the outcome stays masked as before.
+    inconclusive_verification_retries: int = Field(default=2, ge=0)
 
 
 class DeepSWEInstanceRequest(BaseModel):
@@ -139,6 +146,10 @@ class DeepSWEVerifyResponse(BaseVerifyResponse):
     patch_collection_time_s: float
     sandbox_start_time_s: float
     verification_time_s: float
+    # How many verifier attempts ran (0 when the patch was never collected), and why each one before the last
+    # produced no verdict (``inconclusive_verification_retries``).
+    verification_attempts: int = 0
+    inconclusive_attempts: list[str] = Field(default_factory=list)
 
 
 class VerifierResult(BaseModel):
@@ -176,6 +187,19 @@ def _resolve_task_id(body: DeepSWEInstanceRequest) -> str:
     if not isinstance(task_id, str) or not task_id:
         raise ValueError("DeepSWE requests must provide verifier_metadata.task_id or task_id")
     return task_id
+
+
+def _inconclusive_reason(result: VerifierResult, error: Exception | None) -> str | None:
+    """Why a verifier attempt produced no verdict that a fresh sandbox could still produce, or None.
+
+    A sandbox that could not be created or run, and a verifier that left no reward.json, are run again. A malformed
+    verdict and a timeout are the verifier's own answer about this patch, and a completed evaluation is a verdict.
+    """
+    if error is not None:
+        return f"{type(error).__name__}: {error}"
+    if result.evaluation_completed or result.verifier_error != _NO_VERDICT_FILE:
+        return None
+    return result.verifier_error
 
 
 def _resolve_task(body: DeepSWEInstanceRequest, task_store: DeepSWETaskStore) -> Task:
@@ -375,7 +399,7 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 evaluation_completed=False,
                 reward=0.0,
                 verifier_exit_code=command_result.return_code,
-                verifier_error="Verifier did not produce /logs/verifier/reward.json",
+                verifier_error=_NO_VERDICT_FILE,
                 test_output=combined_output,
             )
         try:
@@ -522,30 +546,48 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
         patch_sha256 = hashlib.sha256(model_patch).hexdigest()
         log_dir = _resolve_repo_path(self.config.logs_dir) / current_task_id / session_id
 
-        sandbox: AsyncSandbox | None = None
         sandbox_start_time_s = 0.0
         verification_time_s = 0.0
+        verification_attempts = 0
+        inconclusive_attempts: list[str] = []
         result = VerifierResult(evaluation_completed=False, reward=0.0, verifier_error=patch_error)
         if patch_error is None:
-            try:
-                started = monotonic()
-                phase = "golden-verifier" if self.config.is_verifying_golden_patch else "verifier"
-                sandbox = await self._create_sandbox(task, phase=phase)
-                sandbox_start_time_s = monotonic() - started
-                started = monotonic()
-                result = await self._run_verifier(sandbox, task, model_patch, log_dir)
-                verification_time_s = monotonic() - started
-            except Exception as error:
-                print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
-                failure_cause = error
-                result = VerifierResult(
-                    evaluation_completed=False,
-                    reward=0.0,
-                    verifier_error=f"{type(error).__name__}: {error}",
+            # The same collected patch is verified on a fresh sandbox each time; an attempt without a verdict is run
+            # again within the bound (``_inconclusive_reason``), and the last attempt's result stands.
+            attempts = 1 + self.config.inconclusive_verification_retries
+            phase = "golden-verifier" if self.config.is_verifying_golden_patch else "verifier"
+            for attempt in range(1, attempts + 1):
+                verification_attempts = attempt
+                sandbox: AsyncSandbox | None = None
+                attempt_error: Exception | None = None
+                try:
+                    started = monotonic()
+                    sandbox = await self._create_sandbox(task, phase=phase)
+                    sandbox_start_time_s = monotonic() - started
+                    started = monotonic()
+                    result = await self._run_verifier(sandbox, task, model_patch, log_dir)
+                    verification_time_s = monotonic() - started
+                except Exception as error:
+                    print(f"DeepSWE verifier failed for {current_task_id}: {format_exc()}", file=sys.stderr)
+                    attempt_error = error
+                    result = VerifierResult(
+                        evaluation_completed=False,
+                        reward=0.0,
+                        verifier_error=f"{type(error).__name__}: {error}",
+                    )
+                finally:
+                    if sandbox is not None:
+                        await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
+                reason = _inconclusive_reason(result, attempt_error)
+                if reason is None or attempt == attempts:
+                    failure_cause = attempt_error
+                    break
+                inconclusive_attempts.append(bounded_text(reason, _MAX_FAILURE_REASON_CHARS))
+                print(
+                    f"Retrying DeepSWE verification for {current_task_id} on a fresh sandbox "
+                    f"(attempt {attempt}/{attempts} was inconclusive: {reason})",
+                    file=sys.stderr,
                 )
-            finally:
-                if sandbox is not None:
-                    await self._stop_sandbox(sandbox, task_id=current_task_id, phase="verifier")
 
         if self.config.clear_verifier_logs:
             rmtree(str(log_dir), ignore_errors=True)
@@ -583,6 +625,8 @@ class DeepSWEResourcesServer(SimpleResourcesServer):
                 "patch_collection_time_s": patch_collection_time_s,
                 "sandbox_start_time_s": sandbox_start_time_s,
                 "verification_time_s": verification_time_s,
+                "verification_attempts": verification_attempts,
+                "inconclusive_attempts": inconclusive_attempts,
                 "mask_sample": not result.evaluation_completed,
                 "failure_kind": None if result.evaluation_completed else failure_kind,
                 "failure_reason": None if result.evaluation_completed else result.verifier_error,
