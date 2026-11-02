@@ -174,7 +174,9 @@ HTTP status, else its failure kind, else the default. The defaults: `judge_faile
 `collection_dispatch_failed` and `harness_termination_unconfirmed` are retried, and every other
 saved failure is retried too (`default_action: retry`), within the caps. Settled results are final
 and never reopened: a scored answer or zero, and a clean agent timeout, which is the model's
-result under the benchmark's time limit. Successes and final failures are never run again.
+result under the benchmark's time limit (a harness that records its agent deadline as a graded
+zero has settled it). An `agent_timeout` that kept no answer is a saved failure the policy
+decides, retried by default. Successes and final failures are never run again.
 `--inspect` lists the identities in each state and the policy in force (`outcome_policy`, with its
 `source`: `default`, `config` or `python`). When the budget is spent, or the cluster was down, run
 `gym eval resubmit <id> <benchmark> --recover` again after `--inspect`; running the same command
