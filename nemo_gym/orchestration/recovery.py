@@ -3462,7 +3462,7 @@ def _observed_trial_operations(
             if verifier is not None and (
                 verifier["status"] != "completed"
                 or verifier["failure_kind"] is not None
-                or verifier.get("sandbox_observations") not in (None, [])
+                or _grading_sandbox_failed(verifier.get("sandbox_observations"))
                 or (judge_calls is None and verifier["model_calls"] != [])
                 or not nonempty(verifier["invocation_id"])
                 or verifier["invocation_id"] in populations[3]
@@ -3566,6 +3566,32 @@ def _observed_trial_operations(
     if agent_failed_graded is not None:
         agent_failed_graded.extend(agent_failed)
     return True
+
+
+# A sandbox outcome that reports the sandbox did not finish its work; "unknown" means the provider did not report one.
+_SANDBOX_FAILURES = frozenset({"failed", "timeout", "oom", "sandbox_error", "cancelled"})
+
+
+def _grading_sandbox_failed(observations: Any) -> bool:
+    """Whether a verifier's sandbox observations report that a grading sandbox failed, or are malformed.
+
+    They are lifecycle evidence of the sandboxes the verification used, not a grading record: a completed or
+    unreported outcome, an unconfirmed teardown, a failing test command's exit code and the agent's own sandbox
+    outcome do not leave a bound grading unobserved. A verifier sandbox whose outcome is a failure, or that records
+    an error, does.
+    """
+    if observations is None:
+        return False
+    if not isinstance(observations, list):
+        return True
+    return any(
+        not isinstance(item, Mapping)
+        or (
+            item.get("role") == "verifier"
+            and (item.get("outcome") in _SANDBOX_FAILURES or item.get("error_type") is not None)
+        )
+        for item in observations
+    )
 
 
 def _failed_request(call: Any) -> tuple[str, Any] | None:
