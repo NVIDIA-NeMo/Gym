@@ -24,12 +24,15 @@ import aiohttp
 import pytest
 
 import nemo_gym.sandbox.providers.opensandbox.pty as pty_module
+from nemo_gym.core.failure_kinds import PROVIDER_OOM_KILLED
+from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle, SandboxPtyError, SandboxPtySpec
 from nemo_gym.sandbox.providers.opensandbox.pty import (
     OpenSandboxPtySession,
     _effective_command,
     open_pty_session,
 )
+from nemo_gym.typed_exceptions import NgFailureEvent
 
 
 pytestmark = pytest.mark.sandbox
@@ -611,9 +614,18 @@ async def _diagnosed_session(close_code: int, notice: str | None) -> tuple[OpenS
     """Session whose socket dies with ``close_code``; diagnose returns ``notice``."""
     calls: list[int] = []
 
-    async def diagnose() -> str | None:
+    async def diagnose(cause):
         calls.append(1)
-        return notice
+        if notice is None:
+            raise RuntimeError("diagnostic lookup unavailable")
+        return sandbox_failure(
+            operation="pty",
+            sandbox_id="sb-1",
+            cause=cause,
+            failure_kind=PROVIDER_OOM_KILLED,
+            reason=notice,
+            evidence_source="lifecycle_status",
+        )
 
     ws = FakeWs([CONNECTED], close_code=close_code)
     session = OpenSandboxPtySession(
@@ -634,9 +646,9 @@ async def test_unexpected_close_reports_oom_diagnosis() -> None:
     # everywhere the session's death surfaces.
     session, ws, calls = await _diagnosed_session(1011, "Sandbox was OOM-killed. state='Failed'")
     ws.closed = True
-    with pytest.raises(SandboxPtyError, match="OOM-killed"):
+    with pytest.raises(NgFailureEvent, match="OOM-killed"):
         await session.wait_exit(timeout_s=5)
-    with pytest.raises(SandboxPtyError, match="OOM-killed"):
+    with pytest.raises(NgFailureEvent, match="OOM-killed"):
         await session.read()
     assert calls == [1]
     await session.close()
@@ -831,7 +843,7 @@ async def test_provider_attach_pty_reports_dead_sandbox_on_exhausted_takeover(
 
     provider = _always_refused_provider(monkeypatch)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=DeadRaw())
-    with pytest.raises(SandboxPtyError, match="Sandbox is dead") as exc_info:
+    with pytest.raises(NgFailureEvent, match="Sandbox is unavailable") as exc_info:
         await provider.attach_pty(handle, "s-7", takeover=True)
     assert "already has an attached client" in str(exc_info.value.__cause__)
 
@@ -851,7 +863,7 @@ async def test_provider_attach_pty_keeps_refusal_when_status_unavailable(
 
     provider = _always_refused_provider(monkeypatch)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueRaw())
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="unknown"):
         await provider.attach_pty(handle, "s-7", takeover=True)
 
 
@@ -920,7 +932,7 @@ async def test_provider_attach_pty_keeps_retrying_when_absence_is_unproven(
     provider, handed_out = _refused_with_existence(monkeypatch, get_response)
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=OpaqueStatusRaw())
 
-    with pytest.raises(SandboxPtyError, match="already has an attached client"):
+    with pytest.raises(NgFailureEvent, match="unknown"):
         await provider.attach_pty(handle, "s-7", takeover=True)
 
     attaches = [client for client in handed_out if client.ws_calls]
@@ -956,7 +968,7 @@ async def test_provider_session_reports_non_oom_death_on_server_error_close(monk
     monkeypatch.setattr(provider, "_pty_http_client", lambda: FakeHttpClient(ws=dying))
     handle = SandboxHandle(sandbox_id="sb-1", provider_name="opensandbox", raw=LostRaw())
     session = await provider.attach_pty(handle, "s-7", takeover=True)
-    with pytest.raises(SandboxPtyError, match="Sandbox is dead"):
+    with pytest.raises(NgFailureEvent, match="Sandbox is unavailable"):
         await session.wait_exit(timeout_s=5)
     await session.close()
 
