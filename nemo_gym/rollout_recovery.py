@@ -779,6 +779,7 @@ def _configuration_identity(
 
 # Null defaults a server config once declared and later dropped. Null and absent resolve alike, so a run saved while a
 # config still declared them resumes on the config without them; any other difference keeps the identities apart.
+# These are the settings whose default is null, so only here a null and an absent setting are the same identity.
 _REMOVED_NULL_DEFAULTS: dict[tuple[str, str], tuple[str, ...]] = {
     ("responses_api_models", "vllm_model"): ("chat_template_kwargs", "sampling_overrides", "extra_body"),
 }
@@ -794,12 +795,17 @@ def _server_settings(identity: dict) -> Iterator[tuple[str, str, str, dict]]:
                     yield name, kind, implementation, settings
 
 
-def _without_null_settings(identity: dict) -> dict:
-    """The identity with each server's None-valued settings dropped: a null setting and an absent one are the same."""
+def _without_null_defaults(identity: dict) -> dict:
+    """The identity without null settings whose default is null: there a null setting and an absent one are the same.
+
+    Elsewhere null is a value of its own (claude_code_agent's ``max_turns: null`` is unlimited, its omission 30
+    turns), so it stays in the identity.
+    """
     normalized = json.loads(json.dumps(identity))
-    for _, _, _, settings in _server_settings(normalized):
-        for key in [key for key, value in settings.items() if value is None]:
-            del settings[key]
+    for _, kind, implementation, settings in _server_settings(normalized):
+        for key in _REMOVED_NULL_DEFAULTS.get((kind, implementation), ()):
+            if key in settings and settings[key] is None:
+                del settings[key]
     return normalized
 
 
@@ -1069,7 +1075,7 @@ class RunManifest(BaseModel):
     @classmethod
     def create(cls, source: Path, rows: list[dict], config: dict, global_config: dict) -> "RunManifest":
         identity = _configuration_identity(config, global_config, rows)
-        config_digest = _digest(_without_null_settings(identity))
+        config_digest = _digest(_without_null_defaults(identity))
         legacy = _legacy_config_digests(identity)
         try:
             # The digest an earlier Gym took over resolved credentials, compared in memory only, so its runs resume.
@@ -1077,7 +1083,7 @@ class RunManifest(BaseModel):
         except (ConfigError, OmegaConfBaseException):
             earlier = None
         if earlier is not None:
-            legacy = {_digest(_without_null_settings(earlier)): ()} | _legacy_config_digests(earlier) | legacy
+            legacy = {_digest(_without_null_defaults(earlier)): ()} | _legacy_config_digests(earlier) | legacy
         _LEGACY_CONFIG_DIGESTS[config_digest] = _LEGACY_CONFIG_DIGESTS.get(config_digest, {}) | legacy
         manifest = cls(
             max_rollout_attempts=_get_max_rollout_attempts(),
@@ -1087,7 +1093,7 @@ class RunManifest(BaseModel):
             materialized_digest=_digest(rows),
             config_digest=config_digest,
         )
-        _CONFIG_IDENTITIES[config_digest] = _without_null_settings(identity)
+        _CONFIG_IDENTITIES[config_digest] = _without_null_defaults(identity)
         return manifest
 
     def matches_config(self, saved_digest: str) -> bool:

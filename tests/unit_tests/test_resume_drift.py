@@ -324,3 +324,34 @@ def test_a_different_grading_prompt_template_refuses_the_resume(tmp_path: Path) 
 )
 def test_a_prompt_or_template_path_is_semantic_and_other_paths_stay_operational(key: str, semantic: bool) -> None:
     assert _is_semantic(key) is semantic
+
+
+def claude_code_agent(**settings) -> dict:
+    agent = {"model_server": {"type": "responses_api_models", "name": "policy_model"}, **settings}
+    return {
+        "policy_model": BASE["policy_model"],
+        "claude_code": {"responses_api_agents": {"claude_code_agent": agent}},
+    }
+
+
+@pytest.mark.parametrize(
+    ("saved", "current"),
+    [({}, {"max_turns": None}), ({"max_turns": None}, {})],
+    ids=["default-to-unlimited", "unlimited-to-default"],
+)
+def test_an_explicit_null_turn_budget_is_not_the_default_one(tmp_path: Path, saved: dict, current: dict) -> None:
+    # claude_code_agent: max_turns omitted is 30 turns, max_turns null is unlimited.
+    path, materialized = saved_run(tmp_path, claude_code_agent(**saved))
+    resumed = current_manifest(tmp_path, claude_code_agent(**current))
+
+    assert resumed.config_digest != json.loads(path.read_text())["config_digest"]
+    with pytest.raises(ConfigError, match=r"semantic settings differ: .*claude_code_agent\.max_turns"):
+        validate_resume(path, resumed, materialized)
+
+
+def test_a_null_that_is_the_setting_default_is_still_the_same_as_absent(tmp_path: Path) -> None:
+    path, materialized = saved_run(tmp_path, BASE)  # vllm_model extra_body etc. default to null
+    current = current_manifest(tmp_path, merged(BASE, {f"{VLLM}.extra_body": _DROP}))
+
+    assert current.config_digest == json.loads(path.read_text())["config_digest"]
+    assert validate_resume(path, current, materialized) is not None
