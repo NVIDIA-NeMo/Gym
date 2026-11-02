@@ -498,6 +498,7 @@ def compute_fingerprint(
     materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     rollout_collection_config: Optional[Any] = None,
     resolved_global_config: Optional[Mapping[str, Any]] = None,
+    canonical_paths: bool = True,
 ) -> str:
     """Stable hash of the configured inputs that affect stage planning or judged results.
 
@@ -509,6 +510,10 @@ def compute_fingerprint(
     agent knobs in ``_OPERATIONAL_SERVER_FIELDS``, ``partial_completion``,
     ``retry_inprocess``, ``NEMO_GYM_MAX_ROLLOUT_ATTEMPTS``, and the contents
     of the reference deliverable directories.
+
+    An existing absolute path in a server block is hashed as its real path, so two names of one directory (a
+    symlinked and a physical mount of the run directory, say, as different segments see ``$PWD``) hash alike.
+    ``canonical_paths=False`` gives the value earlier Gym versions wrote, for journals written before this rule.
     """
     return _fingerprint_digest(
         _fingerprint_payload(
@@ -518,6 +523,7 @@ def compute_fingerprint(
             materialized_rows=materialized_rows,
             rollout_collection_config=rollout_collection_config,
             resolved_global_config=resolved_global_config,
+            canonical_paths=canonical_paths,
         )
     )
 
@@ -530,6 +536,7 @@ def compute_fingerprint_with_components(
     materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     rollout_collection_config: Optional[Any] = None,
     resolved_global_config: Optional[Mapping[str, Any]] = None,
+    canonical_paths: bool = True,
 ) -> Tuple[str, Dict[str, str]]:
     """Return ``compute_fingerprint``'s value and a digest of each component it hashes.
 
@@ -546,6 +553,7 @@ def compute_fingerprint_with_components(
         materialized_rows=materialized_rows,
         rollout_collection_config=rollout_collection_config,
         resolved_global_config=resolved_global_config,
+        canonical_paths=canonical_paths,
     )
     components = {name: _fingerprint_digest(value) for name, value in payload.items() if name != "runtime_components"}
     for name, block in payload.get("runtime_components", {}).items():
@@ -566,6 +574,7 @@ def _fingerprint_payload(
     materialized_rows: Optional[Sequence[Mapping[str, Any]]] = None,
     rollout_collection_config: Optional[Any] = None,
     resolved_global_config: Optional[Mapping[str, Any]] = None,
+    canonical_paths: bool = True,
 ) -> Dict[str, Any]:
     """The inputs ``compute_fingerprint`` hashes, as one JSON-ready mapping."""
 
@@ -603,6 +612,19 @@ def _fingerprint_payload(
             or name.startswith("endpoint_")
         )
 
+    def real_paths(value: Any) -> Any:
+        """Replace each string that names an existing absolute path with that path's real location."""
+        if not canonical_paths:
+            return value
+        if isinstance(value, Mapping):
+            return {key: real_paths(item) for key, item in value.items()}
+        if isinstance(value, list):
+            return [real_paths(item) for item in value]
+        if isinstance(value, str) and os.path.isabs(value) and not any(c.isspace() for c in value):
+            if os.path.exists(value):
+                return os.path.realpath(value)
+        return value
+
     def jsonable_runtime_block(block: Mapping[str, Any]) -> Dict[str, Any]:
         """Serialize a component block without its unhashed top-level server fields."""
         result: Dict[str, Any] = {}
@@ -620,7 +642,7 @@ def _fingerprint_payload(
             result[key] = {
                 str(server_name): (
                     {
-                        str(field): field_value
+                        str(field): real_paths(field_value)
                         for field, field_value in server_config.items()
                         if not is_unhashed_field(str(field))
                     }
@@ -2900,12 +2922,23 @@ async def run_e2e_multistage(
 
         assignment_repair = make_assignment_repair(global_config_dict, transport_config)
 
+    # A journal written before paths were canonicalized carries the raw-path value: accept it for the same inputs.
+    legacy_fingerprint = compute_fingerprint(
+        multistage_config,
+        reference_elos,
+        distribution,
+        materialized_rows=materialized_rows,
+        rollout_collection_config=rollout_collection_config,
+        resolved_global_config=global_config_dict,
+        canonical_paths=False,
+    )
     resume = _prepare_resume(
         rollout_collection_config,
         output_fpath,
         journal_fpath,
         fingerprint,
         fingerprint_components=fingerprint_components,
+        accepted_fingerprints=(legacy_fingerprint,),
     )
 
     # Rewrite the materialized inputs from the journal on every plan and outcome: a stage's
@@ -2978,6 +3011,7 @@ def _prepare_resume(
     fingerprint: str,
     *,
     fingerprint_components: Optional[Mapping[str, str]] = None,
+    accepted_fingerprints: Sequence[str] = (),
 ) -> StageResume:
     """Build the file-backed :class:`StageResume` for the run.
 
@@ -2988,7 +3022,8 @@ def _prepare_resume(
     rollouts, failure sidecar, journals, manifest, materialized inputs, coverage and aggregate metrics to
     ``<name>.stale.<ns>`` and starts fresh (with the reason logged). The reason
     for a stale journal names the fingerprint components that differ; the
-    digests never change the decision.
+    digests never change the decision. ``accepted_fingerprints`` are other values that describe the same inputs
+    (the fingerprint an earlier Gym version computed for them); a journal carrying one of them resumes too.
     """
     import sys
 
@@ -3002,7 +3037,7 @@ def _prepare_resume(
         reason = "resume_from_cache not set"
     elif not output_fpath.exists() or not journal_fpath.exists():
         reason = f"no prior cache (rollouts exist={output_fpath.exists()}, journal exists={journal_fpath.exists()})"
-    elif (journal_fingerprint := read_journal(journal_fpath)[2]) != fingerprint:
+    elif (journal_fingerprint := read_journal(journal_fpath)[2]) not in (fingerprint, *accepted_fingerprints):
         changes = describe_fingerprint_component_changes(
             read_journal_fingerprint_components(journal_fpath), fingerprint_components
         )

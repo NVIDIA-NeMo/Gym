@@ -375,3 +375,88 @@ async def test_the_driver_journals_the_digests_and_names_a_changed_block(
         f"[multistage-elo] starting fresh: journal STALE (fingerprint {old_fingerprint} != {new_fingerprint}): "
         "components differ: runtime_components.policy_model\n"
     ) in capsys.readouterr().err
+
+
+def _persist_dir(path: str) -> Callable[[Dict[str, Any]], None]:
+    def mutate(inputs: Dict[str, Any]) -> None:
+        inputs["resolved_global_config"]["gdpval_resources_server"]["resources_servers"]["gdpval"][
+            "persist_deliverables_dir"
+        ] = path
+
+    return mutate
+
+
+def _two_names(tmp_path: Path) -> Tuple[Path, Path]:
+    real = tmp_path / "physical" / "run" / "bench"
+    real.mkdir(parents=True)
+    (tmp_path / "linked").symlink_to(tmp_path / "physical", target_is_directory=True)
+    return real, tmp_path / "linked" / "run" / "bench"
+
+
+def test_two_names_of_one_directory_give_one_fingerprint(tmp_path: Path) -> None:
+    # A run directory reached through a symlinked mount in one segment and its physical path in the next.
+    real, linked = _two_names(tmp_path)
+
+    assert _digests(_persist_dir(str(real))) == _digests(_persist_dir(str(linked)))
+
+
+def test_a_different_directory_or_a_content_change_still_differs(tmp_path: Path) -> None:
+    real, _ = _two_names(tmp_path)
+    other = tmp_path / "other"
+    other.mkdir()
+    fingerprint, components = _digests(_persist_dir(str(real)))
+
+    other_fingerprint, other_components = _digests(_persist_dir(str(other)))
+    assert other_fingerprint != fingerprint
+    assert [k for k in components if components[k] != other_components[k]] == [
+        "runtime_components.gdpval_resources_server"
+    ]
+    assert _digests(_change_judge)[0] != _digests()[0]
+
+
+def test_a_journal_written_with_the_raw_path_resumes(tmp_path: Path, capsys: pytest.CaptureFixture) -> None:
+    real, linked = _two_names(tmp_path)
+    cfg, reference_elos, distribution, inputs = _fixture()
+    _persist_dir(str(linked))(inputs)
+    legacy = compute_fingerprint(cfg, reference_elos, distribution, **inputs, canonical_paths=False)
+    _persist_dir(str(real))(inputs)
+    fingerprint, components = compute_fingerprint_with_components(cfg, reference_elos, distribution, **inputs)
+    assert legacy != fingerprint
+    run = tmp_path / "journal"
+    run.mkdir()
+    out, journal = _journal(run, legacy, None)
+
+    resume = _prepare_resume(
+        SimpleNamespace(resume_from_cache=True),
+        out,
+        journal,
+        fingerprint,
+        fingerprint_components=components,
+        accepted_fingerprints=(legacy,),
+    )
+
+    assert "resuming multi-stage run from cache (fingerprint match)" in capsys.readouterr().err
+    assert set(resume.plans) == {0}
+
+
+def test_a_resume_through_the_other_name_of_the_run_directory_replays_the_journal(
+    tmp_path: Path, capsys: pytest.CaptureFixture
+) -> None:
+    # One segment sees the physical run directory as its working directory, the next (a requeue on another node or
+    # a resubmit) sees the symlinked one: the journal written by the first must be replayed by the second.
+    real, linked = _two_names(tmp_path)
+    cfg, reference_elos, distribution, inputs = _fixture()
+    _persist_dir(str(real))(inputs)
+    first, first_components = compute_fingerprint_with_components(cfg, reference_elos, distribution, **inputs)
+    run = tmp_path / "journal"
+    run.mkdir()
+    out, journal = _journal(run, first, first_components)
+
+    _persist_dir(str(linked))(inputs)
+    second, second_components = compute_fingerprint_with_components(cfg, reference_elos, distribution, **inputs)
+    resume = _resume(out, journal, second, second_components)
+
+    assert second == first
+    err = capsys.readouterr().err
+    assert "resuming multi-stage run from cache (fingerprint match)" in err and "STALE" not in err
+    assert set(resume.plans) == {0} and set(resume.outcomes) == {0}
