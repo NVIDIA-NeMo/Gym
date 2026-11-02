@@ -7,8 +7,9 @@ from pathlib import Path
 
 import pytest
 import yaml
+from pydantic import ValidationError
 
-from nemo_gym.config.config_types import ConfigInterpolationError
+from nemo_gym.config.config_types import AlmostServerError, ConfigInterpolationError
 from nemo_gym.environment.manifest import EnvironmentManifest, dump_manifest, load_manifest
 from nemo_gym.environment.validation import (
     EnvironmentValidationError,
@@ -144,6 +145,47 @@ def test_resolve_config_servers_is_unknown_when_the_config_needs_run_time_server
     )
 
     assert resolve_config_servers(config_path) is None
+
+
+def test_resolve_config_servers_does_not_apply_manifest_dataset_rules(tmp_path: Path) -> None:
+    config_path = _asset(tmp_path, kind="benchmark").with_name("config.yaml")
+    # A benchmark whose data already exists may omit prepare_script; only a manifest requires it.
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("        prepare_script: benchmarks/demo/prepare.py\n", ""),
+        encoding="utf-8",
+    )
+
+    assert resolve_config_servers(config_path) == ("demo", "simple_agent")
+    with pytest.raises(ValidationError):
+        _resolve_manifest_composition(config_path)
+
+
+@pytest.mark.parametrize(
+    "text",
+    [b"demo: ${unclosed\n", b"- a list\n- not a mapping\n", b"\xff\xfe not utf-8\n"],
+    ids=["interpolation-syntax", "top-level-list", "not-utf-8"],
+)
+def test_resolve_config_servers_is_unknown_for_a_malformed_config(tmp_path: Path, text: bytes) -> None:
+    config_path = tmp_path / "config.yaml"
+    config_path.write_bytes(text)
+
+    assert resolve_config_servers(config_path) is None
+
+
+def test_resolve_config_servers_prints_nothing_for_a_server_block_that_fails_validation(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    config_path = _asset(tmp_path).with_name("config.yaml")
+    config_path.write_text(
+        config_path.read_text(encoding="utf-8").replace("domain: math", "domain: not_a_domain"), encoding="utf-8"
+    )
+
+    assert resolve_config_servers(config_path) is None
+    assert capsys.readouterr() == ("", "")
+    # Validating the config still reports the block.
+    with pytest.raises(AlmostServerError):
+        _resolve_manifest_composition(config_path)
+    assert "Almost-Server Detected: 'demo_resources'" in capsys.readouterr().err
 
 
 def test_manifest_accepts_external_agent_without_resources(tmp_path: Path) -> None:

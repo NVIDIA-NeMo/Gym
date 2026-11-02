@@ -1791,6 +1791,52 @@ class TestListEnvironments:
         out = capsys.readouterr().out
         assert "resources servers: math_with_judge" in out and "agent: simple_agent" in out
 
+    def test_list_and_inspect_survive_configs_that_fail_manifest_rules_or_parsing(
+        self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
+    ) -> None:
+        # A benchmark whose data already exists may omit prepare_script: Gym runs it, though a manifest would not
+        # accept it. A malformed config is still discovered by its location.
+        benchmark = tmp_path / "benchmarks" / "no_prepare" / "config.yaml"
+        benchmark.parent.mkdir(parents=True)
+        benchmark.write_text(
+            "no_prepare_resources:\n"
+            "  resources_servers:\n"
+            "    no_prepare:\n"
+            "      entrypoint: app.py\n"
+            "      domain: math\n"
+            "no_prepare_agent:\n"
+            "  responses_api_agents:\n"
+            "    simple_agent:\n"
+            "      entrypoint: app.py\n"
+            "      resources_server: {type: resources_servers, name: no_prepare_resources}\n"
+            "      model_server: {type: responses_api_models, name: policy_model}\n"
+            "      datasets:\n"
+            "      - {name: no_prepare, type: benchmark, jsonl_fpath: benchmarks/no_prepare/data.jsonl}\n",
+            encoding="utf-8",
+        )
+        malformed = tmp_path / "environments" / "malformed" / "config.yaml"
+        malformed.parent.mkdir(parents=True)
+        malformed.write_text("malformed: ${unclosed\n", encoding="utf-8")
+        monkeypatch.setattr("nemo_gym.registry.component_search_roots", lambda: [tmp_path])
+
+        monkeypatch.setattr(nemo_gym.cli.env, "_command_overrides", lambda: OmegaConf.create({"json": True}))
+        list_environments()
+        payloads = {payload["name"]: payload for payload in json.loads(capsys.readouterr().out)}
+        assert (payloads["no_prepare"]["resources_server"], payloads["no_prepare"]["agent_server"]) == (
+            "no_prepare",
+            "simple_agent",
+        )
+        assert (payloads["malformed"]["resources_server"], payloads["malformed"]["agent_server"]) == (None, None)
+
+        for name in ("no_prepare", "malformed"):
+            monkeypatch.setattr(
+                nemo_gym.cli.env, "_command_overrides", lambda name=name: OmegaConf.create({"component_name": name})
+            )
+            list_environments()
+        out = capsys.readouterr().out
+        assert "The no_prepare benchmark" in out and "resources servers: no_prepare" in out
+        assert "The malformed environment" in out
+
     def test_json_output_without_manifest_has_null_manifest_path(
         self, monkeypatch: MonkeyPatch, capsys, tmp_path: Path
     ) -> None:

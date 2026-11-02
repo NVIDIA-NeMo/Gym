@@ -16,12 +16,12 @@ from typing import Any
 
 import orjson
 from omegaconf import DictConfig, OmegaConf
-from omegaconf.errors import InterpolationResolutionError
+from omegaconf.errors import InterpolationResolutionError, OmegaConfBaseException
 from pydantic import BaseModel, ValidationError
 from yaml import YAMLError
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _resolve_under_cwd_or_install
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config.config_types import AlmostServerError, ConfigError
 from nemo_gym.config.global_config import (
     GlobalConfigDictParser,
     GlobalConfigDictParserConfig,
@@ -183,13 +183,41 @@ def _resolve_dataset_owner_agent(resolved: DictConfig, owner_instance_name: str)
     return agents.pop()
 
 
-def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:
-    """Resolve manifest wiring without probing or materializing runtime services."""
+@dataclass(frozen=True)
+class _ConfigWiring:
+    """The servers a workload config wires around its dataset-bearing agent."""
+
+    resolved: DictConfig
+    by_instance: dict[str, Any]
+    selected_agent: Any
+    dataset_rs: Any | None
+    resources_instance: Any | None
+    model_server: str | None
+
+
+class _ServerLookupParser(GlobalConfigDictParser):
+    """Fails on an almost-server without printing the run-time warning, since a lookup starts nothing."""
+
+    def detect_and_report_almost_servers(self, global_config_dict: DictConfig) -> list[tuple[str, ValidationError]]:
+        almost_servers = super().detect_and_report_almost_servers(global_config_dict)
+        if almost_servers:
+            names = ", ".join(name for name, _error in almost_servers)
+            raise AlmostServerError(f"Server blocks failed validation: {names}.")
+        return almost_servers
+
+
+def _resolve_config_wiring(
+    config_path: Path,
+    *,
+    dataset_owner: str | None = None,
+    parser: GlobalConfigDictParser | None = None,
+) -> _ConfigWiring:
+    """Resolve which servers a workload config wires, without probing or materializing runtime services."""
     initial = OmegaConf.merge(
         GlobalConfigDictParserConfig.NO_MODEL_GLOBAL_CONFIG_DICT,
         {"config_paths": [str(config_path.resolve())]},
     )
-    parser = GlobalConfigDictParser()
+    parser = parser or GlobalConfigDictParser()
     with _with_component_root(config_path):
         try:
             resolved = parser.parse(
@@ -245,7 +273,6 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         # Rejects an `agent:` pin naming anyone but the declaring agent (dispatch would ignore it).
         _resolve_dataset_owner_agent(resolved, selected_agent.name)
 
-    agent_server = _implementation_name(selected_agent)
     agent_config = selected_agent.get_inner_run_server_config_dict()
     resources_ref = agent_config.get("resources_server") or {}
     model_ref = agent_config.get("model_server") or {}
@@ -256,10 +283,24 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         if isinstance(resources_ref, DictConfig)
         else None
     )
+    return _ConfigWiring(
+        resolved=resolved,
+        by_instance=by_instance,
+        selected_agent=selected_agent,
+        dataset_rs=dataset_rs,
+        resources_instance=resources_instance,
+        model_server=model_ref.get("name") if isinstance(model_ref, DictConfig) else None,
+    )
 
+
+def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | None = None) -> ResolvedComposition:
+    """Resolve manifest wiring, with datasets in manifest form, without probing or materializing runtime services."""
+    wiring = _resolve_config_wiring(config_path, dataset_owner=dataset_owner)
+    selected_agent, resources_instance = wiring.selected_agent, wiring.resources_instance
+    by_instance, model_server = wiring.by_instance, wiring.model_server
+    agent_server = _implementation_name(selected_agent)
     resources_server = _implementation_name(resources_instance) if resources_instance is not None else None
-    model_server = model_ref.get("name") if isinstance(model_ref, DictConfig) else None
-    owner = dataset_rs if dataset_rs is not None else selected_agent
+    owner = wiring.dataset_rs if wiring.dataset_rs is not None else selected_agent
     datasets = tuple(_manifest_dataset(dataset) for dataset in (owner.datasets or []))
     grading_mode = None
     if resources_instance is not None:
@@ -311,23 +352,33 @@ def _resolve_manifest_composition(config_path: Path, *, dataset_owner: str | Non
         agent_server=agent_server,
         model_server=str(model_server) if model_server else None,
         datasets=datasets,
-        rollout_driver=resolved.get("rollout_collection_driver"),
+        rollout_driver=wiring.resolved.get("rollout_collection_driver"),
         grading_mode=str(grading_mode) if grading_mode is not None else None,
         components=tuple(components),
     )
 
 
+# What a config file can raise while its wiring is resolved: unreadable or malformed YAML, OmegaConf syntax and key
+# errors, server blocks Gym's models reject, and wiring that needs values only a run supplies.
+_CONFIG_LOOKUP_ERRORS = (ConfigError, OmegaConfBaseException, ValidationError, YAMLError, UnicodeError, OSError)
+
+
 def resolve_config_servers(config_path: Path) -> tuple[str | None, str | None] | None:
     """The resources server and agent server a workload config wires, as a manifest would mirror them.
 
-    Returns ``None`` when the config does not resolve on its own, for example because it references a judge model
-    or an environment variable that only a run supplies.
+    Only the wiring is resolved, so datasets need not meet manifest rules, and nothing is printed. Returns ``None``
+    when the config does not resolve on its own: for example, it references a judge model or an environment
+    variable that only a run supplies, or the file is malformed.
     """
     try:
-        composition = _resolve_manifest_composition(config_path)
-    except ConfigError:
+        wiring = _resolve_config_wiring(config_path, parser=_ServerLookupParser())
+    except _CONFIG_LOOKUP_ERRORS:
         return None
-    return composition.resources_server, composition.agent_server
+    resources_instance = wiring.resources_instance
+    return (
+        _implementation_name(resources_instance) if resources_instance is not None else None,
+        _implementation_name(wiring.selected_agent),
+    )
 
 
 def _mirror_values(composition: ResolvedComposition) -> dict[str, Any]:
