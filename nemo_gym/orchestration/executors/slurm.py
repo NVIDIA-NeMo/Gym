@@ -1495,6 +1495,8 @@ class SlurmExecutor(BaseExecutor):
                     "gym eval reverify",
                     "--judge-failed-only",
                     "--settle-into-source",
+                    # The dispatch below runs only when no allocation of the run is live.
+                    "--withdraw-unresolved-admissions",
                     "--settle-source-snapshot",
                     shlex.quote(json.dumps(queued_snapshot, sort_keys=True)),
                     "--rollouts",

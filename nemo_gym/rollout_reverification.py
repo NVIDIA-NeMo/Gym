@@ -205,6 +205,14 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
         ),
     )
     settle_source_snapshot_json: str | None = None
+    withdraw_unresolved_admissions: bool = Field(
+        default=False,
+        description=(
+            "Recovery-only: with settle_into_source, withdraw each admitted re-judgment that has no saved outcome "
+            "before binding, so its judge failure is judged again. Only a dispatcher that ruled out a live job of the "
+            "run sets it: the pass that admitted them died."
+        ),
+    )
     skip_spent_judge_failures: bool = Field(
         default=False,
         description=(
@@ -234,6 +242,8 @@ class RolloutReverificationConfig(RemovedRolloutOptionsMixin, UploadRolloutsConf
             _parse_settle_source_snapshot(self.settle_source_snapshot_json)
         if self.skip_spent_judge_failures and not self.settle_into_source:
             raise ValueError("`skip_spent_judge_failures` is only valid together with `settle_into_source`.")
+        if self.withdraw_unresolved_admissions and not self.settle_into_source:
+            raise ValueError("`withdraw_unresolved_admissions` is only valid together with `settle_into_source`.")
         if self.append and self.overwrite:
             raise ValueError("`append` and `overwrite` are mutually exclusive: one appends, the other clears.")
         if self.input_format == "gym":
@@ -1201,12 +1211,16 @@ def _reverifiable_saved_result(row: Dict[str, Any]) -> bool:
     return reverification_cause(saved_row_evidence(row)) is not None
 
 
-def bind_judge_failures(source: Path, *, skip_spent: bool = False) -> Dict[str, Any]:
+def bind_judge_failures(
+    source: Path, *, skip_spent: bool = False, withdraw_unresolved: bool = False
+) -> Dict[str, Any]:
     """Snapshot the source run's selected judge failures and provenance before any judge call; the caller holds run_lock.
 
     A failed re-judgment spends the run's failure budget (``attempt_counts`` against the saved
     ``max_rollout_attempts``); a rollout that has spent it, or a run without a saved cap, is refused before judging.
-    With ``skip_spent`` a rollout that has spent it is left out of the binding, and the others are bound.
+    With ``skip_spent`` a rollout that has spent it is left out of the binding, and the others are bound. An admitted
+    re-judgment with no saved outcome is refused, unless ``withdraw_unresolved``: the caller ruled out a live job of
+    the run, so the pass that admitted it died, and it is withdrawn and its row bound again.
 
     The selected saved results whose grading failed for a judge or verify-transport cause, or was never recorded
     (``_reverifiable_saved_result``), are bound too, under ``saved_results``: a failed re-verification of one saves
@@ -1214,6 +1228,9 @@ def bind_judge_failures(source: Path, *, skip_spent: bool = False) -> Dict[str, 
     """
     store = RolloutStore.open_for_rejudgment(source)
     for identity, pending in dict(store.manifest.pending_rejudge).items():
+        if identity in store._state.unresolved_dispatches and withdraw_unresolved:
+            store.withdraw_rejudgment(identity, pending.operation_id, unsaved_judge_failure=True)
+            continue
         if identity in store._state.unresolved_dispatches:
             raise ConfigError(
                 f"Rollout {identity!r} has an admitted re-judgment ({pending.operation_id}) with no saved outcome; "
@@ -1572,7 +1589,9 @@ class RolloutReverificationHelper(BaseModel):
                     if config.settle_source_snapshot_json is not None:
                         validate_settle_source_snapshot(rollouts_jsonl_fpath, config.settle_source_snapshot_json)
                     settle_binding = bind_judge_failures(
-                        rollouts_jsonl_fpath, skip_spent=config.skip_spent_judge_failures
+                        rollouts_jsonl_fpath,
+                        skip_spent=config.skip_spent_judge_failures,
+                        withdraw_unresolved=config.withdraw_unresolved_admissions,
                     )
                     await _drop_unsupported_saved_results(settle_binding)
                 reverify_source_fpath = failures_path_for(rollouts_jsonl_fpath)

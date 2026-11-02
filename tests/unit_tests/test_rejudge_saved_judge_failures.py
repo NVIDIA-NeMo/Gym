@@ -209,7 +209,7 @@ def _job(tmp_path: Path, judge_failures: int) -> tuple[Path, Path, list[str]]:
     return job, output, [logical_rollout_id(f) for f in failures]
 
 
-def _decision(job: Path):
+def _decision(job: Path, live_job: bool | None = False):
     import subprocess
     import sys
 
@@ -222,7 +222,7 @@ def _decision(job: Path):
 
     raw = subprocess.run([sys.executable, "-c", COLLECT_SCRIPT, str(job)], capture_output=True, text=True, check=True)
     collected = select_managed_evidence(CollectedEvidence.model_validate_json(raw.stdout), job)
-    return decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=False)
+    return decide_from_collected(collected, max_infra_retries=3, max_walltime_s=3600, live_job=live_job)
 
 
 def _state(output: Path) -> tuple[dict, list[str], dict]:
@@ -314,3 +314,51 @@ def test_only_a_judge_failure_with_no_saved_outcome_is_withdrawn(tmp_path):
         store.withdraw_rejudgment(identity, pending.operation_id, unsaved_judge_failure=True)
         assert store.manifest.pending_rejudge == {}
     assert due_judge_failures(output) == [identity]
+
+
+# --- an admission whose pass died ------------------------------------------------------------------------------
+
+
+def _admitted_by_a_dead_pass(tmp_path: Path) -> tuple[Path, Path, str]:
+    """A run whose re-judge pass admitted its judge failure and was then killed: no outcome was saved."""
+    job, output, (identity,) = _job(tmp_path, judge_failures=1)
+    store = RolloutStore.open_for_rejudgment(output)
+    store.admit_rejudgment(next(iter(store.failures())))
+    assert RolloutStore.read(output, import_legacy=False).unresolved_rejudgments() == [identity]
+    return job, output, identity
+
+
+@pytest.mark.parametrize(
+    ("live_job", "action"),
+    [(False, "reverify"), (True, "noop"), (None, "stop")],
+    ids=["no-live-job", "live-job", "scheduler-unknown"],
+)
+def test_an_admission_whose_pass_died_is_reverified_once_no_job_is_live(tmp_path, live_job, action):
+    job, _, identity = _admitted_by_a_dead_pass(tmp_path)
+
+    decision = _decision(job, live_job=live_job)
+
+    assert decision.action.value == action, decision.reason
+    if live_job is False:
+        assert [f"{t}-{r}" for t, r in decision.identities["judge_recoverable"]] == [identity]
+    if live_job is None:
+        assert "admitted re-judgment outcome unknown" in decision.reason
+
+
+def test_the_recovery_pass_withdraws_an_admission_whose_pass_died(tmp_path):
+    _, output, identity = _admitted_by_a_dead_pass(tmp_path)
+    with pytest.raises(ConfigError, match="has an admitted re-judgment"):
+        bind_judge_failures(output)  # an ordinary pass still refuses it
+
+    binding = bind_judge_failures(output, withdraw_unresolved=True)
+
+    assert list(binding["failures"]) == [identity]  # bound again for its re-judgment
+    assert RolloutStore.read(output, import_legacy=False).manifest.pending_rejudge == {}
+    with pytest.raises(ValueError, match="only valid together with `settle_into_source`"):
+        RolloutReverificationConfig(
+            materialized_inputs_jsonl_fpath=str(materialized_path_for(output)),
+            rollouts_jsonl_fpath=str(output),
+            output_jsonl_fpath=str(tmp_path / "other.jsonl"),
+            judge_failed_only=True,
+            withdraw_unresolved_admissions=True,
+        )

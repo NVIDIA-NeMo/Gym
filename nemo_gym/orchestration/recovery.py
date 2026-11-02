@@ -1655,6 +1655,8 @@ class CollectedEvidence(BaseModel):
     source_job_identity: tuple[str, int, int] | None = None
     managed_selection: list[ManagedRecoveryFact] | None = None
     managed_reader_error: str | None = None
+    # Rollouts with an admitted re-judgment and no saved outcome: its row is still the selected judge failure.
+    unresolved_rejudgments: list[str] = Field(default_factory=list)
     # Effective setting derived by the installed runtime from the bound saved configuration, not an observation.
     checkpoint_enabled: bool | None = Field(default=None, strict=True)
     # rollouts_coverage.json's allocation_id: the scheduler allocation that last opened the Store for writing.
@@ -1819,8 +1821,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
             raise ValueError("managed source has no readable manifest or inventory")
         if store.manifest.max_rollout_attempts is None:
             raise ValueError("managed manifest does not preserve its rollout attempt cap")
-        if store.unresolved_rejudgments():
-            raise ValueError(f"admitted re-judgment outcome unknown for {store.unresolved_rejudgments()}")
+        unresolved_rejudgments = store.unresolved_rejudgments()
         coverage = store.coverage()
         if len(collected.materialized) != coverage["expected"] or not coverage["identity_verified"]:
             raise ValueError("managed inventory is ambiguous or its identity is not verified")
@@ -1869,6 +1870,7 @@ def select_managed_evidence(collected: CollectedEvidence, job_dir: Path) -> Coll
                 "failures": failures,
                 "managed_selection": facts,
                 "checkpoint_enabled": checkpoint_enabled,
+                "unresolved_rejudgments": unresolved_rejudgments,
             }
         )
     except (ImportError, OSError, ValueError, KeyError, TypeError, RuntimeError, ConfigError) as error:
@@ -2106,6 +2108,19 @@ def _decide_from_collected(
         allocation_cut=allocation_cut and live_job is False,
     )
     decision = decide_recovery(**inputs, budget=budget)
+    if collected.unresolved_rejudgments and live_job is None:
+        # With no job of the run live, the pass that admitted them died: its rows are still the selected judge
+        # failures, re-verified like any other, and the recovery pass withdraws the admissions first. A live job may
+        # still be in that pass (NOOP above); an unknown scheduler rules out neither.
+        return decision.model_copy(
+            update={
+                "action": RecoveryAction.STOP,
+                "reason": (
+                    f"admitted re-judgment outcome unknown for {collected.unresolved_rejudgments}: "
+                    "the scheduler query failed, so the pass that admitted them may still run"
+                ),
+            }
+        )
     if collected.results is None and not decision.scheduler_live:
         return decision.model_copy(
             update={

@@ -1773,6 +1773,12 @@ COMMANDS = {
                 "With --judge-failed-only: settle each re-judged judge failure in the manifest-backed source run "
                 "(same attempt and saved answer, no model attempt added).",
             ),
+            _bool_flag(
+                "withdraw-unresolved-admissions",
+                "withdraw_unresolved_admissions",
+                "With --settle-into-source, for a recovery that ruled out a live job of the run: withdraw each "
+                "admitted re-judgment with no saved outcome and judge its judge failure again.",
+            ),
         ),
     ),
     "eval profile": Command(
