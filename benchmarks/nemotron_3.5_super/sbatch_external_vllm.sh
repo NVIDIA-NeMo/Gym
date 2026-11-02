@@ -393,6 +393,15 @@ if [[ -f "\$flashinfer_manifest" ]]; then
         --verify /opt/super-vl-evals/flashinfer-warmup.env
 fi
 
+# CuTe-DSL has its own cache, separate from the FlashInfer native module cache.
+prims_cache=/opt/super-vl-evals/prims-cute-cache
+if [[ -f "\$prims_cache/.warmed" && -f "\$flashinfer_manifest" ]] && \\
+    grep -qx "FLASHINFER_SHA=\$(cat "\$prims_cache/.warmed")" "\$flashinfer_manifest"; then
+    export CUTE_DSL_CACHE_DIR="\${CUTE_DSL_CACHE_DIR:-\$prims_cache}"
+    export CUTE_DSL_DISABLE_FILE_CACHING="\${CUTE_DSL_DISABLE_FILE_CACHING:-False}"
+    echo "Using Prims CuTe-DSL cache: \$CUTE_DSL_CACHE_DIR"
+fi
+
 # Increase the number of file descriptors to 65k
 if [[ \$(ulimit -Hn) == "unlimited" ]] || [[ 65535 -lt \$(ulimit -Hn) ]]; then
   ulimit -Sn 65535

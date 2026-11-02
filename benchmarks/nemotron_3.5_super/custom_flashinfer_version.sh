@@ -10,28 +10,59 @@
 # SLURM_QOS, SLURM_TIME (default 04:00:00), SLURM_CPUS_PER_TASK (default 64), MAX_JOBS (default 32),
 # FLASHINFER_NVCC_THREADS (default 1), FLASHINFER_CUDA_ARCH_LIST (10.0a or 10.0f).
 # FLASHINFER_BUILD_MODE=auto (default), reuse (require compatible official
-# binaries), or source (rebuild everything); FLASHINFER_CUBIN_DOWNLOAD_THREADS=32.
+# binaries), source (rebuild everything), or incremental (reuse a verified custom image
+# and rebuild FLASHINFER_REBUILD_MODULES, a comma-separated list of module names/globs); FLASHINFER_CUBIN_DOWNLOAD_THREADS=32.
 # Reuse official binaries for checked ReplaySSM-only changes; otherwise build
-# the fork's full SM100 provider. Always rebuild the custom FP16 ReplaySSM variants.
+# the fork's full SM100 provider. Incremental builds retain unselected modules.
+# Incremental example: FLASHINFER_REBUILD_MODULES=fused_moe_trtllm_sm100,fmha_gen
+# Existing warmup generators also support checkpointing_ssu_* and replayssm_materialize_*.
+# Optional Prims BF16 warmup: FLASHINFER_PRIMS_WARMUP=1 and
+# FLASHINFER_PRIMS_WARMUP_DUMP=/lustre/.../call-01 (trusted standalone MoE capture).
+# FLASHINFER_PRIMS_WARMUP_ITERATIONS=2; FLASHINFER_PRIMS_WEIGHT_LAYOUT=BlockMajorK.
 # Keep the CUDA toolkit in the image for other kernels' runtime JIT.
 set -Eeuo pipefail
 
 export FLASHINFER_REPO="${FLASHINFER_REPO:-https://github.com/bxyu-nvidia/flashinfer.git}"
 export FLASHINFER_CUDA_ARCH_LIST="${FLASHINFER_CUDA_ARCH_LIST:-10.0a}"
 export FLASHINFER_BUILD_MODE="${FLASHINFER_BUILD_MODE:-auto}"
+export FLASHINFER_REBUILD_MODULES="${FLASHINFER_REBUILD_MODULES:-fused_moe_trtllm_sm100}"
+export FLASHINFER_PRIMS_WARMUP="${FLASHINFER_PRIMS_WARMUP:-0}"
+export FLASHINFER_PRIMS_WARMUP_DUMP="${FLASHINFER_PRIMS_WARMUP_DUMP:-}"
+export FLASHINFER_PRIMS_WARMUP_ITERATIONS="${FLASHINFER_PRIMS_WARMUP_ITERATIONS:-2}"
+export FLASHINFER_PRIMS_WEIGHT_LAYOUT="${FLASHINFER_PRIMS_WEIGHT_LAYOUT:-BlockMajorK}"
 export FLASHINFER_CUBIN_DOWNLOAD_THREADS="${FLASHINFER_CUBIN_DOWNLOAD_THREADS:-32}"
 export SLURM_CPUS_PER_TASK="${SLURM_CPUS_PER_TASK:-128}"
 export MAX_JOBS="${MAX_JOBS:-64}"
 export FLASHINFER_NVCC_THREADS="${FLASHINFER_NVCC_THREADS:-1}"
 case "${FLASHINFER_BUILD_MODE}" in
-    auto|reuse|source) ;;
-    *) echo "ERROR: FLASHINFER_BUILD_MODE must be auto, reuse, or source." >&2; exit 2 ;;
+    auto|reuse|source|incremental) ;;
+    *) echo "ERROR: FLASHINFER_BUILD_MODE must be auto, reuse, source, or incremental." >&2; exit 2 ;;
 esac
 case "${FLASHINFER_CUDA_ARCH_LIST}" in
     10.0a|10.0f) ;;
     *) echo "ERROR: FLASHINFER_CUDA_ARCH_LIST must be 10.0a or 10.0f for this SM100 image." >&2; exit 2 ;;
 esac
 BUILD_ROOT=/opt/super-vl-evals
+case "${FLASHINFER_PRIMS_WARMUP}" in
+    0|1) ;;
+    *) echo "ERROR: FLASHINFER_PRIMS_WARMUP must be 0 or 1." >&2; exit 2 ;;
+esac
+if [[ "${FLASHINFER_PRIMS_WARMUP}" == 1 ]]; then
+    if [[ ! "${FLASHINFER_PRIMS_WARMUP_ITERATIONS}" =~ ^[1-9][0-9]*$ || ! -d "${FLASHINFER_PRIMS_WARMUP_DUMP}" ]]; then
+        echo "ERROR: Prims warmup needs a positive iteration count and an existing FLASHINFER_PRIMS_WARMUP_DUMP directory." >&2
+        exit 2
+    fi
+    case "${FLASHINFER_PRIMS_WEIGHT_LAYOUT}" in
+        BlockMajorK|MajorK) ;;
+        *) echo "ERROR: FLASHINFER_PRIMS_WEIGHT_LAYOUT must be BlockMajorK or MajorK." >&2; exit 2 ;;
+    esac
+    for dump_file in metadata.json inputs.pt outputs.pt; do
+        if [[ ! -f "${FLASHINFER_PRIMS_WARMUP_DUMP}/${dump_file}" ]]; then
+            echo "ERROR: Prims warmup dump is missing ${dump_file}." >&2
+            exit 2
+        fi
+    done
+fi
 
 ###############################################################################
 # Inside the container (this script re-execs itself here).
@@ -72,7 +103,97 @@ if [[ "${1:-}" == __inside_build ]]; then
     export FLASHINFER_RELEASE_VERSION="$(cat version.txt)"
     export FLASHINFER_RELEASE_SHA=""
     export FLASHINFER_INSTALL_MODE=source
-    if [[ "${FLASHINFER_BUILD_MODE}" != source && "${FLASHINFER_CUDA_ARCH_LIST}" == 10.0a ]]; then
+    if [[ "${FLASHINFER_BUILD_MODE}" == incremental ]]; then
+        # Read the installed package outside the new checkout. Reuse only an
+        # image whose native binaries and ReplaySSM overrides were verified.
+        (
+            cd /
+            FLASHINFER_DISABLE_JIT=1 python3 "${BUILD_ROOT}/verify-flashinfer.py" \
+                --verify "${BUILD_ROOT}/flashinfer-warmup.env"
+            python3 - "${BUILD_DIR}" "${BUILD_ROOT}" <<'PY'
+import importlib
+import os
+import shlex
+import shutil
+import sys
+from pathlib import Path
+
+import flashinfer
+import flashinfer_cubin
+import flashinfer_jit_cache
+from flashinfer._build_meta import __git_commit__
+from flashinfer.jit import env as jit_env
+
+build_dir, build_root = map(Path, sys.argv[1:])
+manifest = dict(line.split("=", 1) for line in (build_root / "flashinfer-build.env").read_text().splitlines())
+assert manifest.get("FLASHINFER_REPLAY_VERIFIED") == "1", "Base image needs verified ReplaySSM binaries"
+assert manifest["FLASHINFER_SHA"] == __git_commit__, "Base image source provenance mismatch"
+assert manifest["FLASHINFER_JIT_CACHE_ARCH"] == os.environ["FLASHINFER_CUDA_ARCH_LIST"], "Base image architecture mismatch"
+assert flashinfer.__version__ == flashinfer_cubin.__version__, "Base image cubin version mismatch"
+assert len(jit_env.FLASHINFER_AOT_PROVIDERS) == 1, "Expected one base image provider"
+provider = jit_env.FLASHINFER_AOT_PROVIDERS[0]
+package = importlib.import_module(f"flashinfer_jit_cache.providers.{provider.provider_id}")
+assert package.__git_version__ == flashinfer_jit_cache.__git_version__ == flashinfer_cubin.__git_version__
+version = flashinfer.__version__
+release = os.environ["FLASHINFER_RELEASE_VERSION"]
+assert version == release or version.startswith(release + "+"), "Target must use the same FlashInfer release"
+values = {
+    "FLASHINFER_BASE_SHA": __git_commit__,
+    "FLASHINFER_BASE_BINARY_SHA": package.__git_version__,
+    "FLASHINFER_BASE_CACHE_VERSION": provider.version,
+    "FLASHINFER_BASE_LOCAL_VERSION": version.partition("+")[2],
+    "FLASHINFER_RELEASE_SHA": manifest.get("FLASHINFER_RELEASE_SHA", ""),
+}
+(build_dir / "base.env").write_text("".join(f"export {key}={shlex.quote(value)}\n" for key, value in values.items()))
+shutil.copytree(jit_env.FLASHINFER_AOT_DIR, build_dir / "base-aot")
+shutil.copy2(build_root / "flashinfer-warmup.env", build_dir / "base-warmup.env")
+PY
+        )
+        # Generated locally from the verified installed package, not the branch.
+        source "${BUILD_DIR}/base.env"
+        git fetch --depth=1 origin "${FLASHINFER_BASE_SHA}"
+        git diff --name-only --no-renames -z "${FLASHINFER_BASE_SHA}" HEAD -- > "${BUILD_DIR}/changed-files"
+        python3 - "${BUILD_DIR}/changed-files" <<'PY'
+import fnmatch
+import os
+import sys
+from pathlib import Path
+
+patterns = [item.strip() for item in os.environ["FLASHINFER_REBUILD_MODULES"].split(",")]
+families = ("fused_moe_trtllm_sm100", "fmha_gen", "checkpointing_ssu_*", "replayssm_materialize_*")
+if any(not item or item not in families for item in patterns):
+    raise SystemExit(f"Incremental rebuild supports comma-separated selections from {families}; got {patterns}")
+for changed_file in Path(sys.argv[1]).read_bytes().decode().split("\0"):
+    if not changed_file:
+        continue
+    required = ()
+    if changed_file == "csrc/trtllm_fused_moe_kernel_launcher.cu":
+        required = ("fused_moe_trtllm_sm100",)
+    elif changed_file == "csrc/trtllm_fmha_kernel_launcher.cu":
+        required = ("fmha_gen",)
+    elif changed_file == "csrc/replayssm_materialize.cu":
+        required = ("replayssm_materialize_*",)
+    elif changed_file in (
+        "include/flashinfer/mamba/kernel_checkpointing_ssu.cuh",
+        "include/flashinfer/mamba/kernel_checkpointing_ssu_common.cuh",
+        "include/flashinfer/mamba/kernel_checkpointing_ssu_main.cuh",
+    ):
+        required = ("checkpointing_ssu_*", "replayssm_materialize_*")
+    elif any(fnmatch.fnmatchcase(changed_file, pattern) for pattern in (
+        "flashinfer/autotuner/*.py", "flashinfer/fused_moe/backends/prims_ts/*.py",
+        "flashinfer/prims_ts/*.py", "flashinfer/jit/cute_dsl_core.py",
+        "tests/*", "benchmarks/*", "docs/*", "*.md", "prims_ts_batched_gemm_kernel_notes.py",
+    )):
+        continue
+    else:
+        raise SystemExit(f"Cannot safely reuse binaries after change: {changed_file}. Use FLASHINFER_BUILD_MODE=source.")
+    missing = set(required) - set(patterns)
+    if missing:
+        raise SystemExit(f"Change to {changed_file} requires FLASHINFER_REBUILD_MODULES to include {sorted(missing)}")
+PY
+        # Changes to a module family invalidate even its unwarmed specializations.
+        export FLASHINFER_INSTALL_MODE=incremental
+    elif [[ "${FLASHINFER_BUILD_MODE}" != source && "${FLASHINFER_CUDA_ARCH_LIST}" == 10.0a ]]; then
         if git fetch --depth=1 https://github.com/flashinfer-ai/flashinfer.git \
             "refs/tags/v${FLASHINFER_RELEASE_VERSION}"; then
             FLASHINFER_RELEASE_SHA=$(git rev-parse 'FETCH_HEAD^{commit}')
@@ -123,10 +244,12 @@ preserve = {"torch", "torchvision", "torchaudio", "vllm", "triton", "numpy", "cu
 for dist in metadata.distributions():
     name = re.sub(r"[-_.]+", "-", dist.metadata["Name"]).lower()
     if name.startswith("flashinfer-"):
-        keep = os.environ["FLASHINFER_INSTALL_MODE"] == "reuse" and (
+        keep = (os.environ["FLASHINFER_INSTALL_MODE"] == "incremental" and name != "flashinfer-python") or (
+            os.environ["FLASHINFER_INSTALL_MODE"] == "reuse" and (
             (name == "flashinfer-cubin" and dist.version == os.environ["FLASHINFER_RELEASE_VERSION"])
             or (name in {"flashinfer-jit-cache", "flashinfer-jit-cache-sm100a"}
                 and dist.version == os.environ["FLASHINFER_CACHE_VERSION"])
+            )
         )
         if not keep:
             remove.append(dist.metadata["Name"])
@@ -157,6 +280,14 @@ PY
     # remains in _build_meta and our image manifest; version checks stay enabled.
     if [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
         unset FLASHINFER_LOCAL_VERSION
+    elif [[ "${FLASHINFER_INSTALL_MODE}" == incremental ]]; then
+        # Binary packages retain their version; the new Python SHA is recorded
+        # independently in _build_meta and the image manifests.
+        if [[ -n "${FLASHINFER_BASE_LOCAL_VERSION}" ]]; then
+            export FLASHINFER_LOCAL_VERSION="${FLASHINFER_BASE_LOCAL_VERSION}"
+        else
+            unset FLASHINFER_LOCAL_VERSION
+        fi
     else
         export FLASHINFER_LOCAL_VERSION="g${FLASHINFER_HEAD_SHA}"
     fi
@@ -168,7 +299,37 @@ PY
     uv pip install --no-cache --system --no-deps --no-build-isolation .
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCH="${FLASHINFER_CUDA_ARCH_LIST}"
     export FLASHINFER_JIT_CACHE_PROVIDER_ARCHS="${FLASHINFER_CUDA_ARCH_LIST}"
-    if [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
+    if [[ "${FLASHINFER_INSTALL_MODE}" == incremental ]]; then
+        (
+            cd /
+            python3 - "${BUILD_DIR}/base-aot" <<'PY'
+import fnmatch
+import json
+import os
+import shutil
+import sys
+
+from flashinfer.jit import env as jit_env
+
+shutil.copytree(sys.argv[1], jit_env.FLASHINFER_AOT_DIR, dirs_exist_ok=True)
+# A family can have other cached shapes besides the explicit warmup cases.
+# Remove all selected family variants so those shapes compile patched sources.
+patterns = [p.strip() for p in os.environ["FLASHINFER_REBUILD_MODULES"].split(",") if "*" in p]
+for provider in jit_env.FLASHINFER_AOT_PROVIDERS:
+    manifest_path = provider.jit_cache_dir.parent / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    affected = [name for name in manifest["modules"] if any(fnmatch.fnmatchcase(name, p) for p in patterns)]
+    for name in affected:
+        shutil.rmtree(provider.jit_cache_dir / name)
+    manifest["modules"] = [name for name in manifest["modules"] if name not in affected]
+    manifest_path.write_text(json.dumps(manifest, indent=2) + "\n")
+for directory in jit_env.FLASHINFER_AOT_DIR.iterdir():
+    if directory.is_dir() and any(fnmatch.fnmatchcase(directory.name, p) for p in patterns):
+        shutil.rmtree(directory)
+PY
+        )
+        echo ">>> Reuse base image cubins, JIT-cache provider, and unchanged AOT modules"
+    elif [[ "${FLASHINFER_INSTALL_MODE}" == reuse ]]; then
         echo ">>> Reuse official cubins and SM100a JIT-cache wheels"
         uv pip install --system --no-deps --only-binary=:all: \
             "flashinfer-cubin==${FLASHINFER_RELEASE_VERSION}" --index-url https://flashinfer.ai/whl
@@ -230,6 +391,9 @@ assert flashinfer.__version__ == flashinfer_cubin.__version__
 reuse = os.environ["FLASHINFER_INSTALL_MODE"] == "reuse"
 binary_sha = os.environ["FLASHINFER_RELEASE_SHA"] if reuse else __git_commit__
 cache_version = os.environ["FLASHINFER_CACHE_VERSION"] if reuse else flashinfer.__version__
+if os.environ["FLASHINFER_INSTALL_MODE"] == "incremental":
+    binary_sha = os.environ["FLASHINFER_BASE_BINARY_SHA"]
+    cache_version = os.environ["FLASHINFER_BASE_CACHE_VERSION"]
 assert flashinfer_cubin.__git_version__ == binary_sha
 assert flashinfer_jit_cache.__version__ == cache_version
 assert flashinfer_jit_cache.__git_version__ == binary_sha
@@ -275,6 +439,7 @@ PY
     # even when runtime jobs mount a different HOME or FlashInfer workspace.
     # Keep one module list for compilation and verification in a fresh process.
     cat > "${BUILD_DIR}/warmup.py" <<'PY'
+import fnmatch
 import hashlib
 import os
 import shutil
@@ -354,6 +519,19 @@ records = [f"FLASHINFER_SHA={__git_commit__}\n"]
 expected = dict(line.split("=", 1) for line in Path(sys.argv[2]).read_text().splitlines()) if verify_only else {}
 install_mode = expected["FLASHINFER_INSTALL_MODE"] if verify_only else os.environ["FLASHINFER_INSTALL_MODE"]
 records.append(f"FLASHINFER_INSTALL_MODE={install_mode}\n")
+base_records = {}
+rebuild_modules = set()
+if install_mode == "incremental" and not verify_only:
+    base_records = dict(line.split("=", 1) for line in Path(os.environ["BUILD_DIR"], "base-warmup.env").read_text().splitlines())
+    records.append(f"FLASHINFER_BASE_SHA={os.environ['FLASHINFER_BASE_SHA']}\n")
+    patterns = [item.strip() for item in os.environ["FLASHINFER_REBUILD_MODULES"].split(",")]
+    module_names = {generate_spec().name for _, generate_spec, _, _ in modules}
+    for pattern in patterns:
+        matches = {name for name in module_names if fnmatch.fnmatchcase(name, pattern)}
+        if not matches:
+            raise RuntimeError(f"No warmup generator matches {pattern}; available modules: {sorted(module_names)}")
+        rebuild_modules.update(matches)
+    records.append(f"FLASHINFER_REBUILD_MODULES={','.join(sorted(rebuild_modules))}\n")
 if verify_only:
     assert __git_commit__ == expected["FLASHINFER_SHA"], "Installed FlashInfer commit changed"
 for index, name in enumerate(
@@ -380,6 +558,17 @@ for label, generate_spec, artifact, expected_sha in modules:
 
     spec = generate_spec()
     destination = jit_env.FLASHINFER_AOT_DIR / spec.name / f"{spec.name}.so"
+    if install_mode == "incremental" and not verify_only and spec.name not in rebuild_modules:
+        destination = spec.aot_path
+        assert str(destination) == base_records[f"{label}_DISPATCHER_PATH"], f"Base module resolution changed: {label}"
+        digest = hashlib.sha256(destination.read_bytes()).hexdigest()
+        assert digest == base_records[f"{label}_DISPATCHER_SHA256"], f"Base module changed: {label}"
+        records.append(
+            f"{label}_MODULE_NAME={spec.name}\n{label}_DISPATCHER_PATH={destination}\n"
+            f"{label}_DISPATCHER_SHA256={digest}\n"
+        )
+        print(f"Reusing verified base module: {destination}")
+        continue
     reuse_binary = install_mode == "reuse" and artifact is not None
     if reuse_binary:
         # FMHA and fused MoE are unchanged in the checked diff. Load the official
@@ -396,6 +585,7 @@ for label, generate_spec, artifact, expected_sha in modules:
             print(f"Reusing official module: {destination}")
             continue
     if verify_only:
+        destination = Path(expected[f"{label}_DISPATCHER_PATH"])
         assert spec.aot_path == destination and destination.is_file(), f"Missing warmed module: {destination}"
         assert hashlib.sha256(destination.read_bytes()).hexdigest() == expected[f"{label}_DISPATCHER_SHA256"], (
             f"Installed binary changed: {destination}"
@@ -422,7 +612,8 @@ if not verify_only:
     Path(sys.argv[1]).write_text("".join(records))
 PY
 
-    echo ">>> Warm up TRTLLM-GEN and ReplaySSM JIT modules"
+    export BUILD_DIR
+    echo ">>> Warm up TRTLLM-GEN and ReplaySSM JIT modules (mode: ${FLASHINFER_INSTALL_MODE})"
     FLASHINFER_WORKSPACE_BASE="${BUILD_DIR}/warmup-cache" \
         python3 "${BUILD_DIR}/warmup.py" "${BUILD_DIR}/warmup.env"
 
@@ -434,11 +625,43 @@ PY
     install -m 644 "${BUILD_DIR}/warmup.py" "${BUILD_ROOT}/verify-flashinfer.py"
     install -m 644 "${BUILD_DIR}/warmup.env" "${BUILD_ROOT}/flashinfer-warmup.env"
 
+    # Prims calls cute.compile directly. Preserve its disk cache in the image,
+    # separately from the native .so overrides and disposable build workspace.
+    if [[ "${FLASHINFER_PRIMS_WARMUP}" == 1 ]]; then
+        export CUTE_DSL_CACHE_DIR="${BUILD_ROOT}/prims-cute-cache"
+        export CUTE_DSL_DISABLE_FILE_CACHING=False
+        mkdir -p "${CUTE_DSL_CACHE_DIR}"
+        echo ">>> Warm Prims BF16 FC1/FC2 from ${FLASHINFER_PRIMS_WARMUP_DUMP}"
+        python3 "${BUILD_DIR}/source/benchmarks/replay_flashinfer_dump.py" \
+            --module flashinfer.fused_moe.backends.prims_ts.bf16_op \
+            --function prims_ts_bf16_moe \
+            --weight-layout "${FLASHINFER_PRIMS_WEIGHT_LAYOUT}" \
+            --warmup "${FLASHINFER_PRIMS_WARMUP_ITERATIONS}" --iterations 1 \
+            "${FLASHINFER_PRIMS_WARMUP_DUMP}"
+        # A second process exercises disk-cache reuse and checks outputs again.
+        python3 "${BUILD_DIR}/source/benchmarks/replay_flashinfer_dump.py" \
+            --module flashinfer.fused_moe.backends.prims_ts.bf16_op \
+            --function prims_ts_bf16_moe \
+            --weight-layout "${FLASHINFER_PRIMS_WEIGHT_LAYOUT}" \
+            --warmup 0 --iterations 1 "${FLASHINFER_PRIMS_WARMUP_DUMP}"
+        if [[ -z "$(find "${CUTE_DSL_CACHE_DIR}" -type f ! -name .warmed -print -quit)" ]]; then
+            echo "ERROR: Prims warmup produced no CuTe-DSL disk-cache files." >&2
+            exit 1
+        fi
+        printf '%s\n' "${FLASHINFER_HEAD_SHA}" > "${CUTE_DSL_CACHE_DIR}/.warmed"
+    fi
+
     # Leave the vLLM build manifest intact when layering onto a custom image.
     {
         printf 'BASE_IMAGE=%s\nFLASHINFER_REPO=%s\nFLASHINFER_BRANCH=%s\n' \
             "${BASE_IMAGE}" "${FLASHINFER_REPO}" "${FLASHINFER_BRANCH}"
         printf 'FLASHINFER_RELEASE_SHA=%s\n' "${FLASHINFER_RELEASE_SHA}"
+        printf 'FLASHINFER_PRIMS_WARMUP=%s\n' "${FLASHINFER_PRIMS_WARMUP}"
+        if [[ "${FLASHINFER_PRIMS_WARMUP}" == 1 ]]; then
+            printf 'FLASHINFER_PRIMS_WARMUP_DUMP=%s\nFLASHINFER_PRIMS_WEIGHT_LAYOUT=%s\n' \
+                "${FLASHINFER_PRIMS_WARMUP_DUMP}" "${FLASHINFER_PRIMS_WEIGHT_LAYOUT}"
+            printf 'FLASHINFER_PRIMS_CUTE_CACHE=%s\n' "${CUTE_DSL_CACHE_DIR}"
+        fi
         python3 -c 'import flashinfer; print(f"FLASHINFER_VERSION={flashinfer.__version__}")'
         cat "${BUILD_DIR}/jit-cache.env"
         cat "${BUILD_DIR}/warmup.env"
@@ -488,6 +711,10 @@ trap 'rm -f "${SNAP}"' EXIT
 cp "$0" "${SNAP}"
 MOUNTS="$(dirname "${SNAP}"):$(dirname "${SNAP}")"
 [[ ! -d /lustre ]] || MOUNTS="${MOUNTS},/lustre:/lustre"
+if [[ "${FLASHINFER_PRIMS_WARMUP}" == 1 ]]; then
+    FLASHINFER_PRIMS_WARMUP_DUMP="$(cd "${FLASHINFER_PRIMS_WARMUP_DUMP}" && pwd)"
+    MOUNTS="${MOUNTS},${FLASHINFER_PRIMS_WARMUP_DUMP}:${FLASHINFER_PRIMS_WARMUP_DUMP}"
+fi
 
 echo "Base   ${BASE_IMAGE}"
 echo "Source ${FLASHINFER_REPO} ${FLASHINFER_BRANCH} @ ${FLASHINFER_HEAD_SHA}"
