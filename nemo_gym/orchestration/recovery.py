@@ -65,6 +65,7 @@ from nemo_gym.core.failure_kinds import (
     AGENT_TIMEOUT_INFRASTRUCTURE,
     COLLECTION_DISPATCH_FAILED,
     EMPTY_ANSWER,
+    EPISODE_FAILED,
     HARBOR_FAILED,
     HARNESS_TERMINATION_UNCONFIRMED,
     INFRASTRUCTURE_ERROR,
@@ -107,6 +108,10 @@ COUNTS_AS_ZERO = "_ng_failure_counts_as_zero"
 MAX_ATTEMPTS = "_ng_failure_max_attempts"
 FAILURE_EVENTS = "_ng_failure_events"
 FAILURE_ID = "_ng_failure_id"
+# Facts of a failure's recorded cause that the collector reads on the run host (see ``_cause_kind``).
+COLLECTED_CAUSE = "_ng_collected_cause"
+# The reason an environment server records when its own episode deadline ends an episode; no kind goes with it.
+EPISODE_DEADLINE_REASON = "Episode timed out"
 
 Identity = tuple[int, int]
 
@@ -561,6 +566,64 @@ def _retry_kind(row: Mapping[str, Any]) -> str | None:
     return value if isinstance(value, str) else None
 
 
+def _cause_kind(row: Mapping[str, Any]) -> tuple[str | None, bool, str | None]:
+    """The kind of a failure whose producer recorded none, or an unregistered one, from its recorded cause.
+
+    Returns ``(kind, model_final, reason)``; the kind is None when the cause cannot be determined, with the reason.
+    The cause is the event the row selects, else every event it saved, with the collector's facts of the model call
+    that recorded each one (``COLLECTED_CAUSE``):
+
+    - a model request that failed with HTTP 5xx or in transport is infrastructure: its own kind, retried under the cap;
+    - an HTTP 4xx of the policy's own call is the model's final result: ``model_context_limit`` when the call recorded
+      the context limit, else ``model_request_error``;
+    - an HTTP 4xx of a harness call (a user simulator, a judge, any model that is not the policy) is evaluation-side:
+      ``environment_episode_failed``, retried under the cap;
+    - with no event, the environment's own episode deadline is evaluation-side too: ``environment_episode_failed``.
+
+    As for a kind (``_retry_kind``), the unselected events of a row that keeps a response are attempts, not its cause,
+    and a cause chain that is broken or omitted names no cause.
+    """
+    from nemo_gym.rollout_recovery import holds_response
+
+    facts = row.get(COLLECTED_CAUSE)
+    facts = facts if isinstance(facts, Mapping) else {}
+    events, selected = row.get(FAILURE_EVENTS), row.get(FAILURE_ID)
+    if isinstance(events, Mapping) and events:
+        if row.get("_ng_failure_events_omitted") or isinstance(selected, str) and _cause_chain(row) is None:
+            return None, False, "its recorded cause is incomplete"
+        if not isinstance(selected, str) and holds_response(row):
+            return None, False, "it kept a response, so its saved model failures are attempts, not its cause"
+        ids = [selected] if isinstance(selected, str) else [key for key in events if isinstance(key, str)]
+        chosen = [events.get(key) for key in ids]
+        if not chosen or not all(
+            isinstance(e, Mapping)
+            and e.get("boundary") == FailureBoundary.MODEL
+            and e.get("operation") == "model_request"
+            for e in chosen
+        ):
+            return None, False, "its recorded cause is not a failed model request"
+        statuses = [e.get("http_status") for e in chosen]
+        if any(e.get("failure_kind") == MODEL_TRANSPORT_ERROR for e in chosen):
+            return MODEL_TRANSPORT_ERROR, False, None
+        if any(type(s) is int and 500 <= s <= 599 for s in statuses):
+            return MODEL_REQUEST_ERROR, False, None
+        if not all(type(s) is int and 400 <= s <= 499 for s in statuses):
+            return None, False, "its failed model request has no HTTP status"
+        calls = facts.get("event_calls") if isinstance(facts.get("event_calls"), Mapping) else {}
+        owners = [calls.get(key) if isinstance(calls.get(key), Mapping) else {} for key in ids]
+        if any(owner.get("policy") not in (True, False) for owner in owners):
+            return None, False, "the model call that failed is not recorded, so whose call it was is unknown"
+        if all(owner["policy"] is False for owner in owners):
+            return EPISODE_FAILED, False, None
+        if all(owner["policy"] is True for owner in owners):
+            context = any(owner.get("context_limit") is True for owner in owners)
+            return (MODEL_CONTEXT_LIMIT if context else MODEL_REQUEST_ERROR), True, None
+        return None, False, "the failed model calls belong to both the policy and the harness"
+    if facts.get("episode_deadline") is True:
+        return EPISODE_FAILED, False, None
+    return None, False, None
+
+
 def decide_recovery(
     *,
     materialized: Iterable[Mapping[str, Any]],
@@ -763,6 +826,10 @@ def decide_recovery(
         kind = _retry_kind(last)
         reason = None
         unscored = False
+        # A kind the producer did not record, or did not register, is read from the recorded cause instead.
+        derived = None if _known_kind(kind) else _cause_kind(last)
+        if derived is not None and derived[0] is not None:
+            kind = derived[0]
         if is_omitted_rollout_row(last):
             # Only a recorded interruption restarts its input. An adapter's omitted outcome is not a result.
             interrupted = last.get(FAILURE_CLASS) == "kill_shaped"
@@ -816,12 +883,25 @@ def decide_recovery(
                 if model_kind and is_terminal_failure(last) and not contradictory
                 else IdentityState.UNKNOWN
             )
-        elif not _known_kind(_retry_kind(last)):
+        elif not _known_kind(kind):
             state = IdentityState.UNKNOWN
             reason = f"unregistered kind {_retry_kind(last)}" if _retry_kind(last) else "no failure kind"
+            if derived is not None and derived[2]:
+                reason = f"{reason}: {derived[2]}"
+        elif derived is not None and derived[1]:
+            # The policy's own request failed: the model's final result, unless a resume would run it again.
+            if last.get(TERMINAL) is True or _policy_replay_is_unsupported(last):
+                state = IdentityState.MODEL_FINAL
+            else:
+                state = IdentityState.UNKNOWN
+                reason = f"the policy's request failed ({kind}), a final model result, but a resume would run it again"
         elif last.get(TERMINAL) is True:
             state = IdentityState.TERMINAL
-        elif (action := _sidecar_action(last, policy)) == OutcomeAction.FAIL:
+        elif (
+            action := choose_action(
+                failure_kind=kind or "unknown", http_status=_policy_evidence(last)[1], config=policy
+            )
+        ) == OutcomeAction.FAIL:
             # Unrestricted resume would still retry this nonterminal saved row.
             policy_stopped = True
             state = IdentityState.TERMINAL
@@ -1074,6 +1154,7 @@ COLLECT_SCRIPT = (
     + repr(TASK_ID_FIELDS)
     + "\n"
     + f"UNOBSERVED_CLAIM_REASON = {UNOBSERVED_CLAIM_REASON!r}\n"
+    + f"EPISODE_DEADLINE_REASON = {EPISODE_DEADLINE_REASON!r}\n"
     + f"UNREADABLE_CLAIM_REASON = {UNREADABLE_CLAIM_REASON!r}\n"
     + f"OPERATOR_CONTINUATION_JOURNAL_NAME = {OPERATOR_CONTINUATION_JOURNAL_NAME!r}\n"
     + r"""
@@ -1316,6 +1397,33 @@ def rows(name, skip=0):
                 failure = record.get("failure")
                 selected["_ng_failure_record"] = {"source": record.get("source"), "delivery": record.get("delivery"),
                     "failure": {"stage": failure.get("stage"), "failure_kind": failure.get("failure_kind")} if isinstance(failure, dict) else None}
+            if name == "rollouts_failures.jsonl":
+                # A failure's recorded cause as facts: whether the environment's own episode deadline ended it, and for
+                # each failed model call's events, whether the call was the policy's and whether it hit the context limit.
+                policy = r.get("ng_policy_model_server")
+                policy = policy if isinstance(policy, str) and policy else "policy_model"
+                failure = record.get("failure") if isinstance(record, dict) else None
+                capture = r.get("ng_model_call_capture")
+                calls = capture.get("calls") if isinstance(capture, dict) else None
+                event_calls = {}
+                for call in calls if isinstance(calls, list) else []:
+                    report = call.get("failure_report") if isinstance(call, dict) else None
+                    events = report.get("events") if isinstance(report, dict) else None
+                    if not isinstance(events, dict) or not events:
+                        continue
+                    model_ref = call.get("model_ref")
+                    # Captures made before model_ref existed held only policy calls.
+                    owner = True if model_ref is None else model_ref.get("name") == policy if isinstance(model_ref, dict) else None
+                    limit = "context_length_exceeded" in (call.get("local_response_reason"), call.get("error_category"))
+                    for event_id in events:
+                        if isinstance(event_id, str) and len(event_calls) < 256:
+                            event_calls[event_id[:64]] = {"policy": owner, "context_limit": limit}
+                selected["_ng_collected_cause"] = {
+                    "episode_deadline": isinstance(record, dict) and record.get("source") == "environment"
+                    and isinstance(failure, dict) and failure.get("failure_reason") == EPISODE_DEADLINE_REASON
+                    and not failure.get("failure_kind"),
+                    "event_calls": event_calls,
+                }
             for key in ("response", "_ng_failure_response", "_ng_failure_partial_response"):
                 answer = r.get(key)
                 if key in r and not isinstance(answer, dict):
