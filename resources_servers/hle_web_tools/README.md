@@ -147,5 +147,5 @@ pytest resources_servers/hle_web_tools/tests/test_app.py
 Model-free; the Tavily transport is stubbed. Each rule family has one test built on rules taken from
 the upstream blocklist, plus the two query refusals, the fail-closed refusal of a cookie-less
 `POST /web_search` after a seed, the 409 on re-seeding a session with another question, wrapper decoding, the cap and marker, the exact two-tool list over a
-real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and the
-blocklist digest pin.
+real MCP `tools/list`, the 20-result cap, the cache re-check, the redirect check, key failover and exhaustion of the key
+pool, malformed provider bodies (a tool error, not an HTTP 500) and the blocklist digest pin.

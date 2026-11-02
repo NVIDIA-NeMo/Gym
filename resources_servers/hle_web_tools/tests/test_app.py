@@ -396,6 +396,27 @@ async def test_rejected_key_fails_over_and_provider_bodies_stay_private(server, 
     assert "secret" not in str(error.value)
 
 
+@pytest.mark.parametrize(
+    "payload, search_text",
+    [
+        ([], "Search failed: the search provider returned a malformed response."),
+        ({"results": None}, "Search failed: the search provider returned a malformed response."),
+        ({"results": [1, None, "x"]}, "No results."),
+        (
+            {"results": [{"url": "https://example.org/a", "title": 5, "content": {"x": 1}, "raw_content": ["x"]}]},
+            "[1] \n    URL: https://example.org/a\n    Snippet: ",
+        ),
+    ],
+    ids=["body-not-object", "results-null", "items-not-objects", "fields-not-strings"],
+)
+async def test_malformed_tavily_payloads_become_tool_errors(server, payload, search_text):
+    server._backend = MagicMock(search=AsyncMock(return_value=payload), extract=AsyncMock(return_value=payload))
+    found = await search(server, "spin structures")
+    assert (found.text, found.refused) == (search_text, False)
+    fetched = await fetch(server, "https://example.org/a")
+    assert (fetched.text, fetched.refused) == ("Fetch failed for https://example.org/a", False)
+
+
 class KeyPoolSpin(BaseException):
     """Raised by the alarm; a BaseException so the transport's ``except TimeoutError`` cannot swallow it."""
 

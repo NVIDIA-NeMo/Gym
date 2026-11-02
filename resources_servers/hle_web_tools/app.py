@@ -526,6 +526,17 @@ def _next_accepted_key(count: int, index: int, rejected: Set[int]) -> Optional[i
     return None
 
 
+def _tavily_results(response: Any) -> Optional[List[Dict[str, Any]]]:
+    """The objects in a Tavily body's ``results`` list, or None when the body or that list is malformed."""
+    results = response.get("results") if isinstance(response, dict) else None
+    return [r for r in results if isinstance(r, dict)] if isinstance(results, list) else None
+
+
+def _text_field(item: Dict[str, Any], key: str) -> str:
+    value = item.get(key)
+    return value if isinstance(value, str) else ""
+
+
 class HLEWebToolsResourcesServerConfig(BaseResourcesServerConfig):
     tavily_api_key: str | List[str]
     blocklist_file_path: str = DEFAULT_BLOCKLIST_FILE_PATH
@@ -723,9 +734,15 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
         response = await self._backend.search(
             query, max_results=self.config.max_results, search_depth=self.config.search_depth
         )
+        results = _tavily_results(response)
+        if results is None:
+            logger.warning("hle_web_tools web_search got a malformed Tavily body (session %s)", session_id)
+            return WebSearchResponse(
+                text="Search failed: the search provider returned a malformed response.", result_count=0, refused=False
+            )
         kept: List[Dict[str, Any]] = []
-        for result in response.get("results", []):
-            url, title, snippet = result.get("url"), result.get("title") or "", result.get("content") or ""
+        for result in results:
+            url, title, snippet = result.get("url"), _text_field(result, "title"), _text_field(result, "content")
             if not isinstance(url, str):
                 continue
             block = self._result_block(url, title, snippet)
@@ -758,14 +775,15 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             self._page_cache.move_to_end(url)
         else:
             response = await self._backend.extract(url, extract_depth=self.config.extract_depth)
-            results = [r for r in response.get("results", []) if isinstance(r, dict)]
-            if not results or not results[0].get("raw_content"):
-                failed = response.get("failed_results") or []
+            results = _tavily_results(response) or []
+            if not results or not _text_field(results[0], "raw_content"):
+                failed = response.get("failed_results") if isinstance(response, dict) else None
+                failed = failed if isinstance(failed, list) else []
                 error = failed[0].get("error") if failed and isinstance(failed[0], dict) else None
                 detail = f": {str(error)[:200]}" if error else ""
                 return WebFetchResponse(text=f"Fetch failed for {url}{detail}", truncated=False, refused=False)
             result = results[0]
-            markdown = _DATA_URI_RE.sub("[data URI removed]", str(result["raw_content"]))
+            markdown = _DATA_URI_RE.sub("[data URI removed]", result["raw_content"])
             markdown = markdown[: self.config.max_cached_page_chars]
             title = result.get("title")
             if not isinstance(title, str) or not title.strip():
