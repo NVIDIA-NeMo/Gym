@@ -264,6 +264,12 @@ class RecoveryOutcome(BaseModel):
     mlflow: dict[str, Any] | None = None
     # The GYM_READER_TOKEN a login-host Store reader of this recovery carries; None for a caller that sets none.
     reader_token: str | None = None
+    # A --max-walltime raise checked against the partition before any evidence is read: the partition, its MaxTime
+    # (as sinfo prints it, None when unknown), the requested chain cap, the walltime each segment requests, why it
+    # was refused (None when it fits), and a note when MaxTime is unknown or segments are shorter than the raise.
+    walltime_plan: dict[str, Any] | None = None
+    # The scheduler refused to queue the job: its text verbatim, and what the job dir holds after the exit trap.
+    scheduler_refusal: dict[str, Any] | None = None
 
 
 class IdentityEvidence(BaseModel):

@@ -41,7 +41,7 @@ from nemo_gym.orchestration.api import (
     SubmitConfig,
     VllmPDServiceConfig,
 )
-from nemo_gym.orchestration.executors.base import BaseExecutor
+from nemo_gym.orchestration.executors.base import BaseExecutor, SchedulerRefusedError
 from nemo_gym.orchestration.executors.connection import Connection, LocalConnection, get_connection
 from nemo_gym.orchestration.executors.git_ref import validate_gym_install_ref
 from nemo_gym.orchestration.executors.otel import (
@@ -266,8 +266,11 @@ def _spinup_timeout_config(config: SubmitConfig, benchmark: str, seconds: int) -
     return config.model_copy(update={"driver": driver})
 
 
-def _walltime_config(config: SubmitConfig, cluster: str, benchmark: str, walltime: str) -> SubmitConfig:
-    """``config`` with the Slurm walltime ``walltime`` and a chain cap of at least that; every other field as saved."""
+def _walltime_config(
+    config: SubmitConfig, cluster: str, benchmark: str, walltime: str, segment: str | None = None
+) -> SubmitConfig:
+    """``config`` with a chain cap of at least ``walltime`` and each Slurm segment requesting ``segment`` (by default
+    ``walltime`` itself); every other field as saved."""
     bench = config.driver.benchmarks[benchmark]
     resume = bench.resume_config
     update = {}
@@ -277,8 +280,111 @@ def _walltime_config(config: SubmitConfig, cluster: str, benchmark: str, walltim
     driver = config.driver.model_copy(
         update={"benchmarks": {**config.driver.benchmarks, benchmark: bench.model_copy(update=update)}}
     )
-    compute = {**config.compute, cluster: config.compute[cluster].model_copy(update={"walltime": walltime})}
+    compute = {
+        **config.compute,
+        cluster: config.compute[cluster].model_copy(update={"walltime": segment or walltime}),
+    }
     return config.model_copy(update={"driver": driver, "compute": compute})
+
+
+def _slurm_time_limit_seconds(text: str) -> int | None:
+    """A partition time limit as sinfo prints it (``%l``) in seconds; None for ``UNLIMITED`` or ``infinite``.
+
+    Takes Slurm's duration spellings (``MM``, ``MM:SS``, ``HH:MM:SS``, ``D-HH``, ``D-HH:MM``, ``D-HH:MM:SS``) and
+    raises ValueError for anything else, such as ``n/a``.
+    """
+    value = text.strip()
+    if value.upper() in ("UNLIMITED", "INFINITE"):
+        return None
+    return _walltime_to_seconds(value)
+
+
+def _slurm_duration(seconds: int) -> str:
+    return f"{seconds // 3600:02}:{seconds % 3600 // 60:02}:{seconds % 60:02}"
+
+
+def _partition_time_limit(conn: Connection, compute: SlurmComputeConfig) -> dict[str, Any]:
+    """The partition a job of ``compute`` queues on and its MaxTime, read with sinfo over ``conn``.
+
+    ``partition`` is the node pools' partition, else ``extra_args.partition``, else the cluster's default one;
+    ``max_time`` is sinfo's text and ``max_time_s`` its seconds (None when unlimited); ``error`` says why they are
+    unknown. A partition list (``a,b``) takes the lowest limit.
+    """
+    pools = {pool.partition for pool in compute.node_pools.values()}
+    partition = next(iter(pools)) if len(pools) == 1 else compute.extra_args.get("partition")
+    limit: dict[str, Any] = {"partition": partition, "max_time": None, "max_time_s": None, "error": None}
+    try:
+        if partition is not None:
+            lines = conn.run([f"sinfo -h -p {shlex.quote(str(partition))} -o %l"]).split()
+        else:
+            rows = [line.split() for line in conn.run(["sinfo -h -o '%P %l'"]).splitlines()]
+            default = [row for row in rows if len(row) == 2 and row[0].endswith("*")]
+            if not default:
+                raise ValueError("sinfo names no default partition")
+            limit["partition"], lines = default[0][0].rstrip("*"), [default[0][1]]
+        if not lines:
+            raise ValueError(f"sinfo lists no partition {limit['partition']}")
+        parsed = [(_slurm_time_limit_seconds(line), line) for line in lines]
+    except (RuntimeError, OSError, ValueError) as error:
+        return limit | {"error": str(error).strip().splitlines()[-1] if str(error).strip() else type(error).__name__}
+    bounded = [item for item in parsed if item[0] is not None]
+    seconds, text = min(bounded) if bounded else (None, parsed[0][1])
+    return limit | {"max_time": text, "max_time_s": seconds}
+
+
+def _plan_walltime(
+    config: SubmitConfig, cluster: str, benchmark: str, max_walltime: str, limit: dict[str, Any]
+) -> dict[str, Any]:
+    """How the raise ``max_walltime`` fits the partition ``limit``: each segment requests the smaller of the raise
+    and the partition's MaxTime, and the raise is the chain cap the segments continue under. Refused when no segment
+    fits: a run that does not chain segments needs the whole raise in one job, and a chained one at least its
+    recorded segment walltime."""
+    partition, max_time, max_s = limit["partition"], limit["max_time"], limit["max_time_s"]
+    plan = {
+        "partition": partition,
+        "max_time": max_time,
+        "requested": max_walltime,
+        "segment": max_walltime,
+        "refused": None,
+        "note": None,
+    }
+    try:
+        requested_s = _walltime_to_seconds(max_walltime)
+    except ValueError:
+        return plan  # The raise itself is refused, with its own message, where it is rendered.
+    if limit["error"] is not None:
+        plan["note"] = (
+            f"partition {partition or '(default)'} MaxTime unknown ({limit['error']}); each segment requests the "
+            f"whole --max-walltime {max_walltime} as before"
+        )
+        return plan
+    if max_s is None or requested_s <= max_s:
+        return plan
+    bench = config.driver.benchmarks[benchmark]
+    recorded = config.compute[cluster].walltime
+    if bench.resume_config is None:
+        plan["segment"], plan["refused"] = (
+            None,
+            (
+                f"--max-walltime {max_walltime} exceeds partition {partition} MaxTime {max_time}, and the run does not "
+                "continue in segments (no resumable config), so no job can take it"
+            ),
+        )
+    elif recorded is not None and _walltime_to_seconds(recorded) > max_s:
+        plan["segment"], plan["refused"] = (
+            None,
+            (
+                f"partition {partition} MaxTime {max_time} is below the run's segment walltime {recorded}, so not even one "
+                f"segment of the --max-walltime {max_walltime} raise fits"
+            ),
+        )
+    else:
+        plan["segment"] = _slurm_duration(max_s)
+        plan["note"] = (
+            f"--max-walltime {max_walltime} exceeds partition {partition} MaxTime {max_time}: each segment requests "
+            f"{plan['segment']} and the chain continues under the {max_walltime} cap"
+        )
+    return plan
 
 
 def _reconcile_requeued_chain(
@@ -1517,6 +1623,14 @@ class SlurmExecutor(BaseExecutor):
             result |= {"state": "failed", "error": f"exit code {rc[-1] if rc else 'unknown'}: " + " | ".join(tail)}
         return result
 
+    def walltime_plan(self, record: SubmissionRecord, benchmark: str, max_walltime: str) -> dict[str, Any]:
+        """Check a ``--max-walltime`` raise against the partition's MaxTime, read with sinfo on the cluster, before
+        any evidence is read (see ``_plan_walltime``). A failed query keeps the whole raise per segment and says so."""
+        with get_connection(record.hostname) as conn:
+            config = self._saved_config(conn, Path(record.run_dir))
+            limit = _partition_time_limit(conn, config.compute[record.cluster])
+        return _plan_walltime(config, record.cluster, benchmark, max_walltime, limit)
+
     def resubmit(
         self,
         record: SubmissionRecord,
@@ -1536,6 +1650,7 @@ class SlurmExecutor(BaseExecutor):
         server_spinup_timeout_seconds: int | None = None,
         spinup_timeout_reason: str | None = None,
         fresh_restart: bool = False,
+        segment_walltime: str | None = None,
     ) -> BenchmarkJob:
         """Queue `benchmark`'s job.sh again from its job dir and record the new job id.
 
@@ -1556,6 +1671,9 @@ class SlurmExecutor(BaseExecutor):
         ``max_walltime`` (with ``keep_budget`` and ``walltime_reason``) raises the Slurm walltime the same way a repin
         moves the commit, in the same render: ``compute.<cluster>.walltime`` becomes it, the chain cap becomes at least
         it, and a value below the recorded walltime is refused. The run dir's walltime journal records the raise.
+        ``segment_walltime`` (from ``walltime_plan``) is what each Slurm segment requests instead, when the partition's
+        MaxTime is below the raise: the raise stays the chain cap.
+        A job the scheduler refuses raises ``SchedulerRefusedError`` with sbatch's text and the restored job dir.
         ``unsafe_resume_reason`` (with ``keep_budget``) renders the job with ``allow_unsafe_resume`` the same way, so
         its resume proceeds past a refused run identity check; the run dir's unsafe-resume journal records the reason
         and the user once the job is queued.
@@ -1603,6 +1721,7 @@ class SlurmExecutor(BaseExecutor):
                     server_spinup_timeout_seconds=server_spinup_timeout_seconds,
                     spinup_timeout_reason=spinup_timeout_reason,
                     fresh_restart=fresh_restart,
+                    segment_walltime=segment_walltime,
                 )
                 if repin is not None
                 or max_walltime is not None
@@ -1676,7 +1795,7 @@ class SlurmExecutor(BaseExecutor):
             # One script, so the lock spans the scheduler check and sbatch; any failed step stops it.
             # The job itself resets the run's retry and attempt state when it starts (see RESUBMIT_ENV).
             results = _parse_sbatch_results(
-                conn.run(
+                output := conn.run(
                     exports
                     + [
                         'fail() { echo "Error: $*" >&2; exit 1; }',
@@ -1686,9 +1805,10 @@ class SlurmExecutor(BaseExecutor):
                         # report success to two concurrent callers.
                         f'(set -o noclobber; : > {_RESUBMIT_LOCK}) 2>/dev/null || fail "another resubmit holds '
                         f'$PWD/{_RESUBMIT_LOCK}; remove it if no resubmit is running"',
-                        "_gym_submit_started=0; _gym_submit_confirmed=0",
+                        "_gym_submit_started=0; _gym_submit_confirmed=0; _gym_submit_refused=0",
                         "_gym_release_resubmit_lock() { "
-                        'if [[ "$_gym_submit_started" == 1 && "$_gym_submit_confirmed" != 1 ]]; then '
+                        'if [[ "$_gym_submit_started" == 1 && "$_gym_submit_confirmed" != 1 '
+                        '&& "$_gym_submit_refused" != 1 ]]; then '
                         f"printf '%s\\n' {shlex.quote(ACCOUNTING_UNKNOWN_PREFIX + ' Resubmit acknowledgement was not confirmed.')} "
                         "> .gym_chain_incomplete || return; fi; "
                         f"rm -f {_RESUBMIT_LOCK}; }}",
@@ -1789,6 +1909,13 @@ class SlurmExecutor(BaseExecutor):
                             f"sys.exit(0 if words and re.fullmatch({_JOB_ID_RE.pattern!r}, words[-1]) else 1)"
                         )
                         + ' "$out"; then _gym_submit_confirmed=1; fi',
+                        # The scheduler's own refusal, not a lost reply, and the queue confirms nothing of this run is
+                        # in it: no job was queued, so the chain's accounting stays known.
+                        'if [[ $rc != 0 ]] && [[ $out == *"Batch job submission failed"* ]] '
+                        "&& ! grep -qiE 'timed out|unable to contact|socket|zero bytes|connection' <<< \"$out\" "
+                        "&& _gym_after=$(squeue --me --all --noheader --format=%Z); then _gym_submit_refused=1; "
+                        'for d in $_gym_after; do [ "$d" != "$PWD" ] || _gym_submit_refused=0; done; fi',
+                        'echo "__GYM_SUBMIT_REFUSED:$_gym_submit_refused"',
                         *(
                             # Still under the lock: name the queued job in the epoch record written before sbatch.
                             # A failure here leaves the record without its job ID, never without its epoch.
@@ -1805,15 +1932,38 @@ class SlurmExecutor(BaseExecutor):
             )
             job_id, error = results.get(benchmark, (None, "sbatch produced no result"))
             if job_id is None:
-                raise RuntimeError(
+                message = (
                     f"Resubmit of {benchmark} failed: {error}"
                     + ("; the run stays on its recorded Gym commit" if repin is not None else "")
                     + ("; the run keeps its recorded walltime" if max_walltime is not None else "")
                 )
+                if benchmark not in results:
+                    raise RuntimeError(message)
+                # sbatch answered: the exit trap put back everything this resubmit changed before releasing the lock.
+                marker = conn.run(
+                    [f"cat {shlex.quote(str(job_dir / INCOMPLETE_MARKER_NAME))} 2>/dev/null || true"]
+                ).strip()
+                raise SchedulerRefusedError(
+                    message,
+                    {
+                        "benchmark": benchmark,
+                        "scheduler_text": error,
+                        # Only a refusal the queue confirmed leaves the chain marker as it was; otherwise the
+                        # trap records that the acknowledgement is unknown, as before.
+                        "job_dir_restored": "__GYM_SUBMIT_REFUSED:1" in output,
+                        "restored": [
+                            *(["job.sh", RESOLVED_CONFIG_NAME] if repin_commands else []),
+                            *(["infra-retry extension"] if extend_retries else []),
+                            *(["operator continuation counters"] if operator_continuation is not None else []),
+                            "resubmit lock released",
+                        ],
+                        "chain_marker": marker or None,
+                    },
+                )
             job = job.model_copy(
                 update={"job_id": job_id, "error": None}
                 | ({"gym_commit": repin} if repin is not None else {})
-                | ({"walltime": max_walltime} if max_walltime is not None else {})
+                | ({"walltime": segment_walltime or max_walltime} if max_walltime is not None else {})
             )
             if extend_retries:
                 entry = shlex.quote(json.dumps({"by": extend_retries, "at": utc_timestamp(utc_now())}))
@@ -1905,6 +2055,7 @@ class SlurmExecutor(BaseExecutor):
         server_spinup_timeout_seconds: int | None = None,
         spinup_timeout_reason: str | None = None,
         fresh_restart: bool = False,
+        segment_walltime: str | None = None,
     ) -> tuple[list[str], dict[str, str]]:
         """The locked shell steps that render one benchmark's job.sh and saved config again, with a repin, a walltime
         raise or both, and the journal entries to append once its job is queued. A fresh restart raises the walltime
@@ -1953,7 +2104,7 @@ class SlurmExecutor(BaseExecutor):
             if recorded is not None and seconds < _walltime_to_seconds(recorded):
                 raise ValueError(f"--max-walltime {max_walltime} is below the recorded walltime {recorded}")
             resume = config.driver.benchmarks[benchmark].resume_config
-            target = _walltime_config(target, record.cluster, benchmark, max_walltime)
+            target = _walltime_config(target, record.cluster, benchmark, max_walltime, segment_walltime)
             raised = target.driver.benchmarks[benchmark].resume_config
             journals[WALLTIME_JOURNAL_NAME] = json.dumps(
                 {
@@ -1962,6 +2113,7 @@ class SlurmExecutor(BaseExecutor):
                     "to": max_walltime,
                     "max_walltime_from": resume.max_walltime if resume else None,
                     "max_walltime_to": raised.max_walltime if raised else None,
+                    "segment": segment_walltime or max_walltime,
                     "reason": walltime_reason,
                     "actor": getpass.getuser(),
                     "at": stamp,

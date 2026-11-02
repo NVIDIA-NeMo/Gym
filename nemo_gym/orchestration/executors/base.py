@@ -43,6 +43,14 @@ class UnsupportedOperationError(RuntimeError):
     """The executor does not implement this operation."""
 
 
+class SchedulerRefusedError(RuntimeError):
+    """The scheduler refused to queue a resubmitted job; ``detail`` holds its text verbatim and the job dir's state."""
+
+    def __init__(self, message: str, detail: dict[str, Any]) -> None:
+        super().__init__(message)
+        self.detail = detail
+
+
 class BaseExecutor(ABC):
     # Whether this executor can auto-resubmit a benchmark that gets killed by
     # the scheduler (time limit, preemption, node failure). False means asking
@@ -111,6 +119,11 @@ class BaseExecutor(ABC):
             "error": f"{type(self).__name__} cannot export a saved run; run `gym eval export mlflow "
             "+rollouts_jsonl_fpath=<job dir>/artifacts/rollouts.jsonl` with the run's MLflow settings",
         }
+
+    def walltime_plan(self, record: SubmissionRecord, benchmark: str, max_walltime: str) -> dict[str, Any] | None:
+        """How a ``--max-walltime`` raise fits the scheduler's limits, checked before any evidence is read; None
+        when the executor has no such limit to check."""
+        return None
 
     @abstractmethod
     def resubmit(

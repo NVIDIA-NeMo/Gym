@@ -23,6 +23,7 @@ from typing import Any
 from pydantic import ValidationError
 
 from nemo_gym.orchestration.api import KubernetesComputeConfig, SlurmComputeConfig, SubmitConfig
+from nemo_gym.orchestration.executors.base import SchedulerRefusedError
 from nemo_gym.orchestration.executors.kubernetes import KubernetesExecutor
 from nemo_gym.orchestration.executors.resume_script import fresh_restart_command
 from nemo_gym.orchestration.executors.slurm import SlurmExecutor, reader_token
@@ -32,6 +33,7 @@ from nemo_gym.orchestration.recovery import (
     GateCriteria,
     OperatorBudget,
     RecoveryAction,
+    RecoveryDecision,
     RecoveryOutcome,
     RecoveryOutcomePolicyConfig,
     gate_summary_from_collected,
@@ -268,6 +270,24 @@ def _recover(
         if max_walltime is not None and (walltime_reason or "").strip() and not inspect_only
         else None
     )
+    # A walltime raise the partition cannot take is refused at once, before the slow evidence read.
+    plan_walltime = getattr(executor, "walltime_plan", None)
+    walltime_plan = (
+        plan_walltime(record, benchmark, max_walltime)
+        if max_walltime is not None and not inspect_only and plan_walltime is not None
+        else None
+    )
+    if walltime_plan is not None and walltime_plan.get("refused"):
+        refused = RecoveryDecision(
+            action=RecoveryAction.STOP,
+            reason=f"walltime raise refused: {walltime_plan['refused']}",
+            expected=0,
+            counts={},
+            identities={},
+            evidence=[],
+        )
+        return RecoveryOutcome(decision=refused, ok=False, dispatched=None, walltime_plan=walltime_plan)
+    segment = {"segment_walltime": walltime_plan["segment"]} if walltime_plan is not None else {}
 
     def collect():
         decision, collected = executor.recovery_evidence(
@@ -373,39 +393,61 @@ def _recover(
         return outcome.model_copy(update={"gate_task": gate_task, "mlflow": mlflow})
     if decision.action == RecoveryAction.RESUBMIT:
         operator = decision.operator_continuation
-        job = executor.resubmit(
-            record,
-            benchmark,
-            keep_budget=True,
-            accounted_walltime_s=collected.accounted_walltime_s if collected is not None else None,
-            accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
-            # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.
-            **({"accounting_reconciled": True} if collected is not None and collected.accounting_reconciled else {}),
-            **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
-            # Under an operator continuation, N is the allowance its record fills, not a recorded extension.
-            **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
-            **({"max_walltime": max_walltime, "walltime_reason": walltime_reason} if max_walltime is not None else {}),
-            **({"unsafe_resume_reason": unsafe_resume_reason} if unsafe_resume_reason is not None else {}),
-            **_spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason),
-            **({"operator_continuation": operator} if operator is not None else {}),
-        )
+        try:
+            job = executor.resubmit(
+                record,
+                benchmark,
+                keep_budget=True,
+                accounted_walltime_s=collected.accounted_walltime_s if collected is not None else None,
+                accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
+                # Only a reconciled chain passes the flag, so executors without requeue reconciliation keep working.
+                **(
+                    {"accounting_reconciled": True}
+                    if collected is not None and collected.accounting_reconciled
+                    else {}
+                ),
+                **({"repin": repin, "repin_reason": repin_reason} if repin is not None else {}),
+                # Under an operator continuation, N is the allowance its record fills, not a recorded extension.
+                **({"extend_retries": extend_retries} if extend_retries and operator is None else {}),
+                **(
+                    {"max_walltime": max_walltime, "walltime_reason": walltime_reason}
+                    if max_walltime is not None
+                    else {}
+                ),
+                **({"unsafe_resume_reason": unsafe_resume_reason} if unsafe_resume_reason is not None else {}),
+                **_spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason),
+                **({"operator_continuation": operator} if operator is not None else {}),
+                **segment,
+            )
+        except SchedulerRefusedError as error:
+            return _refused(decision, gate_task, mlflow, walltime_plan, error)
         if gate_task["status"] == "PLANNED":
             gate_task = {**gate_task, "status": "RESUMING"}
         return RecoveryOutcome(
-            decision=decision, ok=True, dispatched="resubmit", job_id=job.job_id, gate_task=gate_task, mlflow=mlflow
+            decision=decision,
+            ok=True,
+            dispatched="resubmit",
+            job_id=job.job_id,
+            gate_task=gate_task,
+            mlflow=mlflow,
+            walltime_plan=walltime_plan,
         )
     if decision.action == RecoveryAction.FRESH_RESTART and max_walltime is not None:
         if repin is not None or extend_retries:
             raise ValueError("a fresh restart takes only --max-walltime and --walltime-reason")
-        job = executor.resubmit(
-            record,
-            benchmark,
-            fresh_restart=True,
-            accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
-            max_walltime=max_walltime,
-            walltime_reason=walltime_reason,
-            **_spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason),
-        )
+        try:
+            job = executor.resubmit(
+                record,
+                benchmark,
+                fresh_restart=True,
+                accounting_snapshot=collected.accounting_snapshot if collected is not None else None,
+                max_walltime=max_walltime,
+                walltime_reason=walltime_reason,
+                **_spinup_timeout_raise(server_spinup_timeout_seconds, spinup_timeout_reason),
+                **segment,
+            )
+        except SchedulerRefusedError as error:
+            return _refused(decision, gate_task, mlflow, walltime_plan, error)
         if gate_task["status"] == "PLANNED":
             gate_task = {**gate_task, "status": "RESUMING"}
         return RecoveryOutcome(
@@ -415,6 +457,7 @@ def _recover(
             job_id=job.job_id,
             gate_task=gate_task,
             mlflow=mlflow,
+            walltime_plan=walltime_plan,
         )
     return RecoveryOutcome(decision=decision, ok=False, dispatched=None, gate_task=gate_task, mlflow=mlflow)
 
@@ -437,6 +480,32 @@ def _tracking_export_due(decision: Any, collected: Any, mlflow: dict[str, Any]) 
         and isinstance(local, dict)
         and "receipt" in local
         and local["receipt"] is None
+    )
+
+
+def _refused(
+    decision: RecoveryDecision,
+    gate_task: dict[str, Any],
+    mlflow: dict[str, Any],
+    walltime_plan: dict[str, Any] | None,
+    error: SchedulerRefusedError,
+) -> RecoveryOutcome:
+    """The outcome of a resubmit the scheduler refused: nothing queued, its text verbatim, the job dir restored."""
+    restored = ", ".join(error.detail.get("restored") or [])
+    state = (
+        f"nothing was queued and the job dir was restored ({restored})"
+        if error.detail.get("job_dir_restored")
+        else f"{restored}; whether a job was queued is unknown: {error.detail.get('chain_marker')}"
+    )
+    reason = f"{decision.reason}; the scheduler refused the job: {error.detail.get('scheduler_text')}; {state}"
+    return RecoveryOutcome(
+        decision=decision.model_copy(update={"reason": reason}),
+        ok=False,
+        dispatched=None,
+        gate_task={**gate_task, "status": "FAILED"} if gate_task else gate_task,
+        mlflow=mlflow,
+        walltime_plan=walltime_plan,
+        scheduler_refusal=error.detail,
     )
 
 
