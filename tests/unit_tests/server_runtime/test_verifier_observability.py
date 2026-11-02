@@ -1,6 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
+import ast
 import asyncio
 import json
 from pathlib import Path
@@ -722,15 +723,30 @@ def test_a_server_whose_grading_may_use_an_uninstrumented_model_saves_no_grading
     assert ("grading_record" in invocation) is not uninstrumented
 
 
+def _class_attribute(source: Path, class_name: str, attribute: str) -> object:
+    """The literal a class body assigns to ``attribute``, read from the module source without importing it.
+
+    Importing a resources server's app here would put the whole server, and everything it imports, into this core
+    job's coverage; the server's own tests run in its shard.
+    """
+    for node in ast.parse(source.read_text()).body:
+        if isinstance(node, ast.ClassDef) and node.name == class_name:
+            for item in node.body:
+                targets = item.targets if isinstance(item, ast.Assign) else [getattr(item, "target", None)]
+                if any(isinstance(target, ast.Name) and target.id == attribute for target in targets):
+                    return ast.literal_eval(item.value)
+    return None
+
+
 @pytest.mark.parametrize(
-    "module,name",
+    "app,name",
     [
-        ("resources_servers.gdpval.app", "GDPValResourcesServer"),
-        ("resources_servers.job_bench.app", "JobBenchResourcesServer"),
-        ("resources_servers.proof_judge.app", "ProofWithJudgeResourcesServer"),
-        ("resources_servers.proof_verification.app", "ProofVerificationResourcesServer"),
+        ("resources_servers/gdpval/app.py", "GDPValResourcesServer"),
+        ("resources_servers/job_bench/app.py", "JobBenchResourcesServer"),
+        ("resources_servers/proof_judge/app.py", "ProofWithJudgeResourcesServer"),
+        ("resources_servers/proof_verification/app.py", "ProofVerificationResourcesServer"),
     ],
 )
-def test_the_servers_that_judge_through_an_external_sdk_are_listed(module, name):
-    server_class = getattr(pytest.importorskip(module), name)
-    assert server_class.grading_may_use_uninstrumented_model is True
+def test_the_servers_that_judge_through_an_external_sdk_are_listed(app, name):
+    source = Path(__file__).resolve().parents[3] / app
+    assert _class_attribute(source, name, "grading_may_use_uninstrumented_model") is True
