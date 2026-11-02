@@ -217,9 +217,10 @@ The skills path is resolved like `input_jsonl_fpath` (relative paths check the w
   only). A run cut off at the timeout has no result event; it counts each call once by message id,
   from Claude Code's session transcripts and its stream: a call that finished counts its final
   usage, and a call cut off in flight counts the input it was sent with but no output, which is
-  reported only when a call ends. Context compaction is missing, since Claude Code leaves it out
-  of its transcripts (each compaction is one call over the whole context, about 0.5% of a long
-  run's input).
+  reported only when a call ends. A call cut off before Claude Code recorded it, seconds after it
+  started, is in neither and is not counted. Context compaction is missing, since Claude Code leaves
+  it out of its transcripts (each compaction is one call over the whole context, about 0.5% of a
+  long run's input).
 - Through a Gym model server, the Anthropic Messages responses carry the cache reads in
   `cache_read_input_tokens`, so Claude Code counts them as against an Anthropic endpoint.
 - Usage is Claude Code's own count. Against vLLM it counts a call's prompt twice when the call's
