@@ -50,6 +50,7 @@ from resources_servers.competitive_coding_challenges.app import (
     CompetitiveCodingChallengesResourcesServerConfig,
     CompetitiveCodingChallengesVerifyRequest,
 )
+from resources_servers.competitive_coding_challenges.ccc_eval import GRADED_ANSWER_KEY
 
 
 def _make_server(**config_overrides) -> CompetitiveCodingChallengesResourcesServer:
@@ -383,8 +384,8 @@ async def test_verify_emits_the_extracted_code_that_aggregation_reads() -> None:
 
 
 @pytest.mark.asyncio
-async def test_verify_replaces_extracted_code_carried_by_a_saved_rollout() -> None:
-    # Re-verifying a saved rollout sends its old `extracted_code` back; verify must replace it, not fail.
+async def test_verify_overwrites_extracted_code_already_on_the_request() -> None:
+    # The request model allows extra fields; one carrying `extracted_code` must not collide with the computed value.
     server = _make_server()
     evaluator = MagicMock()
     evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
@@ -409,6 +410,37 @@ async def test_verify_reports_an_empty_answer_as_no_answer() -> None:
 
     assert response.model_dump()["extracted_code"] is None
     assert server.compute_metrics([[response.model_dump()]])["pass@1/no_answer"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_verify_reports_an_empty_code_block_as_no_answer() -> None:
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(return_value={"test_case_results": {}})
+    server._evaluator = evaluator
+
+    response = await server.verify(_make_verify_request(text="Here it is:\n```cpp\n  \n```"))
+
+    assert response.model_dump()["extracted_code"] is None
+    assert server.compute_metrics([[response.model_dump()]])["pass@1/no_answer"] == 100.0
+
+
+@pytest.mark.asyncio
+async def test_verify_votes_on_the_answer_the_evaluator_graded() -> None:
+    # SIMULATION problems grade the last ```txt block; voting on a ```cpp block or the whole text would split
+    # identical answers wrapped in different explanations (review on #5336).
+    server = _make_server()
+    evaluator = MagicMock()
+    evaluator.eval_single = AsyncMock(
+        side_effect=lambda _entry: {"test_case_results": {}, GRADED_ANSWER_KEY: "MOVE\n"}
+    )
+    server._evaluator = evaluator
+    texts = ["First idea.\n```txt\nMOVE\n```", "Another explanation.\n```txt\nMOVE\n```"]
+
+    responses = [(await server.verify(_make_verify_request(text=text))).model_dump() for text in texts]
+
+    assert [r["extracted_code"] for r in responses] == ["MOVE\n", "MOVE\n"]
+    assert all(GRADED_ANSWER_KEY not in r["details"] for r in responses)
 
 
 @pytest.mark.asyncio

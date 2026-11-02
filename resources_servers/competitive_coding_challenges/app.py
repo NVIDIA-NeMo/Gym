@@ -34,7 +34,11 @@ from nemo_gym.server_runtime import (
     SimpleResourcesServer,
 )
 from nemo_gym.verification import SandboxVerificationError
-from resources_servers.competitive_coding_challenges.ccc_eval import CCCEvaluator, extract_final_code_block
+from resources_servers.competitive_coding_challenges.ccc_eval import (
+    GRADED_ANSWER_KEY,
+    CCCEvaluator,
+    extract_final_code_block,
+)
 from resources_servers.competitive_coding_challenges.sandbox_evaluator import CCCSandboxConfig, evaluate_in_sandbox
 
 
@@ -61,7 +65,8 @@ class CompetitiveCodingChallengesVerifyResponse(BaseVerifyResponse):
     subtask: Optional[str] = None
     name: Optional[str] = None
     subtask_score: Optional[float] = None
-    # The answer's last ```cpp block, or its whole text when it has none; None when the answer is empty.
+    # The answer the evaluator graded: the last ```txt block for SIMULATION problems, else the last ```cpp block,
+    # or the whole text when it has none. None when that is empty. When evaluation fails, the last ```cpp block.
     # compute_metrics reads it as the answer, so a row without it counts as no_answer.
     extracted_code: Optional[str] = None
     details: dict[str, Any] = Field(default_factory=dict)
@@ -412,8 +417,6 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         payload = body.model_dump()
         payload["name"] = payload.get("name") or body.problem_id
         generation = _extract_last_assistant_text(body)
-        # Set on payload, not as a keyword, so a re-verified rollout that already carries the field is overwritten.
-        payload["extracted_code"] = extract_final_code_block(generation, ("cpp",)) if generation.strip() else None
 
         reward = 0.0
         details: dict[str, Any] = {}
@@ -451,6 +454,12 @@ class CompetitiveCodingChallengesResourcesServer(SimpleResourcesServer):
         except Exception as e:
             details = {"error": str(e)}
             failure_kind, failure_reason = VERIFIER_ERROR, str(e)
+
+        answer = details.pop(GRADED_ANSWER_KEY, None)
+        if answer is None:
+            answer = extract_final_code_block(generation, ("cpp",))
+        # Set on payload, not as a keyword, so a request that already carries the field is overwritten.
+        payload["extracted_code"] = answer if answer.strip() else None
 
         if LOG_JSONL_PATH:
             await self._append_log_jsonl(
