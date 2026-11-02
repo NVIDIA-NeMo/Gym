@@ -52,10 +52,10 @@ from nemo_gym.sandbox import (
     resolve_provider_metadata,
     resolve_provider_volume_sources,
     sandbox_platform,
+    sandbox_server_url,
     service_gpus,
     service_resources,
 )
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.tasks.harbor import HarborTask
 from nemo_gym.tasks.harbor.compose_overlay import overlay_files
 from nemo_gym.tasks.harbor.dockerfile import RECORD_VERSION

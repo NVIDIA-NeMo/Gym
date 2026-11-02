@@ -279,3 +279,33 @@ def test_warm_check_uses_private_scratch_without_writing_read_only_runtime(tmp_p
         for path in paths:
             if not path.is_symlink():
                 path.chmod(0o755 if path.is_dir() or path.name == "python3" else 0o644)
+
+
+@pytest.mark.parametrize("corrupt", [False, True])
+def test_offline_install_verifies_wheels_and_never_resolves_remote_requirements(tmp_path: Path, corrupt: bool) -> None:
+    call = make_call(tmp_path / "offline")
+    wheels = archive_bytes({"package-1-py3-none-any.whl": (b"fixture", 0o644)})
+    (call.scratch / "wheels.tar.gz").write_bytes(wheels + (b"corruption" if corrupt else b""))
+    result = subprocess.run(
+        [*call.command(), hashlib.sha256(wheels).hexdigest()],
+        env=call.env,
+        text=True,
+        capture_output=True,
+        timeout=20,
+    )
+    if corrupt:
+        assert result.returncode != 0
+        assert not (call.runtime.parent / ".builds").exists()
+        assert not Path(call.env["NOOA_TEST_EVENTS"]).exists()
+    else:
+        assert result.returncode == 0, result.stdout + result.stderr
+        (record,) = records(Path(call.env["NOOA_TEST_EVENTS"]))
+        assert "--no-index" in record["argv"]
+        assert "--no-deps" in record["argv"]
+        assert "--only-binary=:all:" in record["argv"]
+        assert not any(arg.startswith(("http:", "https:")) for arg in record["argv"])
+        assert "-r" not in record["argv"]
+        assert record["argv"][-1].endswith("/wheels/package-1-py3-none-any.whl")
+        hook = call.runtime / "python/lib/python3.13/site-packages/nooa_offline_runtime.pth"
+        assert hook.read_text() == 'import os; os.environ["LITELLM_LOCAL_MODEL_COST_MAP"] = "True"\n'
+        assert call.runtime.is_symlink()

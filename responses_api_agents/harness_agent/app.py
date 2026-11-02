@@ -50,8 +50,8 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
     resolve_provider_metadata,
+    sandbox_server_url,
 )
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 
 

@@ -82,7 +82,11 @@ def model_response(*outputs: object, response_id: str = "resp-1") -> dict:
 
 
 def make_llm(
-    payload: dict, *, max_policy_calls: int | None = 2, sampling_overrides: dict | None = None
+    payload: dict,
+    *,
+    max_policy_calls: int | None = 2,
+    sampling_overrides: dict | None = None,
+    context_window: int | None = None,
 ) -> tuple[GymResponsesLLM, MagicMock, RolloutLLMState]:
     server_client = MagicMock()
     server_client.post = AsyncMock(return_value=FakeHTTPResponse(payload))
@@ -94,6 +98,7 @@ def make_llm(
         state=state,
         cookies={},
         sampling_overrides=sampling_overrides,
+        context_window=context_window,
     )
     return llm, server_client, state
 
@@ -120,6 +125,28 @@ async def test_response_progress_fires_after_capture_and_cookies_before_output_v
     with pytest.raises(ConnectionError):
         await llm.acall([{"role": "user", "content": "task"}])
     assert len(captured) == 1
+
+
+@pytest.mark.asyncio
+async def test_context_planning_reserves_the_effective_gym_reply_cap() -> None:
+    llm, client, _ = make_llm(model_response(), context_window=262144, sampling_overrides={"max_output_tokens": 32768})
+    overrides = {"max_tokens": 128, "extra_body": {"max_completion_tokens": 64, "custom": True}}
+    limits = llm.get_context_limits(overrides, fallback_reserve=4096)
+    assert llm.context_window == limits.context_window == 262144
+    assert limits.reserved_output_tokens == 32768
+    assert limits.usable_input_tokens == 229376
+    assert not limits.reserve_is_fallback
+    assert overrides == {"max_tokens": 128, "extra_body": {"max_completion_tokens": 64, "custom": True}}
+    await llm.acall([{"role": "user", "content": "hello"}], max_tokens=128)
+    assert client.post.await_args.kwargs["json"].max_output_tokens == limits.reserved_output_tokens
+
+
+def test_context_planning_without_gym_reply_override_keeps_nooa_reserve_semantics() -> None:
+    llm, _, _ = make_llm(model_response(), context_window=262144)
+    explicit = llm.get_context_limits({"max_tokens": 128}, fallback_reserve=4096)
+    assert explicit.reserved_output_tokens == 128 and not explicit.reserve_is_fallback
+    fallback = llm.get_context_limits(fallback_reserve=4096)
+    assert fallback.reserved_output_tokens == 4096 and fallback.reserve_is_fallback
 
 
 @pytest.mark.parametrize(
@@ -462,3 +489,47 @@ async def test_successful_response_after_output_limit_recovers_normally() -> Non
     assert state.used == len(state.calls) == 2
     assert state.calls[0].response.incomplete_details.reason == "max_output_tokens"
     assert state.calls[1].response.incomplete_details is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("key", ["max_tokens", "max_completion_tokens", "max_output_tokens"])
+@pytest.mark.parametrize("nested", [False, True])
+@pytest.mark.parametrize("gym_cap", [None, 256])
+async def test_reply_cap_alias_matches_planning_and_wire_request(key: str, nested: bool, gym_cap: int | None) -> None:
+    params = {key: 128}
+    if nested:
+        params = {"extra_body": params}
+    llm, client, _ = make_llm(model_response(), context_window=1024, sampling_overrides={"max_output_tokens": gym_cap})
+    limits = llm.get_context_limits(params)
+    await llm.acall([{"role": "user", "content": "hello"}], **params)
+    body = client.post.await_args.kwargs["json"]
+    assert body.max_output_tokens == limits.reserved_output_tokens == (gym_cap or 128)
+    assert limits.usable_input_tokens == 1024 - body.max_output_tokens
+
+
+@pytest.mark.asyncio
+async def test_absent_reply_cap_does_not_send_planning_fallback() -> None:
+    llm, client, _ = make_llm(model_response(), context_window=1024)
+    assert llm.get_context_limits(fallback_reserve=256).reserved_output_tokens == 256
+    await llm.acall([{"role": "user", "content": "hello"}])
+    assert client.post.await_args.kwargs["json"].max_output_tokens is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "params",
+    [
+        {"max_tokens": 512, "max_completion_tokens": 64},
+        {"extra_body": {"max_tokens": 1024}},
+        {"max_completion_tokens": 0},
+        {"max_output_tokens": True},
+    ],
+)
+async def test_invalid_reply_caps_fail_planning_and_call_before_model_transport(params: dict) -> None:
+    llm, client, state = make_llm(model_response(), context_window=1024)
+    with pytest.raises(ValueError):
+        llm.get_context_limits(params)
+    with pytest.raises(ValueError):
+        await llm.acall([{"role": "user", "content": "hello"}], **params)
+    client.post.assert_not_awaited()
+    assert state.used == 0

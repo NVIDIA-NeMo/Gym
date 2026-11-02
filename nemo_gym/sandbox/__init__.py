@@ -104,6 +104,7 @@ from nemo_gym._public_api import lazy_exports
 
 if TYPE_CHECKING:
     from nemo_gym.sandbox.access import DirectSandboxConnection, SandboxAccess
+    from nemo_gym.sandbox.agent_tools import restricted_network_policy, sandbox_server_url
     from nemo_gym.sandbox.compose_config import (
         adapt_non_root_sidecars,
         deployment_platform,
@@ -164,7 +165,9 @@ _PUBLIC_API = {
     "read_text": "utils",
     "remote_kind": "transfer",
     "resolve_compose": "compose_config",
+    "restricted_network_policy": "agent_tools",
     "sandbox_platform": "compose_config",
+    "sandbox_server_url": "agent_tools",
     "service_gpus": "compose_fields",
     "service_resources": "compose_fields",
     "upload_archive": "transfer",

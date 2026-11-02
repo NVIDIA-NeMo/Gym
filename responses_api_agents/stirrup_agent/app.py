@@ -53,8 +53,8 @@ from nemo_gym.sandbox import (
     SandboxSpec,
     create_provider,
     resolve_provider_config,
+    sandbox_server_url,
 )
-from nemo_gym.sandbox.agent_tools import sandbox_server_url
 from nemo_gym.server_runtime import BaseRunRequest, DirectHTTPToolAccess, MCPToolAccess
 from nemo_gym.trajectory import (
     AgentInvocation,

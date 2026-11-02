@@ -4,11 +4,13 @@
 import asyncio
 import hashlib
 import io
+import json
 import os
 import shlex
 import shutil
 import subprocess
 import tarfile
+import tomllib
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -93,6 +95,23 @@ def test_expected_python_checksum_invalidates_runtime_fingerprint(
     after, updated_fingerprint = sandbox_runtime._runtime_archive(source_tree)
     assert after == before
     assert updated_fingerprint != fingerprint
+
+
+def test_archive_selects_thin_runtime_dependencies(source_tree: Path) -> None:
+    blob, _ = sandbox_runtime._runtime_archive(source_tree)
+    with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
+        manifest = tomllib.loads(archive.extractfile("pyproject.toml").read().decode())
+    assert manifest["project"]["dependencies"] == ["openai==2.44.0", "requests"]
+    root = Path(sandbox_runtime.__file__).resolve().parents[2]
+    actual_blob, _ = sandbox_runtime._runtime_archive(root)
+    with tarfile.open(fileobj=io.BytesIO(actual_blob)) as archive:
+        actual_manifest = tomllib.loads(archive.extractfile("pyproject.toml").read().decode())
+    core_dependencies = tomllib.loads((root / "pyproject.toml").read_text())["project"]["dependencies"]
+    # server_utils imports httptools even in the otherwise thin worker process.
+    assert (
+        next(value for value in core_dependencies if value.startswith("httptools"))
+        in actual_manifest["project"]["dependencies"]
+    )
 
 
 @pytest.fixture
@@ -296,7 +315,7 @@ async def test_changed_cached_archive_is_rejected_before_payload_uploads(
 ) -> None:
     portable_download.return_value.write_bytes(b"cache replaced after initial verification")
     sandbox.exec.side_effect = [SandboxExecResult("x86_64/gnu", "", 0), SandboxExecResult("", "", 1)]
-    with pytest.raises(RuntimeError, match="NOOA Python artifact checksum mismatch for x86_64/gnu"):
+    with pytest.raises(RuntimeError, match="NOOA Python artifact checksum mismatch before sandbox upload"):
         await sandbox_runtime.prepare_nooa_runtime(sandbox)
     sandbox.upload.assert_awaited_once()
     assert sandbox.exec.await_count == 2
@@ -400,10 +419,133 @@ async def test_cleanup_failure_does_not_discard_healthy_runtime(
     portable_download.assert_not_awaited()
 
 
-def test_archive_preserves_full_project_metadata(source_tree: Path) -> None:
-    blob, _ = sandbox_runtime._runtime_archive(source_tree)
-    with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
-        assert archive.extractfile("pyproject.toml").read() == (source_tree / "pyproject.toml").read_bytes()
+def test_runtime_entrypoint_import_does_not_load_controller_dependencies() -> None:
+    import subprocess
+    import sys
+
+    # A fresh interpreter catches imports hidden by a test process's module cache.
+    script = """
+import importlib.abc
+import sys
+class RejectControllerDependencies(importlib.abc.MetaPathFinder):
+    def find_spec(self, fullname, path=None, target=None):
+        if fullname.split('.')[0] in {'ray', 'datasets', 'pyarrow', 'pandas', 'mlflow'}:
+            raise RuntimeError('task runtime imported controller dependency: ' + fullname)
+sys.meta_path.insert(0, RejectControllerDependencies())
+from responses_api_agents.nooa_agent.sandbox_entrypoint import SandboxInput
+from responses_api_agents.nooa_agent.invocation import NOOAInvocationConfig, validate_invocation
+from responses_api_agents.nooa_agent.task_agent import TaskAgent
+config = NOOAInvocationConfig(agent_class='responses_api_agents.nooa_agent.task_agent:TaskAgent',
+    invocation_adapter='responses_api_agents.nooa_agent.task_agent:invoke_solve_task')
+assert validate_invocation(config)[0] is TaskAgent
+"""
+    subprocess.run([sys.executable, "-c", script], cwd=Path(sandbox_runtime.__file__).resolve().parents[2], check=True)
+
+
+@pytest.fixture
+def wheelhouse(tmp_path: Path, runtime_package: tuple[bytes, str], portable_download: AsyncMock) -> Path:
+    path = tmp_path / "wheelhouse"
+    path.mkdir()
+    (path / "python.tar.gz").write_bytes(portable_download.return_value.read_bytes())
+    with tarfile.open(path / "wheels.tar.gz", "w:gz") as archive:
+        data = b"fixture wheel bytes"
+        member = tarfile.TarInfo("fixture-1-py3-none-any.whl")
+        member.size = len(data)
+        archive.addfile(member, io.BytesIO(data))
+    manifest = {
+        "version": 1,
+        "target": "x86_64/gnu",
+        "source_fingerprint": runtime_package[1],
+        "python_version": sandbox_runtime._PYTHON_VERSION,
+        "python_sha256": sandbox_runtime._PYTHON_SHA256["x86_64/gnu"],
+        "wheels_sha256": hashlib.sha256((path / "wheels.tar.gz").read_bytes()).hexdigest(),
+        "glibc": "2.28",
+    }
+    (path / "manifest.json").write_text(json.dumps(manifest))
+    return path
+
+
+@pytest.mark.asyncio
+async def test_offline_runtime_stages_only_verified_local_artifacts(
+    sandbox: AsyncMock, wheelhouse: Path, runtime_package: tuple[bytes, str], portable_download: AsyncMock
+) -> None:
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.31", "", 0),
+        SandboxExecResult("", "", 1),
+        SandboxExecResult("ready", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    python = await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    portable_download.assert_not_awaited()
+    script = sandbox.upload.await_args_list[0].args[1]
+    scratch = script.removesuffix(".sh")
+    assert sandbox.uploaded[f"{scratch}/wheels.tar.gz"] == (wheelhouse / "wheels.tar.gz").read_bytes()
+    assert sandbox.uploaded[f"{scratch}/python.tar.gz"] == (wheelhouse / "python.tar.gz").read_bytes()
+    command = shlex.split(sandbox.exec.await_args_list[3].args[0])
+    wheels_sha = json.loads((wheelhouse / "manifest.json").read_text())["wheels_sha256"]
+    expected_fingerprint = hashlib.sha256(f"{runtime_package[1]}:{wheels_sha}".encode()).hexdigest()
+    assert command[2] == "install"
+    assert command[4] == expected_fingerprint
+    assert command[-1] == wheels_sha
+    assert python == f"/opt/nemo-gym-nooa/{expected_fingerprint}-x86_64-gnu/python/bin/python3"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("libc", ["glibc 2.17", "unknown", "glibc 2.31 extra"])
+async def test_offline_runtime_rejects_incompatible_libc_without_online_fallback(
+    sandbox: AsyncMock, wheelhouse: Path, portable_download: AsyncMock, libc: str
+) -> None:
+    sandbox.exec.side_effect = [SandboxExecResult("x86_64/gnu", "", 0), SandboxExecResult(libc, "", 0)]
+    with pytest.raises(RuntimeError, match="requires glibc >= 2.28"):
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    portable_download.assert_not_awaited()
+    sandbox.upload.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("changed", ["source", "target", "python", "wheels", "missing"])
+async def test_offline_runtime_rejects_incompatible_or_damaged_bundle_without_online_fallback(
+    sandbox: AsyncMock, wheelhouse: Path, portable_download: AsyncMock, changed: str
+) -> None:
+    if changed in {"source", "target"}:
+        manifest = json.loads((wheelhouse / "manifest.json").read_text())
+        manifest["source_fingerprint" if changed == "source" else "target"] = "changed"
+        (wheelhouse / "manifest.json").write_text(json.dumps(manifest))
+    elif changed == "missing":
+        (wheelhouse / "wheels.tar.gz").unlink()
+    else:
+        (wheelhouse / f"{changed}.tar.gz").write_bytes(b"replaced")
+    sandbox.exec.return_value = SandboxExecResult("x86_64/gnu", "", 0)
+    with pytest.raises(ValueError, match="NOOA wheelhouse"):
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    portable_download.assert_not_awaited()
+    sandbox.upload.assert_awaited_once()
+    sandbox.exec.assert_awaited_once()
+
+
+@pytest.mark.asyncio
+async def test_offline_runtime_revalidates_private_wheel_snapshot(
+    monkeypatch: pytest.MonkeyPatch, sandbox: AsyncMock, wheelhouse: Path, portable_download: AsyncMock
+) -> None:
+    copyfile = sandbox_runtime.shutil.copyfile
+
+    def replace_during_copy(source: Path, target: Path) -> Path:
+        result = copyfile(source, target)
+        if source.name == "wheels.tar.gz":
+            target.write_bytes(b"replaced while copying")
+        return result
+
+    monkeypatch.setattr(sandbox_runtime.shutil, "copyfile", replace_during_copy)
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.28", "", 0),
+        SandboxExecResult("", "", 1),
+    ]
+    with pytest.raises(RuntimeError, match="wheelhouse changed before sandbox upload"):
+        await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)
+    portable_download.assert_not_awaited()
+    sandbox.upload.assert_awaited_once()
 
 
 @pytest.mark.asyncio
@@ -438,3 +580,118 @@ async def test_runtime_packaging_does_not_block_other_requests(
     finally:
         release.set()
         await preparation
+
+
+@pytest.mark.parametrize("root_name,runtime_name", [("pydantic_core", "Pydantic-Core"), ("hydra-core", "hydra_core")])
+def test_archive_normalizes_dependency_names(source_tree: Path, root_name: str, runtime_name: str) -> None:
+    (source_tree / "pyproject.toml").write_text(f'[project]\ndependencies = ["{root_name}>=1"]')
+    (source_tree / "responses_api_agents/nooa_agent/runtime/pyproject.toml").write_text(
+        "[project]\ndependencies = []\n[tool.nemo-gym-runtime]\n"
+        f'core-dependencies = ["{runtime_name}"]\nadditional-dependencies = []\n'
+    )
+    blob, _ = sandbox_runtime._runtime_archive(source_tree)
+    with tarfile.open(fileobj=io.BytesIO(blob)) as archive:
+        contents = tomllib.loads(archive.extractfile("pyproject.toml").read().decode())
+    assert contents["project"]["dependencies"] == [f"{root_name}>=1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("stage", ["validate", "snapshot"])
+async def test_bundle_work_keeps_loop_responsive_and_joins_cancelled_workers(
+    monkeypatch: pytest.MonkeyPatch, sandbox: AsyncMock, wheelhouse: Path, stage: str
+) -> None:
+    import threading
+
+    from responses_api_agents.nooa_agent import offline_runtime
+
+    entered = threading.Event()
+    release = threading.Event()
+    completed = threading.Event()
+    snapshot_paths = []
+    module = offline_runtime if stage == "validate" else sandbox_runtime
+    name = "load_runtime_wheelhouse" if stage == "validate" else "_stage_runtime_artifacts"
+    original = getattr(module, name)
+
+    def blocked(*args, **kwargs):
+        if stage == "snapshot":
+            snapshot_paths.append(args[0])
+        entered.set()
+        assert release.wait(5), "Event loop stalled during bundle work"
+        result = original(*args, **kwargs)
+        completed.set()
+        return result
+
+    monkeypatch.setattr(module, name, blocked)
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.28", "", 0),
+        SandboxExecResult("", "", 1),
+    ]
+    preparation = asyncio.create_task(sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse))
+    try:
+        assert await asyncio.to_thread(entered.wait, 3)
+        preparation.cancel()
+        await asyncio.sleep(0.01)
+        assert not preparation.done()
+        assert not completed.is_set()
+        for path in snapshot_paths:
+            assert path.exists()
+        preparation.cancel()  # Repeated cancellation still cannot race the worker's files.
+        await asyncio.sleep(0.01)
+    finally:
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await preparation
+    assert completed.is_set()
+    assert all(not path.exists() for path in snapshot_paths)
+    assert sandbox.upload.await_count == 1
+
+
+@pytest.mark.asyncio
+async def test_runtime_io_bounds_concurrent_bundle_work() -> None:
+    import threading
+
+    lock = threading.Lock()
+    release = threading.Event()
+    two_started = threading.Event()
+    active = 0
+    peak = 0
+
+    def work() -> None:
+        nonlocal active, peak
+        with lock:
+            active += 1
+            peak = max(peak, active)
+            if active == 2:
+                two_started.set()
+        assert release.wait(5)
+        with lock:
+            active -= 1
+
+    tasks = [asyncio.create_task(sandbox_runtime._runtime_io(work)) for _ in range(6)]
+    try:
+        assert await asyncio.to_thread(two_started.wait, 3)
+        await asyncio.sleep(0.01)
+        assert peak == active == 2
+    finally:
+        release.set()
+        await asyncio.gather(*tasks)
+    assert peak == 2
+
+
+@pytest.mark.asyncio
+async def test_glibc_217_bundle_accepts_ubuntu_1804_task_image(
+    sandbox: AsyncMock, wheelhouse: Path, portable_download: AsyncMock
+) -> None:
+    manifest_path = wheelhouse / "manifest.json"
+    manifest = json.loads(manifest_path.read_text())
+    manifest["glibc"] = "2.17"
+    manifest_path.write_text(json.dumps(manifest))
+    sandbox.exec.side_effect = [
+        SandboxExecResult("x86_64/gnu", "", 0),
+        SandboxExecResult("glibc 2.27", "", 0),
+        SandboxExecResult("", "", 0),
+        SandboxExecResult("", "", 0),
+    ]
+    assert (await sandbox_runtime.prepare_nooa_runtime(sandbox, wheelhouse_path=wheelhouse)).endswith("/bin/python3")
+    portable_download.assert_not_awaited()
