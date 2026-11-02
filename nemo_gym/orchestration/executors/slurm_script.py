@@ -1169,7 +1169,7 @@ def build_sbatch_script(
         run_args.setdefault("require_complete", True)
         run_args = _with_resume_flag(run_args, resume is not None)
         gym_cmd = render_gym_cmd("eval run", "GYM_CMD", [output_path] + extra_flags + flatten_run_args(run_args))
-        # A job queued by `gym eval resubmit` resets the attempt budget and enables resume before exporters open:
+        # A job queued by `gym job resubmit` resets the attempt budget and enables resume before exporters open:
         # a fresh start would delete the run's rollouts, whatever its original config says.
         # The auto-resume prologue, when there is one, has moved the variable into `_gym_resubmit`.
         gym_cmd += (

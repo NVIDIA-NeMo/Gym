@@ -1433,7 +1433,7 @@ class RolloutCollectionConfig(SharedRolloutCollectionConfig):
     resubmit: bool = Field(
         default=False,
         description=(
-            "Set by a job queued with `gym eval resubmit`: resume from cache whatever resume_from_cache says, "
+            "Set by a job queued with `gym job resubmit`: resume from cache whatever resume_from_cache says, "
             "and give every failed rollout that is not final a fresh attempt budget."
         ),
     )
@@ -3083,7 +3083,7 @@ class RolloutCollectionHelper(BaseModel):
         # per key + flag terminal rows so chain-hop 2 retries the right ones.
         failures_fpath = failures_path_for(Path(config.output_jsonl_fpath))
         attempts_by_key: Counter = Counter()
-        # Attempts since the last `gym eval resubmit`: a resubmit gives every non-terminal failure a fresh budget.
+        # Attempts since the last `gym job resubmit`: a resubmit gives every non-terminal failure a fresh budget.
         # If the sidecar is later rewritten shorter (a GDPval stage restart), the offset only gives extra attempts.
         resubmit_offset = load_resubmit_offset(config.output_jsonl_fpath)
         budget_used: Counter = Counter()

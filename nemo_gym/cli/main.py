@@ -23,6 +23,7 @@ import sys
 from collections.abc import Callable
 from contextlib import contextmanager
 from dataclasses import dataclass, field
+from datetime import date
 from pathlib import Path
 
 from nemo_gym import NEMO_GYM_EXTRA_ROOTS_ENV_VAR_NAME, _augment_sys_path, component_search_roots
@@ -693,9 +694,12 @@ def _next_steps(gym_job_id: str) -> list[str]:
     ]
 
 
-def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
-    if overrides:
-        args._parser.error("resubmit does not accept Hydra overrides")
+# `gym eval resubmit` is the old name of `gym job resubmit`. It stays until this date so scripts keep working;
+# a test in tests/unit_tests/test_eval_resubmit.py starts failing on it, as the reminder to remove the alias.
+EVAL_RESUBMIT_REMOVAL_DATE = date(2026, 11, 23)
+
+
+def _resubmit(args: argparse.Namespace) -> None:
     from nemo_gym.orchestration.submit import resubmit
 
     try:
@@ -703,6 +707,21 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     except (ValueError, RuntimeError) as error:
         print(f"Error: {error}", file=sys.stderr)
         sys.exit(1)
+
+
+def _job_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "resubmit")
+    _resubmit(args)
+
+
+def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
+    _reject_overrides(args, overrides, "resubmit")
+    print(
+        f"Warning: `gym eval resubmit` is deprecated and goes away on {EVAL_RESUBMIT_REMOVAL_DATE}; "
+        f"use `gym job resubmit {args.gym_job_id} {args.benchmark}`.",
+        file=sys.stderr,
+    )
+    _resubmit(args)
 
 
 # `gym job` commands print JSON themselves, so they do not take the shared flag that also translates to a
@@ -1729,7 +1748,7 @@ COMMANDS = {
     ),
     "eval resubmit": Command(
         target=_eval_resubmit,
-        summary="Queue one benchmark of a submitted run again, in place.",
+        summary="Deprecated, use `gym job resubmit`: queue one benchmark of a submitted run again, in place.",
         flags=(
             Flag(
                 register=lambda p: p.add_argument(
@@ -1913,6 +1932,18 @@ COMMANDS = {
                     "--tail", type=int, metavar="N", help="Print only the last N lines (a log can be large)."
                 ),
             ),
+        ),
+    ),
+    "job resubmit": Command(
+        target=_job_resubmit,
+        summary="Queue one benchmark of a submitted run again, in place; prints the new job id.",
+        flags=(
+            Flag(
+                register=lambda p: p.add_argument(
+                    "gym_job_id", metavar="ID", help="The submission's id, as printed by `gym eval submit`."
+                ),
+            ),
+            Flag(register=lambda p: p.add_argument("benchmark", metavar="BENCHMARK", help="The benchmark to queue.")),
         ),
     ),
     "dev test": Command(target="nemo_gym.cli.dev:dev_test", summary="Run NeMo Gym's unit tests."),

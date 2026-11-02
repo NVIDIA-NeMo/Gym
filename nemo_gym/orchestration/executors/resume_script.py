@@ -38,7 +38,7 @@ RETRY_FILE_NAME = ".gym_infra_retries"
 # Written when the chain stops before the run finished (no eligible retries, walltime cap, or cancel), so a reader of the
 # job dir, not only of sacct, sees that rollouts are missing. A chain that continues removes it.
 INCOMPLETE_MARKER_NAME = ".gym_chain_incomplete"
-# Set to 1 in the environment of a job queued by `gym eval resubmit`.
+# Set to 1 in the environment of a job queued by `gym job resubmit`.
 RESUBMIT_ENV = "GYM_RESUBMIT"
 
 _PROLOGUE_TEMPLATE = """\
@@ -58,7 +58,7 @@ _gym_stop_incomplete() {{
     exit 1
 }}
 
-# A job queued by `gym eval resubmit` starts a fresh retry count and a fresh walltime budget: a chain
+# A job queued by `gym job resubmit` starts a fresh retry count and a fresh walltime budget: a chain
 # stopped at the walltime cap says "resubmit to continue". The variable is read once and unset,
 # so the follow-up queued below (which inherits this environment) is an ordinary chain hop.
 _gym_resubmit="${{{resubmit_env}:-}}"
