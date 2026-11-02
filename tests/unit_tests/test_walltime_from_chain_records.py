@@ -79,3 +79,15 @@ def test_no_stored_walltime_sums_the_records_and_a_stored_one_must_still_match()
     assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=None) == 30
     assert accounted_chain_walltime(["101", "102"], accounting, stored_walltime_s=0) is None
     assert accounted_chain_walltime(["101", "102"], "101|CANCELLED|10\n", stored_walltime_s=None) is None
+
+
+def test_a_segment_cancelled_by_the_operator_is_accounted_from_its_record():
+    # The follow-up's prologue stops at the cancel before storing it, so only the first segment is stored.
+    chain = ["101", "102", "103"]
+    accounting = "101|TIMEOUT|1146\n102|CANCELLED by 1000|759\n103|FAILED|14\n"
+    assert accounted_chain_walltime(chain, accounting, stored_walltime_s=1146) == 1919
+
+
+def test_the_cancel_allowance_needs_the_cancelled_segment_second_to_last():
+    accounting = "101|TIMEOUT|1146\n102|FAILED|759\n103|FAILED|14\n"
+    assert accounted_chain_walltime(["101", "102", "103"], accounting, stored_walltime_s=1146) is None

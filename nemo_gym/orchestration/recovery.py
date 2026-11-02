@@ -2166,26 +2166,31 @@ def accounted_chain_walltime(
     if not job_chain or len(set(job_chain)) != len(job_chain):
         return None
     elapsed: dict[str, int] = {}
+    states: dict[str, str] = {}
     for line in accounting.splitlines():
         parts = line.strip().split("|")
         if len(parts) != 3:
             return None
         job_id, state, seconds = parts
-        if (
-            job_id not in job_chain
-            or job_id in elapsed
-            or (state.split()[0].rstrip("+") if state.split() else "") not in terminal
-        ):
+        state = state.split()[0].rstrip("+") if state.split() else ""
+        if job_id not in job_chain or job_id in elapsed or state not in terminal:
             return None
         if not seconds.isdecimal():
             return None
         elapsed[job_id] = int(seconds)
+        states[job_id] = state
     if set(elapsed) != set(job_chain):
         return None
     total = sum(elapsed.values())
     # The prologue records predecessors. A stopped guard may already have accounted for the last job too.
+    # After an operator cancels a segment, the next prologue stops at the cancel before recording it, so neither
+    # the cancelled segment nor the one that stopped there is stored. A segment before the cancel must have stored
+    # its time, so a chain that stored nothing still has to match exactly.
     # Other values cannot identify the budget epoch (e.g. an intentional manual reset in an old chain).
-    if stored_walltime_s is not None and stored_walltime_s not in (total - elapsed[job_chain[-1]], total):
+    accepted = {total - elapsed[job_chain[-1]], total}
+    if len(job_chain) >= 3 and states[job_chain[-2]] == "CANCELLED":
+        accepted.add(total - elapsed[job_chain[-1]] - elapsed[job_chain[-2]])
+    if stored_walltime_s is not None and stored_walltime_s not in accepted:
         return None
     return float(total)
 
