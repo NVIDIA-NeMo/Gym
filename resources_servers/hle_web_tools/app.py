@@ -892,7 +892,14 @@ class HLEWebToolsResourcesServer(SimpleResourcesServer):
             while len(table) > MAX_SESSION_QUESTIONS:
                 session_id = next(iter(table))
                 self._session_identity.pop(session_id, None)
-                self._session_spans.pop(session_id, None)
+                if self._session_spans.pop(session_id, None) is not None:
+                    logger.warning(
+                        "hle_web_tools forgot the question of session %s: more than %d seeded sessions are held; "
+                        "its web_search calls will be refused as %s",
+                        session_id,
+                        MAX_SESSION_QUESTIONS,
+                        UNSEEDED_SESSION_FAMILY,
+                    )
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
         # Released by resources_session_id: a close after a lost seed reply carries no cookie.

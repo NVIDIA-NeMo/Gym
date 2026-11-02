@@ -293,6 +293,23 @@ def test_typed_sessions_follow_the_resources_session_contract():
     )
 
 
+async def test_sessions_past_the_cap_are_forgotten_with_a_warning(server, monkeypatch, caplog):
+    """Past the cap the least recently seeded session loses its question and its episode binding together, and the
+    loss is logged, since its later searches are refused as unseeded."""
+    monkeypatch.setattr(module, "MAX_SESSION_QUESTIONS", 1)
+    for session_id in ("first", "second"):
+        typed = {
+            "resources_session_id": session_id,
+            "episode_id": {"rollout_id": session_id},
+            "task_id": {"taskset": "hle_diamond", "task_id": session_id},
+            "task_data": {"question": QUESTION},
+        }
+        with caplog.at_level(logging.WARNING, logger=module.__name__):
+            await seed(server, typed, session_id)
+    assert "forgot the question of session first" in caplog.text
+    assert list(server._session_spans) == list(server._session_identity) == ["second"]
+
+
 @pytest.mark.parametrize(
     "url, rule",
     [
