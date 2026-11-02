@@ -108,7 +108,8 @@ def _record(job_dir: Path) -> SubmissionRecord:
 
 @pytest.fixture
 def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242."""
+    """squeue prints the `squeue_workdirs` file; sbatch records its cwd and environment and answers 4242; sinfo
+    fails, so a walltime raise is planned with the partition's MaxTime unknown, also on a host with real Slurm."""
     bin_dir = tmp_path / "bin"
     bin_dir.mkdir()
     # A job in a hidden partition is listed only with --all.
@@ -121,7 +122,9 @@ def slurm_bin(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     )
     (bin_dir / "sacct").write_text('#!/bin/bash\ncat "$(dirname "$0")/accounting"\n')
     (bin_dir / "accounting").write_text("100|FAILED|7200|0\n101|FAILED|60|0\n")
-    for stub in ("squeue", "sbatch", "sacct"):
+    # Shadows a real sinfo; a test that needs a partition listing writes its own.
+    (bin_dir / "sinfo").write_text('#!/bin/bash\necho "sinfo: error: not available in this test" >&2\nexit 1\n')
+    for stub in ("squeue", "sbatch", "sacct", "sinfo"):
         (bin_dir / stub).chmod(0o755)
     monkeypatch.setenv("PATH", f"{bin_dir}{os.pathsep}{os.environ['PATH']}")
     return bin_dir
@@ -556,7 +559,11 @@ def test_resubmit_with_telemetry_off_needs_no_token(
 
 # --- The saved config round trip: what submit persists, resubmit loads -----------------------------------------
 
-_ENV = {"HF_HOME": "lit:/cache/huggingface", "API_KEY": "host:GYM_TEST_SECRET", "LATE": "runtime:LATE"}
+_ENV = {
+    "HF_HOME": "lit:/cache/huggingface",
+    "API_KEY": "host:GYM_TEST_SECRET",  # pragma: allowlist secret
+    "LATE": "runtime:LATE",
+}
 
 
 def _policy_config(tmp_path: Path, env: dict[str, str]) -> dict:

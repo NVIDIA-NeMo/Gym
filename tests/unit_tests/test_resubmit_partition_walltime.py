@@ -128,7 +128,7 @@ def test_a_raise_the_partition_takes_renders_as_before(tmp_path, slurm_bin):
 def test_an_unknown_max_time_keeps_the_whole_raise_and_says_so(tmp_path, slurm_bin):
     from nemo_gym.orchestration.submit import recover
 
-    job_dir = _run(tmp_path)  # No sinfo on PATH: the query fails.
+    job_dir = _run(tmp_path)  # The fixture's sinfo fails: the query fails.
     out = recover(*_handle(job_dir), max_walltime="12:00:00", walltime_reason="slow but healthy policy")
     assert out.ok and out.dispatched == "resubmit", out.decision.reason
     assert out.walltime_plan["segment"] == "12:00:00" and out.walltime_plan["max_time"] is None
