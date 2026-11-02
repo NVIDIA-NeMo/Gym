@@ -19,7 +19,7 @@ import yaml
 from pydantic import ValidationError
 
 from nemo_gym import PARENT_DIR, component_search_roots
-from nemo_gym.config.config_types import ConfigError
+from nemo_gym.config import ConfigError
 from nemo_gym.environment.manifest import (
     Determinism,
     EnvironmentKind,
