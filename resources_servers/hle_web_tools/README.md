@@ -138,6 +138,17 @@ grades the rollout with its own `resources_server` (for HLE-Diamond, the equival
 tool server. The checks below need `TAVILY_API_KEY` in the environment of the process that starts the
 servers and are described in that benchmark's README.
 
+## Example data
+
+`data/example.jsonl` holds 5 synthetic placeholder rows (general-knowledge questions, not HLE items; each
+row carries a `placeholder` field saying so) for the data validation CI runs on every resources server.
+The `hle_web_tools_simple_agent` and `hle_web_tools_environment_server` instances in
+`configs/hle_web_tools.yaml` exist for that check and reach the tools over the plain HTTP routes.
+`data/example_metrics.json` was generated from those rows with
+`gym dataset collate ... +mode=example_validation`; `data/example_rollouts.jsonl` holds `<PLACEHOLDER ROW>`
+lines, as in `resources_servers/tavily_search`, because no rollout was collected (that needs a policy
+model and a Tavily key), and the server stays `verified: false`.
+
 ## Tests
 
 ```bash
