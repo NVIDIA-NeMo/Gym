@@ -182,11 +182,23 @@ def test_unverified_coverage_withholds_a_pass_without_a_health_failure():
 
 def test_records_that_do_not_cover_every_trial_keep_the_lower_bound_wording():
     collected = _run(99, settled={"model_transport_error": 1})
-    # A bound, completed grading operation, but a policy capture that does not join the saved answer.
-    collected.results[0]["response"]["id"] = "another-response"
+    # A completed grading operation that is not bound to the saved answer.
+    grade = collected.results[0]["ng_trial_observations"]["verifier_invocations"][0]["grading_operations"][0]
+    grade["result_binding_sha256"] = "0" * 64
     _, (passed, reason, report), _ = _gate(collected)
     assert passed is None and report["exact"] is False
     assert reason.startswith("trial: UNVERIFIED, known failures are a lower bound: evaluation-side faults: 1 of 100")
+
+
+def test_a_policy_capture_that_does_not_join_the_bound_answer_is_reported_not_a_coverage_condition():
+    collected = _run(99, settled={"model_transport_error": 1})
+    # The grading is bound to the saved answer; only the policy capture does not join it.
+    collected.results[0]["response"]["id"] = "another-response"
+    _, (passed, reason, report), _ = _gate(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert report["evaluation"]["kinds"] == {"model_transport_error": 1}
+    assert report["trajectory_evidence"]["incomplete"] == 1
+    assert "trajectory evidence incomplete: 1 of 100" in reason
 
 
 def test_full_coverage_gives_the_exact_count_with_kinds_and_classes():

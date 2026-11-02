@@ -101,36 +101,48 @@ def test_trial_coverage_from_actual_cpu_collector_metadata_fails_closed_when_evi
     from copy import deepcopy
     from pathlib import Path
 
-    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
+    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
 
     fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     collected = CollectedEvidence.model_validate(deepcopy(fixture))
     decision = decide_from_collected(collected, max_infra_retries=3, max_walltime_s=None, live_job=False)
     assert trial_health(decision, collected)[0] is True
-    for key in ("invocations", "verifier_invocations", "model_calls", "turns"):
+    # Without its verifier, or with verification skipped, the trial's grading is not observed.
+    negative = CollectedEvidence.model_validate(deepcopy(fixture))
+    negative.results[0]["ng_trial_observations"].pop("verifier_invocations")
+    assert trial_health(decision, negative)[0] is None
+    negative = CollectedEvidence.model_validate(deepcopy(fixture))
+    negative.results[0]["ng_trial_observations"]["invocations"][0]["verification_skipped"] = True
+    assert trial_health(decision, negative)[0] is None
+
+    # The rest is trajectory evidence: reported, never a coverage condition.
+    def reported(negative):
+        passed, reason, report = trial_verdict(decision, negative)
+        assert passed is True and report["trajectory_evidence"]["incomplete"] == 1, reason
+
+    for key in ("invocations", "model_calls", "turns"):
         negative = CollectedEvidence.model_validate(deepcopy(fixture))
         negative.results[0]["ng_trial_observations"].pop(key)
-        assert trial_health(decision, negative)[0] is None
-    for flag, value in (("in_session", None), ("verification_skipped", True)):
-        negative = CollectedEvidence.model_validate(deepcopy(fixture))
-        negative.results[0]["ng_trial_observations"]["invocations"][0][flag] = value
-        assert trial_health(decision, negative)[0] is None
+        reported(negative)
+    negative = CollectedEvidence.model_validate(deepcopy(fixture))
+    negative.results[0]["ng_trial_observations"]["invocations"][0]["in_session"] = None
+    reported(negative)
     negative = CollectedEvidence.model_validate(deepcopy(fixture))
     negative.results[0]["ng_trial_observations"]["tool_call_count"] = False
-    assert trial_health(decision, negative)[0] is None
+    reported(negative)
 
     negative = CollectedEvidence.model_validate(deepcopy(fixture))
     observed = negative.results[0]["ng_trial_observations"]
     observed["invocations"][0]["model_calls"][0]["model_call_id"] = observed["model_calls"][0]["model_call_id"]
     observed["invocations"][0]["model_calls"][0]["response_id"] = "contradictory-response"
-    assert trial_health(decision, negative)[0] is None
+    reported(negative)
 
 
-def test_trial_coverage_requires_whole_row_report_and_matching_turn():
+def test_trial_coverage_requires_whole_row_report_and_reports_the_turn():
     import json
     from pathlib import Path
 
-    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health
+    from nemo_gym.orchestration.recovery import CollectedEvidence, decide_from_collected, trial_health, trial_verdict
 
     fixture = json.loads((Path(__file__).parent / "fixtures/cpu-mcqa-programmatic-operations.json").read_text())
     baseline = CollectedEvidence.model_validate(fixture)
@@ -147,14 +159,17 @@ def test_trial_coverage_requires_whole_row_report_and_matching_turn():
         negative = baseline.model_copy(deep=True)
         negative.results[0][key] = value
         assert trial_health(decision, negative)[0] is None
+    # Invocation and turn identities are trajectory evidence: reported, never a coverage condition.
     for value in (None, "", " "):
         negative = baseline.model_copy(deep=True)
         negative.results[0]["ng_trial_observations"]["invocations"][0]["invocation_id"] = value
-        assert trial_health(decision, negative)[0] is None
+        passed, reason, report = trial_verdict(decision, negative)
+        assert passed is True and report["trajectory_evidence"]["incomplete"] == 1, reason
     for key in ("invocation_id", "task_id", "rollout_id"):
         negative = baseline.model_copy(deep=True)
         negative.results[0]["ng_trial_observations"]["turns"][0][key] = "contradictory"
-        assert trial_health(decision, negative)[0] is None
+        passed, reason, report = trial_verdict(decision, negative)
+        assert passed is True and report["trajectory_evidence"]["incomplete"] == 1, reason
     for value in (None, False, "true"):
         negative = baseline.model_copy(deep=True)
         negative.quality["source_matches"] = value

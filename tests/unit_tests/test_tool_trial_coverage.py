@@ -26,25 +26,56 @@ def health(collected):
     return decision, trial_health(decision, collected)
 
 
+def trajectory_reported(collected):
+    """The trial verdict and its reported trajectory evidence: the grading bound to the answer decides."""
+    from nemo_gym.orchestration.recovery import trial_verdict
+
+    decision = decide_from_collected(collected, max_infra_retries=1, max_walltime_s=None, live_job=False)
+    passed, reason, report = trial_verdict(decision, collected)
+    return passed, reason, report
+
+
+def assert_reported(collected, incomplete=1):
+    """The run passes on its bound grading, and the trajectory evidence it lacks is reported."""
+    passed, reason, report = trajectory_reported(collected)
+    assert passed is True and report["exact"] is True, reason
+    assert report["trajectory_evidence"]["incomplete"] == incomplete, report
+    assert "trajectory evidence incomplete:" in reason
+
+
 @pytest.mark.parametrize(
     "case,reward,expected,action",
     [
         ("healthy", 1, True, "noop"),
         ("wrong", 0, True, "noop"),
-        ("tool-error", 1, None, "noop"),
+        ("tool-error", 1, True, "noop"),
         ("verifier-error", None, None, "stop"),
-        ("hosted-tool", 1, None, "noop"),
+        ("hosted-tool", 1, True, "noop"),
     ],
 )
 def test_actual_tool_producer_outcomes(case, reward, expected, action):
     collected = fixture(case)
     decision, (passed, _) = health(collected)
     assert passed is expected
-    assert _observed_trial_operations(decision, collected) is (case in {"healthy", "wrong"})
+    # A tool that failed or ran hosted is trajectory evidence; only the verifier's error leaves grading unbound.
+    assert _observed_trial_operations(decision, collected) is (case != "verifier-error")
     assert decision.action.value == action
     assert decision.expected == 1
     if reward is not None:
         assert collected.results[0]["reward"] == reward
+
+
+# Mutations that leave a trial's grading unobserved, or its failures unaccounted for; the rest are trajectory evidence.
+COVERAGE_MUTATIONS = {
+    "duplicate_trial",
+    "missing_expected_trial",
+    "missing_verifier",
+    "unobserved_grader",
+    "failed_verifier",
+    "unselected_failure",
+    "omitted_failures",
+    "stale_source",
+}
 
 
 @pytest.mark.parametrize(
@@ -81,7 +112,7 @@ def test_actual_tool_producer_outcomes(case, reward, expected, action):
         "missing_raw_output",
     ],
 )
-def test_incomplete_or_contradictory_tool_evidence_cannot_accept(mutation):
+def test_incomplete_or_contradictory_tool_evidence_is_reported_not_a_coverage_condition(mutation):
     c = fixture()
     row = c.results[0]
     t = row["ng_trial_observations"]
@@ -144,9 +175,15 @@ def test_incomplete_or_contradictory_tool_evidence_cannot_accept(mutation):
         c.quality["source_matches"] = False
     elif mutation == "missing_raw_output":
         t["model_calls"][0]["output_items"] = None
-    decision, (passed, _) = health(c)
-    assert passed is None
-    assert _observed_trial_operations(decision, c) is False
+    if mutation in COVERAGE_MUTATIONS:
+        # Missing or unbound grading, a missing or duplicated trial, a failure no recovery accounts for, or an
+        # unreadable source: the run is not observed.
+        decision, (passed, _) = health(c)
+        assert passed is None
+        assert _observed_trial_operations(decision, c) is False
+    else:
+        # Tool and turn evidence is trajectory evidence: reported, never a coverage condition.
+        assert_reported(c)
 
 
 def test_tool_coverage_uses_observed_operations_not_benchmark_names():
@@ -187,10 +224,16 @@ def test_actual_repeated_tool_trials_keep_the_full_inventory():
     assert _observed_trial_operations(decision, c) is False
 
 
-@pytest.mark.parametrize("change", ["id", "status", "error"])
-def test_graded_response_must_match_the_completed_final_capture(change):
+@pytest.mark.parametrize("change", ["id", "status"])
+def test_a_graded_response_that_does_not_match_the_final_capture_is_reported(change):
     c = fixture()
-    c.results[0]["response"][change] = {"id": "foreign", "status": "incomplete", "error": {}}[change]
+    c.results[0]["response"][change] = {"id": "foreign", "status": "incomplete"}[change]
+    assert_reported(c)
+
+
+def test_a_graded_response_that_saved_an_error_cannot_accept():
+    c = fixture()
+    c.results[0]["response"]["error"] = {}
     decision, (passed, _) = health(c)
     assert passed is None
     assert _observed_trial_operations(decision, c) is False
@@ -204,12 +247,10 @@ def test_graded_response_must_match_the_completed_final_capture(change):
         ("input_items", {"type": "custom_tool_call_output", "call_id": "foreign"}),
     ],
 )
-def test_unjoined_runtime_operations_do_not_hide_beside_supported_items(location, item):
+def test_unjoined_runtime_operations_beside_supported_items_are_reported(location, item):
     c = fixture()
     c.results[0]["ng_trial_observations"]["model_calls"][-1][location].append(item)
-    decision, (passed, _) = health(c)
-    assert passed is None
-    assert _observed_trial_operations(decision, c) is False
+    assert_reported(c)
 
 
 @pytest.mark.parametrize(
@@ -234,12 +275,10 @@ def test_malformed_recovery_counters_do_not_become_zero(counters):
 
 @pytest.mark.parametrize("section", ["tool_calls", "turns"])
 @pytest.mark.parametrize("malformed", [None, False, 7, "unknown", []])
-def test_malformed_runtime_entries_remain_unknown(section, malformed):
+def test_malformed_runtime_entries_are_reported(section, malformed):
     c = fixture()
     c.results[0]["ng_trial_observations"][section][0] = malformed
-    decision, (passed, _) = health(c)
-    assert passed is None
-    assert _observed_trial_operations(decision, c) is False
+    assert_reported(c)
 
 
 def test_actual_judge_backed_verifier_without_captures_cannot_be_called_programmatic():
@@ -304,7 +343,7 @@ def test_historical_mcqa_without_grading_observation_is_unknown_not_rescored():
 
 
 @pytest.mark.parametrize("location", ["materialized", "trajectory", "turn"])
-def test_actual_bound_producer_requires_the_same_task_identity(location):
+def test_a_trajectory_with_another_task_identity_is_reported(location):
     c = fixture()
     assert health(c)[1][0] is True
     if location == "materialized":
@@ -313,7 +352,7 @@ def test_actual_bound_producer_requires_the_same_task_identity(location):
         c.results[0]["ng_trial_observations"]["task_id"] = "foreign"
     else:
         c.results[0]["ng_trial_observations"]["turns"][0]["task_id"] = "foreign"
-    assert health(c)[1][0] is None
+    assert_reported(c)
 
 
 @pytest.mark.parametrize("bad", [None, False, 7, "unknown", [], {}])

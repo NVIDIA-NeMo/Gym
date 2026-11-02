@@ -2722,8 +2722,18 @@ def _observed_trial_operations(
     policy_recovery: dict[str, int] | None = None,
     verifier_recorded: list[Identity] | None = None,
     artifact_recorded: list[Identity] | None = None,
+    trajectory_incomplete: dict[Identity, list[str]] | None = None,
 ) -> bool:
-    """Join observed model/tool operations and the outer verifier invocation for every expected trial.
+    """Whether every expected trial that is not a counted failure is observed: its saved answer is bound to its grading.
+
+    Observed means a recorded grading bound to the saved answer and score: one completed verifier's grading operation
+    bound to the row, its own grading record, a saved grading artifact (``GRADING_ARTIFACTS``) with the collector's
+    binding, or the model's own failed answer. Only that decides coverage. Each trial's model/tool trajectory is
+    joined too (its one agent invocation, turns, calls, tools and failure events), but that is observability
+    evidence: a trial whose trajectory does not join is reported in ``trajectory_incomplete`` with the kinds of its
+    missing evidence (``_trajectory_kinds``), and it is still observed.
+
+    Join observed model/tool operations and the outer verifier invocation for every expected trial.
 
     A trial whose verifier recorded no grading operation and no grading record of its own is observed through a
     saved grading artifact (``GRADING_ARTIFACTS``) or through the model's own failed answer the benchmark's rule
@@ -2776,6 +2786,7 @@ def _observed_trial_operations(
     invalid_grades = []
     recorded_trials = []
     artifact_trials = []
+    incomplete: dict[Identity, list[str]] = {}
 
     def nonempty(value):
         return isinstance(value, str) and bool(value.strip())
@@ -3002,77 +3013,13 @@ def _observed_trial_operations(
         recovered_policy["policy_recovered_operations"] += bool(events)
         return True
 
-    try:
-        for row in rows:
-            if _identity(row) in final_zero:
-                continue
-            if _truncated_zero(row):
-                # A counted model failure (TRUNCATED_ANSWER), like a final zero: only its answer must be observed.
-                if not _observed_cut_off_answer(row):
-                    return False
-                continue
-            truncated = _truncated_answer(row)
-            prior_recovered_events = set(recovered_events)
-            agent = servers[row["agent_ref"]["name"]]
-            resource = servers[agent["resources_server"]]
-            environment = servers[row["_ng_environment_server"]]
+    def trajectory_complete(row, observed, calls, artifact, truncated):
+        """The trial's model/tool trajectory joins its one agent invocation, turn by turn, call by call."""
+        try:
+            invocations, turns, tools = observed["invocations"], observed["turns"], observed["tool_calls"]
             if (
-                agent.get("kind") != "responses_api_agents"
-                or resource.get("kind") != "resources_servers"
-                or environment.get("kind") != "environment_servers"
-                or row.get("_ng_result_type") != environment.get("implementation")
-                or row.get(FAILURE_CLASS) is not None
-                or row.get("failure_kind") is not None
-                or row.get(FAILURE_ID) is not None
-                or row.get("_ng_failure_events_omitted", False) is not False
-                or not isinstance(row.get(FAILURE_EVENTS, {}), dict)
-            ):
-                return False
-            observed = row["ng_trial_observations"]
-            invocations, verifiers = observed["invocations"], observed["verifier_invocations"]
-            calls, turns, tools = observed["model_calls"], observed["turns"], observed["tool_calls"]
-            judge_calls = None
-            single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
-            graded = single.get("grading_operations") if isinstance(single, dict) else None
-            # Without a grading operation, a saved grading artifact or the model's own failed answer records the
-            # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
-            artifact = None
-            if not graded and not (single is not None and _verifier_recorded(single, row, agent["resources_server"])):
-                artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
-            if artifact is not None and single is not None and isinstance(calls, list):
-                owned = single.get("model_calls")
-                if not isinstance(owned, list):
-                    return False
-                judge_calls = []
-                for ref in owned:
-                    hit = [call for call in calls if matches(ref, call)]
-                    if len(hit) != 1 or any(hit[0] is seen for seen in judge_calls):
-                        return False
-                    judge_calls.append(hit[0])
-                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
-            if isinstance(graded, list) and len(graded) == 1 and (graded[0] or {}).get("kind") == "llm_judge":
-                # Every dependency is exactly one captured call owned by this verifier invocation, every owned call is
-                # a dependency, and only the remaining calls are the policy's.
-                dependencies, owned = graded[0].get("dependencies"), single.get("model_calls")
-                if not dependencies or not isinstance(dependencies, list) or not isinstance(owned, list):
-                    return False
-                if not isinstance(calls, list):
-                    return False
-                judge_calls = []
-                for ref in dependencies:
-                    hit = [call for call in calls if matches(ref, call)]
-                    if len(hit) != 1 or any(hit[0] is seen for seen in judge_calls):
-                        return False
-                    if sum(1 for item in owned if matches(item, hit[0])) != 1:
-                        return False
-                    judge_calls.append(hit[0])
-                if len(owned) != len(judge_calls):
-                    return False
-                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
-            if (
-                not all(isinstance(items, list) for items in (invocations, verifiers, calls, turns, tools))
+                not all(isinstance(items, list) for items in (invocations, calls, turns, tools))
                 or len(invocations) != 1
-                or len(verifiers) != (0 if artifact == "environment_reward" and not verifiers else 1)
                 or not calls
                 or len(turns) != len(calls)
                 or type(observed["tool_call_count"]) is not int
@@ -3081,7 +3028,7 @@ def _observed_trial_operations(
                 or any(gap.get("code") != "resolution_unavailable" for gap in observed["gaps"])
             ):
                 return False
-            invocation, verifier = invocations[0], (verifiers[0] if verifiers else None)
+            invocation = invocations[0]
             session = invocation["in_session"]
             task_id = row.get("materialized_task_id") if session else input_task_ids.get(_identity(row))
             if (
@@ -3097,59 +3044,7 @@ def _observed_trial_operations(
                 or invocation.get("stop_reason") is not None
                 or invocation["verification_skipped"] is not (None if session else False)
                 or (session and invocation["invocation_id"] != "root")
-                or (
-                    verifier is not None
-                    and (
-                        verifier["status"] != "completed"
-                        or verifier["failure_kind"] is not None
-                        or verifier.get("sandbox_observations") not in (None, [])
-                        or (judge_calls is None and verifier["model_calls"] != [])
-                        or not nonempty(verifier["invocation_id"])
-                        or verifier["invocation_id"] in populations[3]
-                    )
-                )
                 or len(invocation["model_calls"]) != len(calls)
-            ):
-                return False
-            grading = verifier.get("grading_operations") if verifier is not None else None
-            if artifact is not None:
-                grade = None
-                artifact_trials.append(_identity(row))
-            elif judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
-                grade = None
-                recorded_trials.append(_identity(row))
-            elif not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
-                return False
-            else:
-                grade = grading[0]
-            binding = row.get("_ng_collected_grading_binding")
-            if grade is not None and (
-                grade.get("kind") != ("programmatic_calculation" if judge_calls is None else "llm_judge")
-                or grade.get("outcome")
-                not in (
-                    ("completed", "unknown")
-                    if judge_calls is not None and grading_failures is not None
-                    else ("completed",)
-                )
-                or (judge_calls is None and grade.get("dependencies") != [])
-                or not nonempty(grade.get("operation_id"))
-                or grade["operation_id"] in grading_ids
-                or not isinstance(binding, str)
-                or len(binding) != 64
-                or grade.get("result_binding_sha256") != binding
-            ):
-                return False
-            if grade is not None:
-                grading_ids.add(grade["operation_id"])
-            if verifier is not None:
-                populations[3].add(verifier["invocation_id"])
-            if (
-                grade is not None
-                and judge_calls is not None
-                and not all(
-                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed")
-                    for call in judge_calls
-                )
             ):
                 return False
             ordered = []
@@ -3222,25 +3117,167 @@ def _observed_trial_operations(
                         return False
                 elif not emitted:
                     return False
-            # Every failure event the row saved is a recovered attempt of one of its own completed operations.
-            for event_id, event in row.get(FAILURE_EVENTS, {}).items():
-                if (
-                    event_id in prior_recovered_events
-                    or event_id not in recovered_events
-                    or not isinstance(event, dict)
-                    or any(event.get(key) != value for key, value in recovered_events[event_id].items())
-                ):
+            saved_response = row["response"]
+            return (
+                set(requested) == set(tool_by_id)
+                and saved_response.get("id") == ordered[-1]["response_metadata"]["response_id"]
+                and saved_response.get("status") == ("incomplete" if truncated else "completed")
+            )
+        except (KeyError, TypeError, ValueError, AttributeError, IndexError):
+            return False
+
+    try:
+        for row in rows:
+            if _identity(row) in final_zero:
+                continue
+            if _truncated_zero(row):
+                # A counted model failure (TRUNCATED_ANSWER), like a final zero: only its answer must be observed.
+                if not _observed_cut_off_answer(row):
                     return False
+                continue
+            truncated = _truncated_answer(row)
+            prior_recovered_events = set(recovered_events)
+            agent = servers[row["agent_ref"]["name"]]
+            resource = servers[agent["resources_server"]]
+            environment = servers[row["_ng_environment_server"]]
+            if (
+                agent.get("kind") != "responses_api_agents"
+                or resource.get("kind") != "resources_servers"
+                or environment.get("kind") != "environment_servers"
+                or row.get("_ng_result_type") != environment.get("implementation")
+                or row.get(FAILURE_CLASS) is not None
+                or row.get("failure_kind") is not None
+                or row.get(FAILURE_ID) is not None
+                or row.get("_ng_failure_events_omitted", False) is not False
+                or not isinstance(row.get(FAILURE_EVENTS, {}), dict)
+            ):
+                return False
+            observed = row["ng_trial_observations"]
+            verifiers, calls = observed["verifier_invocations"], observed.get("model_calls")
+            judge_calls = None
+            single = verifiers[0] if isinstance(verifiers, list) and len(verifiers) == 1 else None
+            graded = single.get("grading_operations") if isinstance(single, dict) else None
+            # Without a grading operation, a saved grading artifact or the model's own failed answer records the
+            # grading; the verifier's captured calls (a judge's) are then its own, never the policy's.
+            artifact = None
+            if not graded and not (single is not None and _verifier_recorded(single, row, agent["resources_server"])):
+                artifact = grading_artifact(row) or ("model_failure" if _model_failure(row) else None)
+            if artifact is not None and single is not None and isinstance(calls, list):
+                owned = single.get("model_calls")
+                if not isinstance(owned, list):
+                    return False
+                judge_calls = []
+                for ref in owned:
+                    hit = [call for call in calls if matches(ref, call)]
+                    if len(hit) != 1 or any(hit[0] is seen for seen in judge_calls):
+                        return False
+                    judge_calls.append(hit[0])
+                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
+            if isinstance(graded, list) and len(graded) == 1 and (graded[0] or {}).get("kind") == "llm_judge":
+                # Every dependency is exactly one captured call owned by this verifier invocation, every owned call is
+                # a dependency, and only the remaining calls are the policy's.
+                dependencies, owned = graded[0].get("dependencies"), single.get("model_calls")
+                if not dependencies or not isinstance(dependencies, list) or not isinstance(owned, list):
+                    return False
+                if not isinstance(calls, list):
+                    return False
+                judge_calls = []
+                for ref in dependencies:
+                    hit = [call for call in calls if matches(ref, call)]
+                    if len(hit) != 1 or any(hit[0] is seen for seen in judge_calls):
+                        return False
+                    if sum(1 for item in owned if matches(item, hit[0])) != 1:
+                        return False
+                    judge_calls.append(hit[0])
+                if len(owned) != len(judge_calls):
+                    return False
+                calls = [call for call in calls if not any(call is judge for judge in judge_calls)]
+            # Grading coverage: the trial's one verifier (none only beside an environment reward) and how it graded.
+            if not isinstance(verifiers, list) or len(verifiers) != (
+                0 if artifact == "environment_reward" and not verifiers else 1
+            ):
+                return False
+            verifier = verifiers[0] if verifiers else None
+            if verifier is not None and (
+                verifier["status"] != "completed"
+                or verifier["failure_kind"] is not None
+                or verifier.get("sandbox_observations") not in (None, [])
+                or (judge_calls is None and verifier["model_calls"] != [])
+                or not nonempty(verifier["invocation_id"])
+                or verifier["invocation_id"] in populations[3]
+            ):
+                return False
+            grading = verifier.get("grading_operations") if verifier is not None else None
+            if artifact is not None:
+                # A saved grading artifact must be bound to the saved answer and score; the model's own failed
+                # answer is a counted model failure instead.
+                if artifact != "model_failure" and not _bound_answer(row):
+                    return False
+                grade = None
+                artifact_trials.append(_identity(row))
+            elif judge_calls is None and _verifier_recorded(verifier, row, agent["resources_server"]):
+                grade = None
+                recorded_trials.append(_identity(row))
+            elif not isinstance(grading, list) or len(grading) != 1 or not isinstance(grading[0], dict):
+                return False
+            else:
+                grade = grading[0]
+            binding = row.get("_ng_collected_grading_binding")
+            if grade is not None and (
+                grade.get("kind") != ("programmatic_calculation" if judge_calls is None else "llm_judge")
+                or grade.get("outcome")
+                not in (
+                    ("completed", "unknown")
+                    if judge_calls is not None and grading_failures is not None
+                    else ("completed",)
+                )
+                or (judge_calls is None and grade.get("dependencies") != [])
+                or not nonempty(grade.get("operation_id"))
+                or grade["operation_id"] in grading_ids
+                or not isinstance(binding, str)
+                or len(binding) != 64
+                or grade.get("result_binding_sha256") != binding
+            ):
+                return False
+            if grade is not None:
+                grading_ids.add(grade["operation_id"])
+            if verifier is not None:
+                populations[3].add(verifier["invocation_id"])
+            if (
+                grade is not None
+                and judge_calls is not None
+                and not all(
+                    completed_once(call, judge=True, valid_grade=grade["outcome"] == "completed")
+                    for call in judge_calls
+                )
+            ):
+                return False
             if grade is not None and judge_calls is not None and grade["outcome"] == "unknown":
                 invalid_grades.append(_identity(row))
-            saved_response = row.get("response")
-            if (
-                set(requested) != set(tool_by_id)
-                or not isinstance(saved_response, dict)
-                or saved_response.get("id") != ordered[-1]["response_metadata"]["response_id"]
-                or saved_response.get("status") != ("incomplete" if truncated else "completed")
-                or saved_response.get("error") is not None
+            # An agent invocation that says verification was skipped contradicts any recorded grading.
+            if any(
+                isinstance(invocation, dict) and invocation.get("verification_skipped") is True
+                for invocation in (observed.get("invocations") or [])
             ):
+                return False
+            # A judge's call is the verifier's own: the agent never asked for it.
+            agent_refs = [
+                ref
+                for invocation in (observed.get("invocations") or [])
+                if isinstance(invocation, dict)
+                for ref in (invocation.get("model_calls") or [])
+            ]
+            if judge_calls and any(matches(ref, call) for ref in agent_refs for call in judge_calls):
+                return False
+            saved_response = row.get("response")
+            if not isinstance(saved_response, dict) or saved_response.get("error") is not None:
+                return False
+            # Trajectory evidence: reported, never a coverage condition.
+            if not trajectory_complete(row, observed, calls, artifact, truncated):
+                incomplete[_identity(row)] = _trajectory_kinds(observed) or ["operation_join_incomplete"]
+            # Every recorded model failure is accounted for: a failure is never hidden behind a graded answer.
+            fresh = {key: value for key, value in recovered_events.items() if key not in prior_recovered_events}
+            if _unaccounted_failures(row, fresh):
                 return False
     except (KeyError, TypeError, ValueError, AttributeError):
         return False
@@ -3254,7 +3291,31 @@ def _observed_trial_operations(
         verifier_recorded.extend(recorded_trials)
     if artifact_recorded is not None:
         artifact_recorded.extend(artifact_trials)
+    if trajectory_incomplete is not None:
+        trajectory_incomplete.update(incomplete)
     return True
+
+
+def _failed_request_kind(call: Any) -> str | None:
+    """The failure kind of a captured call whose final model operation failed with its own recorded request event."""
+    meta = call.get("response_metadata") if isinstance(call, dict) else None
+    operations = meta.get("model_operations") if isinstance(meta, dict) else None
+    report = meta.get("failure_report") if isinstance(meta, dict) else None
+    events = report.get("events") if isinstance(report, dict) else None
+    if not isinstance(operations, list) or not operations or not isinstance(operations[-1], dict):
+        return None
+    final = operations[-1]
+    event = events.get(final.get("failure_id")) if isinstance(events, dict) else None
+    if (
+        final.get("outcome") == "failed"
+        and isinstance(event, dict)
+        and event.get("boundary") == "model"
+        and event.get("operation") == "model_request"
+        and event.get("operation_id") == final.get("operation_id")
+        and isinstance(event.get("failure_kind"), str)
+    ):
+        return event["failure_kind"]
+    return None
 
 
 def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[Identity, str]:
@@ -3262,7 +3323,9 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
 
     The last policy call of the row's one invocation ends in a failed model operation whose failure event the call
     recorded, and the row's reward is zero. Such a trial is settled as a failure under the benchmark protocol: it
-    has no selectable response, and it is counted once, in the trial family.
+    has no selectable response, and it is counted once, in the trial family. An agent that records no call of its own
+    (its invocations reference none, so its last call is unknown) ended on a failed request when a captured call's
+    final operation failed that way and every such failure names the same kind.
     """
     scored = set(decision.identities.get(IdentityState.SCORED.value, []))
     found: dict[Identity, str] = {}
@@ -3272,6 +3335,16 @@ def final_zero_trials(decision: RecoveryDecision, collected: CollectedEvidence |
         if _identity(row) not in scored or type(reward) not in (int, float) or reward != 0:
             continue
         invocations = observed.get("invocations") if isinstance(observed, dict) else None
+        unreferenced = (
+            isinstance(invocations, list)
+            and bool(invocations)
+            and all(isinstance(item, dict) and item.get("model_calls") == [] for item in invocations)
+        )
+        if unreferenced and isinstance(observed.get("model_calls"), list):
+            ended = {_failed_request_kind(call) for call in observed["model_calls"]} - {None}
+            if len(ended) == 1:
+                found[_identity(row)] = ended.pop()
+            continue
         if not isinstance(invocations, list) or len(invocations) != 1 or not isinstance(invocations[0], dict):
             continue
         refs, calls = invocations[0].get("model_calls"), observed.get("model_calls")
@@ -3642,6 +3715,58 @@ def _truncated_zero(row: Mapping[str, Any]) -> bool:
     return type(row.get("reward")) in (int, float) and row["reward"] == 0 and _truncated_answer(row)
 
 
+def _trajectory_kinds(observed: Any) -> list[str]:
+    """The kinds of trajectory evidence a trial lacks: its recorded gaps, and its agent invocations' own shape.
+
+    Recorded gap codes other than ``resolution_unavailable`` (for example ``sandbox_lifecycle_timing_unavailable``,
+    ``conversation_unavailable``, ``model_call_ownership_unavailable``), then ``invocation_unavailable`` or
+    ``multiple_invocations``, ``in_session_unrecorded`` and ``invocation_<status>`` for an invocation that did not
+    record a completed status. Empty when none of these is named.
+    """
+    if not isinstance(observed, dict):
+        return ["trajectory_unavailable"]
+    gaps = observed.get("gaps")
+    kinds = sorted(
+        {
+            gap["code"]
+            for gap in (gaps if isinstance(gaps, list) else [])
+            if isinstance(gap, dict) and isinstance(gap.get("code"), str) and gap["code"] != "resolution_unavailable"
+        }
+    )
+    invocations = observed.get("invocations")
+    if not isinstance(invocations, list) or not invocations:
+        return kinds + ["invocation_unavailable"]
+    if len(invocations) > 1:
+        kinds.append("multiple_invocations")
+    statuses = sorted(
+        {
+            str(invocation.get("status"))
+            for invocation in invocations
+            if isinstance(invocation, dict) and invocation.get("status") != "completed"
+        }
+    )
+    if any(
+        isinstance(invocation, dict) and type(invocation.get("in_session")) is not bool for invocation in invocations
+    ):
+        kinds.append("in_session_unrecorded")
+    return kinds + [f"invocation_{status}" for status in statuses]
+
+
+def trajectory_evidence(incomplete: Mapping[Identity, list[str]], trials: int) -> dict[str, Any]:
+    """Trials whose trajectory evidence is incomplete, over the trials, with the count of each missing kind."""
+    kinds = Counter(kind for found in incomplete.values() for kind in found)
+    return {"incomplete": len(incomplete), "trials": trials, "kinds": dict(sorted(kinds.items()))}
+
+
+def _trajectory_text(evidence: Mapping[str, Any]) -> str:
+    """``trajectory evidence incomplete: N of M (kinds: kind n, ...)``, reported and never a condition."""
+    kinds = ", ".join(f"{kind} {n}" for kind, n in evidence["kinds"].items())
+    return (
+        f"trajectory evidence incomplete: {evidence['incomplete']} of {evidence['trials']} (kinds: {kinds}); "
+        "reported, not a coverage or health condition"
+    )
+
+
 def _observed_cut_off_answer(row: Mapping[str, Any]) -> bool:
     """Whether a scored-zero cut-off answer (``_truncated_zero``) is the model's own observed answer.
 
@@ -3722,6 +3847,127 @@ def _observed_cut_off_answer(row: Mapping[str, Any]) -> bool:
     )
 
 
+def _row_recovered_attempts(row: Mapping[str, Any]) -> list[tuple[str, dict[str, dict]]]:
+    """The row's recovered model attempts, by the completed operation that recovered them (``recovered_attempt_joins``).
+
+    Each entry is an operation id and its failure events, keyed by event id, from one answered call of the row.
+    """
+
+    def nonempty(value: Any) -> bool:
+        return isinstance(value, str) and bool(value.strip())
+
+    observed = row.get("ng_trial_observations")
+    calls = observed.get("model_calls") if isinstance(observed, dict) else None
+    saved = row.get(FAILURE_EVENTS)
+    saved = saved if isinstance(saved, dict) else {}
+    found: list[tuple[str, dict[str, dict]]] = []
+    seen: set[str] = set()
+    for call in calls if isinstance(calls, list) else []:
+        meta = call.get("response_metadata") if isinstance(call, dict) else None
+        report = meta.get("failure_report") if isinstance(meta, dict) else None
+        events = report.get("events") if isinstance(report, dict) else None
+        operations = meta.get("model_operations") if isinstance(meta, dict) else None
+        status = meta.get("status_code") if isinstance(meta, dict) else None
+        # The health counter's own test of an answered call: a success status and no failure recorded on it.
+        if (
+            not isinstance(events, dict)
+            or not events
+            or not isinstance(operations, list)
+            or type(status) is not int
+            or not 200 <= status < 400
+            or meta.get("error_category")
+            or meta.get("response_status") in ("failed", "error", "cancelled")
+        ):
+            continue
+        for operation in operations:
+            op_id = operation.get("operation_id") if isinstance(operation, dict) else None
+            if not nonempty(op_id) or operation.get("outcome") != "completed" or op_id in seen:
+                continue
+            owned = {
+                key: event
+                for key, event in events.items()
+                if isinstance(event, dict) and event.get("operation_id") == op_id
+            }
+            tries, transport = operation.get("http_attempts"), operation.get("transport_failures")
+            answer = operation.get("final_attempt_id")
+            ids = {event.get("attempt_id") for event in owned.values()}
+            if (
+                not owned
+                or type(tries) is not int
+                or type(transport) is not int
+                or tries < 1
+                or transport < 0
+                or len(owned) != tries - 1 + transport
+                or sum(event.get("http_status") is None for event in owned.values()) != transport
+                or not nonempty(answer)
+                or answer in ids
+                or len(ids) != len(owned)
+                or operation.get("failure_id") is not None
+                or any(
+                    key != event.get("event_id")
+                    or not nonempty(event.get("attempt_id"))
+                    or event.get("boundary") != "model"
+                    or event.get("operation") != "model_request"
+                    or event.get("failure_kind") != MODEL_REQUEST_ERROR
+                    or event.get("cause_id") is not None
+                    or not (
+                        event.get("http_status") is None
+                        or (type(event["http_status"]) is int and 400 <= event["http_status"] <= 599)
+                    )
+                    or (
+                        key in saved
+                        and (
+                            not isinstance(saved[key], dict)
+                            or any(saved[key].get(name) != value for name, value in event.items())
+                        )
+                    )
+                    for key, event in owned.items()
+                )
+            ):
+                continue
+            seen.add(op_id)
+            found.append((op_id, owned))
+    return found
+
+
+def _unaccounted_failures(row: Mapping[str, Any], recovered: Mapping[str, Any]) -> bool:
+    """Whether the row recorded a model failure that no recovery accounts for.
+
+    Every failure event the row saved or its captured calls reported must be a recovered attempt (``recovered``: the
+    events the coverage join joined, with the row's own ``_row_recovered_attempts``), a saved copy must agree with its
+    call's, and every failed model operation must be one whose failure such a recovery accounts for. A trial that
+    ended on its failed request is counted separately (``final_zero_trials``) and is never asked this.
+    """
+    joined = dict(recovered)
+    for _, owned in _row_recovered_attempts(row):
+        joined.update(owned)
+    saved = row.get(FAILURE_EVENTS, {})
+    observed = row.get("ng_trial_observations")
+    calls = observed.get("model_calls") if isinstance(observed, dict) else None
+    if not isinstance(saved, dict) or (calls is not None and not isinstance(calls, list)):
+        return True
+    for event_id, event in saved.items():
+        if (
+            event_id not in joined
+            or not isinstance(event, dict)
+            or any(event.get(key) != value for key, value in joined[event_id].items())
+        ):
+            return True
+    for call in calls or []:
+        meta = call.get("response_metadata") if isinstance(call, dict) else None
+        if not isinstance(meta, dict):
+            continue
+        report = meta.get("failure_report")
+        events = report.get("events") if isinstance(report, dict) else None
+        if isinstance(events, dict) and any(event_id not in joined for event_id in events):
+            return True
+        for operation in meta.get("model_operations") or []:
+            if isinstance(operation, dict) and operation.get("outcome") == "failed":
+                if operation.get("failure_id") not in joined:
+                    return True
+    return False
+
+
 def recovered_attempt_joins(decision: RecoveryDecision, collected: CollectedEvidence | None) -> dict[str, int]:
     """Failed model attempts each joined to the completed operation that recovered them, in a scored trial's own call.
 
@@ -3739,87 +3985,18 @@ def recovered_attempt_joins(decision: RecoveryDecision, collected: CollectedEvid
     attempts_seen: set[str] = set()
     operations_seen: set[str] = set()
     joined = {"attempts": 0, "operations": 0}
-
-    def nonempty(value: Any) -> bool:
-        return isinstance(value, str) and bool(value.strip())
-
     for row in (collected.results or []) if collected is not None else []:
-        observed = row.get("ng_trial_observations")
-        calls = observed.get("model_calls") if isinstance(observed, dict) else None
-        if _identity(row) not in scored or not isinstance(calls, list):
+        if _identity(row) not in scored:
             continue
-        saved = row.get(FAILURE_EVENTS)
-        saved = saved if isinstance(saved, dict) else {}
-        for call in calls:
-            meta = call.get("response_metadata") if isinstance(call, dict) else None
-            report = meta.get("failure_report") if isinstance(meta, dict) else None
-            events = report.get("events") if isinstance(report, dict) else None
-            operations = meta.get("model_operations") if isinstance(meta, dict) else None
-            status = meta.get("status_code") if isinstance(meta, dict) else None
-            # The health counter's own test of an answered call: a success status and no failure recorded on it.
-            if (
-                not isinstance(events, dict)
-                or not events
-                or not isinstance(operations, list)
-                or type(status) is not int
-                or not 200 <= status < 400
-                or meta.get("error_category")
-                or meta.get("response_status") in ("failed", "error", "cancelled")
-            ):
+        for op_id, owned in _row_recovered_attempts(row):
+            ids = {event["attempt_id"] for event in owned.values()}
+            if op_id in operations_seen or events_seen & set(owned) or attempts_seen & ids:
                 continue
-            for operation in operations:
-                op_id = operation.get("operation_id") if isinstance(operation, dict) else None
-                if not nonempty(op_id) or operation.get("outcome") != "completed" or op_id in operations_seen:
-                    continue
-                owned = {
-                    key: event
-                    for key, event in events.items()
-                    if isinstance(event, dict) and event.get("operation_id") == op_id
-                }
-                tries, transport = operation.get("http_attempts"), operation.get("transport_failures")
-                answer = operation.get("final_attempt_id")
-                ids = {event.get("attempt_id") for event in owned.values()}
-                if (
-                    not owned
-                    or type(tries) is not int
-                    or type(transport) is not int
-                    or tries < 1
-                    or transport < 0
-                    or len(owned) != tries - 1 + transport
-                    or sum(event.get("http_status") is None for event in owned.values()) != transport
-                    or not nonempty(answer)
-                    or answer in ids
-                    or len(ids) != len(owned)
-                    or operation.get("failure_id") is not None
-                    or any(
-                        key != event.get("event_id")
-                        or key in events_seen
-                        or not nonempty(event.get("attempt_id"))
-                        or event["attempt_id"] in attempts_seen
-                        or event.get("boundary") != "model"
-                        or event.get("operation") != "model_request"
-                        or event.get("failure_kind") != MODEL_REQUEST_ERROR
-                        or event.get("cause_id") is not None
-                        or not (
-                            event.get("http_status") is None
-                            or (type(event["http_status"]) is int and 400 <= event["http_status"] <= 599)
-                        )
-                        or (
-                            key in saved
-                            and (
-                                not isinstance(saved[key], dict)
-                                or any(saved[key].get(name) != value for name, value in event.items())
-                            )
-                        )
-                        for key, event in owned.items()
-                    )
-                ):
-                    continue
-                events_seen.update(owned)
-                attempts_seen.update(ids)
-                operations_seen.add(op_id)
-                joined["attempts"] += len(owned)
-                joined["operations"] += 1
+            events_seen.update(owned)
+            attempts_seen.update(ids)
+            operations_seen.add(op_id)
+            joined["attempts"] += len(owned)
+            joined["operations"] += 1
     return joined
 
 
@@ -3937,6 +4114,7 @@ def trial_verdict(
     policy_recovery: dict[str, int] = {}
     invalid_grades: list[str] = []
     recorded: list[Identity] = []
+    incomplete: dict[Identity, list[str]] = {}
     covered = _observed_trial_operations(
         decision,
         collected,
@@ -3944,6 +4122,7 @@ def trial_verdict(
         grading_failures=invalid_grades,
         policy_recovery=policy_recovery,
         verifier_recorded=recorded,
+        trajectory_incomplete=incomplete,
     )
     # A recovered attempt is no trial failure only when it joins the completed operation that recovered it, in a
     # scored trial's own call. That join is per attempt and does not wait on the coverage join above: a run whose
@@ -3982,7 +4161,7 @@ def trial_verdict(
             f"{recovered_policy} failed policy attempt(s) were retried and completed in the same operation "
             "(recovered, no trial failure); "
             if recovered_policy
-            else ""
+            else (recovered if incomplete else "")
         )
         scored = decision.counts.get(IdentityState.SCORED, 0) - len(final_zero_trials(decision, collected))
         grading = (
@@ -3991,6 +4170,17 @@ def trial_verdict(
             if recorded
             else "bound grading operations"
         )
+        if incomplete:
+            # Trajectory evidence is observability, never coverage: the grading bound to every answer decides.
+            evidence = trajectory_evidence(incomplete, trials)
+            passed, reason, result = verdict(
+                report["evaluation"]["fraction"] < limit,
+                f"trial: {_fault_text(report, limit)}; exact count: {len(invalid_grades)} observed returned grading "
+                f"result(s) lack a valid verdict; {retried}recorded grading bound to the saved answer ({grading}) covers "
+                f"every identity and repeat that is not a recorded failure; {_trajectory_text(evidence)}",
+                exact=True,
+            )
+            return passed, reason, result | {"trajectory_evidence": evidence}
         return verdict(
             report["evaluation"]["fraction"] < limit,
             f"trial: {_fault_text(report, limit)}; exact count: {len(invalid_grades)} observed returned grading "
