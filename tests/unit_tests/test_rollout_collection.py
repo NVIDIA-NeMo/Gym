@@ -1353,6 +1353,41 @@ class TestRolloutCollection:
             "response_status": "completed",
         }
 
+    def test_trajectory_keeps_each_captured_calls_total_duration(self) -> None:
+        # A saved row keeps every captured call's start, end and total duration, a failed call's too, so a reader can
+        # tell how long the model server took inside the agent's window.
+        row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
+        result = {
+            "ng_model_call_capture": {
+                "calls": [
+                    {
+                        "model_call_id": "ok",
+                        "started_at": 100.0,
+                        "completed_at": 101.5,
+                        "status_code": 200,
+                        "latency_ttft_ms": 40.0,
+                        "latency_total_ms": 1500.0,
+                    },
+                    {
+                        "model_call_id": "failed",
+                        "started_at": 102.0,
+                        "completed_at": 132.0,
+                        "status_code": 503,
+                        "error_category": "upstream_error",
+                        "latency_total_ms": 30000.0,
+                    },
+                ]
+            }
+        }
+
+        calls = _build_trajectory_record(row, result).model_calls
+
+        assert [(call.started_at, call.completed_at, call.duration_ms) for call in calls] == [
+            (100.0, 101.5, 1500.0),
+            (102.0, 132.0, 30000.0),
+        ]
+        assert calls[0].response_metadata.latency_ttft_ms == 40.0
+
     def test_trajectory_projection_failure_preserves_rollout(self) -> None:
         row = {TASK_INDEX_KEY_NAME: 2, ROLLOUT_INDEX_KEY_NAME: 3}
         result = {
