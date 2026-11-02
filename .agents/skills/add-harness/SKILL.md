@@ -166,6 +166,8 @@ follow the [gym-eval](../gym-eval/SKILL.md) skill.
 
 The [conformance results](../../../fern/versions/latest/pages/observability/harness-conformance.mdx#results) are published by CI from registered harnesses. A local `python -m scripts.harness_conformance.table` run is a preview only; do not commit its output.
 
+An agent that grades its own rollouts (no resources server) also follows [add-benchmark](../add-benchmark/SKILL.md), Step 7b, "Failure-handling conformance": its grading path, typed failures, time contract and the three fault fixtures.
+
 ## Step 8: Pre-commit and PR
 
 ```bash
