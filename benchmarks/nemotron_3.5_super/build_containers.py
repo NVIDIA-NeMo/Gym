@@ -1,6 +1,8 @@
-from asyncio import FIRST_COMPLETED, create_subprocess_shell, create_task, wait
-from asyncio.subprocess import PIPE
+from asyncio import create_subprocess_shell
+from asyncio.subprocess import PIPE, STDOUT
+from os import killpg
 from pathlib import Path
+from signal import SIGKILL
 from typing import List, Optional
 
 import aiofiles
@@ -44,36 +46,32 @@ class BaseBuilder(BaseModel):
         raise NotImplementedError
 
     async def _run_command(self, command: str) -> CommandOutput:
-        process = await create_subprocess_shell(command, stdout=PIPE, stderr=PIPE)
+        async with aiofiles.open(self.log_file, "a") as log_file:
+            process = await create_subprocess_shell(command, stdout=PIPE, stderr=STDOUT, start_new_session=True)
+            output_lines = []
 
-        output_lines = []
-        log_file = await aiofiles.open(self.log_file, "a")
-        while True:
-            tasks = [
-                create_task(process.stdout.readline()),
-                create_task(process.stderr.readline()),
-            ]
-            done, _ = await wait(tasks, return_when=FIRST_COMPLETED)
-            line = done[0].result()
+            try:
+                assert process.stdout is not None
 
-            if not line:
-                break  # EOF reached
+                async for line in process.stdout:
+                    line = line.decode(errors="replace").rstrip()
 
-            decoded_line = line.decode().rstrip()
+                    print(line, flush=True)
+                    output_lines.append(line)
+                    await log_file.write(line + "\n")
 
-            print(decoded_line)
-            output_lines.append(decoded_line)
-            await log_file.write(decoded_line + "\n")
+                returncode = await process.wait()
+            except:
+                try:
+                    killpg(process.pid, SIGKILL)
+                except ProcessLookupError:
+                    pass  # Already exited.
 
-        stdout_rem, stderr = await process.communicate()
-        output_lines.append(stdout_rem.decode().rstrip())
-        output_lines.append(stderr.decode().rstrip())
-
-        await log_file.write(output_lines[-2] + "\n" + output_lines[-1] + "\n")
-        await log_file.close()
+                await process.communicate()
+                raise
 
         return CommandOutput(
-            returncode=process.returncode,
+            returncode=returncode,
             output_lines=output_lines,
         )
 
@@ -82,21 +80,19 @@ class BaseBuilder(BaseModel):
         Returns the head sha
         """
 
-        command_output = await self._run_command(
-            command=f'git ls-remote --exit-code "{repo}" "refs/heads/{branch}" | cut -f1'
-        )
-        assert command_output.returncode == 0 and len(command_output.output_lines[-1].split("\n")) == 1, (
-            f"Preflight git repo check failed for {repo} @ {branch}. See {self.log_file}"
-        )
+        command_output = await self._run_command(command=f'git ls-remote --exit-code "{repo}" "refs/heads/{branch}"')
 
-        return command_output.output_lines[-1]
+        error_message = f"Preflight git repo check failed for {repo} @ {branch}. See {self.log_file}"
+        assert command_output.returncode == 0 and command_output.output_lines, error_message
+
+        last_output_split = command_output.output_lines[-1].split()
+        assert len(last_output_split) == 2 and last_output_split[1] == f"refs/heads/{branch}", error_message
+
+        return last_output_split[0]
 
 
 class MooncakeBuilder(BaseBuilder):
     config: MooncakeConfig
-
-    def preflight_checks(self) -> None:
-        return super().preflight_checks()
 
 
 class BuildContainerHelper:
