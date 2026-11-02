@@ -25,6 +25,7 @@ from asyncio import Future, Semaphore
 from collections import Counter, defaultdict
 from contextlib import ExitStack, nullcontext
 from dataclasses import dataclass
+from math import isfinite
 from pathlib import Path
 from typing import Any, Callable, Dict, Iterator, List, Literal, Optional, Tuple, Union
 
@@ -105,6 +106,7 @@ from nemo_gym.utils.path_utils import (
 # Todo after merging branch `edobrowolska/judge_failures_v2`: replace this by importing from judge.py
 JUDGE_FAILED_FAILURE_CLASS = "judge_failed"
 ATIF_PROVENANCE_KEY = "_ng_atif_provenance"
+_SOURCE_RUN_ID_KEY = "_ng_reverification_source_run_id"
 ATIF_NO_PERSIST_FAILURE_CLASS = "kill_shaped"
 _CONFIG_BOOL_ADAPTER = TypeAdapter(bool)
 
@@ -598,6 +600,14 @@ def _reject_multistage_recovery_source(rollouts_jsonl_fpath: Path) -> None:
                 )
 
 
+def _project_reverification_row(row: Dict) -> Dict:
+    """Retain source provenance without claiming ownership of its recovery history."""
+    result = dict(row)
+    if RUN_ID_KEY in result:
+        result[_SOURCE_RUN_ID_KEY] = result.pop(RUN_ID_KEY)
+    return result
+
+
 def _seed_output_with_successes(
     successes_fpath: Path, output_fpath: Path, exclude: frozenset[tuple[int, int]] = frozenset()
 ) -> set[tuple[int, int]]:
@@ -609,8 +619,17 @@ def _seed_output_with_successes(
         with output_fpath.open("rb") as f:
             present = {key for line in f if (key := _parse_output_line_key(line)) is not None}
     seeded = 0
+    source_store = RolloutStore.read(successes_fpath, import_legacy=False)
     with successes_fpath.open("rb") as src, output_fpath.open("ab") as dst:
-        for line in src:
+        selected = (
+            (
+                orjson.dumps(_project_reverification_row(record.read())) + b"\n"
+                for record in source_store.selected_records("success").values()
+            )
+            if source_store is not None
+            else src
+        )
+        for line in selected:
             if not line.strip():
                 continue
             key = _parse_output_line_key(line)
@@ -640,6 +659,8 @@ def _yield_inputs_and_rollouts_paired(
     rollouts_jsonl_fpath: Path,
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
+    *,
+    selected_rollouts: Optional[List[Dict]] = None,
 ) -> "Iterator[InputRolloutPair]":
     inputs_by_key = {}
     with open(materialized_inputs_jsonl_fpath) as m_f:
@@ -648,11 +669,11 @@ def _yield_inputs_and_rollouts_paired(
             inputs_by_key[(r[TASK_INDEX_KEY_NAME], r[ROLLOUT_INDEX_KEY_NAME])] = r
     # `limit` bounds the number of pairs actually YIELDED (post-predicate)
     n_yielded = 0
-    with open(rollouts_jsonl_fpath) as r_f:
+    with nullcontext(selected_rollouts) if selected_rollouts is not None else open(rollouts_jsonl_fpath) as r_f:
         for line in tqdm(r_f, desc="Reading rollouts"):  # never holds the whole file
             if limit is not None and n_yielded >= limit:
                 break
-            rollout_row = orjson.loads(line)
+            rollout_row = line if selected_rollouts is not None else orjson.loads(line)
             if rollout_predicate is not None and not rollout_predicate(rollout_row):
                 continue
             input_row = inputs_by_key.get((rollout_row[TASK_INDEX_KEY_NAME], rollout_row[ROLLOUT_INDEX_KEY_NAME]))
@@ -769,11 +790,17 @@ def _prepare_payloads(
     limit: Optional[int] = None,
     rollout_predicate: Optional[Callable[[Dict[str, Any]], bool]] = None,
     retry_terminal_timeouts: bool = False,
+    *,
+    selected_rollouts: Optional[List[Dict]] = None,
 ) -> List[Dict]:
     all_payloads = [
         _build_verify_payload(pair)
         for pair in _yield_inputs_and_rollouts_paired(
-            materialized_inputs_jsonl_fpath, rollouts_jsonl_fpath, limit=limit, rollout_predicate=rollout_predicate
+            materialized_inputs_jsonl_fpath,
+            rollouts_jsonl_fpath,
+            limit=limit,
+            rollout_predicate=rollout_predicate,
+            **({"selected_rollouts": selected_rollouts} if selected_rollouts is not None else {}),
         )
     ]
     if resume_from_cache:
@@ -854,7 +881,9 @@ def _run_verification_payloads(
             rs_name = _rs_for_row(row, agent_to_rs, server_client.global_config_dict)
             check_saved_patch_replay(row, rs_name, server_client.global_config_dict)
             request_row = {
-                key: value for key, value in row.items() if key != ATIF_PROVENANCE_KEY and key not in _IDENTITY_KEYS
+                key: value
+                for key, value in row.items()
+                if key not in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY) and key not in _IDENTITY_KEYS
             }
             # A /verify request that may have been delivered is never resent: the verifier may already have graded it
             # (and called its judge). A refused connection is still retried. A lost outcome fails this run; with
@@ -1490,6 +1519,20 @@ def settle_rejudgments(source: Path, judged: List[Dict], binding: Dict[str, Any]
     return settled
 
 
+def _validate_rescored_completion(result: object) -> None:
+    """Keep a malformed verifier reply out of a managed source's separate scoring output."""
+    if not isinstance(result, dict):
+        raise ConfigError("The verifier must return a JSON object.")
+    if result.get(NG_FAILURE_CLASS_KEY) is not None or result.get(NG_NO_PERSIST_KEY):
+        return
+    try:
+        scored = type(result.get("reward")) in (int, float) and isfinite(result["reward"])
+    except OverflowError:
+        scored = False
+    if not isinstance(result.get("response"), dict) or not scored:
+        raise ConfigError("A completed verifier reply requires a response object and a finite numeric reward.")
+
+
 def _ungraded_reverification(result: Dict[str, Any]) -> bool:
     """Whether a re-verification answered without a usable grade: a failure, a mask or no finite reward."""
     reward = result.get("reward")
@@ -1625,6 +1668,7 @@ class RolloutReverificationHelper(BaseModel):
         # whose superseded rows are earlier judge failures of the same attempt may be re-judged again.
         if (
             config.rollouts_jsonl_fpath is not None
+            and config.judge_failed_only
             and not config.settle_into_source
             and not raw_outcomes_are_selected(_resolve_under_cwd_or_install(config.rollouts_jsonl_fpath))
         ):
@@ -1695,6 +1739,9 @@ class RolloutReverificationHelper(BaseModel):
             _start_over_without_cache(config, output_fpaths)
             reverify_source_fpath = rollouts_jsonl_fpath
             rollout_predicate = None
+            source_store = (
+                RolloutStore.read(rollouts_jsonl_fpath, import_legacy=False) if not config.judge_failed_only else None
+            )
 
             if config.judge_failed_only:
                 print(_RECOVERY_TWO_SOURCES_WARNING)
@@ -1740,7 +1787,11 @@ class RolloutReverificationHelper(BaseModel):
                 config.limit,
                 rollout_predicate=rollout_predicate,
                 retry_terminal_timeouts=config.retry_terminal_timeouts,
+                **({"selected_rollouts": source_store.selected("success")} if source_store is not None else {}),
             )
+            if source_store is not None:
+                for payload in payloads_to_reverify:
+                    payload[_SOURCE_RUN_ID_KEY] = source_store.manifest.run_id
             if config.settle_into_source and settle_binding["saved_results"]:
                 # The bound saved results are read from the run's results, exactly as bound.
                 bound_results = {
@@ -1799,6 +1850,8 @@ class RolloutReverificationHelper(BaseModel):
         try:
             for future in _run_verification_payloads(payloads_to_reverify, semaphore=semaphore):
                 row, result = await future
+                if _SOURCE_RUN_ID_KEY in row:
+                    _validate_rescored_completion(result)
 
                 result[TASK_INDEX_KEY_NAME] = row[TASK_INDEX_KEY_NAME]
                 result[ROLLOUT_INDEX_KEY_NAME] = row[ROLLOUT_INDEX_KEY_NAME]
@@ -1811,8 +1864,9 @@ class RolloutReverificationHelper(BaseModel):
                     result[TASK_SOURCE_KEY_NAME] = row[TASK_SOURCE_KEY_NAME]
                 if SKILLS_REF_KEY_NAME in row:
                     result[SKILLS_REF_KEY_NAME] = row[SKILLS_REF_KEY_NAME]
-                if ATIF_PROVENANCE_KEY in row:
-                    result[ATIF_PROVENANCE_KEY] = row[ATIF_PROVENANCE_KEY]
+                for key in (ATIF_PROVENANCE_KEY, _SOURCE_RUN_ID_KEY):
+                    if key in row:
+                        result[key] = row[key]
 
                 no_persist = bool(result.get(NG_NO_PERSIST_KEY))
                 failure_class = result.get(NG_FAILURE_CLASS_KEY)
