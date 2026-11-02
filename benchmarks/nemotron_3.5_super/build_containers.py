@@ -15,6 +15,7 @@ import aiofiles
 from pydantic import BaseModel, Field, PrivateAttr
 
 from nemo_gym.config_types import BaseNeMoGymCLIConfig
+from nemo_gym.global_config import get_global_config_dict
 
 
 class FlashInferConfig(BaseNeMoGymCLIConfig):
@@ -286,7 +287,7 @@ class FlashInferBuilder(BaseBuilder):
         }
 
 
-class BuildContainerHelper:
+class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
     def run(self) -> None:
@@ -323,3 +324,9 @@ srun \\
             raise RuntimeError(
                 f"Command failed with returncode {command_output.returncode}. See {self.config.log_file}"
             )
+
+
+if __name__ == "__main__":
+    global_config_dict = get_global_config_dict()
+    bch = BuildContainerHelper(config=BuildContainerConfig.model_validate(global_config_dict))
+    bch.run()
