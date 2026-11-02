@@ -14754,6 +14754,45 @@ class TestRunRecordWriter:
         writer.write({**rows[2], "reward": 1.0})
         assert completed() == 3  # the last expected record is always written
 
+    async def test_a_reused_row_is_recorded_under_the_shard_run(self, tmp_path: Path, monkeypatch) -> None:
+        """A row that carries an earlier run's id is dispatched and saved under the shard's run, so the Store reads it."""
+        from nemo_gym.rollout_collection import RUN_ID_KEY, RolloutStore, _failure_diagnostics
+
+        monkeypatch.setenv("NEMO_GYM_MAX_ROLLOUT_ATTEMPTS", "3")
+        row = {**TestEnrichRunResult._row("g7_g0_a0"), RUN_ID_KEY: "an-earlier-run"}
+        failure = {NG_FAILURE_CLASS_KEY: "agent_request_failed", "_ng_failure_message": "connection refused"}
+
+        class Helper(RolloutCollectionHelper):
+            def setup_server_client(self, head_server_config=None):
+                return SimpleNamespace(global_config_dict={})
+
+            def _run_examples_with_metadata(self, examples, *args, **kwargs):
+                future = Future()
+                future.set_result(
+                    _CompletedRollout(
+                        row=examples[0],
+                        result=dict(failure),
+                        rollout_latency_ms=None,
+                        diagnostics=_failure_diagnostics(failure),
+                    )
+                )
+                return iter([future])
+
+        run_dir = tmp_path / "run"
+        [completion] = list(
+            Helper().run_examples(
+                [row], record_output_dir=run_dir, record_shard="step_2", route_failures_to_sidecar=True
+            )
+        )
+        await completion
+        [written] = self._lines(run_dir / "rollouts-step_2_failures.jsonl")
+        store = RolloutStore.read(run_dir / "rollouts-step_2.jsonl")
+        assert (
+            written[RUN_ID_KEY] == written["_ng_failure_record"]["run_id"] == store.manifest.run_id != "an-earlier-run"
+        )
+        assert [failed[NG_FAILURE_CLASS_KEY] for failed in store.failures()] == ["agent_request_failed"]
+        assert row[RUN_ID_KEY] == "an-earlier-run"  # the caller's row is untouched
+
 
 @pytest.mark.parametrize("retain_results", [False, True])
 async def test_run_status_is_written_without_a_manifest_and_recovers_on_resume(

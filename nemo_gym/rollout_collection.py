@@ -6123,16 +6123,11 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                 if missing:
                     raise ValueError(f"Recording row {index} is missing required fields: {', '.join(missing)}")
             # Recorded as collection dispatches: typed failure records under route_failures_to_sidecar and validated
-            # results, on rows that name the shard's run. The caller's rows are not modified.
+            # results, on copies that all name the shard's run, a row reused from an earlier run included, so every
+            # record checks against the shard's manifest. The caller's rows are not modified.
             run_id = uuid4().hex
             dispatched = [
-                dict(
-                    row,
-                    **{
-                        RUN_ID_KEY: row.get(RUN_ID_KEY) or run_id,
-                        ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME, 0),
-                    },
-                )
+                dict(row, **{RUN_ID_KEY: run_id, ATTEMPT_INDEX_KEY_NAME: row.get(ATTEMPT_INDEX_KEY_NAME, 0)})
                 for row in examples
             ]
         completions = self._run_examples_with_metadata(
