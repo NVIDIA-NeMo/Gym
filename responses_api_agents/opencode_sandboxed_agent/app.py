@@ -22,14 +22,14 @@ import sqlite3
 import sys
 import tempfile
 from asyncio import Semaphore
-from contextlib import nullcontext
+from contextlib import contextmanager, nullcontext
 from copy import deepcopy
 from functools import cache
 from pathlib import Path
 from shlex import quote
 from time import time
 from traceback import format_exc
-from typing import Any, ClassVar, Dict, List, Literal, NamedTuple, Optional
+from typing import Any, ClassVar, Dict, Iterator, List, Literal, NamedTuple, Optional
 from uuid import uuid4
 
 from anyio import CancelScope
@@ -76,7 +76,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
-from nemo_gym.sandbox.failure_details import sandbox_failure_event
+from nemo_gym.sandbox.failure_details import sandbox_failure_event, sandbox_transport_failure_event
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -745,6 +745,37 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
         return plugins
 
     @staticmethod
+    def _observe_sandbox_failure(error: BaseException, sandbox: AsyncSandbox, *, stage: str, operation: str) -> None:
+        """Observe the sandbox failure ``error`` reports beside the failure the caller raises; the caller's reply, its
+        kind and the retry decision stay its own.
+
+        A provider-ended sandbox is observed as the typed event ``sandbox_failure_event`` builds. Only when it builds
+        none, a ``TimeoutError`` or ``SandboxBackendUnreachableError`` is observed as ``sandbox_transport_failure_event``
+        builds it, so one error never yields two events.
+        """
+        handle = getattr(sandbox, "_handle", None)
+        provider = getattr(handle, "provider_name", None)
+        sandbox_id = getattr(handle, "sandbox_id", None)
+        facts: dict[str, Any] = {
+            "provider": provider if isinstance(provider, str) else None,
+            "sandbox_id": sandbox_id if isinstance(sandbox_id, str) else None,
+            "operation": operation,
+            "stage": stage,
+        }
+        event = sandbox_failure_event(error, **facts) or sandbox_transport_failure_event(error, **facts)
+        if event is not None:
+            observe_failure(event)
+
+    @contextmanager
+    def _observing_sandbox_failure(self, sandbox: AsyncSandbox, *, stage: str, operation: str) -> Iterator[None]:
+        """Observe the sandbox failure an error raised in the block reports, then let the error propagate unchanged."""
+        try:
+            yield
+        except Exception as error:
+            self._observe_sandbox_failure(error, sandbox, stage=stage, operation=operation)
+            raise
+
+    @staticmethod
     def _agent_sandbox_facts(sandbox: AsyncSandbox, **facts: Any) -> str:
         """The failure_reason prefix for the agent's own command: its phase, provider, sandbox and command."""
         handle = getattr(sandbox, "_handle", None)
@@ -995,7 +1026,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
 
         effective_config = await self._create_opencode_config(request, image_input=bool(attachments))
         for name in self._runtime_plugins():
-            await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
+            with self._observing_sandbox_failure(sandbox, stage="seed", operation="agent.sandbox_upload_plugin"):
+                await sandbox.upload(Path(__file__).with_name(name), f"/tmp/nemo-gym-{name}")
         build_agent = effective_config.setdefault("agent", {}).setdefault("build", {})
         for name in ("temperature", "top_p"):
             value = getattr(body, name, None)
@@ -1003,7 +1035,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                 build_agent[name] = value
         if self._model_call_capture_enabled():
             # Keep the plugin outside the task repo so it cannot enter a generated patch.
-            await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
+            with self._observing_sandbox_failure(
+                sandbox, stage="seed", operation="agent.sandbox_upload_observability_patch"
+            ):
+                await sandbox.upload(OBSERVABILITY_PATCH, _REMOTE_ASSISTANT_MESSAGE_PLUGIN)
             apply_observability_patch(effective_config, plugin_path=Path(_REMOTE_ASSISTANT_MESSAGE_PLUGIN))
         if attachments:
             # Decoded on the host only for the upload; the bytes never reach the launch command or a log.
@@ -1014,7 +1049,10 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
                     # Uploads keep the host mode and may land root-owned: world-readable so the
                     # sandbox user can open the file.
                     local_path.chmod(0o644)
-                    await sandbox.upload(local_path, attachment.remote_path)
+                    with self._observing_sandbox_failure(
+                        sandbox, stage="seed", operation="agent.sandbox_upload_attachment"
+                    ):
+                        await sandbox.upload(local_path, attachment.remote_path)
         opencode_config_content = json.dumps(effective_config)
         observation_invocation_id = getattr(request.state, "_ng_observation_invocation_id", None)
         observation_invocation_id = observation_invocation_id if isinstance(observation_invocation_id, str) else None
@@ -1060,7 +1098,8 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             print("Starting OpenCode (runtime configuration omitted to protect credentials)", file=sys.stderr)
 
         if ripgrep_remote_path is not None:
-            await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
+            with self._observing_sandbox_failure(sandbox, stage="seed", operation="agent.sandbox_upload_ripgrep"):
+                await sandbox.upload(self.config.local_ripgrep_binary_path, ripgrep_remote_path)
 
         run_error_type = None
         try:
@@ -1072,20 +1111,7 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             # A provider exception does not establish how the command ended: report it at the agent boundary, with
             # the sandbox facts known here, rather than grade a substituted partial run. A provider-ended sandbox is
             # observed beside it as a typed sandbox failure.
-            handle = getattr(sandbox, "_handle", None)
-            ended = sandbox_failure_event(
-                error,
-                provider=getattr(handle, "provider_name", None)
-                if isinstance(getattr(handle, "provider_name", None), str)
-                else None,
-                sandbox_id=getattr(handle, "sandbox_id", None)
-                if isinstance(getattr(handle, "sandbox_id", None), str)
-                else None,
-                operation="agent.sandbox_exec",
-                stage="agent",
-            )
-            if ended is not None:
-                observe_failure(ended)
+            self._observe_sandbox_failure(error, sandbox, stage="agent", operation="agent.sandbox_exec")
             raise NgFailureEvent(
                 boundary="agent",
                 failure_kind=AGENT_ROUTE_FAILED,
