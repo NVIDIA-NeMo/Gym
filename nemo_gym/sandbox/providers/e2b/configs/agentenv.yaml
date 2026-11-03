@@ -29,7 +29,9 @@ sandbox:
       # One template per task image: map image references to AgentENV template names.
       template: null
       template_map: {}
-      timeout_s: 3600.0
+      # A live session's sandbox lives at most this long; it must exceed the agent's timeout plus the checkpoint pause
+      # allowance plus close. A sandbox of a process that died still ends one lease later.
+      timeout_s: 10800.0
       # Kill at timeout. AgentENV otherwise pauses timed-out sandboxes and never evicts them.
       auto_resume: false
       # Sandboxes of a process that died end one lease later instead of at their full lifetime.
