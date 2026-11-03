@@ -1,7 +1,7 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-"""The a-Interact tools' arguments and replies, and the per-phase results. The task rows are in ``task_data.py``."""
+"""The tools' arguments and a-Interact's replies, and the per-phase results. The task rows are in ``task_data.py``."""
 
 from typing import Literal
 
@@ -24,7 +24,7 @@ class AskArguments(BaseModel):
 class SQLArguments(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    sql: str = Field(description="The SQLite query.")
+    sql: str = Field(description="The SQL query.")
 
 
 class ColumnMeaningArguments(BaseModel):
