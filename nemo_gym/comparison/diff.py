@@ -107,9 +107,9 @@ def _warn_if_repeat_samples_differ(run: LoadedRun, label: str) -> None:
 
 
 def _welch_delta_confidence_interval(
-    baseline: LoadedRun, candidate: LoadedRun, name: str, *, confidence_level: float
+    baseline: LoadedRun, candidate: LoadedRun, name: str
 ) -> Tuple[Optional[float], Optional[float]]:
-    """Two-sided Welch interval for candidate minus baseline at the requested confidence level."""
+    """Two-sided 95% Welch interval for candidate minus baseline."""
     mean_across_repeats_name = f"{Stat.MEAN.across_repeats_prefix}{name}"
     if any(_numeric(run.agent_metrics.get(mean_across_repeats_name)) is None for run in (baseline, candidate)):
         return None, None
@@ -120,7 +120,7 @@ def _welch_delta_confidence_interval(
         return None, None
 
     test_result = stats.ttest_ind(candidate_values, baseline_values, equal_var=False)
-    interval = test_result.confidence_interval(confidence_level=confidence_level)
+    interval = test_result.confidence_interval(confidence_level=0.95)
 
     return float(interval.low), float(interval.high)
 
@@ -147,9 +147,7 @@ def _candidate_metric_value(
     )
 
 
-def build_metric_rows(
-    baseline: LoadedRun, candidates: Sequence[LoadedRun], *, confidence_level: float = 0.95
-) -> List[MetricRow]:
+def build_metric_rows(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> List[MetricRow]:
     """One row per metric reported by any side, key metrics flagged.
 
     `key_metrics` can rename or synthesize names that never appear in `agent_metrics` (e.g. an ASR
@@ -184,9 +182,7 @@ def build_metric_rows(
                 metrics,
                 name,
                 baseline_point,
-                _welch_delta_confidence_interval(baseline, candidate, name, confidence_level=confidence_level)
-                if baseline_value
-                else (None, None),
+                _welch_delta_confidence_interval(baseline, candidate, name) if baseline_value else (None, None),
             )
             for candidate, metrics in zip(candidates, candidate_metrics)
         ]
@@ -374,11 +370,9 @@ def build_flip_summary(baseline: LoadedRun, candidate: LoadedRun, *, candidate_i
     )
 
 
-def compare_runs(
-    baseline: LoadedRun, candidates: Sequence[LoadedRun], confidence_level: float = 0.95
-) -> AgentComparison:
+def compare_runs(baseline: LoadedRun, candidates: Sequence[LoadedRun]) -> AgentComparison:
     """Build one agent's comparison block: metric rows, flips, and anything worth flagging."""
-    rows = build_metric_rows(baseline, candidates, confidence_level=confidence_level)
+    rows = build_metric_rows(baseline, candidates)
     if not any(row.baseline is not None and any(row.candidates) for row in rows):
         baseline_only = sorted(row.metric for row in rows if row.baseline is not None)[:5]
         candidate_only = sorted(row.metric for row in rows if row.baseline is None)[:5]

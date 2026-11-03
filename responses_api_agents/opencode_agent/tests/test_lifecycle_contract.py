@@ -9,7 +9,7 @@ from types import SimpleNamespace
 import pytest
 from fastapi import Request
 
-from nemo_gym.agents import is_harness_termination_failure
+from nemo_gym.agent_utils.supervisor_client import is_harness_termination_failure
 from nemo_gym.typed_exceptions import NgFailureEvent
 from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import seed, setup  # noqa: F401
 

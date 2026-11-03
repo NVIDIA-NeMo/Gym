@@ -453,8 +453,6 @@ class CritPtResourcesServer(SimpleResourcesServer):
         """
         n = len(self._api_keys)
         last_exc: Optional[Union[CritPtRateLimitExceeded, CritPtAccessDenied]] = None
-        last_rate_limited: Optional[CritPtRateLimitExceeded] = None
-        denied = 0
         for attempt in range(n):
             current = (self._key_index + attempt) % n
             try:
@@ -469,10 +467,6 @@ class CritPtResourcesServer(SimpleResourcesServer):
                 return result
             except (CritPtRateLimitExceeded, CritPtAccessDenied) as exc:
                 last_exc = exc
-                if isinstance(exc, CritPtRateLimitExceeded):
-                    last_rate_limited = exc
-                else:
-                    denied += 1
                 remaining = n - (attempt + 1)
                 if remaining > 0:
                     next_idx = (current + 1) % n
@@ -498,13 +492,6 @@ class CritPtResourcesServer(SimpleResourcesServer):
                         )
         if last_exc is None:
             raise RuntimeError("_call_aa_with_rotation invoked with no api_keys configured")
-        if last_rate_limited is not None and denied:
-            # A mixed pool: an approved key is only out of quota, so its reset decides when grading can resume,
-            # whichever key rotation happened to try last.
-            last_rate_limited.add_note(
-                f"{denied} of {n} key(s) were denied (HTTP 403, account not approved); the others are rate-limited."
-            )
-            raise last_rate_limited
         raise last_exc
 
     # ──────────────────────────────────────────────────────────

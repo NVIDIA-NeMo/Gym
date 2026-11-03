@@ -441,7 +441,7 @@ def test_sequential_worker_jobs_share_live_http_client_and_limits(monkeypatch):
     import httpx
     from aiohttp import web
 
-    from nemo_gym.sandbox import OpenSandboxProvider
+    from nemo_gym.sandbox.providers.opensandbox.provider import OpenSandboxProvider
 
     loop = asyncio.new_event_loop()
     monkeypatch.setattr(app, "_RAY_WORKER_EVENT_LOOP", loop)

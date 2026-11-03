@@ -30,8 +30,8 @@ import nemo_gym.sandbox.providers.registry as provider_registry
 from nemo_gym.core.failure_kinds import PROVIDER_UNAVAILABLE
 from nemo_gym.sandbox.api import AsyncSandbox, Sandbox, _AsyncLoopRunner
 from nemo_gym.sandbox.config import SandboxConfig, resolve_provider_config, resolve_provider_metadata
-from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import (
+    SandboxCreateError,
     SandboxEndpoint,
     SandboxExecResult,
     SandboxHandle,
@@ -133,12 +133,14 @@ def _require_opensandbox_provider() -> tuple[Any, Any, Any, str, str]:
     from nemo_gym.sandbox.providers.opensandbox.provider import (
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
         IMAGE_PULL_POLICY_EXTENSION_KEY,
+        OpenSandboxCreateVerificationError,
         OpenSandboxProvider,
     )
 
     return (
         opensandbox_provider_module,
         OpenSandboxProvider,
+        OpenSandboxCreateVerificationError,
         IMAGE_PULL_POLICY_EXTENSION_KEY,
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
     )
@@ -1022,9 +1024,11 @@ async def _assert_opensandbox_sdk_create_receives_default_image_pull_policy(monk
     (
         opensandbox_provider_module,
         OpenSandboxProvider,
+        _OpenSandboxCreateVerificationError,
         IMAGE_PULL_POLICY_EXTENSION_KEY,
         IMAGE_PULL_POLICY_ANNOTATION_EXTENSION_KEY,
     ) = _require_opensandbox_provider()
+    del _OpenSandboxCreateVerificationError
 
     class FakeSDKSandbox:
         create_calls: list[dict[str, Any]] = []
@@ -1226,18 +1230,17 @@ def test_opensandbox_create_probe_failures_are_retryable() -> None:
     (
         opensandbox_provider_module,
         _OpenSandboxProvider,
+        OpenSandboxCreateVerificationError,
         *_unused,
     ) = _require_opensandbox_provider()
 
-    error = sandbox_failure(
-        operation="create_probe", sandbox_id="sdk-sandbox-0", failure_kind="provider_not_ready", reason="probe failed"
-    )
+    error = OpenSandboxCreateVerificationError("pod sdk-sandbox-0 failed create probe")
 
-    assert error.boundary.value == "sandbox"
+    assert isinstance(error, SandboxCreateError)
     assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
-def test_opensandbox_create_policy_does_not_guess_from_error_text() -> None:
+def test_opensandbox_starting_pod_endpoint_errors_are_retryable() -> None:
     opensandbox_provider_module, *_unused = _require_opensandbox_provider()
 
     error = RuntimeError(
@@ -1245,7 +1248,7 @@ def test_opensandbox_create_policy_does_not_guess_from_error_text() -> None:
         "Pod IP is not yet available. The Pod may still be starting."
     )
 
-    assert opensandbox_provider_module._is_retryable_create_error(error) is False
+    assert opensandbox_provider_module._is_retryable_create_error(error) is True
 
 
 @requires_tenacity
@@ -1417,7 +1420,7 @@ async def _assert_opensandbox_close_propagates_stop_failure() -> None:
     )
     handle = SandboxHandle(sandbox_id="sdk-sandbox-1", provider_name="opensandbox", raw=StopFailureRaw())
 
-    with pytest.raises(NgFailureEvent):
+    with pytest.raises(RuntimeError, match="stop failed"):
         await provider.close(handle)
 
 
@@ -1753,7 +1756,7 @@ async def test_pty_exec_timeout_closes_session() -> None:
 
 
 async def test_pty_exec_on_existing_session() -> None:
-    from nemo_gym.sandbox.providers.base import SandboxPtySpec
+    from nemo_gym.sandbox.providers.base import SandboxPtyError, SandboxPtySpec
 
     class NoCreateProvider(PlainSandboxProvider):
         async def create_pty(self, handle: SandboxHandle, spec: SandboxPtySpec) -> object:
@@ -1781,7 +1784,7 @@ async def test_pty_exec_on_existing_session() -> None:
     assert not session.closed, "an existing session must stay open"
 
     dying = _LiveShellSession(die=True)
-    with pytest.raises(NgFailureEvent, match="ended before the command finished"):
+    with pytest.raises(SandboxPtyError, match="ended before the command finished"):
         await sandbox.pty.exec("make", session=dying)
     await sandbox.stop()
 

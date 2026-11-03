@@ -7,10 +7,9 @@ import pytest
 from fastapi.testclient import TestClient
 
 import nemo_gym.rollout_collection as collection
+from nemo_gym.base_responses_api_model import BaseResponsesAPIModelConfig, CaptureStore
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.models.base_responses_api_model import BaseResponsesAPIModelConfig
-from nemo_gym.models.model_call_capture import CaptureStore
 from nemo_gym.rollout_store import RolloutStore
 from tests.unit_tests.test_rollout_collection import FakeResponse, failing_row, install_fake_server_client
 from tests.unit_tests.test_streamed_failure_reports import FINAL, RECOVERED, _LateChat, _LateResponses
@@ -22,7 +21,7 @@ async def test_actual_stream_capture_survives_collection_and_store(tmp_path, mon
     capture = tmp_path / "capture"
     global_config = {"observability_enabled": True, "model_call_capture_dir": str(capture)}
     monkeypatch.setattr(collection, "get_global_config_dict", lambda: global_config)
-    monkeypatch.setattr("nemo_gym.models.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.005)
+    monkeypatch.setattr("nemo_gym.base_responses_api_model._CHAT_KEEPALIVE_SECONDS", 0.005)
     cls = _LateResponses if dialect == "responses" else _LateChat
     server = cls(
         config=BaseResponsesAPIModelConfig(

@@ -26,10 +26,9 @@ image_tools_pivot:
 
 image_tools_pivot_agent:
   responses_api_agents:
-    simple_agent:
+    tool_simulation_agent:
       entrypoint: app.py
-      # One model call; its tool calls go to the verifier unexecuted.
-      execute_tools: false
+      # A pivot is a single decision: one model call, no tool execution.
       max_steps: 1
       resources_server:
         type: resources_servers
@@ -54,7 +53,7 @@ image_tools_pivot_agent:
 
 image_tools_pivot_environment_server:
   environment_servers:
-    single_agent_turn_legacy:
+    legacy_agent:
       entrypoint: app.py
       agent_server:
         type: responses_api_agents

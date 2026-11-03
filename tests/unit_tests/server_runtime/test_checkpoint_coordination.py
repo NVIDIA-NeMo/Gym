@@ -11,7 +11,6 @@ from fastapi import FastAPI
 from omegaconf import OmegaConf
 
 from nemo_gym.client.server_client import ServerClient
-from nemo_gym.config.config_types import BaseServerConfig
 from nemo_gym.core.episode import EpisodeId
 from nemo_gym.server_runtime._checkpoint import coordination
 from nemo_gym.server_runtime._checkpoint.control import (
@@ -23,6 +22,7 @@ from nemo_gym.server_runtime._checkpoint.control import (
     next_attempt,
 )
 from nemo_gym.server_runtime._checkpoint.coordination import CoordinationError
+from nemo_gym.server_utils import BaseServerConfig
 
 
 TOKEN = "t"

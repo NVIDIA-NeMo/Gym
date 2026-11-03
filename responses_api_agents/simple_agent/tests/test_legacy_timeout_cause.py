@@ -13,7 +13,7 @@ from aiohttp.test_utils import TestServer
 from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client as http_client
-import nemo_gym.client.openai_client as model_client
+import nemo_gym.openai_utils as model_client
 import nemo_gym.rollout_collection as collection
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,

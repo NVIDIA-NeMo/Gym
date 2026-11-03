@@ -20,7 +20,7 @@ from fastapi import HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import Field, ValidationError
 
-from nemo_gym.agents.utils import lifecycle_observation
+from nemo_gym.agent_utils import lifecycle_observation
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import SESSION_EXPIRED, SESSION_LOST, VERIFIER_ERROR, EpisodeId, NeMoGymResponse, rollout_context
 from nemo_gym.failure_transport import FailureReportRow

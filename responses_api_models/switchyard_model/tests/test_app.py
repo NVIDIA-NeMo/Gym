@@ -33,6 +33,7 @@ from fastapi.testclient import TestClient
 from pytest import MonkeyPatch
 
 import nemo_gym.client.http_client
+import nemo_gym.server_utils as server_utils
 import responses_api_models.switchyard_model.app as app_module
 from nemo_gym.client import ServerClient
 from responses_api_models.switchyard_model.app import (
@@ -879,7 +880,7 @@ target = "policy"
             # The snapshot built the process-singleton aiohttp client on this test's loop; leaving
             # it behind would break later classes that bind it to theirs.
             try:
-                nemo_gym.client.http_client.global_aiohttp_client_exit()
+                server_utils.global_aiohttp_client_exit()
             except Exception:
                 nemo_gym.client.http_client._GLOBAL_AIOHTTP_CLIENT = None
 

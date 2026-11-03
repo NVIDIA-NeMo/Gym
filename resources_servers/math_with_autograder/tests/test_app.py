@@ -199,7 +199,7 @@ class TestGenerateJudgeEvaluation:
         assert "2" in rendered
 
     async def test_non_text_content_yields_false(self, server: MathWithAutograderResourcesServer) -> None:
-        from nemo_gym.core import NeMoGymResponseOutputRefusal
+        from nemo_gym.core.responses_api_types import NeMoGymResponseOutputRefusal
 
         refusal_response = NeMoGymResponse(
             id="r",

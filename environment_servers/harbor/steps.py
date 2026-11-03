@@ -17,8 +17,9 @@ import shlex
 
 from environment_servers.harbor.entrypoint import HealthcheckFailed
 from environment_servers.harbor.session import HarborSession
-from nemo_gym.data.tasks.harbor import HarborTask, HarborTurn, is_ignored
 from nemo_gym.sandbox import SandboxExecResult, SandboxProbeError, SandboxTransferError, upload_dir
+from nemo_gym.tasks.harbor.digest import is_ignored
+from nemo_gym.tasks.harbor.task import HarborTask, HarborTurn
 
 
 LOGGER = logging.getLogger(__name__)

@@ -5,7 +5,7 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from nemo_gym.agents.utils.sandbox_observation import lifecycle_observation
+from nemo_gym.agent_utils.sandbox_observation import lifecycle_observation
 from nemo_gym.sandbox.api import AsyncSandbox
 from nemo_gym.sandbox.providers.base import SandboxSpec
 from nemo_gym.trajectory.trajectory_record import SandboxObservation

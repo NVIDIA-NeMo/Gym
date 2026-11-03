@@ -365,7 +365,7 @@ def test_preparation_consumes_the_common_verifier_deadline(tmp_path):
         execution = [kwargs for command, kwargs in sdk.commands if command.startswith("/tests/test.sh")]
         assert len(execution) == 1
         assert 0 < execution[0]["timeout_s"] < 0.1
-        assert 0.18 <= elapsed < 0.45
+        assert 0.18 <= elapsed < 0.28
         assert diagnostics[-1]["operation"] == "verifier_execution"
         assert [cause["exception_type"] for cause in diagnostics[-1]["causes"]] == ["TimeoutError", "CancelledError"]
 
@@ -403,7 +403,7 @@ def test_optional_transfer_uses_remaining_budget_and_retains_reward(tmp_path, tr
         assert result["rewards"] == {"reward": 1}
         assert (tmp_path / "verifier/reward.txt").read_text() == "1"
         assert sdk.tests == 1
-        assert 0.18 <= elapsed < 0.45
+        assert 0.18 <= elapsed < 0.28
         for _, kwargs in sdk.commands[1:]:
             assert 0 < kwargs["timeout_s"] < 0.1
         assert diagnostics[-1]["operation"] == "verifier_artifact_transfer"
@@ -440,7 +440,7 @@ def test_reward_transfer_cannot_restart_the_verifier_deadline(tmp_path, transfer
         with pytest.raises(verifier.VerifierTimeoutError):
             await verifier.run_verifier(env, tmp_path, diagnostics)
         elapsed = asyncio.get_running_loop().time() - start
-        assert 0.18 <= elapsed < 0.45
+        assert 0.18 <= elapsed < 0.28
         assert sdk.tests == 1
         assert diagnostics[-1]["operation"] == "verifier_reward_transfer"
         assert not (tmp_path / "verifier/reward.txt").exists()

@@ -85,8 +85,6 @@ def observe_programmatic_grading(calculate: Callable[[], T]) -> T:
     except BaseException:
         operation.outcome = "failed"
         raise
-    if invocation is None:
-        return result  # No invocation records this operation, so its result is not hashed.
     try:
         operation.result_binding_sha256 = grading_result_binding(result)
     except Exception:
@@ -119,8 +117,6 @@ async def observe_llm_judge_grading(calculate: Callable[[], Awaitable[T]]) -> T:
     finally:
         _judge_grading.reset(token)
         operation.dependencies = list(grading.dependencies)
-    if invocation is None:
-        return result  # No invocation records this operation, so its result is not hashed.
     try:
         operation.result_binding_sha256 = grading_result_binding(result)
     except Exception:

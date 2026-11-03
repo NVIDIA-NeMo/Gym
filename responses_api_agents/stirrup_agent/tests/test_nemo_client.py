@@ -684,7 +684,7 @@ class TestProviderHistoryMatchesStrictIngress:
         canonical output would 422 and this fails first."""
         from typing import get_type_hints
 
-        from nemo_gym.core import (
+        from nemo_gym.core.responses_api_types import (
             NeMoGymChatCompletionAssistantMessageParam,
             NeMoGymChatCompletionMessageToolCallParam,
             NeMoGymChatCompletionToolMessageParam,

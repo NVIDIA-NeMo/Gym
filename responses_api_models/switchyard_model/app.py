@@ -43,12 +43,17 @@ from typing import Any, Dict, List, Optional
 import aiohttp
 from pydantic import Field, model_validator
 
-from nemo_gym.client import NeMoGymAsyncOpenAI, request
+from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    Body,
+    SimpleResponsesAPIModel,
+)
+from nemo_gym.client import request
 from nemo_gym.config import (
     DISALLOWED_PORTS_KEY_NAME,
     OBSERVABILITY_ENABLED_KEY_NAME,
     ROLLOUT_PATH_PREFIX,
-    TOKEN_CAPTURE_BLOCK,
+    TOKEN_ID_CAPTURE_BLOCK,
     find_open_port,
     get_global_config_dict,
 )
@@ -58,7 +63,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
 )
-from nemo_gym.models import BaseResponsesAPIModelConfig, Body, SimpleResponsesAPIModel
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
@@ -321,7 +326,7 @@ class SwitchyardModel(SimpleResponsesAPIModel):
         global_config = getattr(self.server_client, "global_config_dict", None)
         if not isinstance(global_config, Mapping):
             return
-        token_capture_block = global_config.get(TOKEN_CAPTURE_BLOCK) or {}
+        token_capture_block = global_config.get(TOKEN_ID_CAPTURE_BLOCK) or {}
         correlation_active = bool(global_config.get(OBSERVABILITY_ENABLED_KEY_NAME, False)) or (
             isinstance(token_capture_block, Mapping) and bool(token_capture_block.get("enabled", False))
         )

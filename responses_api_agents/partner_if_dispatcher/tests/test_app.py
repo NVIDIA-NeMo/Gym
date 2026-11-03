@@ -16,7 +16,8 @@ from pydantic import ValidationError
 from starlette.requests import Request
 
 from environment_servers.legacy_agent.tests.test_app import _Client, _Upstream
-from nemo_gym.config import AggregateMetricsRequest, BaseServerConfig
+from nemo_gym.config import AggregateMetricsRequest
+from nemo_gym.server_utils import BaseServerConfig
 
 
 METRICS_SERVER = {"type": "resources_servers", "name": "partner_if"}

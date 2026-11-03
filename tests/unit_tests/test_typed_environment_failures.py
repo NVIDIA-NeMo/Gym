@@ -11,24 +11,24 @@ from fastapi import Body, FastAPI, Response
 from omegaconf import OmegaConf
 
 import nemo_gym.client.http_client
-import nemo_gym.client.openai_client as openai_utils_module
-import nemo_gym.server_runtime.base_server
+import nemo_gym.openai_utils as openai_utils_module
+import nemo_gym.server_utils
 from environment_servers.single_agent_turn.app import (
     SingleAgentTurnEnvironmentServer,
     SingleAgentTurnEnvironmentServerConfig,
 )
-from nemo_gym.agents.base_responses_api_agent import (
+from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     SimpleResponsesAPIAgent,
 )
-from nemo_gym.client.openai_client import NeMoGymAsyncOpenAI
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.config.config_types import AgentServerRef, BaseServerConfig, ResourcesServerRef
 from nemo_gym.core.episode import EpisodeId, TaskId
 from nemo_gym.core.responses_api_types import NeMoGymResponse
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
 from nemo_gym.server_runtime.episode_types import FailureReport, MaterializedTask
 from nemo_gym.server_runtime.single_agent_turn_types import SingleAgentTurnRequest, SingleAgentTurnTaskInput
 from tests.unit_tests.test_agent_environment_collection_failures import _serve
@@ -184,8 +184,8 @@ async def _episode(monkeypatch, statuses: list[int], *, via_http: bool = False):
 
 def _set_tracing(monkeypatch, traced: bool) -> None:
     """Select the traced or the untraced request path; diagnostics must not depend on it."""
-    monkeypatch.setattr(nemo_gym.server_runtime.base_server, "is_trace_exporter_active", lambda: traced)
-    monkeypatch.setattr(nemo_gym.server_runtime.base_server, "is_span_group_enabled", lambda group: traced)
+    monkeypatch.setattr(nemo_gym.server_utils, "is_trace_exporter_active", lambda: traced)
+    monkeypatch.setattr(nemo_gym.server_utils, "is_span_group_enabled", lambda group: traced)
 
 
 def _episode_response():

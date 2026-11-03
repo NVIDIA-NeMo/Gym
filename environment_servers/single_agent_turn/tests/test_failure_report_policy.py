@@ -4,9 +4,9 @@
 
 import pytest
 
-from nemo_gym.agents import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
-from nemo_gym.client.openai_client import MODEL_RESPONSE_TIMEOUT_REASON
+from nemo_gym.agent_outcome import AGENT_OUTCOME_METADATA_KEY, AgentOutcome
 from nemo_gym.core.failure_kinds import MODEL_POLICY_RESPONSE_TIMEOUT
+from nemo_gym.openai_utils import MODEL_RESPONSE_TIMEOUT_REASON
 from tests.single_agent_turn_helpers import _agent_response, _environment_server, _request, _Response
 
 
@@ -213,26 +213,3 @@ async def test_only_matching_environment_selector_overrides_agent_timeout_rule(p
         assert result.result is None
         assert result.failure.terminal is (action == "fail")
         assert result.failure.failure_kind == MODEL_POLICY_RESPONSE_TIMEOUT
-
-
-async def test_report_without_selected_failure_follows_outcome_policy():
-    # A plain provider 400 carries no rebuildable failure, so the agent reports nothing selected.
-    environment, client = _environment_server()
-    response = _agent_response().model_dump(mode="json")
-    response.update(
-        status="failed",
-        output=[],
-        error={"code": "server_error", "message": "scripted bad request"},
-        metadata={
-            AGENT_OUTCOME_METADATA_KEY: AgentOutcome(
-                failure_kind="model_request_error", status_code=400
-            ).model_dump_json()
-        },
-        failure_report={"failure_id": None, "events": {}},
-    )
-    client.responses[2] = _Response(response)
-    result = await environment.run_request(_request())
-    assert result.failure is None and result.result is not None
-    (verify,) = [kwargs["json"] for _, path, kwargs in client.calls if path == "/verify"]
-    assert verify["response"]["status"] == "failed"
-    assert verify["response"]["failure_report"] == {"failure_id": None, "events": {}}

@@ -164,7 +164,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
             return False
         return "docker" in provider_cfg
 
-    async def _create_opencode_config(self, request: Request, *, image_input: bool = False) -> Dict[str, Any]:
+    async def _create_opencode_config(self, request: Request) -> Dict[str, Any]:
         """Rewrite only the *host* of the parent's model URL.
 
         The parent builds this through ``base_url_for_run``, so the URL carries the run's
@@ -174,7 +174,7 @@ class VibenchAgent(OpenCodeSandboxedAgent):
         exports an empty app with nothing logged, which no failure field reports because the
         build technically succeeded.
         """
-        config = await super()._create_opencode_config(request, image_input=image_input)
+        config = await super()._create_opencode_config(request)
         options = ((config.get("provider") or {}).get("nemo_gym") or {}).get("options")
         if not isinstance(options, dict) or not isinstance(options.get("baseURL"), str):
             return config

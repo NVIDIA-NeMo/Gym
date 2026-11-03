@@ -1,10 +1,9 @@
 # ============================================================================================
 # COMPARISON INFRASTRUCTURE ONLY. NOT A BENCHMARK. EGRESS UNRESTRICTED. LABEL EVERY RESULT.
 # ============================================================================================
-# Composable override that runs the hle_diamond sandboxed presets (opencode, opencode_search,
-# opencode_full, opencode_search_full, pi, pi_search, and opencode_reference behind the
-# acknowledgement below) on the LOCAL Docker sandbox provider instead of OpenSandbox, for smoke
-# tests and pilots on a workstation. It declares no dataset, so it is not discovered by `gym list benchmarks`.
+# Composable override that runs the hle_diamond sandboxed presets (opencode, opencode_search, pi,
+# pi_search) on the LOCAL Docker sandbox provider instead of OpenSandbox, for smoke tests and
+# pilots on a workstation. It declares no dataset, so it is not discovered by `gym list benchmarks`.
 # Pass it, together with judge_openai.yaml (otherwise the policy grades itself), as ONE raw Hydra
 # token: the CLI appends raw tokens after the --benchmark and --model-type configs, so the override
 # merges last and wins. Never pass it with `--config <file>`: --config is translated before
@@ -28,9 +27,9 @@
 #   That block cannot be removed or re-typed by an override (the provider resolver counts keys
 #   regardless of value), so export the placeholder values above before composing, and this file
 #   defines a second block, `sandbox_docker` (the content of
-#   nemo_gym/sandbox/providers/docker/configs/docker.yaml under that name), and repoints the three
+#   nemo_gym/sandbox/providers/docker/configs/docker.yaml under that name), and repoints the two
 #   hle_diamond sandboxed agents at it. Only the agent the composed preset defines is started;
-#   the other blocks below stay partial, inert entries.
+#   the other block below stays a partial, inert entry.
 # - The Docker provider ignores sandbox_config.ttl_s when an entrypoint is set (the presets set
 #   `entrypoint: [sleep, infinity]`), so container lifetime relies on the agent's cleanup; check
 #   `docker ps -a --filter label=nemo-gym.sandbox` after every run.

@@ -28,12 +28,12 @@ from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.sandbox import (
     ConnectableProvider,
-    LocalProvider,
     SandboxBackendUnreachableError,
     SandboxCreateError,
     SandboxExecResult,
     SandboxSpec,
 )
+from nemo_gym.sandbox.providers.local import LocalProvider
 from responses_api_agents.harness_agent.app import (
     _RUN_CONTEXT,
     HarnessAgent,
@@ -858,46 +858,3 @@ def test_sandbox_model_url_override_keeps_the_span(monkeypatch):
     finally:
         _RUN_CONTEXT.reset(token)
     assert url == f"http://sandbox-gateway:8000/ng-rollout/rollout-1{_SEGMENT}"
-
-
-def test_gym_tar_ships_the_data_package_but_not_the_agents_datasets(monkeypatch: pytest.MonkeyPatch) -> None:
-    import tarfile
-
-    import responses_api_agents.harness_agent.app as harness_app
-
-    monkeypatch.setattr(
-        harness_app, "resolve_agent", lambda name: ("responses_api_agents.anyswe_agent.agent", "Agent", "Config")
-    )
-    agent = SimpleNamespace(config=SimpleNamespace(agent="anyswe"))
-    tar_path = harness_app.HarnessAgent._build_gym_tar(agent)
-    try:
-        with tarfile.open(tar_path) as archive:
-            names = archive.getnames()
-    finally:
-        tar_path.unlink()
-    assert "nemo_gym/data/__init__.py" in names
-    assert any(name.startswith("responses_api_agents/anyswe_agent/") for name in names)
-    assert not any(name.startswith("responses_api_agents/anyswe_agent/data") for name in names)
-
-
-@pytest.mark.parametrize("kind", ["provider_create_pending", "provider_setup_failed", "provider_pty_busy"])
-def test_typed_sandbox_failure_keeps_its_kind_without_message_inference(kind):
-    from nemo_gym.typed_exceptions import NgFailureEvent
-    from responses_api_agents.harness_agent.app import sandbox_infra_failure_kind
-
-    assert (
-        sandbox_infra_failure_kind(
-            NgFailureEvent(
-                boundary="sandbox",
-                failure_kind=kind,
-                failure_reason="OOMKilled text does not override the explicit kind",
-            )
-        )
-        == kind
-    )
-    assert (
-        sandbox_infra_failure_kind(
-            NgFailureEvent(boundary="harness", failure_kind="agent_run_error", failure_reason="OOMKilled")
-        )
-        is None
-    )

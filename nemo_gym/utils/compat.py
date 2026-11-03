@@ -24,7 +24,7 @@ core module would create a circular import.
 import importlib
 from typing import Any, Callable, Mapping
 
-from nemo_gym._moved_paths import _names_were_listed_under, warn_moved
+from nemo_gym._moved_paths import warn_moved
 
 
 def moved_attr_getter(module_name: str, moved: Mapping[str, str]) -> Callable[[str], Any]:
@@ -46,10 +46,8 @@ def moved_attr_getter(module_name: str, moved: Mapping[str, str]) -> Callable[[s
             raise AttributeError(f"module {module_name!r} has no attribute {name!r}")
         new_module, _, new_name = target.partition(":")
         new_name = new_name or name
-        # A module that itself moved still warns under its old path, which is the path the caller imported.
-        old_module = _names_were_listed_under(module_name)[-1]
         warn_moved(
-            f"`{old_module}.{name}` has moved to `{new_module}.{new_name}` and will be removed in a "
+            f"`{module_name}.{name}` has moved to `{new_module}.{new_name}` and will be removed in a "
             f"future release. Update your import to `from {new_module} import {new_name}`.",
             old_module=module_name,
         )

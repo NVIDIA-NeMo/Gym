@@ -5,7 +5,7 @@
 import pytest
 from pydantic import ValidationError
 
-from nemo_gym.agents.agent_outcome import (
+from nemo_gym.agent_outcome import (
     AgentOutcomePolicyConfig,
     OutcomeAction,
     OutcomePolicyConfig,

@@ -24,17 +24,7 @@ from time import monotonic
 from typing import TYPE_CHECKING, Any, ClassVar, Generic, Optional, TypedDict, TypeVar, get_args
 
 from fastapi import FastAPI, HTTPException, Request
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    Field,
-    JsonValue,
-    PrivateAttr,
-    SerializerFunctionWrapHandler,
-    TypeAdapter,
-    field_validator,
-    model_serializer,
-)
+from pydantic import BaseModel, ConfigDict, Field, JsonValue, PrivateAttr, TypeAdapter, field_validator
 from starlette.middleware import Middleware
 
 
@@ -64,10 +54,10 @@ from nemo_gym.server_runtime._checkpoint.resources import (
 )
 from nemo_gym.server_runtime._checkpoint.settings import checkpoint_settings
 from nemo_gym.server_runtime._checkpoint.steps import CHECKPOINT_CLOSE_FOLLOWS_HEADER, StepType
-from nemo_gym.server_runtime.base_server import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.server_runtime.request_handling.rollout_context import RolloutContextMiddleware
 from nemo_gym.server_runtime.request_handling.session_routing import SessionKind
 from nemo_gym.server_runtime.verifier_observability import observe_verifier
+from nemo_gym.server_utils import BaseRunServerInstanceConfig, BaseServer, SimpleServer
 from nemo_gym.telemetry.endpoints import traced_verify_endpoint
 from nemo_gym.trajectory.trajectory_record import VerifierInvocation
 from nemo_gym.verification.judge import judge_failsafe
@@ -272,24 +262,13 @@ class ResourcesSeedSessionRequest(BaseModel):
 
 
 class ResourcesSeedSessionResponse(BaseModel):
-    """Confirm resources state and return optional agent access and an initial observation."""
+    """Confirm resources state and return optional agent access."""
 
     model_config = ConfigDict(extra="forbid")
 
     resources_session_id: str
     resources_tools: MCPServerMetadata | None = None
     sandbox_access: SandboxAccess | None = None
-    # The single_agent_turn Environment Server appends this to the agent's input as one user message.
-    observation: str | None = None
-
-    # A return annotation would replace the model's serialization schema with that container schema.
-    @model_serializer(mode="wrap")
-    def _serialize_observation(self, handler: SerializerFunctionWrapHandler):
-        """Preserve the seed wire shape when the server supplies no observation field."""
-        result = handler(self)
-        if "observation" not in self.model_fields_set:
-            result.pop("observation", None)
-        return result
 
 
 VerificationInputT = TypeVar("VerificationInputT")

@@ -82,7 +82,7 @@ def test_every_module_is_in_a_layer() -> None:
         module
         for module in _module_files()
         if not _in_layer(module, layered | outside)
-        # A package listed as some of its submodules (the root, cli, ...) is not checked itself.
+        # A package listed as some of its submodules (the root, cli, sandbox, ...) is not checked itself.
         and not any(layer.startswith(f"{module}.") for layer in layered)
     )
     assert not unlayered, (

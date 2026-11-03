@@ -31,10 +31,7 @@ def lazy_exports(package: str, exports: Mapping[str, str]) -> tuple[Callable[[st
     def __getattr__(name: str) -> Any:
         submodule = exports.get(name)
         if submodule is None:
-            # A name the package exported before it moved or was renamed resolves through MOVED_NAMES.
-            from nemo_gym._moved_paths import moved_names_getattr
-
-            return moved_names_getattr(package)(name)
+            raise AttributeError(f"module {package!r} has no attribute {name!r}")
         try:
             module = importlib.import_module(f"{package}.{submodule}")
         except AttributeError as exc:

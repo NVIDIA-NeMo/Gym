@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 
 from fastapi import Body, FastAPI, HTTPException, Request
 
-from nemo_gym.agents import (
+from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
     AgentSessionSetupError,

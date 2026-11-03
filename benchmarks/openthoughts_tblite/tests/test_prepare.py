@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 
 from benchmarks.openthoughts_tblite import prepare as preparation
 from nemo_gym.config import GlobalConfigDictParser, GlobalConfigDictParserConfig
-from nemo_gym.environment import load_manifest, resolve_manifest_config_path
+from nemo_gym.environment.manifest import load_manifest, resolve_manifest_config_path
 
 
 BENCHMARK_DIR = Path(__file__).resolve().parents[1]

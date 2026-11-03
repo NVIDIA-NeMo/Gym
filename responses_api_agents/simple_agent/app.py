@@ -37,23 +37,23 @@ from pydantic import (
     model_validator,
 )
 
-from nemo_gym.agents import (
-    AGENT_ACTIVATION_HEADER,
+from nemo_gym.agent_outcome import (
     AGENT_OUTCOME_METADATA_KEY,
-    AgentCloseSessionResponse,
     AgentOutcome,
+    OutcomeAction,
+    OutcomePolicyConfig,
+    confirmed_policy_response_timeout,
+    failure_outcome_policy,
+)
+from nemo_gym.base_responses_api_agent import (
+    AGENT_ACTIVATION_HEADER,
+    AgentCloseSessionResponse,
     AgentSeedRejectedError,
     AgentSeedSessionRequest,
     AgentSessionState,
     BaseResponsesAPIAgentConfig,
     Body,
-    OutcomeAction,
     SimpleResponsesAPIAgent,
-)
-from nemo_gym.agents.agent_outcome import (
-    OutcomePolicyConfig,
-    confirmed_policy_response_timeout,
-    failure_outcome_policy,
 )
 from nemo_gym.client import get_response_json, raise_for_status, rollout_path_prefix
 from nemo_gym.client import request as http_request

@@ -17,20 +17,19 @@ from fastapi import HTTPException
 from fastapi.testclient import TestClient
 from starlette.requests import Request
 
-from nemo_gym.agents import (
-    HARNESS_RUNNER_FILE,
-    HARNESS_RUNNER_SCRIPT,
+from nemo_gym.agent_utils.sandbox_session import HARNESS_RUNNER_FILE, HARNESS_RUNNER_SCRIPT, SandboxSession
+from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentSeedSessionRequest,
     AgentSessionSetupError,
-    SandboxSession,
 )
 from nemo_gym.core import EpisodeId, NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming, TaskId
 from nemo_gym.observability.model_calls import ModelCallRecord
 from nemo_gym.rollout_collection import _build_trajectory_record
 from nemo_gym.rollout_health import run_health_checks
 from nemo_gym.sandbox import DirectSandboxConnection, SandboxAccess, SandboxExecResult
-from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle, join_agent_model_calls
+from nemo_gym.trajectory import AgentInvocation, AgentObservationBundle
+from nemo_gym.trajectory.trajectory_record import join_agent_model_calls
 from responses_api_agents.kilocode_agent.app import KiloCodeAgent, KiloCodeAgentRunRequest, _runtime_failure
 from responses_api_agents.kilocode_agent.sandbox import KiloArtifacts, KiloSandboxSession, _sandbox_prepare_command
 from responses_api_agents.kilocode_agent.tests.test_app import _make_model_server_agent
@@ -551,7 +550,6 @@ async def stage_locally(
     config: str = "{}",
     required_mcp_servers: tuple[str, ...] = (),
     mcp_preflight: bool = False,
-    output_token_max: int | None = None,
 ) -> list[str]:
     """Stage an activation into ``directory`` as the sandbox would receive it; return the runner argv."""
     session = KiloSandboxSession(
@@ -562,11 +560,7 @@ async def stage_locally(
         ),
     )
     shutil.copyfile(HARNESS_RUNNER_SCRIPT, directory / HARNESS_RUNNER_FILE)
-    return (
-        await session.stage_activation(
-            command=command, config=config, mcp_preflight=mcp_preflight, output_token_max=output_token_max
-        )
-    ).argv
+    return (await session.stage_activation(command=command, config=config, mcp_preflight=mcp_preflight)).argv
 
 
 @pytest.mark.parametrize("exit_code", [0, 3])
@@ -580,17 +574,15 @@ async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int)
         "print(json.dumps({'cwd':os.getcwd(),'config':os.environ['KILO_CONFIG'],"
         "'home':os.environ['HOME'],'db':os.environ['KILO_DB'],"
         "'project':os.environ['KILO_DISABLE_PROJECT_CONFIG'],'key':os.getenv('OPENAI_API_KEY'),"
-        "'output_limit':os.getenv('KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX'),"
         "'kilo':os.getenv('KILO_MODEL'),'kept':os.getenv('KEPT'),'stdin':sys.stdin.read()})); "
         "sys.stderr.buffer.write(b'diagnostic\\xff'); "
         f"sys.exit({exit_code})"
     )
-    argv = await stage_locally(directory, repo, [sys.executable, "-c", script], output_token_max=65536)
+    argv = await stage_locally(directory, repo, [sys.executable, "-c", script])
     assert argv == ["bash", f"{directory}/harness_runner.sh", f"{directory}/params.sh"]
     task_home = str(tmp_path / 'task "home" \\')
     env = {key: value for key, value in os.environ.items() if not key.startswith("XDG_")}
     inherited = {"OPENAI_API_KEY": "test-credential", "KILO_MODEL": "other", "KEPT": "yes", "HOME": task_home}
-    inherited["KILO_EXPERIMENTAL_OUTPUT_TOKEN_MAX"] = "1"
     result = subprocess.run(argv, env=env | inherited, input=b"unexpected inherited input", capture_output=True)
     assert result.returncode == exit_code, result.stderr
     output = json.loads((directory / "stdout.jsonl").read_text())
@@ -603,7 +595,6 @@ async def test_runner_executes_in_task_directory(tmp_path: Path, exit_code: int)
         "key": None,
         "kilo": None,
         "kept": "yes",
-        "output_limit": "65536",
         "stdin": "",
     }
     assert (repo / "patch.txt").read_text() == "changed"

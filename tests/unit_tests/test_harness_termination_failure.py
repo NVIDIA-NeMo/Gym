@@ -1,8 +1,8 @@
 # SPDX-FileCopyrightText: Copyright (c) 2026 NVIDIA CORPORATION & AFFILIATES. All rights reserved.
 # SPDX-License-Identifier: Apache-2.0
 
-from nemo_gym.agents.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
-from nemo_gym.agents.utils.supervisor_client import harness_termination_failure
+from nemo_gym.agent_utils.supervisor_client import harness_termination_failure
+from nemo_gym.base_responses_api_agent import AgentSessionSetupError, AgentSessionState
 from nemo_gym.failure_transport import FailureHeader
 from nemo_gym.typed_exceptions import NgFailureEvent
 from tests.unit_tests.test_agent_seed_failure_boundary import _served

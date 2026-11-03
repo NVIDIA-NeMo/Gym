@@ -197,10 +197,10 @@ _LAZY_EXPORTS: dict[str, str] = {
     "BaseSeedSessionResponse": "server_runtime.base_resources_server",
     "ReverifyMode": "server_runtime.base_resources_server",
     # Agent and model extension points
-    "BaseResponsesAPIAgentConfig": "agents.base_responses_api_agent",
-    "SimpleResponsesAPIAgent": "agents.base_responses_api_agent",
-    "BaseResponsesAPIModelConfig": "models.base_responses_api_model",
-    "SimpleResponsesAPIModel": "models.base_responses_api_model",
+    "BaseResponsesAPIAgentConfig": "base_responses_api_agent",
+    "SimpleResponsesAPIAgent": "base_responses_api_agent",
+    "BaseResponsesAPIModelConfig": "base_responses_api_model",
+    "SimpleResponsesAPIModel": "base_responses_api_model",
     # Common server-client utilities
     "ServerClient": "client.server_client",
     "raise_for_status": "client.http_client",
@@ -214,7 +214,7 @@ _LAZY_EXPORTS: dict[str, str] = {
     "AggregateMetricsRequest": "config.config_types",
     "ModelServerRef": "config.config_types",
     # High-level OpenAI-compatible client and API boundary types
-    "NeMoGymAsyncOpenAI": "client.openai_client",
+    "NeMoGymAsyncOpenAI": "openai_utils",
     "NeMoGymResponse": "core.responses_api_types",
     "NeMoGymResponseCreateParamsNonStreaming": "core.responses_api_types",
     "NeMoGymChatCompletion": "core.responses_api_types",

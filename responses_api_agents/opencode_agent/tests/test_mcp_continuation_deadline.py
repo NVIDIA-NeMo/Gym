@@ -9,7 +9,7 @@ from time import monotonic
 import pytest
 from fastapi.testclient import TestClient
 
-from nemo_gym.agents import AgentContinuationRequirements
+from nemo_gym.agent_activation_types import AgentContinuationRequirements
 from responses_api_agents.opencode_agent.tests.test_continuation import (
     activate,
     close,

@@ -14,7 +14,6 @@
 # limitations under the License.
 
 from .base import (
-    FAILURE_INFO_KEYS,
     EnvResetRequest,
     EnvResetResponse,
     EnvStepRequest,
@@ -25,7 +24,6 @@ from .base import (
 
 
 __all__ = [
-    "FAILURE_INFO_KEYS",
     "EnvResetRequest",
     "EnvResetResponse",
     "EnvStepRequest",

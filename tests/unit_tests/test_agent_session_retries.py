@@ -9,7 +9,7 @@ import pytest
 from fastapi import HTTPException
 from pydantic import ValidationError
 
-from nemo_gym.agents.base_responses_api_agent import (
+from nemo_gym.base_responses_api_agent import (
     AgentCloseSessionRequest,
     AgentCloseSessionResponse,
     AgentSeedSessionRequest,
@@ -20,7 +20,6 @@ from nemo_gym.agents.base_responses_api_agent import (
 )
 from nemo_gym.client.server_client import ServerClient
 from nemo_gym.core.episode import current_rollout_id, rollout_context
-from nemo_gym.server_runtime.request_handling.session_routing import SessionClaims
 from nemo_gym.trajectory.trajectory_record import AgentObservationBundle
 
 
@@ -151,7 +150,7 @@ async def test_failed_close_retains_state_and_can_retry(agent):
 
 async def test_retry_window_begins_after_cleanup_and_is_not_extended(agent, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     agent.config.session_close_retry_window_seconds = 10
     seed = _seed()
     request = SimpleNamespace(session={})
@@ -256,7 +255,7 @@ async def test_request_and_close_response_cannot_mutate_stored_binding(agent):
 
 async def test_close_receipt_expiry_does_not_expire_active_sessions(agent, monkeypatch):
     clock = [100.0]
-    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
     seed = _seed()
     await agent.seed_agent_session(SimpleNamespace(session={}), seed)
     state = agent._require_agent_session(seed.agent_session_id)
@@ -275,7 +274,7 @@ def test_retry_window_must_be_positive_and_finite(window):
 
 async def _fail_seed_and_let_its_window_pass(agent, monkeypatch, seed):
     clock = [0.0]
-    monkeypatch.setattr("nemo_gym.agents.base_responses_api_agent.monotonic", lambda: clock[0])
+    monkeypatch.setattr("nemo_gym.base_responses_api_agent.monotonic", lambda: clock[0])
 
     async def initialize(body):
         raise AgentSessionSetupError(AgentSessionState(request=body), error=RuntimeError("partial setup"))
@@ -329,271 +328,3 @@ async def test_a_failed_release_keeps_the_state_for_a_later_close(agent, monkeyp
     clock[0] += 2 * agent.config.session_close_retry_window_seconds
     await agent.seed_agent_session(SimpleNamespace(session={}), _seed(2))
     assert seed.agent_session_id not in agent._session_records
-
-
-async def test_lifespan_closes_open_sessions_and_preserves_receipts(agent):
-    app = agent.setup_webserver()
-    async with app.router.lifespan_context(app):
-        first, second = _seed(), _seed(1)
-        await agent.seed_agent_session(SimpleNamespace(session={}), first)
-        await agent.seed_agent_session(SimpleNamespace(session={}), second)
-        closed = await agent.close_agent_session(SimpleNamespace(session={}), _close(first))
-    assert agent._close_agent_session_state.await_count == 2
-    for seed in (first, second):
-        result = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
-        assert result.agent_observations.source == "test"
-        assert result.resources_cookies == {"session": "updated"}
-        assert agent._session_records[seed.agent_session_id].state is None
-    assert agent._session_records[first.agent_session_id].close_response == closed
-    assert agent._close_agent_session_state.await_count == 2
-
-
-async def test_shutdown_closes_partial_state_after_canceled_seed(agent):
-    seed = _seed()
-    state = AgentSessionState(request=seed)
-    agent._seed_agent_session_state.side_effect = AgentSessionSetupError(state, error=asyncio.CancelledError())
-    app = agent.setup_webserver()
-    async with app.router.lifespan_context(app):
-        with pytest.raises(asyncio.CancelledError):
-            await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-    agent._close_agent_session_state.assert_awaited_once_with(state)
-    assert agent._session_records[seed.agent_session_id].state is None
-
-
-async def test_shutdown_releases_rollout_claim_but_retains_close_receipt(agent, tmp_path):
-    app = agent.setup_webserver()
-    claims = SessionClaims(str(tmp_path), "a" * 32, agent.holds_agent_session)
-    agent.use_agent_session_claims(claims)
-    seed = _seed()
-    rollout_key = f"/rollouts/{seed.episode_id.capture_key}"
-    async with app.router.lifespan_context(app):
-        await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-        assert claims.claimant(rollout_key) == claims.routing_id
-    assert claims.claimant(rollout_key) is None
-    assert not agent.holds_agent_session(rollout_key)
-    receipt = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
-    assert receipt.agent_observations.source == "test"
-    agent._close_agent_session_state.assert_awaited_once()
-
-
-async def test_shutdown_budget_is_shared_and_failures_keep_handles(agent, caplog):
-    agent.config.session_close_timeout_seconds = 0.02
-    canceled = asyncio.Event()
-
-    async def close(state):
-        session_id = state.request.agent_session_id
-        if session_id == "session-1":
-            raise RuntimeError("cleanup failed")
-        if session_id == "session-2":
-            try:
-                await asyncio.Event().wait()
-            except asyncio.CancelledError:
-                canceled.set()
-                raise
-        return await agent._close_agent_session_state._mock_wraps(state)
-
-    agent._close_agent_session_state.side_effect = close
-    app = agent.setup_webserver()
-    loop = asyncio.get_running_loop()
-    started = loop.time()
-    async with app.router.lifespan_context(app):
-        for index in range(3):
-            await agent.seed_agent_session(SimpleNamespace(session={}), _seed(index))
-    assert loop.time() - started < 0.5
-    assert canceled.is_set()
-    assert agent._session_records["session-0"].close_response is not None
-    for session_id in ("session-1", "session-2"):
-        record = agent._session_records[session_id]
-        assert record.state is not None and record.close_response is None
-        assert f"Agent session {session_id} cleanup unconfirmed" in caplog.text
-
-
-async def test_shutdown_cancels_an_existing_failed_seed_release(agent):
-    seed = _seed()
-    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-    record = agent._session_records[seed.agent_session_id]
-    entered, canceled = asyncio.Event(), asyncio.Event()
-
-    async def close(state):
-        entered.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            canceled.set()
-            raise
-
-    agent._close_agent_session_state.side_effect = close
-    release = asyncio.create_task(agent._release_failed_seed(seed.agent_session_id, record))
-    agent._failed_seed_releases.add(release)
-    await entered.wait()
-    agent.config.session_close_timeout_seconds = 0.01
-    app = agent.setup_webserver()
-    async with app.router.lifespan_context(app):
-        pass
-    assert canceled.is_set()
-    assert release.cancelled()
-    assert record.state is not None and record.close_response is None
-    agent._close_agent_session_state.assert_awaited_once()
-
-
-async def test_shutdown_cancellation_propagates_after_canceling_cleanup(agent):
-    seed = _seed()
-    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-    entered, canceled = asyncio.Event(), asyncio.Event()
-
-    async def close(state):
-        entered.set()
-        try:
-            await asyncio.Event().wait()
-        except asyncio.CancelledError:
-            canceled.set()
-            raise
-
-    agent._close_agent_session_state.side_effect = close
-    app = agent.setup_webserver()
-
-    async def shutdown():
-        async with app.router.lifespan_context(app):
-            pass
-
-    task = asyncio.create_task(shutdown())
-    await entered.wait()
-    task.cancel()
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert canceled.is_set()
-    assert agent._session_records[seed.agent_session_id].state is not None
-
-
-async def test_cancellation_resistant_close_cannot_cache_a_successful_receipt(agent):
-    seed = _seed()
-    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-    release, entered = asyncio.Event(), asyncio.Event()
-    agent.config.session_close_timeout_seconds = 0.01
-
-    async def close(state):
-        entered.set()
-        try:
-            await release.wait()
-        except asyncio.CancelledError:
-            await release.wait()
-        return AgentCloseSessionResponse(agent_session_id=seed.agent_session_id)
-
-    agent._close_agent_session_state.side_effect = close
-    app = agent.setup_webserver()
-    tasks_before = asyncio.all_tasks()
-    async with app.router.lifespan_context(app):
-        pass
-    await entered.wait()
-    tasks = asyncio.all_tasks() - tasks_before
-    assert agent._session_records[seed.agent_session_id].state is not None
-    release.set()
-    await asyncio.gather(*tasks, return_exceptions=True)
-    assert agent._session_records[seed.agent_session_id].close_response is None
-
-
-@pytest.mark.parametrize("timeout", [0, -1, float("nan"), float("inf")])
-def test_shutdown_drain_budget_must_be_positive_and_finite(timeout):
-    with pytest.raises(ValidationError):
-        BaseResponsesAPIAgentConfig(
-            host="localhost", port=1, entrypoint="app.py", name="test", session_close_timeout_seconds=timeout
-        )
-
-
-async def test_cached_close_does_not_bind_a_fresh_request_to_the_closed_session(agent):
-    first = _seed(0)
-    original_request = SimpleNamespace(session={})
-    await agent.seed_agent_session(original_request, first)
-    receipt = await agent.close_agent_session(original_request, _close(first))
-    assert original_request.session == {"agent_session_id": first.agent_session_id}
-
-    fresh_request = SimpleNamespace(session={})
-    repeated = await agent.close_agent_session(fresh_request, _close(first))
-    assert repeated == receipt
-    assert fresh_request.session == {}
-    second = _seed(1)
-    seeded = await agent.seed_agent_session(fresh_request, second)
-    assert seeded.agent_session_id == second.agent_session_id
-    await agent.close_agent_session(fresh_request, _close(second))
-
-
-@pytest.mark.parametrize("failed_seed_release", [False, True], ids=["close", "failed-seed-release"])
-async def test_cleanup_after_handled_caller_cancellation_preserves_the_original_cancellation(
-    agent, failed_seed_release
-):
-    seed = _seed()
-    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-    record = agent._session_records[seed.agent_session_id]
-    if failed_seed_release:
-        agent._keep_failed_seed(seed.agent_session_id, record)
-    cleaned = asyncio.Event()
-
-    async def operation():
-        task = asyncio.current_task()
-        task.cancel("caller cancellation")
-        try:
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            assert task.cancelling() == 1
-            if failed_seed_release:
-                await agent._release_failed_seed(seed.agent_session_id, record)
-            else:
-                receipt = await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
-                assert receipt.agent_observations.source == "test"
-            assert task.cancelling() == 1
-            cleaned.set()
-            raise
-
-    task = asyncio.create_task(operation())
-    with pytest.raises(asyncio.CancelledError, match="caller cancellation"):
-        await task
-    assert cleaned.is_set()
-    assert task.cancelling() == 1
-    assert record.state is None
-    if failed_seed_release:
-        assert seed.agent_session_id not in agent._session_records
-    else:
-        assert record.close_response is not None
-    agent._close_agent_session_state.assert_awaited_once()
-
-
-@pytest.mark.parametrize("failed_seed_release", [False, True], ids=["close", "failed-seed-release"])
-@pytest.mark.parametrize("inherited_cancellation", [False, True], ids=["fresh-task", "canceled-caller"])
-async def test_cleanup_cannot_discard_a_new_cancellation_suppressed_by_its_hook(
-    agent, failed_seed_release, inherited_cancellation
-):
-    seed = _seed()
-    await agent.seed_agent_session(SimpleNamespace(session={}), seed)
-    record = agent._session_records[seed.agent_session_id]
-    if failed_seed_release:
-        agent._keep_failed_seed(seed.agent_session_id, record)
-
-    async def cleanup(state):
-        asyncio.current_task().cancel("cleanup cancellation")
-        try:
-            await asyncio.sleep(0)
-        except asyncio.CancelledError:
-            return AgentCloseSessionResponse(agent_session_id=seed.agent_session_id)
-
-    agent._close_agent_session_state.side_effect = cleanup
-
-    async def operation():
-        if inherited_cancellation:
-            asyncio.current_task().cancel("caller cancellation")
-            try:
-                await asyncio.sleep(0)
-            except asyncio.CancelledError:
-                pass
-        if failed_seed_release:
-            await agent._release_failed_seed(seed.agent_session_id, record)
-        else:
-            await agent.close_agent_session(SimpleNamespace(session={}), _close(seed))
-
-    task = asyncio.create_task(operation())
-    with pytest.raises(asyncio.CancelledError):
-        await task
-    assert task.cancelling() == 1 + inherited_cancellation
-    assert record.state is not None
-    assert record.close_response is None
-    assert agent._session_records[seed.agent_session_id] is record
-    agent._close_agent_session_state.assert_awaited_once()

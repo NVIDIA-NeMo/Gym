@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 import pytest
 from pydantic import ValidationError
 
+from nemo_gym.agent_outcome import OutcomeAction, failure_outcome_policy
 from nemo_gym.core.failure_kinds import (
     AGENT_ROUTE_FAILED,
     PROVIDER_COMMAND_OUTCOME_UNKNOWN,
@@ -19,7 +20,6 @@ from nemo_gym.core.failure_kinds import (
     PROVIDER_STATUS_UNAVAILABLE,
     PROVIDER_UNAVAILABLE,
 )
-from nemo_gym.core.outcome_policy import OutcomeAction, failure_outcome_policy
 from nemo_gym.failure_transport import FailureHeader, RequestFailureLog
 from nemo_gym.sandbox.failures import sandbox_failure
 from nemo_gym.sandbox.providers.base import SandboxHandle
@@ -218,7 +218,9 @@ async def test_renewal_failure_prevents_new_provider_operation(command):
         if command:
             await provider._submit_command(submit, operation="command run", sandbox_id="sb", timeout_s=1, retries=9)
         else:
-            await provider._await_sdk_operation(submit, operation="write_file", sandbox_id="sb", timeout_s=1)
+            await provider._await_sdk_operation(
+                submit, operation="write_file", sandbox_id="sb", timeout_s=1, report_failure=True
+            )
     assert caught.value.failure_kind == PROVIDER_UNAVAILABLE
     assert caught.value.operation == "lifetime renewal"
     assert caught.value.__cause__ is renewal.exception()
@@ -248,123 +250,3 @@ async def test_owned_session_deadline_is_observed_without_claiming_a_provider_re
     assert result.error_type == "timeout"
     assert report.failure_id is None
     assert [event.failure_kind for event in report.events.values()] == [PROVIDER_COMMAND_TIMEOUT]
-
-
-@pytest.mark.asyncio
-@pytest.mark.parametrize(
-    "transport_name, expected_kind", [("ReadTimeout", "provider_io_timeout"), ("ConnectError", "provider_unavailable")]
-)
-async def test_real_sdk_wrapped_transport_failure_recovers_and_retains_observation(transport_name, expected_kind):
-    import httpx
-    from opensandbox.adapters.command_adapter import CommandsAdapter
-    from opensandbox.config import ConnectionConfig
-    from opensandbox.models.sandboxes import SandboxEndpoint
-
-    calls = []
-
-    async def respond(request):
-        calls.append(request)
-        if len(calls) == 1:
-            raise getattr(httpx, transport_name)("injected network failure", request=request)
-        return httpx.Response(200, json={"id": "exec-1", "running": False, "exit_code": 0})
-
-    adapter = CommandsAdapter(
-        ConnectionConfig(transport=httpx.MockTransport(respond)),
-        SandboxEndpoint(endpoint="example.invalid", headers={}),
-    )
-    commands = SimpleNamespace(
-        run=AsyncMock(return_value=SimpleNamespace(id="exec-1")),
-        get_command_status=adapter.get_command_status,
-        get_background_command_logs=AsyncMock(return_value=SimpleNamespace(content="done")),
-    )
-    provider = module.OpenSandboxProvider(
-        operations={
-            "background_exec": True,
-            "background_poll_initial_s": 0.001,
-            "retry_delay_s": 0,
-            "retry_max_delay_s": 0,
-        }
-    )
-    handle = SandboxHandle("sb", "opensandbox", SimpleNamespace(commands=commands))
-    try:
-        with RequestFailureLog.capture() as log:
-            result = await provider.exec(handle, "echo ok", timeout_s=1)
-            report = log.reply_report(None)
-        assert result.return_code == 0
-        assert len(calls) == 2
-        commands.run.assert_awaited_once()
-        assert report.failure_id is None
-        event = next(e for e in report.events.values() if e.failure_kind == expected_kind)
-        assert event.boundary.value == "sandbox"
-        assert event.foreign_error.message
-        assert event.sandbox.sandbox_id == "sb"
-    finally:
-        await adapter._httpx_client.aclose()
-        await adapter._sse_client.aclose()
-
-
-def test_unknown_wrapper_does_not_borrow_transport_or_http_facts():
-    import httpx
-    from opensandbox.exceptions import SandboxApiException
-
-    for cause in (httpx.ReadTimeout("timeout"), SandboxApiException("denied", status_code=401)):
-        wrapper = RuntimeError("wrapper")
-        wrapper.__cause__ = cause
-        failure = sandbox_failure(operation="get_info", sandbox_id="sb", cause=wrapper)
-        assert failure.failure_kind == "provider_request_failed"
-        assert failure.http_status is None
-
-
-def test_sdk_message_survives_event_serialization():
-    from opensandbox.exceptions import SandboxApiException
-
-    cause = SandboxApiException("explicit provider diagnostic", status_code=403)
-    failure = sandbox_failure(operation="create", cause=cause)
-    report = failure.to_record()
-    event = report["failure_events"][failure.event_id]
-    assert event["foreign_error"]["message"] == "explicit provider diagnostic"
-    assert event["failure_kind"] == "provider_credentials_rejected"
-    assert event["http_status"] == 403
-    assert failure.sandbox is None  # No invented sandbox id before creation succeeds.
-
-
-@pytest.mark.asyncio
-async def test_create_recovered_failures_and_policy_override_preserve_facts():
-    from opensandbox.exceptions import SandboxApiException
-
-    cause = SandboxApiException("busy", status_code=503)
-    handle = SandboxHandle("sb", "opensandbox", None)
-    provider = module.OpenSandboxProvider(create={"retries": 1, "retry_delay_s": 0, "retry_max_delay_s": 0})
-    provider._create_once = AsyncMock(side_effect=[cause, handle])
-    with RequestFailureLog.capture() as log:
-        assert await provider.create(module.SandboxSpec(image="test")) is handle
-        report = log.reply_report(None)
-    assert report.failure_id is None
-    event = next(e for e in report.events.values() if e.boundary.value == "sandbox")
-    assert event.http_status == 503 and event.failure_kind == "provider_unavailable"
-    provider = module.OpenSandboxProvider(create={"retries": 4, "outcome_policy": {"by_status_code": {503: "fail"}}})
-    provider._create_once = AsyncMock(side_effect=cause)
-    with pytest.raises(NgFailureEvent) as caught:
-        await provider.create(module.SandboxSpec(image="test"))
-    provider._create_once.assert_awaited_once()
-    assert caught.value.http_status == event.http_status
-    assert caught.value.failure_kind == event.failure_kind
-
-
-def test_create_policy_rejects_grading_actions():
-    with pytest.raises(ValidationError, match="only retry and fail"):
-        module.OpenSandboxProvider(create={"outcome_policy": {"default_action": "count_as_zero"}})
-
-
-def test_broken_exception_formatter_does_not_hide_observed_failure():
-    class BadMessage(Exception):
-        status_code = 503
-
-        def __str__(self):
-            raise RuntimeError("broken formatter")
-
-    cause = BadMessage()
-    failure = sandbox_failure(operation="get_info", sandbox_id="sb", cause=cause)
-    assert failure.failure_kind == "provider_unavailable" and failure.http_status == 503
-    assert failure.__cause__ is cause
-    assert failure.foreign_error.message == ""

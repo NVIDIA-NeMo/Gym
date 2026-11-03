@@ -17,7 +17,7 @@ import json
 from fastapi import Request, Response
 from pydantic import ConfigDict, ValidationError
 
-from nemo_gym.agents import (
+from nemo_gym.base_responses_api_agent import (
     BaseResponsesAPIAgentConfig,
     Body,
     SimpleResponsesAPIAgent,

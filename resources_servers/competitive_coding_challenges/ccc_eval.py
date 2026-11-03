@@ -199,8 +199,6 @@ def _exec_sync(tls: threading.local, sandbox: LocalSandbox, cmd: str, *, languag
 
 # Printed, as the whole stdout, by a guard that runs before compile.sh.
 WORK_DIR_NOT_VISIBLE = "CCC_WORK_DIR_NOT_VISIBLE_TO_SANDBOX"
-# Key under which eval_single returns the answer it graded (the extracted code block, before includes).
-GRADED_ANSWER_KEY = "graded_answer"
 
 
 def _require_visible(work_dir: str, script: str) -> str:
@@ -895,12 +893,16 @@ class CCCEvaluator(BaseEvaluator):
         problem_metadata = self.get_problem_metadata(problem_id, competition_id)
         task_config = extract_task_config(problem_metadata)
         task_type = str(task_config.get("task_type", "Batch"))
-        langs = ("txt", "text", "plain") if task_type == "SIMULATION" else ("cpp",)
-        answer = extract_final_code_block((entry.get("generation") or ""), langs)
-        if task_type in ("SIMULATION", "MULTIFILE"):
-            completion = answer
+        if task_type == "SIMULATION":
+            completion = extract_final_code_block((entry.get("generation") or ""), ("txt", "text", "plain"))
+        elif task_type == "MULTIFILE":
+            completion = extract_final_code_block((entry.get("generation") or ""), ("cpp",))
         else:
-            completion = add_includes(answer, problem_metadata.get("problem_header_include"), problem_id)
+            completion = add_includes(
+                extract_final_code_block((entry.get("generation") or ""), ("cpp",)),
+                problem_metadata.get("problem_header_include"),
+                problem_id,
+            )
         cache_key = self._cache_key(problem_id, competition_id)
         pre_dir = await asyncio.to_thread(self._get_precompiled_dir, cache_key, problem_id, problem_metadata)
         time_scale = self.eval_cfg.time_scale * (0.5 if float(entry.get("total_time") or 0.0) > 300.0 else 1.0)
@@ -915,7 +917,7 @@ class CCCEvaluator(BaseEvaluator):
             sandbox_factory=self.sandbox_factory,
         )
         try:
-            details = await self._evaluate_compiled_solution(
+            return await self._evaluate_compiled_solution(
                 entry,
                 problem_metadata,
                 compiled_solution_dir,
@@ -924,9 +926,6 @@ class CCCEvaluator(BaseEvaluator):
             )
         finally:
             shutil.rmtree(compiled_solution_dir, ignore_errors=True)
-        # The answer as graded, before includes are added: the server reports it as the row's vote identity.
-        details[GRADED_ANSWER_KEY] = answer
-        return details
 
     async def eval_full(self, input_files):  # type: ignore[override]
         await self._initialize_runtime()

@@ -9,7 +9,11 @@ import pytest
 from fastapi import HTTPException
 from starlette.requests import Request
 
-from nemo_gym.agents import AGENT_SESSION_COOKIE_KEY, AgentCloseSessionRequest, AgentSeedSessionRequest
+from nemo_gym.base_responses_api_agent import (
+    AGENT_SESSION_COOKIE_KEY,
+    AgentCloseSessionRequest,
+    AgentSeedSessionRequest,
+)
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
     NeMoGymResponse,

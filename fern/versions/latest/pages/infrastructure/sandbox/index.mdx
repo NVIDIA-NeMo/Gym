@@ -332,26 +332,18 @@ Rewrites are ordered. The first matching `from` prefix wins.
 
 ## Error Handling
 
-Providers that have not migrated to the shared failure contract use these creation exceptions:
+Sandbox create failures use provider-neutral exception classes:
 
 - `SandboxCreateError` for sandbox allocation or readiness failures.
 - `SandboxCreateVerificationError` when a created sandbox fails Gym readiness verification.
 
-Command process exits, including nonzero exits, return `SandboxExecResult`. OpenSandbox allocation, readiness, lifecycle and runtime failures
+Command process exits, including nonzero exits, return `SandboxExecResult`. OpenSandbox runtime failures
 raise the shared `NgFailureEvent` with `boundary="sandbox"`. Its registered `failure_kind`, `operation`,
 HTTP status when observed, `sandbox` details and explicit cause carry the evidence; callers apply their
 own outcome policy. A failure kind does not decide attribution, retryability, health or a zero score.
 
 | Failure kind | Observed condition |
 | --- | --- |
-| `provider_create_timeout` | The create/reconnect readiness deadline expired without a confirmed Pending observation. |
-| `provider_create_pending` | An attempt-owned sandbox was observed Pending when its create deadline expired. |
-| `provider_not_ready` | A newly created sandbox failed the configured readiness probe, or the SDK reported it unhealthy. |
-| `provider_setup_failed` | Sandbox setup or a required runtime check failed. |
-| `provider_internal_error` | The SDK reported an internal failure without a recognized transport cause. |
-| `provider_pty_unavailable` | The PTY session is missing, detached, closed or has lost its connection. |
-| `provider_pty_busy` | The PTY server refused attachment because another client holds the session. |
-| `provider_protocol_error` | An SDK response or PTY frame lacked required protocol fields. |
 | `provider_request_failed` | A provider request failed without a more specific classification. |
 | `provider_unavailable` | A transport failure or unavailable-backend HTTP response. |
 | `provider_credentials_rejected` | An observed HTTP 401 or 403 from the provider. |
@@ -365,28 +357,19 @@ A command exit code of 137, a signal kill near a deadline, an error message, or 
 establish the command's cause. Forward `NgFailureEvent` unchanged when only forwarding; when reporting
 a distinct failure at a caller's boundary, create its event and use `raise ... from error`.
 
-OpenSandbox uses this contract for creation/readiness, lifecycle requests, command execution, file requests and
-PTY failures. Replace catches of its former `OpenSandboxCreate*Error`, `OpenSandboxSetupError` and
-`SandboxPtyError` with `NgFailureEvent` plus an explicit boundary/kind check. Other providers retain their
-existing exception contracts. Invalid local configuration still raises `ValueError`; cancellation propagates.
-PTY `read(timeout_s=...)` and `wait_exit(timeout_s=...)` retain `TimeoutError` for a caller's bounded wait:
-that timeout alone does not mean the PTY or command failed.
+This migration covers OpenSandbox command execution, runtime file requests and PTY loss diagnostics.
+Allocation/readiness, other lifecycle operations and other providers retain their existing contracts.
+The proposed runtime exception subclasses from earlier revisions of this PR are replaced by registered kinds.
 
-In resources servers and agents, forward OpenSandbox failures to the owning task boundary for its outcome
-policy. An infrastructure failure alone does not justify a zero reward:
+In resources servers and agents, preserve creation failures and their causes at the task boundary:
 
 ```python
-from nemo_gym.sandbox import AsyncSandbox
-from nemo_gym.server_runtime import FailureBoundary
-from nemo_gym.typed_exceptions import NgFailureEvent
+from nemo_gym.sandbox import AsyncSandbox, SandboxCreateError
 
 
 sandbox = AsyncSandbox(provider_config, spec)
 try:
     await sandbox.start()
-except NgFailureEvent as error:
-    if error.boundary != FailureBoundary.SANDBOX:
-        raise
-    # Preserve the event and its causes for the task boundary's policy and report.
-    raise
+except SandboxCreateError as error:
+    return {"reward": 0.0, "error": f"sandbox_create_failed: {error}"}
 ```

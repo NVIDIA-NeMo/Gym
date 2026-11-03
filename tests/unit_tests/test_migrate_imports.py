@@ -325,9 +325,9 @@ class TestRewritePython:
         """)
 
     def test_a_wrapped_fallback_import_keeps_every_line(self) -> None:
-        migrator = migrate_imports.Migrator({"nemo_gym.openai_utils": "nemo_gym.client.openai_client"}, {})
+        migrator = migrate_imports.Migrator({"nemo_gym.openai_utils": "nemo_gym.models.openai_utils"}, {})
         source = (
-            "try:\n    import nemo_gym.client.openai_client\nexcept ImportError:\n"
+            "try:\n    import nemo_gym.models.openai_utils\nexcept ImportError:\n"
             "    from nemo_gym.openai_utils import (\n        A,\n        B,\n    )  # path before nemo_gym 0.8.0\n"
         )
         assert migrator.rewrite_python(source, path="x.py")[0] == source

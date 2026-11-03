@@ -27,7 +27,11 @@ from typing import Any, Dict
 from fastapi import Request
 from pydantic import Field
 
-from nemo_gym.client import NeMoGymAsyncOpenAI
+from nemo_gym.base_responses_api_model import (
+    BaseResponsesAPIModelConfig,
+    Body,
+    SimpleResponsesAPIModel,
+)
 from nemo_gym.core import (
     NeMoGymChatCompletion,
     NeMoGymChatCompletionCreateParamsNonStreaming,
@@ -35,7 +39,8 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     current_rollout_id,
 )
-from nemo_gym.models import BaseResponsesAPIModelConfig, Body, ResponsesConverter, SimpleResponsesAPIModel
+from nemo_gym.openai_utils import NeMoGymAsyncOpenAI
+from nemo_gym.responses_converter import ResponsesConverter
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
 
 
