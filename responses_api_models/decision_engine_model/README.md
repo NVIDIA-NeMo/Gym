@@ -22,7 +22,7 @@ policy_model:
   responses_api_models:
     decision_engine_model:
       entrypoint: app.py
-      base_url: ${oc.env:DECISION_ENGINE_BASE_URL,${decision_engine_base_url}}
+      base_url: ${oc.env:DECISION_ENGINE_BASE_URL,${decision_engine_base_url}}   # required, no default
       api_key: ${oc.env:DECISION_ENGINE_API_KEY,${decision_engine_api_key}}
       model: ${oc.env:DECISION_ENGINE_MODEL,${decision_engine_model_name}}
       endpoint: systemone
@@ -30,4 +30,4 @@ policy_model:
       max_concurrent_requests: 32
 ```
 
-The key is redacted in `resolved_config.yaml`. `/v1/chat/completions` is not served.
+The endpoint is required (`decision_engine_base_url: ???`): serve the engine locally and point it at `http://127.0.0.1:<port>`. The key is optional and redacted in `resolved_config.yaml`. `/v1/chat/completions` is not served.

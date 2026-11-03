@@ -1,5 +1,6 @@
-# A typed decision engine (/v1/systemone or /v1/decisions) as the policy model. Set the endpoint and key in env.yaml
-# (decision_engine_base_url, decision_engine_api_key, decision_engine_model_name) or through the environment.
+# A typed decision engine (/v1/systemone or /v1/decisions) as the policy model. The endpoint is required and has no
+# default: set DECISION_ENGINE_BASE_URL (or decision_engine_base_url in env.yaml) to the engine you serve, normally a
+# local server (http://127.0.0.1:<port>). The key is optional (DECISION_ENGINE_API_KEY / decision_engine_api_key).
 policy_model:
   responses_api_models:
     decision_engine_model:
@@ -13,6 +14,6 @@ policy_model:
       request_timeout_seconds: 600
       max_attempts: 4
 
-decision_engine_base_url: null
+decision_engine_base_url: ???
 decision_engine_api_key: null
 decision_engine_model_name: default
