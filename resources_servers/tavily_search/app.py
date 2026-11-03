@@ -18,16 +18,18 @@ import re
 from asyncio import sleep
 from collections import OrderedDict, defaultdict
 from contextlib import asynccontextmanager
+from dataclasses import dataclass
 from fnmatch import fnmatchcase
 from pathlib import Path
 from time import time
-from typing import Any, ClassVar, Dict, List, Literal, Optional, Sequence, Tuple
+from typing import Annotated, Any, ClassVar, Dict, List, Literal, Optional, Sequence, Tuple
 from urllib.parse import unquote, urlparse, urlsplit, urlunsplit
+from uuid import uuid4
 
 from aiohttp import ClientConnectionError, ClientPayloadError, ClientTimeout
 from fastapi import FastAPI, Request
 from httpx import AsyncClient
-from pydantic import BaseModel, Field, PrivateAttr, ValidationError, model_validator
+from pydantic import BaseModel, BeforeValidator, Field, PrivateAttr, ValidationError, model_validator
 from tavily import AsyncTavilyClient
 
 from nemo_gym import _resolve_under_cwd_or_install
@@ -47,6 +49,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -320,6 +323,18 @@ def select_provider_domains(
     return ordered[:limit]
 
 
+def _reject_typed_seed(value: object) -> object:
+    if isinstance(value, dict) and any(field in value for field in ResourcesSeedSessionRequest.model_fields):
+        raise ValueError("A resources session seed must satisfy ResourcesSeedSessionRequest")
+    return value
+
+
+@dataclass
+class _VerifiedSession:
+    identity: Optional[Tuple[EpisodeId, TaskId]]
+    metrics: Optional[TavilySearchMetrics]
+
+
 class TavilySearchResourcesServer(SimpleResourcesServer):
     config: TavilySearchResourcesServerConfig
 
@@ -327,10 +342,9 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
     _num_requests: int = 0
     _session_id_to_metrics: Optional[Dict[str, TavilySearchMetrics]] = PrivateAttr(default=None)
     # The episode and task each typed seed bound its resources_session_id to.
-    # These sessions keep their metrics until /close_session; an Agent's /run never closes, so /verify releases
-    # the sessions it used.
     _typed_sessions: Dict[str, Tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _fence: ResourcesSessionFence = PrivateAttr()
+    _verified_sessions: ClosedResourcesSessionRecords[_VerifiedSession] = PrivateAttr()
 
     JUDGE_PROMPT_TEMPLATE: ClassVar[str] = JUDGE_PROMPT_TEMPLATE
 
@@ -354,6 +368,7 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
 
         self._session_id_to_metrics = defaultdict(TavilySearchMetrics)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
         policy_path = _resolve_under_cwd_or_install(self.config.exclude_domains_file_path)
         self._url_policy = URLExclusionPolicy(policy_path)
@@ -411,23 +426,37 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         return ["web_search", "find_in_page", "scroll_page"]
 
     async def seed_session(
-        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(_reject_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         if not isinstance(body, ResourcesSeedSessionRequest):
+            session_id = request.session[SESSION_ID_KEY]
+            async with self._fence.locked(session_id):
+                self._fence.raise_if_closed(session_id)
+                verified = self._verified_sessions.get(session_id)
+                if session_id in self._typed_sessions or (verified is not None and verified.identity is not None):
+                    raise ResourcesSessionConflictError("The session cookie belongs to a typed resources session")
+                if verified is not None:
+                    request.session[SESSION_ID_KEY] = str(uuid4())
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
-            identity = self._typed_sessions.get(session_id)
+            verified = self._verified_sessions.get(session_id)
+            identity = self._typed_sessions.get(session_id) or (verified.identity if verified else None)
             if identity is None:
+                if session_id in self._session_id_to_metrics or verified is not None:
+                    raise ResourcesSessionConflictError("resources_session_id already belongs to another caller")
                 # The verify body is the task's fields, so a task that fails here would fail its verify too.
                 try:
                     TaskData.model_validate(body.task_data)
                 except ValidationError as error:
                     raise ResourcesSeedRejectedError(f"task_data is not a tavily_search task: {error}") from error
+                metrics = TavilySearchMetrics()
+                self._session_id_to_metrics[session_id] = metrics
                 self._typed_sessions[session_id] = (body.episode_id, body.task_id)
-                self._session_id_to_metrics.setdefault(session_id, TavilySearchMetrics())
             elif identity != (body.episode_id, body.task_id):
                 raise ResourcesSessionConflictError("resources_session_id is already bound to another episode or task")
         # Only on success: a refused seed must not hand the caller a cookie for a session another episode holds.
@@ -441,10 +470,13 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
             closed_episode = self._fence.closed_episode(session_id)
             if closed_episode is not None and closed_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-            identity = self._typed_sessions.get(session_id)
+            verified = self._verified_sessions.get(session_id)
+            identity = self._typed_sessions.get(session_id) or (verified.identity if verified else None)
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
             self._release(session_id)
+            if verified is not None:
+                verified.metrics = None
             self._fence.mark_closed(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
 
@@ -454,6 +486,16 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         if not self.config.dump_session_id_to_metrics_on_exit:
             self._session_id_to_metrics.pop(session_id, None)
 
+    async def retire_session_state(self, session_id: str) -> None:
+        async with self._fence.locked(session_id):
+            verified = self._verified_sessions.get(session_id)
+            identity = self._typed_sessions.get(session_id) or (verified.identity if verified else None)
+            self._release(session_id)
+            if verified is not None:
+                verified.metrics = None
+            if identity is not None:
+                self._fence.mark_closed(session_id, identity[0])
+
     def _session_metrics(self, request: Request) -> TavilySearchMetrics:
         """The metrics of the calling session.
 
@@ -461,8 +503,8 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
         use. A session closed within the fence window does not: a late call would recreate what its close released.
         """
         session_id = request.session[SESSION_ID_KEY]
-        if self._fence.closed_episode(session_id) is not None:
-            raise ResourcesSessionLostError("This tavily_search session is already closed")
+        if self._fence.closed_episode(session_id) is not None or session_id in self._verified_sessions:
+            raise ResourcesSessionLostError("This tavily_search session has already ended")
         return self._session_id_to_metrics[session_id]
 
     def _select_tavily_client(self) -> AsyncTavilyClient:
@@ -649,6 +691,12 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 num_tool_calls=num_tool_calls,
                 metrics=TavilySearchMetrics(),
             )
+        verified = self._verified_sessions.get(session_id)
+        metrics = (
+            self._session_id_to_metrics.get(session_id)
+            or (verified.metrics if verified is not None else None)
+            or TavilySearchMetrics()
+        )
         try:
             question = body.question
             ground_truth = body.ground_truth
@@ -665,14 +713,19 @@ class TavilySearchResourcesServer(SimpleResourcesServer):
                 **body.model_dump(),
                 **judge_evaluation.model_dump(),
                 num_tool_calls=num_tool_calls,
-                metrics=self._session_id_to_metrics.get(session_id) or TavilySearchMetrics(),
+                metrics=metrics,
             )
             if judge_error is not None:
                 raise judge_error
             return response
         finally:
-            if session_id not in self._typed_sessions:
-                self._release(session_id)
+            # A wait-style verify ends checkpoint tracking even when the caller intends to close afterwards.
+            # Preserve only bounded retry evidence; the judge still evaluates each request as before.
+            if self._fence.closed_episode(session_id) is None:
+                self._verified_sessions.remember(
+                    session_id, _VerifiedSession(self._typed_sessions.get(session_id), metrics)
+                )
+            self._release(session_id)
 
     ###### UTILITY FUNCTIONS ######
 

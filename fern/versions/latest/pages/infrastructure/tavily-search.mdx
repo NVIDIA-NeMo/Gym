@@ -111,11 +111,15 @@ neither forwarded to models nor logged.
 
 These behaviors apply to all Tavily configurations:
 
-- Each session's Tavily call metrics, returned by `/verify` in `metrics`, are released when
-  the session ends: `/close_session` releases a session an Environment Server seeded, and
-  `/verify` releases any other. For `session_close_retry_window_seconds` after `/close_session`,
-  a tool call gets 404 rather than starting a new record, and a `/verify` returns a masked sample. With `dump_session_id_to_metrics_on_exit: true`, released metrics
-  stay in memory until shutdown so the dump still lists every session.
+- Each session's Tavily call metrics are returned by `/verify` in `metrics`. Verification
+  releases the live session maps and retains an expiring identity and metrics record for
+  `session_close_retry_window_seconds`, so an HTTP retry keeps its metrics. The judge still
+  evaluates each verify request. Tool calls after verification are refused during that window;
+  a new `/run` seed with the completed run's cookie receives a fresh session ID.
+  `/close_session` and checkpoint retirement release unverified sessions. After close, a tool
+  call gets 404 and `/verify` returns a masked sample during the retry window.
+  With `dump_session_id_to_metrics_on_exit: true`, released metrics stay in memory until
+  shutdown so the dump still lists every session.
 - Search requests disable Tavily's aggregate answer, and returned aggregate answers
   are discarded. The former `Search Answer` output section is removed because its
   sources cannot be checked against the local policy; agents receive source results.
