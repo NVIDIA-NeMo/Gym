@@ -20,6 +20,7 @@ import io
 import random
 from pathlib import Path
 from types import SimpleNamespace
+from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -717,6 +718,72 @@ class TestRun:
             result = await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
         assert result.reward == 0.0
         assert "verify_failed" in result.failure_reason
+
+
+class TestMaskFailedAttempts:
+    """mask_failed_attempts keeps attempts without a gradable answer out of training, never out of evaluation."""
+
+    async def _run(self, *, create_episode: Any, verify_raises: bool = False, **config: Any) -> Any:
+        agent = _agent(strip_images_from_output=False, **config)
+
+        async def post(**kw: Any) -> SimpleNamespace:
+            if kw["url_path"] == "/verify" and verify_raises:
+                raise RuntimeError("judge outage")
+            return SimpleNamespace(
+                cookies={}, data=(kw["json"] | {"reward": 0.0}) if kw["url_path"] == "/verify" else {}
+            )
+
+        agent.server_client.post = AsyncMock(side_effect=post)
+        with (
+            patch.object(GdpPdfAgent, "_create_episode", **create_episode),
+            patch.object(GdpPdfAgent, "_model_call_capture_enabled", return_value=False),
+            patch.object(gdp_pdf_agent_app, "raise_for_status", new=AsyncMock()),
+            patch.object(gdp_pdf_agent_app, "get_response_json", new=AsyncMock(side_effect=lambda r: r.data)),
+        ):
+            return await agent.run(SimpleNamespace(cookies={}), _run_request(_example_manifest_relpath))
+
+    @requires_example_manifest
+    async def test_off_by_default_so_evaluation_counts_the_zero(self) -> None:
+        result = await self._run(create_episode={"side_effect": _error("maximum context length")}, min_dpi=140)
+        assert result.reward == 0.0
+        assert result.mask_sample is False
+        assert result.failure_kind is None
+        assert "mask_sample" not in (result.model_extra.get("instance_config") or {})
+
+    @requires_example_manifest
+    @pytest.mark.parametrize(
+        ("error", "kind"),
+        [
+            (_error("maximum context length"), "model_context_limit"),
+            (_error("out of memory"), "model_request_error"),
+        ],
+    )
+    async def test_masks_an_attempt_the_model_never_answered(self, error: ClientResponseError, kind: str) -> None:
+        result = await self._run(create_episode={"side_effect": error}, min_dpi=140, mask_failed_attempts=True)
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == kind
+        assert result.model_extra["instance_config"]["mask_sample"] is True
+        assert result.failure_reason.startswith("GDP.pdf terminal input limit: ")
+
+    @requires_example_manifest
+    async def test_masks_an_attempt_whose_verification_failed(self) -> None:
+        result = await self._run(
+            create_episode={"new": AsyncMock(return_value=(_response(), None, {}, {}))},
+            verify_raises=True,
+            mask_failed_attempts=True,
+        )
+        assert result.reward == 0.0
+        assert result.mask_sample is True
+        assert result.failure_kind == "verifier_error"
+
+    @requires_example_manifest
+    async def test_leaves_a_graded_answer_alone(self) -> None:
+        result = await self._run(
+            create_episode={"new": AsyncMock(return_value=(_response(), None, {}, {}))}, mask_failed_attempts=True
+        )
+        assert result.mask_sample is False
+        assert result.failure_reason is None
 
 
 class TestStripImageBlocks:

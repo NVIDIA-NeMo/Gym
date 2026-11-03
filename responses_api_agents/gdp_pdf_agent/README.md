@@ -40,6 +40,7 @@ vision input.
 | `include_text` | `true` | Attach the manifest's extracted text |
 | `include_images` | `true` | Attach the manifest's rendered page images |
 | `strip_images_from_output` | `true` | Drop base64 from the saved rollout artifacts |
+| `mask_failed_attempts` | `false` | Training only: mark attempts that end without a gradable answer with `mask_sample` (see below) |
 
 `max_steps: 1` — GDP.pdf is single-turn with no tools.
 
@@ -75,6 +76,16 @@ rejected attempt along the way. It includes `image_pages_covered`, `image_pages_
 `image_coverage_end_page`, so a degraded or failed delivery is visible rather than silently mistaken
 for a model failure. `strip_images_from_output` keeps rollout JSONL readable; redaction is recorded
 as a `multimodal_history_redacted` gap on the trajectory.
+
+## Failed attempts in training
+
+An attempt can end without a gradable answer: the input still does not fit after the backoff, the
+model call fails, or `/verify` fails. It then scores 0 and carries a `failure_reason`. Evaluation
+should count that zero, so `mask_failed_attempts` is off by default. For training the zero says
+nothing about an answer, so set `mask_failed_attempts: true`: such attempts get `mask_sample: true`
+and a `failure_kind` (`model_context_limit`, `model_request_error` or `verifier_error`), and the
+trainer leaves them out of the loss. Rows whose judge call failed are already masked by
+`judge_failsafe`.
 
 ## Text-only models
 
