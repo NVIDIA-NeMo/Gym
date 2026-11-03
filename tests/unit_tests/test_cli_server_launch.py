@@ -21,12 +21,12 @@ from pathlib import Path
 import pytest
 
 from nemo_gym import PARENT_DIR
-from nemo_gym.cli.env import _server_launch_command
 from nemo_gym.config.global_config import (
     NEMO_GYM_CONFIG_DICT_ENV_VAR_NAME,
     NEMO_GYM_CONFIG_PATH_ENV_VAR_NAME,
     UV_VENV_DIR_KEY_NAME,
 )
+from nemo_gym.orchestration.server_supervisor import _server_launch_command
 from nemo_gym.telemetry.startup import STARTUP_SETUP_DONE_NS_ENV
 from tests.unit_tests.config.test_global_config import TestGlobalConfig as _TestGlobalConfig
 

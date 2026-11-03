@@ -25,7 +25,6 @@ from pathlib import Path
 
 import pytest
 
-from nemo_gym.cli.env import ServerSpinupTimeoutError
 from nemo_gym.cli.utils import exit_cleanly_on_config_error
 from nemo_gym.config.config_types import ConfigError
 from nemo_gym.orchestration.api import ResumeConfig, SubmitConfig
@@ -39,6 +38,7 @@ from nemo_gym.orchestration.recovery import (
     decide_from_collected,
     select_managed_evidence,
 )
+from nemo_gym.orchestration.server_supervisor import ServerSpinupTimeoutError
 from nemo_gym.rollouts.rollout_recovery import RunManifest, validate_resume
 from nemo_gym.rollouts.rollout_store import RolloutStore
 from tests.unit_tests.test_eval_resubmit import _handle, _resumable_run, _sbatch_env

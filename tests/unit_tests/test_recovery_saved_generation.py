@@ -261,7 +261,7 @@ async def test_current_unrouted_diagnostic_blocks_projected_older_retryable_outc
 )
 async def test_reverification_requires_the_original_verifier_input_slot(tmp_path, monkeypatch, slot, expected):
     from nemo_gym.config.config_types import ConfigError
-    from nemo_gym.rollout_reverification import _rollout_response
+    from nemo_gym.eval.rollout_reverification import _rollout_response
 
     result = {"_ng_failure_class": "judge_failed", "failure_kind": "judge_failed", slot: response()}
     decision, store, projected = await persist_producer_result(tmp_path, monkeypatch, result)
@@ -286,7 +286,7 @@ async def test_actual_judge_route_saved_input_survives_collection_and_reverifica
     from fastapi.testclient import TestClient
     from omegaconf import OmegaConf
 
-    import nemo_gym.rollout_reverification as reverify
+    import nemo_gym.eval.rollout_reverification as reverify
     from nemo_gym.client.server_client import ServerClient
     from nemo_gym.server_runtime.base_resources_server import (
         BaseResourcesServerConfig,
@@ -419,8 +419,8 @@ async def test_unusable_original_response_does_not_fall_back_to_different_partia
 
 
 def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
+    from nemo_gym.eval.rollout_reverification import _rollout_response
     from nemo_gym.orchestration.recovery import _saved_answer
-    from nemo_gym.rollout_reverification import _rollout_response
     from nemo_gym.rollouts.rollout_recovery import has_saved_generation
     from tests.unit_tests.test_eval_resubmit_decision import _judge_failure, collect, write_job_dir
 
@@ -439,7 +439,7 @@ def test_persisted_null_original_input_does_not_fall_back_to_partial(tmp_path):
 
 
 async def test_producer_null_is_omitted_before_saved_native_partial_selection(tmp_path, monkeypatch):
-    from nemo_gym.rollout_reverification import _rollout_response
+    from nemo_gym.eval.rollout_reverification import _rollout_response
 
     result = {
         "_ng_failure_class": "judge_failed",

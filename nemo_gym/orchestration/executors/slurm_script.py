@@ -60,16 +60,20 @@ from nemo_gym.orchestration.executors.resume_script import (
 from nemo_gym.orchestration.executors.script_templates import (
     DRIVER_FAILURE_ENV,
     ENSURE_RAY_INSTALLED,
+    EVAL_SUCCEEDED_MARKER_ENV,
     bash_var,
     escape_for_single_quoted_block,
     render_driver_entrypoint,
+    render_export_tail,
     render_gym_cmd,
     render_health_check,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
     render_write_file_from_base64,
 )
-from nemo_gym.orchestration.executors.utils import flatten_run_args
+from nemo_gym.orchestration.executors.utils import flatten_export_args, flatten_run_args
+from nemo_gym.orchestration.exports import effective_exports, export_install_extras, export_run_settings
+from nemo_gym.orchestration.jobs import ARTIFACTS_DIRNAME, EVAL_SUCCEEDED_FILENAME, LOGS_DIRNAME, ROLLOUTS_FILENAME
 
 
 _SCRIPT_TEMPLATE = """\
@@ -228,7 +232,7 @@ def _render_service_command(
     return (
         f"# service: {name}\n"
         f"{env_prefix}srun --overlap{node_flags}{container_flags}{step_flags}"
-        f" --output=logs/{name}-$SLURM_JOB_ID.log {command} &\n"
+        f" --output={LOGS_DIRNAME}/{name}-$SLURM_JOB_ID.log {command} &\n"
         f"{var}_PID=$!"
     )
 
@@ -792,7 +796,9 @@ _WATCHED_DRIVER_TEMPLATE = """\
 _gym_driver_pid=$!
 _gym_service_exited() {{
     # A successful run tears its services down as the driver ends: if the driver is already gone, its status stands.
-    if ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
+    # Once the evaluation has succeeded (a driver with exports writes the marker then), a service that is lost
+    # costs nothing the exports need, so the driver is left to finish and its status stands.
+    if [ -e "${{GYM_EVAL_SUCCEEDED_MARKER:-}}" ] || ! kill -0 "$_gym_driver_pid" 2>/dev/null; then
         wait "$_gym_driver_pid"
         return
     fi
@@ -819,6 +825,9 @@ def _render_watched_driver(driver: str, services: list[str]) -> str:
     A dead service would otherwise leave the driver retrying it until the walltime. The job exits
     non-zero instead, so the auto-resume chain reruns it with fresh services; TERM is what the
     driver gets at the time limit, so its in-flight rollouts leave no row and run again on resume.
+    That applies while the evaluation runs. When the driver has exports it creates the marker named by
+    `GYM_EVAL_SUCCEEDED_MARKER` as soon as the evaluation succeeds, and from then on a lost service no
+    longer ends the driver: the exports do not use it, and a requeue would reload the model for nothing.
     The driver's PID is kept in a lowercase variable, which no service's uppercase <NAME>_PID can overwrite.
     """
     if not services:
@@ -1113,7 +1122,7 @@ def build_sbatch_script(
     # checkout instead of the job directory -- the run completes, exits 0, and
     # leaves nothing behind. Making the OUTPUT absolute is what keeps artifacts
     # in the job directory without constraining cwd.
-    output_path = f"+output_jsonl_fpath={remote_bench_dir}/artifacts/rollouts.jsonl"
+    output_path = f"+output_jsonl_fpath={remote_bench_dir}/{ARTIFACTS_DIRNAME}/{ROLLOUTS_FILENAME}"
     policy_type = config.driver.policy_model_type
     extra_flags = [f"--model-type {shlex.quote(policy_type)}"] if config.driver.policy_model and policy_type else []
     driver_env = dict(config.driver.env)
@@ -1145,20 +1154,49 @@ def build_sbatch_script(
         # as a calling convention it would have to parse.
         gym_cmd = ""
         driver_env |= _command_env(benchmark, remote_bench_dir)
+    exports = effective_exports(config, benchmark_name)
+    export_tail = (
+        render_export_tail(
+            remote_bench_dir,
+            [
+                (
+                    name,
+                    flatten_export_args(
+                        export_run_settings(
+                            name,
+                            settings,
+                            benchmark_name=benchmark_name,
+                            gym_job_id=remote_bench_dir.parent.name,
+                            bench_dir=remote_bench_dir,
+                        )
+                    ),
+                )
+                for name, settings in exports.items()
+            ],
+        )
+        if exports
+        else None
+    )
+    extras = tuple(
+        dict.fromkeys(
+            ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
+            + exporter_extras(benchmark.run)
+            + export_install_extras(list(exports))
+            + gitlab_storage_extras(benchmark.prepare)
+            + gitlab_storage_extras(benchmark.run)
+        )
+    )
+    if export_tail is not None:
+        # One file per attempt, so the marker of an earlier attempt of this run never counts for this one.
+        driver_env = {**driver_env, EVAL_SUCCEEDED_MARKER_ENV: f"{RUNTIME_ENV_PREFIX}{EVAL_SUCCEEDED_MARKER_ENV}"}
     entrypoint = render_driver_entrypoint(
         repo=gi.repo if gi else None,
         ref=gi.ref if gi else None,
         prepare_cmd=prepare_cmd,
         command=benchmark.command,
         record_install_failure=resume is not None,
-        extras=tuple(
-            dict.fromkeys(
-                ((GYM_TELEMETRY_EXTRA,) if instrumented else ())
-                + exporter_extras(benchmark.run)
-                + gitlab_storage_extras(benchmark.prepare)
-                + gitlab_storage_extras(benchmark.run)
-            )
-        ),
+        extras=extras,
+        export_tail=export_tail,
     )
     prepare_command = ""
     driver_env_prefix = _resolve_env(driver_env) if driver_env else ""
@@ -1185,7 +1223,7 @@ def build_sbatch_script(
     driver_srun = (
         f"{driver_env_prefix}{failure_file}srun --overlap --no-container-mount-home{driver_node_flags}{driver_mounts_flag}"
         f" --container-image={shlex.quote(config.driver.container)} "
-        f"--output=logs/driver-$SLURM_JOB_ID.log {entrypoint}"
+        f"--output={LOGS_DIRNAME}/driver-$SLURM_JOB_ID.log {entrypoint}"
     )
     if resume and benchmark.command is None:
         # Run only the saved-state reader, with the same pinned install, image and mounted artifacts as the
@@ -1222,7 +1260,14 @@ def build_sbatch_script(
         for name, service in config.deployed_services.items()
         for step in (_ray_steps(name, service, config, compute) if isinstance(service, RayServiceConfig) else [name])
     ]
-    driver_command = (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
+    marker_definition = (
+        f'{EVAL_SUCCEEDED_MARKER_ENV}={shlex.quote(str(remote_bench_dir / EVAL_SUCCEEDED_FILENAME))}".${{SLURM_JOB_ID}}"\n'
+        if export_tail is not None
+        else ""
+    )
+    driver_command = (
+        marker_definition + (f"{gym_cmd}\n" if gym_cmd else "") + _render_watched_driver(driver_srun, watched)
+    )
     if resume:
         # A job that finished the run cancels the follow-up and sentinel it queued; its status stays the driver's.
         driver_command += "\n" + render_resume_epilogue()
