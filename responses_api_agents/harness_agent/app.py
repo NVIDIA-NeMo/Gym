@@ -20,9 +20,10 @@ import socket
 import subprocess
 import tempfile
 from asyncio import Semaphore
+from collections.abc import Mapping
 from contextvars import ContextVar
 from pathlib import Path
-from typing import Any, Mapping
+from typing import Any
 from urllib.parse import urlsplit, urlunsplit
 from uuid import uuid4
 
@@ -42,6 +43,7 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     failure_kinds,
+    observe_failure,
 )
 from nemo_gym.sandbox import (
     ConnectableProvider,
@@ -52,6 +54,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.sandbox.failure_details import ended_sandbox, sandbox_failure_event
 from nemo_gym.server_runtime import NEMO_GYM_MCP_METADATA_KEY, BaseRunRequest, BaseVerifyResponse
 from nemo_gym.utils.exception_inspection import error_to_http_status, provider_error_reason, sandbox_failure_prefix
 
@@ -107,7 +110,8 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     container was OOM-killed or evicted), Gym's ``SandboxCreateError`` and ``SandboxBackendUnreachableError``, and a
     timeout or dropped connection while the episode runs (to the sandbox or to the resources server). Runner output
     never decides it, and a runner that exits on a signal stays a runner failure: the agent's own commands can send it.
-    Messages naming an OOM kill are reported as ``provider_oom_killed``, the rest as ``provider_unavailable``.
+    The provider's typed report decides an OOM kill (``provider_oom_killed``); without one, messages naming an OOM
+    kill still do (records and providers that predate the typed report); the rest are ``provider_unavailable``.
     """
     names = {cls.__name__ for cls in type(exc).__mro__}
     infra = (
@@ -117,7 +121,10 @@ def sandbox_infra_failure_kind(exc: BaseException) -> str | None:
     )
     if not infra:
         return None
-    if any(marker in str(exc) for marker in _OOM_MARKERS):
+    ended = ended_sandbox(exc)
+    if ended is not None and ended.cause == "oom":
+        return failure_kinds.PROVIDER_OOM_KILLED
+    if ended is None and any(marker in str(exc) for marker in _OOM_MARKERS):
         return failure_kinds.PROVIDER_OOM_KILLED
     return failure_kinds.PROVIDER_UNAVAILABLE
 
@@ -381,6 +388,14 @@ class HarnessAgent(SimpleResponsesAPIAgent):
                 # A dead sandbox would otherwise fail this /run with HTTP 500 and abort the whole collection.
                 LOG.warning("sandbox failed during the episode; masking this rollout: %s", exc)
                 sandbox_id = (descriptor or {}).get("sandbox_id") if isinstance(descriptor, Mapping) else None
+                ended = sandbox_failure_event(
+                    exc,
+                    sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,
+                    operation="harness.run",
+                    stage="agent" if phase == "agent" else "verification",
+                )
+                if ended is not None:
+                    observe_failure(ended)
                 facts = sandbox_failure_prefix(
                     phase=phase,
                     sandbox_id=sandbox_id if isinstance(sandbox_id, str) else None,

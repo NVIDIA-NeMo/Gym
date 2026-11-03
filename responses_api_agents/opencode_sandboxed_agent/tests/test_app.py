@@ -1761,3 +1761,69 @@ async def test_a_provider_ending_the_agents_sandbox_records_its_code_status_and_
     # The provider's own message still travels beside it, as the event's foreign error.
     own = failure_report_for(caught.value).events[caught.value.event_id]
     assert own.foreign_error.message == "Sandbox ended (OOMKilled)" and own.foreign_error.http_status == 410
+
+
+def _ended_sdk_error(reason: str, container_line: str):
+    """Shaped like the OpenSandbox SDK's SandboxApiException for a sandbox the provider ended (HTTP 410)."""
+    message = (
+        f"Sandbox box-1 has ended ({reason}): 1/1 observed pods failed; primary reason=ContainerFailed; "
+        f"sample pod=box-1-0; sample detail=Pod box-1-0 {container_line}"
+    )
+    cls = type("SandboxApiException", (Exception,), {"__module__": "opensandbox.exceptions.sandbox"})
+    error = cls(f"Get command status failed: HTTP 410: {message}")
+    error.status_code = 410
+    error.error = SimpleNamespace(code="SANDBOX::ENDED", message=message)
+    return error
+
+
+async def test_a_provider_ended_agent_sandbox_is_observed_as_a_typed_sandbox_failure(tmp_path, monkeypatch):
+    from nemo_gym.core import NgFailureEvent
+    from nemo_gym.sandbox import SandboxHandle
+    from responses_api_agents.opencode_sandboxed_agent import app as agent_app
+
+    observed = []
+    monkeypatch.setattr(agent_app, "observe_failure", observed.append)
+    error = _ended_sdk_error("OOMKilled", "container sandbox exited with code 137 (OOMKilled)")
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=error), download=AsyncMock())
+    sandbox._handle = SandboxHandle(sandbox_id="box-1", provider_name="opensandbox", raw=None)
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(NgFailureEvent) as caught:
+        await server.responses(request, body)
+    # The raised failure is unchanged: the agent route failure, caused by the provider's error.
+    assert caught.value.failure_kind == "agent_route_failed" and caught.value.__cause__ is error
+    [ended] = observed
+    assert ended.boundary == "sandbox" and ended.failure_kind == "provider_oom_killed" and ended.__cause__ is error
+    assert (ended.stage, ended.details.provider_status_reason) == ("agent", "OOMKilled")
+    assert (ended.details.sandbox_id, ended.details.provider) == ("box-1", "opensandbox")
+    assert ended.http_status == 410
+
+
+async def test_a_provider_exception_that_reports_no_ended_sandbox_observes_nothing(tmp_path, monkeypatch):
+    from nemo_gym.core import NgFailureEvent
+    from responses_api_agents.opencode_sandboxed_agent import app as agent_app
+
+    observed = []
+    monkeypatch.setattr(agent_app, "observe_failure", observed.append)
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.artifacts_dir = str(tmp_path)
+    config.preinstalled_opencode = True
+    server = OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    sandbox = MagicMock(exec=AsyncMock(side_effect=TimeoutError("status read timed out")), download=AsyncMock())
+    server._sandbox_id_to_sandbox = {"session": sandbox}
+    server._create_opencode_config = AsyncMock(return_value={})
+    request = SimpleNamespace(
+        cookies={"sandbox_id": "session"}, session={SESSION_ID_KEY: "session"}, state=SimpleNamespace()
+    )
+    body = NeMoGymResponseCreateParamsNonStreaming(input=[{"role": "user", "content": "Solve"}])
+    with raises(NgFailureEvent):
+        await server.responses(request, body)
+    assert observed == []

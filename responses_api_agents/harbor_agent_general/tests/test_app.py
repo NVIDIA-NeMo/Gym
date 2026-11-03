@@ -628,3 +628,21 @@ async def test_a_failed_trial_names_the_phase_it_was_in(tmp_path, monkeypatch, r
     message = str(raised.value)
     assert message.startswith(f"[sandbox phase={phase} ")
     assert " reason=SandboxApiException] Harbor trial failed with SandboxApiException: sandbox ended" in message
+
+
+def test_a_trial_whose_sandbox_the_provider_ended_is_observed_as_a_typed_sandbox_failure(monkeypatch):
+    from responses_api_agents.harbor_agent_general import app
+
+    report = (
+        "Sandbox box-1 has ended (OOMKilled): 1/1 observed pods failed; primary reason=ContainerFailed; "
+        "sample pod=box-1-0; sample detail=Pod box-1-0 container sandbox exited with code 137 (OOMKilled)"
+    )
+    err = RuntimeError(
+        "[sandbox phase=agent provider=opensandbox reason=SandboxApiException] Harbor trial failed with "
+        f"SandboxApiException: Get command status failed: HTTP 410: {{'code':'SANDBOX::ENDED','message':'{report}'}}"
+    )
+    ended = app._ended_sandbox(err)
+    assert ended.boundary == "sandbox" and ended.failure_kind == "provider_oom_killed" and ended.stage == "agent"
+    assert (ended.details.provider_status_reason, ended.details.sandbox_id) == ("OOMKilled", "box-1")
+    # Harbor's other failures (a verifier timeout, an environment that never started) report no ended sandbox.
+    assert app._ended_sandbox(RuntimeError("Harbor trial failed with VerifierTimeoutError: 1800 s")) is None

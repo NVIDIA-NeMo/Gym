@@ -64,6 +64,7 @@ from nemo_gym.core import (
     NeMoGymResponseUsage,
     NeMoGymSummary,
     NgFailureEvent,
+    observe_failure,
 )
 from nemo_gym.models import ResponsesConverter
 from nemo_gym.sandbox import (
@@ -75,6 +76,7 @@ from nemo_gym.sandbox import (
     resolve_provider_config,
     resolve_provider_metadata,
 )
+from nemo_gym.sandbox.failure_details import sandbox_failure_event
 from nemo_gym.server_runtime import (
     BaseRunRequest,
     BaseVerifyRequest,
@@ -1042,7 +1044,22 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
             )
         except Exception as error:
             # A provider exception does not establish how the command ended: report it at the agent boundary, with
-            # the sandbox facts known here, rather than grade a substituted partial run.
+            # the sandbox facts known here, rather than grade a substituted partial run. A provider-ended sandbox is
+            # observed beside it as a typed sandbox failure.
+            handle = getattr(sandbox, "_handle", None)
+            ended = sandbox_failure_event(
+                error,
+                provider=getattr(handle, "provider_name", None)
+                if isinstance(getattr(handle, "provider_name", None), str)
+                else None,
+                sandbox_id=getattr(handle, "sandbox_id", None)
+                if isinstance(getattr(handle, "sandbox_id", None), str)
+                else None,
+                operation="agent.sandbox_exec",
+                stage="agent",
+            )
+            if ended is not None:
+                observe_failure(ended)
             raise NgFailureEvent(
                 boundary="agent",
                 failure_kind=AGENT_ROUTE_FAILED,

@@ -17,6 +17,7 @@ import asyncio
 import json
 import logging
 import os
+import re
 import sys
 import time
 from collections.abc import Iterator
@@ -55,8 +56,10 @@ from nemo_gym.core import (
     NeMoGymResponseOutputText,
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
+    observe_failure,
 )
 from nemo_gym.metrics import compute_pass_majority_metrics
+from nemo_gym.sandbox.failure_details import sandbox_failure_event
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
 from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
@@ -244,6 +247,19 @@ _HARBOR_PHASES = (
 )
 
 
+_PHASE_FACT = re.compile(r"^\[sandbox phase=(setup|agent|verify|unknown)\b")
+_HARBOR_STAGES = {"setup": "seed", "agent": "agent", "verify": "verification", "unknown": None}
+
+
+def _ended_sandbox(err: Exception):
+    """The typed sandbox failure a failed trial's error reports (Harbor carries the provider's report in its
+    exception message), in the phase ``run_job`` named; None when the provider did not report an ended sandbox."""
+    cause = getattr(err, "cause", None) or err
+    phase_fact = _PHASE_FACT.match(str(cause))
+    phase = phase_fact.group(1) if phase_fact else "unknown"
+    return sandbox_failure_event(cause, operation="harbor.trial", stage=_HARBOR_STAGES[phase])
+
+
 def _running_phase(result: object) -> str:
     """The phase a failed Harbor trial or step result was in: the last timed phase that started and did not finish,
     else ``unknown``."""
@@ -330,6 +346,9 @@ class HarborAgent(SimpleResponsesAPIAgent):
                     body.task_index,
                     body.rollout_index,
                 )
+                ended = _ended_sandbox(err)
+                if ended is not None:
+                    observe_failure(ended)
                 return self.failure_response(body, err)
 
     @staticmethod
