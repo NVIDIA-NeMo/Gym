@@ -23,14 +23,14 @@ from nemo_gym.config.config_types import (
     UploadJsonlDatasetHuggingFaceMaybeDeleteConfig,
 )
 from nemo_gym.config.global_config import GlobalConfigDictParserConfig, get_global_config_dict
-from nemo_gym.dataset_orchestrator import (
+from nemo_gym.data.dataset_orchestrator import (
     delete_jsonl_dataset_from_gitlab,
     upload_jsonl_dataset_to_hf_maybe_delete,
 )
-from nemo_gym.gitlab_utils import download_jsonl_dataset, upload_jsonl_dataset
-from nemo_gym.hf_utils import download_hf_dataset_as_jsonl
-from nemo_gym.prompt import MaterializePromptsConfig, materialize_prompts
-from nemo_gym.train_data_utils import TrainDataProcessor
+from nemo_gym.data.dataset_preparation import TrainDataProcessor
+from nemo_gym.data.gitlab_utils import download_jsonl_dataset, upload_jsonl_dataset
+from nemo_gym.data.hf_utils import download_hf_dataset_as_jsonl
+from nemo_gym.data.prompt import MaterializePromptsConfig, materialize_prompts
 
 
 @exit_cleanly_on_config_error

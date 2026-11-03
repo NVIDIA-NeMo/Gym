@@ -8,9 +8,9 @@ import pytest
 from omegaconf import DictConfig
 
 from nemo_gym.config.config_types import ResponsesAPIAgentServerInstanceConfig
-from nemo_gym.tasks.harbor.cli import prepare_target
-from nemo_gym.tasks.harbor.materialize import dataset_entry
-from nemo_gym.train_data_utils import TrainDataProcessor, TrainDataProcessorConfig
+from nemo_gym.data.dataset_preparation import TrainDataProcessor, TrainDataProcessorConfig
+from nemo_gym.data.tasks.harbor.materialize import dataset_entry
+from nemo_gym.data.tasks.harbor.prepare import prepare_target
 from tests.unit_tests.test_harbor_tasks import write_task
 
 
