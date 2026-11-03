@@ -4,6 +4,7 @@
 import ast
 import json
 import os
+import runpy
 import shlex
 import shutil
 import subprocess
@@ -12,6 +13,9 @@ from pathlib import Path
 
 import pytest
 
+import nemo_gym.orchestration.build_containers as build_containers
+from nemo_gym.cli.main import main as cli_main
+from nemo_gym.global_config import GlobalConfigDictParser, GlobalConfigDictParserConfig
 from nemo_gym.orchestration.build_containers import BuildContainerConfig, FlashInferBuilder, FlashInferConfig
 
 
@@ -139,3 +143,47 @@ def test_flashinfer_command_rejects_invalid_patterns(builder, pattern):
     builder.config.invalidate_modules = [pattern]
     with pytest.raises(ValueError, match="Invalid FlashInfer module"):
         builder.get_srun_command_str()
+
+
+@pytest.mark.parametrize("entrypoint", ["gym", "module"])
+def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
+    config = tmp_path / "build.yaml"
+    config.write_text(
+        "input_container_fpath: base.sqsh\n"
+        "output_container_fpath: output.sqsh\n"
+        "flashinfer:\n"
+        "  repo: https://example.invalid/flashinfer.git\n"
+        "  branch: main\n"
+        "  invalidate_modules: [fused_moe_trtllm_sm100]\n"
+        "  cpus_per_task: 128\n"
+    )
+    override = tmp_path / "override.yaml"
+    override.write_text("flashinfer:\n  branch: dev\n")
+    monkeypatch.chdir(tmp_path)
+    # Exercise real config composition without reading developer credentials or
+    # launching subprocesses, copying images, or submitting a Slurm job.
+    monkeypatch.setattr(
+        build_containers,
+        "get_global_config_dict",
+        lambda: GlobalConfigDictParser().parse(GlobalConfigDictParserConfig(skip_load_from_dotenv=True)),
+    )
+    captured = []
+
+    async def capture_run(self):
+        captured.append(self.config)
+
+    monkeypatch.setattr(build_containers.BuildContainerHelper, "run", capture_run)
+    args = ["--config", str(config), "--config", str(override), "++flashinfer.cpus_per_task=64"]
+    if entrypoint == "gym":
+        monkeypatch.setattr(sys, "argv", ["gym", "build-containers", *args])
+        cli_main()
+    else:
+        monkeypatch.setattr(sys, "argv", [build_containers.__file__, *args])
+        runpy.run_path(build_containers.__file__, run_name="__main__")
+    assert len(captured) == 1
+    resolved = captured[0]
+    assert resolved.input_container_fpath == (tmp_path / "base.sqsh").resolve()
+    assert resolved.output_container_fpath == (tmp_path / "output.sqsh").resolve()
+    assert resolved.flashinfer.branch == "dev"
+    assert resolved.flashinfer.cpus_per_task == 64
+    assert resolved.flashinfer.invalidate_modules == ["fused_moe_trtllm_sm100"]

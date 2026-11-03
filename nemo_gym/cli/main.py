@@ -782,6 +782,11 @@ GROUPS = {
 
 # NOTE: none of the flags are argparse-required (every value can also be supplied as a Hydra `+key=value` override).
 COMMANDS = {
+    "build-containers": Command(
+        target="nemo_gym.orchestration.build_containers:main",
+        summary="Build container images using configured Slurm stages.",
+        flags=(CONFIG,),
+    ),
     "list benchmarks": Command(
         target=_list_benchmarks,
         summary="List or inspect available benchmarks.",

@@ -364,7 +364,18 @@ srun \\
         return await _run_command(srun_command_str, self.config.log_file)
 
 
-if __name__ == "__main__":
+def main() -> None:
+    """Run container build stages using Gym's resolved configuration."""
     global_config_dict = get_global_config_dict()
     bch = BuildContainerHelper(config=BuildContainerConfig.model_validate(global_config_dict))
     asyncio.run(bch.run())
+
+
+if __name__ == "__main__":
+    import sys
+
+    from nemo_gym.cli.main import main as cli_main
+
+    # Share --config translation and override handling with `gym build-containers`.
+    sys.argv.insert(1, "build-containers")
+    cli_main()
