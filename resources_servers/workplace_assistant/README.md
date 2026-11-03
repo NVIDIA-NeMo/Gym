@@ -33,7 +33,7 @@ An Environment Server, such as `single_agent_turn`, seeds the session with a typ
 
 A tool call for a session the server no longer holds (never seeded, closed, or lost with a restart) gets 404 with `failure_kind: session_lost`, and its `/verify` returns a masked sample (`reward: 0`, `mask_sample: true`).
 
-The `/run` seed is kept for compatibility. The configs in `configs/` still front `simple_agent` with the `legacy_agent` relay, so the agent's `/run` seeds with its run body under the session cookie. The server keeps accepting that body so these configs run unchanged until they switch. That caller never closes the session, so `/verify` releases its databases. To run the configs through `single_agent_turn_legacy` instead, switch them:
+The `/run` seed is kept for compatibility. The configs in `configs/` still front `simple_agent` with the `legacy_agent` relay, so the agent's `/run` seeds with its run body under the session cookie. The server keeps accepting that body so these configs run unchanged until they switch. That caller never closes the session, so `/verify` releases its databases; a verify the HTTP client sends again after a dropped connection is still scored for `session_close_retry_window_seconds`. To run the configs through `single_agent_turn_legacy` instead, switch them:
 
 ```bash
 python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent resources_servers/workplace_assistant/configs/

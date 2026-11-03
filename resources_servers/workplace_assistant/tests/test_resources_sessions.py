@@ -192,6 +192,17 @@ def test_an_agents_run_seed_still_gets_a_session_that_verify_releases() -> None:
 
     assert (verified["reward"], verified["mask_sample"]) == (1.0, False)
     assert server.session_id_to_tool_env == {}
+    # The HTTP client sends a verify again when its connection drops after the server answered.
+    resent = client.post("/verify", json=verify_json(SEND)).json()
+    assert (resent["reward"], resent["mask_sample"]) == (1.0, False)
+
+
+def test_an_agents_run_verify_without_a_seed_is_masked() -> None:
+    client = TestClient(make_server().setup_webserver())
+
+    verified = client.post("/verify", json=verify_json(SEND)).json()
+
+    assert (verified["reward"], verified["mask_sample"], verified["failure_kind"]) == (0.0, True, SESSION_LOST)
 
 
 def test_mcp_tool_calls_reach_the_tables_seeded_under_the_callers_id() -> None:

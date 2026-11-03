@@ -28,6 +28,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedRejectedError,
@@ -142,10 +143,14 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
     # releases the sessions it seeds.
     _typed_sessions: Dict[str, tuple[EpisodeId, TaskId]] = PrivateAttr(default_factory=dict)
     _fence: ResourcesSessionFence = PrivateAttr()
+    # Sessions of an Agent's /run whose verify released them. The HTTP client sends a verify again when the
+    # connection drops, and the score reads only the request, so that resend is scored rather than masked.
+    _verified_run_sessions: ClosedResourcesSessionRecords[None] = PrivateAttr()
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
+        self._verified_run_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
 
     def setup_webserver(self) -> FastAPI:
         app = super().setup_webserver()
@@ -227,7 +232,7 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
 
     async def verify(self, request: Request, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
         session_id = request.session[SESSION_ID_KEY]
-        if session_id not in self.session_id_to_tool_env:
+        if session_id not in self.session_id_to_tool_env and session_id not in self._verified_run_sessions:
             # Never seeded, closed, or gone with a restart: the agent's tool calls had no tables to act on,
             # so replaying them would not measure the policy.
             lost = lost_session_verification("No seeded workplace_assistant session for this verify")
@@ -254,8 +259,11 @@ class WorkbenchResourcesServer(SimpleResourcesServer):
             total_score += is_correct(predicted_function_calls, ground_truth, None) * 1.0
             return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
         finally:
-            if session_id not in self._typed_sessions:
-                self.session_id_to_tool_env.pop(session_id, None)
+            if (
+                session_id not in self._typed_sessions
+                and self.session_id_to_tool_env.pop(session_id, None) is not None
+            ):
+                self._verified_run_sessions.remember(session_id, None)
 
     async def export_session_states(self, session_ids: list[str]) -> dict[str, JsonValue]:
         # A session verify already discarded, for example because it raised, is left out.
