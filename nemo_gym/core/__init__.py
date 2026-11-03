@@ -33,6 +33,7 @@ if TYPE_CHECKING:
     from nemo_gym.core.failure_kinds import (
         AGENT_INVALID_OUTPUT,
         AGENT_LIMIT,
+        AGENT_ROUTE_FAILED,
         AGENT_TIMEOUT,
         ENVIRONMENT_SERVER_FAILED,
         JUDGE_FAILED,
@@ -102,8 +103,10 @@ if TYPE_CHECKING:
 # What code outside the library, such as servers, imports from this package. Each name's submodule loads
 # on first use. Code inside nemo_gym imports the submodules directly.
 _PUBLIC_API = {
+    "current_verifier_invocation_id": "episode",
     "AGENT_INVALID_OUTPUT": "failure_kinds",
     "AGENT_LIMIT": "failure_kinds",
+    "AGENT_ROUTE_FAILED": "failure_kinds",
     "AGENT_TIMEOUT": "failure_kinds",
     "CHAT_REQUEST_PROVIDER_EXTENSION_FIELDS": "responses_api_types",
     "ENVIRONMENT_SERVER_FAILED": "failure_kinds",

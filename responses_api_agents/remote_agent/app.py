@@ -47,7 +47,7 @@ from pydantic import ConfigDict, PrivateAttr, field_validator
 from pydantic import ValidationError as PydanticValidationError
 
 from nemo_gym.agents import BaseResponsesAPIAgentConfig, SimpleResponsesAPIAgent
-from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_PERSIST_KEY
+from nemo_gym.artifacts import NG_FAILURE_CLASS_KEY, NG_NO_GENERATION_METADATA, NG_NO_PERSIST_KEY
 from nemo_gym.client import (
     get_response_json,
     is_global_aiohttp_client_request_debug_enabled,
@@ -487,6 +487,8 @@ class RemoteAgent(SimpleResponsesAPIAgent):
             created_at=0.0,
             model="remote_agent",
             object="response",
+            # No generation happened: recovery must not keep this placeholder as the model's answer.
+            metadata=dict(NG_NO_GENERATION_METADATA),
             output=[
                 {
                     "type": "message",

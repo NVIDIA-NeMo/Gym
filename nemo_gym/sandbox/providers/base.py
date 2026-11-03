@@ -21,6 +21,11 @@ from pathlib import Path
 from typing import Any, Protocol, runtime_checkable
 from urllib.parse import urlsplit
 
+from nemo_gym.core.failure_kinds import PROVIDER_CREDENTIALS_REJECTED, FailureStage
+from nemo_gym.exception_inspection import error_to_http_status
+from nemo_gym.server_runtime.episode_types import FailureBoundary
+from nemo_gym.typed_exceptions import NgFailureEvent, sdk_error_details
+
 
 # How long a provider may spend finding and deleting the sandbox a timed-out create left behind (one list
 # and one delete per orphan). A caller that puts its own deadline on a create leaves at least this much room
@@ -260,6 +265,35 @@ class SandboxPtySpec:
 
 class SandboxPtyError(RuntimeError):
     """Raised when a PTY session fails outside normal process exit."""
+
+
+def sandbox_credentials_rejected(
+    error: BaseException,
+    *,
+    boundary: FailureBoundary,
+    operation: str,
+    stage: FailureStage | None = None,
+    sdk_message: str | None = None,
+) -> NgFailureEvent | None:
+    """The failure for ``error`` when its HTTP status is 401 or 403, caused by ``error``; else ``None``.
+
+    The kind comes from the status only, never from the error's text. ``sdk_message`` is the diagnostic
+    the caller selected for the provider's SDK (see ``sdk_error_details``).
+    """
+    status = error_to_http_status(error)
+    if status not in (401, 403):
+        return None
+    rejected = NgFailureEvent(
+        boundary=boundary,
+        failure_kind=PROVIDER_CREDENTIALS_REJECTED,
+        failure_reason=f"Sandbox provider refused the credentials (HTTP {status})",
+        operation=operation,
+        stage=stage,
+        http_status=status,
+        foreign_error=sdk_error_details(error, message=sdk_message),
+    )
+    rejected.__cause__ = error
+    return rejected
 
 
 class SandboxCreateError(RuntimeError):

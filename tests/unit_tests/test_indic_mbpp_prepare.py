@@ -257,8 +257,8 @@ def test_native_config_reuses_prompt_agent_and_verifier():
         )
     en, indic = configs
     assert "responses_create_params" not in OmegaConf.load(module.BENCHMARK_DIR / "config.yaml")
-    assert indic.policy_model.responses_api_models.vllm_model.sampling_overrides is None
-    assert indic.policy_model.responses_api_models.vllm_model.chat_template_kwargs is None
+    assert indic.policy_model.responses_api_models.vllm_model.get("sampling_overrides") is None
+    assert indic.policy_model.responses_api_models.vllm_model.get("chat_template_kwargs") is None
     original = OmegaConf.to_container(en.mbpp_evalplus_simple_agent.responses_api_agents.simple_agent, resolve=True)
     translated = OmegaConf.to_container(indic.indic_mbpp_simple_agent.responses_api_agents.simple_agent, resolve=True)
     assert original["datasets"][0]["prompt_config"] == translated["datasets"][0]["prompt_config"]

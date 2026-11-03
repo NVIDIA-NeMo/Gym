@@ -18,11 +18,12 @@ from unittest.mock import AsyncMock, MagicMock, call
 
 from fastapi.testclient import TestClient
 from pydantic import ValidationError
-from pytest import fixture, raises
+from pytest import fixture
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef, ResourcesServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponseCreateParamsNonStreaming
+from nemo_gym.testing.failure_assertions import raises_agent_failure
 from responses_api_agents.tool_simulation_agent.app import ToolSimulationAgent, ToolSimulationAgentConfig
 
 
@@ -105,7 +106,7 @@ class TestApp:
             "id": "no_created_at",
         }
         self._set_server_client_post_responses(server_client_post_mock, no_time_response_object)
-        with raises(RuntimeError, match="Received an invalid response from the model server: "):
+        with raises_agent_failure(RuntimeError, match="Received an invalid response from the model server: "):
             test_client.post(
                 "/v1/responses",
                 json={
@@ -234,7 +235,7 @@ class TestApp:
             "id": "no_model",
         }
         self._set_server_client_post_responses(server_client_post_mock, no_model_response_object)
-        with raises(ValidationError, match="ToolSimulationAgentVerifyRequest"):
+        with raises_agent_failure(ValidationError, match="ToolSimulationAgentVerifyRequest"):
             test_client.post(
                 "/run",
                 json={
@@ -284,7 +285,7 @@ class TestApp:
         self._set_server_client_post_responses(
             server_client_post_mock, tool_call_response_object, invalid_verify_response_object
         )
-        with raises(ValidationError, match="ToolSimulationAgentVerifyResponse"):
+        with raises_agent_failure(ValidationError, match="ToolSimulationAgentVerifyResponse"):
             test_client.post(
                 "/run",
                 json={

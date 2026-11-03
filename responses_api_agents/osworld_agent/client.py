@@ -48,6 +48,7 @@ from responses_api_agents.osworld_agent.rollout_outcome import (
 from responses_api_agents.osworld_agent.runner_registry import load_attr, resolve_runner_spec
 from responses_api_agents.osworld_agent.runtime_errors import (
     OSWorldActionTimeoutError,
+    OSWorldGuestStartTimeoutError,
     OSWorldModelTimeoutError,
 )
 
@@ -157,6 +158,10 @@ class RolloutResult:
     # Resolved Gym-owned model/history behavior. It is deliberately distinct
     # from request-owned sampling parameters and infrastructure provenance.
     agent_contract: Optional[Dict[str, Any]] = None
+    # Set when the sandbox guest never became ready for an infrastructure reason:
+    # {"provider", "http_status", "message", "sandbox_id"}. The agent reports it as a
+    # retryable infrastructure_error instead of a masked result.
+    sandbox_start_failure: Optional[Dict[str, Any]] = None
 
     def __post_init__(self) -> None:
         for field_name in (
@@ -1256,6 +1261,18 @@ def _safe_task_id(task_config: Dict[str, Any]) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", raw)[:120] or "unknown"
 
 
+def _guest_start_timeout(error: BaseException) -> Optional[OSWorldGuestStartTimeoutError]:
+    """The guest start timeout ``error`` is or was raised from, if any (the OSWorld environment may wrap it)."""
+    seen: set[int] = set()
+    current: Optional[BaseException] = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, OSWorldGuestStartTimeoutError):
+            return current
+        seen.add(id(current))
+        current = current.__cause__ or current.__context__
+    return None
+
+
 def _safe_artifact_component(value: Any, *, fallback: str = "unknown") -> str:
     component = re.sub(r"[^A-Za-z0-9_.-]+", "_", str(value or fallback)).strip("._")
     return component[:120] or fallback
@@ -1873,6 +1890,7 @@ def run_osworld_task(
     operation_failure_reason: Optional[str] = None
     evaluation_error: Optional[str] = None
     proxy_setup_error = False
+    sandbox_start_failure: Optional[Dict[str, Any]] = None
     rollout_phase = "before_environment"
     task_start = time.monotonic()
     recording_path: Optional[str] = None
@@ -2555,6 +2573,14 @@ def run_osworld_task(
     except Exception as exc:  # noqa: BLE001 — top-level guard so caller sees error not crash.
         proxy_setup_error = bool(requires_proxy and enable_proxy and rollout_phase == "environment_reset")
         error = f"{type(exc).__name__}: {exc}\n{traceback.format_exc()}"
+        start_timeout = _guest_start_timeout(exc)
+        if start_timeout is not None and start_timeout.is_infrastructure_failure:
+            sandbox_start_failure = {
+                "provider": start_timeout.provider,
+                "http_status": start_timeout.http_status,
+                "message": str(start_timeout),
+                "sandbox_id": start_timeout.sandbox_id,
+            }
         LOG.exception("OSWorld rollout failed before evaluation")
     finally:
         if pointer_io_context_token is not None:
@@ -2646,6 +2672,7 @@ def run_osworld_task(
         artifact_dir=task_artifacts.directory if task_artifacts is not None else None,
         termination_reason=outcome.termination_reason,
         agent_contract=effective_agent_contract,
+        sandbox_start_failure=sandbox_start_failure,
     )
     _finalize_task_artifacts(
         task_artifacts,

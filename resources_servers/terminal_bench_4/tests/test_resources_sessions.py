@@ -36,6 +36,8 @@ OTHER_TASK = "batched-eval-parity"
 class FakeEnvironment:
     def __init__(self, workdir: str = "/app") -> None:
         self.workdir = workdir
+        self.main = None
+        self.uses_compose = False
         self.closed = False
         self.stops = 0
         self.stop_error: Exception | None = None
@@ -585,3 +587,54 @@ def test_legacy_seed_and_verify_shapes_still_route_to_the_tb4_session_path(harne
             },
         )
         assert unknown.status_code == 404
+
+
+def test_registered_native_verify_binds_owned_sandbox_lifecycle(tmp_path, monkeypatch):
+    # Actual native session route and AsyncSandbox lifecycle; provisioning and grade are controlled.
+    from nemo_gym.sandbox import AsyncSandbox, SandboxHandle, SandboxSpec
+
+    original_prepare = Harness._prepare
+    original_stop = FakeEnvironment.stop
+
+    class Provider:
+        def __init__(self, identity):
+            self.identity = identity
+
+        async def create(self, spec):
+            return SandboxHandle(self.identity, "scripted-sdk", None)
+
+        async def close(self, handle):
+            return None
+
+        async def aclose(self):
+            return None
+
+    async def prepare(self, session):
+        await original_prepare(self, session)
+        for role, environment in (("agent", session.environment), ("verifier", session.verifier_environment)):
+            environment.main = AsyncSandbox(Provider(role), SandboxSpec(image="scripted"))
+            await environment.main.start()
+
+    async def stop(environment):
+        await environment.main.stop()
+        await original_stop(environment)
+
+    monkeypatch.setattr(Harness, "_prepare", prepare)
+    monkeypatch.setattr(FakeEnvironment, "stop", stop)
+    harness = Harness(tmp_path, monkeypatch, sandbox_provider_ref="task_sandbox")
+    harness.server.server_client.global_config_dict = {"observability_enabled": True}
+    with TestClient(harness.server.setup_webserver()) as client:
+        seed = client.post("/ng-rollout/native-lifecycle/seed_session", json=harness.seed().model_dump(mode="json"))
+        assert seed.status_code == 200
+        verified = client.post("/ng-rollout/native-lifecycle/verify", json=harness.verify_body())
+        assert verified.status_code == 200, verified.text
+        result = verified.json()
+        invocation = result["ng_verifier_invocations"][0]
+        assert invocation["status"] == "completed"
+        assert invocation.get("grading_operations") is None
+        facts = invocation["sandbox_observations"]
+        assert [(fact["role"], fact["sandbox_id"]) for fact in facts] == [("agent", "agent"), ("verifier", "verifier")]
+        assert all(fact["teardown_confirmed"] is True and fact["observed_client_interval_s"] >= 0 for fact in facts)
+        assert all(fact["outcome"] == "unknown" for fact in facts)
+        assert result["reward"] == 0 and result["partial_credit"] == 0.75
+        assert harness.graded == [True]

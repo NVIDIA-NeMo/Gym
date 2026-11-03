@@ -435,7 +435,8 @@ async def test_health_on_and_off_leave_collection_and_metrics_byte_identical(
             "failures": output_path.with_name("rollouts_failures.jsonl").read_bytes(),
             "metrics": output_path.with_name("rollouts_aggregate_metrics.json").read_bytes(),
         }
-        assert (run_dir / "quality_summary.json").exists() is (not disabled)
+        summary = json.loads((run_dir / "quality_summary.json").read_text())["run"]["artifacts"]
+        assert (summary["state"], summary["healthy"]) == (("disabled", None) if disabled else ("observed", True))
         assert (run_dir / "rollout_verdicts.jsonl").exists() is (not disabled)
         if not disabled:
             assert "Finished rollout collection" in stdout
@@ -2502,9 +2503,94 @@ def test_summary_leaves_expected_missing_and_healthy_unknown_without_materialize
     artifacts = run_health_checks(rollout_path, workers=1).summary["run"]["artifacts"]
 
     assert (artifacts["expected"], artifacts["missing"], artifacts["healthy"]) == (None, None, None)
+    assert (artifacts["state"], artifacts["state_reason"]) == ("unavailable", "no inventory of the expected rollouts")
+    # The record has no reward: it completed, and nothing was scored.
+    assert (artifacts["completed"], artifacts["scored"]) == (1, 0)
     assert artifacts["unhealthy_reasons"] == []
     # No sidecar: nothing was measured, so not a count of 0.
     assert artifacts["failed"] is None
+
+
+def _all_failed_run(root: Path) -> Path:
+    """Eight expected rollouts, eight final failures and no result."""
+    rollout_path = _write_fixture(root, [])
+    _inventory(root, 8)
+    (root / "rollouts_failures.jsonl").write_bytes(
+        b"".join(
+            orjson.dumps(
+                {
+                    "_ng_task_index": task,
+                    "_ng_rollout_index": 0,
+                    "_ng_failure_class": "agent_run_error",
+                    "_ng_failure_terminal": True,
+                }
+            )
+            + b"\n"
+            for task in range(8)
+        )
+    )
+    return rollout_path
+
+
+# The coverage a run manifest gives for the same run: no result, eight failures that a resume does not retry.
+_ALL_FAILED_COVERAGE = {
+    "expected": 8,
+    "successful": 0,
+    "measured": 0,
+    "missing": 0,
+    "not_started": 0,
+    "intentionally_omitted": 0,
+    "failed_final": 8,
+    "failed_not_final": 0,
+    "failed_by_class": {"agent_run_error": 8},
+}
+
+
+@pytest.mark.parametrize("coverage", [None, _ALL_FAILED_COVERAGE], ids=["sidecar", "manifest"])
+def test_a_run_whose_every_rollout_failed_is_unhealthy_and_says_why(tmp_path: Path, coverage: dict | None) -> None:
+    """Failures alone judge nothing until a limit is set, but 8 expected, 8 failed and 0 scored is never healthy."""
+    rollout_path = _all_failed_run(tmp_path)
+
+    artifacts = run_health_checks(rollout_path, workers=1, run_coverage=[coverage]).summary["run"]["artifacts"]
+
+    assert artifacts["state"] == "observed"
+    assert (artifacts["expected"], artifacts["completed"], artifacts["scored"], artifacts["missing"]) == (8, 0, 0, 0)
+    assert artifacts["failed"] == {"total": 8, "final": 8, "not_final": 0, "by_class": {"agent_run_error": 8}}
+    assert artifacts["healthy"] is False
+    assert artifacts["unhealthy_reasons"] == ["none of 8 rollouts completed"]
+
+
+def test_completed_counts_results_and_scored_counts_only_unmasked_rewards(tmp_path: Path) -> None:
+    rows = [
+        ({**_record(0, 0), "reward": 1.0}, [_call()]),
+        ({**_record(1, 0), "reward": 0.0, "mask_sample": True}, [_call()]),
+        (_record(2, 0), [_call()]),
+    ]
+    rollout_path = _write_fixture(tmp_path, rows)
+    _inventory(tmp_path, 4)
+
+    artifacts = run_health_checks(rollout_path, workers=1).summary["run"]["artifacts"]
+
+    assert (artifacts["expected"], artifacts["completed"], artifacts["scored"], artifacts["missing"]) == (4, 3, 1, 1)
+    assert artifacts["unhealthy_reasons"] == ["missing 1 of 4"]
+
+
+def test_a_disabled_check_is_recorded_as_disabled_not_as_a_healthy_run(tmp_path: Path) -> None:
+    """Disabling the check stays distinguishable from validating the run: no count, no verdict, and the state."""
+    rollout_path = _all_failed_run(tmp_path)
+    (tmp_path / "rollout_verdicts.jsonl").write_text("{}\n")  # A report an earlier check left.
+    config = RolloutCollectionConfig(input_jsonl_fpath="unused.jsonl", output_jsonl_fpath=str(rollout_path))
+
+    health._health_check_collected_rollouts(rollout_path, config, disabled=True)
+
+    run = json.loads((tmp_path / "quality_summary.json").read_text())["run"]
+    assert run["artifacts"]["state"] == "disabled"
+    assert run["artifacts"]["state_reason"] == "disable_health_check is set"
+    assert run["artifacts"]["healthy"] is None
+    assert [run["artifacts"][key] for key in ("expected", "completed", "scored", "failed", "missing")] == [None] * 5
+    assert run["artifacts"]["not_evaluated"] == sorted(spec.id for spec in CHECK_REGISTRY)
+    assert run["rollouts"] == ["rollouts.jsonl"]
+    assert not (tmp_path / "rollout_verdicts.jsonl").exists()
 
 
 def test_failed_collection_still_writes_quality_summary_with_counts(
@@ -2606,6 +2692,10 @@ cli_eval.collect_rollouts()
     summary = json.loads((tmp_path / "quality_summary.json").read_text())
     artifacts = summary["run"]["artifacts"]
     assert (artifacts["partial"], artifacts["expected"], artifacts["missing"]) == (True, 3, 2)
+    assert (artifacts["state"], artifacts["state_reason"]) == (
+        "unavailable",
+        "the run stopped before its rollouts were read",
+    )
     assert artifacts["healthy"] is False
     assert artifacts["unhealthy_reasons"] == ["missing 2 of 3"]
     assert "verdicts" not in summary["run"]
@@ -3193,3 +3283,33 @@ class TestFailureGroupsAreNamedByRetry:
 
         _, overrides = _dispatch_for(monkeypatch, ["eval", command, "--health-max-not-final-failure-fraction", "0.05"])
         assert overrides == ["+health_check_max_not_final_failure_fraction=0.05"]
+
+
+@pytest.mark.parametrize(
+    "responses",
+    [
+        None,
+        {"selected": 1600, "faulted": 36, "unknown": 0, "duplicated": 0},
+        {"selected": 0, "faulted": 0, "unknown": 2, "duplicated": 1},
+    ],
+)
+def test_console_distinguishes_rollout_checks_from_response_population(responses, tmp_path):
+    from copy import deepcopy
+    from types import SimpleNamespace
+
+    summary = {"run": {"verdicts": {"healthy": 1599, "unhealthy": 1, "unobserved": 0}, "stats": {}}}
+    if responses is not None:
+        summary["run"]["stats"]["responses"] = responses
+    original = deepcopy(summary)
+    report = health.format_health_report(
+        SimpleNamespace(summary=summary, summary_path=tmp_path / "quality_summary.json")
+    )
+    assert "Rollout checks: 1600 checked, 1599 passed, 1 flagged, 0 unobserved" in report
+    assert "Rollout health:" not in report
+    if responses is None:
+        assert "Model responses:" not in report
+    else:
+        assert f"Model responses: {responses['faulted']}/{responses['selected']} faulted" in report
+        assert f"{responses['unknown']} rollout scopes unobserved" in report
+        assert f"{responses['duplicated']} duplicate call IDs" in report
+    assert summary == original
