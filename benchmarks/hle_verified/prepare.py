@@ -26,7 +26,7 @@ import json
 from pathlib import Path
 from typing import Any, Optional, Union
 
-from nemo_gym.vision_input import build_image_input
+from nemo_gym.data import build_image_input
 
 
 BENCHMARK_DIR = Path(__file__).parent
@@ -133,7 +133,7 @@ def prepare(
 
     from datasets import load_dataset
 
-    from nemo_gym.global_config import HF_TOKEN_KEY_NAME, get_global_config_dict
+    from nemo_gym.config import HF_TOKEN_KEY_NAME, get_global_config_dict
 
     print(f"Downloading {REPO_ID} from HuggingFace...")
     hf_token = get_global_config_dict().get(HF_TOKEN_KEY_NAME)
@@ -141,7 +141,7 @@ def prepare(
 
     prompt_config = None
     if include_vision:
-        from nemo_gym.prompt import load_prompt_config
+        from nemo_gym.data import load_prompt_config
 
         prompt_config = load_prompt_config(str(PROMPT_CONFIG_FPATH))
 

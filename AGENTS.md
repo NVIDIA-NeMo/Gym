@@ -99,7 +99,7 @@ For guidance on how to build environments, see `fern/versions/latest/pages/envir
 
 Servers communicate via `ServerClient`, which wraps aiohttp with retry logic (3 tries, exponential backoff) and connection pooling via a singleton aiohttp client.
 
-- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.server_utils.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
+- **Use aiohttp, not httpx, for async HTTP.** All async HTTP calls must go through NeMo Gym's global aiohttp client (`nemo_gym.client.http_client.request()`). Do not use `httpx.AsyncClient` — httpx/httpcore has O(n^2) connection pooling that causes hangs at high concurrency (16k+ requests). When wrapping external libraries that use httpx internally, replace their HTTP transport with an aiohttp adapter. See `resources_servers/tavily_search/app.py` (`TavilySearchAIOHTTPClient`) for the adapter pattern.
 - **Propagate session cookies** through all downstream calls (`cookies=request.cookies`) for stateful environments.
 - Use `asyncio.Semaphore` to bound concurrent subprocess/external calls
 - For Ray remote tasks in async code: `result = await future` (Ray futures are directly awaitable). Never call `ray.get()` directly in async context.
@@ -130,7 +130,7 @@ Servers and agent harnesses run tasks in remote sandboxes through `nemo_gym.sand
 
 - **Keep the `nemo_gym.sandbox` public API minimal and lifecycle-only**: create/start, exec, upload/download, stop
   (and provider capabilities such as pause/resume or endpoints). Put utilities and helpers built on top of it outside
-  `nemo_gym.sandbox`, for example in `nemo_gym/agent_utils/` or the server that uses them.
+  `nemo_gym.sandbox`, for example in `nemo_gym/agents/utils/` or the server that uses them.
 - **Resolve providers from config** with `resolve_provider_config(sandbox_provider, global_config_dict)` and merge
   `resolve_provider_metadata(...)` into `SandboxSpec.metadata`. Do not hard-code a provider or parse provider blocks by
   hand. Merge metadata as provider defaults, then `sandbox_config.metadata`, then per-task labels, and keep label
@@ -170,7 +170,7 @@ gym env test --all
 pytest tests/unit_tests/ -x
 
 # Run a single test file
-pytest tests/unit_tests/test_openai_utils.py -x
+pytest tests/unit_tests/client/test_openai_client.py -x
 
 # Lint and format
 ruff check --fix .
@@ -188,6 +188,22 @@ gym dev test
 # Dump merged config
 gym env resolve --config ...
 ```
+
+## Imports from nemo_gym
+
+- Code outside `nemo_gym/` and its tests (servers and their tests, benchmarks, scripts, and code samples in docs
+  and skills) imports public names from the package's public API: `from nemo_gym.<package> import Name`. If such
+  code needs a name the package does not export, add it to the package's `_PUBLIC_API` in its `__init__.py` rather
+  than importing the submodule. `scripts/migrate_imports.py` writes this form, and a unit test checks it.
+- A subpackage that is a namespace of its own, such as a task format (`nemo_gym.data.tasks.harbor`), has its own
+  public API. Code outside `nemo_gym/` imports that format's names from the subpackage, not from the parent
+  package, so a name such as `load_task` keeps the format in its import and cannot collide with another format's.
+- Code inside `nemo_gym/` and its tests (`tests/`) imports from the module that defines each name
+  (`from nemo_gym.<package>.<module> import Name`), never a package's public API, so the import-linter contract in
+  `pyproject.toml` sees every dependency and a test reads what it patches. A package imports only packages below it.
+- A `mock.patch` or `monkeypatch.setattr` target names the module the code under test looks the name up in: the
+  module that defines it, or the module that imports it by name and calls it. Never a package's public API or an
+  old path.
 
 ## Code Style
 

@@ -15,12 +15,16 @@
 
 import os
 import warnings
+from math import sqrt
 from pathlib import Path
+from statistics import mean, variance
 from typing import Any, Dict, List, Optional
 
 import orjson
 import pytest
+from scipy.stats import t
 
+import nemo_gym.rollouts.rollout_collection as collection
 from nemo_gym.comparison.diff import (
     build_flip_summary,
     build_metric_rows,
@@ -34,8 +38,8 @@ from nemo_gym.comparison.loading import (
 from nemo_gym.comparison.report import render_key_metrics_tables, render_markdown, summary_lines, write_reports
 from nemo_gym.comparison.runner import build_comparison_result, resolve_output_dir
 from nemo_gym.comparison.schema import ComparisonConfig
-from nemo_gym.config_types import ConfigError, ConfigPathNotFoundError
-from nemo_gym.path_utils import aggregate_metrics_path_for
+from nemo_gym.config.config_types import ConfigError, ConfigPathNotFoundError
+from nemo_gym.utils.path_utils import aggregate_metrics_path_for
 
 
 AGENT = "bird_sql_simple_agent"
@@ -552,7 +556,8 @@ class TestMetricRows:
             warnings.simplefilter("error")
             compare_runs(baseline, [candidate])
 
-    def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path):
+    @pytest.mark.parametrize("confidence_level", [0.90, 0.95, 0.99])
+    def test_welch_delta_ci_supports_unequal_variance_and_repeat_counts(self, tmp_path, confidence_level):
         baseline_values = [0.0, 0.1, 0.2]
         candidate_values = [0.1, 0.5, 0.9, 1.3]
         baseline = _load(
@@ -577,10 +582,17 @@ class TestMetricRows:
             role="candidate",
         )
 
-        (row,) = build_metric_rows(baseline, [candidate])
+        (row,) = build_metric_rows(baseline, [candidate], confidence_level=confidence_level)
+        baseline_variance = variance(baseline_values) / len(baseline_values)
+        candidate_variance = variance(candidate_values) / len(candidate_values)
+        delta_variance = baseline_variance + candidate_variance
+        degrees_of_freedom = delta_variance**2 / (
+            baseline_variance**2 / (len(baseline_values) - 1) + candidate_variance**2 / (len(candidate_values) - 1)
+        )
+        margin = t.ppf((1 + confidence_level) / 2, degrees_of_freedom) * sqrt(delta_variance)
         assert row.candidates[0].delta == pytest.approx(0.6)
-        assert row.candidates[0].delta_ci_low < row.candidates[0].delta < row.candidates[0].delta_ci_high
-        assert (row.candidates[0].delta_ci_low + row.candidates[0].delta_ci_high) / 2 == pytest.approx(0.6)
+        assert row.candidates[0].delta_ci_low == pytest.approx(0.6 - margin)
+        assert row.candidates[0].delta_ci_high == pytest.approx(0.6 + margin)
 
     def test_benchmark_defined_repeat_metric_gets_a_delta_interval(self, tmp_path):
         baseline = _load(
@@ -993,6 +1005,14 @@ class TestComparisonConfig:
         config = ComparisonConfig.model_validate(self._config())
         assert config.report_format == "both"
         assert config.output_dirpath is None
+        assert config.confidence_level == 0.95
+
+    @pytest.mark.parametrize(
+        "confidence_level", [-0.1, 0.0, 1.0, 1.1, float("nan"), float("inf"), -float("inf"), True, False]
+    )
+    def test_invalid_confidence_levels_are_rejected(self, confidence_level):
+        with pytest.raises(ValueError, match="confidence_level"):
+            ComparisonConfig.model_validate(self._config(confidence_level=confidence_level))
 
     def test_multiple_candidates_are_rejected_for_now(self):
         payload = self._config(candidate_rollouts_jsonl_fpaths=["b/r.jsonl", "c/r.jsonl"])
@@ -1046,6 +1066,34 @@ class TestCliFlagTranslation:
         )
         assert config.baseline_rollouts_jsonl_fpath == "runs/a/rollouts.jsonl"
         assert config.candidate_rollouts_jsonl_fpaths == ["runs/b/rollouts.jsonl"]
+        assert config.confidence_level == 0.95
+
+    @pytest.mark.parametrize("confidence_level", [0.90, 0.99])
+    def test_confidence_level_round_trips_through_hydra(self, confidence_level):
+        config = self._config(
+            [
+                "eval",
+                "compare",
+                "--baseline",
+                "a.jsonl",
+                "--candidates",
+                "b.jsonl",
+                "--confidence-level",
+                str(confidence_level),
+            ]
+        )
+        assert config.confidence_level == confidence_level
+
+    def test_help_displays_the_confidence_option_and_default(self, capsys):
+        from nemo_gym.cli.main import build_parser
+
+        with pytest.raises(SystemExit) as exit_info:
+            build_parser().parse_args(["eval", "compare", "--help"])
+        assert exit_info.value.code == 0
+        output = capsys.readouterr().out
+        assert "--confidence-level" in output
+        assert "(default: 0.95)." in output
+        assert "95%" in output
 
     @pytest.mark.parametrize(
         "path",
@@ -1161,12 +1209,76 @@ class TestEndToEnd:
     def test_result_carries_both_sides_and_the_flip(self, tmp_path):
         _, result = self._result(tmp_path)
         assert result.schema_version == "1"
+        assert result.confidence_level == 0.95
         assert result.baseline.label == "run_a" and result.candidates[0].label == "run_b"
         comparison = result.comparisons[0]
         key_row = next(row for row in comparison.metrics if row.is_key_metric)
         assert key_row.metric == "pass@1[avg-of-2]/accuracy"
         assert key_row.candidates[0].delta == pytest.approx(-50.0)
         assert comparison.flips[0].pass_to_fail_count == 1
+
+    @pytest.mark.parametrize(
+        "confidence_level, label", [(0.90, "90%"), (0.99, "99%"), (0.995, "99.5%"), (0.9999999, "99.99999%")]
+    )
+    def test_confidence_level_reaches_statistics_and_reports(self, tmp_path, confidence_level, label):
+        rollouts = []
+        for name, values, stored_ci in (
+            ("baseline", [0.70, 0.80], (0.69, 0.81)),
+            ("candidate", [0.20, 0.30], (0.19, 0.31)),
+        ):
+            rollouts.append(
+                _write_run(
+                    tmp_path,
+                    name,
+                    [
+                        _entry(
+                            agent_metrics={
+                                "mean/reward": mean(values),
+                                "mean_across_repeats/mean/reward": mean(values),
+                                "ci_low_95_across_repeats/mean/reward": stored_ci[0],
+                                "ci_high_95_across_repeats/mean/reward": stored_ci[1],
+                                "pass@1/accuracy": 100 * mean(values),
+                            },
+                            key_metrics={"mean/reward": mean(values)},
+                            repeat_level_metrics=[{"mean/reward": value} for value in values],
+                        )
+                    ],
+                )
+            )
+        config = ComparisonConfig.model_validate(
+            {
+                "baseline_rollouts_jsonl_fpath": str(rollouts[0]),
+                "candidate_rollouts_jsonl_fpaths": [str(rollouts[1])],
+                "confidence_level": confidence_level,
+            }
+        )
+        result = build_comparison_result(config, "gym eval compare ...")
+        assert result.confidence_level == confidence_level
+        row = next(row for row in result.comparisons[0].metrics if row.metric == "mean/reward")
+        # Two observations per arm give df=2 and SE=sqrt(0.005), independently of the stored CIs.
+        margin = t.ppf((1 + confidence_level) / 2, 2) * sqrt(0.005)
+        assert row.candidates[0].delta_ci_low == pytest.approx(-0.5 - margin)
+        assert row.candidates[0].delta_ci_high == pytest.approx(-0.5 + margin)
+        assert (row.baseline.ci_low, row.baseline.ci_high) == (0.69, 0.81)
+        assert (row.candidates[0].ci_low, row.candidates[0].ci_high) == (0.19, 0.31)
+
+        written = write_reports(result, tmp_path / "reports", "both")
+        payload = orjson.loads(next(path for path in written if path.suffix == ".json").read_bytes())
+        assert payload["confidence_level"] == confidence_level
+        json_row = next(row for row in payload["comparisons"][0]["metrics"] if row["metric"] == "mean/reward")
+        assert json_row["candidates"][0]["delta_ci_low"] == pytest.approx(-0.5 - margin)
+        markdown = next(path for path in written if path.suffix == ".md").read_text()
+        # The key-metric and expandable other-metric table must use the same selected confidence.
+        assert markdown.count(f"| {label} CI for Δ (cand − base) |") == 2
+        assert f"two-sided independent-sample {label} Welch t-interval" in markdown
+        assert "| Baseline 95% CI |" in markdown
+        assert "| Candidate 95% CI |" in markdown
+        assert "| 95% CI for Δ (cand − base) |" not in markdown
+        (table,) = render_key_metrics_tables(result)
+        columns = {column.header: list(column.cells) for column in table.columns}
+        assert f"{label} CI for Δ (cand − base)" in columns
+        assert columns["Baseline 95% CI"] == ["[0.6900, 0.8100]"]
+        assert columns["Candidate 95% CI"] == ["[0.1900, 0.3100]"]
 
     def test_output_dir_defaults_to_the_candidate_directory(self, tmp_path):
         config, _ = self._result(tmp_path)
@@ -1554,3 +1666,266 @@ class TestReportEdgeCases:
         markdown = render_markdown(result)
         assert "## Warnings" in markdown
         assert "extra" in markdown
+
+
+@pytest.mark.parametrize("legacy_alias_sidecars", [False, True])
+def test_comparison_uses_reverification_metrics_through_alias(tmp_path, legacy_alias_sidecars):
+    from nemo_gym.rollout_reverification import _prepare_output_fpaths
+    from nemo_gym.utils.path_utils import failures_path_for
+
+    target = tmp_path / "original.jsonl"
+    target.touch()
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    if legacy_alias_sidecars:
+        failures_path_for(alias).touch()
+    output = _prepare_output_fpaths("", str(alias), True, False, False).output
+    aggregate_metrics_path_for(output).write_bytes(orjson.dumps([_entry()]))
+    loaded = load_agg_metrics_file(str(alias), role="baseline")
+    assert build_loaded_run(loaded, AGENT).key_metrics == {"mean/reward": 0.5}
+
+
+def test_explicit_comparison_metrics_override_keeps_its_path(tmp_path):
+    from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
+
+    override = tmp_path / "custom_metrics.json"
+    assert resolve_aggregate_metrics_fpath(str(tmp_path / "absent.jsonl"), str(override)) == override
+
+
+@pytest.mark.parametrize("merge", [False, True])
+@pytest.mark.parametrize("stale_metrics", [False, True])
+async def test_compare_reads_fresh_metrics_after_aggregation_through_alias(
+    tmp_path, monkeypatch, merge, stale_metrics
+):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+    from tests.unit_tests.rollouts.test_rollout_collection import (
+        FakeResponse,
+        compute_aggregate_metrics,
+        failing_row,
+        install_fake_server_client,
+    )
+
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(orjson.dumps(failing_row(0) | {"reward": 1.0, "response": {}}) + b"\n")
+    target = tmp_path / "merged.jsonl" if merge else source
+    if merge:
+        target.touch()
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    if stale_metrics:
+        aggregate_metrics_path_for(target).write_bytes(
+            orjson.dumps([_entry(agent="my_agent", key_metrics={"mean/reward": 0.0})])
+        )
+
+    async def post(**kwargs):
+        assert kwargs["url_path"] == "/aggregate_metrics"
+        return FakeResponse(
+            200, compute_aggregate_metrics([dict(row) for row in kwargs["json"].verify_responses]).model_dump()
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    metrics = await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(source), output_jsonl_fpath=str(alias), merge_shards=merge, disable_health_check=True
+        )
+    )
+    assert metrics == aggregate_metrics_path_for(target)
+    assert (
+        build_loaded_run(load_agg_metrics_file(str(alias), role="baseline"), "my_agent").key_metrics["mean/reward"]
+        == 1.0
+    )
+    assert not aggregate_metrics_path_for(alias).exists()
+    coverage = coverage_path_for(target if merge else target.with_stem(target.stem + "_aggregate"))
+    assert coverage.exists()
+    assert alias.is_symlink()
+
+
+async def test_aggregation_and_compare_retain_legacy_alias_sidecars(tmp_path, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+    from nemo_gym.utils.path_utils import failures_path_for
+    from tests.unit_tests.rollouts.test_rollout_collection import (
+        FakeResponse,
+        compute_aggregate_metrics,
+        failing_row,
+        install_fake_server_client,
+    )
+
+    target = tmp_path / "source.jsonl"
+    target.write_bytes(orjson.dumps(failing_row(0) | {"reward": 1.0, "response": {}}) + b"\n")
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    failures_path_for(alias).touch()
+
+    async def post(**kwargs):
+        return FakeResponse(
+            200, compute_aggregate_metrics([dict(row) for row in kwargs["json"].verify_responses]).model_dump()
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    result = await RolloutAggregationHelper().run_from_config(
+        RolloutAggregationConfig(
+            input_glob=str(alias), output_jsonl_fpath=str(alias), merge_shards=False, disable_health_check=True
+        )
+    )
+    assert result == aggregate_metrics_path_for(alias)
+    assert (
+        build_loaded_run(load_agg_metrics_file(str(alias), role="baseline"), "my_agent").key_metrics["mean/reward"]
+        == 1.0
+    )
+    assert coverage_path_for(alias.with_stem(alias.stem + "_aggregate")).exists()
+    assert not aggregate_metrics_path_for(target).exists()
+
+
+@pytest.mark.parametrize("merge", [False, True])
+async def test_aggregate_destination_with_competing_alias_companions_is_unchanged(tmp_path, monkeypatch, merge):
+    from unittest.mock import AsyncMock
+
+    from nemo_gym.comparison.loading import resolve_aggregate_metrics_fpath
+    from nemo_gym.rollouts.rollout_collection import RolloutAggregationConfig, RolloutAggregationHelper
+    from nemo_gym.utils.path_utils import failures_path_for
+    from tests.unit_tests.rollouts.test_rollout_collection import (
+        FakeResponse,
+        compute_aggregate_metrics,
+        failing_row,
+        install_fake_server_client,
+    )
+
+    async def post(**kwargs):
+        return FakeResponse(
+            200, compute_aggregate_metrics([dict(row) for row in kwargs["json"].verify_responses]).model_dump()
+        )
+
+    install_fake_server_client(monkeypatch, AsyncMock(side_effect=post))
+    source = tmp_path / "source.jsonl"
+    source.write_bytes(orjson.dumps(failing_row(0) | {"reward": 1.0, "response": {}}) + b"\n")
+    target = tmp_path / "target.jsonl"
+    target.write_text("target data\n")
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(target)
+    failures_path_for(alias).write_text("alias evidence\n")
+    failures_path_for(target).write_text("target evidence\n")
+    before = {p: p.read_bytes() for p in tmp_path.iterdir()}
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        await RolloutAggregationHelper().run_from_config(
+            RolloutAggregationConfig(input_glob=str(source), output_jsonl_fpath=str(alias), merge_shards=merge)
+        )
+    with pytest.raises(ConfigError, match="beside the rollout alias"):
+        resolve_aggregate_metrics_fpath(str(alias), None)
+    assert {p: p.read_bytes() for p in tmp_path.iterdir()} == before
+
+
+def _rows(path: Path, count: int) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    rows = [{"_ng_task_index": i, "_ng_rollout_index": 0, "agent_ref": {"name": "agent"}} for i in range(count)]
+    path.write_bytes(b"".join(orjson.dumps(row | {"reward": 1.0, "response": {}}) + b"\n" for row in rows))
+    path.with_name(path.stem + "_materialized_inputs.jsonl").write_bytes(
+        b"".join(orjson.dumps(row) + b"\n" for row in rows)
+    )
+
+
+def _snapshot(root: Path) -> dict:
+    return {
+        path: (path.readlink() if path.is_symlink() else path.read_bytes())
+        for path in root.rglob("*")
+        if path.is_symlink() or path.is_file()
+    }
+
+
+@pytest.fixture
+def fake_aggregation(monkeypatch):
+    # Same destination rule as the real _call_aggregate_metrics: beside the path it is given.
+    async def aggregate(self, results, rows, path, *, raise_on_error=True):
+        metrics = aggregate_metrics_path_for(path)
+        metrics.write_bytes(orjson.dumps([{"agent_ref": {"name": "agent"}, "rows": len(results)}]))
+        return metrics
+
+    monkeypatch.setattr(collection.RolloutCollectionHelper, "_call_aggregate_metrics", aggregate)
+    monkeypatch.setattr(collection, "get_exporters", list)
+
+
+@pytest.mark.parametrize("target_kind", ["other_run", "one_of_two_inputs"])
+async def test_metrics_only_aggregation_refuses_a_symlink_to_another_run(tmp_path, fake_aggregation, target_kind):
+    _rows(tmp_path / "shards" / "a.jsonl", 2)
+    _rows(tmp_path / "shards" / "b.jsonl", 3)
+    if target_kind == "other_run":
+        target = tmp_path / "runs" / "run3" / "rollouts.jsonl"
+        _rows(target, 2)
+        target.with_name("rollouts_manifest.json").write_text('{"run_id": "run3"}')
+        (target.parent / "quality_summary.json").write_text('{"run3": "own health report"}')
+    else:
+        target = tmp_path / "shards" / "a.jsonl"
+    aggregate_metrics_path_for(target).write_bytes(b'[{"agent_ref": {"name": "agent"}, "own": true}]')
+    alias = tmp_path / "results" / "latest.jsonl"
+    alias.parent.mkdir()
+    alias.symlink_to(target)
+    before = _snapshot(tmp_path)
+
+    with pytest.raises(ConfigError, match="Metrics-only aggregation through"):
+        await collection.RolloutAggregationHelper().run_from_config(
+            collection.RolloutAggregationConfig(
+                input_glob=str(tmp_path / "shards" / "*.jsonl"),
+                output_jsonl_fpath=str(alias),
+                merge_shards=False,
+            )
+        )
+
+    assert _snapshot(tmp_path) == before
+
+
+@pytest.mark.parametrize("destination_kind", ["dangling_alias", "direct", "directory_alias"])
+async def test_metrics_only_aggregation_allows_explicit_or_new_output(tmp_path, fake_aggregation, destination_kind):
+    from nemo_gym.rollouts.rollout_records import coverage_path_for
+
+    source = tmp_path / "shards" / "source.jsonl"
+    _rows(source, 2)
+    target = tmp_path / "reports" / "combined.jsonl"
+    target.parent.mkdir()
+    target_before = None
+    if destination_kind != "dangling_alias":
+        _rows(target, 1)
+        target_before = target.read_bytes()
+    if destination_kind == "dangling_alias":
+        destination = tmp_path / "latest.jsonl"
+        destination.symlink_to(target)
+    elif destination_kind == "directory_alias":
+        alias_dir = tmp_path / "reports-alias"
+        alias_dir.symlink_to(target.parent, target_is_directory=True)
+        destination = alias_dir / target.name
+    else:
+        destination = target
+
+    metrics = await collection.RolloutAggregationHelper().run_from_config(
+        collection.RolloutAggregationConfig(
+            input_glob=str(source),
+            output_jsonl_fpath=str(destination),
+            merge_shards=False,
+            disable_health_check=True,
+        )
+    )
+    assert metrics == aggregate_metrics_path_for(target)
+    assert orjson.loads(metrics.read_bytes())[0]["rows"] == 2
+    assert coverage_path_for(target.with_stem(target.stem + "_aggregate")).exists()
+    if target_before is None:
+        assert destination.is_symlink() and not target.exists()
+    else:
+        assert target.read_bytes() == target_before
+
+
+async def test_merge_into_input_alias_names_the_given_output_in_refusal(tmp_path, fake_aggregation):
+    source = tmp_path / "source.jsonl"
+    _rows(source, 2)
+    alias = tmp_path / "latest.jsonl"
+    alias.symlink_to(source)
+    before = _snapshot(tmp_path)
+    with pytest.raises(ConfigError, match="Merged output") as error:
+        await collection.RolloutAggregationHelper().run_from_config(
+            collection.RolloutAggregationConfig(input_glob=str(source), output_jsonl_fpath=str(alias))
+        )
+    assert str(alias) in str(error.value)
+    assert _snapshot(tmp_path) == before

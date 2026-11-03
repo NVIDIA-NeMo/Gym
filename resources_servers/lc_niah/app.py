@@ -39,7 +39,7 @@ from enum import Enum
 
 from pydantic import ConfigDict
 
-from nemo_gym.base_resources_server import (
+from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
     BaseVerifyRequest,

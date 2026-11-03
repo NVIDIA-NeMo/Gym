@@ -25,7 +25,7 @@ from pathlib import Path
 from typing import Dict, Literal, Optional
 from urllib.parse import unquote, urlparse
 
-from nemo_gym.server_utils import raise_for_status, request
+from nemo_gym.client import raise_for_status, request
 
 
 DatasetKind = Literal["fileset", "githistory"]
@@ -41,7 +41,7 @@ async def fetch_artifact(
 ) -> None:
     """Stream-download an artifact via aiohttp into `dest_path`.
 
-    `nemo_gym.server_utils.request` retries indefinitely on `ClientOSError`
+    `nemo_gym.client.http_client.request` retries indefinitely on `ClientOSError`
     (designed for transient model-server hiccups during a training run). For
     a broken or unreachable artifact URL the rollout should fail fast with a
     clean exception, not hang forever, so the fetch is wrapped with a hard

@@ -1,10 +1,10 @@
 ---
 title: "OpenAI"
-description: "Use OpenAI (or any endpoint that natively serves the Responses API) with no conversion"
+description: "Connect to OpenAI or another Responses endpoint without translating between API formats"
 position: 2
 ---
 
-The `openai_model` server connects NeMo Gym to OpenAI. It forwards requests straight through with no conversion in either direction: a Responses request goes to OpenAI's [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and returns a Responses object, and a Chat Completions request goes to OpenAI's Chat Completions and returns a chat completion — OpenAI serves both natively.
+The `openai_model` server connects NeMo Gym to OpenAI without translating between API formats: a Responses request goes to OpenAI's [Responses API](https://developers.openai.com/api/reference/resources/responses/methods/create) and returns a Responses object, and a Chat Completions request goes to OpenAI's Chat Completions and returns a chat completion — OpenAI serves both natively.
 
 Because it is a pass-through, the Responses endpoint also works with any other backend that implements the Responses API natively — point `openai_base_url` at it. In practice that is rare: most hosted backends only expose Chat Completions and instead go through [Inference Providers](/model-server/inference-providers), which translates between the two formats.
 
@@ -19,6 +19,16 @@ This server exposes both endpoints and forwards each directly to the upstream en
 
 - **OpenAI Responses** — `/v1/responses`
 - **OpenAI Chat Completions** — `/v1/chat/completions`
+
+### Provider reasoning content
+
+Responses-compatible providers sometimes use `output_text` for a reasoning
+item's content. Before validating provider responses, this server changes that
+part's discriminator to `reasoning_text` only when it contains a string `text`
+and no other fields except optional empty `annotations: []`. Text, encrypted
+content, item order and other response fields are preserved without modifying
+the provider's response object. Unknown or malformed shapes still go through
+validation unchanged. Requests and continuation replay are unchanged.
 
 ## Set Your Credentials
 
@@ -44,7 +54,7 @@ For NVCF endpoints, requests that take longer than 340 seconds to produce a firs
 | `openai_default_headers` | `dict` | `{}` | Extra headers sent on every request. |
 | `extra_body` | `dict` | `{}` | Default parameters merged into every request body. Values set on the incoming request take precedence. |
 | `max_concurrent_requests` | `int` | `null` | Cap on in-flight upstream requests (per-process, at least 1). `null` = unlimited; set it on rate-limited endpoints. |
-| `max_http_attempts` | `int` | `3` | Bounded retries for transient HTTP failures (404, 408, 429, 500, 502, 503, 504, 520). Retries wait with exponential backoff and full jitter (1 s doubling, capped at 60 s), or for the answer's `Retry-After` within the same cap. A 429 whose `error.code`/`error.type` is `budget_exceeded` or `insufficient_quota`, or a 401/403 whose body is an invalid key, trips the client immediately; later requests skip the wire. Generic "quota exceeded" 429s and other 401/403s still retry or return as before. |
+| `max_http_attempts` | `int` | `3` | Bounded retries for transient HTTP failures (404, 408, 429, 500, 502, 503, 504, 520). Retries wait with exponential backoff and full jitter (1 s doubling, capped at 60 s), or for the answer's `Retry-After` within the same cap. A 429 whose `error.code`/`error.type` is `budget_exceeded` or `insufficient_quota`, or a 401/403 whose body is an invalid key, trips the client immediately; later requests skip the wire. Generic "quota exceeded" 429s and other 401/403s still retry or return as before. A provider that refuses or drops connections gets the same number of connection attempts, 0.5 s apart, before the call fails with HTTP 500. Values of 1 or 2 also reduce request-timeout attempts from three to one or two; the default stays three. |
 | `max_rate_limit_wait_seconds` | `float` | `3600` | Total wait for 429 and 503 answers, which are retried until it is spent instead of `max_http_attempts` times; the request fails once the next wait would pass it, even when `max_http_attempts` allows more tries. `0` keeps 429 and 503 on the `max_http_attempts` count. |
 | `reasoning_effort_none_replacement` | `str` | `null` | Opt-in value reported in place of a response's `reasoning.effort: "none"`, for callers that cannot accept `"none"`. `null` reports the provider's value unchanged. |
 | `upstream_max_num_tries` | `int` | `null` | Set to `1` so each provider call makes exactly one HTTP attempt. Disables the client's transport and HTTP-status retries, replacing their generic-error and `max_http_attempts` limits. Required by an `upstream_retry_policy` with more than one attempt. |

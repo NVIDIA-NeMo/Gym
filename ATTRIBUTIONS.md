@@ -11,6 +11,22 @@ All third-party software is used without modification unless otherwise noted
 
 ---
 
+## MiMo music scorer
+
+`resources_servers/mimo_music/scorer/` vendors the music scorer and
+`baselines/ref_full4k.json` from [XiaomiMiMo/verl](https://github.com/XiaomiMiMo/verl/tree/a2ad9f6160b03ff2d47e59832bfb6b289f37c917/recipes/design/music/scorer),
+revision `a2ad9f6160b03ff2d47e59832bfb6b289f37c917`, under Apache-2.0.
+Original Copyright 2026 Bytedance Ltd. and/or its affiliates notices are retained.
+Local changes are formatting, SPDX modification notices, and classifying a
+signal-terminated renderer as an infrastructure failure before inspecting its
+MIDI output. The scoring formula, composition rejection gates, and reference
+baseline are unchanged.
+
+The environment invokes [abcMIDI](https://github.com/sshlien/abcmidi) as an
+external executable (GPL-2.0-or-later). Its source and binaries are **not**
+included in this repository. The optional Linux startup installer downloads
+revision `6441b478418350b338589cbfb1b4397fed4a490e` (abc2midi 4.88) into an ignored local directory.
+
 ## Python Package Dependencies
 
 | Component | Version | License | URL |
@@ -219,7 +235,8 @@ upstream copyright header and adds an NVIDIA modifications block.
 | AssayBench reference harness | MIT (original); Apache-2.0 (NVIDIA modifications) | `resources_servers/assaybench/gene_parsing.py` (`parse_genes_from_output`, `extract_genes_from_raw_response` from `benchmarking/predictions_generation/collect_llm_predictions.py`; formatting and type hints only) | https://github.com/Genentech/AssayBench |
 | ReactionMechanismReasoning (FukuyamaBench) | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/fukuyamabench/` (pathway scorer ported into `metrics.py` from upstream `eval/eval_infer_pathway.py`; system prompt and user template copied into `scripts/prepare_fukuyamabench.py` from upstream `eval/prompts/infer_pathway_prompts.yaml` — the user template byte-identical, the system prompt content-preserving with trailing whitespace stripped) | https://github.com/HaCTang/ReactionMechanismReasoning |
 | ChemReason-Bench | Apache-2.0 (original and NVIDIA modifications) | `resources_servers/chemreason_bench/` (primary metrics ported into `metrics.py` from upstream `eval/eval.py`; `canonicalize_slots`, the post-processors and the lm probability rules ported into `slot_canonicalization.py` and `response_parsing.py` from `predict/predict.py`) | https://github.com/Khadaz/ChemReason-Bench |
-| Harbor | Apache-2.0 (vendored unmodified) | `nemo_gym/tasks/harbor/harbor_compat.py` (`environment_content_hash` and `_CONTENT_HASH_IGNORE_NAMES` from `src/harbor/environments/definition.py`, `_sanitize_docker_image_name` from `src/harbor/environments/docker/docker.py`, at tag `v0.22.0`; bodies byte-for-byte, the private sanitiser exposed without its leading underscore) | https://github.com/harbor-framework/harbor |
+| Harbor | Apache-2.0 (vendored unmodified) | `nemo_gym/data/tasks/harbor/harbor_compat.py` (`environment_content_hash` and `_CONTENT_HASH_IGNORE_NAMES` from `src/harbor/environments/definition.py`, `_sanitize_docker_image_name` from `src/harbor/environments/docker/docker.py`, at tag `v0.22.0`; bodies byte-for-byte, the private sanitiser exposed without its leading underscore) | https://github.com/harbor-framework/harbor |
+| NeMo Skills `generic/math` prompt | Apache-2.0 (vendored unmodified) | `resources_servers/ns_tools/prompts/generic/math.yaml` (upstream `nemo_skills/prompt/config/generic/math.yaml`, byte-for-byte below a provenance header) | https://github.com/NVIDIA-NeMo/Skills |
 
 - Upstream license: reproduced in full in the Apple MIT License section below
 - Subcomponent notices: `resources_servers/toolsandbox/tool_sandbox/ACKNOWLEDGEMENTS`
@@ -229,6 +246,7 @@ upstream copyright header and adds an NVIDIA modifications block.
 - ReactionMechanismReasoning: pinned at upstream revision `63bb79f912f0b2de593996b80ffeea894f6f1a59`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. NVIDIA modifications to the ported scorer are documented at their call sites in `metrics.py` and summarised in `resources_servers/fukuyamabench/README.md`. Benchmark data is **not** vendored; it is downloaded at runtime by `scripts/prepare_fukuyamabench.py`.
 - Harbor: vendored, unmodified, from upstream tag `v0.22.0` (https://github.com/harbor-framework/harbor/tree/v0.22.0/src/harbor), so that Gym and Harbor compute the same environment content hash and image name for the same task. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The vendored section is marked in-file; Gym does not import or depend on the `harbor` package.
 - ChemReason-Bench: pinned at upstream revision `c0b9ac2933708fcca47b1795492952cbf280e194`. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required; its `LICENSE` leaves the copyright holder unfilled, so no upstream notice exists to reproduce. NVIDIA modifications are noted in-file and in `resources_servers/chemreason_bench/README.md`. Benchmark rows committed as test fixtures are CC BY 4.0 (upstream `DATA_LICENSE`), attributed in that README.
+- NeMo Skills `generic/math` prompt: vendored, unmodified, from upstream revision `da85a881d972e6fec847b90cf553a0bf9bf10638` (https://github.com/NVIDIA-NeMo/Skills/blob/da85a881d972e6fec847b90cf553a0bf9bf10638/nemo_skills/prompt/config/generic/math.yaml), the revision `resources_servers/ns_tools/requirements.txt` pins, because the pinned `nemo-skills-tools` package ships no prompt YAMLs. Upstream is Apache-2.0, the same license as this repository, so no additional license text is required. The file header records the same source, revision and license.
 
 ---
 

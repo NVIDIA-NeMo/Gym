@@ -13,9 +13,10 @@ from omegaconf import OmegaConf
 from pydantic import ValidationError
 from sandbox_app import CompCodingSandboxResourcesServer
 
-from nemo_gym.base_resources_server import ReverifyMode
 from nemo_gym.cli.env import _ray_server_names
-from nemo_gym.server_utils import ServerClient, _connect_server_to_ray
+from nemo_gym.client import ServerClient
+from nemo_gym.server_runtime import ReverifyMode
+from nemo_gym.server_runtime.ray_support import _connect_server_to_ray
 
 
 def test_sandbox_entrypoint_imports_without_ray():
@@ -46,7 +47,7 @@ def test_sandbox_entrypoint_does_not_require_parent_ray(monkeypatch):
         pytest.fail("sandbox-only server must not check or initialize Ray")
 
     monkeypatch.setattr("nemo_gym.cli.env.ray_is_installed", unexpected_ray_check)
-    monkeypatch.setattr("nemo_gym.server_utils.initialize_ray", unexpected_ray_check)
+    monkeypatch.setattr("nemo_gym.server_runtime.ray_support.initialize_ray", unexpected_ray_check)
     server = SimpleNamespace(
         top_level_path="code_gen",
         dir_path=Path(__file__).parents[1],
