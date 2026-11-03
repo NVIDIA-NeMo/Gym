@@ -50,7 +50,6 @@ from nemo_gym.core import (
     NeMoGymResponse,
     NgFailureEvent,
     RequestFailureLog,
-    encode_model_sampling,
     model_sampling_path_segment,
     rebuild_failure,
 )
@@ -142,6 +141,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
     config: SingleAgentTurnEnvironmentServerConfig
     request_model = SingleAgentTurnRequest
     checkpoint_mode = "exported"
+    applies_model_sampling = True
     response_model = SingleAgentTurnResponse
 
     def model_post_init(self, context: Any, /) -> None:
@@ -808,11 +808,7 @@ class SingleAgentTurnEnvironmentServer(BaseEnvironmentServer[SingleAgentTurnRequ
         )
         capture_segment = f"/{TOKEN_CAPTURE_PATH_SEGMENT}" if token_capture else ""
         # The agent is the one the training framework trains, so its model calls carry the episode's values.
-        sampling_segment = (
-            model_sampling_path_segment(encode_model_sampling(request.model_sampling))
-            if request.model_sampling is not None
-            else ""
-        )
+        sampling_segment = model_sampling_path_segment(self.model_sampling_segment(request, trained=True))
         return f"/ng-rollout/{request.episode_id.capture_key}{capture_segment}{sampling_segment}/v1/responses"
 
     @staticmethod
