@@ -760,7 +760,7 @@ class _CompletedRollout:
     run_error: Optional[BaseException] = None
 
 
-def _collection_failure_report(exc: BaseException, failure_class: str, headers: Any) -> FailureReport:
+def _collection_failure_report(exc: BaseException, headers: Any) -> FailureReport:
     """Collection's own failure for a failed `/run` dispatch, caused by the dispatch error, with the report the
     reply forwarded. Routing classes remain outcome metadata; this diagnostic has a registered collection kind."""
     failure = NgFailureEvent(
@@ -4784,7 +4784,7 @@ Aggregate metrics: {aggregate_metrics_fpath}{coverage}""")
                     status = getattr(e, "status", None) or getattr(res, "status", None)
                     failure = _agent_request_failure_row(e, status)
                     failure_report = _collection_failure_report(
-                        e, failure[NG_FAILURE_CLASS_KEY], getattr(e, "headers", None) or getattr(res, "headers", None)
+                        e, getattr(e, "headers", None) or getattr(res, "headers", None)
                     )
                     if isinstance(e, TimeoutError) and status is None:
                         # Collection's own HTTP deadline for this /run expired: typed deadline evidence the timeout
