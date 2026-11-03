@@ -188,12 +188,12 @@ def test_the_judge_job_runs_the_reverify_command_on_one_cpu_node_without_any_ser
     assert job.driver.env == config.driver.env and job.driver.gym_install == config.driver.gym_install
     assert job.driver.container == config.driver.container
     compute = job.compute["cluster"]
-    # GPU resources and node-shape directives of the original allocation do not follow; the rest does.
-    assert compute.extra_args == {"qos": "normal", "comment": "campaign"}
+    # GPU resources, node-shape directives and the QOS of the original allocation do not follow; the rest does.
+    assert compute.extra_args == {"comment": "campaign"}
     script = build_sbatch_script(job, "bench", bench, compute, Path("/jobs/bench"))
     assert "#SBATCH --partition=cpu" in script and "#SBATCH --nodes=1" in script
     assert "#SBATCH --gpus-per-node=0" in script and "#SBATCH --time=04:00:00" in script
-    assert "#SBATCH --qos=normal" in script and "--gres" not in script
+    assert "--qos" not in script and "--gres" not in script
     assert "vllm serve" not in script and "gym eval run" not in script and "afternotok" not in script
     assert command in script
 
@@ -203,3 +203,68 @@ def test_a_repinned_judge_job_runs_the_launcher_revision(tmp_path) -> None:
     profile = judge_execution_profile(config, "cluster", "cpu", "--judge-partition", {"max_time_s": None})
     job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify", gym_ref="b" * 40)
     assert job.driver.gym_install.ref == "b" * 40 and job.driver.gym_install.repo == config.driver.gym_install.repo
+
+
+# --- the judge job's QOS -----------------------------------------------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "reader_srun,expected",
+    [
+        ("-p cpu -q cpu_normal -c 4", "cpu_normal"),
+        ("--qos=cpu_normal", "cpu_normal"),
+        ("-p other_cpu --qos cpu_normal", None),
+        (None, None),
+    ],
+)
+def test_the_runs_gpu_qos_does_not_follow_and_the_reader_placement_names_one(tmp_path, reader_srun, expected) -> None:
+    # A GPU QOS that requires GPUs refuses a job on a CPU partition (QOSMinGRES), so the run's QOS stays behind.
+    config = model_served(tmp_path, extra_args={"qos": "normal", "comment": "campaign"})
+    profile = judge_execution_profile(
+        config, "cluster", "cpu", "--judge-partition", {"max_time_s": None}, reader_srun=reader_srun
+    )
+    job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify")
+    compute = job.compute["cluster"]
+    script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
+    assert "--qos=normal" not in script
+    assert profile.qos == expected and profile.report()["qos"] == expected
+    if expected:
+        assert f"#SBATCH --qos={expected}" in script and "NEMO_GYM_REMOTE_READER_SRUN" in profile.qos_source
+    else:
+        assert "--qos" not in script and profile.qos_source == "the partition's default"
+
+
+def test_a_saved_cpu_pool_keeps_its_own_qos(tmp_path) -> None:
+    config = model_served(
+        tmp_path,
+        extra_args={"qos": "normal"},
+        pools={
+            "gpu": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8},
+            "scorer": {"partition": "cpu_long", "nodes": 1, "gpus_per_node": 0, "extra_args": {"qos": "cpu"}},
+        },
+    )
+    profile = judge_execution_profile(
+        config, "cluster", "cpu_long", "the saved node pool 'scorer'", {"max_time_s": None}, reader_srun="-q other"
+    )
+    assert profile.qos == "cpu" and profile.qos_source == "the saved CPU node pool"
+    assert profile.compute.node_pools[JUDGE_POOL_NAME].extra_args == {"qos": "cpu"}
+    assert "qos" not in profile.compute.extra_args
+
+
+def test_an_explicit_judge_qos_wins_over_the_saved_pool_and_the_reader_placement(tmp_path) -> None:
+    config = model_served(
+        tmp_path,
+        extra_args={"qos": "normal"},
+        pools={
+            "gpu": {"partition": "gpu", "nodes": 1, "gpus_per_node": 8},
+            "scorer": {"partition": "cpu_long", "nodes": 1, "gpus_per_node": 0, "extra_args": {"qos": "cpu"}},
+        },
+    )
+    profile = judge_execution_profile(
+        config, "cluster", "cpu_long", "--judge-partition", {"max_time_s": None}, qos="cpu_ops", reader_srun="-q other"
+    )
+    assert profile.qos == "cpu_ops" and profile.qos_source == "--judge-qos"
+    job = judge_job_config(config, "cluster", "bench", profile, "gym eval reverify")
+    compute = job.compute["cluster"]
+    script = build_sbatch_script(job, "bench", job.driver.benchmarks["bench"], compute, Path("/jobs/bench"))
+    assert script.count("--qos=") == 1 and "#SBATCH --qos=cpu_ops" in script

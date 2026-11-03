@@ -102,13 +102,15 @@ def recover(
     server_spinup_timeout_seconds: int | None = None,
     spinup_timeout_reason: str | None = None,
     judge_partition: str | None = None,
+    judge_qos: str | None = None,
 ) -> RecoveryOutcome:
     """Recover a saved submission, preserving its recorded retry and walltime budgets.
 
     ``repin`` (with ``repin_reason``) continues the run on another full Gym commit, which must be this launcher's; a
     judge-only job of the run runs at it too.
     ``judge_partition`` names the CPU partition of the judge-only job that grades a model-served run's saved answers
-    again, when its saved config declares no CPU node pool and the launcher's reader placement names none.
+    again, when its saved config declares no CPU node pool and the launcher's reader placement names none, and
+    ``judge_qos`` that job's QOS (else the saved CPU pool's, the reader placement's or the partition's default).
     ``extend_retries`` records that many more infra retries for the run: explicit and journaled, never a reset.
     ``extend_attempts`` records that many more attempts for every rollout the Store would run again (not a model
     failure); explicit, journaled with the infra extension, and named in the decision.
@@ -145,6 +147,7 @@ def recover(
         server_spinup_timeout_seconds=server_spinup_timeout_seconds,
         spinup_timeout_reason=spinup_timeout_reason,
         judge_partition=judge_partition,
+        judge_qos=judge_qos,
     )
     return outcome.model_copy(update={"reader_token": reader_token()})
 
@@ -222,6 +225,7 @@ def _recover(
     server_spinup_timeout_seconds: int | None = None,
     spinup_timeout_reason: str | None = None,
     judge_partition: str | None = None,
+    judge_qos: str | None = None,
 ) -> RecoveryOutcome:
     """Recover `benchmark` of submission `gym_job_id` from its persisted evidence (`gym eval resubmit --recover`).
 
@@ -402,6 +406,8 @@ def _recover(
         options: dict[str, Any] = {}
         if judge_partition is not None:
             options["judge_partition"] = judge_partition
+        if judge_qos is not None:
+            options["judge_qos"] = judge_qos
         if repin is not None:
             options |= {"repin": repin, "repin_reason": repin_reason}
         outcome = executor.reverify_judge_failures(record, benchmark, decision, **options)
