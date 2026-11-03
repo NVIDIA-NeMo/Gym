@@ -312,7 +312,9 @@ class SearchResourcesServer(SimpleResourcesServer):
             url_path="/v1/responses",
             json=judge_create_params,
             response_model=NeMoGymResponse,
-            timeout_seconds=(self.config.judge_timeout_seconds if timeout_seconds is None else timeout_seconds),
+            timeout=aiohttp.ClientTimeout(
+                total=self.config.judge_timeout_seconds if timeout_seconds is None else timeout_seconds
+            ),
         )
         if not judge_response.output:
             raise JudgeError("empty judge response")
