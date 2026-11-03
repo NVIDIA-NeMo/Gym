@@ -24,9 +24,15 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.config import ModelServerRef, get_first_server_config_dict, get_global_config_dict
-from nemo_gym.core import ENVIRONMENT_SERVER_FAILED, SESSION_LOST, VERIFIER_ERROR, current_verifier_invocation_id
-from nemo_gym.exception_inspection import bounded_text
-from nemo_gym.failure_transport import observe_failure
+from nemo_gym.core import (
+    ENVIRONMENT_SERVER_FAILED,
+    SESSION_LOST,
+    VERIFIER_ERROR,
+    FailureBoundary,
+    NgFailureEvent,
+    current_verifier_invocation_id,
+    observe_failure,
+)
 from nemo_gym.sandbox import (
     AsyncSandbox,
     SandboxResources,
@@ -40,13 +46,11 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
-    FailureBoundary,
     ReverifyMode,
     SimpleResourcesServer,
     lost_session_verification,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint
+from nemo_gym.utils import bounded_text, is_nemo_gym_fastapi_entrypoint
 from resources_servers.deepswe.task_store import (
     EXPECTED_TASK_COUNT,
     DeepSWETaskStore,

@@ -31,13 +31,13 @@ from httpx import ASGITransport, AsyncClient
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import (
+    FailureReportRow,
     NeMoGymResponse,
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.failure_transport import FailureReportRow
-from nemo_gym.typed_exceptions import NgFailureEvent
 from nemo_gym.verification import judge_failsafe
 from resources_servers.false_statement_judge.app import (
     FalseStatementJudgeConfig,

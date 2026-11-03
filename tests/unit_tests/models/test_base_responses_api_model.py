@@ -1816,9 +1816,9 @@ def test_a_handled_upstream_error_reply_names_its_failure():
     original model failure as the final one."""
     from aiohttp import ClientResponseError
 
-    from nemo_gym.failure_transport import FailureHeader
-    from nemo_gym.server_runtime.episode_types import FailureBoundary
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core.episode_types import FailureBoundary
+    from nemo_gym.core.failure_transport import FailureHeader
+    from nemo_gym.core.typed_exceptions import NgFailureEvent
 
     model = NgFailureEvent(
         boundary=FailureBoundary.MODEL,

@@ -1687,8 +1687,8 @@ async def test_provider_exec_failure_is_not_substituted_with_a_scored_response(t
 
 @mark.parametrize("error_type", ["UnknownError", None])
 async def test_unconfirmed_exec_result_does_not_grade_a_partial_workspace(tmp_path, error_type):
+    from nemo_gym.core import NgFailureEvent
     from nemo_gym.sandbox import SandboxExecResult
-    from nemo_gym.typed_exceptions import NgFailureEvent
 
     config = TestOpenCodeSandboxedAgent()._create_config()
     config.artifacts_dir = str(tmp_path)

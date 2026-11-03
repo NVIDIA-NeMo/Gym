@@ -29,8 +29,8 @@ from nemo_gym.config.global_config import (
     TASK_INDEX_KEY_NAME,
 )
 from nemo_gym.core.episode import TaskId, maybe_rollout_id_from_run_body
+from nemo_gym.core.episode_types import is_materialized_task_row
 from nemo_gym.data.task_materialization import TASK_ID_FIELDS
-from nemo_gym.server_runtime.episode_types import is_materialized_task_row
 from nemo_gym.trajectory.trajectory_record import (
     NG_AGENT_OBSERVATIONS_KEY,
     NG_TRAJECTORY_KEY,

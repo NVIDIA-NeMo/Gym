@@ -383,7 +383,7 @@ async def test_probe_failure_outside_final_termination_is_preserved(kind):
     from types import SimpleNamespace
     from unittest.mock import AsyncMock
 
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import NgFailureEvent
 
     error = RuntimeError("cleanup evidence is not available")
     if kind != "unknown":

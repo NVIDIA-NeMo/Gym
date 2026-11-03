@@ -549,8 +549,7 @@ async def test_a_replay_through_the_checkpoint_control_plane_gets_the_recorded_o
 
 @pytest.mark.parametrize("owner", ["task", "server"])
 async def test_owner_cancellation_preserves_already_observed_cohort_events(config, owner):
-    from nemo_gym.failure_transport import RequestFailureLog, observe_failure
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog, observe_failure
 
     entered = asyncio.Event()
     events = []
@@ -595,8 +594,7 @@ async def test_owner_cancellation_preserves_already_observed_cohort_events(confi
 
 @pytest.mark.parametrize("fails", [False, True])
 async def test_finished_cohort_checkpoint_preserves_exact_report_without_rejudging(config, fails):
-    from nemo_gym.failure_transport import RequestFailureLog, observe_failure
-    from nemo_gym.typed_exceptions import NgFailureEvent
+    from nemo_gym.core import NgFailureEvent, RequestFailureLog, observe_failure
 
     events = []
 
@@ -644,7 +642,7 @@ async def test_finished_cohort_checkpoint_preserves_exact_report_without_rejudgi
 
 
 async def test_old_checkpoint_has_explicitly_missing_observation_coverage(config):
-    from nemo_gym.failure_transport import RequestFailureLog
+    from nemo_gym.core import RequestFailureLog
 
     server, participant = seeded(config)
     await finish_cohort(server)
@@ -661,7 +659,7 @@ async def test_old_checkpoint_has_explicitly_missing_observation_coverage(config
 
 
 async def test_restore_rejects_inconsistent_reports_before_installing_any_member(config):
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import NgFailureEvent, failure_report_for
 
     server, participant = seeded(config)
     await asyncio.gather(*(verify_as(server, SESSIONS[i], member(i)) for i in range(2)))
@@ -678,7 +676,7 @@ async def test_restore_rejects_inconsistent_reports_before_installing_any_member
 
 
 async def test_completed_checkpoint_cannot_select_a_failure(config):
-    from nemo_gym.typed_exceptions import NgFailureEvent, failure_report_for
+    from nemo_gym.core import NgFailureEvent, failure_report_for
 
     server, participant = seeded(config)
     await finish_cohort(server)
