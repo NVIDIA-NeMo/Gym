@@ -73,6 +73,7 @@ from nemo_gym.models.model_call_capture import (
     _with_stream_report,
     install_model_call_capture,
 )
+from nemo_gym.models.model_call_timing import ModelCallTimingMiddleware
 from nemo_gym.models.responses_streaming import (
     NamespaceMap,
     restore_namespace_tool_calls,
@@ -388,6 +389,9 @@ class SimpleResponsesAPIModel(BaseResponsesAPIModel, SimpleServer):
         client unchanged, so a server that serves those cannot keep a stream alive.
         """
         return False
+
+    def setup_request_timing(self, app: FastAPI) -> None:
+        app.add_middleware(ModelCallTimingMiddleware, server_name=self.config.name)
 
     def setup_webserver(self) -> FastAPI:
         if self.config.stream_keepalive_s is not None and not self._mints_response_ids():

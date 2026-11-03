@@ -199,6 +199,32 @@ RUN_METRIC_BUCKET_ATTRIBUTE = "nemo.gym.run.bucket"
 RUN_METRIC_UNREGISTERED_BUCKET = "unregistered"
 # Failure classes outside the registered failure kinds that still name a bounded bucket.
 _RUN_METRIC_EXTRA_BUCKETS = frozenset({"skipped", "unknown"})
+
+
+MODEL_CALL_DURATION_INSTRUMENT = "gym.model.call_duration_ms"
+MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT = "gym.model.time_to_first_byte_ms"
+MODEL_DIALECT_ATTRIBUTE = "nemo.gym.model.dialect"
+MODEL_CALL_OUTCOME_ATTRIBUTE = "nemo.gym.model.call_outcome"
+# From a cached reply in a few milliseconds to a long reasoning generation of half an hour.
+MODEL_CALL_BOUNDARIES_MS: tuple[float, ...] = (
+    5,
+    10,
+    25,
+    50,
+    100,
+    250,
+    500,
+    1_000,
+    2_500,
+    5_000,
+    10_000,
+    30_000,
+    60_000,
+    120_000,
+    300_000,
+    600_000,
+    1_800_000,
+)
 ROLLOUT_COMPLETED_INSTRUMENT = "gym.rollout.completed_total"
 ROLLOUT_OUTCOME_ATTRIBUTE = "nemo.gym.rollout.outcome"
 FAILURE_CLASS_ATTRIBUTE = "nemo.gym.failure_class"
@@ -538,6 +564,30 @@ def record_run_summary(summary: Mapping[str, float], *, run_id: Optional[str]) -
             gauge.set(value, attributes=attributes)
         except Exception:
             logger.debug("nemo-lens: failed to record %s", name, exc_info=True)
+
+
+def record_model_call_duration(duration_ms: float, *, dialect: str, server_name: str, outcome: str) -> None:
+    """Record one model call, from request to its last response byte, by dialect, server and outcome."""
+    _record_histogram(
+        MODEL_CALL_DURATION_INSTRUMENT,
+        "ms",
+        "Time a model server took for one call, to its last response byte.",
+        duration_ms,
+        {MODEL_DIALECT_ATTRIBUTE: dialect, SERVER_NAME_ATTRIBUTE: server_name, MODEL_CALL_OUTCOME_ATTRIBUTE: outcome},
+        boundaries=MODEL_CALL_BOUNDARIES_MS,
+    )
+
+
+def record_model_time_to_first_byte(duration_ms: float, *, dialect: str, server_name: str) -> None:
+    """Record when one model call sent its first content byte, skipping keepalives and lifecycle events."""
+    _record_histogram(
+        MODEL_TIME_TO_FIRST_BYTE_INSTRUMENT,
+        "ms",
+        "Time from a model call's request to its first content byte (keepalives and lifecycle events skipped).",
+        duration_ms,
+        {MODEL_DIALECT_ATTRIBUTE: dialect, SERVER_NAME_ATTRIBUTE: server_name},
+        boundaries=MODEL_CALL_BOUNDARIES_MS,
+    )
 
 
 def register_http_connection_pool_connect_counter(snapshot: Callable[[], dict[str, int]]) -> None:

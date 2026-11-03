@@ -389,6 +389,21 @@ These pool metrics require telemetry initialization before client construction. 
 collection does not initialize telemetry automatically, so missing metrics do not mean no
 queueing. See [HTTP Connection Pool](/reference/configuration#http-connection-pool) for process coverage.
 
+### Model Call Timing
+
+Every model server times each call to its three dialect routes (`/v1/responses`, `/v1/chat/completions`,
+`/v1/messages`), with or without a rollout prefix and whether or not model-call capture is on. The timing sits outside
+the server's checkpoint admission and exception handling, so refused and failed calls are timed too:
+
+| Metric | Attributes | Meaning |
+| --- | --- | --- |
+| `gym.model.call_duration_ms` | `nemo.gym.model.dialect`, `nemo.gym.server.name`, `nemo.gym.model.call_outcome` | From the request until the server finished sending the last response byte, so a streamed reply counts its whole stream. The outcome is the status class (`2xx`, `4xx`, `5xx`); `cancelled` when the client went away first, or `error` when the call failed or stopped before its last byte, even after part of the response was sent. |
+| `gym.model.time_to_first_byte_ms` | `nemo.gym.model.dialect`, `nemo.gym.server.name` | From the request until the server finished sending the first content byte. SSE keepalives and Responses `response.created` / `response.in_progress` events are skipped, as in model-call capture, so a held-open stream does not look fast. A call that sends no content records no sample. |
+
+Both use buckets from 5 ms to 30 min. They overlap `http.server.duration`, which stays the request-latency metric
+for every route; these add time to first byte, buckets for minute-long generations, and a server name that is present
+whether or not traces are on. Each call costs at most two histogram records.
+
 ### A Note on `gym.server.request_duration_ms`
 
 `nemo-lens` declares a `gym.server.request_duration_ms` histogram. NeMo Gym does not use
