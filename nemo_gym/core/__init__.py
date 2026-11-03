@@ -94,7 +94,6 @@ if TYPE_CHECKING:
         NeMoGymResponseReasoningItem,
         NeMoGymResponseUsage,
         NeMoGymSummary,
-        ReasoningEffort,
         accumulate_response_usage,
     )
 
@@ -156,7 +155,6 @@ _PUBLIC_API = {
     "PROVIDER_UNAVAILABLE": "failure_kinds",
     "REQUIRED_TOKEN_METADATA_FIELDS": "responses_api_types",
     "RESPONSES_TO_TRAIN": "responses_api_types",
-    "ReasoningEffort": "responses_api_types",
     "SESSION_EXPIRED": "failure_kinds",
     "SESSION_LOST": "failure_kinds",
     "SSE_KEEPALIVE": "responses_api_types",

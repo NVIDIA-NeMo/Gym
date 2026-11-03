@@ -9,7 +9,7 @@ from pathlib import Path
 
 from pydantic import BaseModel, Field
 
-from nemo_gym.global_config import get_global_config_dict
+from nemo_gym.config import get_global_config_dict
 from nemo_gym.sandbox import AsyncSandbox, SandboxSpec, resolve_provider_config, resolve_provider_metadata
 
 
