@@ -35,9 +35,9 @@ from nemo_gym.core import (
     NeMoGymResponseCreateParamsNonStreaming,
     NeMoGymResponseOutputMessage,
     NeMoGymResponseOutputText,
+    NgFailureEvent,
 )
-from nemo_gym.typed_exceptions import NgFailureEvent
-from nemo_gym.verification.judge import is_judge_failure
+from nemo_gym.verification import is_judge_failure
 from resources_servers.math_with_judge.app import LibraryJudgeMathVerifyRequest
 from resources_servers.physics_judge.app import (
     PhysicsJudgeResourcesServer,

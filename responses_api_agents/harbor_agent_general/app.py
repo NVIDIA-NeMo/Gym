@@ -56,10 +56,10 @@ from nemo_gym.core import (
     NeMoGymResponseReasoningItem,
     NeMoGymSummary,
 )
-from nemo_gym.exception_inspection import sandbox_failure_prefix
 from nemo_gym.metrics import compute_pass_majority_metrics
 from nemo_gym.server_runtime import BaseRunRequest, BaseVerifyResponse
 from nemo_gym.telemetry import init_telemetry
+from nemo_gym.utils.exception_inspection import sandbox_failure_prefix
 
 
 logger = logging.getLogger(__name__)

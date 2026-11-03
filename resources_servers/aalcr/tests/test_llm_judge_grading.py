@@ -8,8 +8,7 @@ import pytest
 
 from nemo_gym.client import ServerClient
 from nemo_gym.server_runtime import verifier_observability
-from nemo_gym.trajectory import VerifierInvocation
-from nemo_gym.trajectory.trajectory_record import grading_result_binding
+from nemo_gym.trajectory import VerifierInvocation, grading_result_binding
 from nemo_gym.verification import judge
 from resources_servers.aalcr.app import LEGACY_JUDGE_PROTOCOL, V1_1_JUDGE_PROTOCOL, AalcrResourcesServer
 from resources_servers.aalcr.tests.test_app import _config, _request, _response

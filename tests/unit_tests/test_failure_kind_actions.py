@@ -33,7 +33,7 @@ from nemo_gym.orchestration.recovery import (
 )
 from nemo_gym.rollouts.rollout_recovery import RunManifest
 from nemo_gym.rollouts.rollout_store import RolloutStore
-from tests.unit_tests.test_possibly_delivered_replay import _ANSWER, _route_failure_row
+from tests.unit_tests.rollouts.test_possibly_delivered_replay import _ANSWER, _route_failure_row
 
 
 _BUDGET = RecoveryBudget(max_infra_retries=2, infra_retries_used=0, walltime_used_s=0.0, live_job=False)
