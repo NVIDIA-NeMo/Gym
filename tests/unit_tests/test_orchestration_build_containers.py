@@ -25,6 +25,8 @@ from nemo_gym.orchestration.build_containers import (
     CommandOutput,
     FlashInferBuilder,
     FlashInferConfig,
+    MooncakeBuilder,
+    MooncakeConfig,
     VLLMBuilder,
     VLLMConfig,
 )
@@ -172,6 +174,11 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
         "  branch: main\n"
         "  invalidate_modules: [fused_moe_trtllm_sm100]\n"
         "  cpus_per_task: 128\n"
+        "mooncake:\n"
+        "  repo: https://example.invalid/Mooncake.git\n"
+        "  branch: mooncake-dev\n"
+        "  cpus_per_task: 32\n"
+        "  build_parallel_level: 8\n"
     )
     override = tmp_path / "override.yaml"
     override.write_text("flashinfer:\n  branch: dev\n")
@@ -206,6 +213,8 @@ def test_cli_loads_configs_and_overrides(entrypoint, tmp_path, monkeypatch):
     assert resolved.flashinfer.branch == "dev"
     assert resolved.flashinfer.cpus_per_task == 64
     assert resolved.flashinfer.invalidate_modules == ["fused_moe_trtllm_sm100"]
+    assert resolved.mooncake.branch == "mooncake-dev"
+    assert resolved.mooncake.build_parallel_level == 8
 
 
 @pytest.fixture
@@ -354,11 +363,12 @@ def test_vllm_installed_rust_launcher_compatibility(vllm_builder, tmp_path, supp
         assert "--input-listener-fd" in result.stderr
 
 
-@pytest.mark.parametrize("fail_vllm", [False, True])
-async def test_container_stages_run_vllm_before_flashinfer(container_config, tmp_path, monkeypatch, fail_vllm):
+@pytest.mark.parametrize("failed_stage", [None, "build-vllm", "build-flashinfer", "build-mooncake"])
+async def test_container_stage_order_and_cleanup(container_config, tmp_path, monkeypatch, failed_stage):
     container_config.input_container_fpath.write_text("base")
     container_config.vllm = VLLMConfig(repo="vllm", branch="dev", version="0.32.0", precompiled_wheel_commit="b" * 40)
     container_config.flashinfer = FlashInferConfig(repo="fi", branch="dev", invalidate_modules=[], cpus_per_task=64)
+    container_config.mooncake = MooncakeConfig(repo="mooncake", branch="dev", cpus_per_task=32, build_parallel_level=8)
     monkeypatch.setattr(build_containers.BaseBuilder, "_preflight_check_git_repo", AsyncMock(return_value="a" * 40))
     stages = []
 
@@ -368,22 +378,23 @@ async def test_container_stages_run_vllm_before_flashinfer(container_config, tmp
         image = str(container_config.output_container_fpath)
         assert builder_srun_slurm_vars["container-image"] == image
         assert builder_srun_slurm_vars["container-save"] == image
-        expected = "base" if stage == "build-vllm" else "build-vllm"
+        expected = stages[-2] if len(stages) > 1 else "base"
         assert container_config.output_container_fpath.read_text() == expected
         container_config.output_container_fpath.write_text(stage)
-        return CommandOutput(returncode=1 if fail_vllm else 0, output_lines=[])
+        return CommandOutput(returncode=1 if stage == failed_stage else 0, output_lines=[])
 
     monkeypatch.setattr(BuildContainerHelper, "_run_single_srun", run_stage)
     helper = BuildContainerHelper(config=container_config)
-    if fail_vllm:
+    expected_stages = ["build-vllm", "build-flashinfer", "build-mooncake"]
+    if failed_stage:
         with pytest.raises(RuntimeError, match="Command failed"):
             await helper.run()
-        assert stages == ["build-vllm"]
+        assert stages == expected_stages[: expected_stages.index(failed_stage) + 1]
         assert not container_config.output_container_fpath.exists()
     else:
         await helper.run()
-        assert stages == ["build-vllm", "build-flashinfer"]
-        assert container_config.output_container_fpath.read_text() == "build-flashinfer"
+        assert stages == expected_stages
+        assert container_config.output_container_fpath.read_text() == "build-mooncake"
     assert container_config.input_container_fpath.read_text() == "base"
 
 
@@ -459,3 +470,128 @@ def test_slim_invalidates_selected_families_in_all_caches(tmp_path, monkeypatch,
     namespace["metadata"].version = lambda name: "0.8.0"
     with pytest.raises(RuntimeError, match="Unexpected binary package change"):
         exec(compile(program, "flashinfer-cache-invalidation", "exec"), namespace)
+
+
+@pytest.fixture
+def mooncake_builder(tmp_path):
+    return MooncakeBuilder(
+        config=MooncakeConfig(
+            repo="repo with spaces $(touch INJECTED)",
+            branch="dev",
+            cpus_per_task=64,
+            build_parallel_level=16,
+        ),
+        log_file=tmp_path / "mooncake.log",
+    )
+
+
+async def test_mooncake_preflight_and_resources(mooncake_builder, container_config, monkeypatch):
+    with pytest.raises(RuntimeError, match="preflight"):
+        mooncake_builder.get_srun_command_str()
+    with pytest.raises(RuntimeError, match="preflight"):
+        mooncake_builder.get_srun_env_vars(container_config)
+    lookup = AsyncMock(return_value="a" * 40)
+    monkeypatch.setattr(MooncakeBuilder, "_preflight_check_git_repo", lookup)
+    await mooncake_builder.perform_preflight_checks()
+    lookup.assert_awaited_once_with(mooncake_builder.config.repo, "dev")
+    env = mooncake_builder.get_srun_env_vars(container_config)
+    assert env["MOONCAKE_HEAD_SHA"] == "a" * 40
+    assert env["CMAKE_BUILD_PARALLEL_LEVEL"] == "16"
+    assert mooncake_builder.get_srun_slurm_vars(container_config)["cpus-per-task"] == "64"
+    lookup.side_effect = RuntimeError("lookup failed")
+    with pytest.raises(RuntimeError, match="lookup failed"):
+        await mooncake_builder.perform_preflight_checks()
+    with pytest.raises(RuntimeError, match="preflight"):
+        mooncake_builder.get_srun_command_str()
+
+
+@pytest.mark.parametrize("cuda_version,install_failure", [("12.9", False), ("13.0", False), ("13.0", True)])
+def test_mooncake_build_and_cleanup(mooncake_builder, container_config, tmp_path, cuda_version, install_failure):
+    mooncake_builder._head_sha = "a" * 40
+    argv = shlex.split(mooncake_builder.get_srun_command_str())
+    subprocess.run(["bash", "-n", "-c", argv[2]], check=True)
+    cuda_home = tmp_path / "cuda toolkit"
+    cuda_bin = cuda_home / "bin"
+    cuda_bin.mkdir(parents=True)
+    nvcc = cuda_bin / "nvcc"
+    nvcc.write_text(f"#!/bin/sh\necho 'Cuda compilation tools, release {cuda_version}'\n")
+    nvcc.chmod(0o755)
+    bin_dir = tmp_path / "bin"
+    bin_dir.mkdir()
+    driver = bin_dir / "driver"
+    driver.write_text(
+        f"#!{sys.executable}\n"
+        + """import json, os, sys
+from pathlib import Path
+tool = Path(sys.argv[0]).name
+args = sys.argv[1:]
+build_dir = os.environ.get("BUILD_DIR")
+with open(os.environ["CAPTURE_FILE"], "a") as f:
+    f.write(json.dumps({"tool": tool, "args": args, "cwd": os.getcwd(),
+                        "build_dir": build_dir,
+                        "build_exists": bool(build_dir and Path(build_dir).exists())}) + "\\n")
+if tool == "git":
+    if args[0] == "init":
+        Path(args[1]).mkdir()
+    elif args[0] == "rev-parse":
+        print(os.environ["MOONCAKE_HEAD_SHA"])
+elif tool == "uv" and args[:2] == ["pip", "install"]:
+    if os.environ["INSTALL_FAILURE"] == "1":
+        sys.exit(42)
+elif tool == "uv" and args == ["cache", "clean"]:
+    sys.exit(23)  # Stop before OS cleanup.
+"""
+    )
+    driver.chmod(0o755)
+    for tool in ("git", "apt-get", "apt-cache", "uv"):
+        (bin_dir / tool).symlink_to(driver)
+    capture = tmp_path / "calls.jsonl"
+    result = subprocess.run(
+        argv,
+        env={
+            **os.environ,
+            **mooncake_builder.get_srun_env_vars(container_config),
+            "CUDA_HOME": str(cuda_home),
+            "PATH": f"{bin_dir}:{os.environ['PATH']}",
+            "CAPTURE_FILE": str(capture),
+            "INSTALL_FAILURE": str(int(install_failure)),
+        },
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        timeout=15,
+    )
+    if cuda_version.startswith("12"):
+        assert result.returncode == 1
+        assert "CUDA 13 development toolkit" in result.stderr
+        assert not capture.exists()
+        return
+    calls = [json.loads(line) for line in capture.read_text().splitlines()]
+    git_args = [call["args"] for call in calls if call["tool"] == "git"]
+    assert ["remote", "add", "origin", mooncake_builder.config.repo] in git_args
+    assert ["fetch", "--depth=1", "origin", "a" * 40] in git_args
+    assert ["submodule", "update", "--init", "--recursive", "--depth=1"] in git_args
+    uv_args = [call["args"] for call in calls if call["tool"] == "uv"]
+    assert uv_args[0] == [
+        "pip",
+        "uninstall",
+        "--system",
+        "mooncake-transfer-engine-cuda13",
+        "mooncake-transfer-engine",
+    ]
+    assert uv_args[1][:4] == ["pip", "install", "--system", "."]
+    assert "--config-settings=cmake.define.USE_CUDA=ON" in uv_args[1]
+    assert "--config-settings=cmake.define.WITH_TE=ON" in uv_args[1]
+    assert "--config-settings=cmake.define.WITH_STORE=ON" in uv_args[1]
+    assert "--config-settings=cmake.define.WITH_STORE_RUST=OFF" in uv_args[1]
+    assert f"--config-settings=cmake.define.CUDAToolkit_ROOT={cuda_home}" in uv_args[1]
+    assert not Path(calls[-1]["build_dir"]).exists()
+    assert not (tmp_path / "INJECTED").exists()
+    if install_failure:
+        assert result.returncode == 42, result.stderr
+        assert ["cache", "clean"] not in uv_args
+    else:
+        assert result.returncode == 23, result.stderr
+        assert calls[-1]["args"] == ["cache", "clean"]
+        assert calls[-1]["cwd"] == "/"
+        assert not calls[-1]["build_exists"]

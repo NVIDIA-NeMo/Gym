@@ -36,6 +36,15 @@ class VLLMConfig(BaseNeMoGymCLIConfig):
     precompiled_wheel_commit: str
 
 
+class MooncakeConfig(BaseNeMoGymCLIConfig):
+    """Build Mooncake's CUDA 13 Transfer Engine and Store from source."""
+
+    repo: str
+    branch: str
+    cpus_per_task: int = Field(gt=0)
+    build_parallel_level: int = Field(gt=0)
+
+
 class BuildContainerConfig(BaseNeMoGymCLIConfig):
     input_container_fpath: Path
     output_container_fpath: Path
@@ -44,6 +53,7 @@ class BuildContainerConfig(BaseNeMoGymCLIConfig):
     slurm: Dict[str, Any] = Field(default_factory=dict)
     vllm: Optional[VLLMConfig] = None
     flashinfer: Optional[FlashInferConfig] = None
+    mooncake: Optional[MooncakeConfig] = None
 
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
@@ -443,6 +453,115 @@ class VLLMBuilder(BaseBuilder):
         }
 
 
+class MooncakeBuilder(BaseBuilder):
+    """Build CUDA 13 Mooncake and smoke-test the installed Store over TCP."""
+
+    config: MooncakeConfig
+    _head_sha: Optional[str] = PrivateAttr(default=None)
+
+    async def perform_preflight_checks(self) -> None:
+        """Pin the configured branch before submitting the build."""
+        self._head_sha = None
+        self._head_sha = await self._preflight_check_git_repo(self.config.repo, self.config.branch)
+
+    def get_srun_command_str(self) -> str:
+        """Build the native Store and Transfer Engine, then verify installed artifacts."""
+        if self._head_sha is None:
+            raise RuntimeError("Run Mooncake preflight checks before generating the build command")
+        script = dedent(
+            r"""
+            set -Eeuo pipefail
+            export CUDA_HOME="${CUDA_HOME:-/usr/local/cuda}"
+            : "${BASE_IMAGE:?}" "${MOONCAKE_HEAD_SHA:?}"
+            echo ">>> Mooncake ${MOONCAKE_BRANCH} @ ${MOONCAKE_HEAD_SHA} on $(hostname)"
+            if [[ ! -x "${CUDA_HOME}/bin/nvcc" ]] || ! "${CUDA_HOME}/bin/nvcc" --version | grep -q 'release 13\.'; then
+                echo "ERROR: BASE_IMAGE needs a CUDA 13 development toolkit at CUDA_HOME=${CUDA_HOME}." >&2
+                exit 1
+            fi
+            export PATH="${CUDA_HOME}/bin:${PATH}"
+            export DEBIAN_FRONTEND=noninteractive
+            apt-get update -y
+            # Install the C++ Store/TE dependencies directly; dependencies.sh also
+            # installs Go and optional backends that this serving configuration omits.
+            apt-get install -y --no-install-recommends \
+                git ca-certificates build-essential cmake ninja-build pkg-config python3-dev \
+                libibverbs-dev libgoogle-glog-dev libgflags-dev libjsoncpp-dev libunwind-dev \
+                libnuma-dev libboost-dev libssl-dev libyaml-cpp-dev libcurl4-openssl-dev \
+                liburing-dev libmsgpack-dev libzstd-dev libasio-dev libxxhash-dev
+            # Newer Ubuntu releases split the C++ headers out of libmsgpack-dev.
+            if apt-cache show libmsgpack-cxx-dev >/dev/null 2>&1; then
+                apt-get install -y --no-install-recommends libmsgpack-cxx-dev
+            fi
+            command -v uv >/dev/null || python3 -m pip install uv
+
+            BUILD_DIR=$(mktemp -d /tmp/mooncake-build.XXXXXX)
+            export BUILD_DIR
+            trap 'cd /; rm -rf "${BUILD_DIR}"' EXIT
+            git init "${BUILD_DIR}/source"
+            cd "${BUILD_DIR}/source"
+            git remote add origin "${MOONCAKE_REPO}"
+            # Use the commit resolved on the login node even if main moves while queued.
+            git fetch --depth=1 origin "${MOONCAKE_HEAD_SHA}"
+            git checkout --detach FETCH_HEAD
+            test "$(git rev-parse HEAD)" = "${MOONCAKE_HEAD_SHA}"
+            git submodule update --init --recursive --depth=1
+
+            # Both distributions own the same mooncake package and CLI entry points.
+            uv pip uninstall --system mooncake-transfer-engine-cuda13 mooncake-transfer-engine
+            uv pip install --system . \
+                --config-settings=cmake.build-type=Release \
+                --config-settings=cmake.define.USE_CUDA=ON \
+                --config-settings="cmake.define.CUDAToolkit_ROOT=${CUDA_HOME}" \
+                --config-settings=cmake.define.WITH_TE=ON \
+                --config-settings=cmake.define.WITH_STORE=ON \
+                --config-settings=cmake.define.BUILD_EXAMPLES=OFF \
+                --config-settings=cmake.define.BUILD_UNIT_TESTS=OFF \
+                --config-settings=cmake.define.BUILD_BENCHMARK=OFF \
+                --config-settings=cmake.define.WITH_EP=OFF \
+                --config-settings=cmake.define.WITH_STORE_GO=OFF \
+                --config-settings=cmake.define.WITH_STORE_RUST=OFF \
+                --config-settings=cmake.define.WITH_STORE_RS=OFF \
+                --config-settings=cmake.define.WITH_P2P_STORE=OFF
+
+            cd /
+            rm -rf "${BUILD_DIR}"
+            uv cache clean
+            apt-get clean
+            rm -rf /var/lib/apt/lists/*
+            """
+        ).lstrip()
+        return join(["bash", "-c", script, "mooncake-build"])
+
+    def get_srun_env_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        """Pass source and build settings as literal environment values."""
+        if self._head_sha is None:
+            raise RuntimeError("Run Mooncake preflight checks before generating the build environment")
+        return {
+            "BASE_IMAGE": str(container_config.input_container_fpath),
+            "MOONCAKE_REPO": self.config.repo,
+            "MOONCAKE_BRANCH": self.config.branch,
+            "MOONCAKE_HEAD_SHA": self._head_sha,
+            "CMAKE_BUILD_PARALLEL_LEVEL": str(self.config.build_parallel_level),
+        }
+
+    def get_srun_slurm_vars(self, container_config: BuildContainerConfig) -> Dict[str, Any]:
+        """Build into the working image shared by all stages."""
+        return {
+            "job-name": "build-mooncake",
+            "nodes": "1",
+            "ntasks": "1",
+            "segment": "1",
+            "cpus-per-task": str(self.config.cpus_per_task),
+            "gpus-per-node": "4",
+            "mem": "0",
+            "time": "02:00:00",
+            "container-image": str(container_config.output_container_fpath),
+            "no-container-mount-home": True,
+            "container-save": str(container_config.output_container_fpath),
+            "export": "ALL",
+        }
+
+
 class BuildContainerHelper(BaseModel):
     config: BuildContainerConfig
 
@@ -466,6 +585,10 @@ class BuildContainerHelper(BaseModel):
             builders.append(VLLMBuilder(config=self.config.vllm, log_file=self.config.log_file))
         if self.config.flashinfer is not None:
             builders.append(FlashInferBuilder(config=self.config.flashinfer, log_file=self.config.log_file))
+
+        # Install Mooncake last so earlier dependency resolution cannot replace it.
+        if self.config.mooncake is not None:
+            builders.append(MooncakeBuilder(config=self.config.mooncake, log_file=self.config.log_file))
 
         for builder in builders:
             await builder.perform_preflight_checks()
