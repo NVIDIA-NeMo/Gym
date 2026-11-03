@@ -1606,12 +1606,18 @@ def test_package_is_dependency_free_leaf():
     """Keep token capture independent of Gym's server stack.
 
     Framework inference workers import the record and protocols.
-    They must not import Ray, FastAPI, or uvicorn through this package.
+    They must not import Ray, FastAPI, uvicorn, or an OpenAI client through this package.
+    Importing the package loads none of its modules, so the check loads every name each public API serves.
     A subprocess isolates this check from earlier test imports.
     """
-    heavy = ("ray", "fastapi", "uvicorn", "aiohttp", "requests", "torch")
+    heavy = ("ray", "fastapi", "starlette", "uvicorn", "aiohttp", "requests", "httpx", "openai", "torch")
     program = (
-        f"import sys; import nemo_gym.models.token_capture; print(','.join(m for m in {heavy!r} if m in sys.modules))"
+        "import importlib, sys\n"
+        "for package in ('nemo_gym.models.token_capture', 'nemo_gym.models.token_capture.staging'):\n"
+        "    module = importlib.import_module(package)\n"
+        "    for name in module._PUBLIC_API:\n"
+        "        getattr(module, name)\n"
+        f"print(','.join(m for m in {heavy!r} if m in sys.modules))"
     )
     proc = subprocess.run([sys.executable, "-c", program], capture_output=True, text=True)
     assert proc.returncode == 0, proc.stderr
