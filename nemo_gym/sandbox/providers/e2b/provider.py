@@ -119,6 +119,16 @@ _TIMEOUT_RETURN_CODE = 124
 # answer "not found" for one that still runs.
 KILL_RECHECK_DELAY_S = 1.0
 
+# A kill of a sandbox in its new-sandbox grace period (``operations.new_sandbox_grace_s``) that finds nothing is
+# repeated after this delay until the sandbox is found or the grace period ends.
+NEW_SANDBOX_KILL_RETRY_S = 1.0
+
+# AgentENV answers a lease renewal of a sandbox it is killing with 500 "sandbox ... is in invalid state Killing".
+_DYING_STATE = re.compile(r"invalid state Kill(?:ing|ed)\b")
+
+# The resource warning is logged once per process; later templates are logged at DEBUG.
+_resource_warning_logged = False
+
 # Lease renewal: at most this many renewals at once, each cut off after this long.
 LEASE_RENEW_BATCH = 64
 LEASE_RENEW_TIMEOUT_S = 10.0
@@ -390,11 +400,16 @@ class E2BOperationConfig:
     retries: int = 2
     retry_delay_s: float = 0.5
     retry_max_delay_s: float = 8.0
+    # Seconds after a create returns during which "not found" about the new sandbox means "not routable yet": in a
+    # sandbox's first seconds a gateway node can briefly lose its route and answer 404 for a sandbox that runs. A kill
+    # that finds nothing is repeated, and status() reports UNKNOWN rather than STOPPED. 0 turns this off.
+    new_sandbox_grace_s: float = 15.0
 
     def __post_init__(self) -> None:
         _validate_nonnegative_int("operations.retries", self.retries)
         _validate_nonnegative_number("operations.retry_delay_s", self.retry_delay_s)
         _validate_nonnegative_number("operations.retry_max_delay_s", self.retry_max_delay_s)
+        _validate_nonnegative_number("operations.new_sandbox_grace_s", self.new_sandbox_grace_s)
 
 
 @dataclass(frozen=True)
@@ -441,6 +456,8 @@ class E2BProvider:
         self._warned_resource_requests = False
         self._leases: dict[str, _Lease] = {}
         self._lease_task: asyncio.Task[None] | None = None
+        # Monotonic end of each new sandbox's grace period (``operations.new_sandbox_grace_s``), by sandbox id.
+        self._new_until: dict[str, float] = {}
 
     # ---------------------------------------------------------------- helpers
 
@@ -548,7 +565,12 @@ class E2BProvider:
             raise E2BCreateError(message)
         if template not in self._warned_resource_specs:
             self._warned_resource_specs.add(template)
-            LOGGER.warning("%s", message)
+            global _resource_warning_logged
+            if _resource_warning_logged:
+                LOGGER.debug("%s", message)
+            else:
+                _resource_warning_logged = True
+                LOGGER.warning("%s Later templates are logged at DEBUG.", message)
 
     async def _with_retries(
         self,
@@ -680,14 +702,23 @@ class E2BProvider:
         except Exception as exc:
             raise E2BCreateError(f"Failed to create e2b sandbox from template {template!r}: {exc}") from exc
 
+        # Before the reachability probe, so the probe, a kill after it fails, and a restore's first commands are all
+        # covered.
+        self._start_grace(str(sandbox.sandbox_id))
         self._hold_lease(sandbox, lifetime_s)
         if self._create.reachable_timeout_s is not None:
             try:
                 await self._wait_reachable(sandbox, self._create.reachable_timeout_s)
             except Exception as exc:
+                LOGGER.warning(
+                    "e2b sandbox %s did not become reachable within %gs: %r",
+                    sandbox.sandbox_id,
+                    self._create.reachable_timeout_s,
+                    exc,
+                )
                 self._leases.pop(str(sandbox.sandbox_id), None)
                 try:
-                    await sandbox.kill(**self._api_params())
+                    await self._stop(sandbox, str(sandbox.sandbox_id))
                 except Exception as kill_error:  # noqa: BLE001 - the lease or timeout still ends it
                     LOGGER.warning("could not kill unreachable e2b sandbox %s: %r", sandbox.sandbox_id, kill_error)
                 raise E2BCreateError(
@@ -740,9 +771,11 @@ class E2BProvider:
             raise
 
     async def _wait_reachable(self, sandbox: Any, timeout_s: float) -> None:
-        """Run a no-op command until the gateway reaches ``sandbox``; only "could not be reached" is waited out.
+        """Run a no-op command until the gateway reaches ``sandbox``.
 
-        The command does nothing, so running it again is always safe, unlike the caller's own commands.
+        "Could not be reached" (502) and "not found" (404, including one whose body the SDK cannot parse) are waited
+        out: in a new sandbox's first seconds a gateway node can answer either for a sandbox that runs. The command
+        does nothing, so running it again is always safe, unlike the caller's own commands.
         """
         e2b = _require_e2b_sdk()
         deadline = monotonic() + timeout_s
@@ -757,8 +790,11 @@ class E2BProvider:
                     request_timeout=self._exec_request_timeout(),
                 )
             except Exception as exc:
-                if not _is_unreachable(exc, e2b) or monotonic() + delay > deadline:
+                not_found = _is_not_found(exc, e2b) or isinstance(exc, json.JSONDecodeError)
+                if not (_is_unreachable(exc, e2b) or not_found) or monotonic() + delay > deadline:
                     raise
+                if not_found:
+                    LOGGER.info("e2b sandbox %s not routable yet (%r); probing again", sandbox.sandbox_id, exc)
                 await asyncio.sleep(delay)
                 delay = min(delay * 2, REACHABLE_RETRY_MAX_DELAY_S)
                 continue
@@ -796,6 +832,8 @@ class E2BProvider:
 
     async def _renew_lease(self, sandbox_id: str, lease: _Lease) -> None:
         assert self._create.lease_s is not None
+        if self._leases.get(sandbox_id) is not lease:
+            return  # closed or dropped since this round began
         timeout_s = self._create.lease_s
         if lease.lifetime_end is not None:
             remaining = lease.lifetime_end - monotonic()
@@ -810,7 +848,14 @@ class E2BProvider:
                 LEASE_RENEW_TIMEOUT_S,
             )
         except Exception as error:  # noqa: BLE001 - a failed renewal is retried at the next round
-            if _is_not_found(error, _require_e2b_sdk()) or await self._gone_behind_unparsed_reply(error, sandbox_id):
+            if _DYING_STATE.search(str(error)):
+                LOGGER.info("e2b sandbox %s is being killed; stopping its lease", sandbox_id)
+                self._leases.pop(sandbox_id, None)
+                return
+            gone = _is_not_found(error, _require_e2b_sdk()) or await self._gone_behind_unparsed_reply(
+                error, sandbox_id
+            )
+            if gone and not self._in_grace(sandbox_id):
                 LOGGER.info("e2b sandbox %s is gone; stopping its lease", sandbox_id)
                 self._leases.pop(sandbox_id, None)
                 return
@@ -928,7 +973,8 @@ class E2BProvider:
             # Control-plane status avoids waking paused sandboxes with a health check.
             info = await sandbox.get_info(**self._request_params())
         except not_found:
-            return SandboxStatus.STOPPED
+            # A new sandbox the gateway cannot route yet is not known to be stopped.
+            return SandboxStatus.UNKNOWN if self._in_grace(handle.sandbox_id) else SandboxStatus.STOPPED
         except Exception:  # noqa: BLE001 - status must not raise for transient issues
             return SandboxStatus.UNKNOWN
         return {"running": SandboxStatus.RUNNING, "paused": SandboxStatus.PAUSED}.get(
@@ -936,31 +982,51 @@ class E2BProvider:
         )
 
     async def close(self, handle: SandboxHandle) -> None:
-        e2b = _require_e2b_sdk()
         sandbox = handle.raw
         if sandbox is None:
             return
+        self._leases.pop(handle.sandbox_id, None)
+        await self._stop(sandbox, handle.sandbox_id)
+        handle.raw = None
+
+    async def _stop(self, sandbox: Any, sandbox_id: str) -> None:
+        """Kill a sandbox, making sure a "not found" really means it is gone.
+
+        During the new-sandbox grace period, a kill that finds nothing is repeated until it finds the sandbox or the
+        period ends. After it, a kill that finds nothing is checked again once: a gateway replica that has not seen the
+        sandbox can answer "not found" for one that still runs.
+        """
+        e2b = _require_e2b_sdk()
         not_found = tuple(
             exc
             for exc in (getattr(e2b, "SandboxNotFoundException", None), getattr(e2b, "NotFoundException", None))
             if isinstance(exc, type)
         )
-        self._leases.pop(handle.sandbox_id, None)
-        if await self._kill(sandbox, not_found) is False:
-            # Already gone (expired TTL or killed elsewhere) -- unless a gateway replica that has not seen the
-            # sandbox answered for one that still runs. Look again, and kill it if it is there.
-            await asyncio.sleep(KILL_RECHECK_DELAY_S)
-            if await self.status(handle) is SandboxStatus.RUNNING:
-                LOGGER.warning(
-                    "e2b sandbox %s still runs after a kill that did not find it; killing again", handle.sandbox_id
-                )
-                await self._kill(sandbox, not_found)
-            else:
-                LOGGER.debug("e2b sandbox %s already gone on close", handle.sandbox_id)
-        handle.raw = None
+        while await self._kill(sandbox, not_found) is False:
+            if not self._in_grace(sandbox_id):
+                break
+            LOGGER.info("e2b kill did not find new sandbox %s yet; retrying", sandbox_id)
+            await asyncio.sleep(NEW_SANDBOX_KILL_RETRY_S)
+        else:  # killed
+            self._new_until.pop(sandbox_id, None)
+            return
+        # The kill found nothing after the grace period: look once more.
+        await asyncio.sleep(KILL_RECHECK_DELAY_S)
+        if await self.status(SandboxHandle(sandbox_id=sandbox_id, provider_name=self.name, raw=sandbox)) is (
+            SandboxStatus.RUNNING
+        ):
+            LOGGER.warning("e2b sandbox %s still runs after a kill that did not find it; killing again", sandbox_id)
+            await self._kill(sandbox, not_found)
+        else:
+            LOGGER.debug("e2b sandbox %s already gone on close", sandbox_id)
+        self._new_until.pop(sandbox_id, None)
 
     async def _kill(self, sandbox: Any, not_found: tuple[type[BaseException], ...]) -> bool:
-        """Kill a sandbox; False when the service did not find it."""
+        """Kill a sandbox; False when the service did not find it.
+
+        A reply the SDK cannot parse (an empty or plain-text 404) also counts as "not found": during the new-sandbox
+        grace period without a lookup, so the caller retries, and after it only when a lookup confirms the 404.
+        """
         try:
             killed = await self._with_retries(
                 lambda: sandbox.kill(**self._api_params()),
@@ -970,10 +1036,26 @@ class E2BProvider:
         except not_found:
             return False
         except Exception as error:
+            if isinstance(error, json.JSONDecodeError) and self._in_grace(sandbox.sandbox_id):
+                return False
             if await self._gone_behind_unparsed_reply(error, sandbox.sandbox_id):
                 return False
             raise
         return killed is not False
+
+    def _start_grace(self, sandbox_id: str) -> None:
+        if self._operations.new_sandbox_grace_s > 0:
+            self._new_until[sandbox_id] = monotonic() + self._operations.new_sandbox_grace_s
+
+    def _in_grace(self, sandbox_id: str) -> bool:
+        """Whether ``sandbox_id`` is still in its new-sandbox grace period; forgets one whose period has ended."""
+        until = self._new_until.get(sandbox_id)
+        if until is None:
+            return False
+        if monotonic() < until:
+            return True
+        del self._new_until[sandbox_id]
+        return False
 
     async def _gone_behind_unparsed_reply(self, error: BaseException, sandbox_id: str) -> bool:
         """Whether ``error`` is a reply the SDK could not parse about a sandbox the service no longer has.
@@ -1019,7 +1101,9 @@ class E2BProvider:
         try:
             info = await create_snapshot(name if self._snapshots.send_names else None, **self._request_params())
         except Exception as error:
-            if await self._gone_behind_unparsed_reply(error, handle.sandbox_id):
+            if not self._in_grace(handle.sandbox_id) and await self._gone_behind_unparsed_reply(
+                error, handle.sandbox_id
+            ):
                 raise E2BSnapshotError(
                     f"e2b sandbox {handle.sandbox_id!r} is gone and cannot be snapshotted (HTTP 404)"
                 ) from error
@@ -1085,28 +1169,30 @@ class E2BProvider:
         """
         e2b = _require_e2b_sdk()
         command_timeout = kwargs.get("timeout")
+        started = monotonic()
         deadline = (
-            monotonic() + float(command_timeout)
-            if command_timeout is not None and float(command_timeout) > 0
-            else None
+            started + float(command_timeout) if command_timeout is not None and float(command_timeout) > 0 else None
         )
         handle = await sandbox.commands.run(**kwargs, background=True)
         pid = getattr(handle, "pid", None)
         stdout = ""
         stderr = ""
 
-        # Never swallow these while reattaching: a non-zero exit and a command
-        # timeout are real outcomes, not transport failures.
+        # Never swallowed while reattaching: a non-zero exit is a real outcome, and so is a timeout at the command's
+        # own deadline. A timeout before it is the stream's (E2B reports a dropped stream as a TimeoutException, and
+        # its "could not be reached" is one too), so the command is reattached like after any transport failure.
         exit_exc = getattr(e2b, "CommandExitException", None)
-        terminal = tuple(
-            exc
-            for exc in (
-                TimeoutError,
-                exit_exc,
-                getattr(e2b, "TimeoutException", None),
+        timeout_exc = getattr(e2b, "TimeoutException", None)
+
+        def at_deadline(exc: BaseException) -> bool:
+            timed_out = isinstance(exc, TimeoutError) or (
+                isinstance(timeout_exc, type) and isinstance(exc, timeout_exc)
             )
-            if isinstance(exc, type)
-        )
+            return (
+                timed_out
+                and deadline is not None
+                and monotonic() - started >= _DEADLINE_FRACTION * float(command_timeout)
+            )
 
         for attempt in range(self._exec.reconnect_attempts + 1):
             try:
@@ -1114,12 +1200,13 @@ class E2BProvider:
                 result.stdout = stdout + (getattr(result, "stdout", "") or "")
                 result.stderr = stderr + (getattr(result, "stderr", "") or "")
                 return result
-            except terminal as exc:
+            except Exception as exc:  # noqa: BLE001 - transport failure unless an exit or the deadline; reattach
                 if isinstance(exit_exc, type) and isinstance(exc, exit_exc):
                     exc.stdout = stdout + (getattr(exc, "stdout", "") or "")
                     exc.stderr = stderr + (getattr(exc, "stderr", "") or "")
-                raise
-            except Exception as exc:  # noqa: BLE001 - transport failure; try to reattach
+                    raise
+                if at_deadline(exc):
+                    raise
                 stdout += getattr(handle, "stdout", "") or ""
                 stderr += getattr(handle, "stderr", "") or ""
                 if pid is None or attempt >= self._exec.reconnect_attempts:

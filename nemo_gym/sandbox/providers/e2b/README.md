@@ -75,7 +75,7 @@ provisioning the remaining images.
 | `connection` | SDK credentials, hosted or gateway URLs, headers, proxy, and control-plane `request_timeout_s`. |
 | `create` | Default template/mapping, sandbox `timeout_s`, timeout action `auto_resume`, `secure`, `allow_internet_access`, `network` (`allow_out`/`deny_out`), `custom_extension_params` (AgentEnv `customExtensionParams`; creates through `POST /sandboxes`), and `strict_resources`. |
 | `exec` | Fallback command timeout, default user, stream-open request timeout, background execution, and reconnect attempts. |
-| `operations` | Retry count and exponential-backoff delays for safe, retryable operations. |
+| `operations` | Retry count and exponential-backoff delays for safe, retryable operations, and `new_sandbox_grace_s`, the window in which a new sandbox's "not found" is retried rather than believed. |
 | `attribution` | Automatic `team` / `user` / `workload` / `run` metadata on every sandbox (on by default); see [Job Attribution](#job-attribution). |
 
 `SandboxSpec.ttl_s` overrides `create.timeout_s`. `SandboxSpec.ready_timeout_s` is a positive
