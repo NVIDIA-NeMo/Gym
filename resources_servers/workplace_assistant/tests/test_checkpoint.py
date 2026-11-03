@@ -255,4 +255,4 @@ async def test_a_session_dropped_by_a_failed_verify_is_left_out_of_the_export(
     assert commit["manifest"]["record_count"] == 1
     assert len(restored.session_id_to_tool_env) == 1
     assert continued == ["00000301"]
-    assert gone.status_code == 400
+    assert gone.status_code == 404

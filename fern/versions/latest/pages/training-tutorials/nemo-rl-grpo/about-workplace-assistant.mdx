@@ -183,6 +183,8 @@ async def verify(self, body: WorkbenchVerifyRequest) -> WorkbenchVerifyResponse:
     return WorkbenchVerifyResponse(**body.model_dump(), reward=total_score)
 ```
 
+The replay needs only the trajectory, but the server first checks that it still holds the rollout's databases. If the session was never seeded, already closed, or lost with a restart, the agent's tool calls had no databases to act on, so `verify` returns a masked sample (`reward: 0`, `mask_sample: true`) instead of a score.
+
 The `is_correct` function implements the state-matching logic:
 
 ```python

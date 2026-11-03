@@ -25,6 +25,21 @@ gym eval run --no-serve \
    --limit 1
 ```
 
+## Sessions
+
+Each rollout gets its own copy of the five databases, created at `/seed_session`. The server accepts two seed bodies:
+
+- An Agent's `/run`, such as `simple_agent` behind the `legacy_agent` relay in `configs/workplace_assistant.yaml`, seeds with its run body under the session cookie. That caller never closes the session, so `/verify` releases its databases.
+- An Environment Server, such as `single_agent_turn`, seeds with a typed `ResourcesSeedSessionRequest` and closes with `/close_session`. The databases are keyed by the caller's `resources_session_id`: a repeated seed returns the same databases, `/verify` leaves them for the close, and the close releases them even without the seed's cookie. A seed after its session closed gets 409, and a seed whose `task_data` is not a workplace_assistant task gets 422.
+
+A tool call for a session the server no longer holds (never seeded, closed, or lost with a restart) gets 404 with `failure_kind: session_lost`, and its `/verify` returns a masked sample (`reward: 0`, `mask_sample: true`).
+
+The configs still front `simple_agent` with the `legacy_agent` relay. To run the pairing through `single_agent_turn_legacy` instead, switch them:
+
+```bash
+python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent resources_servers/workplace_assistant/configs/
+```
+
 ## Generating Additional Training Data
 
 To generate your own training JSONL for this environment using NeMo Data Designer, see the [synthetic data generation example](notebooks/synthetic-data-generation/).
