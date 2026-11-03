@@ -795,7 +795,7 @@ fi
 
 _MAX_WALLTIME_CHECK_TEMPLATE = """\
 if (( _gym_accumulated >= {seconds} )); then
-    _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; continue with gym eval resubmit --recover --max-walltime HH:MM:SS above the cap: the retry and walltime budgets carry over."
+    _gym_stop_incomplete "Accumulated walltime (${{_gym_accumulated}}s) reached max_walltime cap ({raw} = {seconds}s). Chain stopped at the walltime cap with rollouts missing; continue with gym eval resubmit --recover --max-walltime HH:MM:SS --walltime-reason TEXT, with HH:MM:SS above the cap: the retry and walltime budgets carry over."
 fi
 # Slurm rounds time limits up to minutes. Round the remaining allowance down instead, never granting extra time.
 _gym_remaining_minutes=$((({seconds} - _gym_accumulated) / 60))
