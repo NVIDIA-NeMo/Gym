@@ -896,7 +896,7 @@ class TestResourcesSessions:
                 assert response.status_code == 200
                 assert response.json()["reward"] == pytest.approx(0.5)
                 assert response.json()["mask_sample"] is False
-            envs[0].close.assert_not_called()
+            envs[0].close.assert_called_once()
             assert client.post("/close_session", json=_typed_close()).status_code == 200
 
         envs[0].close.assert_called_once()
@@ -914,7 +914,8 @@ class TestResourcesSessions:
             late = client.post("/step", json={})
             retried = client.post("/verify", json=VERIFY_BODY)
 
-        assert late.json() == {"error": "Episode has ended.", "result": None}
+        assert late.status_code == 404
+        assert late.json()["detail"]["failure_kind"] == "session_lost"
         envs[0].step.assert_not_called()
         assert retried.json()["reward"] == pytest.approx(0.5)
 
@@ -1006,3 +1007,136 @@ class TestResourcesSessions:
 
         assert failed_env.close.call_count == 3
         replacement_env.close.assert_called_once()
+
+
+@pytest.mark.parametrize("stage", ["active", "verified", "closed"])
+def test_legacy_seed_cannot_overwrite_typed_or_closed_cookie(stage: str) -> None:
+    server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=_typed_seed().model_dump(mode="json")).status_code == 200
+        if stage == "verified":
+            assert client.post("/verify", json=VERIFY_BODY).status_code == 200
+        elif stage == "closed":
+            assert client.post("/close_session", json=_typed_close()).status_code == 200
+        before = dict(server._sessions)
+        assert client.post("/seed_session", json={}).status_code == 409
+        assert server._sessions == before
+
+
+def test_malformed_typed_seed_does_not_fall_back_to_legacy() -> None:
+    server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
+    malformed = dict({}) | {"resources_session_id": "incomplete-typed"}
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json=malformed).status_code == 422
+    assert server._sessions == {}
+    assert server._session_episodes == {}
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_checkpoint_verify_releases_state_but_retry_survives_until_expiry(typed: bool, monkeypatch) -> None:
+    from omegaconf import DictConfig
+
+    clock = [100.0]
+    monkeypatch.setattr("nemo_gym.server_runtime.base_resources_server.monotonic", lambda: clock[0])
+    server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    prefix = "/ng-rollout/rollout"
+    with TestClient(server.setup_webserver()) as client:
+        assert (
+            client.post(
+                prefix + "/seed_session", json=_typed_seed().model_dump(mode="json") if typed else {}
+            ).status_code
+            == 200
+        )
+        sid = next(iter(server._sessions))
+        assert server._checkpoint.is_open(sid)
+        env = server._sessions[sid].env
+        first = client.post(prefix + "/verify", json=VERIFY_BODY).json()
+        assert not first["mask_sample"]
+        assert not server._checkpoint.is_open(sid)
+        assert server._sessions == {}
+        assert server._session_episodes == {}
+        env.close.assert_called_once()
+        retry = client.post(prefix + "/verify", json=VERIFY_BODY).json()
+        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+        if typed:
+            wrong_owner = _typed_close()
+            wrong_owner["episode_id"]["rollout_id"] = "other"
+            assert client.post(prefix + "/close_session", json=wrong_owner).status_code == 409
+        clock[0] += server.config.session_close_retry_window_seconds + 1
+        assert client.post(prefix + "/verify", json=VERIFY_BODY).json()["mask_sample"] is True
+        assert len(server._verified_sessions) == 0
+
+
+def test_next_legacy_run_gets_new_cookie_and_old_verify_remains_retryable() -> None:
+    server = _session_server(reset_obs=MagicMock(reward=0.5, done=False))[0]
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json={}).status_code == 200
+        old_cookies = dict(client.cookies)
+        old_id = next(iter(server._sessions))
+        first = client.post("/verify", json=VERIFY_BODY).json()
+        assert client.post("/seed_session", json={}).status_code == 200
+        new_id = next(iter(server._sessions))
+        assert new_id != old_id
+        assert client.post("/verify", json=VERIFY_BODY).json()["mask_sample"] is False
+        client.cookies.clear()
+        client.cookies.update(old_cookies)
+        retry = client.post("/verify", json=VERIFY_BODY).json()
+        assert retry["reward"] == first["reward"] and retry["mask_sample"] is False
+
+
+@pytest.mark.parametrize("typed", [False, True])
+def test_checkpoint_retire_releases_live_session(typed: bool) -> None:
+    from omegaconf import DictConfig
+
+    server = _session_server()[0]
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    with TestClient(server.setup_webserver()) as client:
+        assert (
+            client.post(
+                "/ng-rollout/rollout/seed_session", json=_typed_seed().model_dump(mode="json") if typed else {}
+            ).status_code
+            == 200
+        )
+        sid = next(iter(server._sessions))
+        handle = server._sessions[sid].env
+        client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
+        assert server._sessions == {}
+        assert server._session_episodes == {}
+        handle.close.assert_called_once()
+
+
+def test_checkpoint_retire_retries_failed_environment_close() -> None:
+    from omegaconf import DictConfig
+
+    server, envs = _session_server()
+    server.server_client.global_config_dict = DictConfig(
+        {"checkpoint": {"enabled": True, "control_auth_token": "test"}}
+    )
+    with TestClient(server.setup_webserver()) as client:
+        client.post("/ng-rollout/rollout/seed_session", json=_typed_seed().model_dump(mode="json"))
+        envs[0].close.side_effect = [RuntimeError("close failed"), None]
+        with pytest.raises(RuntimeError, match="close failed"):
+            client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
+        assert "resources-session" in server._sessions
+        assert "resources-session" in server._session_episodes
+        assert server._fence.closed_episode("resources-session") is None
+        client.portal.call(server._checkpoint.retire, EpisodeId(rollout_id="rollout", attempt=0))
+        assert server._sessions == {} and server._session_episodes == {}
+        assert envs[0].close.call_count == 2
+
+
+def test_typed_seed_cannot_replace_a_live_legacy_session() -> None:
+    server = _session_server()[0]
+    with TestClient(server.setup_webserver()) as client:
+        assert client.post("/seed_session", json={}).status_code == 200
+        sid = next(iter(server._sessions))
+        original = server._sessions[sid]
+        assert client.post("/seed_session", json=_typed_seed(sid).model_dump(mode="json")).status_code == 409
+        assert server._sessions[sid] is original
+        assert server._session_episodes == {}
+        original.env.close.assert_not_called()

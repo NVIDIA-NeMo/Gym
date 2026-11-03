@@ -23,10 +23,11 @@ to add a new environment.
 
 import importlib
 import logging
-from typing import Any, Dict, Optional
+from typing import Annotated, Any, Dict, Optional
+from uuid import uuid4
 
 from fastapi import FastAPI, Request
-from pydantic import BaseModel, create_model
+from pydantic import BaseModel, BeforeValidator, create_model
 
 from nemo_gym.client import SESSION_ID_KEY
 from nemo_gym.core import EpisodeId, TaskId
@@ -36,6 +37,7 @@ from nemo_gym.server_runtime import (
     BaseSeedSessionResponse,
     BaseVerifyRequest,
     BaseVerifyResponse,
+    ClosedResourcesSessionRecords,
     ResourcesCloseSessionRequest,
     ResourcesCloseSessionResponse,
     ResourcesSeedSessionRequest,
@@ -61,6 +63,12 @@ def _import_class(dotted_path: str) -> type:
         raise RuntimeError(
             f"Failed to import '{dotted_path}': {e}. Ensure the environment's dependencies are installed."
         ) from e
+
+
+def _reject_typed_seed(value: object) -> object:
+    if isinstance(value, dict) and ResourcesSeedSessionRequest.model_fields.keys() & value.keys():
+        raise ValueError("A typed seed must supply a valid resources session, episode, task and task_data")
+    return value
 
 
 class OpenEnvResourcesServerConfig(BaseResourcesServerConfig):
@@ -94,6 +102,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     _pending_envs: Dict[str, Any] = {}
     # The episode and task each Environment Server session was seeded for, keyed by resources_session_id.
     _session_episodes: Dict[str, tuple[EpisodeId, TaskId]] = {}
+    _verified_sessions: ClosedResourcesSessionRecords[tuple[Optional[tuple[EpisodeId, TaskId]], float]]
     _fence: Optional[ResourcesSessionFence] = None
     _env_class: Any = None
     _action_class: Any = None
@@ -103,6 +112,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         """Initialize private attributes: session stores and dynamically imported classes."""
         self._sessions = {}
         self._pending_envs = {}
+        self._verified_sessions = ClosedResourcesSessionRecords(self.config.session_close_retry_window_seconds)
         self._session_episodes = {}
         self._fence = ResourcesSessionFence(self.config.session_close_retry_window_seconds)
         self._env_class = _import_class(self.config.env_class)
@@ -254,7 +264,9 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         self._pending_envs.pop(session_id, None)
 
     async def seed_session(
-        self, request: Request, body: ResourcesSeedSessionRequest | BaseSeedSessionRequest
+        self,
+        request: Request,
+        body: ResourcesSeedSessionRequest | Annotated[BaseSeedSessionRequest, BeforeValidator(_reject_typed_seed)],
     ) -> ResourcesSeedSessionResponse | BaseSeedSessionResponse:
         """Create and reset this session's environment instance.
 
@@ -265,14 +277,31 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         """
         if not isinstance(body, ResourcesSeedSessionRequest):
             session_id = request.session[SESSION_ID_KEY]
-            self._sessions[session_id] = self._new_session(session_id)
+            async with self._fence.locked(session_id):
+                self._fence.raise_if_closed(session_id)
+                verified = self._verified_sessions.get(session_id)
+                if session_id in self._session_episodes or (verified is not None and verified[0] is not None):
+                    raise ResourcesSessionConflictError("A legacy seed cannot replace a typed session")
+                if verified is not None:
+                    # A new /run may reuse its caller's cookie; keep the completed cookie valid for verify retries.
+                    session_id = str(uuid4())
+                previous = self._sessions.get(session_id)
+                if previous is not None and hasattr(previous.env, "close"):
+                    previous.env.close()
+                self._sessions.pop(session_id, None)
+                self._sessions[session_id] = self._new_session(session_id)
+                request.session[SESSION_ID_KEY] = session_id
             return BaseSeedSessionResponse()
 
         session_id = body.resources_session_id
         async with self._fence.locked(session_id):
             self._fence.raise_if_closed(session_id)
+            if session_id in self._verified_sessions:
+                raise ResourcesSessionConflictError("resources session has already been verified")
             identity = self._session_episodes.get(session_id)
             if identity is None:
+                if session_id in self._sessions:
+                    raise ResourcesSessionConflictError("A typed seed cannot replace a legacy session")
                 self._sessions[session_id] = self._new_session(session_id)
                 self._session_episodes[session_id] = (body.episode_id, body.task_id)
             elif identity != (body.episode_id, body.task_id):
@@ -281,7 +310,7 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
         return ResourcesSeedSessionResponse(resources_session_id=session_id)
 
     async def close_resources_session(self, body: ResourcesCloseSessionRequest) -> ResourcesCloseSessionResponse:
-        """Close the session's environment instance; verify keeps a typed session's instance until this close.
+        """Close any still-active environment instance and fence subsequent verification retries.
 
         Keyed by resources_session_id, so a close without the cookie (the seed's reply was lost) still releases it.
         Closing an unknown or already-closed session succeeds, and the fence refuses a later seed of it.
@@ -291,18 +320,30 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
             closed_episode = self._fence.closed_episode(session_id)
             if closed_episode is not None and closed_episode != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the closed resources session")
-            identity = self._session_episodes.get(session_id)
+            verified = self._verified_sessions.get(session_id)
+            identity = self._session_episodes.get(session_id) or (verified[0] if verified is not None else None)
             if identity is not None and identity[0] != body.episode_id:
                 raise ResourcesSessionConflictError("episode_id does not match the seeded resources session")
-            self._close_pending_env(session_id)
-            session = self._sessions.get(session_id)
-            if session is not None and hasattr(session.env, "close"):
-                # A failure raises before the session is forgotten or fenced, so the caller can retry the close.
-                session.env.close()
-            self._sessions.pop(session_id, None)
-            self._session_episodes.pop(session_id, None)
+            self._release_session(session_id)
             self._fence.mark_closed(session_id, body.episode_id)
         return ResourcesCloseSessionResponse(resources_session_id=session_id)
+
+    def _release_session(self, session_id: str) -> None:
+        self._close_pending_env(session_id)
+        session = self._sessions.get(session_id)
+        if session is not None and hasattr(session.env, "close"):
+            # Keep both state and identity if cleanup fails, so close or checkpoint retire can retry.
+            session.env.close()
+        self._sessions.pop(session_id, None)
+        self._session_episodes.pop(session_id, None)
+
+    async def retire_session_state(self, session_id: str) -> None:
+        """Release a retired attempt's environment, retaining ownership if its close fails."""
+        async with self._fence.locked(session_id):
+            identity = self._session_episodes.get(session_id)
+            self._release_session(session_id)
+            if identity is not None:
+                self._fence.mark_closed(session_id, identity[0])
 
     # TODO(ahmadki): Reward accumulation strategy needs a revisit.
     #
@@ -316,29 +357,24 @@ class OpenEnvResourcesServer(SimpleResourcesServer):
     # Works correctly for: terminal-only rewards (chess, coding), zero rewards
     # (echo MCP), and true per-step deltas (maze).
     async def verify(self, request: Request, body: BaseVerifyRequest) -> BaseVerifyResponse:
-        """Return accumulated reward, retaining typed sessions until their explicit close.
-
-        An Agent's /run never closes its session, so its verify still releases the environment. An Environment
-        Server closes after verification; retaining that session lets a lost verify reply be retried without
-        discarding the measured reward. A verify for a missing session has no reward to report and is masked.
-        """
+        """Release the environment and retain only its reward for a bounded verification retry window."""
         session_id = request.session[SESSION_ID_KEY]
-        session = self._sessions.get(session_id)
-        if session is None:
-            return BaseVerifyResponse(
-                **(body.model_dump() | lost_session_verification("No active OpenEnv session to verify"))
-            )
-
-        reward = session.accumulated_reward
-        if session_id not in self._session_episodes:
-            if hasattr(session.env, "close"):
-                session.env.close()
-            del self._sessions[session_id]
-        else:
-            # End the episode, so a step that lands after verify cannot change what a retried verify reports.
-            session.done = True
-
-        return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        verified = self._verified_sessions.get(session_id)
+        if self._fence.closed_episode(session_id) is None:
+            if verified is not None:
+                return BaseVerifyResponse(**body.model_dump(), reward=verified[1])
+            session = self._sessions.get(session_id)
+            if session is not None:
+                reward = session.accumulated_reward
+                if hasattr(session.env, "close"):
+                    session.env.close()
+                self._sessions.pop(session_id)
+                identity = self._session_episodes.pop(session_id, None)
+                self._verified_sessions.remember(session_id, (identity, reward))
+                return BaseVerifyResponse(**body.model_dump(), reward=reward)
+        return BaseVerifyResponse(
+            **(body.model_dump() | lost_session_verification("No active OpenEnv session to verify"))
+        )
 
 
 if __name__ == "__main__":

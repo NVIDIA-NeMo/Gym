@@ -201,7 +201,7 @@ gym eval run --no-serve \
 
 1. **`POST /seed_session`** — Creates an environment instance and calls `env.reset()`.
 2. **`POST /<tool_name>`** (MCP) or **`POST /step`** (non-MCP) — Calls `env.step(action)` and accumulates reward.
-3. **`POST /verify`** — Returns accumulated reward. Legacy sessions are released here; typed sessions remain until `/close_session`.
+3. **`POST /verify`** — Returns accumulated reward and releases the environment, keeping only a bounded retry record.
 
 For MCP environments, tool endpoints are discovered at startup via `ListToolsAction`.
 
@@ -212,11 +212,13 @@ body. The environment instance is keyed by its `resources_session_id`, and the s
 the agent's tool calls reach it. Seeding the same ID again for the same episode keeps the instance it already has; a
 seed that binds the ID to another episode is refused with 409. The rows carry no task fields, so the seed reads nothing from `task_data`.
 
-After `/verify`, the Environment Server calls `/close_session`. Typed sessions retain their accumulated reward until
-that close, so a lost verify reply can be retried. Close releases the environment instance and succeeds for an unknown
-or already-closed session. If `env.close()` raises, the close fails and can be retried. An instance whose reset and
-cleanup both failed is also retained for a later close or seed retry. A seed that reuses a closed
-`resources_session_id` is refused with 409.
+`/verify` closes both typed and legacy environments before checkpoint tracking ends. It keeps only the measured
+reward and optional typed identity for `session_close_retry_window_seconds`, so a lost reply can be retried without
+keeping an environment alive. `/close_session` fences that record and releases any still-active or incomplete
+instance. If `env.close()` raises, ownership is retained and close or checkpoint retirement can retry. An instance
+whose reset and cleanup both failed remains owned until cleanup succeeds. Checkpoint retirement also releases live
+instances. Seeds cannot reopen typed, verified or closed IDs; a new legacy `/run` reusing a verified legacy cookie
+receives a fresh session cookie while the old verification remains retryable.
 
 A tool call (`/step` or `/<tool_name>`) for a session the server no longer holds fails with 404
 (`failure_kind: session_lost`), and `/verify` for it returns a masked sample (`mask_sample: true`) instead of a
