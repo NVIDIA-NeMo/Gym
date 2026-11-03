@@ -4,7 +4,8 @@ Case-level **hallucination detection** over the `qa` / `summary` / `data2txt`
 slices. The model is shown a `(reference context, candidate response)` pair and must emit a
 `{"hallucination list": [...]}` JSON object listing any hallucinated spans. The
 per-sample reward is `1.0` when the model's binary "any hallucination?" verdict
-matches the gold label, else `0.0`.
+matches the gold label, else `0.0`. A reply that is not such an object scores
+`0.0`.
 
 Source dataset: [`ParticleMedia/RAGTruth`](https://github.com/ParticleMedia/RAGTruth)
 (`dataset/response.jsonl` + `dataset/source_info.jsonl`).
@@ -25,11 +26,14 @@ breaks results down per slice.
 
 `compute_metrics` reports both the headline metric and the original paper's:
 
-- `mean_reward` — mean per-sample accuracy (also the reward).
+- `mean_reward` — mean per-sample reward: accuracy, with replies that are not a
+  `hallucination list` object counted as wrong.
 - `precision` / `recall` / `f1` — corpus-level over the binary halu labels,
   reconstructed from per-row `is_halu` (gold) and `pred_halu` (predicted) flags.
 - `task_type/<slice>/{accuracy,precision,recall,f1,count}` — per-slice breakdown.
-- `parse_fail_rate` — fraction of responses that didn't parse as JSON.
+- `parse_fail_rate` — fraction of responses that aren't a JSON object with a
+  `hallucination list` array. These score `0.0` and count as a "no
+  hallucination" prediction in `precision` / `recall` / `f1`.
 
 > **Reasoning models:** verify() strips a leading `<think>…</think>` block and
 > any ```json fences before parsing.

@@ -15,7 +15,7 @@
 from types import SimpleNamespace
 from unittest.mock import MagicMock
 
-from pytest import approx
+from pytest import approx, mark
 
 from nemo_gym.client import ServerClient
 from nemo_gym.core import (
@@ -165,6 +165,18 @@ class TestVerify:
         assert result.parse_fail == 1
         assert result.pred_halu == 0
         assert result.reward == approx(0.0)
+
+    @mark.parametrize(
+        "text",
+        ["", "ok", '{"hallucination list": [', "{}", '{"hallucination list": "none"}', '{"spans": []}'],
+    )
+    async def test_invalid_reply_scores_zero_on_clean_case(self, text: str) -> None:
+        # Only a {"hallucination list": [...]} object is a verdict; anything
+        # else must not score like a correct "no hallucination" answer.
+        result = await _server().verify(_request(text, is_halu=False))
+        assert result.reward == approx(0.0)
+        assert result.parse_fail == 1
+        assert result.pred_halu == 0
 
     async def test_think_stripped_before_parse(self) -> None:
         result = await _server().verify(

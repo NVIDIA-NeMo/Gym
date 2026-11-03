@@ -103,6 +103,10 @@ def math_equal(gt_answer: Optional[str], predicted_answer: Optional[str]) -> boo
     """
     if predicted_answer is None or predicted_answer == "":
         return False
+    # Proof-only problems have no short answer (the dataset stores " "), so
+    # there is nothing to compare; leave them to the LLM judge.
+    if gt_answer is None or not str(gt_answer).strip():
+        return False
     gt = str(gt_answer)
     pred = str(predicted_answer)
 

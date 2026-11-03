@@ -15,7 +15,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
-from pytest import approx, fixture
+from pytest import approx, fixture, mark
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -65,6 +65,30 @@ class TestParseJudgeGrade:
         assert parse_judge_grade("A: CORRECT") == "A"
         assert parse_judge_grade("B - INCORRECT") == "B"
         assert parse_judge_grade("C, NOT_ATTEMPTED") == "C"
+
+    @mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Answer: B", "B"),
+            ("Answer: C", "C"),
+            ("Based on the analysis: A", "A"),
+            ("Grade:\nB: INCORRECT", "B"),
+            ("**B**", "B"),
+            ("[C]", "C"),
+            ("NOT ATTEMPTED", "C"),
+            ("NOT_ATTEMPTED", "C"),
+            ("ATTEMPTED", "C"),
+            ("A1", "C"),
+            ("grade_A", "C"),
+            ("It is A or B", "C"),
+            ("A possible grade is B", "C"),
+            ("A or B?\nB", "B"),
+        ],
+    )
+    def test_standalone_grade_tokens(self, text: str, expected: str) -> None:
+        # Letters inside words ("Answer", "ATTEMPTED") are not grades; missing
+        # or conflicting grades fall back to NOT_ATTEMPTED.
+        assert parse_judge_grade(text) == expected
 
 
 class TestExtractTextFromResponse:
@@ -345,6 +369,35 @@ class TestSimpleQAServer:
         )
         result = await server.verify(request)
         assert result.verdict == "not_attempted"
+
+    @mark.parametrize(
+        ("judge_text", "reward", "verdict"),
+        [
+            ("NOT ATTEMPTED", 0.0, "not_attempted"),
+            ("NOT_ATTEMPTED", 0.0, "not_attempted"),
+            ("Answer: B", 0.0, "incorrect"),
+            ("Answer: C", 0.0, "not_attempted"),
+            ("Answer: A", 1.0, "correct"),
+        ],
+    )
+    async def test_verify_grade_inside_word_is_not_correct(
+        self, config: SimpleQAConfig, judge_text: str, reward: float, verdict: str
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = SimpleQAServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        response_mock.read = AsyncMock(return_value=orjson.dumps(_make_judge_response_dict(judge_text)))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        request = SimpleQAVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_response("I don't know."),
+            question="What is the capital of France?",
+            expected_answer="Paris",
+        )
+        result = await server.verify(request)
+        assert result.reward == approx(reward)
+        assert result.verdict == verdict
 
 
 class TestSimpleQAScoreFn:

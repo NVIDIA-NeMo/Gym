@@ -32,6 +32,7 @@ Computes:
 
 from __future__ import annotations
 
+import re
 from pathlib import Path
 from typing import ClassVar, List, Optional, Union
 
@@ -85,30 +86,29 @@ def extract_text_from_response(response: NeMoGymResponse) -> str:
     return ""
 
 
-_VALID_GRADES = ("A", "B", "C")
-
-
 def parse_judge_grade(judge_text: str) -> str:
     """Parse the single-letter grade (A/B/C) from the judge's response.
 
-    Falls back to "C" (NOT_ATTEMPTED) when the output cannot be reliably
-    parsed — matches Skills' SimpleQAMetrics behavior of treating
+    A bare grade on the last line takes precedence. Otherwise, accept only
+    one distinct standalone grade, so the A in "Answer" or "NOT_ATTEMPTED"
+    is not a grade. Missing or conflicting grades fall back to "C"
+    (NOT_ATTEMPTED) — matches Skills' SimpleQAMetrics behavior of treating
     unparseable judgements as NOT_ATTEMPTED (DEFAULT_GRADE_IF_UNPARSEABLE = "C").
     """
-    # Skills' is_correct_judgement_label_matching matches either the whole
-    # cleaned string or judgement[0] — covered by the cleaned[:1] check on
-    # the stripped string and on the last line.
+    # Skills' is_correct_judgement_label_matching also accepts judgement[0],
+    # which reads "Answer: B" as A. A leading grade such as "A: CORRECT" is
+    # still accepted below as a standalone letter.
     cleaned = judge_text.strip()
-    if cleaned[:1] in _VALID_GRADES:
-        return cleaned[:1]
+    if cleaned in ("A", "B", "C"):
+        return cleaned
 
     last_line = cleaned.rsplit("\n", 1)[-1].strip()
-    if last_line[:1] in _VALID_GRADES:
-        return last_line[:1]
+    if last_line in ("A", "B", "C"):
+        return last_line
 
-    for letter in _VALID_GRADES:
-        if letter in cleaned:
-            return letter
+    grades = set(re.findall(r"\b[ABC]\b", cleaned))
+    if len(grades) == 1:
+        return grades.pop()
 
     return "C"
 

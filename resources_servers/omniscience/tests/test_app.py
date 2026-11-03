@@ -15,7 +15,7 @@
 from unittest.mock import AsyncMock, MagicMock
 
 import orjson
-from pytest import approx, fixture
+from pytest import approx, fixture, mark
 
 from nemo_gym.client import ServerClient
 from nemo_gym.config import ModelServerRef
@@ -82,6 +82,28 @@ class TestParseJudgeGrade:
 
     def test_d_in_multiline(self) -> None:
         assert parse_judge_grade("reasoning\nmore reasoning\nD") == "D"
+
+    @mark.parametrize(
+        ("text", "expected"),
+        [
+            ("Answer: B", "B"),
+            ("C: PARTIAL_ANSWER", "C"),
+            ("D: NOT_ATTEMPTED", "D"),
+            ("B: INCORRECT", "B"),
+            ("A: CORRECT", "A"),
+            ("**D**", "D"),
+            ("NOT ATTEMPTED", "B"),
+            ("NOT_ATTEMPTED", "B"),
+            ("PARTIAL_ANSWER", "B"),
+            ("A1", "B"),
+            ("A or D", "B"),
+            ("A or C?\nD", "D"),
+        ],
+    )
+    def test_standalone_grade_tokens(self, text: str, expected: str) -> None:
+        # Letters inside words ("Answer", "ATTEMPTED", "PARTIAL") are not
+        # grades; missing or conflicting grades fall back to INCORRECT.
+        assert parse_judge_grade(text) == expected
 
 
 class TestExtractTextFromResponse:
@@ -442,6 +464,35 @@ class TestOmniscienceServer:
         result = await server.verify(request)
         assert result.extracted_answer == ""
         assert result.verdict == "not_attempted"
+
+    @mark.parametrize(
+        ("judge_text", "verdict", "index"),
+        [
+            ("NOT ATTEMPTED", "incorrect", -1.0),
+            ("D: NOT_ATTEMPTED", "not_attempted", 0.0),
+            ("C: PARTIAL_ANSWER", "partial", 0.0),
+            ("Answer: B", "incorrect", -1.0),
+        ],
+    )
+    async def test_verify_grade_inside_word_is_not_correct(
+        self, config: OmniscienceConfig, judge_text: str, verdict: str, index: float
+    ) -> None:
+        server_mock = MagicMock(spec=ServerClient)
+        server = OmniscienceServer(config=config, server_client=server_mock)
+        response_mock = AsyncMock()
+        response_mock.read = AsyncMock(return_value=orjson.dumps(self._make_judge_response(judge_text)))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        request = OmniscienceVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=self._make_model_response("I don't know."),
+            question="What is the capital of France?",
+            expected_answer="Paris",
+        )
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.verdict == verdict
+        assert result.omniscience_index == approx(index)
 
 
 class TestOmniscienceScoreFn:

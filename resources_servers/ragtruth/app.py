@@ -199,10 +199,12 @@ class RagtruthResourcesServer(SimpleResourcesServer):
 
     async def verify(self, body: RagtruthVerifyRequest) -> RagtruthVerifyResponse:
         parsed = _parse_response(_response_text(body.response), think_tag=self.config.think_tag)
-        parse_fail = parsed is None
+        # A reply without a "hallucination list" array is not a verdict, so it earns no reward. It still
+        # counts as a "no hallucination" prediction in the corpus precision / recall / F1.
+        parse_fail = not (isinstance(parsed, dict) and isinstance(parsed.get("hallucination list"), list))
         pred_halu = _has_hallucination(parsed)
         is_halu = bool(body.is_halu)
-        correct = pred_halu == is_halu
+        correct = not parse_fail and pred_halu == is_halu
 
         if isinstance(parsed, dict) and isinstance(parsed.get("hallucination list"), list):
             extracted = json.dumps(parsed["hallucination list"], ensure_ascii=False)

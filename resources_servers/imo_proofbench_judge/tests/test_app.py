@@ -189,6 +189,14 @@ class TestMathEqual:
         assert math_equal("3", None) is False
         assert math_equal("3", "") is False
 
+    def test_blank_expected_answer_never_matches(self):
+        # Proof-only problems store a blank short answer (" "); a blank or
+        # whitespace-like prediction must not count as equal to it.
+        assert math_equal(" ", " ") is False
+        assert math_equal(" ", "\\ ") is False
+        assert math_equal("", " ") is False
+        assert math_equal(None, "None") is False
+
     def test_numeric_equivalence_with_latex_expression(self):
         """The case that motivated this whole helper: model emits a numeric
         value that's symbolically equal to a LaTeX expected_answer.
@@ -699,6 +707,56 @@ class TestServer:
         )
         result = await server.verify(request)
         assert result.judge_points == 1
+        server_mock.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("boxed", [" ", "\\ "])
+    async def test_verify_blank_expected_answer_calls_judge(self, chat_config, boxed):
+        """Proof-only rows ship ``expected_answer=" "``. A blank boxed answer
+        must not hit the "two answers are identical" shortcut; the judge
+        decides, as it does when ``expected_answer`` is None."""
+        server_mock = MagicMock(spec=ServerClient)
+        server = ImoProofBenchJudgeServer(config=chat_config, server_client=server_mock)
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=self._judge_chat_response("<points>0 out of 7</points>"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        request = ImoProofBenchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_response(f"</think>\\boxed{{{boxed}}}"),
+            problem="P",
+            reference_solution="S",
+            rubric="R",
+            expected_answer=" ",
+        )
+        result = await server.verify(request)
+        assert result.reward == approx(0.0)
+        assert result.symbolic_correct == approx(0.0)
+        assert result.judge_points == 0
+        server_mock.post.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_verify_blank_expected_answer_judge_yes(self, chat_config):
+        """A proof the judge accepts still scores on a proof-only row."""
+        server_mock = MagicMock(spec=ServerClient)
+        server = ImoProofBenchJudgeServer(config=chat_config, server_client=server_mock)
+        response_mock = AsyncMock()
+        response_mock.json = AsyncMock(return_value=self._judge_chat_response("<points>7 out of 7</points>"))
+        response_mock.read = AsyncMock(return_value=orjson.dumps(response_mock.json.return_value))
+        server_mock.post = AsyncMock(return_value=response_mock)
+
+        request = ImoProofBenchVerifyRequest(
+            responses_create_params=NeMoGymResponseCreateParamsNonStreaming(input=[]),
+            response=_make_response("</think>\\boxed{\\text{By induction on } n \\ldots}"),
+            problem="P",
+            reference_solution="S",
+            rubric="R",
+            expected_answer=" ",
+        )
+        result = await server.verify(request)
+        assert result.reward == approx(1.0)
+        assert result.judge_correct == approx(1.0)
         server_mock.post.assert_called_once()
 
     @pytest.mark.asyncio

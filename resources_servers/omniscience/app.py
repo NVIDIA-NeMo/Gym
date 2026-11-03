@@ -112,8 +112,9 @@ def extract_text_from_response(response: NeMoGymResponse, strip_thinking: bool =
 def parse_judge_grade(judge_text: str) -> str:
     """Parse the single-letter grade (A/B/C/D) from the judge's response.
 
-    Returns "A", "B", "C", or "D". Falls back to "B" (INCORRECT) when the
-    output cannot be reliably parsed.
+    A bare grade on the last line takes precedence. Otherwise, accept only
+    one distinct standalone grade. Missing or conflicting grades fall back
+    to "B" (INCORRECT).
     """
     cleaned = judge_text.strip()
     if cleaned in ("A", "B", "C", "D"):
@@ -124,9 +125,9 @@ def parse_judge_grade(judge_text: str) -> str:
         if last_line == letter:
             return letter
 
-    for letter in ("A", "B", "C", "D"):
-        if letter in cleaned:
-            return letter
+    grades = set(re.findall(r"\b[ABCD]\b", cleaned))
+    if len(grades) == 1:
+        return grades.pop()
 
     return "B"
 
