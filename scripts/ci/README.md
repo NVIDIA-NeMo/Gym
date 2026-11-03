@@ -19,6 +19,14 @@ structured verdict and its head SHA.
 Each changed file uses the last matching standard CODEOWNERS rule. One member of any team on
 that line must approve: the specialist team and `frontier-evals` are alternatives. Different
 packages require their respective approvals; one Frontier Eval approval can cover every package.
+During rollout, a non-Frontier owner group is automatically satisfied while its live membership is
+exactly Ananth (`ananthsub`, account ID `2382532`) and Yuya (`yaoyu-33`, account ID `54727607`).
+The checker reports `OPTIONAL` and records `optional_owners` without inventing an approval.
+Membership is checked separately for each owner team: the European `frontier-evals` roster never
+counts toward filling a US specialist group, and Frontier Eval itself never gets this exemption.
+Adding a third specialist member activates the normal approval requirement on the next check;
+approval from that specialist team or Frontier Eval then satisfies it. Empty groups, one-person
+groups, and other two-person groups do not receive the exemption.
 Paths outside the package map retain a maintainer fallback with Frontier Eval as an alternative;
 CI infrastructure and the existing BioNeMo overrides keep their dedicated owners.
 `# suggest:` comments never gate approval. Renames check old and new paths. The checker rejects
@@ -29,7 +37,7 @@ Policy and identity links come from the immutable target commit, not the submitt
 checker itself must execute from trusted target-branch code. GitHub uses `pull_request_target`, plus
 a secret-free review-event workflow followed by `workflow_run`. It posts the `Package approvals`
 commit status against the actual PR head. Use its `workflow_dispatch` input to reevaluate a specific
-PR after a team membership change, including removal of a previously eligible approver.
+PR after a team membership change, including filling a specialist team or removing an eligible approver.
 
 `.github/reviewer-identities.json` links stable GitLab and GitHub numeric account IDs; it does not
 duplicate groups. Initial links were resolved through the corporate SSO audit and provider APIs.

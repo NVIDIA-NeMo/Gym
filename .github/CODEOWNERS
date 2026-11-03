@@ -1,9 +1,13 @@
 # NeMo Gym — code ownership
 #
 # Standard rules request code-owner review. The portable approval check in
-# scripts/ci/check-review-approvals.sh enforces this same map on both hosts. Each package lists its specialist team and frontier-evals on
+# scripts/ci/check-review-approvals.sh enforces this same map on both hosts.
+# Each package lists its specialist team and frontier-evals on
 # the SAME line: approval from either team satisfies that rule. Both teams
 # are requested, but approval from both is not required.
+# A non-Frontier team containing exactly Ananth and Yuya is automatically
+# satisfied by the portable check until its membership changes. Frontier Eval
+# membership never counts toward activating a specialist team's requirement.
 #
 # Reviewer teams belong under gym_team. Membership is managed in GitHub;
 # keep individual reviewers out of this file.

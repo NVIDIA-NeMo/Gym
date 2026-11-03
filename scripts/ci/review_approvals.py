@@ -26,6 +26,8 @@ from typing import Callable
 ReadJSON = Callable[[str], object]
 CODEOWNERS_PATH = ".github/CODEOWNERS"
 IDENTITIES_PATH = ".github/reviewer-identities.json"
+INITIAL_REVIEWER_IDS = frozenset({2382532, 54727607})
+FRONTIER_TEAM = "@nvidia-nemo/frontier-evals"
 
 
 class NoRedirect(urllib.request.HTTPRedirectHandler):
@@ -219,13 +221,18 @@ def gitlab_snapshot(read: ReadJSON, project: int, number: int) -> dict:
 
 
 def evaluate(matches: list[dict], teams: dict[str, list[dict]], approved: set[int]) -> dict:
-    """Require one eligible approval for each winning rule, allowing alternatives."""
+    """Require approval unless a non-Frontier owner still has only Ananth and Yuya."""
     results = []
     for match in matches:
+        optional_owners = [
+            owner
+            for owner in match["owners"]
+            if owner.lower() != FRONTIER_TEAM and {user["id"] for user in teams[owner]} == INITIAL_REVIEWER_IDS
+        ]
         members = {user["id"]: user["login"] for owner in match["owners"] for user in teams[owner]}
         satisfied = sorted(members[user_id] for user_id in approved & members.keys())
-        results.append(match | {"approved_by": satisfied})
-    return {"passed": all(result["approved_by"] for result in results), "rules": results}
+        results.append(match | {"approved_by": satisfied, "optional_owners": optional_owners})
+    return {"passed": all(result["approved_by"] or result["optional_owners"] for result in results), "rules": results}
 
 
 def run_check(args: argparse.Namespace) -> dict:
@@ -275,11 +282,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.output:
         args.output.write_text(json.dumps(report, indent=2) + "\n")
     for rule in report["rules"]:
-        state = "PASS" if rule["approved_by"] else "MISSING"
-        print(
-            f"{state}: {rule['pattern']} ({len(rule['files'])} files): "
-            + ", ".join(rule["approved_by"] or rule["owners"])
-        )
+        state = "OPTIONAL" if rule["optional_owners"] else "PASS" if rule["approved_by"] else "MISSING"
+        reviewers = rule["optional_owners"] or rule["approved_by"] or rule["owners"]
+        print(f"{state}: {rule['pattern']} ({len(rule['files'])} files): " + ", ".join(reviewers))
     if report["unlinked_gitlab_users"]:
         print(f"Ignored GitLab approvals without verified identity links: {report['unlinked_gitlab_users']}")
     print(f"Package approvals: {'passed' if report['passed'] else 'missing'} for {report['head']}")

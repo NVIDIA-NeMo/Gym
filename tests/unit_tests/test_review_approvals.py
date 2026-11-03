@@ -5,6 +5,7 @@
 
 import base64
 import importlib.util
+import io
 import json
 import os
 import subprocess
@@ -32,6 +33,109 @@ def encoded_file(text: str) -> dict:
 def review(number: int, user_id: int, state: str, head: str = "head") -> dict:
     """Build one formal GitHub review event."""
     return {"id": number, "user": {"id": user_id}, "state": state, "commit_id": head}
+
+
+def initial_reviewers() -> list[dict]:
+    """Return the verified GitHub identities used to seed specialist teams."""
+    return [{"id": 2382532, "login": "ananthsub"}, {"id": 54727607, "login": "yaoyu-33"}]
+
+
+class RolloutTests(unittest.TestCase):
+    """Activate each specialist requirement only after its initial roster changes."""
+
+    def test_initial_specialist_is_optional_despite_populated_frontier(self) -> None:
+        """The European team's size does not activate an unfilled US specialist team."""
+        specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
+        frontier = "@NVIDIA-NeMo/frontier-evals"
+        matches = approvals.match_policy(
+            ["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist} {frontier}")
+        )
+        teams = {
+            specialist: initial_reviewers(),
+            frontier: [{"id": number, "login": f"fe-{number}"} for number in range(1000, 1014)],
+        }
+        result = approvals.evaluate(matches, teams, set())
+        self.assertTrue(result["passed"])
+        self.assertEqual(result["rules"][0]["optional_owners"], [specialist])
+        self.assertEqual(result["rules"][0]["approved_by"], [])
+
+    def test_third_specialist_member_activates_either_team_approval(self) -> None:
+        """Filling the specialist team requires an actual US or European approval."""
+        specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
+        frontier = "@NVIDIA-NeMo/frontier-evals"
+        matches = approvals.match_policy(
+            ["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist} {frontier}")
+        )
+        teams = {
+            specialist: initial_reviewers() + [{"id": 6000, "login": "specialist"}],
+            frontier: [{"id": 1000, "login": "european-reviewer"}],
+        }
+        missing = approvals.evaluate(matches, teams, set())
+        self.assertFalse(missing["passed"])
+        self.assertEqual(missing["rules"][0]["optional_owners"], [])
+        for approved in ({6000}, {1000}, {2382532}, {54727607}):
+            with self.subTest(approved=approved):
+                self.assertTrue(approvals.evaluate(matches, teams, approved)["passed"])
+
+    def test_only_the_exact_initial_roster_is_optional(self) -> None:
+        """Empty, incomplete, or different small rosters retain their approval requirement."""
+        owner = "@NVIDIA-NeMo/gym_reviewers_agents"
+        matches = approvals.match_policy(["agents/file.py"], approvals.parse_policy(f"/agents/ {owner}"))
+        rosters = [
+            [],
+            initial_reviewers()[:1],
+            initial_reviewers()[1:],
+            [{"id": 1, "login": "ananthsub"}, {"id": 2, "login": "yaoyu-33"}],
+            initial_reviewers()[:1] + [{"id": 3, "login": "someone-else"}],
+        ]
+        for roster in rosters:
+            with self.subTest(roster=roster):
+                self.assertFalse(approvals.evaluate(matches, {owner: roster}, set())["passed"])
+
+    def test_frontier_itself_never_gets_the_initial_roster_exemption(self) -> None:
+        """Frontier Eval remains an actual reviewer even if its roster matches the pair."""
+        frontier = "@NVIDIA-NeMo/FRONTIER-EVALS"
+        matches = approvals.match_policy(["agents/file.py"], approvals.parse_policy(f"/agents/ {frontier}"))
+        teams = {frontier: initial_reviewers()}
+        self.assertFalse(approvals.evaluate(matches, teams, set())["passed"])
+        self.assertTrue(approvals.evaluate(matches, teams, {2382532})["passed"])
+
+    def test_frontier_exemption_cannot_bypass_a_populated_specialist(self) -> None:
+        """A filled US team still needs approval when the European alternative has only the pair."""
+        specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
+        frontier = "@NVIDIA-NeMo/frontier-evals"
+        matches = approvals.match_policy(
+            ["agents/file.py"], approvals.parse_policy(f"/agents/ {specialist} {frontier}")
+        )
+        teams = {specialist: [{"id": 6000, "login": "specialist"}], frontier: initial_reviewers()}
+        self.assertFalse(approvals.evaluate(matches, teams, set())["passed"])
+        self.assertTrue(approvals.evaluate(matches, teams, {54727607})["passed"])
+
+    def test_optional_package_does_not_waive_another_owners_requirement(self) -> None:
+        """A request touching optional code and required CI still needs the CI approval."""
+        specialist = "@NVIDIA-NeMo/gym_reviewers_agents"
+        automation = "@NVIDIA-NeMo/automation"
+        policy = approvals.parse_policy(f"/agents/ {specialist}\n/.github/ {automation}")
+        matches = approvals.match_policy(["agents/file.py", ".github/workflow.yml"], policy)
+        teams = {specialist: initial_reviewers(), automation: [{"id": 6000, "login": "automation-reviewer"}]}
+        self.assertFalse(approvals.evaluate(matches, teams, set())["passed"])
+        self.assertTrue(approvals.evaluate(matches, teams, {6000})["passed"])
+
+    def test_cli_reports_optional_without_claiming_an_approval(self) -> None:
+        """An automatically satisfied rule exits successfully with an explicit optional label."""
+        owner = "@NVIDIA-NeMo/gym_reviewers_agents"
+        matches = approvals.match_policy(["agents/file.py"], approvals.parse_policy(f"/agents/ {owner}"))
+        report = approvals.evaluate(matches, {owner: initial_reviewers()}, set()) | {
+            "head": "head",
+            "base": "base",
+            "unlinked_gitlab_users": [],
+        }
+        output = io.StringIO()
+        with patch.object(approvals, "run_check", return_value=report), patch("sys.stdout", output):
+            self.assertEqual(approvals.main(["github", "--number", "1"]), 0)
+        self.assertIn("OPTIONAL: /agents/", output.getvalue())
+        self.assertNotIn("MISSING", output.getvalue())
+        self.assertEqual(report["rules"][0]["approved_by"], [])
 
 
 class PolicyTests(unittest.TestCase):
