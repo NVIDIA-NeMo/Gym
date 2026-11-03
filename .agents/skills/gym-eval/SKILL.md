@@ -328,12 +328,18 @@ serving; it moves the timeout to the evaluation side and changes nothing else).
 A Gym run reports what it recorded. These outcomes are scored or retried today in a way you must correct
 or report yourself, until the matching policy lands in Gym.
 
-- **A sandbox killed for memory.** A kill during the agent's own command is the model's outcome, not a
-  fault to rerun. Where the stack retries it (harness-agent rows, kind `provider_oom_killed`, the provider
-  text in `failure_reason`) or scores it 0 (Terminal-Bench 4.0: read `sandbox_resource_limit`, resource
-  `memory`, with the provider text in `detail`), count it as the model's. In Terminal-Bench 4.0,
-  a process killed inside a live sandbox (exit 137) is a scored 0 marked interrupted. SWE-family and
-  SkillsBench keep nothing typed about it.
+- **A sandbox killed for memory.** When the provider reports the agent's own sandbox container
+  OOMKilled while the agent's command ran (failure event kind `provider_oom_killed` at stage `agent`),
+  the stack makes the rollout a final zero: it stays in the denominator as the model's failure, is
+  never retried, and the evaluation-health gate counts it as a model fault (`agent_sandbox_oom_killed`),
+  not toward the 2% evaluation-side limit. That holds for the Harbor general agent (SkillsBench) and
+  the sandboxed opencode agent. A memory kill of a helper (sidecar or init) container, one during
+  setup or verification, any other provider ending (an eviction, an `Error` ending) and an exit
+  status without a provider report stay infrastructure and are retried within the attempt cap. Two
+  cases are still yours to count as the model's: a masked harness-agent row is retried as before, and
+  the SWE-family agents keep nothing typed about it. In Terminal-Bench 4.0 read
+  `sandbox_resource_limit` (resource `memory`, the provider text in `detail`): that zero is unchanged,
+  and a process killed inside a live sandbox (exit 137) is a scored 0 marked interrupted.
 - **A sandbox that ended for its own limit.** Terminal-Bench 4.0 scores 0 only when the provider text
   names the sandbox's own memory or storage limit; read `sandbox_resource_limit` before you accept that
   zero. Other sandbox deaths there are `infrastructure_error` and are retried. In SkillsBench a sandbox

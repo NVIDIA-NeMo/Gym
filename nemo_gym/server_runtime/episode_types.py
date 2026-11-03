@@ -74,8 +74,8 @@ class SdkErrorDetails(BaseModel):
 class SandboxFailureDetails(BaseModel):
     """Observed sandbox facts; missing evidence stays absent, with no inferred cause or policy.
 
-    A last execution ID does not establish causation. Preserve provider reason codes as reported;
-    use only reported command exit codes, not synthesized fallback codes.
+    A last execution ID does not establish causation. Preserve provider reason codes and the container name
+    the provider reported as reported; use only reported command exit codes, not synthesized fallback codes.
     """
 
     model_config = ConfigDict(extra="forbid", frozen=True, strict=True)
@@ -84,6 +84,7 @@ class SandboxFailureDetails(BaseModel):
     execution_id: str | None = Field(default=None, max_length=256)
     provider: str | None = Field(default=None, max_length=256)
     provider_status_reason: str | None = Field(default=None, max_length=2000)
+    container: str | None = Field(default=None, max_length=256)
     exit_code: int | None = None
 
 
