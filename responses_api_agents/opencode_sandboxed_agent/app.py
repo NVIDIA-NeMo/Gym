@@ -47,7 +47,7 @@ from nemo_gym.agents import (
     verify_agent_response,
 )
 from nemo_gym.client import SESSION_ID_KEY, raise_for_status
-from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict
+from nemo_gym.config import ModelServerRef, ResourcesServerRef, get_global_config_dict, maybe_get_global_config_dict
 from nemo_gym.core import (
     AGENT_ROUTE_FAILED,
     NeMoGymEasyInputMessage,
@@ -115,6 +115,13 @@ DEPRECATION_WARNING = (
     "working here: SWE resources servers that return only a sandbox_handle (swebench, swe_gym, r2e_gym and others), "
     "the HLE search presets (tool_servers) and vibench_agent. "
     "See responses_api_agents/opencode_agent/README.md#environmentserver-sessions."
+)
+
+
+RIPGREP_WARNING = (
+    "opencode_sandboxed_agent: the agent sandbox has no network access (network_access, or enforce_agent_no_network "
+    "on the resources server) and local_ripgrep_binary_path is not set. OpenCode cannot download ripgrep there, so "
+    "its grep and glob calls fail. Set local_ripgrep_binary_path to a host-local rg executable."
 )
 
 
@@ -648,10 +655,29 @@ class OpenCodeSandboxedAgent(SimpleResponsesAPIAgent):
     def model_post_init(self, context: Any, /) -> None:
         super().model_post_init(context)
         _warn_deprecated_once()
+        if (
+            self.config.local_ripgrep_binary_path is None
+            and self._agent_network_restricted()
+            and not is_nemo_gym_fastapi_worker()
+        ):
+            LOGGER.warning(RIPGREP_WARNING)
 
         self._sem = Semaphore(self.config.concurrency) if self.config.concurrency else nullcontext()
         self._sandbox_id_to_sandbox: Dict[str, AsyncSandbox] = dict()
         self._sandbox_id_to_run_result: Dict[str, Dict[str, Any]] = dict()
+
+    def _agent_network_restricted(self) -> bool:
+        """Whether the agent's sandbox is denied network access: by this agent's ``network_access``, or by its
+        resources server's ``enforce_agent_no_network``. Reads only a config the process already holds."""
+        if self.config.network_access != "inherit":
+            return True
+        global_config = maybe_get_global_config_dict()
+        block = global_config.get(self.config.resources_server.name) if global_config is not None else None
+        implementations = block.get("resources_servers") if hasattr(block, "get") else None
+        return any(
+            hasattr(implementation, "get") and implementation.get("enforce_agent_no_network") is True
+            for implementation in (implementations.values() if hasattr(implementations, "values") else ())
+        )
 
     async def _start_sandbox(self, sandbox_id: Optional[str] = None, workdir: Optional[str] = None) -> AsyncSandbox:
         global_config_dict = get_global_config_dict()

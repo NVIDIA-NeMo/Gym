@@ -1827,3 +1827,54 @@ async def test_a_provider_exception_that_reports_no_ended_sandbox_observes_nothi
     with raises(NgFailureEvent):
         await server.responses(request, body)
     assert observed == []
+
+
+def _agent_with(tmp_path, monkeypatch, *, network_access="inherit", ripgrep=False, enforced=None):
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "")
+    app_module._warn_deprecated_once.cache_clear()
+    config = TestOpenCodeSandboxedAgent()._create_config()
+    config.network_access = network_access
+    if ripgrep:
+        binary = tmp_path / "rg"
+        binary.write_text("#!/bin/sh\n")
+        config.local_ripgrep_binary_path = binary
+    block = None if enforced is None else {"resources_servers": {"deepswe": {"enforce_agent_no_network": enforced}}}
+    monkeypatch.setattr(
+        app_module,
+        "maybe_get_global_config_dict",
+        lambda: None if block is None else {config.resources_server.name: block},
+    )
+    return config
+
+
+@mark.parametrize(
+    "kwargs,warned",
+    [
+        ({"network_access": "model_only"}, True),
+        ({"network_access": "model_and_tools"}, True),
+        ({"enforced": True}, True),
+        ({}, False),
+        ({"enforced": False}, False),
+        ({"network_access": "model_only", "ripgrep": True}, False),
+        ({"enforced": True, "ripgrep": True}, False),
+    ],
+)
+def test_a_network_restricted_agent_without_a_local_ripgrep_warns_at_load(
+    caplog: LogCaptureFixture, monkeypatch: MonkeyPatch, tmp_path, kwargs, warned
+) -> None:
+    config = _agent_with(tmp_path, monkeypatch, **kwargs)
+    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+        OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    messages = [r.getMessage() for r in caplog.records if r.name == app_module.__name__]
+    assert (app_module.RIPGREP_WARNING in messages) is warned
+    assert "local_ripgrep_binary_path" in app_module.RIPGREP_WARNING
+
+
+def test_the_ripgrep_warning_is_logged_by_the_main_process_only(
+    caplog: LogCaptureFixture, monkeypatch: MonkeyPatch, tmp_path
+) -> None:
+    config = _agent_with(tmp_path, monkeypatch, network_access="model_only")
+    monkeypatch.setenv(IS_NEMO_GYM_FASTAPI_WORKER_KEY_NAME, "1")
+    with caplog.at_level(logging.WARNING, logger=app_module.__name__):
+        OpenCodeSandboxedAgent(config=config, server_client=MagicMock(spec=ServerClient))
+    assert app_module.RIPGREP_WARNING not in [r.getMessage() for r in caplog.records]
