@@ -1007,6 +1007,50 @@ async def test_run_daemonizing_returns_despite_lingering_child(fake_binary: str,
     assert out == "started"
 
 
+@pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
+async def test_run_returns_when_the_command_exits_despite_a_lingering_child(fake_binary: str, tmp_path: Path) -> None:
+    """Regression: an exec that leaves a process holding its stdout (`tmux new-session -d`) returns when it exits.
+
+    Reading pipes to EOF waited for the lingering process: Terminus 2's tmux start never returned under uvloop.
+    """
+    provider = apptainer_provider.ApptainerProvider()
+    release = tmp_path / "release"
+    lingering = f"while [ ! -e {shlex.quote(str(release))} ]; do sleep 0.05; done"
+    argv = [shutil.which("sh"), "-c", f"{lingering} & printf started; printf warn >&2"]
+    try:
+        code, out, err = await provider._run(argv, timeout_s=5)
+    finally:
+        release.touch()
+    assert (code, out, err) == (0, "started", "warn")
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
+async def test_run_keeps_its_output_while_a_lingering_child_still_writes(fake_binary: str, tmp_path: Path) -> None:
+    """The capture is read in place: rewinding the shared offset would let the child's writes overwrite it."""
+    provider = apptainer_provider.ApptainerProvider()
+    release = tmp_path / "release"
+    writer = f"while [ ! -e {shlex.quote(str(release))} ]; do printf x; sleep 0.01; done"
+    argv = [shutil.which("sh"), "-c", f"printf started; ({writer}) &"]
+    try:
+        code, out, _err = await provider._run(argv, timeout_s=5)
+    finally:
+        release.touch()
+    assert code == 0
+    assert out.startswith("started")
+
+
+@pytest.mark.skipif(shutil.which("sh") is None, reason="sh not available")
+async def test_run_bounds_the_output_it_returns(fake_binary: str) -> None:
+    """A capture made huge by a truncate, or by real output, is read up to the limit only."""
+    provider = apptainer_provider.ApptainerProvider(exec={"max_output_bytes": 1024})
+    argv = [shutil.which("sh"), "-c", "printf start; python3 -c 'import os; os.ftruncate(1, 1 << 40)'"]
+    code, out, _err = await provider._run(argv, timeout_s=10)
+    assert code == 0
+    assert out.startswith("start")
+    assert out.endswith("[output truncated at 1024 bytes]")
+    assert len(out) == 1024 + len("\n[output truncated at 1024 bytes]")
+
+
 async def test_create_uses_daemonize_for_instance_start(
     fake_binary: str, monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
