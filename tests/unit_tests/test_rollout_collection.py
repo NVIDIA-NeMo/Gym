@@ -76,7 +76,7 @@ from nemo_gym.config.global_config import (
     TASK_SOURCE_KEY_NAME,
 )
 from nemo_gym.core.episode import EpisodeId, maybe_rollout_id_from_run_body
-from nemo_gym.core.failure_kinds import CANCELLED, KILL_SHAPED
+from nemo_gym.core.failure_kinds import CANCELLED, JUDGE_FAILED, KILL_SHAPED
 from nemo_gym.core.responses_api_types import NeMoGymResponseCreateParamsNonStreaming
 from nemo_gym.health.types import RunHealthLimits
 from nemo_gym.metrics.reward_profile import compute_aggregate_metrics, compute_subset_metrics
@@ -13431,12 +13431,63 @@ class TestRunExamplesMaterializedTasks:
     ) -> None:
         self._install(monkeypatch, self._reply(result={"reward": 1.0}) | mismatch)
 
-        with pytest.raises(error):
+        with pytest.raises(error) as raised:
             await next(RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True))
+        # A stale reply is retried on resume; a task mismatch is a protocol violation, so the two must not mix.
+        assert type(raised.value) is error
+
+    @pytest.mark.parametrize(
+        ("envelope", "outcome"),
+        [
+            (False, {"reward": 1.0, "response": {"id": "r"}}),
+            (True, {}),
+            (True, {"result": {"reward": "1.0"}}),
+            (True, {"result": {"reward": None}}),
+        ],
+        ids=["not an episode response", "neither result nor failure", "string reward", "null reward"],
+    )
+    async def test_episode_records_reject_a_reply_gym_eval_run_rejects(
+        self, monkeypatch: pytest.MonkeyPatch, envelope: bool, outcome: dict
+    ) -> None:
+        self._install(monkeypatch, self._reply(**outcome) if envelope else outcome)
+
+        with pytest.raises(InvalidRolloutResult) as raised:
+            await next(RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True))
+        assert type(raised.value) is InvalidRolloutResult
+
+    async def test_episode_records_mask_a_result_whose_judge_failed(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # judge_failsafe returns a result with a placeholder reward; the episode has no real score to train on.
+        result = {"reward": 0.0, NG_FAILURE_CLASS_KEY: JUDGE_FAILED, "failure_kind": "judge_timeout"}
+        self._install(monkeypatch, self._reply(result=result))
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples([self._materialized_row()], episode_records=True)
+        )
+
+        assert record[NG_FAILURE_CLASS_KEY] == JUDGE_FAILED
+        assert record["reward"] == 0.0
+        assert record[MASK_SAMPLE_KEY] is True
+
+    async def test_episode_records_keep_a_routed_run_failure_unmasked(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        # A /run call that never returned is an infrastructure failure Gym recorded, not an episode outcome.
+        install_fake_server_client(
+            monkeypatch, AsyncMock(return_value=FakeResponse(503))
+        ).global_config_dict = self._global_config()
+
+        _, record = await next(
+            RolloutCollectionHelper().run_examples(
+                [self._materialized_row()], route_failures_to_sidecar=True, episode_records=True
+            )
+        )
+
+        assert record[NG_FAILURE_CLASS_KEY] == AGENT_REQUEST_FAILED_FAILURE_CLASS
+        assert record["_ng_failure_http_status"] == 503
+        assert record[NG_DIGEST_KEY] == "sha256:task"
+        assert "reward" not in record and MASK_SAMPLE_KEY not in record
 
     async def test_episode_records_keep_a_gym_built_result_unmasked(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        # A row the dispatch budget never started keeps Gym's drained result, named by its inputs as gym eval run
-        # stores it; it is not an Environment Server failure, so it is not scored or masked here.
+        # A row the dispatch budget never started keeps Gym's drained result, named by its inputs; it is not an
+        # Environment Server reply, so it is not scored or masked here.
         post = self._install(monkeypatch, self._reply(result={"reward": 1.0}))
 
         _, record = await next(
