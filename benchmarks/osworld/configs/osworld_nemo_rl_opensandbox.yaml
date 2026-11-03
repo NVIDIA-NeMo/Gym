@@ -75,5 +75,7 @@ osworld_nano_omni_agent:
         legacy_response_parser: ${oc.decode:${oc.env:OSWORLD_LEGACY_RESPONSE_PARSER,false}}
         mask_context_limit: ${oc.decode:${oc.env:OSWORLD_MASK_CONTEXT_LIMIT,false}}
       task_timeout: ${oc.decode:${oc.env:OSWORLD_TASK_TIMEOUT,7200}}
+      # raw keeps OSWorld partial scores, as the pre-rebase resources server did.
+      reward_mode: ${oc.env:OSWORLD_REWARD_MODE,binary}
       rollout_timeout_s: ${oc.decode:${oc.env:OSWORLD_ROLLOUT_TIMEOUT_S,null}}
       exact_trace_transport_version: 3
