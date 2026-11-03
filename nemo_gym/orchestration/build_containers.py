@@ -611,6 +611,7 @@ class BuildContainerHelper(BaseModel):
                 )
 
         if self.config.warmup is not None:
+            print("Running warmup. Currently, the warmup logs aren't printed and need to be checked manually.")
             await self._run_warmup()
 
     async def _run_warmup(self) -> None:
