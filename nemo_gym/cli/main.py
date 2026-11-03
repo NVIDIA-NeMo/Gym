@@ -779,6 +779,9 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
     judge_partition = getattr(args, "judge_partition", None)
     if judge_partition is not None and (not getattr(args, "recover", False) or inspect_only):
         args._parser.error("--judge-partition needs --recover and cannot be used with --inspect")
+    judge_qos = getattr(args, "judge_qos", None)
+    if judge_qos is not None and (not getattr(args, "recover", False) or inspect_only):
+        args._parser.error("--judge-qos needs --recover and cannot be used with --inspect")
 
     try:
         score_key = getattr(args, "score_key", None)
@@ -820,6 +823,8 @@ def _eval_resubmit(args: argparse.Namespace, overrides: list[str]) -> None:
                 extra |= {"server_spinup_timeout_seconds": spinup_timeout, "spinup_timeout_reason": spinup_reason}
             if judge_partition is not None:
                 extra["judge_partition"] = judge_partition
+            if judge_qos is not None:
+                extra["judge_qos"] = judge_qos
             record_digest = None
             if record_path is not None:
                 original_record, record_digest = load_original_submission_record(record_path)
@@ -1960,7 +1965,17 @@ COMMANDS = {
                     help="With --recover: the CPU partition of the judge-only job that grades a model-served run's "
                     "saved answers again, when its saved config declares no CPU node pool (gpus_per_node 0) and the "
                     "launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN) names none. The job starts the run's "
-                    "judge and verifier servers on one CPU node, never the policy.",
+                    "judge and verifier servers on one CPU node, never the policy. The run's GPU QOS does not "
+                    "follow: the job takes --judge-qos, else the saved CPU pool's QOS, else the -q of "
+                    "NEMO_GYM_REMOTE_READER_SRUN, else the partition's default.",
+                ),
+            ),
+            Flag(
+                register=lambda p: p.add_argument(
+                    "--judge-qos",
+                    metavar="NAME",
+                    help="With --recover: the QOS of the judge-only job, for a site where the CPU partition's default "
+                    "QOS refuses it and neither a saved CPU node pool nor NEMO_GYM_REMOTE_READER_SRUN (-q) names one.",
                 ),
             ),
             Flag(

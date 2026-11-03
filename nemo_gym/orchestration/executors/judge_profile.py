@@ -21,7 +21,10 @@ they did, and replaces what grading does not need: no service, no policy model, 
 bounded walltime. The partition comes from the saved config when it declares a CPU node pool (``gpus_per_node`` 0),
 else from the launcher's reader placement (``NEMO_GYM_REMOTE_READER_SRUN``, the CPU partition the heavy readers already
 run on), else from ``--judge-partition``; without one the profile is refused, naming the three. The walltime is the
-run's segment walltime bounded by the partition's MaxTime, or a default when neither is known.
+run's segment walltime bounded by the partition's MaxTime, or a default when neither is known. The run's QOS belongs
+to its GPU allocation and does not follow (a GPU QOS can refuse a job without GPUs): the judge job takes ``--judge-qos``,
+else the saved CPU pool's own QOS, else the QOS the reader placement names (``-q``/``--qos``) for that partition, else
+the partition's default.
 """
 
 import shlex
@@ -40,9 +43,10 @@ JUDGE_WALLTIME_REASON_DEFAULT = (
     f"the default judge walltime {DEFAULT_JUDGE_WALLTIME}: the run records no segment walltime and the partition's "
     "MaxTime is unknown"
 )
-# Job-level directives of the original allocation's shape and GPU resources, which one CPU judge node does not take.
+# Job-level directives of the original allocation's shape, GPU resources and QOS, which one CPU judge node does not
+# take: a GPU QOS can require GPUs of every job (QOSMinGRES).
 _ALLOCATION_SHAPE_DIRECTIVES = frozenset(
-    {"partition", "nodes", "ntasks-per-node", "gpus", "gpus-per-node", "gpus-per-task", "gres"}
+    {"partition", "nodes", "ntasks-per-node", "gpus", "gpus-per-node", "gpus-per-task", "gres", "qos"}
 )
 _NO_PROFILE = "this submission has no existing CPU-only judge execution profile and none can be derived"
 
@@ -64,11 +68,16 @@ class JudgeExecutionProfile:
     walltime_bounds: tuple[str, ...]
     # The run's compute with one CPU node of the partition and the bounded walltime in place of its allocation.
     compute: SlurmComputeConfig
+    # The QOS the job asks for and where it came from; None takes the partition's default.
+    qos: str | None = None
+    qos_source: str = "the partition's default"
 
     def report(self) -> dict[str, Any]:
         return {
             "partition": self.partition,
             "partition_source": self.partition_source,
+            "qos": self.qos,
+            "qos_source": self.qos_source,
             "walltime": self.walltime,
             "walltime_bounds": list(self.walltime_bounds),
         }
@@ -87,8 +96,7 @@ def is_cpu_only_submission(config: SubmitConfig) -> bool:
     )
 
 
-def reader_step_partition(args: str | None) -> str | None:
-    """The partition the reader step's srun arguments (``NEMO_GYM_REMOTE_READER_SRUN``) name, if any."""
+def _reader_step_option(args: str | None, short: str, long: str) -> str | None:
     if not args or not args.strip():
         return None
     try:
@@ -96,13 +104,23 @@ def reader_step_partition(args: str | None) -> str | None:
     except ValueError:
         return None
     for index, word in enumerate(words):
-        if word in ("-p", "--partition"):
+        if word in (short, long):
             return words[index + 1] if index + 1 < len(words) and words[index + 1] else None
-        if word.startswith("--partition="):
+        if word.startswith(f"{long}="):
             return word.partition("=")[2] or None
-        if word.startswith("-p") and not word.startswith("--") and len(word) > 2:
+        if word.startswith(short) and not word.startswith("--") and len(word) > 2:
             return word[2:]
     return None
+
+
+def reader_step_partition(args: str | None) -> str | None:
+    """The partition the reader step's srun arguments (``NEMO_GYM_REMOTE_READER_SRUN``) name, if any."""
+    return _reader_step_option(args, "-p", "--partition")
+
+
+def reader_step_qos(args: str | None) -> str | None:
+    """The QOS the reader step's srun arguments (``NEMO_GYM_REMOTE_READER_SRUN``) name, if any."""
+    return _reader_step_option(args, "-q", "--qos")
 
 
 def choose_judge_partition(
@@ -163,14 +181,23 @@ def bound_judge_walltime(segment: str | None, limit: dict[str, Any] | None) -> t
 
 
 def judge_execution_profile(
-    config: SubmitConfig, cluster: str, partition: str, partition_source: str, limit: dict[str, Any] | None
+    config: SubmitConfig,
+    cluster: str,
+    partition: str,
+    partition_source: str,
+    limit: dict[str, Any] | None,
+    *,
+    qos: str | None = None,
+    reader_srun: str | None = None,
 ) -> JudgeExecutionProfile:
     """The profile of a judge-only job of this submission on ``partition`` (see ``choose_judge_partition``), with the
     partition's MaxTime ``limit`` bounding the walltime (see ``bound_judge_walltime``).
 
     The derived compute keeps the account, forwarded env and job-level directives of the run, less the directives
-    that shape the original allocation or request its GPUs; a saved CPU pool of the partition lends its own
-    directives to the judge node.
+    that shape the original allocation, request its GPUs or name its QOS; a saved CPU pool of the partition lends its
+    own directives to the judge node. The job's QOS is ``qos`` (``--judge-qos``), else the saved CPU pool's, else the
+    reader placement's (``reader_srun``, the value of ``NEMO_GYM_REMOTE_READER_SRUN``) when that placement names this
+    partition or none, else the partition's default.
     """
     compute = config.compute[cluster]
     walltime, bounds = bound_judge_walltime(compute.walltime, limit)
@@ -186,10 +213,20 @@ def judge_execution_profile(
         extra_args=dict(saved_pool.extra_args) if saved_pool is not None else {},
     )
     extra_args = {k: v for k, v in compute.extra_args.items() if k not in _ALLOCATION_SHAPE_DIRECTIVES}
+    qos_source = "the partition's default"
+    if qos:
+        qos_source = "--judge-qos"
+        extra_args["qos"] = qos
+        pool.extra_args.pop("qos", None)
+    elif saved_pool is not None and saved_pool.extra_args.get("qos"):
+        qos, qos_source = str(saved_pool.extra_args["qos"]), "the saved CPU node pool"
+    elif reader_step_qos(reader_srun) and reader_step_partition(reader_srun) in (None, partition):
+        qos, qos_source = reader_step_qos(reader_srun), "the launcher's reader placement (NEMO_GYM_REMOTE_READER_SRUN)"
+        extra_args["qos"] = qos
     judge_compute = compute.model_copy(
         update={"walltime": walltime, "node_pools": {JUDGE_POOL_NAME: pool}, "extra_args": extra_args}
     )
-    return JudgeExecutionProfile(partition, partition_source, walltime, bounds, judge_compute)
+    return JudgeExecutionProfile(partition, partition_source, walltime, bounds, judge_compute, qos, qos_source)
 
 
 def judge_job_config(
