@@ -185,7 +185,7 @@ async def test_observation_parser_runs_off_event_loop(setup, tmp_path):
     capture_observations(sandbox, tmp_path)
     loop_thread = threading.get_ident()
     parser_threads = []
-    from nemo_gym.base_responses_api_agent import AgentCloseSessionRequest
+    from nemo_gym.agents import AgentCloseSessionRequest
     from responses_api_agents.opencode_agent.tests.test_sandbox_sessions import activate
 
     def parse(*args, **kwargs):

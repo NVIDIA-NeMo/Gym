@@ -35,10 +35,9 @@ from pydantic import BaseModel, Field, PrivateAttr, model_validator
 from tavily import AsyncTavilyClient
 from tavily.errors import BadRequestError
 
-from nemo_gym.client import SESSION_ID_KEY, raise_for_status, request
+from nemo_gym.client import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES, SESSION_ID_KEY, raise_for_status, request
 from nemo_gym.config import ModelServerRef
 from nemo_gym.core import NeMoGymEasyInputMessage, NeMoGymResponse, NeMoGymResponseCreateParamsNonStreaming
-from nemo_gym.openai_utils import RATE_LIMIT_ERROR_CODES, RETRY_ERROR_CODES
 from nemo_gym.server_runtime import (
     BaseResourcesServerConfig,
     BaseRunRequest,
