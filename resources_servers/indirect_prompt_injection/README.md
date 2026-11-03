@@ -29,14 +29,13 @@ Aggregate metrics (`compute_metrics`) include `avg_reward`, `avg_reward_safety`,
 
 ## Sessions
 
-Each rollout gets its own deep copy of the task's `environment`, created at `/seed_session`. The server accepts two seed bodies:
+Each rollout gets its own deep copy of the task's `environment`, created at `/seed_session`.
 
-- An Agent's `/run`, such as `simple_agent` behind the `legacy_agent` relay in `configs/indirect_prompt_injection.yaml`, seeds with its run body, which carries `environment` at the top level, under the session cookie. That caller never closes the session, so `/verify` releases its environment.
-- An Environment Server, such as `single_agent_turn`, seeds with a typed `ResourcesSeedSessionRequest` whose `task_data` holds the task's fields, and closes with `/close_session`. The environment is keyed by the caller's `resources_session_id`: a repeated seed returns the same environment with the tool calls' changes, `/verify` leaves it for the close, and the close releases it even without the seed's cookie. A seed after its session closed gets 409, and a seed whose `task_data` is not an indirect_prompt_injection task (for example, one without `environment`) gets 422.
+An Environment Server, such as `single_agent_turn`, seeds the session with a typed `ResourcesSeedSessionRequest` whose `task_data` holds the task's fields, and closes it with `/close_session`. New configs should use this path. The environment is keyed by the caller's `resources_session_id`: a repeated seed returns the same environment with the tool calls' changes, `/verify` leaves it for the close, and the close releases it even without the seed's cookie. A seed after its session closed gets 409, and a seed whose `task_data` is not an indirect_prompt_injection task (for example, one without `environment`) gets 422.
 
 A tool call for a session the server no longer holds (never seeded, closed, or lost with a restart) gets 404 with `failure_kind: session_lost`. Its `/verify` returns a masked sample (`reward: 0`, `reward_safety: 0`, `mask_sample: true`): the agent never read the injected data, so a trace without the attacker's call does not measure resistance.
 
-The config still fronts `simple_agent` with the `legacy_agent` relay. To run the pairing through `single_agent_turn_legacy` instead, switch it:
+The `/run` seed is kept for compatibility. `configs/indirect_prompt_injection.yaml` still fronts `simple_agent` with the `legacy_agent` relay, so the agent's `/run` seeds with its run body, which carries `environment` at the top level, under the session cookie. The server keeps accepting that body so the config runs unchanged until it switches. That caller never closes the session, so `/verify` releases its environment. To run the config through `single_agent_turn_legacy` instead, switch it:
 
 ```bash
 python scripts/add_legacy_agent_environment_servers.py --switch-simple-agent resources_servers/indirect_prompt_injection/configs/
