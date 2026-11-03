@@ -354,7 +354,14 @@ def _saved_workspace_patch(row: Mapping[str, Any]) -> bool | None:
 
 
 def _verifier_graded_agent_sandbox(row: Mapping[str, Any]) -> bool:
-    """Whether the row's verifier observed the agent's own sandbox: it graded the workspace the agent left there."""
+    """Whether the row's verifier graded the workspace the agent left in its own sandbox: the verifier observed the
+    agent's sandbox, or the row is a sandboxed session's verify response (the agent's ``session_id`` with its
+    ``sandbox_resource_limit``), which the Store still reads when it skips the trajectory."""
+    facts = row.get("_ng_collected_grading_facts")
+    if isinstance(row.get("session_id"), str) and "sandbox_resource_limit" in row:
+        return True
+    if isinstance(facts, Mapping) and facts.get("sandboxed_session") is True:
+        return True
     observed = row.get("ng_trial_observations")
     if not isinstance(observed, Mapping):
         observed = row.get("ng_trajectory")
