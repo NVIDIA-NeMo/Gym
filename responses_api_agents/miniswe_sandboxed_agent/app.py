@@ -37,6 +37,7 @@ from nemo_gym.core import (
     current_rollout_id,
     rollout_context,
 )
+from nemo_gym.data.tasks.harbor import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.failure_transport import FailureReportRow
 from nemo_gym.sandbox import (
     AsyncSandbox,
@@ -45,7 +46,6 @@ from nemo_gym.sandbox import (
     create_provider,
     resolve_provider_config,
 )
-from nemo_gym.tasks.harbor.materialize import AGENT_TIMEOUT_METADATA_KEY
 from nemo_gym.trajectory import AgentObservationBundle
 from nemo_gym.typed_exceptions import agent_route_failure, failure_report_for, rebuild_failure
 from nemo_gym.utils import is_nemo_gym_fastapi_entrypoint, is_nemo_gym_fastapi_worker

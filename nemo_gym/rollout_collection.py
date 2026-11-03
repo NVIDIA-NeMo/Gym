@@ -102,6 +102,7 @@ from nemo_gym.core.failure_kinds import (
     is_namespaced,
     is_registered,
 )
+from nemo_gym.data.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.failure_transport import FailureHeader, FailureReportRow
 from nemo_gym.health.types import RunHealthConfig
 from nemo_gym.observability.model_calls import (
@@ -112,7 +113,6 @@ from nemo_gym.observability.model_calls import (
     observability_enabled_from_config,
 )
 from nemo_gym.omitted_rollouts import omitted_rollout_record
-from nemo_gym.prompt import apply_prompt_to_row, load_prompt_config, validate_prompt_compatibility
 from nemo_gym.rollout_outcomes import InvalidRolloutResult, RolloutFailureRecord, StaleRolloutResult
 from nemo_gym.rollout_records import (
     RUN_ID_KEY,
@@ -208,6 +208,7 @@ from nemo_gym.client.server_client import ServerClient
 from nemo_gym.client.server_client import (
     setup_server_client as setup_server_client_utils,
 )
+from nemo_gym.data.task_materialization import TASK_ID_FIELDS
 from nemo_gym.health.timeouts import ELAPSED_S_KEY, classify_timeout, export_run_health_timeouts
 from nemo_gym.models.token_capture import (
     TokenCaptureConfig,
@@ -224,7 +225,6 @@ from nemo_gym.models.token_capture.delivery import (
     finalize_rollout_token_capture,
     retire_rollout_token_capture,
 )
-from nemo_gym.task_materialization import TASK_ID_FIELDS
 
 
 logger = logging.getLogger(__name__)
@@ -340,7 +340,7 @@ NG_ENVIRONMENT_SERVER_KEY = ENVIRONMENT_SERVER_STAMP_KEY_NAME
 NG_RESULT_TYPE_KEY = "_ng_result_type"
 NG_TASK_ID_KEY = "_ng_task_id"
 # Provenance stamps preparation writes into a materialized row's task_data (the same strings as
-# nemo_gym.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
+# nemo_gym.data.tasks.harbor.digest's DIGEST_KEY and DATASET_DIGEST_KEY, which this module does not import).
 # The collector copies only these from a row onto its record: task_data is dataset-controlled, and any
 # other `_ng_*` key there (`_ng_no_persist`, `_ng_failure_class`, ...) would steer the collector.
 NG_DIGEST_KEY = "_ng_digest"

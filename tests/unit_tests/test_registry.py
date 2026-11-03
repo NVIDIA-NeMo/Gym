@@ -147,7 +147,7 @@ class TestDiscoverEnvironments:
     def test_interrupted_fetch_staging_clone_is_not_scanned(self, tmp_path: Path) -> None:
         """A staging clone an interrupted first fetch left behind is never read as catalog entries.
 
-        ``nemo_gym.tasks.harbor.hub.fetch_dataset`` clones into a hidden ``.nemo-gym-harbor-*`` folder inside the
+        ``nemo_gym.data.tasks.harbor.hub.fetch_dataset`` clones into a hidden ``.nemo-gym-harbor-*`` folder inside the
         dataset folder, and the dataset's ``manifest.toml`` is only written once the first task is moved in. A fetch
         killed mid-clone leaves the clone, a copy of every task, with no ``manifest.toml`` above it to stop the walk,
         so hidden folders are skipped as recursive task discovery skips them.
@@ -168,7 +168,7 @@ class TestDiscoverEnvironments:
         """A local dataset registered by a manifest.yaml at its root keeps its entry after preparation.
 
         Preparing an untracked local dataset writes a Harbor ``manifest.toml`` at its root
-        (``nemo_gym.tasks.harbor.manifest.check_manifest``). That file stops the walk into the task folders
+        (``nemo_gym.data.tasks.harbor.manifest.check_manifest``). That file stops the walk into the task folders
         below, which are data, but the root's own ``manifest.yaml`` is a catalog entry before and after that write.
         """
         envs_dir = tmp_path / "environments"
