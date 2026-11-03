@@ -301,3 +301,11 @@ policy_model:
       uses_interleaved_reasoning: true
       extra_body:
         skip_special_tokens: false
+
+visual_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: visual_opencode

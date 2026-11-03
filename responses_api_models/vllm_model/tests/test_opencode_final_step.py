@@ -66,8 +66,8 @@ def test_final_answer_budget_metadata_reaches_engine(reserve):
 
     from starlette.requests import Request
 
-    from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
     from nemo_gym.client import ServerClient
+    from nemo_gym.core import NeMoGymChatCompletionCreateParamsNonStreaming
 
     config = OpenCodeVLLMModelConfig(
         host="localhost",

@@ -66,6 +66,9 @@ repos:
         name: Update environment list in README
         language: python
         entry: python scripts/update_env_list.py
+        # This hook updates one shared README, regardless of which config triggered it.
+        pass_filenames: false
+        require_serial: true
         additional_dependencies: [pyyaml]
         files: ^README\.md$|^benchmarks/.*/config\.yaml$|^resources_servers/.*/configs/.*\.yaml$|^responses_api_agents/.*/configs/.*\.yaml$
       - id: import-linter

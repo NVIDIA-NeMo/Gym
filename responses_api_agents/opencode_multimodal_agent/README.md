@@ -10,9 +10,14 @@ Each episode stages its input images in a private workspace. Session configurati
 use Bubblewrap. Session artifacts are parsed into Gym responses
 and trajectory records before the workspace is cleaned up.
 
-## Requirements
+## Runtime requirements
 
-Use a Linux host with:
+For session-based evaluation, use a Gym sandbox provider and a Linux sandbox
+image containing Bash, Python, Pillow, numpy, scipy and OpenCV. Gym installs
+the pinned OpenCode runtime inside that sandbox. No host OpenCode installation
+or Bubblewrap is required for this path.
+
+For compatibility configurations, use a Linux host with:
 
 - The native OpenCode 1.17.11 executable on `PATH`.
 - Bubblewrap with permission to create user namespaces.
@@ -26,7 +31,8 @@ Install this agent's Python requirements from its directory:
 uv pip install -r requirements.txt
 ```
 
-The dependency directories are mounted read-only inside each episode. Input
+For compatibility configurations, dependency directories are mounted read-only
+inside each episode. Input
 images are available as `input-0.<extension>`, `input-1.<extension>`, and so on
 under `/testbed`. Training converts inputs to PNG; evaluation preserves their
 format and also supports the `image_` filename prefix.
@@ -92,7 +98,8 @@ the staged image paths. Tool-produced images are embedded in returned tool resul
 before teardown. Session retries reuse the activation rather than launch it again.
 One activation is supported per session; continuation inputs are rejected.
 
-The session path supports evaluation, observations and MCP task grants. Set
+The session path implements the **Observability** capability level: evaluation,
+model-call and tool observations, and MCP task grants. Set
 `tool_rewards: null` and disable token-ID capture for these sessions; unsupported
 training requests are rejected. Training capture and auxiliary rewards remain
 available on the compatibility path. Qualification requires the conformance

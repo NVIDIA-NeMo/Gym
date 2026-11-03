@@ -37,6 +37,7 @@ class VisualVerifyRequest(BaseVerifyRequest):
 
 
 class VisualVerifyResponse(VisualVerifyRequest, BaseVerifyResponse):
+    evaluation_completed: bool = True
     extracted: str | None = None
     scorer: str
     extraction_method: str | None = None

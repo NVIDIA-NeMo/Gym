@@ -88,6 +88,7 @@ async def test_deterministic_scoring(server, benchmark, prediction, reward, monk
     monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
     result = await server.verify(request(benchmark, prediction))
     assert result.reward == reward
+    assert result.evaluation_completed is True
     if prediction:
         judge.assert_not_awaited()
 
@@ -176,3 +177,22 @@ async def test_unfinished_reasoning_does_not_become_an_answer(server, monkeypatc
     result = await server.verify(request("VStarBench", r"<think>The answer might be \boxed{A}"))
     assert result.reward == 0
     judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("unfinished", [[], [{"type": "reasoning", "id": "r", "summary": []}]])
+async def test_missing_final_message_is_scored_as_incorrect(server, monkeypatch, unfinished):
+    judge = AsyncMock(side_effect=AssertionError("No answer must not be judged"))
+    monkeypatch.setattr(VisualBenchmarksServer, "_judge", judge)
+    body = request("VStarBench", "A")
+    body.response = NeMoGymResponse.model_validate(body.response.model_dump() | {"output": unfinished})
+    result = await server.verify(body)
+    assert result.reward == 0 and result.extracted == ""
+    assert result.evaluation_completed is True and result.mask_sample is False
+    judge.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_benchmark_is_not_silently_scored(server):
+    with pytest.raises(ValueError, match="Unsupported visual benchmark"):
+        await server.verify(request("NotABenchmark", "A"))

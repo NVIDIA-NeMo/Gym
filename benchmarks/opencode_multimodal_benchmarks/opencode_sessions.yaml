@@ -12,9 +12,12 @@ visual_agent:
       command: opencode
       sandbox: null
       env:
-        _delete_key: PATH
+        PATH: ""
       sandbox_provider: sandbox
       sandbox_config:
         image: ???
         workdir: /testbed
         ttl_s: 18000
+
+# Replace the compatibility relay inherited from the runtime profile.
+visual_opencode_environment_server: null

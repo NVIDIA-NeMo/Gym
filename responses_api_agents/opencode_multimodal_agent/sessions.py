@@ -57,7 +57,7 @@ class MultimodalSessionMixin:
         unsupported = self.config.opencode_config.keys() - {"permission", "tools", "agent"}
         if unsupported:
             raise AgentSeedRejectedError(f"Unsupported multimodal session options: {sorted(unsupported)}")
-        if self.config.env or self.config.extra_args or self.config.command != "opencode":
+        if any(self.config.env.values()) or self.config.extra_args or self.config.command != "opencode":
             raise AgentSeedRejectedError("Session execution requires command=opencode and no env/extra_args overrides")
         if self.config.sandbox is not None:
             raise AgentSeedRejectedError(

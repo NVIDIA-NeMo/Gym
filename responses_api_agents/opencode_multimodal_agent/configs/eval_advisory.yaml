@@ -16,3 +16,11 @@ policy_model:
     vllm_model:
       entrypoint: visual_eval.py
       turn_budget: null
+
+visual_opencode_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: visual_opencode

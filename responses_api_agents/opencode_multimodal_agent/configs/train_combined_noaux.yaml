@@ -7,3 +7,11 @@ opencode_multimodal_agent:
       entrypoint: combined.py
       system_prompt: null
       tool_rewards: null
+
+opencode_multimodal_agent_environment_server:
+  environment_servers:
+    legacy_agent:
+      entrypoint: app.py
+      agent_server:
+        type: responses_api_agents
+        name: opencode_multimodal_agent
