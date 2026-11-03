@@ -56,6 +56,7 @@ from nemo_gym.orchestration.executors.script_templates import (
     escape_for_single_quoted_block,
     render_driver_entrypoint,
     render_gym_cmd,
+    render_head_node_ip,
     render_health_check,
     render_ray_prelude,
     render_vllm_ray_symmetric_run,
@@ -554,8 +555,8 @@ def _render_ray_head_addresses(config: SubmitConfig, compute: SlurmComputeConfig
     head_node = _driver_node(config, compute)
     lines = [] if _places_services(config, _node_totals(compute)[0] > 1) else [_NODE_ARRAY]
     for name, service in services.items():
-        ip = f"$(getent hosts ${{gym_nodes[{head_node}]}} | awk '{{print $1}}')"
-        lines.append(f'export {ray_head_address_var(name)}="{ip}:{service.port}"')
+        lines.append(render_head_node_ip(f"${{gym_nodes[{head_node}]}}"))
+        lines.append(f'export {ray_head_address_var(name)}="$head_node_ip:{service.port}"')
         for pool, (start, count) in _ray_worker_ranges(service, compute, head_node).items():
             lines.append(f'export {ray_workers_var(name, pool)}="$(IFS=,; echo "${{gym_nodes[*]:{start}:{count}}}")"')
     return "\n".join(lines)
