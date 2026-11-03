@@ -9,9 +9,11 @@ not downloaded; they are in the sandbox image that ``Dockerfile`` builds.
 
 The public rows withhold the ground truth: ``sol_sql``, ``external_knowledge`` and ``test_cases``, for the task and
 for its follow-up. The authors send it on request, and ``prepare`` merges it in by ``instance_id``. It keeps the rows
-that the server can grade: query tasks, whose two phases are both ``Query``, with their ground truth and without custom
-test cases. BIRD-Interact's management tasks, which test cases grade, are left out. It reads the file the authors sent
-from ``data/`` (``GROUND_TRUTH_FILES``), which git ignores, unless ``ground_truth_jsonl`` names another.
+that the server can grade: query tasks, whose two phases are both ``Query``, with their ground truth. As in
+BIRD-Interact, a query phase is graded by comparing its result with the solution's even when it has test cases.
+BIRD-Interact's management tasks, which test cases grade, are left out: the server does not run test cases yet. It reads
+the file the authors sent from ``data/`` (``GROUND_TRUTH_FILES``), which git ignores, unless ``ground_truth_jsonl``
+names another.
 """
 
 import json
@@ -101,8 +103,6 @@ def select_tasks(
             left_out["no ground truth"] += 1
         elif categories != {QUERY_CATEGORY}:
             left_out["management task"] += 1
-        elif merged["test_cases"] or (follow_up is not None and follow_up.get("test_cases")):
-            left_out["custom test cases"] += 1
         else:
             BirdInteractTask.model_validate(merged)
             kept.append(merged)

@@ -10,6 +10,8 @@ dependencies = [
     # The tests' PostgreSQL client: the real-PostgreSQL tests run where `initdb` and `pg_ctl` are on PATH. The server
     # itself never imports it; the runner uses the sandbox image's copy.
     "psycopg2-binary==2.9.13",
+    # Splits the solution SQL into clauses for the user simulator, as the BIRD-Interact ADK does.
+    "sqlglot==30.20.0",
 ]
 
 [tool.uv]
